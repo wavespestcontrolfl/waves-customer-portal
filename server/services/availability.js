@@ -10,7 +10,8 @@ const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
-const { findConflictingVisits, acquireOccupancyLock } = require('./scheduling/occupancy');
+const { findConflictingVisits, acquireOccupancyLock, listOccupiedWindows } = require('./scheduling/occupancy');
+const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
@@ -131,6 +132,45 @@ class AvailabilityEngine {
       etDateString(addETDays(today, config.advance_days_max)),
     );
 
+    // Travel-gap mirror (GATE_SLOT_TRAVEL_GAP): confirmBooking's commit probe
+    // runs the tech-blind, coordinate-aware findConflictingVisits `travel`
+    // predicate over EVERY stop that day, while this builder's occupied set
+    // is zone-scoped and buffer-only — an out-of-zone stop adjacent to a
+    // quoted slot would make the commit reject the exact option just
+    // offered (offer/commit dead end). Gate on: one range read of every
+    // occupying row with guarded coords + the same pin the commit measures
+    // with (customers.latitude/longitude via the estimate's customer; no
+    // estimate or no pin → buffer-only, never a skipped check). Gate off:
+    // no extra statements. Soft-degrade like /book's mirror: a failed read
+    // serves unfiltered and the commit gate keeps correctness.
+    let travelMirror = null;
+    if (travelGapEnabled()) {
+      try {
+        const rows = await listOccupiedWindows({
+          dateFrom: etDateString(addETDays(today, config.advance_days_min)),
+          dateTo: etDateString(addETDays(today, config.advance_days_max)),
+          withCoords: true,
+        });
+        const byDate = new Map();
+        for (const row of rows) {
+          if (!byDate.has(row.date)) byDate.set(row.date, []);
+          byDate.get(row.date).push(row);
+        }
+        let pin = { lat: null, lng: null };
+        if (estimateId) {
+          const est = await db('estimates').where('id', estimateId).first('customer_id');
+          const cust = est?.customer_id
+            ? await db('customers').where('id', est.customer_id).first('latitude', 'longitude')
+            : null;
+          pin = { lat: cust?.latitude ?? null, lng: cust?.longitude ?? null };
+        }
+        travelMirror = { byDate, pin };
+      } catch (mirrorErr) {
+        logger.warn(`[availability] travel-gap mirror unavailable — serving unfiltered slots: ${mirrorErr.message}`);
+        travelMirror = null;
+      }
+    }
+
     for (let i = config.advance_days_min; i <= config.advance_days_max; i++) {
       // ET calendar math — toISOString() reads the UTC date (already tomorrow
       // between 8 PM and midnight ET) and getDay() reads the UTC weekday, so
@@ -204,7 +244,14 @@ class AvailabilityEngine {
       occupied.sort((a, b) => a.start - b.start);
 
       // Find gaps
-      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer);
+      const gaps = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer);
+      // Travel-gap mirror (see above): drop what the commit probe would 409.
+      const slots = travelMirror
+        ? gaps.filter((g) => !violatesTravelGap(
+          { startMin: g.start, endMin: g.end, ...travelMirror.pin },
+          travelMirror.byDate.get(dateStr) || [],
+        ))
+        : gaps;
 
       if (slots.length > 0) {
         days.push({

@@ -15,7 +15,7 @@ const {
   travelGapViolation, travelGapConflicts, violatesTravelGap, resolveStopCoords,
 } = travelGap;
 
-// Rod (Palmetto) → Paul (Bradenton 34211): ~11.7 straight-line miles.
+// Candidate (Palmetto) → neighbour (Bradenton): ~11.7 straight-line miles.
 const PALMETTO = { lat: 27.545, lng: -82.545 };
 const BRADENTON = { lat: 27.425, lng: -82.410 };
 
@@ -63,7 +63,7 @@ describe('requiredGapMinutes', () => {
 });
 
 describe('travelGapViolation', () => {
-  test('the Rod case: 9–10 touching a 10–11 stop 33 minutes away is a violation', () => {
+  test('the field-report case: 9–10 touching a 10–11 stop 33 minutes away is a violation', () => {
     const v = travelGapViolation(
       { startMin: 540, endMin: 600, ...PALMETTO },
       { startMin: 600, endMin: 660, ...BRADENTON },

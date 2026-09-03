@@ -1607,6 +1607,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // linked-customer-city edge (city changes while the estimate address
     // doesn't) stays TTL-bounded.
     String(estimate.address || '').trim().toLowerCase(),
+    // Travel policy in the key: the gate and buffer are read at call time
+    // by reserveSlot, while filterCollidingSlots ran when this entry was
+    // built — a flip or buffer change must not serve now-prohibited slots
+    // until TTL (GH codex #3803 r1 P1).
+    travelGapEnabled() ? `travel-gap:${travelBufferMinutes()}` : 'travel-gap:off',
   ].join(':');
   const cached = wrapperCache.get(cacheKey);
   if (cached) {

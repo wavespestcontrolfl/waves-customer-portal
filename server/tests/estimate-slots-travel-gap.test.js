@@ -1,5 +1,5 @@
 /**
- * Estimate picker travel gap (GATE_SLOT_TRAVEL_GAP) — the Rod Lindsay case
+ * Estimate picker travel gap (GATE_SLOT_TRAVEL_GAP) — the 2026-09-03 field-report case
  * (2026-09-03): the ASAP capacity lane offered 9–10 AM in Palmetto with a
  * 10–11 AM Bradenton stop ~33 modeled minutes away, because
  * filterCollidingSlots only rejected OVERLAP. With the gate on the filter also
@@ -53,70 +53,70 @@ function wireRows(rows) {
   });
 }
 
-// Paul: committed 10:00–11:00 Bradenton stop on tech-1.
-const paulRow = (overrides = {}) => ({
+// Neighbour: committed 10:00–11:00 Bradenton stop on tech-1.
+const neighbourRow = (overrides = {}) => ({
   technician_id: 'tech-1', scheduled_date: DATE, window_start: '10:00:00', window_end: '11:00:00',
   estimated_duration_minutes: 60, zone: 'bradenton', customer_city: 'Bradenton', ...BRADENTON, ...overrides,
 });
-// Rod: the ASAP 09:00–10:00 candidate (touches Paul, no overlap).
-const rodSlot = (overrides = {}) => ({
+// Candidate: the ASAP 09:00–10:00 candidate (touches the neighbour, no overlap).
+const candidateSlot = (overrides = {}) => ({
   slotId: `${DATE}_09-00_tech-1`, date: DATE, windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60, techId: 'tech-1', ...overrides,
 });
 
 test('gate off: the touching 9 AM window survives and the query has no coordinate raws (legacy, byte for byte)', async () => {
-  wireRows([paulRow()]);
-  const out = await filterCollidingSlots([rodSlot()], { ...RANGE, coords: PALMETTO });
+  wireRows([neighbourRow()]);
+  const out = await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO });
   expect(out).toHaveLength(1);
   expect(db.raw).not.toHaveBeenCalled();
   expect(lastChain.select.mock.calls[0]).toHaveLength(7);
 });
 
-test('gate on: the Rod window is dropped — 0 free minutes against ~33 drive + 15 buffer', async () => {
+test('gate on: the candidate window is dropped — 0 free minutes against ~33 drive + 15 buffer', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-  wireRows([paulRow()]);
-  const out = await filterCollidingSlots([rodSlot()], { ...RANGE, coords: PALMETTO });
+  wireRows([neighbourRow()]);
+  const out = await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO });
   expect(out).toHaveLength(0);
   expect(db.raw.mock.calls.some(([sql]) => /COALESCE\(scheduled_services\.lat/.test(sql))).toBe(true);
 });
 
-test('gate on: tech-blind — an UNASSIGNED Paul row blocks an unassigned or tech-assigned candidate alike', async () => {
+test('gate on: tech-blind — an UNASSIGNED neighbour row blocks an unassigned or tech-assigned candidate alike', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-  wireRows([paulRow({ technician_id: null, zone: null, customer_city: null })]);
-  expect(await filterCollidingSlots([rodSlot()], { ...RANGE, coords: PALMETTO })).toHaveLength(0);
-  expect(await filterCollidingSlots([rodSlot({ techId: null })], { ...RANGE, coords: PALMETTO })).toHaveLength(0);
+  wireRows([neighbourRow({ technician_id: null, zone: null, customer_city: null })]);
+  expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO })).toHaveLength(0);
+  expect(await filterCollidingSlots([candidateSlot({ techId: null })], { ...RANGE, coords: PALMETTO })).toHaveLength(0);
 });
 
 test('gate on: a window with enough free time is kept (13:00 after an 11:00 end, or 08:00 before 10:00 with a 60-min gap)', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-  wireRows([paulRow()]);
+  wireRows([neighbourRow()]);
   const out = await filterCollidingSlots([
-    rodSlot({ slotId: `${DATE}_08-00_tech-1`, windowStart: '08:00', windowEnd: '09:00' }),
-    rodSlot({ slotId: `${DATE}_12-00_tech-1`, windowStart: '12:00', windowEnd: '13:00' }),
-    rodSlot({ slotId: `${DATE}_11-00_tech-1`, windowStart: '11:00', windowEnd: '12:00' }),
+    candidateSlot({ slotId: `${DATE}_08-00_tech-1`, windowStart: '08:00', windowEnd: '09:00' }),
+    candidateSlot({ slotId: `${DATE}_12-00_tech-1`, windowStart: '12:00', windowEnd: '13:00' }),
+    candidateSlot({ slotId: `${DATE}_11-00_tech-1`, windowStart: '11:00', windowEnd: '12:00' }),
   ], { ...RANGE, coords: PALMETTO });
   expect(out.map((s) => s.windowStart)).toEqual(['08:00', '12:00']);
 });
 
 test('gate on: a coordless stop (or a no-coords estimate) degrades to the 15-minute buffer only', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-  wireRows([paulRow({ lat: null, lng: null })]);
+  wireRows([neighbourRow({ lat: null, lng: null })]);
   // 0 free minutes < 15 → dropped; 15 free minutes (08:45–09:45) → kept.
-  expect(await filterCollidingSlots([rodSlot()], { ...RANGE, coords: PALMETTO })).toHaveLength(0);
+  expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO })).toHaveLength(0);
   expect(await filterCollidingSlots(
-    [rodSlot({ windowStart: '08:45', windowEnd: '09:45' })], { ...RANGE, coords: PALMETTO },
+    [candidateSlot({ windowStart: '08:45', windowEnd: '09:45' })], { ...RANGE, coords: PALMETTO },
   )).toHaveLength(1);
   // No estimate coords at all (the no-coords branch passes null) → same buffer-only rule.
-  wireRows([paulRow()]);
-  expect(await filterCollidingSlots([rodSlot()], { ...RANGE, coords: null })).toHaveLength(0);
+  wireRows([neighbourRow()]);
+  expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: null })).toHaveLength(0);
   expect(await filterCollidingSlots(
-    [rodSlot({ windowStart: '08:45', windowEnd: '09:45' })], { ...RANGE, coords: null },
+    [candidateSlot({ windowStart: '08:45', windowEnd: '09:45' })], { ...RANGE, coords: null },
   )).toHaveLength(1);
 });
 
 test('gate on: the buffer env is honoured', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   process.env.SLOT_TRAVEL_BUFFER_MINUTES = '0';
-  wireRows([paulRow({ lat: null, lng: null })]);
+  wireRows([neighbourRow({ lat: null, lng: null })]);
   // Coordless stop + zero buffer → touching is allowed again.
-  expect(await filterCollidingSlots([rodSlot()], { ...RANGE, coords: PALMETTO })).toHaveLength(1);
+  expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO })).toHaveLength(1);
 });

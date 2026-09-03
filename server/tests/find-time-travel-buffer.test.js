@@ -63,7 +63,7 @@ const STOP = {
   window_start: '10:00', window_end: '11:00', service_type: 'pest',
   estimated_duration_minutes: 60,
   svc_lat: 27.45, svc_lng: -82.45, cust_lat: null, cust_lng: null,
-  first_name: 'Paul', last_name: 'Stop', city: 'Bradenton',
+  first_name: 'Neighbour', last_name: 'Stop', city: 'Bradenton',
 };
 
 beforeEach(() => {
