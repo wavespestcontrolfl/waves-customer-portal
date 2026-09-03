@@ -329,7 +329,25 @@ function draftAmountLabel({ monthly, oneTime }) {
   return 'amount TBD';
 }
 
+// A unit the customer supplied AFTER the call (clarify write-back): the
+// re-run composes the address WITH it, since the original extraction and
+// the lead line may still describe the whole building. Never doubles a
+// unit the line already carries.
+function withUnitOverride(line, context) {
+  const unit = String(context?.unitLineOverride || '').trim();
+  if (!unit || !line) return line;
+  const { splitStreetLineUnit } = require('../../utils/address-normalizer');
+  const parts = String(line).split(',');
+  if (splitStreetLineUnit(parts[0]).unit) return line;
+  parts[0] = `${parts[0].trim()} ${unit}`;
+  return parts.map((p, i) => (i === 0 ? p : ` ${p.trim()}`)).join(',');
+}
+
 function addressFromContext(context) {
+  return withUnitOverride(addressFromContextBase(context), context);
+}
+
+function addressFromContextBase(context) {
   const sa = context.extraction?.property?.service_address;
   if (sa?.street_line_1) {
     // Street-only extractions (city/ZIP nullable in the schema) borrow
@@ -1232,6 +1250,10 @@ async function maybeDraftEstimateForCall({
   // evidence lives there, not in the SMS thread) with the customer's
   // answer applied; the stale draft is retired atomically on insert.
   supersedeEstimateId = null, supersedeReason = null, supersedeAttempt = null, bedroomCountOverride = null,
+  // Clarify write-back: the apartment/unit the customer texted after the
+  // call ("Apt 204"), composed into the service address and stamped on the
+  // extraction's street_line_2 so the unit-scope model sees the subpremise.
+  unitLineOverride = null,
 }) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
@@ -1253,6 +1275,11 @@ async function maybeDraftEstimateForCall({
       context.supersedeAttempt = supersedeAttempt || null;
     }
     if (context && !context.error && bedroomCountOverride != null) context.bedroomCountOverride = bedroomCountOverride;
+    if (context && !context.error && unitLineOverride) {
+      context.unitLineOverride = String(unitLineOverride);
+      const sa = context.extraction?.property?.service_address;
+      if (sa && typeof sa === 'object' && !String(sa.street_line_2 || '').trim()) sa.street_line_2 = String(unitLineOverride);
+    }
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.
     if (!dryRun && context && !context.error) {
       await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration });

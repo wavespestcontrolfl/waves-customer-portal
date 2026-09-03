@@ -761,6 +761,19 @@ describe('review fixes', () => {
     expect(reasons.join(' ')).toMatch(/lot sqft from fallback/);
   });
 
+  test('unitLineOverride composes the texted unit into the service address without doubling one already there', () => {
+    const base = {
+      extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir', city: 'Sarasota', postal_code: '34232' } } },
+      unitLineOverride: 'Apt 204',
+    };
+    expect(idxPriv.addressFromContext(base)).toBe('1048 Example Lakes Cir Apt 204, Sarasota, FL 34232');
+    const withUnit = { ...base, extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir Apt 9', city: 'Sarasota', postal_code: '34232' } } } };
+    expect(idxPriv.addressFromContext(withUnit)).toBe('1048 Example Lakes Cir Apt 9, Sarasota, FL 34232');
+    const leadOnly = { extraction: null, lead: { address: '5 Other Rd', city: 'Venice', zip: '34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(leadOnly)).toBe('5 Other Rd Apt 204, Venice, 34285');
+    expect(idxPriv.addressFromContext({ ...leadOnly, unitLineOverride: null })).toBe('5 Other Rd, Venice, 34285');
+  });
+
   test('existing-customer address beats a stale phone-matched lead', () => {
     const context = {
       extraction: null,

@@ -1269,6 +1269,19 @@ describe('unit_number ask (call pipeline lane)', () => {
     expect(merged.payload.draft_response).toMatch(/unit number at 1048 Example Lakes Cir\?$/);
   });
 
+  test('a NEWER unit ask with a deliberately-null customer (ambiguous shared phone) CLEARS the prior ask\'s customer target', async () => {
+    mockState.existingDraft = {
+      id: 'draft-1', status: 'pending', sent_at: null,
+      flags: JSON.stringify({ missing: ['unit_number'], lead_id: 'lead-A', call_origin: true, unit_call_log_id: 'call-A', unit_lead_id: 'lead-A', unit_customer_id: 'cust-A', unit_ask_building: BUILDING }),
+    };
+    const result = await parkClarifyAsk({ missing: ['unit_number'], phone: '+17735550142', leadId: 'lead-B', customerId: null, callLogId: 'call-B', source: 'call_missing_unit_number', channelProvenance: 'voice', unitAskBuilding: { street_line_1: '5 Other Rd', city: 'Venice', postal_code: '34285' } });
+    expect(result.skipped).toBe('merged_into_open_clarify');
+    const flags = JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags);
+    expect(flags.unit_customer_id).toBeNull();
+    expect(flags.unit_lead_id).toBe('lead-B');
+    expect(flags.unit_call_log_id).toBe('call-B');
+  });
+
   test('extractUnitReply: designated forms always (incl. PH1 / TH12 / A-204 / ABC12 / PH-1); a bare token only when allowed; never a bare word', () => {
     const { extractUnitReply } = _private;
     expect(extractUnitReply('Apt 204')).toBe('Apt 204');
@@ -1395,7 +1408,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
       customerId: 'cust-1', address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204', city: 'Sarasota', zip: '34232', source: 'clarify_unit_reply',
     }));
     expect(mockSyncPrimaryAddress).not.toHaveBeenCalled();
-    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({ callLogId: 'call-1', quotePromised: false });
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({ callLogId: 'call-1', quotePromised: false, unitLineOverride: 'Apt 204' });
     expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
     const flags = JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags);
     expect(flags.unit_writeback).toEqual(expect.objectContaining({ lead: 'filled', customer: 'primary_property', propertyId: 'prop-1' }));
@@ -1404,6 +1417,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
   });
 
   test('existing customer whose OWN address is the building: line 2 filled + primary synced; lead gets the unit as line 2; the unsent building-level draft is superseded under the re-price guard', async () => {
+    mockState.selectQueue = [[]];
     const result = await reply(
       { id: 'lead-1', address: '1048 Example Lakes Cir, Sarasota, FL 34232' },
       { id: 'cust-1', address_line1: '1048 Example Lakes Circle', address_line2: null, city: 'Sarasota', zip: '34232' },
@@ -1443,6 +1457,88 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     expect(mockState.updates.find((u) => u.table === 'leads')).toBeUndefined();
     expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
     expect(mockRecordCallProperty).not.toHaveBeenCalled();
+  });
+
+  test('unitless primary at the building + an existing property row for THIS unit: nothing moves (the unique address_key would collide)', async () => {
+    mockState.selectQueue = [[{ address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204', city: 'Sarasota', zip: '34232' }]];
+    await reply(
+      { id: 'lead-1', address: null },
+      { id: 'cust-1', address_line1: '1048 Example Lakes Cir', address_line2: null, city: 'Sarasota', zip: '34232' },
+      null,
+    );
+    expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
+    expect(mockSyncPrimaryAddress).not.toHaveBeenCalled();
+    const flags = JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags);
+    expect(flags.unit_writeback.customer).toBe('property_exists');
+  });
+
+  test('race with the original composer: a draft that appeared while we re-ran (and was not replaced) is guarded and handed to the operator', async () => {
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'existing', created: false });
+    // After the re-run: unsentDraftForCall finds the draft the original composer just inserted.
+    mockState.firstQueue = [];
+    const a = AWAITING();
+    mockState.firstQueue = [a, a, { id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }, null, { id: 'est-race' }];
+    const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+    await result.repricePromise;
+    expect(mockState.updates.some((u) => u.table === 'estimates')).toBe(true);
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', 'Unit number received — re-draft the estimate', expect.stringMatching(/still being drafted/), expect.anything());
+  });
+
+  test('a customer row with the unit INLINE on line 1 is never given a second unit', async () => {
+    await reply(
+      { id: 'lead-1', address: null },
+      { id: 'cust-1', address_line1: '1048 Example Lakes Cir Apt 9', address_line2: null, city: 'Sarasota', zip: '34232' },
+      null,
+    );
+    expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
+    expect(mockSyncPrimaryAddress).not.toHaveBeenCalled();
+    expect(mockRecordCallProperty).not.toHaveBeenCalled();
+  });
+
+  test('a SCHEDULED building-level draft is superseded too (the one that must not auto-send)', async () => {
+    await reply({ id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }, { id: 'est-sched' });
+    expect(mockState.raws.some((r) => /status/.test(r.sql) && Array.isArray(r.params) && r.params.includes('scheduled'))
+      || mockMaybeDraftEstimateForCall.mock.calls[0][0].supersedeEstimateId === 'est-sched').toBe(true);
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-sched', unitLineOverride: 'Apt 204' }));
+  });
+
+  test('the texted unit is passed to the call re-run explicitly (unitLineOverride)', async () => {
+    await reply({ id: 'lead-1', address: '5 Other Rd, Venice, FL 34285' }, { id: 'cust-1', address_line1: '9 Home St', city: 'Venice', zip: '34285' }, null);
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ callLogId: 'call-1', unitLineOverride: 'Apt 204' }));
+  });
+
+  test('legacy in-flight ask (no unit_* targets, call-origin): the generic lead and the row customer stand in', async () => {
+    const a = AWAITING({ unit_lead_id: undefined, unit_customer_id: undefined, unit_quote_promised: undefined, unit_quote_requested: undefined });
+    mockState.firstQueue = [a, a, { id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }];
+    const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+    await result.repricePromise;
+    expect(mockState.updates.find((u) => u.table === 'leads').payload.address).toMatch(/Apt 204/);
+    expect(mockRecordCallProperty).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
+    // No quote signals on a legacy row → no re-draft (the card still holds the reply).
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+  });
+
+  test('unit + bedroom answered in one text: one call re-run carries BOTH overrides against the shared target', async () => {
+    const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-1' });
+    mockState.firstQueue = [a, a, { id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }, { id: 'est-1' }];
+    const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204, 2 bedrooms' });
+    expect(result.handled).toBe(true);
+    await result.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledTimes(1);
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({
+      callLogId: 'call-1', unitLineOverride: 'Apt 204', bedroomCountOverride: 2, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_unit_reply',
+    }));
+  });
+
+  test('unit + bedroom with DISTINCT targets: the unit re-run supersedes its draft; the bedroom draft is guarded and handed to the operator', async () => {
+    const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-bed' });
+    mockState.firstQueue = [a, a, { id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }, { id: 'est-call' }];
+    const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204, 2 bedrooms' });
+    await result.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-call', bedroomCountOverride: 2 }));
+    // Both targets were guarded in the locked phase (two estimates updates), and the bedroom one got the operator bell.
+    expect(mockState.updates.filter((u) => u.table === 'estimates').length).toBeGreaterThanOrEqual(2);
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', 'Bedroom count received — re-price the unit draft', expect.stringMatching(/different estimate/), expect.anything());
   });
 
   test('no quote asked for on the call: the record is updated but nothing drafts', async () => {
