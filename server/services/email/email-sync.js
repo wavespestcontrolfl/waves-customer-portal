@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const { isBlocked } = require('./spam-blocker');
+const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 
 // Prevent concurrent syncs from racing on email_sync_state counters.
 let SYNC_IN_FLIGHT = null;
@@ -280,9 +281,17 @@ async function offerZelleNotice(email, { backfill }) {
 async function upsertEmail(parsed, { backfill = false } = {}) {
   const existing = await db('emails').where('gmail_id', parsed.gmail_id).first();
 
-  // Match sender to customer
+  // Match sender to customer — never when the sender is one of OUR OWN
+  // addresses. One customer record carries contact@ on file, so every alert
+  // this mailbox sends to itself (backup-drill failures, digests, control
+  // messages) and every outbound copy Gmail lists was stored as that
+  // customer's email (prod 2026-09-03: 2,319 rows since 2025-06) and rang
+  // the "email from a customer" bell. isInternalEmailRecipient is the same
+  // owned-address definition the internal digests trust — the email mirror
+  // of the SMS owned-number guard in sendSMS (#3829). Migration
+  // 20260903000070 unlinks the rows stored before this guard.
   let customerId = null;
-  if (parsed.from_address) {
+  if (parsed.from_address && !isInternalEmailRecipient(parsed.from_address)) {
     // Case-insensitive, like the request/complaint handlers (codex P2): a
     // sender whose address differs only by casing is the same customer.
     const customer = await db('customers')
@@ -788,4 +797,4 @@ function customerEmailBellEligible({ customerId, classification, listUnsubscribe
   return hasAlignedAuth(authenticationResults, domainFromAddress(fromAddress));
 }
 
-module.exports = { syncEmails, customerEmailBellEligible, sweepUnclaimedCustomerEmailBells };
+module.exports = { syncEmails, upsertEmail, customerEmailBellEligible, sweepUnclaimedCustomerEmailBells };
