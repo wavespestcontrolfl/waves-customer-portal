@@ -1277,9 +1277,13 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // task carries it in its key and #3767 retires the stale one) is a
       // NEW cancellation: fall through and process fresh (the decided term
       // reads 'decision_already_recorded'; the refund recounts from the
-      // live rows). A resolved run with no episode stamp (pre-episode, or
-      // a stamp that failed) keeps the 24h created_at window as its episode
-      // proxy — still only while the row reads churned.
+      // live rows). The echo also stays BOUNDED to the 24h lost-response
+      // window: identity narrows it, never extends it — staff can add
+      // visits or a recurrence to a still-churned account, and a later
+      // cancellation on the same term must reach the processor for them,
+      // not a days-old echo. A resolved run with no episode stamp
+      // (pre-episode, or a stamp that failed) has only the window + the
+      // churned row as its identity.
       if (prior) {
         let tied = false;
         let openTie = false;
@@ -1289,13 +1293,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             : null;
           openTie = !!priorReq && priorReq.status === 'new';
           let resolvedTie = false;
-          if (!openTie && priorReq && priorReq.status === 'resolved') {
+          if (!openTie && priorReq && priorReq.status === 'resolved'
+            && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000) {
             const live = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churn_episode_id');
             const stillChurned = !!live && live.pipeline_stage === 'churned';
             const stamped = (requestCancelPlanMeta(priorReq) || {}).churnEpisodeId || null;
-            const sameEpisode = stamped
-              ? String((live && live.churn_episode_id) || '') === String(stamped)
-              : new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000;
+            const sameEpisode = !stamped || String((live && live.churn_episode_id) || '') === String(stamped);
             // Boundary compared only when both sides carry one (a legacy
             // snapshot without effectiveOn has no date to contradict).
             const priorBoundary = priorSnap && priorSnap.effectiveOn ? String(priorSnap.effectiveOn) : null;
@@ -1307,7 +1310,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           }
           tied = openTie || resolvedTie;
         } catch (tieErr) {
+          // Fail CLOSED: unable to tell a retry from a new cancellation, the
+          // run must not open a second request/case and re-run the
+          // processor on a guess — same posture as the acceptance lookup.
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
+          throw new CancelPlanError(503, 'acceptance_check_unavailable',
+            'Could not confirm whether this cancellation was already processed. Try again in a moment.');
         }
         if (!tied) {
           logger.info(`[admin-cancellation] case ${prior.id} has no live acceptance — treating this as a NEW cancellation, not a retry`);
@@ -1330,6 +1338,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         }
       }
     } catch (dupErr) {
+      // The latch's own fail-closed verdict (acceptance_check_unavailable)
+      // must surface, not degrade into a guessed fresh run.
+      if (dupErr instanceof CancelPlanError) throw dupErr;
       logger.warn(`[admin-cancellation] duplicate-case lookup failed for ${customerId}: ${dupErr.message}`);
     }
     // The destructive inverse is REFUSED: after end_now_refund the paid
