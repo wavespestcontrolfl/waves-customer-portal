@@ -1238,6 +1238,12 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // it answers is retired HERE — same transaction, right before the
     // open-estimate listing — so the replacement passes the guard while a
     // red/skip outcome (no insert) leaves the original draft standing.
+    // The rows this re-run's clarify reply held (same attempt token) are
+    // excluded from EVERY probe, not only the same-call one above: a
+    // building with two held drafts would otherwise surface the second one
+    // here as duplicate_phone and bounce the corrected replacement (codex
+    // r13 P2 on #3804).
+    const probeOptions = { database: trx, excludeRepriceAttempt: context?.supersedeAttempt || null };
     const allOpen = [];
     const seenEstimateIds = new Set();
     const absorb = (rows) => {
@@ -1249,7 +1255,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       }
     };
     for (const phone of dedupePhones) {
-      absorb(await listOpenEstimatesByPhone(phone, { database: trx }));
+      absorb(await listOpenEstimatesByPhone(phone, probeOptions));
     }
     // IDENTITY read, not just phones: an estimate carries ONE
     // customer_phone, so the draft a coordinator (or another service
@@ -1260,7 +1266,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // is unchanged: conflictingOpenEstimate still lets a genuinely
     // different property through.
     if (dedupeCustomerId) {
-      absorb(await listOpenEstimatesByCustomerId(dedupeCustomerId, { database: trx }));
+      absorb(await listOpenEstimatesByCustomerId(dedupeCustomerId, probeOptions));
     }
     if (allOpen.length) {
       const conflicting = conflictingOpenEstimate(allOpen, intent.address);

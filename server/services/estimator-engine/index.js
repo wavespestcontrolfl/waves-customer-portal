@@ -1320,18 +1320,21 @@ async function maybeDraftEstimateForCall({
   // evidence lives there, not in the SMS thread) with the customer's
   // answer applied; the stale draft is retired atomically on insert.
   supersedeEstimateId = null, supersedeReason = null, supersedeAttempt = null, bedroomCountOverride = null,
-  // Clarify write-back: the apartment/unit the customer texted after the
-  // call ("Apt 204"), composed into the service address and stamped on the
-  // extraction's street_line_2 so the unit-scope model sees the subpremise.
-  unitLineOverride = null,
+}) {
+  const result = { callLogId, dryRun, lane: null, created: false };
+  let context = null;
+  // Clarify write-back, read from the call row's unit-answer fence below
+  // (never a caller argument — one owned path, so the adoption identity
+  // stamp can never be bypassed; codex r13 P2 on #3804): the apartment/unit
+  // the customer texted after the call ("Apt 204"), composed into the
+  // service address and stamped on the extraction's street_line_2 so the
+  // unit-scope model sees the subpremise…
+  let unitLineOverride = null;
   // …and the BUILDING the ask was about ({ street_line_1, city,
   // postal_code }): a reprocessed call's rolling extraction may name a
   // different building than the surviving card, so the item-bound building
   // wins over the call row's latest extraction.
-  serviceAddressOverride = null,
-}) {
-  const result = { callLogId, dryRun, lane: null, created: false };
-  let context = null;
+  let serviceAddressOverride = null;
   // This pass's ordering stamp: markers written after it began belong to
   // a newer verdict and are never cleared by it. The wall-clock instant
   // fences generation-less legacy markers; ownerProcGeneration (the claim
@@ -1359,7 +1362,7 @@ async function maybeDraftEstimateForCall({
     // Dry runs (estimator-replay) adopt it too — the read has no side
     // effects, and a replay that priced the whole building while the live
     // path drafts the apartment would misreport production (codex r2 P2).
-    if (context && !context.error && !unitLineOverride) {
+    if (context && !context.error) {
       try {
         const { callUnitAnswer } = require('../../utils/estimate-claim-sql');
         const fence = await callUnitAnswer(db, callLogId);
@@ -1374,7 +1377,7 @@ async function maybeDraftEstimateForCall({
           // 123 Main St") is at the building (codex r1 P2 on #3804).
           if (!own || !buildingLine || sameStreetAddress(splitUnitFirstLine(own)?.rest || own, buildingLine)) {
             unitLineOverride = fence.unit;
-            if (!serviceAddressOverride?.street_line_1 && b?.street_line_1) serviceAddressOverride = b;
+            if (b?.street_line_1) serviceAddressOverride = b;
             result.unitAnswerAdopted = true;
             // The identity the creators' LOCKED fence read must still find
             // on the call row — a Dismiss/Deny that cleared it (or a newer

@@ -630,7 +630,14 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // A failed fence read FAILS the run — never a quiet whole-building compose (pre-push codex P1 on #3804 r5).
     expect(engine).not.toContain('unit-answer fence read failed (composing without it)');
     expect(engine).toContain('fenceErr.message = `unit-answer fence read failed: ${fenceErr.message}`;');
-    expect(engine).toContain('if (context && !context.error && !unitLineOverride) {');
+    // The overrides are LOCALS read from the call row's fence — never
+    // caller arguments, so no second path can inject a unit past the
+    // adoption identity stamp (codex r13 P2 on #3804).
+    expect(engine).toContain('  let unitLineOverride = null;');
+    expect(engine).toContain('  let serviceAddressOverride = null;');
+    expect(engine).not.toMatch(/^\s*unitLineOverride = null,\s*$/m);
+    expect(engine).not.toMatch(/^\s*serviceAddressOverride = null,\s*$/m);
+    expect(engine).toContain('const fence = await callUnitAnswer(db, callLogId);');
     expect(src('../routes/admin-estimates.js')).not.toContain('clearEstimateRepricePending');
     const persistence = src('../services/admin-estimate-persistence.js');
     expect(persistence).toMatch(/REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS = \[[^\]]*'reprice_pending_at',\s*'reprice_attempt',/);
@@ -657,7 +664,9 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // The ANCHOR's final publication honors the hold too: four predicates (claim, sibling publish,
     // anchor finalize, and the generic PATCH status write — codex r5 P0) and the held anchor parks
     // as send_failed (codex r3 P1 on #3804).
-    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(4);
+    // …plus the scheduled-send claim (codex r13 P2 on #3804): a hold landing
+    // after the pre-read 409s instead of reporting "scheduled".
+    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(5);
     expect(route).toContain('if (!verdict.noop && siblingRepricePending(estimate)) {');
     // The customer DECLINE carries the hold predicate on its UPDATE too, and its guard answers the
     // accept path's 409; the legacy SSR renderer checks the hold beside the linkage markers (codex r4 P1).

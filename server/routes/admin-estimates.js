@@ -1032,6 +1032,13 @@ router.post('/:id/send', async (req, res, next) => {
           // must not restore status='scheduled' on the archived draft.
           .whereNull('archived_at')
           .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+          // A clarify hold stamped between assertEstimateSendable's pre-read
+          // and this claim loses the race here (codex r13 P2 on #3804): the
+          // immediate path re-asserts the hold inside sendEstimateNow, but a
+          // scheduled row would otherwise report "scheduled" and the cron
+          // would only refuse it later, with nothing unscheduling it if the
+          // reply's own unschedule ran while the row was still a draft.
+          .whereRaw(REPRICE_PENDING_ABSENT_SQL)
           // Same pricing-authority re-assertion as the immediate-send claim
           // (pre-push codex P1): a revision stamping CLIENT_FALLBACK between
           // the pre-read check and this UPDATE must lose the race with a 409
@@ -1061,7 +1068,7 @@ router.post('/:id/send', async (req, res, next) => {
       const scheduledClaim = scheduleOutcome.claimed;
       if (!scheduledClaim) {
         return res.status(409).json({
-          error: 'This estimate is mid-send, already accepted, or locked — refresh and retry.',
+          error: 'This estimate is mid-send, already accepted, locked, or held for a re-price — refresh and retry.',
         });
       }
       return res.json({ success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() });

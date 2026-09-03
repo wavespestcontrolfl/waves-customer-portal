@@ -133,6 +133,10 @@ describe('schedule-send atomic claim', () => {
       // The claim carries the same filters as the immediate-send path.
       expect(builder.whereNull).toHaveBeenCalledWith('price_locked_at');
       expect(builder.whereNotIn).toHaveBeenCalledWith('status', ['sending', 'accepted', 'declined', 'expired']);
+      // …and re-asserts the clarify re-price hold ON the claim (codex r13
+      // P2 on #3804): a hold landing after the pre-read 409s instead of
+      // reporting "scheduled" for a row the cron will refuse.
+      expect(builder.whereRaw).toHaveBeenCalledWith(require('../utils/estimate-claim-sql').REPRICE_PENDING_ABSENT_SQL);
       expect(builder.update).toHaveBeenCalledWith(expect.objectContaining({
         status: 'scheduled',
         scheduled_send_attempts: 0,
