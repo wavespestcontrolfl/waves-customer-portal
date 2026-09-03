@@ -572,7 +572,7 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   // submitted); every other existing row wins the conflict (at-most-once).
   const inserted = await trx('vendor_orders').insert(claimRow)
     .onConflict('restock_request_id')
-    .merge({ ...claimRow, error: null, evidence: null, amount_cents: null, placed_at: null, external_order_number: null, response_payload: null, updated_at: new Date() })
+    .merge({ ...claimRow, error: null, evidence: JSON.stringify({}), amount_cents: null, placed_at: null, external_order_number: null, response_payload: null, updated_at: new Date() }) // evidence is NOT NULL: reset to {}
     .whereRaw(DRY_RUN_RECLAIMABLE_SQL)
     .returning('*');
   const ledger = inserted && inserted[0];
