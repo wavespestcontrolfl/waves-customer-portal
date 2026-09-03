@@ -685,6 +685,13 @@ async function getAttributionQueue(options = {}) {
   };
 }
 
+// The customer surname as the attribution search compares it: lowercased and
+// apostrophe-free in every form (ASCII ', typographic ’ ‘, modifier ʼ) —
+// mirroring normalizeName in review-click-correlation. Accents stay: no
+// unaccent extension exists, so the caller binds a de-accented AND an
+// as-typed operand against this one expression (GH codex r4 P1, r5 P2).
+const LAST_NAME_APOSTROPHE_FREE = "regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g')";
+
 async function searchAttributionCandidates(options = {}) {
   const conn = options.conn || db;
   const reviewId = options.reviewId;
@@ -740,10 +747,11 @@ async function searchAttributionCandidates(options = {}) {
     // suffixes are de-accented while LOWER(last_name) keeps accents, and no
     // unaccent extension exists: the lowercase name is ALSO bound as-is, so
     // a "Muñoz-Pérez" reviewer finds the customer whether the record keeps
-    // the accents or dropped them (GH codex r1 P2). The suffixes also carry
-    // no apostrophe in any form (normalizeName), so the column is compared
-    // apostrophe-free too — "O’Connor" finds a record stored "O'Connor" or
-    // "OConnor" (GH codex r4 P1). Surnames derive from the
+    // the accents or dropped them (GH codex r1 P2). BOTH operands compare
+    // against the apostrophe-free column and carry no apostrophe themselves,
+    // so "O’Connor" finds a record stored "O'Connor" or "OConnor" (GH codex
+    // r4 P1) and "Pat O’Muñoz" finds "O'Muñoz" whichever clause the accent
+    // survives on (GH codex r5 P2). Surnames derive from the
     // REVIEWER NAME fallback only — an explicit search-box value keeps the
     // plain field matching ("10 Main Street" must not add every customer
     // surnamed Street, ranked ahead of the address hit; GH codex r2 P2).
@@ -754,9 +762,9 @@ async function searchAttributionCandidates(options = {}) {
         .orWhereILike('last_name', like)
         .orWhereRaw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE ?", [likeLower]);
       if (surnames.length) {
-        const lower = terms.toLowerCase();
-        this.orWhereRaw(`regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g') IN (${surnames.map(() => '?').join(', ')})`, surnames)
-          .orWhereRaw("(? = LOWER(last_name) OR ? LIKE ('% ' || LOWER(last_name)))", [lower, lower]);
+        const lower = terms.toLowerCase().replace(/['’‘ʼ]/g, '');
+        this.orWhereRaw(`${LAST_NAME_APOSTROPHE_FREE} IN (${surnames.map(() => '?').join(', ')})`, surnames)
+          .orWhereRaw(`(? = ${LAST_NAME_APOSTROPHE_FREE} OR ? LIKE ('% ' || ${LAST_NAME_APOSTROPHE_FREE}))`, [lower, lower]);
       }
       this.orWhereILike('phone', like)
         .orWhereILike('email', like)

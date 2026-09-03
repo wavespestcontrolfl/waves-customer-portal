@@ -863,22 +863,25 @@ describe('review incentives', () => {
     // De-accented whole-word suffixes, an equality list (no unaccent
     // extension is assumed) — and never a bare final token only.
     expect(raw).toContainEqual([`regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g') IN (?, ?)`, ['pepe munoz-perez', 'munoz-perez']]);
-    // The as-typed lowercase name compares against the accent-keeping
-    // column as an exact or whole-word-suffix match.
-    expect(raw).toContainEqual(["(? = LOWER(last_name) OR ? LIKE ('% ' || LOWER(last_name)))", ['pepe muñoz-pérez', 'pepe muñoz-pérez']]);
-    // Apostrophes in any form are dropped from the suffixes AND from the
-    // column (GH codex r4 P1): "O’Connor" finds "O'Connor" and "OConnor".
+    // The as-typed lowercase name compares against the accent-keeping,
+    // apostrophe-free column as an exact or whole-word-suffix match.
+    expect(raw).toContainEqual([`(? = regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g') OR ? LIKE ('% ' || regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g')))`, ['pepe muñoz-pérez', 'pepe muñoz-pérez']]);
+    // Apostrophes in any form are dropped from BOTH operands and from the
+    // column (GH codex r4 P1, r5 P2): "Pat O’Muñoz" finds a record stored
+    // "O'Muñoz" via the as-typed clause (accents kept, apostrophes gone) and
+    // one stored "OMunoz" via the de-accented list.
     conn.mock.results.length = 0;
-    conn.__state.rows.google_reviews[0].reviewer_name = 'Pat O’Connor';
+    conn.__state.rows.google_reviews[0].reviewer_name = 'Pat O’Muñoz';
     await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
     const rawApos = conn.mock.results.map((r) => r.value).filter((q) => q.table === 'customers').flatMap((q) => q.rawWheres);
-    expect(rawApos).toContainEqual([`regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g') IN (?, ?)`, ['pat oconnor', 'oconnor']]);
+    expect(rawApos).toContainEqual([`regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g') IN (?, ?)`, ['pat omunoz', 'omunoz']]);
+    expect(rawApos).toContainEqual([`(? = regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g') OR ? LIKE ('% ' || regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g')))`, ['pat omuñoz', 'pat omuñoz']]);
     // A one-token display name binds no surname clause at all.
     conn.mock.results.length = 0;
     conn.__state.rows.google_reviews[0].reviewer_name = 'SunshineGal88';
     await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
     const rawHandle = conn.mock.results.map((r) => r.value).filter((q) => q.table === 'customers').flatMap((q) => q.rawWheres);
-    expect(rawHandle.some(([sql]) => sql.includes("'g') IN") || sql.includes('LOWER(last_name))'))).toBe(false);
+    expect(rawHandle.some(([sql]) => sql.includes("'g') IN") || sql.includes("LIKE ('% ' ||"))).toBe(false);
   });
 
   test('candidate search expands surnames ONLY on the reviewer-name fallback — an explicit q keeps plain field matching (GH codex r2 P2)', async () => {
@@ -895,7 +898,7 @@ describe('review incentives', () => {
       }],
     });
     const surnameClauses = () => conn.mock.results.map((r) => r.value).filter((q) => q.table === 'customers').flatMap((q) => q.rawWheres)
-      .filter(([sql]) => sql.includes("'g') IN") || sql.includes("LIKE ('% ' || LOWER(last_name))"));
+      .filter(([sql]) => sql.includes("'g') IN") || sql.includes("LIKE ('% ' ||"));
     // "10 Main Street" is an address search: no customer surnamed "Street"
     // may be pulled in (and ranked ahead of the address hit) by a surname
     // clause derived from the search-box value.
@@ -906,7 +909,7 @@ describe('review incentives', () => {
     await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
     expect(surnameClauses()).toEqual([
       [`regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g') IN (?, ?)`, ['pepe munoz-perez', 'munoz-perez']],
-      ["(? = LOWER(last_name) OR ? LIKE ('% ' || LOWER(last_name)))", ['pepe muñoz-pérez', 'pepe muñoz-pérez']],
+      [`(? = regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g') OR ? LIKE ('% ' || regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g')))`, ['pepe muñoz-pérez', 'pepe muñoz-pérez']],
     ]);
   });
 
