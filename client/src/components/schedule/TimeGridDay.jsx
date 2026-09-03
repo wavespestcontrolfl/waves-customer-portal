@@ -1102,6 +1102,10 @@ export default function TimeGridDay({
   onCreateSlot,
   onDateChange,
   hideUnassignedRail = false,
+  // GATE_VISIT_GROUPS as the day list reports it: Combine is hidden while
+  // grouping is off (the group route 404s); Separate stays available on
+  // visits that already exist.
+  canGroup = false,
 }) {
   const todayIso = toISODate(new Date());
   const handleCreateSlot = useCallback((slot) => {
@@ -1469,7 +1473,8 @@ export default function TimeGridDay({
   // Combine: two or more rows of ONE customer, none terminal. The server
   // owns every other rule (family, tech, autopay, artifacts, windows) and
   // answers with its 409 text.
-  const canCombine = selectedRows.length >= 2
+  const canCombine = canGroup
+    && selectedRows.length >= 2
     && !!customerOf(selectedRows[0])
     && selectedRows.every((s) => customerOf(s) === customerOf(selectedRows[0]))
     && selectedRows.every((s) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(s.status));

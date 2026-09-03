@@ -4037,6 +4037,10 @@ router.get('/', async (req, res, next) => {
 
     res.json({
       date, services: enriched,
+      // Grouping creation gate, so the day grid hides Combine while the
+      // kill switch is off instead of offering an action the group route
+      // 404s (GH codex #3843 r1 P1). Split/Separate stay ungated.
+      visitGroups: isEnabled('visitGroups'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,

@@ -1126,11 +1126,16 @@ class SmartRebooker {
         ? null
         : occupancyProbeEnd(win.start || service.window_start, null, service.estimated_duration_minutes)
     );
+    // keepStatus (office Combine, GH codex #3843 r1 P1): the abut move is
+    // incidental to grouping, so the row keeps its own status — the unit
+    // mover's sibling rule — instead of landing on 'confirmed'; a failed
+    // Combine then has nothing to un-confirm. A live row still rewinds.
+    const landedStatus = options.keepStatus === true && !lifecycleRewound ? service.status : 'confirmed';
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
       window_end: windowEnd,
-      status: 'confirmed',
+      status: landedStatus,
       ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
       // A this-visit-only DATE move of a cadence visit is a deliberate
       // exception to the series — see dateExceptionStamp.
@@ -1435,11 +1440,11 @@ class SmartRebooker {
         });
       }
 
-      if (service.status !== 'confirmed') {
+      if (service.status !== landedStatus) {
         await trx('job_status_history').insert({
           job_id: serviceId,
           from_status: service.status,
-          to_status: 'confirmed',
+          to_status: landedStatus,
           transitioned_by: null,
         });
       }

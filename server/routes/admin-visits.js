@@ -9,6 +9,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { gates } = require('../config/feature-gates');
 const VisitGroups = require('../services/visit-groups');
 const { combineRows } = require('../services/visit-combine');
+const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 
 const router = express.Router();
 // Grouping/splitting is an OFFICE action (doc §3: "The office keeps one
@@ -45,6 +46,14 @@ router.post('/group', async (req, res, next) => {
       serviceIds,
       createdBy: `admin:${(req.technician && req.technician.id) || 'unknown'}`,
     });
+    // Other dispatch boards patch window_start/window_end from
+    // dispatch:job_update (useDispatchBoard) — the same broadcast the
+    // admin reschedule route sends; without it they keep the old slots
+    // until a full reload (GH codex #3843 r1 P2). Best-effort, after the
+    // grouping succeeded.
+    for (const m of moved) {
+      try { await emitDispatchJobUpdate({ jobId: m.id, actorId: req.technicianId }); } catch {}
+    }
     return res.json({ visit, moved });
   } catch (err) {
     if (/row not found/.test(String(err.message))) {

@@ -258,6 +258,7 @@ describe('TimeGridDay visit-group office actions', () => {
         services={[...SERVICES, ...SAME_CUSTOMER]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
         onChange={onChange}
+        canGroup
       />,
     );
     // Two different customers: no Combine.
@@ -286,7 +287,7 @@ describe('TimeGridDay visit-group office actions', () => {
       text: async () => JSON.stringify({ error: 'This customer is on autopay — visits are not grouped until grouped autopay ships.', code: 'visit_group_refused' }),
     });
     render(
-      <TimeGridDay date="2026-09-04" services={SAME_CUSTOMER} technicians={[{ id: 'tech-1', name: 'Alex Tech' }]} onChange={vi.fn()} />,
+      <TimeGridDay date="2026-09-04" services={SAME_CUSTOMER} technicians={[{ id: 'tech-1', name: 'Alex Tech' }]} onChange={vi.fn()} canGroup />,
     );
     fireEvent.click(screen.getByTitle(/Houser Customer/), { shiftKey: true });
     fireEvent.click(screen.getByTitle(/Houser Pest/), { shiftKey: true });
@@ -294,6 +295,19 @@ describe('TimeGridDay visit-group office actions', () => {
     await waitFor(() => expect(window.alert).toHaveBeenCalledWith(
       'Combine failed: This customer is on autopay — visits are not grouped until grouped autopay ships.',
     ));
+  });
+
+  it('hides Combine while grouping is off (the day list reports GATE_VISIT_GROUPS); Separate stays', () => {
+    const grouped = SAME_CUSTOMER.map((s) => ({ ...s, visit: { id: 'v1', serviceCount: 2, serviceTypes: ['Lawn', 'Pest'] } }));
+    render(
+      <TimeGridDay date="2026-09-04" services={grouped} technicians={[{ id: 'tech-1', name: 'Alex Tech' }]} onChange={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByTitle(/Houser Customer/), { shiftKey: true });
+    fireEvent.click(screen.getByTitle(/Houser Pest/), { shiftKey: true });
+    expect(screen.queryByRole('button', { name: 'Combine' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    fireEvent.click(screen.getByTitle(/Houser Pest/), { shiftKey: true });
+    expect(screen.getByRole('button', { name: 'Separate' })).toBeTruthy();
   });
 
   it('offers Separate for exactly one grouped row and posts to the split route', async () => {
