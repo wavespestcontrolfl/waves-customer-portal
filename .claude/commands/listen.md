@@ -17,7 +17,7 @@ Arguments: $ARGUMENTS
 ## 1. Extract (no DB, one FAST-tier LLM pass over redacted prose)
 
 ```sh
-node ops/agents/listen-transcripts.js extract --hours=24 --out=/tmp/listen-<date>.json --execute
+node ops/agents/listen-transcripts.js extract --hours=24 --out=/tmp/listen-$(date +%F).json --execute
 ```
 
 The script keeps only user/assistant prose (tool results, tool inputs and
@@ -51,8 +51,8 @@ the whole selection if any brief fails — fix the brief, do not bypass.
 ## 3. Seed the keepers (dry run, then execute)
 
 ```sh
-railway run --service Postgres node ops/agents/listen-transcripts.js seed --file=/tmp/listen-<date>.json --only=<id,id>
-railway run --service Postgres node ops/agents/listen-transcripts.js seed --file=/tmp/listen-<date>.json --only=<id,id> --execute
+railway run --service Postgres node ops/agents/listen-transcripts.js seed --file=/tmp/listen-$(date +%F).json --only=listen-1a2b3c4d5e,listen-6f7a8b9c0d
+railway run --service Postgres node ops/agents/listen-transcripts.js seed --file=/tmp/listen-$(date +%F).json --only=listen-1a2b3c4d5e,listen-6f7a8b9c0d --execute
 ```
 
 The dry run runs every selected brief through the runner's own
