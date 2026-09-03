@@ -396,9 +396,13 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     // on the domain, so an approval whose bridge run was gated or lease-held (the placement still parked) is invalidated
     // here — otherwise a Reopen or the watch re-investigation would let the bridge release that authorization without a
     // fresh click. The bridge's own invalidation is the ONE writer of invalidated_at on approvals.
-    const audited = open.filter((r) => R.APPROVABLE_LEVELS.includes(r.level));
+    const ownerRows = open.filter((r) => R.APPROVABLE_LEVELS.includes(r.level));
     const word = decision === 'watch' ? 'watches' : 'rejected';
-    const invalidated = await require('./link-authority-bridge').invalidateApprovals(trx, audited.filter((r) => r.approved), `owner ${word} the domain`, now);
+    const invalidated = await require('./link-authority-bridge').invalidateApprovals(trx, ownerRows.filter((r) => r.approved), `owner ${word} the domain`, now);
+    // an orphaned row (its path deleted — path_id SET NULL) has no path to audit against and the approvals table
+    // requires one: its approval is invalidated above and the bridge ends the row on its next pass; it must never
+    // roll the owner's decision back
+    const audited = ownerRows.filter((r) => r.path_id);
     // an active floor waiver (Acquire anyway) is the owner's EARLIER word: left valid, the next bridge sweep would honour
     // it and lift this very rejection — the waiver ends with the decision (a new Acquire anyway writes a new one)
     const waiversInvalidated = await trx('seo_link_floor_waivers').where({ domain_id: domain.id }).whereNull('invalidated_at')

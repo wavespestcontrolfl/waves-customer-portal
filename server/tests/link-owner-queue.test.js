@@ -507,6 +507,18 @@ describe('decideDomain (Reject / Watch)', () => {
     expect(card.rows.find((x) => x.id === row.id)).toMatchObject({ approved: false, approvable: true });
   });
 
+  test('an orphaned row (path deleted) never blocks the decision: its approval is invalidated, no audit row is written for it', async () => {
+    const { db, d } = await parked();
+    const gated = async () => ({ gated: true, skipped: 'gated', selected: 0, decided: 0, parked: 0, released: 0, aggregateChanges: 0, errors: [] });
+    const orphan = openRows(db)[0];
+    const a = await Q.approveRow(db, { authorityId: orphan.id, actor: ACTOR, now: NOW, bridge: gated });
+    orphan.path_id = null; // ON DELETE SET NULL
+    const r = await Q.decideDomain(db, { domainId: d.id, decision: 'rejected', actor: ACTOR, now: LATER });
+    expect(r).toMatchObject({ agent_state: 'rejected', audited: N - 1, invalidated: 1 });
+    expect(approvals(db).find((x) => x.id === a.approval.id).invalidated_at).toBe(LATER);
+    expect(approvals(db).filter((x) => x.decision === 'rejected').every((x) => x.path_id)).toBe(true);
+  });
+
   test('watch: watching + a 30-day recheck, audit rows decision=watch', async () => {
     const { db, d } = await parked();
     const r = await Q.decideDomain(db, { domainId: d.id, decision: 'watch', actor: ACTOR, now: NOW });
