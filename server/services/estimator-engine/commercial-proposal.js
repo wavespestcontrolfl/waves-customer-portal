@@ -411,6 +411,14 @@ async function maybeBuildCommercialProposalDraft({
           // Marker-only invalidated terminals are not live drafts
           // (codex P1, PR #3304 GH r6).
           .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+          // Rows the same clarify hold marked stay held, never block an
+          // adopted-answer replacement (codex r2 P2 on #3804; mirrors the
+          // residential creator).
+          .modify((q) => {
+            if (context?.supersedeReason === 'unit_answer_adopted' && context?.supersedeAttempt) {
+              q.whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_attempt', '') <> ?", [String(context.supersedeAttempt)]);
+            }
+          })
           .first();
         if (existingForCall) return { duplicate: existingForCall };
         // LIVE call-linkage fence, same as the residential creator (codex

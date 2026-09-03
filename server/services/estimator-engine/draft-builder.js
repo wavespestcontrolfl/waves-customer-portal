@@ -1081,8 +1081,17 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'superseded_at', '') = ''")
         // The draft this re-run supersedes carries the same call — it is
-        // the row being replaced, not a concurrent duplicate.
-        .modify((q) => { if (supersedeTarget) q.whereNot('id', supersedeTarget.id); })
+        // the row being replaced, not a concurrent duplicate. An adopted
+        // unit answer replacing a HELD draft also passes the other rows the
+        // same clarify hold marked (one attempt token per reply): they stay
+        // held for the operator, never block the corrected replacement
+        // (codex r2 P2 on #3804).
+        .modify((q) => {
+          if (supersedeTarget) q.whereNot('id', supersedeTarget.id);
+          if (context?.supersedeReason === 'unit_answer_adopted' && context?.supersedeAttempt) {
+            q.whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_attempt', '') <> ?", [String(context.supersedeAttempt)]);
+          }
+        })
         .first();
       if (existingForCall) {
         return {

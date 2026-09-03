@@ -808,6 +808,9 @@ describe('review fixes', () => {
     expect(splitUnitFirstLine('Unit 204 123 Main St')).toEqual({ unit: 'Unit 204', rest: '123 Main St' });
     expect(splitUnitFirstLine('#204 900 Bayview Ter, Venice')).toEqual({ unit: 'Unit 204', rest: '900 Bayview Ter, Venice' });
     expect(splitUnitFirstLine('123 Main St Apt 204')).toBeNull();
+    // Longer designator spellings win over their prefixes in the comma-free form (codex r2 P2 on #3804).
+    expect(splitUnitFirstLine('Floor 2 123 Main St, Sarasota')).toEqual({ unit: 'Floor 2', rest: '123 Main St, Sarasota' });
+    expect(splitUnitFirstLine('Building 9 Apt 204 123 Main St')).toEqual({ unit: 'Building 9 Apt 204', rest: '123 Main St' });
     const inlineSame = { extraction: null, lead: { address: 'Apt 204 at 123 Main St, Sarasota, FL 34232' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
     expect(idxPriv.addressFromContext(inlineSame)).toBe('Apt 204 at 123 Main St, Sarasota, FL 34232');
     const inlineStale = { extraction: null, lead: { address: 'Unit 9 123 Main St, Sarasota, FL 34232' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };

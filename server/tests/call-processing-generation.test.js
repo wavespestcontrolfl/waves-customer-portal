@@ -585,9 +585,17 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     expect(route).toContain('delete nextEngine.reprice_pending_at;');
     expect(route).toContain('unitHoldSatisfied(trx, nextEngine.callLogId || null, locked.address)');
     expect(persistence).toContain('unitHoldSatisfied(trx, lockedEngine.callLogId || null, revisedAddress)');
-    // Grouped siblings honor the hold at preflight, at the claim, and at publication.
+    // Grouped siblings honor the hold at preflight, at the claim, and at publication — and a hold that
+    // zero-rows the publication is a FAILURE (released), never read as a concurrent acceptance.
     expect(route).toContain('if (siblingRepricePending(sibling)) {');
     expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(2);
+    const heldThrowAt = route.indexOf("throw new Error('sibling is held for a re-price");
+    expect(heldThrowAt).toBeGreaterThan(-1);
+    expect(route.indexOf('published = true;', heldThrowAt)).toBeGreaterThan(heldThrowAt);
+    // The rows one clarify hold marked never block an adopted-answer replacement (both creators).
+    for (const rel of ['../services/estimator-engine/draft-builder.js', '../services/estimator-engine/commercial-proposal.js']) {
+      expect(src(rel)).toContain("context?.supersedeReason === 'unit_answer_adopted' && context?.supersedeAttempt");
+    }
     // A force-reprocess whose adopted answer meets the held whole-building draft supersedes it.
     expect(engine).toContain("context.supersedeReason = 'unit_answer_adopted';");
     expect(engine).toContain('sameStreetAddress(splitUnitFirstLine(own)?.rest || own, buildingLine)');

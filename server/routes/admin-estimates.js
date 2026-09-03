@@ -2546,6 +2546,18 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               ),
               updated_at: db.fn.now(),
             });
+          if (!updated) {
+            // Zero rows is EITHER a mid-publication acceptance (price-locked,
+            // handled below) OR a clarify hold stamped after the claim — a
+            // still-'sending', unlocked, held row must not be reported as
+            // published and left customer-viewable behind the anchor link
+            // (codex r2 P1 on #3804): throw into the retry loop, whose final
+            // attempt releases the sibling for the operator.
+            const fresh = await db('estimates').where({ id: sibling.id }).first('status', 'price_locked_at', 'estimate_data');
+            if (fresh && String(fresh.status) === 'sending' && !fresh.price_locked_at && siblingRepricePending(fresh)) {
+              throw new Error('sibling is held for a re-price (a clarify answer replaces its dollars or address) — not published');
+            }
+          }
           published = true;
           // A sibling is a delivered row of its own after the confirmed
           // handoff — same telemetry as the anchor (a fallback sibling
