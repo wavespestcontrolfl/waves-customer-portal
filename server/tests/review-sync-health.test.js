@@ -63,6 +63,11 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
     expect(dbErr.detail).toMatch(/^the GBP pull failed: update "google_reviews" set \.\.\. duplicate key/);
     expect(dbErr.detail).not.toMatch(/credentials/);
     expect(classify({ source: 'places_fallback', gbpFailure: 'GBP getReviews 503: unavailable' }).detail).toContain('503');
+    // A breaker trip pulled the feed and failed WRITING it (codex r5 P2).
+    const trip = classify({ source: 'places_fallback', gbpFailure: 'review upsert failed: 3 review rows failed on connection-class errors this run — aborting the location (1 stored; last: read ECONNRESET)' });
+    expect(trip.detail).toMatch(/^the review writes failed: 3 review rows failed on connection-class errors/);
+    expect(trip.detail).not.toMatch(/pull failed|credentials/);
+    expect(classify({ source: 'none', gbpFailure: 'review upsert failed: 3 review rows failed on connection-class errors this run — aborting the location (0 stored; last: read ECONNRESET)' }).detail).toMatch(/^nothing synced this run — the review writes failed: 3 review rows/);
   });
 
   test('GBP pull succeeds on an EMPTY feed → silent_empty ACT (the Venice class)', () => {

@@ -1056,6 +1056,11 @@ class GoogleBusinessService {
       } catch (sideErr) {
         logger.error(`[gbp] post-write ${label} failed for review row ${result.id} (${normalized.gbp_review_name || normalized.google_review_id || '?'}): ${sideErr.message}`);
         result.sideEffectError = result.sideEffectError || sideErr.message;
+        // The row is stored, but a dead or saturated database fails a
+        // post-write step the same way it fails an upsert — the caller's
+        // breaker must count it or a large feed waits one timeout per row
+        // (codex r5 P1).
+        if (isSystemicDbFailure(sideErr)) result.systemicError = result.systemicError || sideErr;
       }
     };
     if (!result.inserted) {
@@ -1530,10 +1535,15 @@ class GoogleBusinessService {
               totalSynced += gbpErr.partial.stored;
               errors.push(...gbpErr.partial.errors.map((e) => ({ location: loc.name, ...e })));
             }
-            gbpFailure = gbpErr.message;
-            gbpFailures[loc.id] = gbpErr.message;
-            errors.push({ location: loc.name, error: gbpErr.message, source: 'gbp' });
-            logger.warn(`[gbp] GBP Reviews sync failed for ${loc.name}; using Places fallback: ${gbpErr.message}`);
+            // A breaker trip is a database-write failure: the pull itself
+            // succeeded, so the alert and the health line must say so instead
+            // of "the GBP pull failed" (codex r5 P2). Same prefix the
+            // non-aborting row-failure path uses, so both select the
+            // rows-failing-to-store alert.
+            gbpFailure = gbpErr.breaker ? `review upsert failed: ${gbpErr.message}` : gbpErr.message;
+            gbpFailures[loc.id] = gbpFailure;
+            errors.push({ location: loc.name, error: gbpFailure, source: gbpErr.breaker ? 'gbp_row' : 'gbp' });
+            logger.warn(`[gbp] GBP Reviews sync failed for ${loc.name}; using Places fallback: ${gbpFailure}`);
           }
         } else if (loc.googleLocationResourceName) {
           // A null client after a FAILED token lookup is a database
@@ -1635,15 +1645,19 @@ class GoogleBusinessService {
     const days = (ts) => (ts ? (now - new Date(ts).getTime()) / 86400000 : Infinity);
 
     const failureText = gbpFailure && gbpFailure !== 'no_client' ? String(gbpFailure).replace(/\s+/g, ' ').slice(0, 200) : null;
+    // A breaker trip pulled the feed fine and failed WRITING it — say that,
+    // or the remediation reads as a Google/credentials problem (codex r5 P2).
+    const writeFailure = failureText && /^review upsert failed: /.test(failureText);
+    const failedWhat = writeFailure ? `the review writes failed: ${failureText.replace(/^review upsert failed: /, '')}` : `the GBP pull failed: ${failureText}`;
     if (source === 'none') {
-      return { cls: 'feed_down', severity: 'FIX', detail: `nothing synced this run — ${failureText ? `the GBP pull failed (${failureText})` : 'the GBP pull failed'} and no Places sample landed` };
+      return { cls: 'feed_down', severity: 'FIX', detail: `nothing synced this run — ${failureText ? failedWhat : 'the GBP pull failed'} and no Places sample landed` };
     }
     if (source === 'places_fallback') {
       // Say what actually failed: a 503 from Google, a pool timeout, or a
       // row write is not a credentials problem, and "reconnect the GBP
       // account" is the wrong remediation for all three. Only the missing
       // client is a credentials story.
-      const why = failureText ? `the GBP pull failed: ${failureText}` : 'GBP credentials are broken (client could not be initialized)';
+      const why = failureText ? failedWhat : 'GBP credentials are broken (client could not be initialized)';
       return { cls: 'feed_degraded', severity: 'ACT', detail: `${why} — running on the ~5-review Places sample; removals and most new reviews are invisible` };
     }
     // Judged on the CURRENT pull, not retained rows: a wiped profile keeps
@@ -1824,7 +1838,23 @@ class GoogleBusinessService {
     // saturation one success between timeouts must not reset the budget
     // (codex r4 P1) — three connection-class failures in a feed is systemic.
     let systemicFailures = 0;
-    for (const review of reviews) {
+    // A connection-class failure counts whether it hit the upsert or a
+    // post-write step of a stored row (codex r5 P1) — the database is the
+    // same either way. `visited` is the rows walked so far (this one
+    // included); the stored count excludes the rows whose upsert failed.
+    const countSystemic = (err, visited) => {
+      if (++systemicFailures < GBP_ROW_FAILURE_BREAKER) return;
+      const stored = visited - rowFailures.length;
+      const abort = new Error(`${systemicFailures} review rows failed on connection-class errors this run — aborting the location (${stored} stored; last: ${err.message})`);
+      // Rows stored before the trip are durable — hand the counts to the
+      // caller so the run log and the manual sync response report them
+      // (codex r3 P2). `breaker` routes the alert to the database-write
+      // class, not the pull-failure one (codex r5 P2).
+      abort.partial = { stored, inserted, errors };
+      abort.breaker = true;
+      throw abort;
+    };
+    for (const [i, review] of reviews.entries()) {
       const normalized = this._normalizeGbpReview(review, loc);
       const name = normalized.gbp_review_name || normalized.google_review_id || '?';
       try {
@@ -1834,18 +1864,12 @@ class GoogleBusinessService {
         // (no reconcile exclusion, no degraded alert) — it joins errors so
         // the run is not reported clean (pre-push audit r3).
         if (result.sideEffectError) errors.push({ error: `post-write side effect failed for ${name}: ${result.sideEffectError}`, source: 'gbp_side_effect' });
+        if (result.systemicError) countSystemic(result.systemicError, i + 1);
       } catch (rowErr) {
+        if (rowErr.breaker) throw rowErr;
         rowFailures.push({ review: name, error: rowErr.message });
         logger.error(`[gbp] review upsert failed for ${loc.name} (${name}): ${rowErr.message}`);
-        if (!isSystemicDbFailure(rowErr)) continue;
-        if (++systemicFailures >= GBP_ROW_FAILURE_BREAKER) {
-          const abort = new Error(`${systemicFailures} review rows failed on connection-class errors this run — aborting the location (last: ${rowErr.message})`);
-          // Rows stored before the trip are durable — hand the counts to the
-          // caller so the run log and the manual sync response report them
-          // (codex r3 P2).
-          abort.partial = { stored: reviews.indexOf(review) + 1 - rowFailures.length, inserted, errors };
-          throw abort;
-        }
+        if (isSystemicDbFailure(rowErr)) countSystemic(rowErr, i + 1);
       }
     }
     const stored = reviews.length - rowFailures.length;
@@ -2094,6 +2118,9 @@ class GoogleBusinessService {
    * Best-effort — never throws into the sync loop.
    */
   async _notifyDegradedSync(loc, cause, { reconcileFailed = false } = {}) {
+    // A breaker trip (the location aborted mid-feed) never reached the
+    // removal reconcile — the body must not claim the rest reconciled.
+    const breakerTrip = /aborting the location/.test(String(cause || ''));
     try {
       // The title is the 24h dedupe key, so distinct failure classes need
       // distinct titles: a pull-failure alert this morning must not
@@ -2136,7 +2163,7 @@ class GoogleBusinessService {
         const body = reconcileFailure
           ? `Review sync for ${loc.name} pulled the GBP feed, but the ${cause}. New reviews are still syncing; REMOVALS will not be detected until the reconcile succeeds.`
           : upsertFailure
-            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored\)/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; the failed rows were excluded from this run's removal reconcile so they are not misreported as removed${reconcileFailed ? ' (and that reconcile FAILED — see its own alert)' : ' (the rest of the location reconciled normally)'}. This is a database write error, not a credentials problem — read the error and the code.`
+            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored\)/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; ${breakerTrip ? 'the location aborted before its removal reconcile, so nothing is misreported as removed and the sync will attempt the Places sample fallback' : `the failed rows were excluded from this run's removal reconcile so they are not misreported as removed${reconcileFailed ? ' (and that reconcile FAILED — see its own alert)' : ' (the rest of the location reconciled normally)'}`}. This is a database write error, not a credentials problem — read the error and the code.`
             : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
         await NotificationService.notifyAdmin(
           'review',

@@ -454,10 +454,67 @@ describe('Google Business review sync', () => {
     // The two rows stored before the trip are counted (codex r3 P2).
     expect(result.synced).toBe(2);
     expect(result.new).toBe(1);
-    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp', error: expect.stringMatching(/3 review rows failed on connection-class errors this run.*ECONNRESET/) })]);
-    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/3 review rows failed on connection-class errors/));
+    // A trip is a database-WRITE failure: it carries the row-failure source and
+    // prefix so the alert and the health line never call it a pull failure (codex r5 P2).
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringMatching(/^review upsert failed: 3 review rows failed on connection-class errors this run.*\(2 stored; last: read ECONNRESET\)/) })]);
+    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^review upsert failed: 3 review rows failed on connection-class errors/));
     expect(places).toHaveBeenCalledTimes(1);
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
+  test('a connection-class failure inside a post-write step counts toward the breaker (codex r5 P1)', async () => {
+    const reviews = Array.from({ length: 6 }, (_, i) => ({
+      name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
+    }));
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews });
+    });
+    // Rows store, but the pool times out inside every post-write step: the
+    // rows are durable (no rowFailures), yet the database is just as dead.
+    let calls = 0;
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockImplementation(async () => {
+      calls++;
+      const timeout = Object.assign(new Error('Knex: Timeout acquiring a connection. The pool is probably full.'), { name: 'KnexTimeoutError' });
+      return { id: `stored-${calls}`, inserted: true, sideEffectError: timeout.message, systemicError: timeout };
+    });
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation').mockResolvedValue({ synced: 0, new: 0 });
+
+    const result = await service.syncAllReviews();
+
+    expect(upsert).toHaveBeenCalledTimes(3);
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(result.synced).toBe(3);
+    expect(result.new).toBe(3);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'gbp_side_effect' }),
+      expect.objectContaining({ source: 'gbp_row', error: expect.stringMatching(/^review upsert failed: 3 review rows failed on connection-class errors this run.*\(3 stored; last: Knex: Timeout/) }),
+    ]));
+    expect(places).toHaveBeenCalledTimes(1);
+    upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
+  test('a real post-write connection failure is tagged systemic on the result; a row-specific one is only a side-effect error', async () => {
+    const run = async (err) => {
+      const result = { id: 'r1', inserted: false };
+      // The reinstatement clear is the first post-write step: fail its UPDATE.
+      const real = db.getMockImplementation();
+      db.mockImplementationOnce((table) => { const q = real(table); q.update = async () => { throw err; }; return q; });
+      await service._applyPostWriteSideEffects({ result, row: {}, normalized: { gbp_review_name: 'n' }, existing: { customer_id: null }, syncStart: new Date(), pendingRestoredNotifications: [], pendingUnlinkedNotifications: [] });
+      return result;
+    };
+    const timeout = Object.assign(new Error('Knex: Timeout acquiring a connection'), { name: 'KnexTimeoutError' });
+    const tagged = await run(timeout);
+    expect(tagged.sideEffectError).toBe(timeout.message);
+    expect(tagged.systemicError).toBe(timeout);
+    const rowErr = Object.assign(new Error('invalid input syntax'), { code: '22P02' });
+    const untagged = await run(rowErr);
+    expect(untagged.sideEffectError).toBe(rowErr.message);
+    expect(untagged.systemicError).toBeUndefined();
   });
 
   test('a null client after a FAILED stored-token lookup is reported as that failure, never as missing credentials', async () => {
