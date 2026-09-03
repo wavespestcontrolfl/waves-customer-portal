@@ -212,3 +212,24 @@ describe('TimeGridDay closeout-owed chip', () => {
     expect(screen.getAllByText('Closeout owed')).toHaveLength(3);
   });
 });
+
+describe('TimeGridDay all-day closeout-owed chip', () => {
+  it('routes the all-day chip through onEdit even though the stop button opens the customer profile', () => {
+    const onEdit = vi.fn();
+    const onViewCustomer = vi.fn();
+    const owedAllDay = { id: 'svc-allday', customerId: 'cust-1', customerName: 'All Day Customer', status: 'completed', technicianId: 'tech-1', technicianName: 'Alex Tech' };
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[owedAllDay]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        owesCompletion={(svc) => svc.id === 'svc-allday'}
+        onEdit={onEdit}
+        onViewCustomer={onViewCustomer}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Closeout owed' }));
+    expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-allday' }));
+    expect(onViewCustomer).not.toHaveBeenCalled();
+  });
+});

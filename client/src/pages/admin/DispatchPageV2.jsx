@@ -116,6 +116,11 @@ const PRE_SERVICE_STATUSES = new Set(["pending", "confirmed", "rescheduled"]);
 // Recovery deep-links these rows here via ?completeService=.
 export function completedVisitOwesCompletion(service) {
   if (String(service?.status || "").toLowerCase() !== "completed") return false;
+  // A completed project-backed visit is closed by definition — handleComplete
+  // refuses it (projectCompletionIsClosed) and CompletionPanel never owns
+  // it, so advertising a closeout it cannot resume would be a dead cue
+  // (Codex #3799 r1).
+  if (projectCompletionIsClosed(service)) return false;
   return service?.has_service_record === false || completionResumeOwed(service?.id);
 }
 

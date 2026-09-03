@@ -4091,6 +4091,10 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.service_id',
           'scheduled_services.is_callback',
           'scheduled_services.service_type', 'scheduled_services.status',
+          // Same completion-record flag the day endpoint serializes: the
+          // mobile week list opens completion straight off these rows and
+          // its "Closeout owed" badge keys off it (Codex #3799 r1).
+          db.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id) as has_service_record'),
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
           'scheduled_services.estimated_price',
@@ -4325,6 +4329,7 @@ router.get('/week', async (req, res, next) => {
           // "Tree & Shrub Care", which would drop every lawn target.
           serviceTypeRaw: s.service_type,
           serviceCategory: detectServiceCategory(svcType),
+          has_service_record: s.has_service_record === true,
           ...(() => {
             // Primary and add-ons stay SEPARATE through traceFeedFields
             // (codex P1 r7) — same reason as the day feed.

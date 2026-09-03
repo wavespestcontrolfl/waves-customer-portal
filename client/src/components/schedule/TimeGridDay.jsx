@@ -305,12 +305,18 @@ function NowLine() {
 // Completed visit whose closeout (invoice / report / completion text) is
 // still owed — the dispatch page's owesCompletion predicate decides; this
 // is the only visible cue on the grid that the visit still needs a resume.
-function CloseoutOwedChip() {
-  return (
-    <span className="inline-flex items-center h-4 px-1 rounded-xs bg-alert-bg text-alert-fg text-10 font-medium uppercase tracking-label whitespace-nowrap">
-      Closeout owed
-    </span>
-  );
+function CloseoutOwedChip({ onClick }) {
+  const className = 'inline-flex items-center h-4 px-1 rounded-xs bg-alert-bg text-alert-fg text-10 font-medium uppercase tracking-label whitespace-nowrap';
+  if (onClick) {
+    // All-day strip: the stop's own button opens the customer profile, so
+    // the chip carries the resume action itself (Codex #3799 r1).
+    return (
+      <button type="button" onClick={onClick} className={cn(className, 'u-focus-ring')} title="Resume closeout">
+        Closeout owed
+      </button>
+    );
+  }
+  return <span className={className}>Closeout owed</span>;
 }
 
 function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent }) {
@@ -754,7 +760,7 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
           >
             {svc.customerName || 'Unassigned'} · {serviceDisplayName(svc)}
           </button>
-          {owesCompletion?.(svc) && <CloseoutOwedChip />}
+          {owesCompletion?.(svc) && <CloseoutOwedChip onClick={() => onEdit?.(svc)} />}
           {isLawnService(svc) && onTreatmentPlan && (
             <button
               type="button"
