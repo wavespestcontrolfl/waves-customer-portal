@@ -999,7 +999,7 @@ describe('appointmentCardCancelPreview', () => {
     mockApptTime = new Date(Date.now() + 3 * HOUR);
     expect(await appointmentCardCancelPreview('svc-1')).toEqual({
       secured: true, feeApplies: true, feeAmount: 49,
-      rule: { code: 'in_window', willCharge: true, text: expect.stringMatching(/less than 24 hours from now\. The \$49 late-cancel fee will be charged/) },
+      rule: { code: 'in_window', willCharge: true, text: expect.stringMatching(/within the 24-hour late-cancel window\. The \$49 late-cancel fee will be charged/) },
     });
   });
   test('gate off → feeApplies false (charge would no-op anyway)', async () => {
@@ -1014,7 +1014,14 @@ describe('appointmentCardCancelPreview', () => {
     mockApptTime = new Date(Date.now() + 100 * HOUR);
     const res = await appointmentCardCancelPreview('svc-1');
     expect(res).toMatchObject({ secured: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window', willCharge: false } });
-    expect(res.rule.text).toMatch(/more than 24 hours from now, so this is a free cancel and nothing will be charged\.$/);
+    expect(res.rule.text).toMatch(/outside the 24-hour late-cancel window, so this is a free cancel and nothing will be charged\.$/);
+  });
+  test('in-flight charge (fee_status charging) → distinct rule: a charge may still land, no "nothing will be charged" promise', async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'charging' } });
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    expect(res.rule.text).toMatch(/already in progress or under billing review/);
+    expect(res.rule.text).not.toMatch(/Nothing will be charged/);
   });
   test('unresolved (thrown time lookup) → willCharge null and the rule says the cancel parks for review', async () => {
     mockApptTime = null;

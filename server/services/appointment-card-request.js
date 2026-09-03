@@ -2773,7 +2773,11 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
           .first('no_show_fee_amount');
         feeAmount = Number(row?.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : null;
       } catch (err) { /* best-effort */ }
-      return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', feeAmount, detail: String(skipReason || 'lookup failed').replace(/_/g, ' ') }) };
+      // charge_review covers BOTH an in-flight charge (fee_status
+      // 'charging') and a parked review — a payment may still land, so the
+      // copy must not promise "nothing will be charged".
+      const code = skipReason === 'charge_review' ? 'charge_in_flight' : 'unresolved';
+      return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code, feeAmount, detail: String(skipReason || 'lookup failed').replace(/_/g, ' ') }) };
     }
     return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
   }

@@ -771,14 +771,14 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     expect(res).toEqual({ held: true, feeApplies: true, feeAmount: 49, rule: expect.objectContaining({ code: 'in_window', willCharge: true }) });
     // ET wall clock of the start + the fee + the rule, in one sentence.
     // Stubbed ET formatters (see the datetime-et mock) — the shape is what's under test.
-    expect(res.rule.text).toBe('A card is saved and the visit starts Monday, July 13, 2026 at 9:00 AM, less than 24 hours from now. The $49 late-cancel fee will be charged — rule: cancellations less than 24 hours before the visit.');
+    expect(res.rule.text).toBe('A card is saved and the visit starts Monday, July 13, 2026 at 9:00 AM, within the 24-hour late-cancel window. The $49 late-cancel fee will be charged — rule: cancellations within 24 hours of the visit.');
   });
   it('held + start days out → free cancel, and the rule says why in plain words', async () => {
     stubDb(holdRow);
     mockApptTime.mockResolvedValue(new Date('2026-07-13T18:00:00Z'));
     const res = await cardHoldCancelPreview('svc1', now);
     expect(res).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: expect.objectContaining({ code: 'outside_window', willCharge: false }) });
-    expect(res.rule.text).toBe('A card is saved. The visit starts Monday, July 13, 2026 at 9:00 AM, more than 24 hours from now, so this is a free cancel and nothing will be charged.');
+    expect(res.rule.text).toBe('A card is saved. The visit starts Monday, July 13, 2026 at 9:00 AM, outside the 24-hour late-cancel window, so this is a free cancel and nothing will be charged.');
   });
   it('held minutes ago with the visit inside the window → booking-age free period, named as such', async () => {
     stubDb({ ...holdRow, held_at: new Date(now.getTime() - 20 * 60000) });

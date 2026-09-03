@@ -1325,13 +1325,18 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
       return rule(false, `A card is saved, but the fee terms were agreed only ${ago} ago — inside the ${hours}-hour window — so the free-cancel period is still open and nothing will be charged.`);
     }
     case 'outside_window':
-      return rule(false, `A card is saved. The visit starts ${fmtETWhen(start)}, more than ${hours} hours from now, so this is a free cancel and nothing will be charged.`);
+      // Boundary-neutral on purpose: the card-hold rail charges AT exactly
+      // N hours and the appointment rail frees it — "outside the window"
+      // is true for both once the predicate said no fee.
+      return rule(false, `A card is saved. The visit starts ${fmtETWhen(start)}, outside the ${hours}-hour late-cancel window, so this is a free cancel and nothing will be charged.`);
     case 'card_removed':
       return rule(false, 'The customer removed the saved card, so nothing can be charged.');
     case 'in_window':
-      return rule(true, `A card is saved and the visit starts ${fmtETWhen(start)}, less than ${hours} hours from now. ${fee} will be charged — rule: cancellations less than ${hours} hours before the visit.`);
+      return rule(true, `A card is saved and the visit starts ${fmtETWhen(start)}, within the ${hours}-hour late-cancel window. ${fee} will be charged — rule: cancellations within ${hours} hours of the visit.`);
     case 'sticky':
       return rule(true, `A card is saved. The customer rescheduled on ${fmtETWhen(sticky?.rescheduledAt)} while inside the ${hours}-hour window of the earlier slot (${fmtETWhen(sticky?.originalStart)}), so the window carried over to this visit. ${fee} will be charged — rule: a reschedule made inside the window doesn't reset it.`);
+    case 'charge_in_flight':
+      return rule(null, 'A fee charge for this visit is already in progress or under billing review. This cancel starts no new charge — check the visit\'s billing before promising the customer either way.');
     case 'unresolved':
     default:
       return rule(null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. Nothing will be charged automatically — the cancel will be parked for billing review.`);
