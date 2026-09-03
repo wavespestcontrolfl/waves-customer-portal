@@ -6,6 +6,7 @@ const logger = require('../services/logger');
 const leadAttribution = require('../services/lead-attribution');
 const agentActivity = require('../services/agent-activity');
 const modelSwitchboard = require('../services/model-switchboard');
+const modelDiscovery = require('../services/model-discovery');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
@@ -1008,6 +1009,30 @@ router.get('/activity', async (req, res, next) => {
 // client composes; nothing here writes. See services/model-switchboard.js.
 router.get('/models', (_req, res) => {
   res.json(modelSwitchboard.getSwitchboard());
+});
+
+// Live model search across the providers' list endpoints (cached 10 min) so a
+// model released today is pickable without a deploy. ?q=fable 5.1
+// &providers=anthropic,openai. Read-only, no tokens spent.
+router.get('/models/search', async (req, res, next) => {
+  try {
+    const providers = String(req.query.providers || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const out = await modelDiscovery.search(String(req.query.q || '').slice(0, 80), providers.length ? { providers } : {});
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Entitlement check for a searched id before the composer offers its env
+// line: the provider's retrieve endpoint (no tokens). Nothing is written.
+router.post('/models/probe', async (req, res, next) => {
+  try {
+    const { provider, id } = req.body || {};
+    res.json(await modelDiscovery.probe(String(provider || ''), String(id || '')));
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.get('/overview', async (_req, res) => {
