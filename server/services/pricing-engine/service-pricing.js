@@ -5088,6 +5088,8 @@ function priceTrapOnlyRetainer(options = {}) {
     name: plan.label,
     trapOnlyRetainerPlan: planKey,
     trapOnlyRetainerBilling: billing,
+    // Customer-facing terms read the billing mode off the row (codex #3823 r8 P1).
+    retainerBilling: billing,
     trapOnlyRetainerAnnualPrice: plan.annualPrice,
     trapOnlyRetainerMonthlyPrice: plan.monthlyPrice,
     trapOnlyScheduledVisitsIncluded: plan.scheduledVisitsIncluded,
@@ -5116,6 +5118,7 @@ function priceTrapOnlyRetainer(options = {}) {
         name: `${plan.label} - ${billing === 'annual' ? 'Annual prepaid' : 'Monthly, 12-month agreement'}`,
         price: retainerPrice,
         discountEligible: false,
+        retainerBilling: billing,
         detail: billing === 'annual'
           ? `$${plan.annualPrice}/year. Includes ${plan.scheduledVisitsIncluded} scheduled checks and ${plan.responseCallbacksIncluded} response callbacks per year.`
           : `$${plan.monthlyPrice}/month with 12-month agreement. Includes ${plan.scheduledVisitsIncluded} scheduled checks and ${plan.responseCallbacksIncluded} response callbacks per year.`,
@@ -7037,7 +7040,10 @@ function bedBugCommonResult(normalized, fields) {
     requiresInspection: true,
     requiresPrepChecklist: true,
     requiresCustomerAcknowledgement: true,
-    warrantyEligible: false,
+    // Owner ruling 2026-09-03: bed bug treatment IS guaranteed (the site's
+    // written 30-day guarantee on the treated areas); the copy pack reads
+    // this flag. Metadata only — no billing path consumes it.
+    warrantyEligible: true,
     warnings,
     discountHandledByPricingFunction: true,
     recurringCustomerDiscountRate: 0,
@@ -8778,6 +8784,9 @@ function calculateExclusionPrice(config = {}) {
     estimatedPoints, tier,
     estimatedHours: Math.round(laborMinutes / 60 * 10) / 10,
     multiVisit: laborMinutes > 240,
+    // Sold-scope flag the customer estimate's copy pack reads (codex #3823
+    // r5 P1): vent screening is promised only when it was priced.
+    includesScreening: includesScreening === true,
   };
 }
 

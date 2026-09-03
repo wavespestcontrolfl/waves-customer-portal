@@ -3643,7 +3643,7 @@ describe('public estimate one-time breakdown', () => {
 
     // Hero + Waves AI card are Bora-Care-specific, not the generic/pest fallback.
     // (The hero apostrophe is HTML-escaped, so match without it.)
-    expect(html).toContain('your estimate is ready!');
+    expect(html).toContain("your Bora-Care treatment quote is ready!");
     expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
     expect(html).toContain('the Bora-Care application rate to price this treatment.');
     expect(html).not.toContain('choose your pest control option');
@@ -3755,7 +3755,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your estimate is ready!');
+    expect(html).toContain("your Bora-Care treatment quote is ready!");
     expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
     expect(html).not.toContain('30-day callback period if pests return');
     expect(html).not.toContain('class="mini-guarantee"');
@@ -3809,7 +3809,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your estimate is ready!');
+    expect(html).toContain("your Bora-Care treatment quote is ready!");
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
     // Hero treatment name comes from the normalized rows too, so the nested shape
@@ -4357,7 +4357,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your estimate is ready!');
+    expect(html).toContain("your Bora-Care treatment quote is ready!");
     expect(html).not.toContain('your termite trenching quote.');
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
   });
@@ -6512,7 +6512,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your estimate is ready!');
+    expect(html).toContain("your mosquito treatment quote is ready!");
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -6578,7 +6578,10 @@ describe('public estimate one-time breakdown', () => {
       satelliteUrl: 'https://maps.example/mosquito-onetime.png',
     }, estimateData);
 
+    // The $50 residual is a billable unknown charge, so the quote is mixed for
+    // the service copy pack: generic headline, category mosquito copy below.
     expect(html).toContain('your estimate is ready!');
+    expect(html).not.toContain("your mosquito treatment quote is ready!");
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');

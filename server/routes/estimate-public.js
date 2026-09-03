@@ -36,6 +36,7 @@ function acceptBookingGateToken(estimate) {
   return token ? `&accept_token=${encodeURIComponent(token)}` : '';
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
+const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -4325,6 +4326,17 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   ]);
 
   const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
+  // One-time-ONLY estimate whose rows all resolve to one service copy pack
+  // (roach cleanout, flea, wasp, bed bug, …): the card describes THAT
+  // service instead of the generic "reviewed your property" line. Mixed
+  // one-time quotes and anything with a recurring service keep the
+  // category branches below.
+  // Structural one-time-only check, not "no recurring rows were passed":
+  // a caller can hand in an empty recurringServices for a plan estimate
+  // (codex pre-push P1).
+  const oneTimeOnlyCopy = recurringServices.length === 0 && isStructuralOneTimeOnlyEstimate(parsedData, estimate)
+    ? oneTimeOnlyIntelligenceCopy(intelligenceOneTimeItems)
+    : null;
   const intelligenceTitle = isLawnOnly
     ? 'Waves AI reviewed your lawn before pricing this estimate'
     : (isTreeShrubOnly
@@ -4359,8 +4371,8 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
               : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.')))));
   return {
     eyebrow: 'Waves AI',
-    title: intelligenceTitle,
-    body: intelligenceBody,
+    title: oneTimeOnlyCopy?.aiTitle || intelligenceTitle,
+    body: oneTimeOnlyCopy?.aiBody || intelligenceBody,
     satelliteUrl,
     metrics,
     signals: [],
@@ -4693,6 +4705,18 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `${germanRoachVisitPhrase(germanRoachCleanoutItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`
     : '';
   const germanRoachGuaranteeCopy = '100% guaranteed with the Waves Guarantee.';
+  // Service copy pack (estimate-one-time-copy.js) — the hero note takes the
+  // pack only when EVERY billable row resolves to the same key (a mixed
+  // roach + wasp quote must not read as a roach cleanout — codex pre-push
+  // P1) and never on a regulated certificate surface.
+  // Single-service check spans the raw rows AND the normalized breakdown
+  // (whose residual positive one_time_adjustment is a billable unknown
+  // charge) — the same superset the React /data contract reads, so both
+  // renderers agree on when a quote is mixed (codex #3823 r8 P0).
+  const oneTimeIntelligenceRows = [...oneTimeItems, ...boraCareOneTimeRows];
+  const oneTimeHeroCopy = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems) && oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows)
+    ? oneTimeItems.map(resolveOneTimeServiceCopy).find(Boolean) || null
+    : null;
   const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
   const storedBaseMonthly = Number(recurringMonthlyParts.baseMonthly || est.monthlyTotal || 0);
 
@@ -5566,7 +5590,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           <span class="per">one-time</span>
         </div>
         <div class="onetime-note">
-          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (hasOnlyBoraCareServices ? boraCareCopy.note : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.')))}
+          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (hasOnlyBoraCareServices ? boraCareCopy.note : (oneTimeHeroCopy ? oneTimeHeroCopy.outcome : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.'))))}
         </div>
       </div>
     `;
@@ -5647,12 +5671,24 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // One-time-ONLY pages no longer render a hero price card (owner
   // 2026-08-27, mirrors the React OneTimeBreakdownCard-leads layout), so
   // the lone row keeps its dollars — it is the only place the price shows.
-  const realOneTimeRows = billableOneTimeItems.map((it) => {
+  // Row copy is suppressed on a regulated certificate surface (WDO) — the
+  // page stays narrative-free, not just the WDO row (codex pre-push P0).
+  const oneTimeRowCopyAllowed = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
+  // One copy per logical job, included (service-credit) rows skipped — the
+  // same helper the React contract uses (codex #3823 r3 P2s).
+  const oneTimeRowCopies = oneTimeRowCopyAllowed ? resolveOneTimeRowCopies(billableOneTimeItems) : [];
+  const realOneTimeRows = billableOneTimeItems.map((it, rowIndex) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
     const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
-    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceCell}</td></tr>`;
+    // What the visit involves — same outcome + bullet + terms shape the
+    // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
+    const rowCopy = oneTimeRowCopies[rowIndex] || null;
+    const rowCopyHtml = rowCopy
+      ? `<div class="onetime-outcome">${escapeHtml(rowCopy.outcome)}</div><details class="onetime-includes-wrap"><summary>See everything included (${rowCopy.includes.length})</summary><ul class="onetime-includes">${rowCopy.includes.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></details>${rowCopy.terms ? `<div class="onetime-terms">${escapeHtml(rowCopy.terms)}</div>` : ''}`
+      : '';
+    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}${rowCopyHtml}</td><td style="text-align:right">${priceCell}</td></tr>`;
   }).join('');
   const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
     ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">−${fmtMoney(manualOneTimeDiscount)}</td></tr>`
@@ -5896,12 +5932,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // nested-result estimates still surface service-specific chips like
   // "What does Bora-Care treat?". Duplicates are harmless — every chip is added on
   // a boolean, never per row.
-  const askPrompts = buildEstimateAskPrompts(
-    recurring,
-    [...oneTimeItems, ...boraCareOneTimeRows],
-    pestRecurring,
-    hasPestOneTime,
-  );
+  // One-time-only service copy pack chips lead (roach, flea, wasp, bed
+  // bug, …) — same source the React contract's askChips reads.
+  const oneTimeOnlyAskCopy = isOneTimeOnly && !isRegulatedCertificateSurface ? oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows) : null;
+  const askPrompts = oneTimeOnlyAskCopy?.askChips?.length
+    ? oneTimeOnlyAskCopy.askChips.slice(0, 6)
+    : buildEstimateAskPrompts(
+      recurring,
+      [...oneTimeItems, ...boraCareOneTimeRows],
+      pestRecurring,
+      hasPestOneTime,
+    );
   const estimateAskEnabled = !isRegulatedCertificateSurface && isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
@@ -5983,8 +6024,21 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : quoteRequired
     ? { h1: `Hello ${firstName}, your custom quote is in the works.`, eyebrow: 'Your custom quote' }
     : null;
-  const heroH1 = stateHero?.h1 || `Hello ${firstName}, your estimate is ready!`;
-  const heroEyebrow = stateHero?.eyebrow || `Your estimate · ${escapeHtml(quotedServicesLabel)}`;
+  // One-time-only service copy pack hero (roach cleanout, flea, …) — the
+  // eyebrow/headline/subline name the service actually quoted. Terminal
+  // states outrank it, same as the React TERMINAL_HERO rule.
+  const heroCity = (/,\s*([^,]+),\s*FL\b/i.exec(String(est.address || '')) || [])[1]?.trim() || null;
+  const fillOneTimeHero = (str) => escapeHtml(String(str || '')
+    .replace(/\{first\}/g, (est.customerName || '').split(' ')[0] || 'there')
+    .replace(/\s+in \{city\}/gi, heroCity ? ` in ${heroCity}` : '')
+    .replace(/\{city\}/g, heroCity || '')
+    .replace(/ {2,}/g, ' '));
+  const oneTimeHero = !stateHero && oneTimeOnlyAskCopy?.hero ? oneTimeOnlyAskCopy.hero : null;
+  const heroH1 = stateHero?.h1 || (oneTimeHero ? fillOneTimeHero(oneTimeHero.h1) : `Hello ${firstName}, your estimate is ready!`);
+  const heroEyebrow = stateHero?.eyebrow || (oneTimeHero ? escapeHtml(oneTimeHero.eyebrow) : `Your estimate · ${escapeHtml(quotedServicesLabel)}`);
+  // A review-gated quote (trenching review card, no self-booking) drops the
+  // pack subline rather than promise online approval (codex pre-push P1).
+  const heroSubHtml = oneTimeHero?.sub && !hasOnlyTermiteTrenchingServices ? `<p class="hero-sub">${fillOneTimeHero(oneTimeHero.sub)}</p>` : '';
 
   return `<!doctype html>
 <html lang="en"><head>
@@ -6007,6 +6061,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   h3{font-size:18px;font-weight:600}
   p{margin:0 0 12px}
   .eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#475569;font-weight:600;margin-bottom:6px;font-family:Inter,system-ui,sans-serif}
+  .hero-sub{font-size:16px;line-height:1.5;color:#3F4A65;margin:8px 0 12px;max-width:62ch}
   .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
   .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
   .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
@@ -6270,6 +6325,16 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   tr:last-child td{border-bottom:0}
   td.val{text-align:right;font-weight:500;color:#1B2C5B}
   .sub{font-size:12px;color:#475569;margin-top:2px}
+  .onetime-outcome{font-size:15px;font-weight:400;color:#3F4A65;margin-top:6px;line-height:1.5}
+  .onetime-includes-wrap{margin-top:8px}
+  .onetime-includes-wrap summary{cursor:pointer;font-size:14px;font-weight:600;color:#0369a1;list-style:none;user-select:none}
+  .onetime-includes-wrap summary::-webkit-details-marker{display:none}
+  .onetime-includes-wrap summary::after{content:" ▾"}
+  .onetime-includes-wrap[open] summary::after{content:" ▴"}
+  .onetime-includes{list-style:none;margin:10px 0 0;padding:10px 0 0;border-top:1px solid #E6EEF6;display:grid;gap:8px}
+  .onetime-includes li{position:relative;padding-left:18px;font-size:14px;font-weight:600;color:#3F4A65;line-height:1.35}
+  .onetime-includes li::before{content:"";position:absolute;left:0;top:7px;width:6px;height:6px;border-radius:999px;background:#1B2C5B}
+  .onetime-terms{font-size:14px;color:#6B7590;margin-top:10px;line-height:1.5}
   .cta{display:block;width:100%;padding:14px 22px;background:#1B2C5B;color:#fff;border:none;border-radius:10px;font-family:Inter,system-ui,sans-serif;font-weight:500;font-size:16px;cursor:pointer;transition:all .15s;text-align:center;text-decoration:none}
   .cta:hover:not([disabled]){background:#121E3D}
   .cta.secondary{background:transparent;color:#1B2C5B;border:1px solid #1B2C5B}
@@ -6402,6 +6467,7 @@ ${shellTopBar()}
   <div class="hero">
     <div class="eyebrow">${heroEyebrow}</div>
     <h1>${heroH1}</h1>
+    ${heroSubHtml}
     ${est.estimateSlug ? `<div class="hero-contact">Estimate ${escapeHtml(est.estimateSlug)}</div>` : ''}
     ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
@@ -6694,6 +6760,9 @@ ${shellQuestionsBar()}
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const roundMoney = (n) => Math.round(Number(n || 0) * 100) / 100;
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
+  // A closed <details> prints nothing — open every one-time inclusion list
+  // before the browser captures the page (React RowInclusions does the same).
+  window.addEventListener('beforeprint', () => { document.querySelectorAll('details.onetime-includes-wrap').forEach((d) => { d.open = true; }); });
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
   // Subtle click pulse on any button — fires once per click, self-removes after animation
   document.addEventListener('click', (ev) => {
@@ -16767,6 +16836,24 @@ function oneTimeItemsForRender(estResult, estData) {
     reason: row.reason || null,
     customQuoteReason: row.customQuoteReason || null,
     ...(row.kind === 'included' ? { serviceSpecificDiscountApplied: true } : {}),
+    // Sold-scope metadata the one-time copy pack reads (codex #3823 pre-push
+    // P1): without it an engine-backed estimate's SSR page under-describes
+    // purchased scope (exterior flea, wasp removal, guarantees).
+    offerKey: row.offerKey || null,
+    visits: row.visits || null,
+    warrantyType: row.warrantyType || null,
+    exteriorStatus: row.exteriorStatus || null,
+    warrantyEligible: row.warrantyEligible === true,
+    nestRemovalSelected: row.nestRemovalSelected === true,
+    chemistryType: row.chemistryType || null,
+    warrantyTier: row.warrantyTier || null,
+    debrisRemovalIncluded: row.debrisRemovalIncluded === true,
+    creditableWithinDays: row.creditableWithinDays || null,
+    includesScreening: row.includesScreening === true,
+    includedScope: row.includedScope || null,
+    retainerBilling: row.retainerBilling || null,
+    atticSqFt: row.atticSqFt ?? null,
+    surfaceSqFt: row.surfaceSqFt ?? null,
   }));
 }
 
@@ -17209,6 +17296,20 @@ function normalizeOneTimeBreakdown(estData) {
         prepChecklistRequired: item.prepChecklistRequired === true,
         petSourceAttestationRequired: item.petSourceAttestationRequired === true,
         exteriorStatus: item.exteriorStatus || null,
+        // Sold-scope flags the one-time copy pack keys off (codex #3823 r1):
+        // trenching chemistry (repellent barriers get no colony-transfer
+        // claim) and whether wasp nest removal was actually priced.
+        chemistryType: item.chemistryType || null,
+        warrantyTier: item.warrantyTier || null,
+        nestRemovalSelected: item.nestRemovalSelected === true || Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal,
+        warrantyEligible: item.warrantyEligible === true,
+        debrisRemovalIncluded: item.debrisRemovalIncluded === true,
+        creditableWithinDays: Number(item.creditableWithinDays) > 0 ? Number(item.creditableWithinDays) : null,
+        includesScreening: item.includesScreening === true || /\+screening\b/.test(String(item.detail || item.det || '')),
+        includedScope: item.includedScope || null,
+        retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
+        atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
+        surfaceSqFt: Number(item.surfaceSqFt) > 0 ? Number(item.surfaceSqFt) : null,
       });
     }
   };
@@ -22565,12 +22666,43 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // row objects, or the client's exclusion identity (service|label|amount)
   // mismatches across the raw-key/friendly label boundary and an embedded
   // row totals twice in the standalone card.
+  // Row copy never rides a regulated certificate surface (WDO in the aligned
+  // OR raw rows — the aligned breakdown can drop the WDO row): the whole
+  // page stays narrative-free, not just the WDO row (codex pre-push P0).
+  const rawContractRows = normalizeOneTimeBreakdown(estData)?.items || [];
+  const rowCopyAllowed = !hasRegulatedCertificateServiceMix([], [
+    ...(basePayload.oneTimeBreakdown?.items || []),
+    ...rawContractRows,
+  ]);
+  // The aligned one-time-choice breakdown (show_one_time_option) keeps only
+  // service/label/amount/detail per row, so the copy pack would read a
+  // unit-band pest choice as full-perimeter and a flea / wasp / Bora-Care
+  // add-on as scope-less. Resolve each row against its authoritative raw
+  // counterpart (same service key, label-matched when the key repeats):
+  // the raw row supplies the sold-scope flags, the aligned row keeps its
+  // own label/amount (codex #3823 r9 P1). The contract row itself is
+  // unchanged — only the resolver input is enriched.
+  const rawRowFor = (row) => {
+    const service = String(row?.service || '').toLowerCase();
+    if (!service) return null;
+    const candidates = rawContractRows.filter((raw) => String(raw?.service || '').toLowerCase() === service);
+    if (!candidates.length) return null;
+    return candidates.find((raw) => String(raw.label || '') === String(row.label || '')) || candidates[0];
+  };
   const contractPayload = basePayload.oneTimeBreakdown && Array.isArray(basePayload.oneTimeBreakdown.items)
     ? {
       ...basePayload,
       oneTimeBreakdown: {
         ...basePayload.oneTimeBreakdown,
-        items: basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel),
+        items: (() => {
+          const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel);
+          if (!rowCopyAllowed) return labeled;
+          const copies = resolveOneTimeRowCopies(labeled.map((row) => {
+            const raw = rawRowFor(row);
+            return raw ? { ...raw, ...row } : row;
+          }));
+          return labeled.map((row, i) => (copies[i] ? { ...row, copy: copies[i] } : row));
+        })(),
       },
     }
     : basePayload;
@@ -22638,14 +22770,31 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // Regulated check sees the RAW normalized rows too: the contract's aligned
   // breakdown (show_one_time_option) can drop a WDO row, and the Ask bar must
   // not surface on an FDACS certificate surface (pre-push codex P1).
-  const askChips = hasRegulatedCertificateServiceMix(services, [
+  // One-time-ONLY estimate on a single service copy pack: the Waves AI card
+  // and chips describe that service (mirrors the SSR askPrompts branch and
+  // buildWaveGuardIntelligencePayload). Regulated surfaces still get none.
+  // Regulated check sees the RAW normalized rows too (the aligned breakdown
+  // can drop a WDO row) — neither chips nor page copy may mint on an FDACS
+  // certificate surface (codex pre-push P1).
+  const rawOneTimeRows = normalizeOneTimeBreakdown(estData)?.items || [];
+  const regulatedSurface = hasRegulatedCertificateServiceMix(services, [
     ...oneTimeBreakdownItems,
-    ...(normalizeOneTimeBreakdown(estData)?.items || []),
-  ])
+    ...rawOneTimeRows,
+  ]);
+  // Single-service check spans the aligned AND raw rows: alignment can omit
+  // a raw billable row, and a mixed quote must never inherit the retained
+  // row's hero/AI/chips (codex pre-push P0).
+  const oneTimeServiceCopy = !regulatedSurface
+    && (contractPayload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate))
+    ? oneTimeOnlyIntelligenceCopy([...oneTimeBreakdownItems, ...rawOneTimeRows])
+    : null;
+  const askChips = regulatedSurface
     ? []
-    : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
-      ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
-      : askChipsBase;
+    : oneTimeServiceCopy?.askChips?.length
+      ? oneTimeServiceCopy.askChips.slice(0, 6)
+      : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
+        ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
+        : askChipsBase;
   // (Breakdown labels were normalized up top, before sections were built —
   // the embedded contribution rows and this breakdown are the same objects.)
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
@@ -22662,6 +22811,10 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
       ...(manualDiscountItemizedInSections ? { manualDiscountItemizedInSections: true } : {}),
     },
     askChips,
+    // Invariant (docs/public-route-contracts.md): oneTimeServiceCopy.askChips
+    // IS pricing.askChips — hero-only packs carry the category chips the
+    // page actually renders, never an empty list beside a populated one.
+    ...(oneTimeServiceCopy ? { oneTimeServiceCopy: { ...oneTimeServiceCopy, askChips } } : {}),
     oneTimeBreakdown: contractPayload.oneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
   };
