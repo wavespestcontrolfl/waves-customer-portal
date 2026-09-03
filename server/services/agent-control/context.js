@@ -16,7 +16,10 @@
  *     mutates its parent, and the parent is intact when fn returns;
  *   - innermost wins for laneId / runId / workload; withChain keeps the
  *     OUTER chain (every leg of a fallback or fan-out shares one chainId);
- *   - setPromptVersion mutates the innermost store only.
+ *   - withPromptVersion is a scope like the others (a clone), never a
+ *     mutation: sibling calls fanned out under one run share the parent's
+ *     store object, so a setter would let call B's version overwrite call
+ *     A's before A recorded its ledger row.
  *
  * Precedence with explicit arguments: an id a caller passes as a function
  * argument BEATS the ambient scope. That is the CALLER's job — this module
@@ -113,9 +116,8 @@ function current() {
   return s ? { ...s } : { ...EMPTY };
 }
 
-function setPromptVersion(promptVersion) {
-  const s = store.getStore();
-  if (s) s.promptVersion = promptVersion;
+function withPromptVersion(promptVersion, fn) {
+  return enter({ promptVersion: promptVersion == null ? null : String(promptVersion) }, fn);
 }
 
 module.exports = {
@@ -125,7 +127,7 @@ module.exports = {
   withChain,
   withWorkload,
   current,
-  setPromptVersion,
+  withPromptVersion,
   newTraceId,
   newSpanId,
 };

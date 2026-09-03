@@ -20,7 +20,7 @@ describe('agent-control context', () => {
       traceId: null, spanId: null, parentSpanId: null, workload: null, promptVersion: null,
       agentVersionId: null, workflowId: null,
     });
-    expect(() => ctx.setPromptVersion('v9')).not.toThrow();
+    expect(ctx.withPromptVersion('v9', () => ctx.current().promptVersion)).toBe('v9');
     expect(ctx.current().promptVersion).toBeNull();
   });
 
@@ -100,16 +100,31 @@ describe('agent-control context', () => {
     expect(seen).toEqual({ a: 'pest_id', b: 'lawn_assess', b2: 'lawn_assess', c: null });
   });
 
-  it('setPromptVersion mutates the innermost store only', () => {
+  it('withPromptVersion scopes like any other layer: inner wins, the parent is untouched', () => {
     ctx.runInLane('sms_draft', () => {
-      ctx.setPromptVersion('outer-v1');
-      ctx.runInLane('sms_verifier', () => {
+      ctx.withPromptVersion('outer-v1', () => {
         expect(ctx.current().promptVersion).toBe('outer-v1');
-        ctx.setPromptVersion('inner-v2');
-        expect(ctx.current().promptVersion).toBe('inner-v2');
+        ctx.withPromptVersion('inner-v2', () => expect(ctx.current().promptVersion).toBe('inner-v2'));
+        expect(ctx.current().promptVersion).toBe('outer-v1');
       });
-      expect(ctx.current().promptVersion).toBe('outer-v1');
+      expect(ctx.current().promptVersion).toBe(null);
     });
+  });
+
+  it('sibling calls fanned out under one run keep their own prompt versions', async () => {
+    const seen = {};
+    await ctx.runInRun({ runId: 'run-1' }, () =>
+      Promise.all([
+        ctx.withPromptVersion('A', async () => {
+          await new Promise((r) => setTimeout(r, 10));
+          seen.a = ctx.current().promptVersion; // B was set meanwhile
+        }),
+        ctx.withPromptVersion('B', async () => {
+          seen.b = ctx.current().promptVersion;
+        }),
+      ]),
+    );
+    expect(seen).toEqual({ a: 'A', b: 'B' });
   });
 
   it('id generators return the right hex lengths', () => {

@@ -95,7 +95,12 @@ const EVAL_FAMILY = Object.freeze([
  * `error`, validator rejection messages such as `banned:...`) plus the
  * per-lane validator codes: `extraction_schema_invalid` (call extraction),
  * `research_schema_invalid` (call research), `missing_is_service_claim`
- * (footprint claim), `unmappable_screen` (job screen).
+ * (footprint claim), `unmappable_screen` (job screen), `invalid_sms_draft`
+ * (admin SMS draft), `no_json` / `findings_not_array` / `finding_not_object`
+ * (compliance gate), `empty_response`. The dispatcher suffixes a rejection
+ * with `(response truncated at max_tokens=N)` when the reply hit the token
+ * budget — that suffix wins: the answer is incomplete, whatever the validator
+ * then said about its shape.
  *
  * ctx.pastBudget — the chain had already used its time budget when the code
  *   was produced (turns `openai_incomplete` into a timeout instead of an
@@ -111,6 +116,7 @@ const EVAL_FAMILY = Object.freeze([
 function classifyFailure(errorCode, ctx = {}) {
   const code = String(errorCode || '').toLowerCase();
   if (ctx.tool === true || code.startsWith('tool_')) return 'tool';
+  if (code.includes('(response truncated at max_tokens')) return 'incomplete';
   if (code === 'judge_failed') return 'incorrect';
   if (code === 'eval_regression') return 'regression';
   if (code === 'no_key' || code === 'all_providers_failed' || /_(5\d\d|429|529|503)$/.test(code)) return 'provider';
@@ -123,8 +129,8 @@ function classifyFailure(errorCode, ctx = {}) {
   // Lane validators: the model answered, but not in the shape it was told to
   // (`*_schema_invalid`, `unmappable_*`) or with a required field missing
   // (`missing_*`). The model's fault — eval candidates, not plumbing.
-  if (/_schema_invalid$/.test(code) || code.startsWith('unmappable_')) return 'instruction';
-  if (code.startsWith('missing_')) return 'incomplete';
+  if (/(^|_)invalid(_|$)/.test(code) || code.startsWith('unmappable_') || /_not_(array|object|string|number|boolean)$/.test(code)) return 'instruction';
+  if (code.startsWith('missing_') || code === 'no_json' || code === 'empty_response') return 'incomplete';
   // Generic `error` (abort, socket hang-up, fetch failed) and anything unknown.
   return 'infrastructure';
 }
