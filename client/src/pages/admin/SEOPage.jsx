@@ -3569,7 +3569,11 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                 {c.domain.domain}
                 {c.placement.location_key && c.placement.location_key !== "-" ? <span style={{ color: D.muted, fontWeight: 400 }}>{` · ${c.placement.location_key}`}</span> : ""}
                 {c.placement.status === "ready_for_payment" && <span style={{ color: D.amber, fontWeight: 400 }}>{" · at the publisher's checkout"}</span>}
-                {["placed", "live", "indexed"].includes(c.placement.status) && <span style={{ color: D.amber, fontWeight: 400 }}>{` · ${c.placement.status} — renewal`}</span>}
+                {["placed", "live", "indexed"].includes(c.placement.status) && (() => {
+                  // the label is the PENDING payment action, never the status alone: a placed placement can still owe its initial fee
+                  const pending = c.rows.find((r) => r.dimension === "payment" && !r.satisfied_at && !r.approved);
+                  return <span style={{ color: D.amber, fontWeight: 400 }}>{` · ${c.placement.status} — ${pending && pending.action === "renewal" ? "renewal" : "initial fee"}`}</span>;
+                })()}
               </div>
               <div style={{ fontSize: 12, color: D.muted }}>
                 {`DR ${c.domain.domain_rating ?? "—"} · traffic ${compact(c.domain.organic_traffic)} · spam ${c.domain.spam_score ?? "—"} · score ${c.domain.score ?? "—"} · ${c.domain.competitors_linked ?? 0} competitor${c.domain.competitors_linked === 1 ? "" : "s"} linked · D30 ${c.d30_confidence == null ? "n/a" : c.d30_confidence}`}
