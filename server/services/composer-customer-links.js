@@ -1,7 +1,7 @@
 /**
  * Per-customer link builders for the SMS composer's Insert Link sheet —
- * the four link kinds beyond the existing reschedule/re-service pair:
- * review request, pay balance, latest estimate, referral.
+ * the link kinds beyond the existing reschedule/re-service pair:
+ * review request, pay balance, latest estimate, referral, Auto Pay setup.
  *
  * Contract mirrors reschedule-link/reservice-link: each builder returns
  * { url, line, ...context } with url null + a `reason` sentence when there
@@ -357,6 +357,251 @@ async function buildReferralLink(customerId) {
   };
 }
 
+// Every skip requestAutopaySetupLink can return, phrased for the composer
+// (same vocabulary as cardLinkStatus.describeAutopaySetupLinkResult on the
+// Customers page — one plain sentence per outcome, unknown reasons stay
+// visible rather than pretending a link exists).
+const AUTOPAY_SKIP_REASONS = {
+  gate_off: 'Auto Pay setup links are switched off (GATE_AUTOPAY_SETUP_LINK)',
+  customer_not_found: 'Customer not found',
+  payer_billed: 'This customer bills to a third-party payer — no Auto Pay setup link',
+  payer_check_uncertain: 'Could not confirm who this customer bills to — try again in a moment',
+  autopay_already_active: 'This customer is already on Auto Pay',
+  autopay_paused: 'Auto Pay is already set up but paused — resume it instead of sending a setup link',
+  unsupported_billing_lane: 'Auto Pay setup links are only for per-visit and per-application customers',
+  completion_in_progress: 'This customer is finishing an Auto Pay setup right now — try again in a few minutes',
+  autopay_sms_gate_off: 'Auto Pay customer texts are switched off (GATE_AUTOPAY_CUSTOMER_SMS)',
+  template_inactive: 'The Auto Pay setup text is inactive in Templates — activate it before texting a setup link',
+  template_missing_link: 'The Auto Pay setup text in Templates has no {secure_link} placeholder — add it before texting a setup link',
+};
+
+// The composer's insert IS an SMS delivery (the operator's /sms send goes
+// out as original_message_type 'manual', so the Auto Pay classifier never
+// re-applies its gates). Enforce the same two levers the service's own SMS
+// branch checks — the customer-SMS rollout gate and the template's active
+// toggle — BEFORE anything mints or enrolls (GH Codex #3812 r1 P1). Fail
+// closed on an unreadable template row.
+async function autopaySmsLever() {
+  if (!require('../config/feature-gates').isEnabled('autopayCustomerSms')) return 'autopay_sms_gate_off';
+  try {
+    const row = await db('sms_templates').where({ template_key: 'autopay_setup_link' }).first('is_active');
+    if (!row || row.is_active === false) return 'template_inactive';
+  } catch (err) {
+    logger.warn(`[composer-links] autopay template lookup failed: ${err.message}`);
+    return 'template_inactive';
+  }
+  return null;
+}
+
+/**
+ * Auto Pay setup link — delegates entirely to autopay-setup-link's ONE
+ * entry point (inline delivery: mint or reuse the live /secure/:token row,
+ * send nothing — the composer send is the only delivery). Every policy
+ * decision (gate, payer exemption, already-on-Auto-Pay, paused, lane,
+ * saved-method auto-secure, dedup) stays there; this only translates the
+ * outcome into the composer's { url, line } / reason contract.
+ *
+ * auto_secured is the one outcome that is neither a link nor a refusal: a
+ * consented saved card covered the ask and was enrolled (same behavior as
+ * the Customers page button) — there is nothing to insert, and the reason
+ * says so explicitly so the operator does not text a link that no longer
+ * matters.
+ */
+async function buildAutopaySetupLink(customerId) {
+  const lever = await autopaySmsLever();
+  if (lever) return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS[lever] };
+  const { requestAutopaySetupLink } = require('./autopay-setup-link');
+  const result = await requestAutopaySetupLink({ customerId, delivery: 'inline', trigger: 'admin' });
+  // A successful mutation, not a missing link (GH Codex #3812 r2 P2): the
+  // route answers 200 with autoSecured so the composer reports it as done.
+  if (result?.action === 'auto_secured') {
+    return { url: null, line: '', autoSecured: true };
+  }
+  if (result?.action === 'link_created' && result.secureUrl) {
+    // The customer-facing copy is the reviewed autopay_setup_link SMS
+    // template — the SAME body the direct Auto Pay text path renders — not
+    // a second hand-written copy (GH Codex #3812 r3 P1). Rendered here with
+    // the real link, collapsed to ONE line so the composer's recipient-
+    // change strip removes the whole message with the tracked URL (r1 P2),
+    // and flagged standalone: it already greets, so the composer inserts it
+    // as-is instead of wrapping it in the generic prefill.
+    const { renderTemplate } = require('./appointment-card-request');
+    const profile = await db('customers').where({ id: customerId }).first('first_name');
+    const body = await renderTemplate({ first_name: profile?.first_name || 'there', secure_link: result.secureUrl }, 'autopay_setup_link');
+    if (!body) return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS.template_inactive };
+    // validateTemplateBody does not require {secure_link} for this key — an
+    // edit that drops it renders fine and would text setup copy with no
+    // link (GH Codex #3812 r4 P2). The minted URL must be in the body —
+    // compared scheme-stripped, because getTemplate strips https:// from
+    // owned portal hosts before returning (r5 P1).
+    const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
+    if (!String(body).includes(stripPortalUrlScheme(result.secureUrl))) {
+      return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS.template_missing_link };
+    }
+    return {
+      url: result.secureUrl,
+      line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
+      standalone: true,
+      expiresAt: result.expiresAt || null,
+    };
+  }
+  const reason = String(result?.reason || '');
+  return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS[reason] || `Could not build an Auto Pay setup link (${reason || 'unknown'})` };
+}
+
+// The /secure/:token bearer the composer inserts (autopay-setup-link mints
+// 16 random bytes base64url = 22 chars; the visit lane's card requests share
+// the page and the table). Bodies carry the link scheme-stripped
+// (stripSmsLinkScheme), so the match is host + path, scheme optional.
+// Percent-escapes decode before detection: React Router decodes the
+// pathname, so "/secur%65/<token>" still opens the page and must still be
+// judged (GH Codex #3812 r5 P1). Malformed escapes are left as typed.
+function decodeLinkText(body) {
+  // WHATWG parsing treats a backslash as a path separator for special
+  // schemes — "portal…\\secure\\<token>" still opens the page (r7 P1).
+  return String(body || '').replace(/\\/g, '/').replace(/(?:%[0-9A-Fa-f]{2})+/g, (seq) => {
+    try { return decodeURIComponent(seq); } catch { return seq; }
+  });
+}
+
+// Bearer tokens are randomBytes(16).toString('base64url') — 22 URL-safe
+// characters — for both the standalone and the visit lane. A band rather
+// than an exact width so a longer mint never slips past; a run that is no
+// token simply finds no row.
+const TOKEN_RUN_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,64}(?![A-Za-z0-9_-])/g;
+// Every whitespace-delimited run of the (decoded) body that carries a
+// /secure/ path, with wrapping punctuation shed and a bare "Label:" prefix
+// dropped ("Link:portal…" is how operators type it). Each run is PARSED as
+// a URL (https:// assumed when schemeless — that is how the composer inserts
+// owned-host links) and accepted only when its hostname is exactly the
+// portal host and its pathname is exactly /secure/<token>. A substring
+// match is never enough: "https://evil.example/?next=portal…/secure/<tok>"
+// sends the bearer to evil.example (GH Codex #3812 r6 P1; earlier rounds
+// covered path-nested, subdomain and suffix look-alikes the same way).
+// Runs are split on the ORIGINAL text and decoded one by one: decoding
+// first would let "%0A" inside a hostile URL manufacture a fresh,
+// trusted-looking run ("https://evil.example/%0Aportal…/secure/<tok>" —
+// the browser keeps the escape and follows evil.example; r8 P1). Decoded
+// whitespace inside a run stays inside it, and the URL parser then judges
+// the whole run against the real origin.
+function decodedRuns(body) {
+  return String(body || '').split(/\s+/).filter(Boolean).map(decodeLinkText);
+}
+function secureLinkRuns(runs) {
+  return runs
+    .filter((run) => /\/secure\//i.test(run))
+    .map((run) => run.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, ''))
+    // A bare label glued to the link ("Link:", "now,") is shed — but only a
+    // slash-free prefix, so an outer URL's own path/query is never cut away.
+    .map((run) => run.replace(/^[^/]*?(?=https?:\/\/)/i, ''))
+    .map((run) => (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : run.replace(/^[^/:,;]*[:,;]/, '')));
+}
+function canonicalSecureToken(run, host) {
+  let url;
+  try {
+    url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`);
+  } catch {
+    return null;
+  }
+  // HTTPS or the schemeless canonical form only — an explicit http:// would
+  // expose the 30-day bearer before any redirect reaches HTTPS.
+  if (url.protocol !== 'https:') return null;
+  if (url.host.toLowerCase() !== host) return null;
+  const m = /^\/secure\/([A-Za-z0-9_-]{16,})$/i.exec(url.pathname);
+  return m ? m[1] : null;
+}
+
+/**
+ * Delivery-seam check for a composer body carrying Auto Pay setup links
+ * (GH Codex #3812 r2 P1/P2). The composer posts every send as
+ * original_message_type 'manual', so the canonical Auto Pay classifier in
+ * send-customer-message never sees it and the insert-time checks go stale
+ * while a draft sits open. EVERY /secure occurrence in the body is judged
+ * (pre-push Codex P0 — a visit link first must not shadow an Auto Pay link
+ * after it), each must sit on the canonical portal host (pre-push P1 — a
+ * look-alike host carrying a real token is not a Waves link), and each
+ * customer-kind row is re-run through the mint's own side-effect-free
+ * eligibility (pre-push P1). Called by /sms (with the recipient's last-10
+ * AND the customer id the route trusts — the link's owner must be that
+ * customer, so the send rides the owner's own SMS preferences instead of
+ * the lead policy that permits a missing preferences row; GH Codex #3812
+ * r3 P1), by /schedule-sms and the draft approve/revise endpoints
+ * (presence is enough — they refuse):
+ *   { present: false }                       — no customer-kind Auto Pay link in the body
+ *   { present: true, ok: true, tokens }      — every Auto Pay link is live, eligible and
+ *                                              owned by the recipient; the caller reclassifies
+ *   { present: true, ok: false, error }      — refuse the send with this message
+ * Visit-lane card requests (kind 'visit') use the same page but their own
+ * gates — they are neither judged nor reclassified here.
+ */
+async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
+  const runs = decodedRuns(body);
+  const text = runs.join(' ');
+  const refuse = (error) => ({ present: true, ok: false, error });
+  const host = new URL(publicPortalUrl()).host.toLowerCase();
+
+  // 1. Every run carrying a /secure/ path must parse as a canonical link.
+  const canonicalTokens = [];
+  for (const run of secureLinkRuns(runs)) {
+    const token = canonicalSecureToken(run, host);
+    if (!token) return refuse('A /secure link in this message is not on the Waves portal — remove it before sending.');
+    if (!canonicalTokens.includes(token)) canonicalTokens.push(token);
+  }
+
+  // 2. TOKEN-FIRST: the bearer is the token, and a working link must carry
+  // it verbatim (decoded above) whatever the surrounding text looks like.
+  // Every token-shaped run is looked up; a live standalone token that is
+  // not inside a canonical link refuses — that closes the obfuscation
+  // class (percent-encoding, backslashes, hostile outer URLs, look-alike
+  // hosts) under one rule instead of one detector per trick.
+  const candidates = [...new Set([...canonicalTokens, ...(text.match(TOKEN_RUN_RE) || [])])];
+  if (!candidates.length) return { present: false };
+  const { KIND, setupLinkIneligibility } = require('./autopay-setup-link');
+  const rows = await db('appointment_card_requests')
+    .whereIn('token', candidates)
+    .select('id', 'kind', 'token', 'status', 'expires_at', 'customer_id');
+  const byToken = new Map(rows.filter((r) => r.kind === KIND).map((r) => [r.token, r]));
+  for (const [token] of byToken) {
+    if (!canonicalTokens.includes(token)) {
+      return refuse('An Auto Pay setup link in this message is not a plain Waves portal link — remove it and re-insert it from Insert Link.');
+    }
+  }
+  const live = [];
+  for (const token of canonicalTokens) {
+    const row = byToken.get(token);
+    if (!row) {
+      // A canonical /secure link whose token is unknown or belongs to the
+      // visit lane: the visit lane keeps its own gates; an unknown token is
+      // a dead link.
+      if (rows.some((r) => r.token === token)) continue;
+      return refuse('This Auto Pay setup link is expired or no longer live — remove it and insert a fresh one.');
+    }
+    if (row.status !== 'pending' || (row.expires_at && new Date(row.expires_at).getTime() <= Date.now())) {
+      return refuse('This Auto Pay setup link is expired or no longer live — remove it and insert a fresh one.');
+    }
+    live.push({ token, customerId: row.customer_id });
+  }
+  if (!live.length) return { present: false };
+
+  // 3. Levers, eligibility, ownership, trust — per live link.
+  const lever = await autopaySmsLever();
+  if (lever) return refuse(`${AUTOPAY_SKIP_REASONS[lever]} — remove the Auto Pay link before sending.`);
+  for (const { customerId } of live) {
+    const eligibility = await setupLinkIneligibility(customerId);
+    if (eligibility.reason) {
+      return refuse(`${AUTOPAY_SKIP_REASONS[eligibility.reason] || `Auto Pay setup link no longer applies (${eligibility.reason})`} — remove the Auto Pay link before sending.`);
+    }
+    const ownerLast10 = String(eligibility.customer?.phone || '').replace(/\D/g, '').slice(-10);
+    if (!ownerLast10 || ownerLast10 !== String(toLast10 || '')) {
+      return refuse('This Auto Pay setup link belongs to a different customer — remove it before sending.');
+    }
+    if (trustedCustomerId !== undefined && String(trustedCustomerId || '') !== String(customerId)) {
+      return refuse('Pick this customer from the search dropdown before sending an Auto Pay setup link — the text must ride their own SMS preferences.');
+    }
+  }
+  return { present: true, ok: true, tokens: live.map((l) => l.token) };
+}
+
 module.exports = {
   OPEN_ESTIMATE_STATUSES,
   REVIEW_GATE_REASONS,
@@ -368,4 +613,7 @@ module.exports = {
   resolveConfirmationEstimate,
   appendEstimateAcceptLine,
   buildReferralLink,
+  AUTOPAY_SKIP_REASONS,
+  buildAutopaySetupLink,
+  autopayLinkSendCheck,
 };

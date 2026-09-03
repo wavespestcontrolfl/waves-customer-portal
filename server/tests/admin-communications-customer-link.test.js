@@ -1,6 +1,7 @@
 /**
  * POST /admin/communications/customer-link — the Insert Link sheet's other
- * per-customer links (review_request | pay_balance | estimate | referral).
+ * per-customer links (review_request | pay_balance | estimate | referral |
+ * autopay_setup).
  * Pins the same fail-closed recipient contract as /reschedule-link
  * (admin-only, full 10-digit phone, kind allowlist), which builder each kind
  * dispatches to (account ids vs the phone-owning primary id), the response
@@ -77,6 +78,7 @@ jest.mock('../services/composer-customer-links', () => ({
   buildPayBalanceLink: jest.fn(),
   buildLatestEstimateLink: jest.fn(),
   buildReferralLink: jest.fn(),
+  buildAutopaySetupLink: jest.fn(),
 }));
 jest.mock('../services/review-request', () => ({
 }));
@@ -206,6 +208,80 @@ describe('POST /admin/communications/customer-link', () => {
       expect(body.firstName).toBe('PersonA');
       expect(body.url).toContain('/r/WAVES-ABC12345');
       expect(body.line).toContain('Share Waves here');
+    });
+  });
+
+  test('autopay_setup: dispatches the phone-owning customer id (Auto Pay is per row)', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildAutopaySetupLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/secure/tok123',
+      line: 'Hi PersonA! Set up Auto Pay for your Waves service here: https://portal.wavespestcontrol.com/secure/tok123\n\n',
+      standalone: true,
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'autopay_setup' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildAutopaySetupLink).toHaveBeenCalledWith(CUSTOMER_UUID);
+      expect(body.kind).toBe('autopay_setup');
+      expect(body.url).toContain('/secure/tok123');
+      expect(body.line).toContain('Set up Auto Pay');
+      // The resolved owner rides back so the composer selects it and the
+      // /sms send carries customerId; the line is inserted as-is.
+      expect(body.customerId).toBe(CUSTOMER_UUID);
+      expect(body.standalone).toBe(true);
+    });
+  });
+
+  test('autopay_setup: 409 when the phone belongs to more than one sibling — with or without a customerId', async () => {
+    // Two rows on one account share the number: referral falls back to the
+    // sorted first id, but Auto Pay must never guess (a consented card can
+    // enroll on the spot). A body customerId is no proof of an operator
+    // pick (thread open auto-fills it), so the check applies either way.
+    const siblingsSharingPhone = () => makeCustomersBuilder({
+      selectResults: [
+        [{ id: 'aaaa1111-0000-4000-8000-000000000001', account_id: 'acct-1' }, { id: 'aaaa1111-0000-4000-8000-000000000002', account_id: 'acct-1' }],
+        [{ id: 'aaaa1111-0000-4000-8000-000000000001' }, { id: 'aaaa1111-0000-4000-8000-000000000002' }],
+        [{ first_name: 'PersonA' }],
+        [{ id: 'aaaa1111-0000-4000-8000-000000000001' }, { id: 'aaaa1111-0000-4000-8000-000000000002' }],
+      ],
+    });
+    wireDb({ customers: siblingsSharingPhone() });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'autopay_setup' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/profile instead/);
+      expect(builders.buildAutopaySetupLink).not.toHaveBeenCalled();
+    });
+    // Explicit customerId path: the selected-customer branch issues a
+    // customers.first() then the account expansion select, then the
+    // firstName select, then the shared-phone rows.
+    const picked = makeCustomersBuilder({
+      firstRow: { id: 'aaaa1111-0000-4000-8000-000000000001', phone: '+15551234567', account_id: 'acct-1' },
+      selectResults: [
+        [{ id: 'aaaa1111-0000-4000-8000-000000000001' }, { id: 'aaaa1111-0000-4000-8000-000000000002' }],
+        [{ first_name: 'PersonA' }],
+        [{ id: 'aaaa1111-0000-4000-8000-000000000001' }, { id: 'aaaa1111-0000-4000-8000-000000000002' }],
+      ],
+    });
+    wireDb({ customers: picked });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', {
+        phone: '+15551234567', customerId: 'aaaa1111-0000-4000-8000-000000000001', kind: 'autopay_setup',
+      });
+      expect(res.status).toBe(409);
+      expect(builders.buildAutopaySetupLink).not.toHaveBeenCalled();
+    });
+  });
+
+  test('autopay_setup: auto_secured answers 200 with autoSecured and no url — a success, not a 404', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildAutopaySetupLink.mockResolvedValue({ url: null, line: '', autoSecured: true });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'autopay_setup' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ kind: 'autopay_setup', url: null, autoSecured: true, firstName: 'PersonA' });
     });
   });
 

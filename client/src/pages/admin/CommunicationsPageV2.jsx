@@ -708,6 +708,7 @@ export const CUSTOMER_COMPOSER_LINKS = [
   { key: "pay_balance", name: "Pay balance link", keywords: "pay payment invoice bill billing owe money", dynamic: true },
   { key: "estimate", name: "Latest estimate link", keywords: "estimate proposal open pending price quote", dynamic: true },
   { key: "referral", name: "Referral link", keywords: "refer friend neighbor share reward", dynamic: true },
+  { key: "autopay_setup", name: "Auto Pay setup link", keywords: "autopay auto pay card on file save payment method bank ach enroll secure", dynamic: true },
   {
     key: "portal_login",
     name: "Portal login",
@@ -1183,6 +1184,16 @@ function SmsTab() {
       setSendResult({
         ok: false,
         text: "Review request links can only go on an immediate send — send now, or remove the review link first.",
+      });
+      return;
+    }
+    // An Auto Pay setup link is a 30-day bearer credential and the schedule
+    // picker has no upper bound — a send scheduled past expiry delivers a
+    // dead /secure link. Immediate sends only, same rule as review links.
+    if (insertedCustomerLinks.autopay_setup && (scheduledFor || loadedMessageDraft?.id)) {
+      setSendResult({
+        ok: false,
+        text: "Auto Pay setup links expire — send now, or remove the Auto Pay link first.",
       });
       return;
     }
@@ -1708,6 +1719,7 @@ function SmsTab() {
         : "Pay link added.",
     estimate: (d) => `Estimate link added${d.estimate?.serviceType ? ` — ${d.estimate.serviceType}` : ""}.`,
     referral: (d) => `Referral link added${d.firstName ? ` — ${d.firstName}'s personal link` : ""}.`,
+    autopay_setup: () => "Auto Pay setup link added — nothing is charged until they save a payment method.",
   };
 
   // Withdrawal is NON-destructive: the pending review row is SHARED — every
@@ -1753,8 +1765,34 @@ function SmsTab() {
         // shared pending row stays reusable (see the withdrawal note above).
         return;
       }
+      if (d.autoSecured) {
+        // A consented saved card covered the ask and Auto Pay was enrolled —
+        // a successful outcome with nothing to insert.
+        setSendResult({ ok: true, text: "A consented card was already on file — Auto Pay is now enrolled, no link needed." });
+        return;
+      }
       const clause = String(d.line || "").trim() || `${d.url}`;
-      const prefill = buildCustomerLinkPrefill({ firstName: d.firstName, clause });
+      // A standalone line (Auto Pay: the reviewed SMS template, already
+      // greeted) goes in as-is; the generic prefill wraps the others.
+      const prefill = d.standalone ? clause : buildCustomerLinkPrefill({ firstName: d.firstName, clause });
+      // Auto Pay hands back the resolved owner: adopt it as the selected
+      // customer when none was picked, so the send carries customerId and
+      // the link's owner policy applies (server refuses otherwise).
+      const linkCustomerId = d.customerId || requestCustomerId;
+      if (!requestCustomerId && d.customerId) {
+        // The phone did not change — links already minted for this
+        // recipient with no selected customer adopt the resolved owner too,
+        // or the recipient-change effects would strip them (r4 P2).
+        const adopt = (e) => (
+          e && e.recipientKey === requestRecipientKey && e.customerId == null
+            ? { ...e, customerId: d.customerId }
+            : e
+        );
+        setSelectedCustomerId(d.customerId);
+        setInsertedResched(adopt);
+        setInsertedReservice(adopt);
+        setInsertedCustomerLinks((m) => Object.fromEntries(Object.entries(m).map(([k, e]) => [k, adopt(e)])));
+      }
       // Replace-don't-stack per kind (same rule as the reschedule insert).
       // A replaced review link's row is NOT canceled: reuse means the fresh
       // insert hands back the same shared row anyway.
@@ -1771,7 +1809,7 @@ function SmsTab() {
         [kind]: {
           url: d.url,
           recipientKey: requestRecipientKey,
-          customerId: requestCustomerId,
+          customerId: linkCustomerId,
           requestId: d.requestId || null,
         },
       }));

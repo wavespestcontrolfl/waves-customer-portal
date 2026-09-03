@@ -411,15 +411,34 @@ router.post('/sms', async (req, res, next) => {
     // mismatched recipient must never receive it, and an unverifiable state
     // must never send untracked. Only a request with NO reviewRequestId
     // sends unclaimed.
+    // Shared by the review-link and Auto Pay-link pre-send seams below.
+    const abortUnsent = async (status, error) => {
+      await clearManualReservation();
+      await reopenScheduledSuggestions({
+        decisionIds: [claimedDecisionId, ...parkedThreadIds],
+        reason: 'Send was not attempted — suggestion reopened.',
+      });
+      return res.status(status).json({ error });
+    };
+    // Composer-inserted Auto Pay setup link (or a pasted one): re-run the
+    // check BEFORE the review claim below, so a refusal never strands a
+    // claimed review row in 'sending' (GH Codex #3812 r4 P2). Re-run the
+    // canonical levers + row liveness + ownership NOW (the insert-time check
+    // is stale once a draft sits open) and reclassify the send so
+    // send-customer-message's Auto Pay gate applies at delivery. FAIL CLOSED
+    // on any miss (GH Codex #3812 r2 P1/P2).
+    let autopayLinkTokens = null;
+    try {
+      const { autopayLinkSendCheck } = require('../services/composer-customer-links');
+      const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to), { trustedCustomerId: trustedCustomerId || null });
+      if (autopayCheck.present && !autopayCheck.ok) return abortUnsent(409, autopayCheck.error);
+      if (autopayCheck.present) autopayLinkTokens = autopayCheck.tokens;
+    } catch (autopayErr) {
+      logger.warn(`[communications] Auto Pay link pre-send check failed — aborting send: ${autopayErr.message}`);
+      return abortUnsent(503, 'Could not verify the inserted Auto Pay setup link — try again in a moment.');
+    }
+
     if (reviewRequestId) {
-      const abortUnsent = async (status, error) => {
-        await clearManualReservation();
-        await reopenScheduledSuggestions({
-          decisionIds: [claimedDecisionId, ...parkedThreadIds],
-          reason: 'Send was not attempted — suggestion reopened.',
-        });
-        return res.status(status).json({ error });
-      };
       try {
         const ReviewService = require('../services/review-request');
         const rr = await db('review_requests')
@@ -534,7 +553,10 @@ router.post('/sms', async (req, res, next) => {
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       entryPoint: 'admin_communications_manual_sms',
       metadata: {
-        original_message_type: messageType || 'manual',
+        // An Auto Pay setup link makes this an Auto Pay customer SMS whatever
+        // the composer called it — the classifier keys on this prefix.
+        original_message_type: autopayLinkTokens ? 'autopay_setup_link' : (messageType || 'manual'),
+        ...(autopayLinkTokens ? { autopay_setup_tokens: autopayLinkTokens } : {}),
         adminUserId: req.technicianId,
         agentDecisionId: verifiedAgentDecision?.id || undefined,
         // Parked ids ride into the provider-created sms_log row (same as
@@ -586,6 +608,25 @@ router.post('/sms', async (req, res, next) => {
     // already happened — a stranded 'sending' claim is reconciled by
     // claimInlineForSend on the next attempt (repaired to sent from the
     // outbound log, or released once the provider confirms nothing left).
+    // Composer-carried Auto Pay links: stamp sent_at after a REAL provider
+    // send, exactly as the service's own SMS path does (sent_at only —
+    // updated_at is the completion lease token; a row that left 'pending'
+    // meanwhile is left alone). Fail-soft: the text is already out
+    // (pre-push Codex P1 on #3812).
+    if (autopayLinkTokens && result?.sent) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        if (isRealProviderSend(result)) {
+          await db('appointment_card_requests')
+            .whereIn('token', autopayLinkTokens)
+            .where({ status: 'pending' })
+            .whereNull('sent_at')
+            .update({ sent_at: new Date() });
+        }
+      } catch (stampErr) {
+        logger.warn(`[communications] Auto Pay link sent_at stamp failed (text already sent): ${stampErr.message}`);
+      }
+    }
     if (claimedReviewRequestId) {
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');
@@ -1614,7 +1655,7 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
 
 // POST /api/admin/communications/customer-link  { phone, customerId?, kind }
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
-// pay_balance | estimate | referral. Same fail-closed recipient contract as
+// pay_balance | estimate | referral | autopay_setup. Same fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
 // live in services/composer-customer-links.js; a kind with nothing to insert
@@ -1635,9 +1676,14 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       pay_balance: (ids) => builders.buildPayBalanceLink(ids),
       estimate: (ids) => builders.buildLatestEstimateLink(ids),
       referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
+      // Auto Pay is per customer row (the phone's owner), same as referral.
+      // The builder delegates to autopay-setup-link's single entry point —
+      // gate, payer exemption, dedup and the saved-card auto-secure all
+      // live there; a link_created outcome is the ONLY thing inserted.
+      autopay_setup: (ids, primaryId) => builders.buildAutopaySetupLink(primaryId),
     };
     if (!builderByKind[kind]) {
-      return res.status(400).json({ error: 'kind must be one of review_request, pay_balance, estimate, referral' });
+      return res.status(400).json({ error: 'kind must be one of review_request, pay_balance, estimate, referral, autopay_setup' });
     }
 
     const last10 = fullPhoneLast10(req.body?.phone);
@@ -1685,16 +1731,33 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     // expansion has no ORDER BY of its own).
     const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
     let primaryId = selectedId;
-    if (!primaryId) {
+    // Auto Pay is money-affecting and per row (a consented saved card can
+    // enroll on the spot) — never guess the row. The body's customerId is
+    // NOT proof of an operator pick (opening a thread auto-fills whichever
+    // sibling the latest message carried — see firstNameForPhone), so the
+    // check runs whether or not one was supplied: the phone must belong to
+    // exactly ONE row on the account, else 409 to the customer's own
+    // profile card (GH Codex #3812 r1 P1 + pre-push P0).
+    if (!primaryId || kind === 'autopay_setup') {
       const phoneRows = await db('customers')
         .whereNull('deleted_at')
         .whereIn('id', customerIds)
         .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
         .select('id');
-      primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
+      if (kind === 'autopay_setup' && phoneRows.length !== 1) {
+        return res.status(409).json({
+          error: 'That number is on file for more than one customer on this account — send the Auto Pay setup link from that customer\'s profile instead',
+        });
+      }
+      if (!primaryId) primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
     }
 
     const result = await builderByKind[kind](customerIds, primaryId);
+    // Auto Pay auto-secure: a consented saved card was enrolled instead of a
+    // link being minted — a successful outcome with nothing to insert.
+    if (result?.autoSecured) {
+      return res.json({ kind, url: null, line: '', autoSecured: true, firstName: recipientFirstName });
+    }
     if (!result?.url) {
       return res.status(404).json({ error: result?.reason || 'Nothing to link for this customer' });
     }
@@ -1706,6 +1769,13 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       requestId: result.requestId || undefined,
       balance: result.balance || undefined,
       estimate: result.estimate || undefined,
+      expiresAt: result.expiresAt || undefined,
+      // Auto Pay: the resolved owner rides back so the composer can select
+      // it — the /sms send then carries customerId and the link's owner
+      // policy applies (GH Codex #3812 r3 P1). standalone: the line is a
+      // complete greeted message, inserted as-is.
+      customerId: kind === 'autopay_setup' ? primaryId : undefined,
+      standalone: result.standalone || undefined,
     });
   } catch (err) {
     logger.error(`customer-link lookup failed: ${err.message}`);
@@ -2009,6 +2079,16 @@ router.post('/schedule-sms', async (req, res, next) => {
     }
     if (messageType && BLOCKED_SCHEDULED_PURPOSES.has(purposeForScheduledMessageType(messageType))) {
       return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
+    }
+    // An Auto Pay setup link is a 30-day bearer credential with no
+    // schedule-time re-check — immediate sends only (the composer refuses
+    // client-side; this is the authoritative fence).
+    {
+      const { autopayLinkSendCheck } = require('../services/composer-customer-links');
+      const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to));
+      if (autopayCheck.present) {
+        return res.status(400).json({ error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' });
+      }
     }
 
     // ET wall-clock parse — datetime-local strings without offset are
