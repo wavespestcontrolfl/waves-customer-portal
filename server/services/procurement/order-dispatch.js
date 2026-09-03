@@ -287,7 +287,9 @@ async function assertManualActionAllowed(trx, requestId, action) {
  * automatic order for the request, or its claim recorded no conversion.
  */
 async function orderedQuantityFor(conn, requestId) {
-  const row = await conn('vendor_orders').where({ restock_request_id: requestId }).whereNotNull('placed_at').first('request_payload');
+  // A REVOKED order (cancelled with the vendor) is not what arrives — the
+  // manual replacement is; its packaged figure must not become the default.
+  const row = await conn('vendor_orders').where({ restock_request_id: requestId }).whereNotNull('placed_at').whereRaw("NULLIF(evidence->>'revokedAt', '') IS NULL").first('request_payload');
   const q = num(meta(row?.request_payload).orderedQuantity);
   return q && q > 0 ? q : null;
 }
@@ -454,13 +456,18 @@ function parkPatch({ status, reason, message, evidence, bell, amountCents, postS
  * dispatcher or pod already settled keeps that outcome — no overwrite, no
  * second audit (pre-push P1). Then the bell.
  */
-async function park(conn, { ledger, request, product, vendor, adapterKey, reason, message, amountCents = null, evidence = null, status = 'needs_review', notify, placed = null, markRequestOrdered = false }) {
+async function park(conn, { ledger, request, product, vendor, adapterKey, reason, message, amountCents = null, evidence = null, status = 'needs_review', notify, placed = null, markRequestOrdered = false, staleBefore = null }) {
   const postSubmit = POST_SUBMIT_REASONS.has(reason);
   if (postSubmit && status !== 'needs_review') throw new Error(`post-submit reason ${reason} must park as needs_review`);
   const bell = parkBell({ reason, status, product, vendor, request, amountCents, message, placed });
   const patch = parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed });
   const transitioned = await conn.transaction(async (trx) => {
-    const n = await trx('vendor_orders').where({ id: ledger.id, status: 'placing' }).update(patch);
+    const transition = trx('vendor_orders').where({ id: ledger.id, status: 'placing' });
+    // Stale recovery: the heartbeat observed at scan time must STILL be old —
+    // a run that resumed beating between the scan and this write keeps its
+    // claim (Codex r5 P1).
+    if (staleBefore) transition.where('updated_at', '<', staleBefore);
+    const n = await transition.update(patch);
     if (!n) return false;
     if (markRequestOrdered) await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ status: 'ordered', updated_at: new Date() });
     await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: status, amount_cents: amountCents, reason: `${reason}: ${message}`.slice(0, 400), trx });
@@ -572,7 +579,9 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   // submitted); every other existing row wins the conflict (at-most-once).
   const inserted = await trx('vendor_orders').insert(claimRow)
     .onConflict('restock_request_id')
-    .merge({ ...claimRow, error: null, evidence: JSON.stringify({}), amount_cents: null, placed_at: null, external_order_number: null, response_payload: null, updated_at: new Date() }) // evidence is NOT NULL: reset to {}
+    // evidence is NOT NULL: reset to {}. created_at is the cap-accounting
+    // month (monthlySpentCents): a re-armed claim counts against THIS month.
+    .merge({ ...claimRow, error: null, evidence: JSON.stringify({}), amount_cents: null, placed_at: null, external_order_number: null, response_payload: null, created_at: new Date(), updated_at: new Date() })
     .whereRaw(DRY_RUN_RECLAIMABLE_SQL)
     .returning('*');
   const ledger = inserted && inserted[0];
@@ -859,6 +868,7 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
     try {
       const parked = await park(conn, {
         ledger: { id: row.id }, request: { id: row.request_id }, product: { name: row.product_name || '?' }, vendor: { id: row.vendor_id, name: row.vendor_name || '?' }, adapterKey: row.adapter, notify,
+        staleBefore: cutoff,
         reason: 'stale_placing', message: `the dispatcher died mid-order (claimed ${new Date(row.created_at).toISOString()}, last heartbeat ${new Date(row.updated_at || row.created_at).toISOString()}); the ${row.vendor_name || 'vendor'} call may or may not have gone out.`, amountCents: row.amount_cents,
       });
       if (parked.skipped) continue; // settled by its own dispatcher between the scan and the park

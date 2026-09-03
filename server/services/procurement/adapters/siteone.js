@@ -280,6 +280,17 @@ async function openLockedBrowser({ launchBrowser, resolveHostIps, evidence }) {
   let browser;
   try { browser = await launchBrowser({ hostResolverRules: rules.join(',') }); }
   catch (e) { throw runLevel(`siteone bot: browser launch failed: ${String(e.message).slice(0, 120)}`); }
+  try {
+    return await lockContext(browser, evidence, pinned);
+  } catch (e) {
+    // The launch succeeded but the context / page / route setup did not:
+    // close Chromium here, since place() never received the handle (Codex r5 P2).
+    try { await browser.close(); } catch { /* noop */ }
+    throw e;
+  }
+}
+
+async function lockContext(browser, evidence, pinned) {
   const context = await browser.newContext({ serviceWorkers: 'block' });
   const page = await context.newPage();
   if (typeof context.route === 'function') {

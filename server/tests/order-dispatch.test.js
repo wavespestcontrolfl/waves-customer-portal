@@ -578,6 +578,19 @@ test('a stale placing row whose park fails keeps the run red (r2 P1)', async () 
   } finally { dbFn.transaction = realTx; }
 });
 
+test('stale recovery parks only when the heartbeat observed at scan time is still old — the conditional write carries the cutoff (r5 P1)', async () => {
+  const dbFn = require('../models/db');
+  const seen = [];
+  const orig = dbFn.getMockImplementation();
+  dbFn.mockImplementation((table) => { const q = orig(table); if (table === 'vendor_orders') { const w = q.where; q.where = (...a) => { seen.push(a); return w.apply(q, a); }; } return q; });
+  mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), updated_at: new Date(Date.now() - 3600e3), request_id: 'req-old', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
+  try {
+    const a = mockAdapter();
+    await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } });
+    expect(seen.some((args) => args[0] === 'updated_at' && args[1] === '<' && args[2] instanceof Date)).toBe(true);
+  } finally { dbFn.mockImplementation(orig); }
+});
+
 test('orderedQuantityFor: the dispatched claim payload, in the request unit; null without a dispatched order (r2 P1)', async () => {
   const dbFn = require('../models/db');
   mockState.dispatchedLedger = null;

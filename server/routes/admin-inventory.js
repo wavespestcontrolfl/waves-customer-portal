@@ -3291,7 +3291,7 @@ router.get('/restock-requests', async (req, res, next) => {
           revokedAt: row.order_revoked_at || null,
           // What the order actually bought, in the request's unit (packages
           // round up) — the tab's receive default.
-          orderedQuantity: row.order_placed_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,
+          orderedQuantity: row.order_placed_at && !row.order_revoked_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null, // a revoked order is not what arrives
         } : null,
         neededBy: row.needed_by,
         reason: row.reason,

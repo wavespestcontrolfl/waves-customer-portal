@@ -57,7 +57,11 @@ exports.up = async function up(knex) {
 
   if (!(await knex.schema.hasTable('vendors'))) return;
   const hasCode = await knex.schema.hasColumn('vendors', 'code');
-  let vendor = await knex('vendors').whereRaw('LOWER(name) = ?', [STICKER_MULE.name.toLowerCase()]).first();
+  // The STABLE code is the identity (an admin may have renamed the row since
+  // a prior apply; down() leaves it in place) — the name is only the lookup
+  // for a pre-code schema (Codex r5 P1).
+  let vendor = hasCode ? await knex('vendors').where({ code: STICKER_MULE.code }).first() : null;
+  if (!vendor) vendor = await knex('vendors').whereRaw('LOWER(name) = ?', [STICKER_MULE.name.toLowerCase()]).first();
   if (!vendor) {
     const row = { ...STICKER_MULE };
     if (!hasCode) delete row.code;
