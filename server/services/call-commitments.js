@@ -788,11 +788,13 @@ function callEndedAt(call) {
 // handoff — after the boundary, OR acceptance after the boundary (a
 // manual accept stamps sent_at with no delivery record, and an accepted
 // estimate was certainly handed off). A group-send sibling never carries
-// its own deliveryState (only the anchor does), so it inherits the
-// anchor's witness through estimate_data.groupPublishedByEstimateId.
-const HANDED_OFF_AT_SQL = `COALESCE(
-  estimates.estimate_data #>> '{deliveryState,lastDeliveredAt}',
-  (SELECT a.estimate_data #>> '{deliveryState,lastDeliveredAt}' FROM estimates a
+// its own deliveryState (only the anchor does) — and a sibling that was
+// sent on its own BEFORE joining the group keeps its stale stamp — so the
+// witness is the LATER of the sibling's own handoff and its anchor's
+// (GREATEST ignores the null side).
+const HANDED_OFF_AT_SQL = `GREATEST(
+  NULLIF(estimates.estimate_data #>> '{deliveryState,lastDeliveredAt}', '')::timestamptz,
+  (SELECT NULLIF(a.estimate_data #>> '{deliveryState,lastDeliveredAt}', '')::timestamptz FROM estimates a
      WHERE a.id::text = estimates.estimate_data ->> 'groupPublishedByEstimateId'))`;
 // Rows whose witness falls in (after, until]: the SQL form for a single
 // query, the row form for a batch fetched with the `handed_off_at`
@@ -801,14 +803,14 @@ const HANDED_OFF_AT_SQL = `COALESCE(
 // promise at acceptance (pre-push hook P1 on 3b5b2cb27).
 const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWitness() {
   this.whereRaw(
-    `(COALESCE(${HANDED_OFF_AT_SQL}, '') <> '' AND (${HANDED_OFF_AT_SQL})::timestamptz > ?${until ? ` AND (${HANDED_OFF_AT_SQL})::timestamptz <= ?` : ''})`,
+    `((${HANDED_OFF_AT_SQL}) > ?${until ? ` AND (${HANDED_OFF_AT_SQL}) <= ?` : ''})`,
     until ? [after, until] : [after],
   ).orWhere(function acceptedWitness() {
     this.where("accepted_at", ">", after);
     if (until) this.where("accepted_at", "<=", until);
   });
 });
-const HANDOFF_ORDER_SQL = `LEAST(COALESCE((${HANDED_OFF_AT_SQL})::timestamptz, 'infinity'::timestamptz), COALESCE(accepted_at, 'infinity'::timestamptz)) asc`;
+const HANDOFF_ORDER_SQL = `LEAST(COALESCE(${HANDED_OFF_AT_SQL}, 'infinity'::timestamptz), COALESCE(accepted_at, 'infinity'::timestamptz)) asc`;
 const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${HANDED_OFF_AT_SQL} as handed_off_at`)];
 // The EARLIEST post-boundary witness time on a fetched row, or null.
 const witnessAt = (row, after) => {

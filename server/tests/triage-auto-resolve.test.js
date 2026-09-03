@@ -340,6 +340,8 @@ const {
   serviceTypeMatches,
   requestedWindow,
   requestedAddressIsOnFile,
+  bookingAtRequestedAddress,
+  bookingCoversRequest,
   loadEvidence,
 } = require('../services/triage-auto-resolve');
 
@@ -477,6 +479,41 @@ describe('evidence helpers', () => {
     const [exclusion] = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['rodent_exclusion'] } } }));
     expect(serviceTypeMatches('Rodent Control', exclusion)).toBe(false);
     expect(serviceTypeMatches('Rodent Control rodent_exclusion', exclusion)).toBe(true);
+    // The specific service the caller named is one more list to cover: a
+    // flea treatment filed under pest_general is not a generic pest booking.
+    const flea = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_general'], requested_specific_service: 'Flea Treatment' } } }));
+    expect(flea).toEqual([['pest'], ['flea']]);
+    expect(flea.every((tokens) => serviceTypeMatches('Quarterly Pest Control pest_control', tokens))).toBe(false);
+    expect(flea.every((tokens) => serviceTypeMatches('Flea Treatment pest_control', tokens))).toBe(true);
+  });
+
+  test('direct bookings are bound to the address the card asked for: on-file when none was named, the named address otherwise', () => {
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    const base = { call_log_id: 'call-1', call_customer_id: 'cust-1', customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205' };
+    const card = (requested_address) => item({ ...base, reason_code: 'not_confirmed', created_at: FRESH, payload: { scheduling_window: { requested_date_range_start: '2026-07-30', requested_service_categories: ['pest_control'], requested_address } } });
+    const places = new Map([['p1', { customer_id: 'cust-1', key: '77oakstreet', unit: '', city: 'Bradenton', zip: '34205' }]]);
+    const later = new Date(new Date(FRESH).getTime() + 3600 * 1000).toISOString();
+    const booking = (over) => ({ id: 'b1', source_call_log_id: 'call-1', parent_service_id: null, status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-07-30', created_at: later, ...over });
+    const atOnFile = booking({ service_address_line1: '77 Oak Street', service_address_city: 'Bradenton', service_address_zip: '34205' });
+    const atOther = booking({ service_address_line1: '5 Pine Ave', service_address_city: 'Sarasota', service_address_zip: '34236' });
+    // Named nothing → the booking must be positively at the on-file address.
+    expect(bookingAtRequestedAddress(card(none), atOnFile, places)).toBe(true);
+    expect(bookingAtRequestedAddress(card(none), atOther, places)).toBe(false);
+    expect(bookingAtRequestedAddress(card(none), booking({ property_id: 'p1' }), places)).toBe(true);
+    expect(bookingAtRequestedAddress(card(none), booking({}), places)).toBe(false);
+    // Named another address → the booking must be positively at THAT one.
+    const named = { ...none, street_line_1: '5 Pine Ave', city: 'Sarasota', postal_code: '34236' };
+    expect(bookingAtRequestedAddress(card(named), atOther, places)).toBe(true);
+    expect(bookingAtRequestedAddress(card(named), atOnFile, places)).toBe(false);
+    expect(bookingAtRequestedAddress(card(named), booking({ service_address_line1: '5 Pine Ave Unit 2', service_address_city: 'Sarasota' }), places)).toBe(false);
+    expect(bookingAtRequestedAddress(card(named), booking({ service_address_line1: '5 Pine Ave', service_address_city: 'Venice' }), places)).toBe(false);
+    // A second-property ask binds nothing.
+    expect(bookingAtRequestedAddress(card({ ...none, additional_properties: 1 }), atOnFile, places)).toBe(false);
+    // Through the booking arm: this call's own booking at the wrong address
+    // (a reprocess that moved the property) does not close the original ask.
+    expect(bookingCoversRequest(card(none), [atOther], { multiProperty: false, places })).toBe(false);
+    expect(bookingCoversRequest(card(none), [atOnFile], { multiProperty: false, places })).toBe(true);
+    expect(bookingCoversRequest(card(named), [atOther], { multiProperty: true, places })).toBe(true);
   });
 
   test('requestedWindow is ET calendar days: confirmed start first, then the requested range, null without either', () => {

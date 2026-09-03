@@ -201,11 +201,12 @@ describe('triage surfacing', () => {
   });
 
   test('scheduling-shaped cards carry the captured window fields and a filing-time service snapshot', () => {
-    const withService = { ...extraction, service_request: { ...(extraction.service_request || {}), primary_service_category: 'pest_control', secondary_categories: ['mosquito_control', null] } };
+    const withService = { ...extraction, service_request: { ...(extraction.service_request || {}), primary_service_category: 'pest_control', secondary_categories: ['mosquito_control', null], specific_service_name: ' Flea Treatment ' } };
     const item = buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction: withService });
     const payload = JSON.parse(item.payload);
     expect(payload.scheduling_window).toEqual({
       requested_service_categories: ['pest_control', 'mosquito_control'],
+      requested_specific_service: 'Flea Treatment',
       requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 1 },
       status: 'requested',
       confirmed_start_at: null,

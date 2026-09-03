@@ -371,6 +371,11 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       try {
         await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ groupPublishedByEstimateId: anchor.id }) });
         expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+        // A sibling sent on its own BEFORE joining the group keeps its stale
+        // stamp; the anchor's later handoff still counts (Codex r6 P2).
+        await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString() }, groupPublishedByEstimateId: anchor.id }) });
+        expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+        await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ groupPublishedByEstimateId: anchor.id }) });
         await db('estimates').where({ id: anchor.id }).update({ estimate_data: JSON.stringify({}) });
         expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
       } finally {

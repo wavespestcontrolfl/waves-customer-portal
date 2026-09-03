@@ -343,6 +343,13 @@ function buildTriageItem({
         extraction?.service_request?.primary_service_category,
         ...(Array.isArray(extraction?.service_request?.secondary_categories) ? extraction.service_request.secondary_categories : []),
       ].filter((c) => typeof c === 'string' && c.trim()),
+      // The specific catalog service the caller named, when the model
+      // picked one: a coarse category (pest_general for a flea treatment)
+      // is not the ask, and a generic booking in that category must not
+      // answer it.
+      requested_specific_service: typeof extraction?.service_request?.specific_service_name === 'string' && extraction.service_request.specific_service_name.trim()
+        ? extraction.service_request.specific_service_name.trim()
+        : null,
       // Filing-time snapshot of WHERE the caller asked for service, for the
       // same reason: the sweep's same-customer booking arm applies only
       // when the ask named no address or exactly the on-file one.

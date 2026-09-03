@@ -230,13 +230,14 @@ function heardUnitMatches(item, reading) {
   return !heardUnit || heardUnit === onFileUnit(item);
 }
 
-function localityMatches(item, { city, zip }) {
+function localityAgrees(file, { city, zip }) {
   const heardZip = zip5(zip);
-  if (heardZip && heardZip !== zip5(item.customer_zip)) return false;
+  if (heardZip && heardZip !== zip5(file.zip)) return false;
   const heardCity = cityKey(city);
-  if (heardCity && heardCity !== cityKey(item.customer_city)) return false;
+  if (heardCity && heardCity !== cityKey(file.city)) return false;
   return true;
 }
+const localityMatches = (item, reading) => localityAgrees({ city: item.customer_city, zip: item.customer_zip }, reading);
 
 // Readings come ONLY from the card: payload.address_as_heard and the
 // heard_address snapshot call-routing-gates stamps at filing. Never the
@@ -276,20 +277,54 @@ function readingMatchesOnFile(item, reading) {
 // the on-file one? Any other shape — a second property, a different
 // street, a locality/unit-only fragment, or no snapshot — is not an ask
 // the on-file address answers.
-function requestedAddressIsOnFile(item) {
+// The readings of the card's filing-time ask, or null when the ask is not
+// one address (no snapshot, a second property, or a unit / city / ZIP
+// fragment with no street). An empty list = the ask named no address.
+function requestedAddressReadings(item) {
   const ask = parseMaybeJson(item.payload)?.scheduling_window?.requested_address;
-  if (!ask || typeof ask !== 'object') return false;
-  if (Number(ask.additional_properties) > 0) return false;
+  if (!ask || typeof ask !== 'object') return null;
+  if (Number(ask.additional_properties) > 0) return null;
   const readings = [
     { text: ask.street_line_1, line2: ask.street_line_2, city: ask.city, zip: ask.postal_code },
     { text: ask.raw_text, ...localityOfRaw(ask.raw_text) },
   ].filter((r) => String(r.text || '').trim());
-  if (!readings.length) {
-    // No street named — but a unit / city / ZIP fragment alone is still an
-    // ask about SOME address that cannot be keyed.
-    return ![ask.street_line_2, ask.city, ask.postal_code].some((v) => String(v || '').trim());
-  }
+  if (!readings.length && [ask.street_line_2, ask.city, ask.postal_code].some((v) => String(v || '').trim())) return null;
+  return readings;
+}
+
+function requestedAddressIsOnFile(item) {
+  const readings = requestedAddressReadings(item);
+  if (!readings) return false;
   return readings.every((r) => readingMatchesOnFile(item, r));
+}
+
+// The address a booking is POSITIVELY at (its stamped service_address_*
+// when present, else the active property row it points at), or null.
+function bookingPlace(visit, places) {
+  if (visit.service_address_line1) {
+    return { key: addressKey(visit.service_address_line1), unit: unitOf(visit.service_address_line1, visit.service_address_line2), city: visit.service_address_city, zip: visit.service_address_zip };
+  }
+  return visit.property_id ? places.get(String(visit.property_id)) || null : null;
+}
+
+// Is a booking at the address the CARD asked for? The ask named no address
+// or exactly the on-file one → the booking must be positively at the
+// on-file address. The ask named another address → the booking must be
+// positively at THAT one (every reading keys to it, locality and unit
+// agreeing). Any other ask shape binds nothing, so nothing qualifies. A
+// reprocess that moved the extracted property and minted this call's own
+// booking elsewhere must not close the original ask.
+function bookingAtRequestedAddress(item, visit, places) {
+  if (requestedAddressIsOnFile(item)) return visitAtOnFileAddress(item, visit, places);
+  const readings = requestedAddressReadings(item);
+  if (!readings || !readings.length) return false;
+  const place = bookingPlace(visit, places);
+  if (!place || !place.key) return false;
+  if (place.customer_id && String(place.customer_id) !== String(item.call_customer_id)) return false;
+  return readings.every((r) => {
+    const unit = unitOf(r.text, r.line2);
+    return addressKey(r.text) === place.key && (!unit || unit === place.unit) && localityAgrees(place, r);
+  });
 }
 
 // The requested service categories the CARD snapshotted at filing time
@@ -304,14 +339,17 @@ function requestedServiceTokens(item) {
   const payload = parseMaybeJson(item.payload);
   const cats = payload?.scheduling_window?.requested_service_categories;
   if (!Array.isArray(cats)) return [];
+  const tokensOf = (text) => [...new Set(String(text || '').toLowerCase().split(/[^a-z]+/).filter((t) => t && !SERVICE_STOPWORDS.has(t)))];
   const out = [];
   for (const c of cats) {
-    const tokens = new Set();
-    for (const t of String(c || '').toLowerCase().split(/[^a-z]+/)) {
-      if (t && !SERVICE_STOPWORDS.has(t)) tokens.add(t);
-    }
-    if (tokens.size) out.push([...tokens]);
+    const tokens = tokensOf(c);
+    if (tokens.length) out.push(tokens);
   }
+  // The specific service the caller named is one more list the bookings
+  // must cover: a flea treatment filed under pest_general is not answered
+  // by a generic quarterly pest booking.
+  const specific = tokensOf(payload?.scheduling_window?.requested_specific_service);
+  if (specific.length) out.push(specific);
   return out;
 }
 
@@ -724,12 +762,16 @@ async function loadEstimateEvidence(conn, items, flag) {
 // delivery alone only proves some mailbox exists) with a message SENT
 // after the card (an older message opened later proves nothing about
 // this call's capture), and never bounced/complained.
-async function loadEmailEvidence(conn, items, flag) {
+async function loadEmailEvidence(conn, items, flag, { lock = false } = {}) {
   const emailItems = items.filter((i) => i.reason_code === 'email_unverified');
   const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i)]));
   const allEmails = [...new Set([...emailsByItem.values()].flat())];
   if (!allEmails.length) return;
-  const rows = await conn('email_messages')
+  // Under the apply transaction the qualifying message rows are held until
+  // commit: a delayed hard-bounce landing in the gap blocks behind us and
+  // the next sweep sees the bounce, instead of the card closing and the
+  // first-touch ledger releasing the hold to a bounced address.
+  const q = conn('email_messages')
     .whereRaw('LOWER(recipient_email_snapshot) IN (' + allEmails.map(() => '?').join(', ') + ')', allEmails)
     .whereNotNull('sent_at')
     .whereNull('bounced_at')
@@ -738,7 +780,10 @@ async function loadEmailEvidence(conn, items, flag) {
     .where(function engaged() {
       this.whereNotNull('opened_at').orWhereNotNull('clicked_at');
     })
+    .orderBy('id', 'asc')
     .select('recipient_email_snapshot', 'sent_at', 'opened_at', 'clicked_at');
+  if (lock) q.forUpdate();
+  const rows = await q;
   for (const item of emailItems) {
     const mine = new Set(emailsByItem.get(item.id));
     const hit = rows.some((r) => mine.has(String(r.recipient_email_snapshot || '').toLowerCase())
@@ -792,15 +837,10 @@ async function loadContactEvidence(conn, items, flag) {
 function visitAtOnFileAddress(item, visit, places) {
   const onFile = addressKey(item.customer_address_line1);
   if (!onFile) return false;
-  const unit = onFileUnit(item);
-  if (visit.service_address_line1) {
-    return addressKey(visit.service_address_line1) === onFile
-      && unitOf(visit.service_address_line1, visit.service_address_line2) === unit
-      && localityMatches(item, { city: visit.service_address_city, zip: visit.service_address_zip });
-  }
-  const place = visit.property_id ? places.get(String(visit.property_id)) : null;
-  return Boolean(place) && String(place.customer_id) === String(item.call_customer_id)
-    && place.key === onFile && place.unit === unit && localityMatches(item, place);
+  const place = bookingPlace(visit, places);
+  if (!place) return false;
+  if (place.customer_id && String(place.customer_id) !== String(item.call_customer_id)) return false;
+  return place.key === onFile && place.unit === onFileUnit(item) && localityMatches(item, place);
 }
 
 // not_confirmed → bookings created after the card that COLLECTIVELY cover
@@ -809,9 +849,10 @@ function visitAtOnFileAddress(item, visit, places) {
 // the call asked for). Direct = this call's own booking; association =
 // same customer, single ACTIVE property, the card's filing-time ask named
 // no address or exactly the on-file one, scheduled inside the requested
-// days, positively linked to the on-file address. Direct bookings are held to the snapshot too: a reprocess that
-// re-classified the call and minted a different-service booking must not
-// close the original ask. A card with no snapshot (filed before it
+// days, positively linked to the on-file address. Direct bookings are held
+// to the snapshot too — the service AND the requested address: a reprocess
+// that re-classified the call or moved its property and minted a different
+// booking must not close the original ask. A card with no snapshot (filed before it
 // existed — the historical backlog) gets NO booking evidence: without the
 // requested service there is nothing to prove a booking answered, and a
 // reprocess could have re-classified the call. Those cards stay for humans.
@@ -819,7 +860,7 @@ function bookingCoversRequest(item, mine, { multiProperty, places }) {
   const categories = requestedServiceTokens(item);
   if (!categories.length) return false;
   const parents = mine.filter((v) => !v.parent_service_id && strictlyAfter(v.created_at, item.created_at));
-  const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id));
+  const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && bookingAtRequestedAddress(item, v, places));
   let pool = direct;
   if (!multiProperty && requestedAddressIsOnFile(item)) {
     const window = requestedWindow(item);
@@ -915,7 +956,7 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
     evidence.set(id, cur);
   };
   await loadEstimateEvidence(conn, candidates, flag);
-  await loadEmailEvidence(conn, candidates, flag);
+  await loadEmailEvidence(conn, candidates, flag, { lock });
   await loadContactEvidence(conn, candidates, flag);
   await loadVisitEvidence(conn, candidates, flag, { lock });
   return evidence;
@@ -1088,6 +1129,8 @@ module.exports = {
   serviceTypeMatches,
   requestedWindow,
   requestedAddressIsOnFile,
+  bookingAtRequestedAddress,
+  bookingCoversRequest,
   loadEvidence,
   EVIDENCE_CODES,
   LIVE_BOOKING_STATUSES,
