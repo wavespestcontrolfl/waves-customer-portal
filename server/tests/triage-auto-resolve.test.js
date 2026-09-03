@@ -641,6 +641,13 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(card({ ...plan, requested_specific_service: 'Flea Treatment' }), raw)).toBe(false);
     expect(estimateCoversAsk(card({ requested_service_categories: ['rodent_exclusion'], requested_specific_service: null }), raw)).toBe(true);
     expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['rodent_exclusion'] }), raw)).toBe(false);
+    // ...a per-application-only row is a program; a row with only a generic
+    // `amount` (a discount / credit line) prices nothing at either cadence.
+    const perApp = est({ estimate_data: { engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care Program', perApp: 60, visitsPerYear: 8 }, { service: 'waveguard_discount', name: 'Pest Control', amount: 25 }] } } });
+    expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['lawn_care'] }), perApp)).toBe(true);
+    expect(estimateCoversAsk(card({ requested_service_categories: ['lawn_care'], requested_specific_service: null }), perApp)).toBe(false);
+    expect(estimateCoversAsk(card(plan), perApp)).toBe(false);
+    expect(estimateCoversAsk(card({ requested_service_categories: ['pest_general'], requested_specific_service: null }), perApp)).toBe(false);
     // An estimate's address goes through the canonical estimates.address
     // parser: "77 Oak St, Unit 4, Bradenton, FL 34205" is the street, the
     // unit and the locality — not a city called "Unit 4" — so a unit

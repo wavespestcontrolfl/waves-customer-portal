@@ -1088,10 +1088,17 @@ const ONE_TIME_LINE = { cadence: ONE_TIME, amountKeys: ONE_TIME_AMOUNT_KEYS };
 // The raw engine result's lineItems — the shape the public quote and the
 // automated estimator persist, with no typed containers — mix cadences, so
 // each row is read by the engine's own rule (estimate-engine's
-// recurringItems / oneTimeItems, the pricing audit's normalizeEngineLineItems):
-// a row carrying recurring money (annual, monthly, per-application) is a
-// program; any other priced row is a one-time job (codex r23 P2).
-const rawLine = (entry) => (amountOf(entry, RECURRING_AMOUNT_KEYS) > 0 ? RECURRING_LINE : ONE_TIME_LINE);
+// recurringItems / oneTimeItems, the pricing audit's normalizeEngineLineItems
+// and its net / gross aliases): a row carrying recurring money — monthly,
+// annual, per-application — is a program; a row carrying one-time money —
+// price, total — is a one-time job (codex r23 P2). A generic `amount` on a
+// raw row is a discount or credit line's figure, never a price, so it
+// witnesses neither (pre-push codex P1).
+const RAW_RECURRING_KEYS = ['monthlyAfterDiscount', 'monthly', 'mo', 'manualFinalAnnual', 'annualAfterDiscount', 'annual', 'perTreatment', 'perApp', 'perVisit'];
+const RAW_ONE_TIME_KEYS = ['manualFinalOneTime', 'priceAfterDiscount', 'price', 'totalAfterDiscount', 'total'];
+const RAW_RECURRING_LINE = { cadence: RECURRING, amountKeys: RAW_RECURRING_KEYS };
+const RAW_ONE_TIME_LINE = { cadence: ONE_TIME, amountKeys: RAW_ONE_TIME_KEYS };
+const rawLine = (entry) => (amountOf(entry, RAW_RECURRING_KEYS) > 0 ? RAW_RECURRING_LINE : RAW_ONE_TIME_LINE);
 const ENGINE_LINE_SOURCES = [
   { list: (root) => root.recurring?.services, line: () => RECURRING_LINE },
   { list: (root) => root.oneTime?.items, line: () => ONE_TIME_LINE },
