@@ -112,11 +112,15 @@ const CHECKS = [
     // lateral rows but the runtime containment query still returns one service
     // and accepts it (codex r8 P2). Only USABLE members (non-empty strings —
     // the HAS_ENGINE_KEY_SQL predicate) can collide: two rows sharing a "" or
-    // null placeholder are not co-owners of anything (codex r10 P2).
+    // null placeholder are not co-owners of anything (codex r10 P2). A scalar
+    // or object engine_keys value is normalised to [] BEFORE the lateral
+    // expansion — jsonb_array_elements aborts on a scalar even when the WHERE
+    // would discard the row, so one malformed row would kill the whole check;
+    // the malformed row itself surfaces as an engine-key gap (codex r11 P2).
     title: 'Active catalog rows that claim the same engine key (slot-reservation refuses to stamp service_id on these)',
     sql: `select k.member #>> '{}' as engine_key, count(distinct s.id) as active_owners, string_agg(distinct s.service_key, ', ' order by s.service_key) as service_keys
-          from services s cross join lateral jsonb_array_elements(s.engine_keys) as k(member)
-          where s.is_active and jsonb_typeof(s.engine_keys) = 'array'
+          from services s cross join lateral jsonb_array_elements(case when jsonb_typeof(s.engine_keys) = 'array' then s.engine_keys else '[]'::jsonb end) as k(member)
+          where s.is_active
             and jsonb_typeof(k.member) = 'string' and btrim(k.member #>> '{}') <> ''
           group by 1 having count(distinct s.id) > 1 order by 1`,
   },
@@ -310,7 +314,9 @@ const CHECKS = [
     // active-autopay customer unless on a per-visit lane. The population is
     // scoped by COMPLETION time like the workbench (ss.completed_at, ET date
     // >= --since), not by scheduled_date — a late status correction completes
-    // after its service date (codex r9 P2). Two deliberate differences:
+    // after its service date (codex r9 P2). Completion is the SHARED predicate
+    // only — a completed service_records row counts even when the parent
+    // scheduled row carries a stale status (codex r11 P2). Two deliberate differences:
     // membership-covered visits are excluded outright (dues cover them), and
     // any visit stamped with an annual-prepay term is excluded — the workbench
     // validates term coverage in JS (annualPrepayCoversVisit), which this
@@ -323,7 +329,7 @@ const CHECKS = [
             join customers c on c.id = ss.customer_id
             left join service_records sr on sr.scheduled_service_id = ss.id
             left join visit_billing_dispositions d on d.scheduled_service_id = ss.id
-            where ss.status='completed' and (ss.completed_at at time zone 'America/New_York')::date >= $1::date
+            where (ss.completed_at at time zone 'America/New_York')::date >= $1::date
               and ${EFFECTIVE_PRICE_SQL} > 0
               and d.id is null
               and (sr.status = 'completed' or (sr.id is null and ss.status = 'completed'))
