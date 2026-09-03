@@ -106,6 +106,14 @@ const EVAL_FAMILY = Object.freeze([
  *   was produced (turns `openai_incomplete` into a timeout instead of an
  *   incomplete answer).
  * ctx.tool — the failure came from a tool call, whatever the code says.
+ * ctx.validator — the code is a lane validator's rejection (the dispatcher's
+ *   `validate` hook said no). Every such rejection is the MODEL's fault — it
+ *   answered, but not what it was told to — so it is `instruction`, or
+ *   `incomplete` when the code says something is empty or missing. Recorders
+ *   pass this so the classifier never has to know every lane's vocabulary
+ *   (previsit-brief's `forbidden_genus`, the compliance gate's
+ *   `unknown_code:*`, …); the name patterns below are the fallback for a
+ *   code recorded without it.
  *
  * Unknown codes are `infrastructure`: the classes that matter for evals and
  * alerting (quality, budget, provider) are all recognisable by name, so a
@@ -117,6 +125,7 @@ function classifyFailure(errorCode, ctx = {}) {
   const code = String(errorCode || '').toLowerCase();
   if (ctx.tool === true || code.startsWith('tool_')) return 'tool';
   if (code.includes('(response truncated at max_tokens')) return 'incomplete';
+  if (ctx.validator === true) return /^(empty_|no_|missing_)|_empty$|_missing$/.test(code) ? 'incomplete' : 'instruction';
   if (code === 'judge_failed') return 'incorrect';
   if (code === 'eval_regression') return 'regression';
   if (code === 'no_key' || code === 'all_providers_failed' || /_(5\d\d|429|529|503)$/.test(code)) return 'provider';
@@ -129,8 +138,8 @@ function classifyFailure(errorCode, ctx = {}) {
   // Lane validators: the model answered, but not in the shape it was told to
   // (`*_schema_invalid`, `unmappable_*`) or with a required field missing
   // (`missing_*`). The model's fault — eval candidates, not plumbing.
-  if (/(^|_)invalid(_|$)/.test(code) || code.startsWith('unmappable_') || /_not_(array|object|string|number|boolean)$/.test(code)) return 'instruction';
-  if (code.startsWith('missing_') || code === 'no_json' || code === 'empty_response') return 'incomplete';
+  if (/(^|_)invalid(_|$)/.test(code) || /^(unmappable_|not_an?_|forbidden_|retired_|unknown_(code|severity))/.test(code) || /_not_(an?_)?(array|object|string|number|boolean)$/.test(code)) return 'instruction';
+  if (code.startsWith('missing_') || code === 'no_json' || code === 'empty_response' || code === 'empty_output') return 'incomplete';
   // Generic `error` (abort, socket hang-up, fetch failed) and anything unknown.
   return 'infrastructure';
 }

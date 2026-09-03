@@ -85,12 +85,16 @@ function runInLane(laneId, fn) {
   return enter({ laneId: id }, fn);
 }
 
+// A run entered without a traceId starts a FRESH trace: the outer step /
+// span ids belong to another trace and must not become the first step's
+// parent. With an explicit traceId the run joins that trace and keeps them.
 function runInRun({ runId = null, workItemId = null, attemptId = null, traceId = null, agentVersionId = null, workflowId = null } = {}, fn) {
   return enter({
     runId,
     workItemId,
     attemptId,
     traceId: traceId || newTraceId(),
+    ...(traceId ? {} : { stepId: null, spanId: null, parentSpanId: null }),
     agentVersionId,
     workflowId,
   }, fn);

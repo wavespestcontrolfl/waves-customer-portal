@@ -52,6 +52,23 @@ describe('agent-control context', () => {
     });
   });
 
+  it('a run entered inside a step starts a clean trace unless it joins one explicitly', () => {
+    ctx.runInRun({ runId: 'parent' }, () => ctx.withStep('outer-step', () => {
+      const outer = ctx.current();
+      expect(outer.traceId).toHaveLength(32);
+      ctx.runInRun({ runId: 'nested' }, () => {
+        const c = ctx.current();
+        expect(c.traceId).not.toBe(outer.traceId);
+        expect([c.stepId, c.spanId, c.parentSpanId]).toEqual([null, null, null]);
+        ctx.withStep('first', () => expect(ctx.current().parentSpanId).toBeNull());
+      });
+      ctx.runInRun({ runId: 'joined', traceId: outer.traceId }, () => {
+        expect(ctx.current().spanId).toBe(outer.spanId);
+        ctx.withStep('child', () => expect(ctx.current().parentSpanId).toBe(outer.spanId));
+      });
+    }));
+  });
+
   it('withStep chains parent span ids and mints fresh spans', () => {
     ctx.withStep('s1', () => {
       const outer = ctx.current();

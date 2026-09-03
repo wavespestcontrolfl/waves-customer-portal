@@ -88,7 +88,9 @@ const LANE_RUNTIME = {
   call_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   call_self_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_cadence: 'daily', ...LONG_BATCH },
   lead_synopsis: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
-  csr_coach: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'hourly' },
+  // The hourly cron only verifies follow-ups (no model call); the model runs
+  // per scored call and for the weekly recommendation — candidate-driven.
+  csr_coach: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null },
   contact_dictation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'transcription_contact' },
   address_recovery: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
   tech_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'interactive', eval_family: 'transcription_contact' },
