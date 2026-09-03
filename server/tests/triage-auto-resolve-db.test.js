@@ -15,7 +15,7 @@ const PHONE = '+15555550188';
 maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   let db;
   let sweep;
-  const ids = { customers: [], calls: [], visits: [] };
+  const ids = { customers: [], calls: [], visits: [], estimates: [] };
   const OLD_ENV = { base: process.env.GATE_TRIAGE_AUTO_RESOLVE, ev: process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE };
 
   beforeAll(async () => {
@@ -40,6 +40,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
 
   afterAll(async () => {
     if (ids.visits.length) await db('scheduled_services').whereIn('id', ids.visits).del();
+    if (ids.estimates.length) await db('estimates').whereIn('id', ids.estimates).del();
     if (ids.calls.length) await db('triage_items').whereIn('call_log_id', ids.calls).del();
     if (ids.calls.length) await db('call_log').whereIn('id', ids.calls).del();
     if (ids.customers.length) await db('customers').whereIn('id', ids.customers).del();
@@ -73,6 +74,44 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     ids.visits.push(visit.id);
     return { callId: call.id, cardId: card.id };
   }
+
+  // quote_promised: a card + an estimate stamped with the call's id
+  // (estimator provenance), sent at the given age.
+  async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin }) {
+    const customerId = await seedCustomer(sid.slice(-2));
+    const callAt = new Date(Date.now() - (cardAgeMin + 5) * 60000);
+    const [call] = await db('call_log').insert({
+      twilio_call_sid: sid, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
+      status: 'completed', duration_seconds: 120, processing_status: 'processed',
+      customer_id: customerId, review_status: 'open', created_at: callAt,
+    }).returning('id');
+    ids.calls.push(call.id);
+    const cardAt = new Date(Date.now() - cardAgeMin * 60000);
+    const [card] = await db('triage_items').insert({
+      call_log_id: call.id, category: 'time_ambiguous', severity: 'blocking', reason_code: 'quote_promised',
+      status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
+      payload: JSON.stringify({ flag: 'quote_promised' }),
+    }).returning('id');
+    const [est] = await db('estimates').insert({
+      customer_id: customerId, status: 'sent', sent_at: new Date(Date.now() - estimateAgeMin * 60000),
+      estimate_data: JSON.stringify({ estimatorEngine: { callLogId: String(call.id) } }),
+    }).returning('id');
+    ids.estimates.push(est.id);
+    return { callId: call.id, cardId: card.id };
+  }
+
+  test('quote_promised resolves on a call-stamped estimate sent after the card, not one sent before it', async () => {
+    const fresh = await seedQuoteCall(SID.replace(/e2$/, 'q1'), { cardAgeMin: 60, estimateAgeMin: 10 });
+    const stale = await seedQuoteCall(SID.replace(/e2$/, 'q2'), { cardAgeMin: 10, estimateAgeMin: 60 });
+    const result = await sweep.runTriageAutoResolve({ now: new Date() });
+    expect(result.skipped).toBe(false);
+    const closed = await db('triage_items').where({ id: fresh.cardId }).first();
+    expect(closed.status).toBe('resolved');
+    expect(closed.resolution_source).toBe('auto');
+    expect(closed.resolution_note).toBe(sweep.RULE_NOTES.quote_fulfilled);
+    const open = await db('triage_items').where({ id: stale.cardId }).first();
+    expect(open.status).toBe('open');
+  });
 
   test('booking after the card on the requested day resolves it as auto; a pre-card, skipped, or off-day booking leaves it open', async () => {
     const fresh = await seedCall(SID, { cardAgeMin: 60, bookingAgeMin: 10 });

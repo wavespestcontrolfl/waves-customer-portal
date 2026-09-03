@@ -145,8 +145,6 @@ const RULE_NOTES = {
   advisory_aged: `Auto-dismissed: informational flag unactioned after ${ADVISORY_AGE_DAYS} days.`,
 };
 
-// Evidence window for the association booking arm (mirrors
-// call-commitments' ASSOCIATION_WINDOW_DAYS).
 // scheduled_services statuses that are a booking still going to happen or
 // one that did (scheduled_services_status_check minus cancelled /
 // rescheduled / skipped / no_show).
@@ -610,37 +608,25 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
   };
 
   // quote_promised → an estimate DIRECTLY linked to this call, delivered
-  // after it (call-commitments' send_estimate resolver; association-strength
+  // after the CARD (call-commitments' batched direct routes — three queries
+  // for the whole backlog, each card its own boundary; association-strength
   // matches — same customer, unlinked — are ignored on purpose).
-  const { resolveFulfillment } = require('./call-commitments');
-  for (const item of candidates.filter((i) => i.reason_code === 'quote_promised')) {
+  const quoteItems = candidates.filter((i) => i.reason_code === 'quote_promised');
+  if (quoteItems.length) {
+    const { directEstimatesSentAfter } = require('./call-commitments');
     try {
-      // The resolver returns the FIRST direct estimate after its call
-      // boundary and stops, so an older direct estimate would mask a later
-      // qualifying one. Move its boundary to the card: bridged_at + 0s is
-      // exactly callEndedAt, so only estimates delivered after the card are
-      // visible to it.
-      const boundary = new Date(Math.max(
-        toDate(item.created_at)?.getTime() || 0,
-        toDate(item.call_created_at)?.getTime() || 0,
-      ));
-      const proof = await resolveFulfillment(conn, { kind: 'send_estimate' }, {
-        id: item.call_log_id,
-        created_at: boundary,
-        duration_seconds: 0,
-        bridged_at: boundary,
-        direction: item.call_direction,
-        customer_id: item.call_customer_id,
-        twilio_call_sid: item.call_twilio_call_sid,
-        metadata: item.call_metadata,
-        from_phone: item.call_from_phone,
-        to_phone: item.call_to_phone,
-      });
-      if (proof?.strength === 'direct' && strictlyAfter(proof.matched_at, item.created_at)) {
-        flag(item.id, 'estimate_direct');
+      const proofs = await directEstimatesSentAfter(conn, quoteItems.map((item) => ({
+        key: item.id,
+        callId: item.call_log_id,
+        twilioCallSid: item.call_twilio_call_sid,
+        after: new Date(Math.max(toDate(item.created_at)?.getTime() || 0, toDate(item.call_created_at)?.getTime() || 0)),
+      })));
+      for (const item of quoteItems) {
+        const proof = proofs.get(item.id);
+        if (proof && strictlyAfter(proof.matched_at, item.created_at)) flag(item.id, 'estimate_direct');
       }
     } catch (err) {
-      logger.warn(`[triage-sweep] estimate evidence lookup failed for item ${item.id}: ${err.message}`);
+      logger.warn(`[triage-sweep] estimate evidence lookup failed: ${err.message}`);
     }
   }
 

@@ -778,6 +778,78 @@ function callEndedAt(call) {
 // resend that estimate" to an existing customer is kept by a send of an
 // estimate created long before the call — the promised-estimate watcher
 // this lane stands in for accepts exactly that send.
+// The send_estimate DIRECT routes for MANY calls in three queries — the
+// triage evidence sweep's batch form of resolveFulfillment's direct branch
+// below (same two routes: the estimator's own callLogId stamp, and an
+// estimate on a lead THIS call minted — carrying its SID — by the lead FK or
+// the estimate_data.lead_id mirror; same delivery witness: sent_at after the
+// boundary, and for report/plan_restart mints deliveryState.lastDeliveredAt
+// after it too). Never association-strength matches. Keep the two in step.
+//
+// probes: [{ key, callId, twilioCallSid, after }] — one per card, with its
+// own boundary. Returns Map key → the EARLIEST qualifying direct proof.
+async function directEstimatesSentAfter(conn, probes) {
+  const out = new Map();
+  if (!probes.length) return out;
+  const probesByCall = new Map();
+  for (const p of probes) {
+    const list = probesByCall.get(String(p.callId)) || [];
+    list.push(p);
+    probesByCall.set(String(p.callId), list);
+  }
+  const minAfter = new Date(Math.min(...probes.map((p) => new Date(p.after).getTime())));
+  const cols = [
+    "id", "sent_at", "source",
+    conn.raw("estimate_data #>> '{deliveryState,lastDeliveredAt}' as delivered_at"),
+    conn.raw("estimate_data #>> '{estimatorEngine,callLogId}' as stamped_call_id"),
+    conn.raw("estimate_data ->> 'lead_id' as mirror_lead_id"),
+  ];
+  const delivered = (row, after) => !["service_report_cta", "plan_restart"].includes(String(row.source || ""))
+    || (row.delivered_at && new Date(row.delivered_at) > after);
+  const consider = (callId, row, basis) => {
+    for (const p of probesByCall.get(String(callId)) || []) {
+      const after = new Date(p.after);
+      if (!(new Date(row.sent_at) > after) || !delivered(row, after)) continue;
+      const cur = out.get(p.key);
+      if (!cur || new Date(row.sent_at) < new Date(cur.matched_at)) {
+        out.set(p.key, { kind: "estimate_sent", record_type: "estimate", record_id: row.id, matched_at: row.sent_at, strength: "direct", basis });
+      }
+    }
+  };
+  const callIds = [...probesByCall.keys()];
+  const stamped = await conn("estimates")
+    .whereRaw(`estimate_data #>> '{estimatorEngine,callLogId}' IN (${callIds.map(() => "?").join(", ")})`, callIds)
+    .whereNotNull("sent_at")
+    .where("sent_at", ">", minAfter)
+    .select(cols);
+  for (const r of stamped) consider(r.stamped_call_id, r, "estimate_stamped_with_this_call");
+
+  const callBySid = new Map(probes.filter((p) => p.twilioCallSid).map((p) => [p.twilioCallSid, String(p.callId)]));
+  if (!callBySid.size) return out;
+  const leads = await conn("leads")
+    .whereIn("twilio_call_sid", [...callBySid.keys()])
+    .select("id", "estimate_id", "twilio_call_sid");
+  if (!leads.length) return out;
+  const estimateIds = leads.map((l) => l.estimate_id).filter(Boolean);
+  const leadIds = leads.map((l) => String(l.id));
+  const linked = await conn("estimates")
+    .where(function linkedToLeads() {
+      if (estimateIds.length) this.orWhereIn("id", estimateIds);
+      this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${leadIds.map(() => "?").join(", ")})`, leadIds);
+    })
+    .whereNotNull("sent_at")
+    .where("sent_at", ">", minAfter)
+    .select(cols);
+  const leadByEstimateId = new Map(leads.filter((l) => l.estimate_id).map((l) => [String(l.estimate_id), l]));
+  const leadById = new Map(leads.map((l) => [String(l.id), l]));
+  for (const r of linked) {
+    const lead = leadByEstimateId.get(String(r.id)) || leadById.get(String(r.mirror_lead_id || ""));
+    const callId = lead && callBySid.get(lead.twilio_call_sid);
+    if (callId) consider(callId, r, "estimate_linked_to_this_call_sent");
+  }
+  return out;
+}
+
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
   const after = callEndedAt(call);
@@ -1573,6 +1645,7 @@ module.exports = {
   deriveCommitmentsFromExtraction,
   callbackDueAt,
   callEndedAt,
+  directEstimatesSentAfter,
   implicitDueAt,
   staleAiRowSql,
   stillOpenIds,
