@@ -23,7 +23,7 @@ jest.mock('../models/db', () => {
       const meta = (r) => r.metadata || {};
       if (sql.includes("'kind'")) conds.push((r) => meta(r).kind === binds[0]);
       else if (sql.includes("'customerId'")) conds.push((r) => String(meta(r).customerId) === binds[0]);
-      else if (sql.includes("'dedupeKey'")) conds.push((r) => (meta(r).dedupeKey || '') !== binds[0]);
+      else if (sql.includes("'dedupeKey'")) conds.push(sql.includes('<>') ? (r) => (meta(r).dedupeKey || '') !== binds[0] : (r) => meta(r).dedupeKey === binds[0]);
       return b;
     },
     whereIn(k, vals) { conds.push((r) => vals.includes(r[k])); return b; },
@@ -110,6 +110,18 @@ test('a retry of the SAME request leaves its own unread row alone (it dedupes ag
   await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
   expect(mockTables.notifications[0].read_at).toBeNull();
   expect(mockNotifyAdmin.mock.calls[0][2]).not.toMatch(/supersedes/);
+});
+
+test('a retry of an OLDER request whose row was already retired never retires the newer request\'s open task (GH r2 P1)', async () => {
+  // A raised, B raised (retired A), then A's lost-task repair retries: A
+  // dedupes against its own READ row and inserts nothing — B must stay
+  // the one open instruction.
+  mockTables.notifications = [datedRow('req-a'), datedRow('req-b')];
+  mockTables.notifications[0].read_at = new Date('2026-01-02');
+  await raiseTermiteRetrievalTask('c1', 'req-a', { retrieveAfter: '2027-02-28' });
+  expect(mockTables.notifications[1].read_at).toBeNull();
+  expect(mockNotifyAdmin.mock.calls[0][2]).not.toMatch(/supersedes/);
+  expect(mockLog.filter((l) => l === 'update:notifications')).toEqual([]);
 });
 
 test('rows already READ are never touched, and another customer\'s rows are out of scope', async () => {
