@@ -1353,6 +1353,7 @@ const {
   copyBillToFields,
   copyStampedServiceAddressFields,
 } = require('../services/booking/visit-financial-stamps');
+const { anchorSoleProperty } = require('../services/customer-properties');
 
 function clearAppointmentDiscountCatalogFields(target, cols) {
   if (!target || !cols) return;
@@ -4809,6 +4810,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // unowned case, which acceptEstimateOnBook does not).
     const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
     const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
+    // While the estimate link is deferred, the rows carry no
+    // source_estimate_id yet, so the sole-property anchor cannot see that an
+    // estimate owns their address (GH codex #3837 r2 P1): a quote for a NEW
+    // address would anchor the whole series to the customer's old property,
+    // and the post-commit linkage only stamps rows still NULL. Leave the
+    // parent AND its spawned children unanchored — the linkage stamps them.
+    const propertyOwnedByEstimateLinkage = !!linkedEstimateId && !insertLinkId;
 
     // Resolve the prepay-on-book decision now that the estimate is validated.
     // Honor billingTerm='prepay_annual' ONLY for a server-eligible open quote on
@@ -5449,7 +5457,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // (copyStampedServiceAddressFields). Only the customer's SOLE active
       // property is unambiguous; multi-property customers stay
       // office-placed. Never overrides an explicit stamp.
-      if (cols.property_id && insertData.property_id === undefined) {
+      if (cols.property_id && insertData.property_id === undefined && !propertyOwnedByEstimateLinkage) {
         insertData.property_id = await require('../services/customer-properties')
           .soleActivePropertyId(customerId, trx);
       }
@@ -5574,6 +5582,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.skip_weekends) childData.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && skipWeekendsEffective) childData.weekend_shift = shiftDir;
         if (cols.source_estimate_id && insertLinkId) childData.source_estimate_id = insertLinkId;
+        // Property anchor rides the spawn (GH codex #3837 r1 P1): the parent
+        // was anchored at insert, and a child without it is refused by the
+        // maybeGroupRow call below forever.
+        copyStampedServiceAddressFields(childData, svc, cols);
+        if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(childData, cols, trx);
         const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates, skipWeekendsEffective);
         const childFinancials = calculateVisitFinancialsForAddons(pricing, childAddonLines);
         // Carry callback status + suppression onto recurring children: if an
@@ -5646,6 +5659,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.service_id && (childIdentity.service_id || serviceId)) boosterData.service_id = childIdentity.service_id || serviceId;
           if (cols.service_key_snapshot) boosterData.service_key_snapshot = childIdentity.service_key || pricing.primaryServiceKey || null;
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
+          copyStampedServiceAddressFields(boosterData, svc, cols);
+          if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(boosterData, cols, trx);
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
@@ -5852,6 +5867,23 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // The property linkage the acceptance ran (markEstimateManuallyAccepted →
+    // linkAcceptedEstimateProperty) scopes its visit stamp by
+    // source_estimate_id, which the rows above did not carry yet — so it
+    // stamped none of them (GH codex #3837 r2 P1). Now that they are
+    // linked (accept-on-book below, or the attach-only path further down),
+    // run it again for exactly these rows: an estimate for a NEW
+    // address stamps them with that property; the sole-property anchor
+    // deliberately left them alone (propertyOwnedByEstimateLinkage).
+    // Best-effort — never throws.
+    const stampCreatedRowsFromEstimateProperty = async () => {
+      if (!createdAppointments.length) return;
+      await require('../services/estimate-property-linkage').linkAcceptedEstimateProperty({
+        estimateId: linkedEstimateId,
+        customerId,
+        onlyServiceIds: createdAppointments.map((a) => a.id),
+      });
+    };
     // Record the win for a phone-accepted quote — only now that the appointment
     // series is committed, so a booking failure can never strand an accepted
     // estimate with no visit. Reuse the canonical manual-accept flow so funnel
@@ -6043,6 +6075,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // stamp now carries can fire at first completion.
         if (await linkCreatedRowsToEstimate()) {
           await retireRodentSetupStampAfterAcceptance(acceptResult);
+          await stampCreatedRowsFromEstimateProperty();
         } else {
           logger.error(`[schedule] FIX: estimate ${linkedEstimateId} accepted but the appointment link could not be written — setup stamp KEPT as provenance; relink the series and retire the stamp (or it double-bills at first completion)`);
         }
@@ -6070,6 +6103,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             if (retryResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
             if (await linkCreatedRowsToEstimate()) {
               await retireRodentSetupStampAfterAcceptance(retryResult);
+              await stampCreatedRowsFromEstimateProperty();
             } else {
               logger.error(`[schedule] FIX: estimate ${linkedEstimateId} accepted (overlap fallback) but the appointment link could not be written — setup stamp KEPT as provenance; relink the series and retire the stamp (or it double-bills at first completion)`);
             }
@@ -6102,6 +6136,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         await db('scheduled_services')
           .whereIn('id', createdAppointments.map((a) => a.id))
           .update({ source_estimate_id: linkedEstimateId });
+        await stampCreatedRowsFromEstimateProperty();
       } catch (e) {
         logger.warn(`[schedule] could not link appointment to attached estimate ${linkedEstimateId}: ${e.message}`);
       }
@@ -9953,6 +9988,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // anchored on a secondary/rental-property visit must not spawn
               // children that fall back to the customer's primary address.
               copyStampedServiceAddressFields(childData, parent, cols);
+              await anchorSoleProperty(childData, cols, trx);
             } catch (spawnStampErr) {
               // The optional column stamps above are non-blocking, but a
               // pricing refusal (exclusion catalog not loaded) must abort
@@ -11786,6 +11822,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyAppointmentDiscountFields(data, parent, cols);
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
+    await anchorSoleProperty(data, cols, trx);
     const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -12081,6 +12118,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           copyAppointmentDiscountFields(nextData, parent, cols);
           copyBillToFields(nextData, parent, cols);
           copyStampedServiceAddressFields(nextData, parent, cols);
+          await anchorSoleProperty(nextData, cols, conn);
           let parentAddons = [];
           try {
             // Nested transaction = savepoint: a missing
@@ -16878,6 +16916,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
+        await anchorSoleProperty(data, cols, conn);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -16968,6 +17007,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
+        await anchorSoleProperty(data, cols, conn);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
