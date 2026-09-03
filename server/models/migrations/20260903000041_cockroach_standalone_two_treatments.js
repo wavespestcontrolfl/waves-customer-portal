@@ -12,9 +12,9 @@
  * metadata only — it does NOT multiply the price.
  *
  * Read-modify-write: only the one `treatments` value moves, and only when it
- * still reads 1 (an admin who already set it is left alone). down() keys off
- * this migration's own audit row so a pre-existing admin value survives
- * rollback.
+ * still reads 1 or is absent (an admin who already set it is left alone).
+ * down() keys off this migration's own audit row so a pre-existing admin
+ * value survives rollback.
  */
 const CONFIG_KEY = 'pest_base';
 const SCALE_KEY = 'regular_standalone';
@@ -65,9 +65,12 @@ exports.up = async function up(knex) {
     const data = await loadRow(trx);
     if (!data) return;
     const current = Number(data.initial_roach?.display?.[SCALE_KEY]?.treatments);
-    // Anything other than the shipped default of 1 is an admin decision —
-    // leave it (and write no audit row, so down() will not touch it either).
-    if (current !== 1) return;
+    // A row still at the shipped default of 1, or one written before the
+    // display key existed (no count at all — db-bridge would render the
+    // code default), gets the explicit package count persisted. Any other
+    // value is an admin decision — leave it (and write no audit row, so
+    // down() will not touch it either) (codex #3842 r4 P0).
+    if (Number.isFinite(current) && current !== 1) return;
     await saveTreatments(trx, data, TREATMENTS, UP_REASON);
   });
 };

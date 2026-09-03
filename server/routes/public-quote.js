@@ -1558,10 +1558,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // pull the pricing_config row into THIS worker first (coalesced,
       // one read) so a replica cannot pass the gate on a stale count
       // (codex #3842 r3 P1).
+      // The bridge resolves FALSE (constants restored to their last good
+      // state) rather than throwing on a failed read — an unrefreshed
+      // count is unverified, so the gate fails closed (codex #3842 r4 P0).
+      let resynced = true;
       if (engineInput.services?.pestInitialRoach) {
-        try { await syncConstantsFromDB(); } catch (syncErr) { logger.warn(`[public-quote] pricing-config resync before the cockroach gate failed: ${syncErr.message}`); }
+        try { resynced = (await syncConstantsFromDB()) === true; } catch (syncErr) { resynced = false; logger.warn(`[public-quote] pricing-config resync before the cockroach gate failed: ${syncErr.message}`); }
       }
-      const fresh = await publicSelectableService(requestedServiceKey);
+      const fresh = resynced ? await publicSelectableService(requestedServiceKey) : null;
       if (!fresh?.instant) {
         keyedQuoteOnRequest = true;
         services = {};

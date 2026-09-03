@@ -1691,6 +1691,13 @@ function pricePestInitialRoach(property, options = {}) {
     // every other caller, where the display config stays live.
     packageTreatments,
     catalogServiceKey,
+    // Public route signal: the lookup found no real building size and the
+    // route substituted its synthetic 2,000 sqft, which resolvePestFootprint
+    // cannot tell from a measurement (the engine derives property.footprint
+    // from it). Same decisive override priceCommercialPest honors: the
+    // bracket is a guess — manual review, never a firm price (codex #3842
+    // r4 P1). Staff paths never set the flag and are unchanged.
+    buildingSizeMeasured,
   } = options;
   const roachMeta = normalizeRoachType(requestedRoachTypeInput);
   const severityMeta = normalizeRoachSeverity(requestedSeverityInput);
@@ -1731,8 +1738,10 @@ function pricePestInitialRoach(property, options = {}) {
   const margin = price > 0 ? (price - incrementalCost) / price : 0;
 
   const isGerman = roachType === 'german';
+  const unmeasuredFootprint = buildingSizeMeasured === false;
   const manualReviewReasons = uniqueList([
     ...footprintResolution.manualReviewReasons,
+    ...(unmeasuredFootprint ? ['building_size_unmeasured_pest_footprint'] : []),
     ...(severityMeta.severity === 'severe' && !isGerman
       ? ['severe_native_roach_activity_manual_review']
       : []),

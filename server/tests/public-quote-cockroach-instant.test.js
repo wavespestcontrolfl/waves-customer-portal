@@ -131,6 +131,18 @@ describe('cockroach_control as a public instant quote', () => {
     expect(roachLine({ ...BASE_PROPERTY, services: { pestInitialRoach: { roachType: 'regular', packageTreatments: 0, catalogServiceKey: '  ' } } }).treatments).toBe(2);
     expect(roachLine({ ...BASE_PROPERTY, services: { pestInitialRoach: { roachType: 'regular', packageTreatments: '3' } } }).serviceKey).toBeUndefined();
   });
+  test('an unmeasured building (route-synthesized sqft) routes to manual review, never a firm bracket price (codex r4 P1)', () => {
+    const measured = generateEstimate({ ...BASE_PROPERTY, buildingSizeMeasured: true, services: quoteServicesForKey('cockroach_control') });
+    const unmeasured = generateEstimate({ ...BASE_PROPERTY, homeSqFt: 2000, buildingSizeMeasured: false, services: quoteServicesForKey('cockroach_control') });
+    const measuredLine = measured.lineItems.find((l) => l.service === 'pest_initial_roach');
+    const unmeasuredLine = unmeasured.lineItems.find((l) => l.service === 'pest_initial_roach');
+    expect(isManualQuoteLine(measuredLine)).toBe(false);
+    expect(unmeasuredLine.requiresManualReview).toBe(true);
+    expect(unmeasuredLine.manualReviewReasons).toContain('building_size_unmeasured_pest_footprint');
+    expect(isManualQuoteLine(unmeasuredLine)).toBe(true);
+    // Staff / undefined flag: unchanged.
+    expect(isManualQuoteLine(roachLine({ ...BASE_PROPERTY, services: quoteServicesForKey('cockroach_control') }))).toBe(false);
+  });
   test('the footprint drives the bracket, not the lot', () => {
     const small = roachLine({ ...BASE_PROPERTY, homeSqFt: 1200, services: quoteServicesForKey('cockroach_control') });
     const large = roachLine({ ...BASE_PROPERTY, homeSqFt: 3200, lotSqFt: 4000, services: quoteServicesForKey('cockroach_control') });
