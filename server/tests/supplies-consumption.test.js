@@ -266,3 +266,28 @@ describeOrSkip('supplies auto-reorder schema (DB-backed)', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Recap hook source contract (routes/admin-dispatch.js is pinned by source in
+// the house style): a priorCompleted recap still consumes when it is a RETRY
+// of the completing recap — service record created inside the 15-minute
+// window — because submitRecap commits the status before the consumption
+// call (PR 2 pre-push P1). Edits of historical completions keep consuming
+// nothing.
+// ---------------------------------------------------------------------------
+describe('recap consumption hook — retry window (source contract)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+  const hook = src.slice(src.indexOf("router.post('/:serviceId/pest-recap'"), src.indexOf('recap supplies consumption failed'));
+
+  test('the window is 15 minutes and the skip is keyed on the record creation time, not priorCompleted alone', () => {
+    expect(src).toMatch(/const RECAP_RETRY_WINDOW_MS = 15 \* 60 \* 1000;/);
+    expect(hook).toMatch(/let consumeNow = result\.priorCompleted !== true;/);
+    expect(hook).toMatch(/if \(!consumeNow && result\.recordId\)/);
+    expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('created_at'\)/);
+    expect(hook).toMatch(/Date\.now\(\) - createdMs < RECAP_RETRY_WINDOW_MS\) consumeNow = true;/);
+    expect(hook).toMatch(/if \(consumeNow\) \{/);
+    expect(hook).not.toMatch(/if \(result\.priorCompleted !== true\) \{/);
+  });
+});

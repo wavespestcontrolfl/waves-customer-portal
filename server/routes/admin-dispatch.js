@@ -14047,6 +14047,11 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
 });
 
 // POST /:serviceId/pest-recap — commit the recap (complete, no bill).
+// A recap that reports priorCompleted within this window of the service
+// record's creation is a RETRY of the completing recap, not an edit of a
+// historical completion (see the consumption hook in the handler).
+const RECAP_RETRY_WINDOW_MS = 15 * 60 * 1000;
+
 router.post('/:serviceId/pest-recap', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
@@ -14092,9 +14097,23 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
     // consumes nothing, matching the original closeout (GH codex r3 P2). A
     // recap EDIT of a visit that was already completed (priorCompleted) is
     // not a new visit — no kit was left, nothing is consumed (GH codex r4
-    // P2); the at-most-once index still covers a retry of the completing
-    // recap itself.
-    if (result.priorCompleted !== true) {
+    // P2). One exception (PR 2 pre-push P1): submitRecap commits the
+    // completed status BEFORE this call, so a process death in between
+    // makes the client's retry read priorCompleted=true with no kit movement
+    // written. A retry is a record completed MINUTES ago — so a
+    // priorCompleted recap whose service record was created inside
+    // RECAP_RETRY_WINDOW_MS still consumes; the at-most-once movement index
+    // makes a genuine double-consume impossible either way. A recap edit of a
+    // visit completed hours or years ago keeps consuming nothing.
+    let consumeNow = result.priorCompleted !== true;
+    if (!consumeNow && result.recordId) {
+      try {
+        const rec = await db('service_records').where({ id: result.recordId }).first('created_at');
+        const createdMs = rec?.created_at ? new Date(rec.created_at).getTime() : NaN;
+        if (Number.isFinite(createdMs) && Date.now() - createdMs < RECAP_RETRY_WINDOW_MS) consumeNow = true;
+      } catch (e) { logger.warn(`[dispatch] recap retry-window read failed: ${e.message}`); }
+    }
+    if (consumeNow) {
       try {
         const { consumeCompletionSupplies } = require('../services/supplies-consumption');
         const svcRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('customer_id', 'technician_id', 'service_type');
