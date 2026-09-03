@@ -11255,6 +11255,12 @@ const CallRecordingProcessor = {
                 customerId: customerId || null,
                 leadId,
                 callLogId: call.id,
+                // The call's OWN quote signals ride with the ask so a reply
+                // resumes the estimator only when a quote was actually
+                // requested/promised, with the true promise value (codex
+                // r4 P2).
+                quotePromised: callQuotePromised === true,
+                quoteRequested: callQuoteRequested === true,
                 source: unitOwed ? 'call_missing_unit_number' : 'call_missing_service_address',
                 channelProvenance: 'voice',
                 unitAskBuilding,

@@ -198,6 +198,8 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
         // re-run a call whose transcript does not hold the answer (codex
         // r3 P1). The unit item keeps its own unit_call_log_id for the card.
         call_log_id: linkage.callLogId ? String(linkage.callLogId) : null,
+        quote_promised: linkage.callLogId ? linkage.quotePromised === true : null,
+        quote_requested: linkage.callLogId ? linkage.quoteRequested === true : null,
         // Likewise the call-scoped street rule follows the producer that
         // asks for the street.
         ...(askable.includes('street_address')
@@ -255,6 +257,8 @@ async function parkClarifyAsk({
   contextSummary = null,
   callLogId = null,
   unitAskBuilding = null,
+  quotePromised = null,
+  quoteRequested = null,
 }) {
   try {
     if (!clarifyAsksEnabled()) return { parked: false, skipped: 'gate_off' };
@@ -272,7 +276,7 @@ async function parkClarifyAsk({
     if (!digits) return { parked: false, skipped: 'no_usable_phone' };
 
     const sourceRef = `clarify:${digits}`;
-    const linkage = { customerId, leadId, estimateId, source, channelProvenance, callLogId, unitAskBuilding };
+    const linkage = { customerId, leadId, estimateId, source, channelProvenance, callLogId, unitAskBuilding, quotePromised, quoteRequested };
     // The whole dedupe→merge→insert sequence holds the clarify lock, so
     // producers for one phone serialize completely — no lost merges, no
     // 23505 recovery dance (the unique index remains as the DB backstop;
@@ -372,7 +376,7 @@ async function parkClarifyAsk({
           toPhone: `+1${digits}`,
           lead_id: leadId || null,
           estimate_id: estimateId || null,
-          ...(callLogId ? { call_log_id: String(callLogId) } : {}),
+          ...(callLogId ? { call_log_id: String(callLogId), quote_promised: quotePromised === true, quote_requested: quoteRequested === true } : {}),
           // A street ask raised by a CALL is about THAT call's property: the
           // customer's saved home (or a reused estimate) must not retire it
           // at approval (codex r3 P1) — only the call's own lead row counts.
@@ -824,7 +828,11 @@ async function handleClarifyReply({ phone, body }) {
         if (unitLeadId) {
           const leadRow = await trx('leads').where({ id: unitLeadId }).whereNull('deleted_at').first();
           const leadAddress = String(leadRow?.address || '').trim();
-          if (leadAddress && !splitStreetLineUnit(leadAddress).unit) {
+          // …and only while that lead still IS the asked building — an
+          // edited/re-pointed lead must not receive this building's unit
+          // (codex r4 P1; same gate the approval check applies).
+          if (leadAddress && !splitStreetLineUnit(leadAddress).unit
+            && (!building || addressLineAtAskedBuilding(leadAddress, building))) {
             const formatted = normalizeLeadAddress({ raw: leadAddress, line2: unitLine });
             await trx('leads').where({ id: unitLeadId }).whereNull('deleted_at')
               .update({ address: formatted.fullAddress || `${leadAddress}, ${unitLine}` });
@@ -916,6 +924,8 @@ async function handleClarifyReply({ phone, body }) {
       return {
         recorded, estimateId: lockedEstimateId, repriceGuarded, repriceAttempt,
         callLogId: freshFlags.call_log_id ? String(freshFlags.call_log_id) : null,
+        quotePromised: freshFlags.quote_promised === true,
+        quoteRequested: freshFlags.quote_requested === true,
       };
     });
     if (!locked.recorded.length) return { handled: false };
@@ -969,8 +979,14 @@ async function handleClarifyReply({ phone, body }) {
         const voiceCallLogId = supersedeEstimateId ? await voiceOriginCallLogId(supersedeEstimateId) : callOriginId;
         if (voiceCallLogId && !supersedeEstimateId) {
           const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
-          if (estimatorEngineEnabled()) {
-            repriceOutcome = await maybeDraftEstimateForCall({ callLogId: voiceCallLogId, quotePromised: true });
+          if (!(locked.quotePromised || locked.quoteRequested)) {
+            // A booking-only / general inquiry that merely lacked a street
+            // or unit: the answer is recorded, but no quote was asked for,
+            // so the estimator is not started and no "quote promised" bell
+            // is manufactured (codex r4 P2).
+            logger.info('[estimate-clarify] call-origin answer recorded; no quote was requested on the call — estimator not started', { draftId: awaiting.id, callLogId: voiceCallLogId });
+          } else if (estimatorEngineEnabled()) {
+            repriceOutcome = await maybeDraftEstimateForCall({ callLogId: voiceCallLogId, quotePromised: locked.quotePromised === true });
           } else {
             logger.warn('[estimate-clarify] call-origin answer recorded but the estimator engine is gated off — draft from the call manually', { draftId: awaiting.id, callLogId: voiceCallLogId });
           }
@@ -1275,6 +1291,16 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
       // another property, whose apartment answers nothing here. With no
       // building on the ask (never the case for the call lane) any unit
       // on the ask's own lead counts.
+      // The Triage Inbox card is the authoritative human verdict on whether
+      // the unit is still owed: staff resolving/dismissing it (unit
+      // collected by phone, or the whole building is the customer) retires
+      // the ask even when no CRM field changed (codex r4 P1).
+      const unitCardClosed = missing.includes('unit_number') && flags.unit_call_log_id
+        ? !(await trx('triage_items')
+          .where({ call_log_id: String(flags.unit_call_log_id), reason_code: 'missing_unit_number' })
+          .whereIn('status', ['open', 'in_progress'])
+          .first('id'))
+        : false;
       const askedBuilding = flags.unit_ask_building || null;
       const unitOn = (value) => !!value && !!splitStreetLineUnit(String(value)).unit
         && (!askedBuilding || addressLineAtAskedBuilding(String(value), askedBuilding));
@@ -1283,7 +1309,7 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
         || unitOn(unitLead?.address) || (!!askedBuilding && unitOn(estimate?.address));
       const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
         || (item === 'specific_service' && !hasServiceNow)
-        || (item === 'unit_number' && !hasUnitNow)
+        || (item === 'unit_number' && !hasUnitNow && !unitCardClosed)
         // No row carries a bedroom count — only the reply handler can
         // retire it (it drops the item from `missing` when answered).
         || item === 'bedroom_count');

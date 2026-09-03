@@ -1225,6 +1225,7 @@ describe('unit_number ask (call pipeline lane)', () => {
       missing: ['unit_number'], toPhone: '+17735550142', lead_id: 'lead-1',
       unit_call_log_id: 'call-1', unit_lead_id: 'lead-1', unit_customer_id: 'cust-1',
       unit_ask_building: BUILDING, channel_provenance: 'voice', call_log_id: 'call-1',
+      quote_promised: false, quote_requested: false,
     }));
   });
 
@@ -1305,12 +1306,13 @@ describe('unit_number ask (call pipeline lane)', () => {
     });
 
     test('a call-origin ask resumes drafting from the CALL context, never the SMS thread', async () => {
-      const callOrigin = AWAITING({ flags: JSON.stringify({ missing: ['unit_number'], lead_id: 'lead-1', call_log_id: 'call-1', unit_call_log_id: 'call-1', unit_lead_id: 'lead-1', unit_ask_building: BUILDING }) });
+      const callOrigin = AWAITING({ flags: JSON.stringify({ missing: ['unit_number'], lead_id: 'lead-1', call_log_id: 'call-1', quote_promised: false, quote_requested: true, unit_call_log_id: 'call-1', unit_lead_id: 'lead-1', unit_ask_building: BUILDING }) });
       mockState.firstQueue = [callOrigin, callOrigin, LEAD];
       const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
       expect(result.handled).toBe(true);
       await result.repricePromise;
-      expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({ callLogId: 'call-1', quotePromised: true });
+      // The call's TRUE promise value rides along (requested, not promised).
+      expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({ callLogId: 'call-1', quotePromised: false });
       expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
     });
 
@@ -1339,6 +1341,25 @@ describe('unit_number ask (call pipeline lane)', () => {
       expect(result.handled).toBe(true);
       expect(mockState.updates.find((u) => u.table === 'leads').payload.address).toBe('1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232');
       expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
+    });
+
+    test('a lead that no longer IS the asked building gets no unit written', async () => {
+      mockState.firstQueue = [AWAITING(), AWAITING(), { id: 'lead-1', address: '5 Other Rd, Venice, FL 34285' }, { id: 'cust-1', address_line1: '9 Home St' }];
+      const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+      expect(result.handled).toBe(true);
+      expect(mockState.updates.find((u) => u.table === 'leads')).toBeUndefined();
+      // The card still gets the answer for the reviewer.
+      expect(mockState.updates.find((u) => u.table === 'triage_items')).toBeDefined();
+    });
+
+    test('a call with no quote requested records the answer but does not start the estimator', async () => {
+      const noQuote = AWAITING({ flags: JSON.stringify({ missing: ['unit_number'], lead_id: 'lead-1', call_log_id: 'call-1', quote_promised: false, quote_requested: false, unit_call_log_id: 'call-1', unit_lead_id: 'lead-1', unit_ask_building: BUILDING }) });
+      mockState.firstQueue = [noQuote, noQuote, LEAD];
+      const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+      expect(result.handled).toBe(true);
+      await result.repricePromise;
+      expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+      expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
     });
 
     test('a lead line that already carries a unit is left alone', async () => {
@@ -1398,6 +1419,23 @@ describe('unit_number ask (call pipeline lane)', () => {
         freshRow({ estimate_id: 'est-B' }),
         { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Anna' },
         { id: 'est-B', status: 'draft', sent_at: null, address: '5 Other Rd, Apt 9, Venice, FL 34285' },
+      ];
+      expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
+    });
+
+    test('the closed triage card is the human verdict: a resolved/dismissed missing_unit_number card retires the ask', async () => {
+      mockState.firstQueue = [
+        freshRow({ unit_call_log_id: 'call-1' }),
+        { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Anna' },
+        null, // no open/in_progress card
+      ];
+      const verdict = await claimClarifyDispatch({ draft: DRAFT });
+      expect(verdict.outcome).toBe('retired');
+      mockState.updates = [];
+      mockState.firstQueue = [
+        freshRow({ unit_call_log_id: 'call-1' }),
+        { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Anna' },
+        { id: 'card-1' }, // still open
       ];
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
     });
