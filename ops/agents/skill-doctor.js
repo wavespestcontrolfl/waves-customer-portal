@@ -192,22 +192,17 @@ function topLevelPath(p) {
 // restructured often enough (#3715 moved every rule) that resolving those
 // numbers against the local file mis-files findings under the wrong rule.
 // So the rule title is resolved against AGENTS.md AT THE PR HEAD, fetched
-// once per PR through gh and cached on disk by commit SHA (the file is
-// immutable at a SHA, so the cache never goes stale).
-const CACHE_DIR = path.join(os.tmpdir(), 'skill-doctor-agents-md');
+// once per reviewed SHA through gh and memoized in memory for the run
+// (`run` keeps the per-SHA map). No disk cache: the tool is READ-ONLY and
+// writes nothing, not even under the temp dir.
 function agentsMdAt(repo, sha, deps = {}) {
   if (!sha) return null;
-  const cacheFile = path.join(CACHE_DIR, `${sha}.md`);
-  try { return fs.readFileSync(cacheFile, 'utf8').split('\n'); } catch (_) { /* miss */ }
-  let text = null;
   try {
     const out = (deps.gh || gh)(['api', `repos/${repo}/contents/AGENTS.md?ref=${sha}`, '--jq', '.content']);
-    text = Buffer.from(out.replace(/\s/g, ''), 'base64').toString('utf8');
+    return Buffer.from(out.replace(/\s/g, ''), 'base64').toString('utf8').split('\n');
   } catch (_) {
     return null;
   }
-  try { fs.mkdirSync(CACHE_DIR, { recursive: true }); fs.writeFileSync(cacheFile, text); } catch (_) { /* cache is best-effort */ }
-  return text.split('\n');
 }
 
 let agentsLinesCache = null;
@@ -444,7 +439,7 @@ function run(args, deps = {}) {
   // AGENTS.md at the commit EACH COMMENT reviewed (original_commit_id) —
   // AGENTS.md can change between rounds of one PR, so the final head would
   // mis-file an older round's citation. Memoized per SHA for this run
-  // (agentsMdAt also caches on disk by SHA).
+  // — the only cache this READ-ONLY tool keeps.
   const linesAt = new Map();
   const agentsLinesFor = (sha) => {
     if (!linesAt.has(sha)) linesAt.set(sha, (deps.agentsMdAt || agentsMdAt)(args.repo, sha));
