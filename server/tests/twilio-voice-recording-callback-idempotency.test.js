@@ -620,6 +620,24 @@ describe('POST /recording-status', () => {
     expect(row.lead_synopsis).toBeNull();
   });
 
+  test('a replace whose transaction fails answers 500 so Twilio redelivers — the new SID is stored nowhere (codex #3736 gh-r16 P1)', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: null, transcription: null, metadata: null });
+    const realTx = db.transaction;
+    db.transaction = jest.fn(async (fn) => fn(Object.assign((t) => {
+      const b = db(t);
+      if (t === 'call_log') b.update = () => Promise.reject(new Error('deadlock detected'));
+      return b;
+    }, { raw: db.raw })));
+    const res = await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    expect(res.sendStatus).toHaveBeenCalledWith(500);
+    db.transaction = realTx;
+    expect(tables.call_log[0].recording_sid).toBe(REC_1);
+    // The redelivery lands it.
+    const again = await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    expect(again.sendStatus).toHaveBeenCalledWith(200);
+    expect(tables.call_log[0].recording_sid).toBe(REC_2);
+  });
+
   test('a park whose review card cannot be filed answers 500 so Twilio retries; the retry parks and files it', async () => {
     tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, processing_status: 'processing' });
     const realTx = db.transaction;

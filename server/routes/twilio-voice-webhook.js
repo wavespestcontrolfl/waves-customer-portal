@@ -1749,6 +1749,11 @@ router.post('/recording-status', async (req, res) => {
           );
         }
         const baseline = targetRow;
+        // A failed attach/replace transaction (a deadlock, a transient
+        // error in the swap or the card retirement) must reach the handler's
+        // catch as a redelivery request (Codex #3736 r16 P1): a 200 would
+        // tell Twilio the SID was stored while it is stored nowhere, and the
+        // recovery sweep cannot find it (the row still has its old URL).
         updated = await db.transaction(async (trx) => {
         const n = await trx('call_log')
           .where({ id: baseline.id })
@@ -1792,7 +1797,7 @@ router.post('/recording-status', async (req, res) => {
           }
         }
         return n;
-        });
+        }).catch((err) => { err.attachFailed = true; throw err; });
         if (updated > 0) {
           matchedSid = baseline.twilio_call_sid;
           break;
@@ -2044,7 +2049,7 @@ router.post('/recording-status', async (req, res) => {
     // A park that did not commit (its review card insert failed and rolled
     // the park back) is the one failure Twilio must deliver again: a 200
     // here would drop the recording for good.
-    res.sendStatus(err && err.parkFailed ? 500 : 200);
+    res.sendStatus(err && (err.parkFailed || err.attachFailed) ? 500 : 200);
   }
 });
 

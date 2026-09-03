@@ -110,6 +110,15 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(after.indexOf(".update({ review_status: null });")).toBeGreaterThan(after.indexOf("resolution_note: `Adopted ${adopted} processed` });"));
   });
 
+  test('the retrying stat mirrors the sweep\'s media and duration eligibility (codex #3736 gh-r16 P2)', () => {
+    const at = source.indexOf(') as retrying"');
+    expect(at).toBeGreaterThan(-1);
+    const stat = source.slice(source.lastIndexOf('db.raw(`COUNT(*) FILTER (WHERE (processing_status = \'no_transcription\'', at), at);
+    expect(stat).toContain("NULLIF(btrim(recording_url), '') IS NOT NULL OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL)");
+    expect(stat).toContain("COALESCE(recording_duration_seconds, duration_seconds, 0) > 10 OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
+    expect(stat).toContain('${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days');
+  });
+
   test('every provenance write goes through the SQL-side quarantine carry; the read-merge-write helper is gone (codex #3736 gh-r15 P1)', () => {
     expect(source).not.toContain('withPanStamps');
     expect((source.match(/transcription_metadata: transcriptionMetadataWrite\(/g) || []).length).toBe(3);

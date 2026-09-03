@@ -488,7 +488,11 @@ async function deleteRecordingAtTwilio(sid) {
 // of RECORDING_LISTS (a constant, never input).
 // `match` names the entry: { recording_sid } normally; { recording_url } for
 // a legacy entry that never had a SID (Codex #3736 r15 P1).
-async function tombstoneListedRecording(callId, list, match, deleted) {
+// `derivedSid` (a SID read out of a SID-less entry's URL) is written INTO
+// the tombstone: the URL it came from is nulled here, and a delete still
+// owed must stay findable by parkedDeletesPending on the next sweep
+// (Codex #3736 r16 P1).
+async function tombstoneListedRecording(callId, list, match, deleted, derivedSid = null) {
   if (!RECORDING_LISTS.includes(list)) throw new Error(`unknown recording list ${list}`);
   const key = match && match.recording_sid ? 'recording_sid' : 'recording_url';
   const value = match ? match[key] : null;
@@ -501,7 +505,7 @@ async function tombstoneListedRecording(callId, list, match, deleted) {
         `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${list}}',`
         + ` (SELECT COALESCE(jsonb_agg(CASE WHEN e ->> '${key}' = ? THEN e || ?::jsonb ELSE e END), '[]'::jsonb)`
         + ` FROM jsonb_array_elements(COALESCE(metadata -> '${list}', '[]'::jsonb)) e), true)`,
-        [value, JSON.stringify({ recording_url: null, quarantined_at: new Date().toISOString(), delete_pending: !deleted })],
+        [value, JSON.stringify({ recording_url: null, quarantined_at: new Date().toISOString(), delete_pending: !deleted, ...(derivedSid && key === 'recording_url' ? { recording_sid: derivedSid } : {}) })],
       ),
       updated_at: new Date(),
     });
@@ -648,7 +652,7 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     else if (entry.recording_url == null && entry.delete_pending !== true) continue; // already gone
     else deleted = await deleteRecordingAtTwilio(parkedSid);
     try {
-      await tombstoneListedRecording(call.id, list, entry.recording_sid ? { recording_sid: parkedSid } : { recording_url: entry.recording_url }, deleted);
+      await tombstoneListedRecording(call.id, list, entry.recording_sid ? { recording_sid: parkedSid } : { recording_url: entry.recording_url }, deleted, entry.recording_sid ? null : parkedSid);
     } catch (err) {
       logger.error(`[call-proc] PAN quarantine: parked-entry strip failed for call ${call.id}: ${err.message}`);
       deleted = false;
@@ -16038,7 +16042,13 @@ const CallRecordingProcessor = {
       db.raw("COUNT(*) FILTER (WHERE processing_status = 'processing') as processing"),
       db.raw(`COUNT(*) FILTER (WHERE processing_status = 'processing' AND ${reclaimableClaim(LEGACY_CLAIM_QUIET_MINUTES)}) as stalled_claims`),
       db.raw("COUNT(*) FILTER (WHERE processing_status IN ('no_transcription', 'extraction_failed', 'customer_creation_failed', 'lead_creation_failed')) as failed"),
-      db.raw(`COUNT(*) FILTER (WHERE processing_status = 'no_transcription' OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} AND created_at > NOW() - INTERVAL '7 days')) as retrying`),
+      // `retrying` mirrors processAllPending's eligibility (Codex #3736 r16
+      // P2): the failure state alone is not "queued work" — the row must
+      // still carry audio (or a PAN-marked stored transcript) and clear the
+      // sweep's duration floor, or the sweep will never pick it up.
+      db.raw(`COUNT(*) FILTER (WHERE (processing_status = 'no_transcription' OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} AND created_at > NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`
+        + " AND (NULLIF(btrim(recording_url), '') IS NOT NULL OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL))"
+        + " AND (COALESCE(recording_duration_seconds, duration_seconds, 0) > 10 OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')) as retrying"),
       db.raw("COUNT(*) FILTER (WHERE review_status IN ('open', 'in_progress')) as review_open"),
       db.raw("COUNT(*) FILTER (WHERE metadata -> 'additional_recordings' IS NOT NULL) as parked_recordings"),
       // Age of the oldest recorded call that has not reached a terminal

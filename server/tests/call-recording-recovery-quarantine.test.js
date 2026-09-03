@@ -342,6 +342,24 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(out.parked).toEqual({ deleted: 1, pending: 0 });
   });
 
+  test('a SID-less entry whose derived-SID delete FAILS keeps the derived SID in its tombstone so the owed delete stays findable (codex #3736 gh-r16 P1)', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    const FROM_URL = 'RE' + 'e'.repeat(30) + '16';
+    recordingsSpy.mockImplementationOnce(() => ({ remove: async () => { throw Object.assign(new Error('twilio 503'), { status: 503 }); } }));
+    db.raw.mockClear();
+    db.__state.call = {
+      id: 'c-sidless-owed', recording_url: null, recording_sid: null,
+      metadata: { superseded_recordings: [{ recording_sid: null, recording_url: `https://api.twilio.com/2010-04-01/Accounts/AC1/Recordings/${FROM_URL}.mp3` }] },
+      transcription_metadata: { pan_detected: true, pan_notified: true },
+    };
+    const out = await processor.quarantineCardRecording(db.__state.call, { source: 'transcript_scrub' });
+    expect(out.parked).toEqual({ deleted: 0, pending: 1 });
+    const tomb = db.raw.mock.calls.find(([sql, b]) => String(sql).includes("'{superseded_recordings}'") && b && String(b[0]).includes(FROM_URL));
+    expect(tomb).toBeDefined();
+    expect(JSON.parse(tomb[1][1])).toMatchObject({ recording_url: null, delete_pending: true, recording_sid: FROM_URL });
+  });
+
   test('a transcript-only PAN call with no recording anywhere completes on the first pass instead of being reselected forever (codex #3736 gh-r11)', async () => {
     const processor = require('../services/call-recording-processor');
     db.raw.mockClear();
