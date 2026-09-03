@@ -6713,12 +6713,15 @@ export default function EstimateToolViewV2({
                       <InputV2 k="treeCount" type="number" placeholder="Auto" />
                     </FieldV2>
                   )}{" "}
-                  {form.svcTs && (
+                  {form.svcTs && !commercialDetected && (
                     <div className="grid grid-cols-2 gap-3">
-                      {/* Tier names are application counts (owner directive
-                          2026-08-04) and the 9x program is sellable here —
-                          the builder used to hardcode standard (audit
-                          INP-004). Keys stay light/standard/enhanced. */}
+                      {/* Residential only: the commercial ornamental pricer
+                          has a fixed cadence and no access term, so these
+                          would be inert there. Tier names are application
+                          counts (owner directive 2026-08-04) and the 9x
+                          program is sellable here — the builder used to
+                          hardcode standard (audit INP-004). Keys stay
+                          light/standard/enhanced. */}
                       <FieldV2 label="Program">
                         <SelectV2
                           k="tsTier"

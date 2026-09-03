@@ -106,6 +106,19 @@ describe("tree & shrub program and access selects", () => {
     expect(program.value).toBe("enhanced");
     expect(access.value).toBe("moderate");
 
+    // Commercial estimates price through the commercial ornamental pricer
+    // (fixed cadence, no access term) — the controls must not render there.
+    const commercial = findSelectWithOption(container, "YES");
+    expect(commercial).toBeTruthy();
+    fireEvent.change(commercial, { target: { value: "YES" } });
+    await waitFor(() => {
+      expect(findSelectWithOption(container, "enhanced")).toBeUndefined();
+    });
+    fireEvent.change(commercial, { target: { value: "NO" } });
+    await waitFor(() => {
+      expect(findSelectWithOption(container, "enhanced")).toBeTruthy();
+    });
+
     // Deselecting the service hides the controls again.
     fireEvent.click(tsBox);
     await waitFor(() => {

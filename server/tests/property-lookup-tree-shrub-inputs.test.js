@@ -66,6 +66,9 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
       expect(caught).toBeTruthy();
       expect(caught.statusCode).toBe(400);
       expect(caught.code).toBe('TREE_SHRUB_INPUT_INVALID');
+      // The save-time replay rethrows this marker instead of persisting the
+      // browser preview as CLIENT_FALLBACK (serverRecomputeFromEstimateData).
+      expect(caught.failClosed).toBe(true);
     }
     // Not selected ⇒ the options are inert, never validated.
     expect(() => translateV2CallToV1Input(baseProfile(), ['PEST'], { treeShrubTier: 'gold' })).not.toThrow();
@@ -104,6 +107,21 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
       expect(caught?.statusCode).toBe(400);
       expect(caught?.code).toBe('TREE_SHRUB_INPUT_INVALID');
     }
+  });
+
+  test('commercial keeps the commercial pricer contract: zero is omitted, a positive count is passed through', () => {
+    const commercial = (extra) => baseProfile({
+      category: 'commercial', isCommercial: 'YES', propertyType: 'office', commercialSubtype: 'office', ...extra,
+    });
+    // A blank field on every pre-v4.8 commercial engineRequest is a stored
+    // 0 — honouring it would reprice those replays to zero plants.
+    const zero = translateV2CallToV1Input(commercial({ treeCount: 0 }), ['TREE_SHRUB'], {});
+    expect(zero.services.treeShrub).not.toHaveProperty('treeCount');
+    expect(zero.features).not.toHaveProperty('treeCount');
+
+    const typed = translateV2CallToV1Input(commercial({ treeCount: 12 }), ['TREE_SHRUB'], {});
+    expect(typed.services.treeShrub.treeCount).toBe(12);
+    expect(typed.features.treeCount).toBe(12);
   });
 
   test('property palms reach the tree & shrub service line and the price (INP-001)', () => {

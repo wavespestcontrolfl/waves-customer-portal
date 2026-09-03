@@ -3921,6 +3921,12 @@ function treeShrubInputError(message) {
   const err = new Error(message);
   err.statusCode = 400;
   err.code = 'TREE_SHRUB_INPUT_INVALID';
+  // Input rejection, not engine breakage: the save-time replay
+  // (serverRecomputeFromEstimateData) fails OPEN to the browser preview on
+  // engine errors, but a malformed tree & shrub input must never ride that
+  // fallback into a persisted price — persistence rethrows this marker and
+  // the save 400s, exactly like the Bermuda gate (codex #3272 r1).
+  err.failClosed = true;
   return err;
 }
 // First PRESENT value wins: a non-negative integer (an explicit 0 is a real
@@ -4141,7 +4147,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // priceTreeShrub's treeDensity fallback runs — the old
   // `Number(a || b) || 0` fabricated a 0 that priced the per-tree material
   // away (audit INP-002).
-  const typedTreeCount = firstNonNegativeIntegerOrThrow('Tree count', p.treeCount);
+  const typedTreeCountRaw = firstNonNegativeIntegerOrThrow('Tree count', p.treeCount);
+  // COMMERCIAL keeps the commercial pricer's own contract — a zero count is
+  // "omitted" and the lot-density estimate prices the plant program
+  // (priceCommercialTreeShrub, service-pricing.js). Every stored commercial
+  // engineRequest carries profile.treeCount: 0 for a blank field (the
+  // pre-v4.8 builder fabricated it), so honouring zero there would reprice
+  // those replays to zero plants at the next save. Explicit-zero semantics
+  // are residential-only; the builder hides the residential controls on
+  // commercial estimates.
+  const typedTreeCount = commercialProfile && typedTreeCountRaw === 0 ? undefined : typedTreeCountRaw;
   const estimatedTreeCount = Number(p.estimatedTreeCount);
   const resolvedTreeCount = typedTreeCount
     ?? (Number.isInteger(estimatedTreeCount) && estimatedTreeCount > 0 ? estimatedTreeCount : undefined);
