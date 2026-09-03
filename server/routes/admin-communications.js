@@ -205,10 +205,38 @@ router.post('/sms', async (req, res, next) => {
   let parkedThreadIds = [];
   let claimedReviewRequestId = null;
   let claimedReviewClaimToken = null;
+  // Composer-carried card request links: the visit-level send claim won
+  // before dispatch (claimCardRequestSends) — released on every no-send
+  // exit, marked after a real provider send.
+  let cardClaim = null;
   // Verified composer statement links — a real send is their first delivery.
   let statementLinkIds = null;
   // Verified composer prep links — a real send writes the tagger's dedupe marker.
   let prepLinkSends = null;
+  // Composer-carried contract signing links: a prepared link is ACTIVATED
+  // (delivered state stamped, windowed from the send) before the provider
+  // call — handed back on every no-send exit, recorded after a real send.
+  let contractActivations = null;
+  const restoreContractLinks = async () => {
+    if (!contractActivations) return;
+    const activations = contractActivations;
+    contractActivations = null;
+    try {
+      await require('./admin-contracts').restorePreparedShareLinks(activations, req, { reason: 'Send was not attempted, blocked, or failed' });
+    } catch (restoreErr) {
+      logger.warn(`[communications] prepared contract link restore failed (the row keeps its activated link until it expires): ${restoreErr.message}`);
+    }
+  };
+  const releaseCardClaim = async () => {
+    if (!cardClaim) return;
+    const claim = cardClaim;
+    cardClaim = null;
+    try {
+      await require('../services/composer-customer-links').releaseCardRequestSends(claim);
+    } catch (releaseErr) {
+      logger.warn(`[communications] card request claim release failed (the service's stale-claim lease recovers it): ${releaseErr.message}`);
+    }
+  };
   const clearManualReservation = async () => {
     if (!manualReservationId) return;
     const id = manualReservationId;
@@ -233,6 +261,9 @@ router.post('/sms', async (req, res, next) => {
       // Composer Insert Link: a pending inline review_requests row whose link
       // rides in this body — marked delivered after a real send (below).
       reviewRequestId,
+      // Composer Insert Link: the contract a freshly inserted (unwritten)
+      // signing link belongs to — activated before the provider call.
+      contractId,
     } = req.body;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
@@ -418,6 +449,8 @@ router.post('/sms', async (req, res, next) => {
     // Shared by the review-link and Auto Pay-link pre-send seams below.
     const abortUnsent = async (status, error) => {
       await clearManualReservation();
+      await releaseCardClaim();
+      await restoreContractLinks();
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send was not attempted — suggestion reopened.',
@@ -441,16 +474,24 @@ router.post('/sms', async (req, res, next) => {
       logger.warn(`[communications] Auto Pay link pre-send check failed — aborting send: ${autopayErr.message}`);
       return abortUnsent(503, 'Could not verify the inserted Auto Pay setup link — try again in a moment.');
     }
-    // The other per-row bearers (prep guide, payer statement, and the
-    // account-bound appointment page + service report links): liveness +
-    // recipient ownership NOW, fail closed — same bar as above.
+    // The other per-row bearers (contract signing, visit-lane card request,
+    // prep guide, payer statement): liveness + recipient ownership NOW, fail
+    // closed — same bar as above. A prepared contract link is then ACTIVATED
+    // (GH Codex #3844 r3 P1 — delivery state stamped before the provider
+    // call, as the document delivery does; rotated meanwhile refuses) and a
+    // live card request CLAIMED before the provider call — the visit's
+    // one-text-ever claim, exactly as the service's own SMS path takes it
+    // (GH Codex #3844 r1 P1 + pre-push P1): a lost claim (another tab
+    // mid-send, or a text already out) refuses here; every later exit
+    // restores/releases or records/marks them.
     try {
-      const { bearerLinkSendCheck } = require('../services/composer-customer-links');
+      const { bearerLinkSendCheck, claimCardRequestSends } = require('../services/composer-customer-links');
       const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), {
         trustedCustomerId: trustedCustomerId || null,
         // The seam binds by the last ten digits; a non-US E.164 destination
         // sharing them with a customer's US number is a different phone.
         usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
+        contractId: contractId && UUID_RE.test(String(contractId)) ? String(contractId) : null,
       });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
@@ -461,6 +502,16 @@ router.post('/sms', async (req, res, next) => {
       // consent policy applies, never the unverified-lead one (GH Codex
       // #3844 r9 P1). The seam already refused an ambiguous number.
       if (!trustedCustomerId && bearerCheck.customerId) trustedCustomerId = bearerCheck.customerId;
+      if (bearerCheck.contracts) {
+        const activation = await require('./admin-contracts').activatePreparedShareLinks(bearerCheck.contracts, req);
+        if (!activation.ok) return abortUnsent(409, activation.error);
+        contractActivations = activation.activations;
+      }
+      if (bearerCheck.cards) {
+        const claim = await claimCardRequestSends(bearerCheck.cards);
+        if (!claim.ok) return abortUnsent(409, claim.error);
+        cardClaim = claim.claim;
+      }
     } catch (bearerErr) {
       logger.warn(`[communications] bearer link pre-send check failed — aborting send: ${bearerErr.message}`);
       return abortUnsent(503, 'Could not verify a customer link in this message — try again in a moment.');
@@ -612,6 +663,8 @@ router.post('/sms', async (req, res, next) => {
     await clearManualReservation();
     if (result.blocked || result.sent === false) {
       // The reply never left — release the claims and the parked cards.
+      await releaseCardClaim();
+      await restoreContractLinks();
       if (claimedReviewRequestId) {
         await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
@@ -675,6 +728,45 @@ router.post('/sms', async (req, res, next) => {
         if (isRealProviderSend(result)) await require('../services/composer-customer-links').markPrepGuidesSent(prepLinkSends, req.technicianId || null);
       } catch (stampErr) {
         logger.warn(`[communications] prep sent marker failed (text already sent): ${stampErr.message}`);
+      }
+    }
+    // Composer-carried contract signing links: a REAL provider send is the
+    // delivery — record it on the contract's timeline (the row was
+    // activated before the call); a suppressed send hands the prepared link
+    // back. Fail-soft: bookkeeping never breaks a send that already left,
+    // and a restore that misses leaves the row activated (inserts refuse
+    // until the window closes — never a rotation).
+    if (contractActivations) {
+      const activations = contractActivations;
+      contractActivations = null;
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        const contracts = require('./admin-contracts');
+        if (isRealProviderSend(result)) await contracts.recordPreparedShareLinkSends(activations, req, result);
+        else await contracts.restorePreparedShareLinks(activations, req, { reason: 'Send was suppressed (no provider delivery)' });
+      } catch (bookErr) {
+        logger.warn(`[communications] contract link send bookkeeping failed: ${bookErr.message}`);
+      }
+    }
+    // Composer-carried card request links: a REAL provider send IS the
+    // visit's one card-request text — mark the request row (the claim
+    // stays); a suppressed send hands the claim back (same sentinel rule as
+    // the review seam). The service's finalizer parks the claim and alerts
+    // the office itself when the marker cannot land, so nothing here can
+    // risk a second text.
+    if (cardClaim) {
+      const claim = cardClaim;
+      cardClaim = null;
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        const links = require('../services/composer-customer-links');
+        if (isRealProviderSend(result)) {
+          if (!await links.markCardRequestSends(claim)) logger.warn('[communications] card request sent marker did not land (claim parked, office alerted)');
+        } else {
+          await links.releaseCardRequestSends(claim);
+        }
+      } catch (markErr) {
+        logger.warn(`[communications] card request claim finalize failed (text already sent): ${markErr.message}`);
       }
     }
     if (claimedReviewRequestId) {
@@ -833,6 +925,20 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
       }
     }
+    // Same convention for the card request claim: accepted → mark, else release.
+    if (cardClaim) {
+      if (err?.providerOutcome?.sent === true) {
+        const claim = cardClaim;
+        cardClaim = null;
+        try {
+          await require('../services/composer-customer-links').markCardRequestSends(claim);
+        } catch (markErr) {
+          logger.warn(`[communications] card request claim finalize failed after a throw: ${markErr.message}`);
+        }
+      } else {
+        await releaseCardClaim();
+      }
+    }
     // Same convention for the statement stamp (GH Codex #3844 r3 P1): an
     // accepted-then-thrown send DID deliver the statement.
     if (statementLinkIds && err?.providerOutcome?.sent === true) {
@@ -847,6 +953,20 @@ router.post('/sms', async (req, res, next) => {
         await require('../services/composer-customer-links').markPrepGuidesSent(prepLinkSends, req.technicianId || null);
       } catch (stampErr) {
         logger.warn(`[communications] prep sent marker failed after a throw: ${stampErr.message}`);
+      }
+    }
+    // And for the activated contract links: accepted → record, else hand back.
+    if (contractActivations) {
+      if (err?.providerOutcome?.sent === true) {
+        const activations = contractActivations;
+        contractActivations = null;
+        try {
+          await require('./admin-contracts').recordPreparedShareLinkSends(activations, req, err.providerOutcome);
+        } catch (bookErr) {
+          logger.warn(`[communications] contract link send record failed after a throw: ${bookErr.message}`);
+        }
+      } else {
+        await restoreContractLinks();
       }
     }
     // Guarded reopen: anything the send actually resolved before the throw
@@ -1745,8 +1865,8 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
 // POST /api/admin/communications/customer-link  { phone, customerId?, kind }
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
 // pay_balance | estimate | referral | autopay_setup | appointment |
-// prep_guide | service_report | statement (card_request + contract: PR 2b).
-// Same fail-closed recipient contract as
+// card_request | prep_guide | service_report | contract | statement. Same
+// fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
 // live in services/composer-customer-links.js; a kind with nothing to insert
@@ -1860,6 +1980,18 @@ function composerLinkBuilders() {
     // push Codex P1). STRICT_OWNER_KINDS below.
     prep_guide: (ids, primaryId) => builders.buildPrepGuideLink([primaryId]),
     service_report: (ids) => builders.buildServiceReportLink(ids),
+    // Bearer credentials for a payment-adjacent page (card request) or a
+    // signable document (contract) are per customer ROW — the phone's
+    // owner only, never an account sibling (pre-push Codex P0: the
+    // document delivery's SMS_RECIPIENT_UNTRUSTED bar is the customer's
+    // own phone, not any phone on the account). STRICT_OWNER_KINDS below.
+    // The card funnel only accepts its own live statuses — a soonest
+    // 'rescheduled' placeholder would be picked here and then rejected
+    // there, hiding a later eligible visit (GH Codex #3844 r1 P1).
+    card_request: async (ids, primaryId) => builders.buildCardRequestLink(
+      await soonestUpcomingVisit([primaryId], { statuses: require('../services/appointment-card-request').LIVE_VISIT_STATUSES }),
+    ),
+    contract: (ids, primaryId) => builders.buildContractSigningLink([primaryId]),
     // Handled by statementLinkInsert before any customer resolution (the
     // key here only admits the kind).
     statement: null,
@@ -1874,7 +2006,9 @@ function composerLinkBuilders() {
 // else 409 to the customer's own profile card (GH Codex #3812 r1 P1 +
 // pre-push P0). A prep page is the owner's too (name + address on the page,
 // ownership re-checked at /sms).
-const STRICT_OWNER_KINDS = ['autopay_setup', 'prep_guide'];
+// Card requests and contract signing links are the same class of bearer
+// (per row, money- or signature-adjacent) and take the same rule.
+const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_guide'];
 // Appointment pages and service reports are account-scoped (any sibling's
 // visit or report) but the TEXT is a customer-specific bearer, so the
 // resolved phone owner rides back for them too: the /sms send then carries
@@ -1915,7 +2049,7 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10) {
 // the composer refuses to schedule or draft those kinds; /schedule-sms +
 // drafts re-fence. standalone: the line is a complete greeted message,
 // inserted as-is.
-const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'statement', 'expiresAt', 'immediateOnly', 'standalone'];
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'expiresAt', 'immediateOnly', 'standalone'];
 
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
@@ -2278,8 +2412,8 @@ router.post('/schedule-sms', async (req, res, next) => {
         return res.status(400).json({ error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' });
       }
       // Same fence for the other per-row bearers the composer inserts
-      // (statement pay, prep pages, appointment pages, service reports):
-      // only the immediate /sms path re-checks them at delivery —
+      // (contract signing, card request, statement pay, expiring prep
+      // pages): only the immediate /sms path re-checks them at delivery —
       // the scheduler dispatches straight into sendCustomerMessage (GH
       // Codex #3844 r1 P1). The client refusal is transient state; this is
       // the authoritative one.

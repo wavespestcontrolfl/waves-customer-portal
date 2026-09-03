@@ -2,8 +2,8 @@
  * Per-customer link builders for the SMS composer's Insert Link sheet —
  * the link kinds beyond the existing reschedule/re-service pair:
  * review request, pay balance, latest estimate, referral, Auto Pay setup,
- * and (step 2) appointment page, prep guide, latest service report, payer
- * statement (card request + contract signing: PR 2b).
+ * and (step 2) appointment page, card request, prep guide, latest service
+ * report, contract signing, payer statement.
  *
  * Contract mirrors reschedule-link/reservice-link: each builder returns
  * { url, line, ...context } with url null + a `reason` sentence when there
@@ -617,8 +617,9 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
 // immediate /sms path re-runs bearerLinkSendCheck at delivery (the
 // scheduler and draft approve/revise dispatch straight into
 // sendCustomerMessage). So every per-row bearer that seam judges is
-// immediate-only: a payer statement pay link and a prep page (bound to the
-// recipient at /sms alone). Presence-only — the callers (/schedule-sms, draft
+// immediate-only: a contract signing link (time-boxed, rotates), a visit-
+// lane card request, a payer statement pay link, and a prep page (bound to
+// the recipient at /sms alone). Presence-only — the callers (/schedule-sms, draft
 // approve/revise) refuse on any hit. Canonical portal host + path only,
 // like the Auto Pay seam: a look-alike host is not a Waves bearer and is
 // simply not this seam's business. Customer-kind /secure links are the
@@ -626,6 +627,12 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
 // The fence reads presence under ANY_SCHEME — see canonicalPortalToken.
 const ANY_SCHEME = { anyScheme: true };
 const IMMEDIATE_ONLY_LINK_KINDS = [
+  {
+    label: 'Contract signing',
+    fragment: /\/contract\//i,
+    token: (run, host) => canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i),
+    applies: async () => true,
+  },
   {
     // Every prep page — the page shows the customer's name and address and
     // only /sms binds it to the recipient (pre-push Codex P0), expiry or not.
@@ -639,6 +646,15 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
     fragment: /\/pay\/statement\//i,
     token: (run, host) => canonicalPortalToken(run, host, /^\/pay\/statement\/([0-9a-f]{64})$/i, ANY_SCHEME),
     applies: async () => true,
+  },
+  {
+    label: 'Card request',
+    fragment: /\/secure\//i,
+    token: canonicalSecureToken,
+    applies: async (token) => {
+      const row = await db('appointment_card_requests').where({ token }).first('kind');
+      return row?.kind === 'visit';
+    },
   },
 ];
 
@@ -730,11 +746,32 @@ async function immediateOnlyLinkSendCheck(body) {
  * Immediate-send seam for the other per-row bearers the composer inserts
  * (pre-push Codex P0 on the step-2 rows — the same protection the Auto Pay
  * seam gives /secure customer-kind links): a stale tab or a direct API
- * call must not deliver a customer's page to another phone, or after
- * expiry. (The contract signing and card request bearers: PR 2b.)
+ * call must not deliver a signable contract or a payment-adjacent visit
+ * card link to another phone, after rotation, or after expiry.
+ *   contract  — /contract/<token>: the token's hash must match a live,
+ *               unexpired, non-terminal customer_contracts row (a rotated
+ *               or expired link matches nothing → refuse) — OR be the
+ *               composer's own unwritten insert: the caller names the
+ *               contract (`contractId`), the token VERIFIES as the
+ *               server's mint for that contract, unexpired (HMAC over the
+ *               id, a per-insert nonce and the expiry —
+ *               composer-contract-token.js; a caller can never choose the
+ *               bearer) and the contract's customer owns the recipient; the
+ *               send then activates it under the row lock
+ *               (activatePreparedShareLinks). Either way a marketing
+ *               customer guide refuses — that document rides the Document
+ *               Templates delivery's consent + opt-out footer, never a
+ *               conversational text (GH Codex #3844 r4 P1).
  *   prep      — /prep/<token>: the public page's own predicates at the send
  *               (GH Codex #3844 r3 P2) — the token still resolves
  *               (unexpired) and its guide still has an active version.
+ *   card      — /secure/<token> visit-lane rows (kind 'visit'; the Auto Pay
+ *               seam judges kind 'customer'): status must still be pending,
+ *               never texted, AND the canonical funnel
+ *               (requestCardForAppointment, inline) must still answer this
+ *               very token — gate, template, price, payer, hold lane,
+ *               first-time customer, saved-card auto-secure all re-run at
+ *               the send (GH Codex #3844 r2 P1).
  *   appointment — {short}/l/<code> (kind 'appointment') or /appointment/<token>:
  *               GATE_APPOINTMENT_PAGE must still be on (r2 P1), the visit
  *               must still resolve, and its customer must be on an account
@@ -752,8 +789,13 @@ async function immediateOnlyLinkSendCheck(body) {
  * the route trusts a customer id — be that customer. FAIL CLOSED on any
  * miss. { ok: true } when nothing applies or all checks out; `statements`
  * rides back with every verified statement id so a real send can stamp
- * finalized → sent (markStatementsSent). One function per link kind below;
- * bearerLinkSendCheck is the composition.
+ * finalized → sent (markStatementsSent); `cards` with every live visit-lane
+ * link so the caller can CLAIM the card request's one-text-ever send before
+ * dispatch (claimCardRequestSends) — a row already texted (sent_at) refuses
+ * here; `contracts` with every verified signing link ({ id, tokenHash,
+ * delivered }) so the caller can ACTIVATE an unwritten one before dispatch
+ * (activatePreparedShareLinks). One function per link kind below (GH Codex
+ * #3844 r5 P2); bearerLinkSendCheck is the composition.
  */
 // One check per link kind (GH Codex #3844 r5 P2 — the seam was one
 // 40-branch function); the shared parts are the parsed runs, the canonical
@@ -991,30 +1033,123 @@ async function checkAccountBoundLinks(ctx) {
     || checkReportLinks(ctx, shortRows, onRecipientAccount);
 }
 
+// Contract signing links: a stored hash (a link the customer may hold —
+// pasted from the Contracts page) must be live and non-terminal; otherwise
+// the token must be the composer's own unwritten insert — the caller names
+// the contract (`contractId`) and the token VERIFIES as the server's mint
+// for it (HMAC over the id, a per-insert nonce and the expiry, 12h — the
+// caller never chooses the bearer; pre-push Codex P0), on a row a fresh link
+// may be written over (the writer's own rule — an expired document request
+// re-opens, other expired contracts do not; pre-push Codex P1).
+// Delivered-live is judged under the row lock at activation. Either way a
+// marketing customer guide refuses (GH Codex #3844 r4 P1). Every verified
+// link lands in `contracts` as { id, tokenHash, delivered }.
+async function checkContractLinks(ctx, contracts) {
+  const NOT_LIVE = 'This contract signing link is expired or no longer live — remove it and insert a fresh one.';
+  const terminal = (status) => ['signed', 'cancelled', 'voided', 'expired'].includes(String(status || '').toLowerCase());
+  for (const run of linkRuns(ctx.runs, /\/contract\//i)) {
+    const token = canonicalPortalToken(run, ctx.host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i);
+    if (!token) return refuseSend('A contract link in this message is not on the Waves portal — remove it before sending.');
+    const tokenHash = require('./contracts').hashContractToken(token);
+    const row = await db('customer_contracts')
+      .where({ share_token_hash: tokenHash })
+      .first('id', 'customer_id', 'status', 'share_token_expires_at', ...CONTRACT_GUIDE_COLUMNS);
+    if (row) {
+      const dead = terminal(row.status)
+        || (row.share_token_expires_at && new Date(row.share_token_expires_at).getTime() <= Date.now());
+      if (dead) return refuseSend(NOT_LIVE);
+      if (await isMarketingGuideContract(row)) return refuseSend(MARKETING_GUIDE_REFUSAL);
+      const bad = await ownedByRecipient(ctx, row.customer_id, 'contract signing link');
+      if (bad) return bad;
+      ctx.bearers += 1;
+      if (!contracts.some((c) => c.tokenHash === tokenHash)) contracts.push({ id: row.id, tokenHash, delivered: true });
+      continue;
+    }
+    if (!ctx.contractId || !require('../utils/composer-contract-token').verifyComposerContractToken(ctx.contractId, token)) {
+      return refuseSend(NOT_LIVE);
+    }
+    const contract = await db('customer_contracts').where({ id: ctx.contractId }).first('id', 'customer_id', 'status', ...CONTRACT_GUIDE_COLUMNS);
+    const { shareLinkWritableStatuses } = require('../routes/admin-contracts');
+    if (!contract || !shareLinkWritableStatuses(contract).includes(String(contract.status || '').toLowerCase())) {
+      return refuseSend(NOT_LIVE);
+    }
+    if (await isMarketingGuideContract(contract)) return refuseSend(MARKETING_GUIDE_REFUSAL);
+    const bad = await ownedByRecipient(ctx, contract.customer_id, 'contract signing link');
+    if (bad) return bad;
+    ctx.bearers += 1;
+    if (!contracts.some((c) => c.tokenHash === tokenHash)) contracts.push({ id: contract.id, tokenHash, delivered: false });
+  }
+  return null;
+}
+
+// Visit-lane card request links (kind 'visit'; the Auto Pay seam judges kind
+// 'customer'): status must still be pending, never texted, owned by the
+// recipient, AND the canonical funnel (requestCardForAppointment, inline)
+// must still answer this very token — gate, template, price, payer, hold
+// lane, first-time customer, saved-card auto-secure all re-run at the send
+// (GH Codex #3844 r2 P1). Every live link lands in `cards` for the claim.
+async function checkCardLinks(ctx, cards) {
+  for (const run of secureLinkRuns(ctx.runs)) {
+    const token = canonicalSecureToken(run, ctx.host);
+    if (!token) continue; // the Auto Pay seam already refused a non-canonical /secure run
+    const row = await db('appointment_card_requests').where({ token }).first('id', 'kind', 'status', 'customer_id', 'scheduled_service_id', 'sent_at');
+    if (!row || row.kind !== 'visit') continue; // unknown → the Auto Pay seam's verdict; customer-kind → its own
+    if (row.status !== 'pending') return refuseSend('This card request link is no longer live — remove it and insert a fresh one.');
+    if (row.sent_at) return refuseSend('This card request was already texted — the customer gets one card request per appointment. Remove the link before sending.');
+    const bad = await ownedByRecipient(ctx, row.customer_id, 'card request link');
+    if (bad) return bad;
+    ctx.bearers += 1;
+    // auto_secured = a consented saved card covered the ask meanwhile (the
+    // funnel secured the visit, as any trigger would) — nothing to ask.
+    const funnel = await require('./appointment-card-request').requestCardForAppointment({
+      scheduledServiceId: row.scheduled_service_id, trigger: 'admin', delivery: 'inline',
+    });
+    if (funnel?.action === 'auto_secured') {
+      return refuseSend('A consented card already secures this appointment — remove the card request link before sending.');
+    }
+    if (funnel?.action !== 'link_created' || !String(funnel.secureUrl || '').endsWith(`/secure/${token}`)) {
+      return refuseSend(`${cardRequestSkipReason(funnel?.reason)} — remove the card request link before sending.`);
+    }
+    if (!cards.some((c) => c.token === token)) cards.push({ token, scheduledServiceId: row.scheduled_service_id });
+  }
+  return null;
+}
+
 // `usDestination` (default true): the route says whether `to` normalizes to a
 // US number. Every check here binds by the LAST TEN digits, so a non-US
 // E.164 destination whose last ten equal a customer's or payer's US number
 // would pass ownership and even adopt that customer while the provider
 // texts the other country (GH Codex #3844 r10 P1) — a bearer never goes to
 // a non-US destination.
-async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestination = true } = {}) {
+async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestination = true, contractId = null } = {}) {
   const ctx = {
     runs: decodedRuns(body),
     hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
     trustedCustomerId,
     bearers: 0, // verified bearers seen — the owner rule below applies to any
+    contractId,
   };
+  const cards = [];
+  const contracts = [];
   const statements = [];
   const preps = [];
-  const refusal = (await checkPrepLinks(ctx, preps))
+  const refusal = (await checkContractLinks(ctx, contracts))
+    || (await checkPrepLinks(ctx, preps))
     || (await checkStatementLinks(ctx, statements))
-    || (await checkAccountBoundLinks(ctx));
+    || (await checkAccountBoundLinks(ctx))
+    || (await checkCardLinks(ctx, cards));
   if (refusal) return refusal;
   if (ctx.bearers && !usDestination) {
     return refuseSend('Customer links only go to a US number — check the recipient before sending.');
   }
-  const out = { ok: true, ...(statements.length ? { statements } : {}), ...(preps.length ? { preps } : {}) };
+  const out = {
+    ok: true,
+    ...(cards.length ? { cards } : {}),
+    ...(contracts.length ? { contracts } : {}),
+    ...(statements.length ? { statements } : {}),
+    ...(preps.length ? { preps } : {}),
+  };
   // Owner rule for EVERY bearer send (GH Codex #3844 r7 + r9 P1s): the text
   // goes to a phone that may be a customer's, and /sms applies that
   // customer's consent policy only when it trusts a customer id — with none
@@ -1067,10 +1202,60 @@ async function markStatementsSent(statementIds) {
   for (const id of statementIds) await markStatementSent(id);
 }
 
+/**
+ * The composer's card-request send claim (GH Codex #3844 r1 P1 + pre-push
+ * P1): requestCardForAppointment's inline delivery deliberately leaves the
+ * one-text-ever markers unconsumed (the /book wizard's customer may
+ * abandon the step), so the operator's /sms send has to run the SAME
+ * claim mechanics the service's SMS path does — or two tabs, a resend, or
+ * a later previsit/office trigger would text the same payment-adjacent
+ * link again.
+ *   claimCardRequestSends — BEFORE dispatch: the service's own claim
+ *     (claimCardLinkSend — NULL → stamp, else the stale-claim lease
+ *     adoption for a worker that died mid-send). A lost claim means
+ *     another send owns this visit right now, or one already went out;
+ *     every claim this call won is handed back and the send refuses.
+ *   releaseCardRequestSends — the text never left (blocked, failed,
+ *     suppressed, or a throw with no provider acceptance): value-guarded
+ *     release so only THIS claim is cleared.
+ *   markCardRequestSends — a REAL provider send: the service's own
+ *     finalizer (markCardLinkSendOutcome — bounded retries, and a marker
+ *     that cannot land PARKS the claim + alerts the office) stamps the
+ *     request row's sent_at, the durable outcome marker the stale-claim
+ *     lease reads. Returns false when any marker did not land.
+ */
+async function claimCardRequestSends(cards) {
+  const { claimCardLinkSend } = require('./appointment-card-request');
+  const stamp = new Date();
+  const won = [];
+  for (const card of cards) {
+    if (await claimCardLinkSend(card.scheduledServiceId, stamp, card.token)) { won.push(card); continue; }
+    await releaseCardRequestSends({ stamp, cards: won });
+    return { ok: false, error: 'This card request is already being sent, or was already texted — the customer gets one card request per appointment. Remove the link before sending.' };
+  }
+  return { ok: true, claim: { stamp, cards: won } };
+}
+
+async function releaseCardRequestSends(claim) {
+  for (const { scheduledServiceId } of claim.cards) {
+    await db('scheduled_services')
+      .where({ id: scheduledServiceId, card_link_sent_at: claim.stamp })
+      .update({ card_link_sent_at: null, updated_at: new Date() });
+  }
+}
+
+async function markCardRequestSends(claim) {
+  const { markCardLinkSendOutcome } = require('./appointment-card-request');
+  let allMarked = true;
+  for (const { scheduledServiceId } of claim.cards) {
+    if (!await markCardLinkSendOutcome(scheduledServiceId, claim.stamp)) allMarked = false;
+  }
+  return allMarked;
+}
+
 // ---------------------------------------------------------------------------
-// Step 2 rows (Adam's rulings 2026-09-03): appointment page, prep guide,
-// latest service report, payer statement (card request + contract signing
-// follow in PR 2b).
+// Step 2 rows (Adam's rulings 2026-09-03): appointment page, card request,
+// prep guide, latest service report, contract signing, payer statement.
 // Every builder is MINT-ONLY — the operator's composer send is the only
 // delivery — and each one is dark wherever its owning system's gate is off
 // (the reason names the gate). The visit-anchored builders take the row the
@@ -1102,6 +1287,77 @@ async function buildAppointmentPageLink(visit) {
     url,
     line,
     // Immediate sends only — the gate is re-read on /sms alone (r2 P1).
+    immediateOnly: true,
+    appointment: { id: visit.id, scheduledDate: dateOnly(visit.scheduled_date), serviceType: visit.service_type || null },
+  };
+}
+
+// requestCardForAppointment's skip vocabulary, phrased for the composer.
+// Unknown reasons stay visible (never pretend a link exists).
+const CARD_REQUEST_SKIP_REASONS = {
+  gate_off: 'Appointment card requests are switched off (APPOINTMENT_CARD_REQUEST)',
+  visit_not_found: 'That appointment could not be found',
+  no_customer: 'That appointment has no customer on it',
+  visit_in_past: 'That appointment is in the past',
+  unpriced_visit: 'This appointment has no price yet — price it before asking for a card',
+  zero_price_visit: 'This appointment is $0 — nothing to secure with a card',
+  template_inactive: 'The card request text is inactive in Templates — activate it before texting a card link',
+  payer_billed: 'This customer bills to a third-party payer — no card request',
+  payer_check_uncertain: 'Could not confirm who this customer bills to — try again in a moment',
+  card_hold_lane: 'This appointment already holds a card through its estimate',
+  hold_lookup_failed: 'Could not check the card-hold lane — try again in a moment',
+  existing_customer: 'Card requests are for first-time customers only — this customer has completed history',
+  existing_recurring_customer: 'Card requests are for first-time customers only — this customer is already on a plan',
+  existing_plan_member: 'Card requests are for first-time customers only — this customer is already on a plan',
+  request_exists: 'A card request for this appointment was already completed',
+  rodent_setup_staff_review: 'This rodent setup needs staff review before a card request',
+  commercial_rodent_setup_staff_review: 'Commercial rodent setups are billed by staff — no card request',
+  rodent_setup_undisclosed: 'This rodent setup has no disclosure yet — no card request',
+};
+
+function cardRequestSkipReason(reason) {
+  const key = String(reason || '');
+  if (CARD_REQUEST_SKIP_REASONS[key]) return CARD_REQUEST_SKIP_REASONS[key];
+  if (key.startsWith('visit_not_live')) return 'This appointment is not confirmed yet — confirm it before asking for a card';
+  return `Could not build a card request link (${key || 'unknown'})`;
+}
+
+/**
+ * Card request (the "secure your appointment" /secure/:token visit lane) —
+ * delegates to requestCardForAppointment with inline delivery: every gate
+ * (env + template levers, priced visit, first-time customer, payer
+ * exemption, hold-rail exclusion, saved-card auto-secure, dedup) stays in
+ * that one entry point; nothing is texted. The inserted copy is the
+ * reviewed secure_appointment_card SMS template rendered with the real
+ * link (same rule as Auto Pay: never a second hand-written copy).
+ */
+async function buildCardRequestLink(visit) {
+  if (!visit) return { url: null, line: '', reason: NO_UPCOMING_VISIT };
+  const card = require('./appointment-card-request');
+  const result = await card.requestCardForAppointment({ scheduledServiceId: visit.id, trigger: 'admin', delivery: 'inline' });
+  if (result?.action === 'auto_secured') return { url: null, line: '', autoSecured: true };
+  if (result?.action !== 'link_created' || !result.secureUrl) {
+    return { url: null, line: '', reason: cardRequestSkipReason(result?.reason) };
+  }
+  const profile = await db('customers').where({ id: visit.customer_id }).first('first_name');
+  const body = await card.renderTemplate({
+    first_name: profile?.first_name || 'there',
+    service_type: visit.service_type || 'service',
+    date_line: card.dateLineFor(visit.scheduled_date),
+    secure_link: result.secureUrl,
+    cancel_fee_line: card.cancelFeeLine(),
+  });
+  if (!body) return { url: null, line: '', reason: CARD_REQUEST_SKIP_REASONS.template_inactive };
+  const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
+  if (!String(body).includes(stripPortalUrlScheme(result.secureUrl))) {
+    return { url: null, line: '', reason: 'The card request text in Templates has no {secure_link} placeholder — add it before texting a card link' };
+  }
+  return {
+    url: result.secureUrl,
+    line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
+    standalone: true,
+    // Immediate sends only — the delivery seam that consumes the one-text
+    // claim runs on /sms alone (immediateOnlyLinkSendCheck is the server fence).
     immediateOnly: true,
     appointment: { id: visit.id, scheduledDate: dateOnly(visit.scheduled_date), serviceType: visit.service_type || null },
   };
@@ -1223,6 +1479,108 @@ async function buildServiceReportLink(customerIds) {
   };
 }
 
+// A contract a signing link can still be minted for — the share-link
+// route's own status allow-list (expired only re-opens for document
+// requests, which re-issue on a fresh window).
+const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
+
+// The customer_contracts columns the marketing-guide predicate reads (plus
+// the template id its joined columns come from).
+const CONTRACT_GUIDE_COLUMNS = ['contract_type', 'document_template_id', 'document_render_summary', 'requires_signature_snapshot'];
+const MARKETING_GUIDE_REFUSAL = 'This is a customer guide — it goes out from Document Templates (marketing opt-in and opt-out footer), never the composer. Remove the link before sending.';
+
+/**
+ * A marketing customer guide (a bulk product-safety send, or a marketing
+ * customer_guide template needing no signature) is the Document Templates
+ * delivery's alone: the seasonal_tips opt-in, the marketing_seasonal policy
+ * and the opt-out footer live there (document-contract-delivery.js). The
+ * composer sends conversationally, so the contract row never picks one and
+ * the send seam refuses one however it got into the body (GH Codex #3844
+ * r4 P1). The delivery's own predicate, fed the template columns it joins.
+ */
+async function isMarketingGuideContract(row) {
+  if (!row || row.contract_type !== 'document_template') return false;
+  const template = row.document_template_id
+    ? await db('document_templates').where({ id: row.document_template_id }).first('category', 'document_type', 'requires_signature')
+    : null;
+  return require('./document-contract-delivery').isMarketingCustomerGuide({
+    ...row,
+    document_template_category: template?.category ?? null,
+    document_template_document_type: template?.document_type ?? null,
+    document_template_requires_signature: template?.requires_signature ?? null,
+  });
+}
+
+/**
+ * Contract signing link — the phone-owning customer's newest contract
+ * still awaiting a signature (the route passes that ONE row, never account
+ * siblings — a signable bearer follows the document delivery's own
+ * recipient rule). The insert mints the token IN MEMORY and writes nothing:
+ * a bearer nobody can use exists only once the /sms send ACTIVATES it
+ * (bearerLinkSendCheck → activatePreparedShareLinks, the composer naming
+ * the contract and the token proving it was minted here for it — an HMAC
+ * over the contract id, a per-insert nonce and a 12-hour expiry,
+ * composer-contract-token.js),
+ * which writes the hash with status sent and a window
+ * opened from the send — the document delivery's prepare → activate →
+ * send shape, spread across the insert and the send (GH Codex #3844 r3 P1
+ * + pre-push P0: nothing is publicly live before delivery, an abandoned
+ * insert leaves nothing behind). A link the customer may still hold
+ * (delivered, window open) refuses here as a courtesy and again under the
+ * row lock at the send — never rotated (pre-push Codex P0); re-sending a
+ * live link stays the Contracts page's deliberate action. The recipient-
+ * phone trust the document delivery enforces (SMS_RECIPIENT_UNTRUSTED)
+ * already holds: /customer-link only resolves a customer whose phone is
+ * the recipient, and the send re-checks ownership. Marketing customer
+ * guides are skipped — never the composer's to send (isMarketingGuideContract).
+ */
+async function buildContractSigningLink(customerIds) {
+  const PAGE = 15;
+  let row = null;
+  for (let offset = 0; ; offset += PAGE) {
+    const rows = await db('customer_contracts')
+      .whereIn('customer_id', customerIds)
+      .where((qb) => qb
+        .whereIn('status', CONTRACT_LINKABLE_STATUSES)
+        .orWhere({ status: 'expired', contract_type: 'document_template' }))
+      .orderBy('created_at', 'desc')
+      .offset(offset)
+      .limit(PAGE);
+    for (const candidate of rows) {
+      if (!(await isMarketingGuideContract(candidate))) { row = candidate; break; }
+    }
+    if (row || rows.length < PAGE) break;
+  }
+  if (!row) return { url: null, line: '', reason: 'No contract awaiting signature on this account' };
+  const title = String(row.title || '').trim() || 'agreement';
+  if (require('../routes/admin-contracts').deliveredLiveShareLink(row)) {
+    return {
+      url: null,
+      line: '',
+      reason: `A signing link for ${title} was already sent and is still live — the customer can use it, or resend it from the Contracts page`,
+    };
+  }
+  // Server-minted, contract-bound, short-lived (composer-contract-token.js):
+  // the send proves the token is this insert's before it writes the hash —
+  // the caller can never choose the bearer (pre-push Codex P0).
+  const token = require('../utils/composer-contract-token').mintComposerContractToken(row.id);
+  if (!token) return { url: null, line: '', reason: 'Contract signing links are not configured on this server (no signing secret)' };
+  const { publicContractUrl, documentRequiresSignature } = require('./contracts');
+  const url = publicContractUrl(token);
+  // A document request whose template needs no signature is review-only —
+  // the text must not ask for one (pre-push Codex P1). contracts.js's own
+  // predicate: the creation-time snapshot, defaulting to signature required.
+  const needsSignature = documentRequiresSignature(row);
+  return {
+    url,
+    line: `Please review${needsSignature ? ' and sign' : ''} your ${title} here: ${url}\n\n`,
+    // Immediate sends only — /sms is the one path that activates the link
+    // (immediateOnlyLinkSendCheck is the server fence).
+    immediateOnly: true,
+    contract: { id: row.id, title, requiresSignature: needsSignature },
+  };
+}
+
 /**
  * Payer statement pay link — FAIL CLOSED on identity: a statement covers
  * the bill-to's whole book and its pay page charges the PAYER's Stripe
@@ -1288,8 +1646,14 @@ module.exports = {
   bearerLinkSendCheck,
   markStatementsSent,
   markPrepGuidesSent,
+  claimCardRequestSends,
+  releaseCardRequestSends,
+  markCardRequestSends,
   buildAppointmentPageLink,
+  CARD_REQUEST_SKIP_REASONS,
+  buildCardRequestLink,
   buildPrepGuideLink,
   buildServiceReportLink,
+  buildContractSigningLink,
   buildStatementLink,
 };
