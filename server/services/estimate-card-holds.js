@@ -434,13 +434,21 @@ async function handleCardHoldSetupIntentSucceeded(setupIntent) {
   return { handled: true };
 }
 
+// ONE ordering for "which hold row is the visit's" — the charge lookup, the
+// orphan detector, the closed-hold preview and the portal notice all pick
+// the same row (pre-push P1 on #3828: equal/null held_at must never let two
+// paths choose different cards). Newest held_at first, nulls last, then
+// newest row.
+const HELD_ROW_ORDER = 'held_at DESC NULLS LAST, created_at DESC';
+const heldRowOrder = (alias) => HELD_ROW_ORDER.replace(/\b(held_at|created_at)\b/g, `${alias}.$1`);
+
 // Resolve the active ('held') hold for a booked appointment — the entry point
 // for the completion charge (Phase 2) and the no-show fee (Phase 3).
 async function heldCardForScheduledService(scheduledServiceId) {
   if (!scheduledServiceId) return null;
   return db('estimate_card_holds')
     .where({ scheduled_service_id: scheduledServiceId, status: 'held' })
-    .orderBy('held_at', 'desc')
+    .orderByRaw(HELD_ROW_ORDER)
     .first();
 }
 
@@ -498,7 +506,7 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
     // Newest hold first, so the first-seen dedupe below keeps the row the
     // charge paths use (heldCardForScheduledService / cardHoldCancelPreview
     // ordering — Codex #3828 r2 P2).
-    .orderByRaw('h.held_at DESC NULLS LAST, h.created_at DESC')
+    .orderByRaw(heldRowOrder('h'))
     .select([...visitCols, 'h.stripe_payment_method_id as pm_id', 'h.no_show_fee_amount', 'h.parked_at']);
   // Appointment rail: the same frozen-terms bar feeEligibleRequestForVisit
   // enforces (r3 P2) — a positive agreed amount AND window; a row that
@@ -2020,7 +2028,7 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
       // and would otherwise outrank the real closed hold on this visit.
       latest = await db('estimate_card_holds')
         .where({ scheduled_service_id: scheduledServiceId })
-        .orderByRaw('held_at DESC NULLS LAST, created_at DESC')
+        .orderByRaw(HELD_ROW_ORDER)
         .first();
     } catch (err) {
       logger.warn('[estimate-card-holds] hold-state lookup for cancel preview failed — reporting undetermined', { error: err.message });

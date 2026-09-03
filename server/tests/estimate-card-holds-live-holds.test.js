@@ -93,7 +93,7 @@ test('ONE read per rail carrying the live-row predicates; the hold read is custo
   expect(appts.whereNotNull).toEqual(['r.fee_agreed_at']);
   expect(appts.whereNull).toEqual(['r.fee_status']);
   expect(appts.whereNotIn[0]).toEqual(holds.whereNotIn[0]);
-  // Newest hold first (dedupe keeps the row the charge paths use).
+  // Newest hold first — the SAME ordering heldCardForScheduledService uses.
   expect(holds.orderByRaw).toEqual(['h.held_at DESC NULLS LAST, h.created_at DESC']);
   // Lane exclusivity: a hold row in ANY status owns the visit.
   expect(appts.whereNotExists).toEqual([{ from: 'estimate_card_holds as x', whereRaw: 'x.scheduled_service_id = r.scheduled_service_id' }]);
