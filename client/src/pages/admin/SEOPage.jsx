@@ -2976,9 +2976,25 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
       if (gen === loadGen.current) setLoading(false);
     }
   };
+  // detail carries the row id it answers — a slow response for a row the
+  // operator has since left never renders under the newly expanded one,
+  // and (via the ref check) never OVERWRITES the loaded detail of the row
+  // they moved to — that would strand the expanded row on "Loading…"
+  const loadDetail = async (id) => {
+    try {
+      const r = await adminFetch(`/admin/backlink-agent/registry/${id}`);
+      if (expandedRef.current !== id) return;
+      setDetail({ forId: id, ...r });
+    } catch (e) {
+      if (expandedRef.current !== id) return;
+      setDetail({ forId: id, error: e?.message || "Detail load failed" });
+    }
+  };
   useEffect(() => {
     const c = controlsRef.current;
     load(c.stateFilter, c.search, c.page);
+    // the expanded row's detail (waiver, paths, placements) moves with the same mutations — refetch it in place
+    if (expandedRef.current) loadDetail(expandedRef.current);
   }, [refreshKey]);
 
   const toggleExpand = async (id) => {
@@ -2990,18 +3006,7 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
     setExpandedId(id);
     expandedRef.current = id;
     setDetail(null);
-    // detail carries the row id it answers — a slow response for a row the
-    // operator has since left never renders under the newly expanded one,
-    // and (via the ref check) never OVERWRITES the loaded detail of the row
-    // they moved to — that would strand the expanded row on "Loading…"
-    try {
-      const r = await adminFetch(`/admin/backlink-agent/registry/${id}`);
-      if (expandedRef.current !== id) return;
-      setDetail({ forId: id, ...r });
-    } catch (e) {
-      if (expandedRef.current !== id) return;
-      setDetail({ forId: id, error: e?.message || "Detail load failed" });
-    }
+    await loadDetail(id);
   };
 
   const doAction = async (id, action) => {
