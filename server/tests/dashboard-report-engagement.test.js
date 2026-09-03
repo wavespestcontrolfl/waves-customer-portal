@@ -60,6 +60,18 @@ describe('get_report_engagement', () => {
     expect(sql).not.toMatch(/report_viewed_at IS NOT NULL/);
   });
 
+  test('derives sends from server-owned stamps only, never from the public event names', async () => {
+    await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
+    const { sql } = rawCalls[0];
+    // The public /reports/:token/events endpoint accepts sms_sent/mms_sent,
+    // so an event row is not proof of a send (pre-push Codex P1).
+    expect(sql).not.toMatch(/'sms_sent'|'mms_sent'/);
+    expect(sql).toMatch(/FROM service_report_deliveries\s+WHERE status = 'sent' AND sent_at IS NOT NULL/);
+    expect(sql).toMatch(/structured_notes->>'completionSmsStatus' = 'sent'/);
+    expect(sql).toMatch(/completionSmsDeferredDeliveredAt/);
+    expect(sql).toMatch(/sentSmsAt/);
+  });
+
   test('defaults to the last 30 ET days ending today', async () => {
     const res = await executeDashboardTool('get_report_engagement', {});
     expect(res.period.to).toBe(etDateString(new Date()));

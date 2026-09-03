@@ -889,9 +889,13 @@ async function getServiceMix(input) {
 // Report engagement — the read path for the service-report telemetry that
 // completion + the public report page already write (service_report_events,
 // service_report_deliveries.sent_at, service_records.report_viewed_at).
-// Cohort = records whose report was FIRST sent inside the window (email via
-// the delivery queue, or the completion SMS/MMS event). Opens are the
-// first-view stamp; in-report actions are distinct records with the event.
+// Cohort = records whose report was FIRST sent inside the window. Both send
+// sources are server-owned: the delivery queue's sent_at (email) and the
+// completion-SMS stamp the dispatch route / deferred sender write into
+// service_records.structured_notes. The sms_sent/mms_sent EVENT rows are
+// deliberately not used — the public token endpoint accepts those names, so
+// a token holder could forge a send. Opens are the first-view stamp;
+// in-report actions are distinct records with the (customer-written) event.
 const REPORT_ACTION_EVENTS = [
   'pdf_downloaded',
   'photo_opened',
@@ -939,9 +943,13 @@ async function getReportEngagement(input = {}) {
         FROM service_report_deliveries
         WHERE status = 'sent' AND sent_at IS NOT NULL
         UNION ALL
-        SELECT service_record_id, occurred_at AS sent_at
-        FROM service_report_events
-        WHERE event_name IN ('sms_sent', 'mms_sent')
+        SELECT id AS service_record_id,
+               COALESCE(structured_notes->>'completionSmsDeferredDeliveredAt',
+                        structured_notes->>'sentSmsAt')::timestamptz AS sent_at
+        FROM service_records
+        WHERE structured_notes->>'completionSmsStatus' = 'sent'
+          AND COALESCE(structured_notes->>'completionSmsDeferredDeliveredAt',
+                       structured_notes->>'sentSmsAt') ~ '^\\d{4}-\\d{2}-\\d{2}T'
       ) snd
       GROUP BY service_record_id
     ),
@@ -994,7 +1002,7 @@ async function getReportEngagement(input = {}) {
 
   return {
     period: { from, to },
-    cohort: 'service reports first sent to the customer (report email or completion SMS/MMS) in the period',
+    cohort: 'service reports first sent to the customer (report email via the delivery queue, or the completion SMS/MMS per the server-stamped send status) in the period',
     total: totalRow ? shape(totalRow) : shape({ sent: 0, opened: 0 }),
     by_service_line: byLine.map((r) => ({ service_line: r.service_line, ...shape(r) })),
     notes: [
