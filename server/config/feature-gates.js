@@ -831,9 +831,12 @@ const gates = {
   // irreversible step re-checks it. OFF ⇒ no automated lease of ANY level is
   // granted (owner-approved rows included), in-flight work stops before its
   // next irreversible action; nothing's lifecycle status changes (plan §12).
-  // Step 4a (PR 1) only declares it and shows it on the Policy panel — the
-  // shipped policy defaults route every row to the owner regardless. Opt-in in
-  // EVERY env.
+  // Step 4a (PR 1) declares it and shows it on the Policy panel; step 4b lands
+  // the waiver/approval schema (PR 2a-i) and then gates the nightly
+  // `link-authority` bridge on it (PR 2a-ii: off ⇒ selection-only, no
+  // placements, no parks, no bell). Nothing consumes a stamp until the claim
+  // predicate re-check lands (PR 4). The shipped policy defaults route every
+  // row to the owner regardless. Opt-in in EVERY env.
   linkAuthority: process.env.GATE_LINK_AUTHORITY === 'true',
 
   // Backlink profile → astro sameAs sync — weekly job that opens a PR adding
