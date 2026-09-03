@@ -570,13 +570,19 @@ only buckets months into seasons — it never derives an interval itself.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and a one-time-ONLY estimate whose billable rows all resolve to one copy
-pack may carry `pricing.oneTimeServiceCopy` — `{ key, aiTitle, aiBody,
-askChips[] }` — both resolved server-side from the static pack in
+pack may carry `pricing.oneTimeServiceCopy` — `{ key, hero: { eyebrow, h1,
+sub }, aiTitle?, aiBody?, askChips[] }` (hero strings keep `{first}`/`{city}`
+tokens for the page; `aiTitle`/`aiBody` are present only for packs that
+carry Waves AI copy) — both resolved server-side from the static pack in
 `server/services/estimate-one-time-copy.json` (owner-approved customer
 copy: what the visit includes + guarantee terms per service; no customer
-or pricing data). Rows with no pack entry and mixed/recurring estimates
-omit the keys. When `oneTimeServiceCopy` is present its `askChips` ARE
-`pricing.askChips` (regulated WDO surfaces still get `[]`), and the
+or pricing data). A row with no pack entry omits `copy` (rows keep it on
+mixed and recurring estimates — a recurring pest plan with a roach cleanout
+add-on still describes the cleanout); `oneTimeServiceCopy` is omitted on
+mixed one-time quotes and on any estimate with a recurring service; a
+regulated certificate surface (WDO in the aligned OR raw rows) never
+carries either key. When `oneTimeServiceCopy` is present its
+`askChips` ARE `pricing.askChips` (regulated surfaces still get `[]`), and the
 server-rendered page reads the same pack, so the two paths cannot drift.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format

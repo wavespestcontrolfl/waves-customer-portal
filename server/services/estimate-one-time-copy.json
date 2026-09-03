@@ -78,7 +78,7 @@
     "assurance": "If they come back, so do we — 100% guaranteed with the Waves Guarantee",
     "terms": "Pay on service day. No recurring schedule, no contract.",
     "aiTitle": "Waves AI sized this flea treatment to your home and yard",
-    "aiBody": "We priced the interior and the shaded yard areas where flea larvae develop, so the treatment covers the whole cycle — not just the rooms you're seeing bites in.",
+    "aiBody": "Flea treatment covers the interior and the shaded yard areas where larvae develop, so the price reflects the whole cycle — not just the rooms with bites.",
     "askChips": [
       "Does my pet need to be treated too?",
       "How many visits will it take?",
@@ -103,8 +103,8 @@
     ],
     "assurance": "30-day callback — if activity returns within a month, so do we, free",
     "terms": "Pay on service day. No recurring schedule.",
-    "aiTitle": "Waves AI priced this by species, nest location, and how aggressive the colony is",
-    "aiBody": "Wasp and hornet work is quoted by the nest — where it is, how high, and what's building it — not by a flat rate.",
+    "aiTitle": "Waves AI priced this by the nest, not a flat fee",
+    "aiBody": "Wasp and hornet work is quoted by the nest — species, where it is, and how established it is — never a one-size fee.",
     "askChips": [
       "How do you remove the nest?",
       "What precautions should I follow for pets and children?",
@@ -166,8 +166,8 @@
     ],
     "assurance": null,
     "terms": "Pay on service day. No contract.",
-    "aiTitle": "Waves AI priced this exclusion from your home's roofline and access points",
-    "aiBody": "We measured your roofline, vents, and utility penetrations from satellite imagery and property records — the same number a tech would quote in person.",
+    "aiTitle": "Waves AI sized this exclusion to your home",
+    "aiBody": "Exclusion is priced by the entry points a home like yours presents — roofline, vents, and utility penetrations — with every closure documented on the day.",
     "askChips": [
       "Trapping vs exclusion?",
       "What materials do you use to seal?",
@@ -190,8 +190,8 @@
     ],
     "assurance": null,
     "terms": "Pay on service day. No contract.",
-    "aiTitle": "Waves AI priced this trapping plan for your home's active areas",
-    "aiBody": "Trapping is sized to where the activity is — attic, garage, kitchen — and how long the active window usually runs, not a flat per-visit rate.",
+    "aiTitle": "Waves AI sized this trapping plan to the job",
+    "aiBody": "Trapping is sized to where the activity is and how long the active window usually runs — not a flat fee.",
     "askChips": [
       "How often are traps checked?",
       "Trapping vs exclusion?",
@@ -278,7 +278,7 @@
     "assurance": null,
     "terms": "Pay on service day. No recurring schedule, no tier discount.",
     "aiTitle": "Waves AI reviewed your lawn before pricing this treatment",
-    "aiBody": "We measured your treatable turf from satellite imagery and property records to size this one-time application.",
+    "aiBody": "We reviewed your lawn size, turf type, and treatment needs before pricing this one-time application.",
     "askChips": [
       "How does your lawn assessment tech work?",
       "When am I charged?",

@@ -193,6 +193,21 @@ describe('React /data contract', () => {
     expect(contract.oneTimeBreakdown.items[0].copy).toBeUndefined();
     expect(contract.oneTimeServiceCopy).toBeUndefined();
   });
+
+  test('a regulated surface whose aligned breakdown dropped the WDO row still mints no page copy', () => {
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 350, items: [roach2] } },
+      { status: 'sent' },
+      { result: { recurring: { services: [] }, oneTime: { items: [
+        { ...roach2, price: 350, name: roach2.label },
+        { service: 'wdo_inspection', label: 'WDO Inspection', name: 'WDO Inspection', price: 125 },
+      ] } } },
+    );
+    expect(contract.askChips).toEqual([]);
+    expect(contract.oneTimeServiceCopy).toBeUndefined();
+    // …and the roach row carries no narrative copy either.
+    expect(contract.oneTimeBreakdown.items[0].copy).toBeUndefined();
+  });
 });
 
 describe('Waves AI intelligence payload', () => {
@@ -245,5 +260,51 @@ describe('server-rendered page', () => {
     expect(html).toContain('Waves AI sized this cleanout to your infestation');
     expect(html).toContain('data-estimate-ask-prompt="How do you get rid of German roaches?"');
     expect(html).toContain('data-estimate-ask-prompt="What should I do before the first visit?"');
+  });
+
+  test('a mixed one-time quote keeps the generic hero and per-row copy only', () => {
+    const est = {
+      id: 'estimate-mixed-ssr',
+      status: 'sent',
+      customerName: 'Test Customer',
+      address: '1 Main St, Bradenton, FL 34203',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 500,
+      quoteRequired: false,
+    };
+    const html = renderPage('mixed-token', est, {
+      result: { recurring: { services: [] }, oneTime: { items: [
+        { ...roach2, price: 350, name: roach2.label },
+        { service: 'wasp', label: 'Wasp Nest Treatment', name: 'Wasp Nest Treatment', price: 150 },
+      ] } },
+    });
+    expect(html).toContain('<h1>Hello Test, your estimate is ready!</h1>');
+    expect(html).not.toContain('class="hero-sub"');
+    expect(html).toContain('Gel bait placed where German roaches actually live');
+    expect(html).toContain('Nest treatment and physical removal');
+    expect(html).not.toContain('Waves AI sized this cleanout to your infestation');
+  });
+
+  test('a regulated WDO surface renders no row copy at all, even for a roach row beside it', () => {
+    const est = {
+      id: 'estimate-wdo-ssr',
+      status: 'sent',
+      customerName: 'Test Customer',
+      address: '1 Main St, Bradenton, FL 34203',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 475,
+      quoteRequired: false,
+    };
+    const html = renderPage('wdo-token', est, {
+      result: { recurring: { services: [] }, oneTime: { items: [
+        { ...roach2, price: 350, name: roach2.label },
+        { service: 'wdo_inspection', label: 'WDO Inspection', name: 'WDO Inspection', price: 125 },
+      ] } },
+    });
+    expect(html).not.toContain('class="onetime-outcome"');
+    expect(html).not.toContain('<details class="onetime-includes-wrap"');
+    expect(html).not.toContain('class="hero-sub"');
   });
 });

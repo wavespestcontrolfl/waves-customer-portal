@@ -6797,8 +6797,16 @@ function EstimateViewPageInner() {
   const oneTimeServiceCopy = estimate.isOneTimeOnly === true && pricing.oneTimeServiceCopy?.hero
     ? pricing.oneTimeServiceCopy
     : null;
+  // Review-gated quotes (cta.reviewBeforeBooking) keep the overlay's
+  // confirm-with-you subline — a pack subline may promise "approve online
+  // and pick a day" (codex pre-push P1); the service name still leads.
   const glassPack = baseGlassPack && oneTimeServiceCopy
-    ? { ...baseGlassPack, eyebrow: oneTimeServiceCopy.hero.eyebrow, heroH1: oneTimeServiceCopy.hero.h1, heroSub: oneTimeServiceCopy.hero.sub }
+    ? {
+      ...baseGlassPack,
+      eyebrow: oneTimeServiceCopy.hero.eyebrow,
+      heroH1: oneTimeServiceCopy.hero.h1,
+      heroSub: reviewBeforeBooking ? baseGlassPack.heroSub : oneTimeServiceCopy.hero.sub,
+    }
     : baseGlassPack;
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
