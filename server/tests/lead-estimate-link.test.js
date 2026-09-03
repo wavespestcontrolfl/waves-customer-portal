@@ -216,14 +216,26 @@ describe('lead-estimate link service', () => {
   //   leads.whereNotIn(...).whereNull(...).andWhere(...) -> contact matches
   function makeAcceptDb(opts = {}) {
     const updates = [];
+    const lostRace = new Set();
     const database = (table) => ({
       where(clause) {
         if (table === 'leads' && clause && 'estimate_id' in clause) return Promise.resolve(opts.linked || []);
         if (table === 'leads' && clause && 'id' in clause) {
-          return {
-            first: async () => (opts.leadsById || {})[clause.id] || null,
-            update: async (patch) => { updates.push({ id: clause.id, patch }); return 1; },
+          // A conditional (whereNull/whereNotIn-guarded) stamp on a row named
+          // in `raceRows` loses: 0 rows, and every later read of that row
+          // returns the raceRows version (the link another workflow won).
+          let conditional = false;
+          const q = {
+            whereNull: () => { conditional = true; return q; },
+            whereNotIn: () => { conditional = true; return q; },
+            first: async () => (lostRace.has(clause.id) ? opts.raceRows[clause.id] : (opts.leadsById || {})[clause.id]) || null,
+            update: async (patch) => {
+              if (conditional && opts.raceRows && opts.raceRows[clause.id]) { lostRace.add(clause.id); return 0; }
+              updates.push({ id: clause.id, patch, conditional });
+              return 1;
+            },
           };
+          return q;
         }
         if (table === 'estimates') return { first: async () => opts.estimate || null };
         if (table === 'customers') return { first: async () => opts.customer || null };
@@ -288,7 +300,7 @@ describe('lead-estimate link service', () => {
     });
 
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-qw', expect.objectContaining({ customerId: 'customer-1' }));
-    expect(database._updates).toEqual([{ id: 'lead-qw', patch: expect.objectContaining({ estimate_id: 'estimate-2' }) }]);
+    expect(database._updates).toEqual([{ id: 'lead-qw', patch: expect.objectContaining({ estimate_id: 'estimate-2' }), conditional: false }]);
   });
 
   test('a repeat-run duplicate lead named in estimate_data resolves to the OPEN original it duplicates and converts THAT lead', async () => {
@@ -307,7 +319,27 @@ describe('lead-estimate link service', () => {
 
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-orig', expect.objectContaining({ customerId: 'customer-1' }));
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-dup', expect.anything());
-    expect(database._updates).toEqual([{ id: 'lead-orig', patch: expect.objectContaining({ estimate_id: 'estimate-2b' }) }]);
+    // The indirect stamp is conditional (estimate_id IS NULL + open status).
+    expect(database._updates).toEqual([{ id: 'lead-orig', patch: expect.objectContaining({ estimate_id: 'estimate-2b' }), conditional: true }]);
+  });
+
+  test('an indirectly resolved original that loses the stamp race to a concurrent link is not converted — the named row takes the win', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2g', estimate_data: { lead_id: 'lead-dup6' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-dup6': { id: 'lead-dup6', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-orig6' } },
+        'lead-orig6': { id: 'lead-orig6', status: 'new', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' },
+      },
+      // Between the eligibility read and the stamp, another workflow linked
+      // the original to a different estimate: the conditional update hits 0
+      // rows and the re-read shows the other link.
+      raceRows: { 'lead-orig6': { id: 'lead-orig6', status: 'estimate_sent', estimate_id: 'estimate-office' } },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2g', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig6', expect.anything());
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup6', expect.objectContaining({ customerId: 'customer-1' }));
+    expect(database._updates).toEqual([{ id: 'lead-dup6', patch: expect.objectContaining({ estimate_id: 'estimate-2g' }), conditional: false }]);
   });
 
   test('an indirectly resolved original that belongs to a DIFFERENT customer is never converted', async () => {
@@ -323,7 +355,7 @@ describe('lead-estimate link service', () => {
     // The hop cannot land, so the acceptance credits the run's own row.
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig3', expect.anything());
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup3', expect.objectContaining({ customerId: 'customer-1' }));
-    expect(database._updates).toEqual([{ id: 'lead-dup3', patch: expect.objectContaining({ estimate_id: 'estimate-2d' }) }]);
+    expect(database._updates).toEqual([{ id: 'lead-dup3', patch: expect.objectContaining({ estimate_id: 'estimate-2d' }), conditional: false }]);
   });
 
   test('an indirectly resolved original whose contact does not match the estimate is never converted', async () => {
@@ -352,7 +384,7 @@ describe('lead-estimate link service', () => {
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2f', customerId: 'customer-1', database });
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig5', expect.anything());
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1' }));
-    expect(database._updates).toEqual([{ id: 'lead-dup5', patch: expect.objectContaining({ estimate_id: 'estimate-2f' }) }]);
+    expect(database._updates).toEqual([{ id: 'lead-dup5', patch: expect.objectContaining({ estimate_id: 'estimate-2f' }), conditional: false }]);
   });
 
   test('a duplicate lead whose original is gone takes the win itself (no contact-fallback sweep)', async () => {
@@ -363,7 +395,7 @@ describe('lead-estimate link service', () => {
     });
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2c', customerId: 'customer-1', database });
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup2', expect.anything());
-    expect(database._updates).toEqual([{ id: 'lead-dup2', patch: expect.objectContaining({ estimate_id: 'estimate-2c' }) }]);
+    expect(database._updates).toEqual([{ id: 'lead-dup2', patch: expect.objectContaining({ estimate_id: 'estimate-2c' }), conditional: false }]);
   });
 
   test('standalone estimate: rescues a single unlinked lead by contact and stamps the link', async () => {
@@ -379,7 +411,7 @@ describe('lead-estimate link service', () => {
     });
 
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-unlinked', expect.objectContaining({ customerId: 'customer-1' }));
-    expect(database._updates).toEqual([{ id: 'lead-unlinked', patch: expect.objectContaining({ estimate_id: 'estimate-3' }) }]);
+    expect(database._updates).toEqual([{ id: 'lead-unlinked', patch: expect.objectContaining({ estimate_id: 'estimate-3' }), conditional: false }]);
   });
 
   test('standalone estimate: skips an AMBIGUOUS contact match (2+ open leads) without converting', async () => {

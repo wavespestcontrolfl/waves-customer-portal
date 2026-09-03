@@ -567,9 +567,21 @@ async function markLinkedLeadEstimateAccepted({
   // Stamp the accepted estimate onto a rescued (previously unlinked) lead so
   // accepted-estimate reporting that joins on `leads.estimate_id`
   // (seo/conversion-feedback-miner) counts it, then convert it.
-  const convert = async (lead) => {
+  // `atomic` (the indirect duplicate→original hop only) closes the read→stamp
+  // window the same way linkRescuedLead does: stamp only while the lead is
+  // still unlinked and open; on 0 rows re-read and proceed only if the link
+  // that won the race is THIS estimate. Returns false when another estimate
+  // took the lead (pre-push P1 on #3834) so the caller can credit the named
+  // row instead. The direct path keeps its unconditional stamp as before.
+  const convert = async (lead, { atomic = false } = {}) => {
     if (!lead.estimate_id) {
-      await database('leads').where({ id: lead.id }).update({ estimate_id: estimateId, updated_at: new Date() });
+      const stamp = database('leads').where({ id: lead.id });
+      if (atomic) stamp.whereNull('estimate_id').whereNotIn('status', [...CLOSED_LEAD_STATUSES]);
+      const stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
+      if (atomic && !stamped) {
+        const current = await database('leads').where({ id: lead.id }).first('estimate_id', 'status');
+        if (!current || String(current.estimate_id) !== String(estimateId) || CLOSED_LEAD_STATUSES.has(current.status)) return false;
+      }
     }
     await leadAttributionService.markConverted(lead.id, {
       customerId,
@@ -577,6 +589,7 @@ async function markLinkedLeadEstimateAccepted({
       initialServiceValue,
       waveguardTier,
     });
+    return true;
   };
 
   // 1. Directly FK-linked leads. If ANY linkage row exists — even one already
@@ -623,9 +636,10 @@ async function markLinkedLeadEstimateAccepted({
         && (!lead.customer_id || !customerId || lead.customer_id === customerId)
         && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId))
       ));
-    if (eligible) { await convert(lead); return; }
+    if (eligible && (await convert(lead, { atomic: indirect }))) return;
     // The hop could not land (original gone, another customer's, contact
-    // mismatch, or already FK-linked to a different estimate). An accepted
+    // mismatch, already FK-linked to a different estimate, or lost the
+    // stamp race to a concurrent link). An accepted
     // estimate must still credit SOME lead (pre-push P1 on #3834): fall back
     // to the run's own named row — its 'duplicate' status was a dedupe label,
     // not a lost/won decision, and the acceptance is stronger evidence. It
