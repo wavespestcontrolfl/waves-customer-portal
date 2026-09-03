@@ -867,6 +867,8 @@ describe('buildServiceReportLink', () => {
     expect(mockBuilders.service_records.whereNotNull).toHaveBeenCalledWith('report_view_token');
     // Only v1 records: the React page's /:token/data 404s for legacy templates.
     expect(mockBuilders.service_records.where).toHaveBeenCalledWith({ status: 'completed', report_template_version: 'service_report_v1' });
+    // A unique tie-breaker closes the OFFSET-over-a-tie hole (GH Codex #3844 r6 P2).
+    expect(mockBuilders.service_records.orderBy).toHaveBeenCalledWith([{ column: 'service_date', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]);
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/report/${'c'.repeat(32)}`);
     expect(shortenOrPassthrough).toHaveBeenCalledWith(r.url, expect.objectContaining({
       kind: 'service_report', entityType: 'service_records', entityId: 'r-ok', customerId: 'c2', codePrefix: 'report',
@@ -958,6 +960,10 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     // be judged, not missed (GH Codex #3844 r5 P1).
     expect(mockBuilders.short_codes.where).toHaveBeenCalledWith({ code: 'ab12cd' });
     expect(await immediateOnlyLinkSendCheck('Everything about your visit: WAVESPEST.CO/L/AB12CD')).toEqual({ present: true, label: 'Appointment page' });
+    expect(mockBuilders.short_codes.where).toHaveBeenLastCalledWith({ code: 'ab12cd' });
+    // /l/:code is served on the portal origin too — a branded URL rewritten
+    // onto the portal host is the same working link (GH Codex #3844 r6 P1).
+    expect(await immediateOnlyLinkSendCheck('Everything about your visit: portal.wavespestcontrol.com/l/Ab12cD')).toEqual({ present: true, label: 'Appointment page' });
     expect(mockBuilders.short_codes.where).toHaveBeenLastCalledWith({ code: 'ab12cd' });
     mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'estimate' } }) };
     expect(await immediateOnlyLinkSendCheck('See it: wavespest.co/l/Ab12cD')).toEqual({ present: false });
@@ -1110,6 +1116,13 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
       expect(mockBuilders.short_codes.where).toHaveBeenCalledWith({ code: 'ab12cd' });
       expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ id: 'v1' });
+    });
+
+    test('a number on file for more than one ACCOUNT is ambiguous: no trusted customer → refuses (the insert route 409s the same); a trusted customer names the account → passes (GH Codex #3844 r6 P1)', async () => {
+      wireAccount({ recipientRows: [acct('c1', 'acct-a'), acct('c2', 'acct-b')], linkCustomer: acct('c1', 'acct-a') });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/more than one customer account/);
+      wireAccount({ recipientRows: [acct('c1', 'acct-a'), acct('c2', 'acct-b')], linkCustomer: acct('c1', 'acct-a') });
+      expect(await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
     });
 
     test('a visit on another account refuses; an unresolvable one refuses; a trusted customer off the account refuses', async () => {

@@ -645,13 +645,20 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
 // (public-shortlinks lowercases before its lookup), so a pasted upper- or
 // mixed-case code — still a working link — is looked up the same way, or
 // it would slip every fence and send-time check (GH Codex #3844 r5 P1).
+// /l/:code is served on EVERY owned origin — the branded short host and the
+// portal origin alike (server/index.js mounts /l with no host restriction) —
+// so a branded URL rewritten onto the portal host is the same working link
+// and is judged the same (GH Codex #3844 r6 P1). Any other host is not ours.
+function ownedShortLinkHosts() {
+  return [...new Set([require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host.toLowerCase()))];
+}
 async function shortCodeRows(runs) {
   const shortRuns = linkRuns(runs, /\/l\//i);
   if (!shortRuns.length) return [];
-  const shortHost = new URL(require('./short-url').shortLinkBaseUrl()).host.toLowerCase();
+  const hosts = ownedShortLinkHosts();
   const rows = [];
   for (const run of shortRuns) {
-    const code = canonicalPortalToken(run, shortHost, /^\/l\/([A-Za-z0-9_-]+)$/i);
+    const code = hosts.map((host) => canonicalPortalToken(run, host, /^\/l\/([A-Za-z0-9_-]+)$/i)).find(Boolean);
     if (!code) continue;
     const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'entity_type', 'entity_id');
     if (row) rows.push(row);
@@ -756,6 +763,14 @@ function recipientAccountBinder({ toLast10, trustedCustomerId }) {
         .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [toLast10])
         .select('id', 'account_id');
       recipientAccounts = new Set(rows.map(accountKey));
+    }
+    // A number on file for more than one ACCOUNT is ambiguous: with no
+    // trusted customer naming the account, any of them would authorize a
+    // bearer that belongs to the others (a stale or reassigned number). The
+    // insert route 409s this same ambiguity; the send does too (GH Codex
+    // #3844 r6 P1).
+    if (!trustedCustomerId && recipientAccounts.size > 1) {
+      return refuseSend(`That number is on file for more than one customer account — pick the customer from the search dropdown before sending a ${label}.`);
     }
     const row = customerId ? await db('customers').where({ id: customerId }).first('id', 'account_id') : null;
     if (!row || !recipientAccounts.has(accountKey(row))) {
@@ -1031,7 +1046,10 @@ async function buildServiceReportLink(customerIds) {
       .whereIn('customer_id', customerIds)
       .where(PUBLIC_REPORT_WHERE)
       .whereNotNull('report_view_token')
-      .orderBy([{ column: 'service_date', order: 'desc' }, { column: 'created_at', order: 'desc' }])
+      // Unique tie-breaker last: bulk/backfilled records share a service_date
+      // AND created_at, and OFFSET pages over a tie have no stable order
+      // without it (GH Codex #3844 r6 P2).
+      .orderBy([{ column: 'service_date', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
       .offset(offset)
       .limit(PAGE);
     record = rows.find((row) => !suppressedTypedReport(row)) || null;

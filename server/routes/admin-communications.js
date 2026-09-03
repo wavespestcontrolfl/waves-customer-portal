@@ -1758,12 +1758,25 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     if (kind === 'statement') {
       const result = await builderByKind.statement();
       if (!result?.url) return res.status(404).json({ error: result?.reason || 'No payable statement for that number' });
+      // The statement is authorized against the PAYER (the builder), but the
+      // text goes to a phone that may also be a customer's — exactly one live
+      // row on the number rides back as customerId so the composer selects
+      // it and the /sms send carries it: the recipient's own consent policy
+      // then applies instead of the unverified-lead classification, whose
+      // exact-phone consent read can miss a differently formatted number on
+      // file (GH Codex #3844 r6 P1). Several rows on the number → none (no
+      // guess); a body customerId is irrelevant to the statement itself.
+      const owners = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .select('id');
       return res.json({
         kind,
         url: stripSmsLinkScheme(result.url),
         line: stripSmsLinkScheme(result.line),
         statement: result.statement || undefined,
         immediateOnly: result.immediateOnly || undefined,
+        customerId: owners.length === 1 ? owners[0].id : undefined,
       });
     }
 

@@ -356,7 +356,7 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test('statement: resolved as a PAYER from the recipient number — no customer lookup at all (the AP phone is normally no customer\'s phone)', async () => {
+  test('statement: resolved as a PAYER from the recipient number; a unique customer on that number rides back for consent only (GH Codex #3844 r6 P1)', async () => {
     wireDb({ customers: makeCustomersBuilder({ selectResults: [[]] }) });
     builders.buildStatementLink.mockResolvedValue({
       url: 'https://portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64),
@@ -370,11 +370,29 @@ describe('POST /admin/communications/customer-link', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(builders.buildStatementLink).toHaveBeenCalledWith('9415550100');
-      expect(db).not.toHaveBeenCalledWith('customers');
       expect(body.statement).toEqual({ id: 31, number: 'S-31', total: 412.5, payerName: 'Gulf Coast PM' });
       expect(body.immediateOnly).toBe(true);
+      // The AP phone is normally no customer's phone: nothing rides back.
       expect(body.customerId).toBeUndefined();
       expect(body.url).toBe('portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64));
+    });
+
+    // One live customer row on the number → it rides back so the /sms send
+    // carries customerId and the recipient's own consent policy applies; the
+    // statement itself stays authorized against the payer (the builder is
+    // called the same way). Two rows → no guess.
+    wireDb({ customers: makeCustomersBuilder({ selectResults: [[{ id: CUSTOMER_UUID }]] }) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+19415550100', kind: 'statement' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).customerId).toBe(CUSTOMER_UUID);
+      expect(builders.buildStatementLink).toHaveBeenLastCalledWith('9415550100');
+    });
+    wireDb({ customers: makeCustomersBuilder({ selectResults: [[{ id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002' }]] }) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+19415550100', kind: 'statement' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).customerId).toBeUndefined();
     });
 
     builders.buildStatementLink.mockResolvedValue({ url: null, line: '', reason: "This number is not a payer's AP phone on file" });
