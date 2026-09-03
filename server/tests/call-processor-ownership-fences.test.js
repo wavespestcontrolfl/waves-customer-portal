@@ -110,6 +110,14 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(after.indexOf(".update({ review_status: null });")).toBeGreaterThan(after.indexOf("resolution_note: `Adopted ${adopted} processed` });"));
   });
 
+  test('the oldest-unfinished metric counts a PAN-quarantined call with a stored transcript (codex #3736 gh-r18 P2)', () => {
+    const at = source.indexOf('as oldest_unfinished_minutes');
+    expect(at).toBeGreaterThan(-1);
+    const stat = source.slice(at - 700, at);
+    expect(stat).toContain("OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL)");
+    expect(stat).toContain("(NULLIF(btrim(recording_url), '') IS NOT NULL AND COALESCE(recording_duration_seconds, duration_seconds, 0) > 10)");
+  });
+
   test('the retrying stat mirrors the sweep\'s media and duration eligibility (codex #3736 gh-r16 P2)', () => {
     const at = source.indexOf(') as retrying"');
     expect(at).toBeGreaterThan(-1);

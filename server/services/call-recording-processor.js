@@ -16055,7 +16055,12 @@ const CallRecordingProcessor = {
       db.raw("COUNT(*) FILTER (WHERE metadata -> 'additional_recordings' IS NOT NULL) as parked_recordings"),
       // Age of the oldest recorded call that has not reached a terminal
       // state — the number the stall watchdog alerts on, readable here.
-      db.raw("EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE NULLIF(btrim(recording_url), '') IS NOT NULL AND (processing_status IS NULL OR processing_status IN ('pending', 'processing')) AND COALESCE(recording_duration_seconds, duration_seconds, 0) > 10))) / 60 as oldest_unfinished_minutes"),
+      // The stall watchdog's eligibility, mirrored (Codex #3736 r18 P2): a
+      // PAN-quarantined call keeps no audio but its masked transcript is
+      // still processable, so it counts as unfinished work here too.
+      db.raw("EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE (processing_status IS NULL OR processing_status IN ('pending', 'processing'))"
+        + " AND ((NULLIF(btrim(recording_url), '') IS NOT NULL AND COALESCE(recording_duration_seconds, duration_seconds, 0) > 10)"
+        + " OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL))))) / 60 as oldest_unfinished_minutes"),
       db.raw("percentile_cont(0.5) WITHIN GROUP (ORDER BY (metadata -> 'processing_timings' ->> 'total_ms')::numeric) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND metadata -> 'processing_timings' ->> 'total_ms' IS NOT NULL) as p50_pass_ms_7d"),
       db.raw("percentile_cont(0.5) WITHIN GROUP (ORDER BY (metadata -> 'processing_timings' ->> 'transcription_ms')::numeric) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND metadata -> 'processing_timings' ->> 'transcription_ms' IS NOT NULL) as p50_transcription_ms_7d"),
     );
