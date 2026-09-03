@@ -919,6 +919,100 @@ async function isOriginatingLead(database, customerId, lead) {
   return leadDay <= becameDay;
 }
 
+// The day a repeat's inquiry began: the earliest first contact along its
+// recorded ancestry — the original's, not the repeat's own filing day. A
+// repeat is a later run of the SAME inquiry, and the customer row was
+// created by the original's run, so testing the repeat's own date against
+// member_since would fail every repeat filed a day later (codex #3834 r15
+// P1). Walked hop by hop like followDuplicateLink but through every recorded
+// row this customer owns — closed or deleted, the question is when the
+// inquiry began, not whether its rows are live — and never past a row that
+// is not ours (a shared-household root's date is not borrowed, so a later
+// repeat of another customer's lead is still a later add-on). Bounded and
+// cycle-safe; a dead marker ends the walk.
+async function ancestryFirstContactAt(database, repeat, ownedByUs) {
+  let earliest = repeat.first_contact_at || repeat.created_at || null;
+  const seen = new Set([repeat.id]);
+  let current = repeat;
+  while (seen.size < 8) {
+    const parentId = duplicateMarkerOf(current);
+    if (!parentId || seen.has(parentId)) break;
+    const parent = await database('leads').where({ id: parentId }).first();
+    if (!parent || !ownedByUs(parent)) break;
+    seen.add(parent.id);
+    const began = parent.first_contact_at || parent.created_at;
+    if (began && (!earliest || new Date(began) < new Date(earliest))) earliest = began;
+    current = parent;
+  }
+  return earliest;
+}
+
+// Tier 2 of convertLeadFromEvent — the customer-link resolution. Catches an
+// originating lead that already carries a `customer_id` (so the contact
+// fallback can't see it) and folds the customer's auto-filed wizard repeats
+// into that set (codex #3834 r11 P1): a repeat resolves to its open root
+// when that root is this customer's — or unlinked and still matching the
+// verified contact, since staff may have corrected it since the repeat was
+// filed (r13 P1) — and stands in for the root itself when the root is not
+// ours to convert (another customer's via a shared household contact,
+// closed, deleted, vanished). Repeats are resolved ALONGSIDE the open rows
+// (pre-push P1 on r12) so the single-candidate rule judges the combined
+// set: two repeats of one root are one opportunity, an unrelated open lead
+// plus a repeat are two; repeats of one VANISHED original group by their
+// recorded marker (r13 P1). A row staff closed as 'duplicate' by hand
+// carries no server marker and is a deliberate closure, never a candidate
+// (r13 P1). Converts ONLY the customer's first close: exactly one candidate,
+// no prior won lead, and that candidate is the originating deal — first
+// contacted on/before they became a customer, where a repeat's inquiry
+// began with its ancestry (r15 P1). Anything else is an add-on for an
+// established customer — skip rather than guess which deal the event
+// closed. Returns { candidates } (possibly empty) or { reason }.
+async function resolveCustomerLinkCandidates(database, { source, customerId, phone, email, estimateId }) {
+  const ownedByUs = (row) => (row.customer_id
+    ? String(row.customer_id) === String(customerId)
+    : leadMatchesEstimateContact(row, { customer_phone: phone, customer_email: email }));
+  const linked = await findOpenLeadsForCustomer(database, customerId);
+  const repeats = await database('leads')
+    .where({ customer_id: customerId, lead_type: 'quote_wizard', status: 'duplicate' })
+    .whereNull('deleted_at')
+    .orderBy('created_at', 'desc');
+  const seenAncestry = new Set();
+  for (const repeat of repeats) {
+    const marker = duplicateMarkerOf(repeat);
+    if (!marker) continue;
+    const root = await followDuplicateLink(database, repeat);
+    const resolved = root.id !== repeat.id;
+    const ancestryKey = resolved ? root.id : marker;
+    if (linked.some((l) => l.id === ancestryKey) || seenAncestry.has(ancestryKey)) continue;
+    seenAncestry.add(ancestryKey);
+    const rootIsOurs = resolved && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at && ownedByUs(root);
+    // The repeat standing in for its ancestry carries the ancestry's first
+    // contact for the origination test below.
+    linked.push(rootIsOurs ? root : { ...repeat, first_contact_at: await ancestryFirstContactAt(database, repeat, ownedByUs) });
+  }
+  // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
+  // estimate belongs to that deal — exclude it so we never convert it or
+  // misattribute this estimate's value hints. (Tier 1 already handled a
+  // lead linked to THIS estimate.)
+  const scoped = estimateId ? linked.filter((l) => !l.estimate_id || l.estimate_id === estimateId) : linked;
+  if (!scoped.length) return { candidates: [] };
+  if (scoped.length > 1) {
+    logger.warn(`[lead-trigger] ${source} customer-link skip — ${scoped.length} open leads (ambiguous)`, {
+      source, customerId, leadIds: scoped.map((l) => l.id),
+    });
+    return { reason: 'ambiguous_customer_link' };
+  }
+  const established = await customerHasWonLead(database, customerId);
+  const originating = await isOriginatingLead(database, customerId, scoped[0]);
+  if (established || !originating) {
+    logger.warn(`[lead-trigger] ${source} customer-link skip (established=${established}, originating=${originating})`, {
+      source, customerId, leadIds: scoped.map((l) => l.id),
+    });
+    return { reason: established ? 'customer_link_established' : 'customer_link_not_originating' };
+  }
+  return { candidates: scoped };
+}
+
 async function convertLeadFromEvent({
   source,
   estimateId = null,
@@ -963,8 +1057,6 @@ async function convertLeadFromEvent({
     //  3. contact fallback — an open, never-linked lead matched by phone/email.
     let candidates = [];
     let resolution = null; // 'estimate' | 'customer_link' | 'contact'
-    let claimedLead = null; // the tier-2 candidate reached through duplicate ancestry — converts on a status claim
-    let ancestryClaim = null; // ...and the statuses that claim names (OPEN_LEAD_CLAIM for a root, DUPLICATE_LEAD_CLAIM for the repeat)
     if (estimateId) {
       candidates = await database('leads').where({ estimate_id: estimateId });
       if (candidates.length) resolution = 'estimate';
@@ -976,84 +1068,17 @@ async function convertLeadFromEvent({
         resolvedEmail = customer?.email || null;
       }
 
-      // Tier 2 — customer-link. Catches an originating lead that already carries
-      // a `customer_id` (so the contact fallback can't see it). Convert ONLY the
-      // customer's first close: exactly one open lead, no prior won lead, AND
-      // that lead is the originating deal (first contacted on/before they became
-      // a customer). Anything else is an add-on for an established customer —
-      // skip rather than guess which deal the event closed.
+      // Tier 2 — customer-link (resolveCustomerLinkCandidates): the
+      // customer's open leads plus their auto-filed wizard repeats resolved
+      // through duplicate ancestry, gated to the customer's FIRST close.
       if (resolvedCustomerId) {
-        const linked = await findOpenLeadsForCustomer(database, resolvedCustomerId);
-        // A wizard row filed as 'duplicate' is an opportunity too (codex
-        // #3834 r11 P1): it resolves to its open root when that root is this
-        // customer's (or unlinked) — the same opportunity as an open row
-        // already in the set — and to the authenticated repeat row itself
-        // when the original belongs to a DIFFERENT customer (shared
-        // household contact), which is not ours to convert. Duplicate rows
-        // are resolved ALONGSIDE the open rows (pre-push P1 on r12) so the
-        // single-candidate rule below judges the combined set: two repeats
-        // of one root are one opportunity; an unrelated open lead plus a
-        // repeat are two.
-        const repeats = await database('leads')
-          .where({ customer_id: resolvedCustomerId, lead_type: 'quote_wizard', status: 'duplicate' })
-          .whereNull('deleted_at')
-          .orderBy('created_at', 'desc');
-        const claims = new Map(); // candidate id → the status claim its conversion carries (rows reached through ancestry only)
-        const seenAncestry = new Set();
-        for (const repeat of repeats) {
-          // Only auto-filed repeats carry a server-issued marker; a row staff
-          // closed as 'duplicate' by hand has no ancestry and is a deliberate
-          // closure, never a rescue candidate (codex #3834 r13 P1).
-          const marker = duplicateMarkerOf(repeat);
-          if (!marker) continue;
-          const root = await followDuplicateLink(database, repeat);
-          const resolved = root.id !== repeat.id;
-          // Group by the RECORDED ancestry when the root is unavailable
-          // (deleted / missing): two repeats of one vanished original are one
-          // opportunity, and the marker is the identity that survives.
-          const ancestryKey = resolved ? root.id : marker;
-          if (linked.some((l) => l.id === ancestryKey) || seenAncestry.has(ancestryKey)) continue;
-          seenAncestry.add(ancestryKey);
-          // An unlinked root is this customer's only if its CURRENT contact
-          // still matches the verified customer (staff may have corrected
-          // it since the repeat was filed) — the same validation the
-          // accepted-estimate path applies.
-          const rootIsOurs = resolved && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at
-            && (root.customer_id
-              ? String(root.customer_id) === String(resolvedCustomerId)
-              : leadMatchesEstimateContact(root, { customer_phone: resolvedPhone, customer_email: resolvedEmail }));
-          // Either keeper converts on the label it was read with: the repeat
-          // on 'duplicate', an ancestry-resolved root on the open statuses —
-          // a staff closure of that root between this read and the status
-          // write wins, exactly as on the accept path (codex #3834 r14 P1).
-          const keeper = rootIsOurs ? root : repeat;
-          linked.push(keeper);
-          claims.set(keeper.id, rootIsOurs ? OPEN_LEAD_CLAIM : DUPLICATE_LEAD_CLAIM);
-        }
-        // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
-        // estimate belongs to that deal — exclude it so we never convert it or
-        // misattribute this estimate's value hints. (Tier 1 already handled a
-        // lead linked to THIS estimate.)
-        const scoped = estimateId ? linked.filter((l) => !l.estimate_id || l.estimate_id === estimateId) : linked;
-        if (scoped.length) {
-          if (scoped.length > 1) {
-            logger.warn(`[lead-trigger] ${source} customer-link skip — ${scoped.length} open leads (ambiguous)`, {
-              source, customerId: resolvedCustomerId, leadIds: scoped.map((l) => l.id),
-            });
-            return { converted: false, reason: 'ambiguous_customer_link' };
-          }
-          const established = await customerHasWonLead(database, resolvedCustomerId);
-          const originating = await isOriginatingLead(database, resolvedCustomerId, scoped[0]);
-          if (established || !originating) {
-            logger.warn(`[lead-trigger] ${source} customer-link skip (established=${established}, originating=${originating})`, {
-              source, customerId: resolvedCustomerId, leadIds: scoped.map((l) => l.id),
-            });
-            return { converted: false, reason: established ? 'customer_link_established' : 'customer_link_not_originating' };
-          }
-          candidates = scoped;
+        const tier2 = await resolveCustomerLinkCandidates(database, {
+          source, customerId: resolvedCustomerId, phone: resolvedPhone, email: resolvedEmail, estimateId,
+        });
+        if (tier2.reason) return { converted: false, reason: tier2.reason };
+        if (tier2.candidates.length) {
+          candidates = tier2.candidates;
           resolution = 'customer_link';
-          ancestryClaim = claims.get(scoped[0].id) || null;
-          claimedLead = ancestryClaim ? scoped[0] : null;
         }
       }
 
@@ -1081,7 +1106,8 @@ async function convertLeadFromEvent({
     // deleted_at covers the tier-1 estimate-link candidates (queried without a
     // guard so an all-deleted linkage still counts as "accounted for" and
     // blocks the fuzzy tiers); tiers 2/3 come pre-filtered by their finders.
-    const open = (candidates || []).filter((lead) => lead && (!CLOSED_LEAD_STATUSES.has(lead.status) || (lead === claimedLead && ancestryClaim === DUPLICATE_LEAD_CLAIM)) && !lead.deleted_at);
+    const open = (candidates || []).filter((lead) => lead && !lead.deleted_at
+      && (!CLOSED_LEAD_STATUSES.has(lead.status) || (resolution === 'customer_link' && lead.status === 'duplicate')));
     if (!open.length) return { converted: false, reason: 'no_open_lead' };
     // FK-linked leads are authoritatively tied to THIS estimate, so convert them
     // all; tier 2 already enforced a single first-close lead. Only the fuzzy
@@ -1108,24 +1134,22 @@ async function convertLeadFromEvent({
         conversion.initialServiceValue = valueHints.initialServiceValue;
         conversion.waveguardTier = valueHints.waveguardTier;
       }
-      // A candidate reached through duplicate ancestry converts on the label
-      // it was read with — the repeat on 'duplicate', a resolved root on the
+      // A tier-2 row converts on the label it was read with — a repeat on
+      // 'duplicate', an open row (direct or an ancestry-resolved root) on the
       // open statuses: a staff transition in between wins, and this event
-      // converts nothing (pre-push P1, codex #3834 r14 P1).
-      if (lead === claimedLead) conversion.onlyIfStatusIn = ancestryClaim;
+      // converts nothing (pre-push P1, codex #3834 r14 P1; one rule for the
+      // tier instead of tracking which rows came through ancestry, r15 P2).
+      const claim = resolution !== 'customer_link' ? null : (lead.status === 'duplicate' ? DUPLICATE_LEAD_CLAIM : OPEN_LEAD_CLAIM);
+      if (claim) conversion.onlyIfStatusIn = claim;
       const converted = await leadAttributionService.markConverted(lead.id, conversion);
-      if (lead === claimedLead && !converted) {
-        return { converted: false, reason: ancestryClaim === DUPLICATE_LEAD_CLAIM ? 'duplicate_claim_lost' : 'root_claim_lost' };
-      }
+      if (claim && !converted) return { converted: false, reason: 'customer_link_claim_lost' };
       // A repeat taking the win has no funnel row of its own (/calculate
       // skipped it: its root carried the prospect) and that root is not ours
       // to book, so markConverted's bridge advanced nothing — and the booking
       // recorder, told a lead converted, adds no row either: the booked deal
       // would vanish from the Ads funnel. Stamp the row the repeat's own run
       // would have, straight at booked (codex #3834 r14 P2).
-      if (lead === claimedLead && ancestryClaim === DUPLICATE_LEAD_CLAIM) {
-        await stampLeadFunnelRow(database, lead, { customerId: conversion.customerId, funnelStage: 'booked' });
-      }
+      if (claim === DUPLICATE_LEAD_CLAIM) await stampLeadFunnelRow(database, lead, { customerId: conversion.customerId, funnelStage: 'booked' });
     }
     return { converted: true, count: open.length, leadIds: open.map((lead) => lead.id) };
   } catch (err) {

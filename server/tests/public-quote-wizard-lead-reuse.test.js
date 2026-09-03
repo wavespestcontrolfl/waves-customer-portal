@@ -127,7 +127,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // a keeper that filed as a duplicate meanwhile loses the row this request
     // added (codex r14 P1) — on both the current-touch and root-repair paths.
     expect(src).toMatch(/\}\)\.onConflict\('lead_id'\)\.ignore\(\)\.returning\('id'\);\n\s+stampedId = stamped \? stamped\.id : null;/);
-    expect(src).toMatch(/if \(stampedId\) \{\n\s+const keeper = await db\('leads'\)\.where\(\{ id: keeperId \}\)\.first\('status'\);\n\s+if \(keeper\?\.status === 'duplicate'\) await db\('ad_service_attribution'\)\.where\(\{ id: stampedId, funnel_stage: 'lead' \}\)\.del\(\);/);
+    expect(src).toMatch(/if \(stampedId\) \{\n\s+const keeper = await db\('leads'\)\.where\(\{ id: keeperId \}\)\.first\('status'\);\n\s+if \(keeper\?\.status === 'duplicate'\) await db\('ad_service_attribution'\)\.where\(\{ id: stampedId \}\)\.del\(\);/);
     // A submission that adds properties is a wider inquiry, never a repeat
     // (codex r10 P1) — on both paths.
     expect(src).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);

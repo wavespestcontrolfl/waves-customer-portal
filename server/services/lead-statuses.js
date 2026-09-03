@@ -28,23 +28,29 @@ const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewe
 // The marker can chain (B → A → O when two repeats raced), so the walk is
 // the same bounded, cycle-safe hop-by-hop resolution followDuplicateLink
 // does: through live 'duplicate' hops only — a deleted hop or a dead
-// marker ends it with no root (pre-push P1 on r14). NULL-safe: no marker,
-// or a marker naming nothing, never excludes; a malformed marker fails the
+// marker ends it with no root (pre-push P1 on r14). A won root counts only
+// when it is the same customer's (or unlinked — the marker was minted from
+// an exact contact match): a repeat promoted BECAUSE its root is another
+// customer's already-won lead (a shared household contact) is that
+// customer's own conversion (codex #3834 r15 P2). NULL-safe: no marker, or
+// a marker naming nothing, never excludes; a malformed marker fails the
 // uuid guard rather than the cast. Applied through knex .modify() on an
 // unaliased `leads` query.
 const UUID_RE = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 const markerUuid = (extracted) => `(CASE WHEN ${extracted}->>'duplicate_of_lead_id' ~ '${UUID_RE}' THEN (${extracted}->>'duplicate_of_lead_id')::uuid END)`;
 const SECOND_WIN_SQL = `(leads.status IS DISTINCT FROM 'won' OR NOT EXISTS (
   WITH RECURSIVE chain AS (
-    SELECT o.status, o.deleted_at, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
+    SELECT o.status, o.deleted_at, o.customer_id, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
     FROM leads o
     WHERE o.id = ${markerUuid('leads.extracted_data')}
     UNION ALL
-    SELECT p.status, p.deleted_at, ${markerUuid('p.extracted_data')}, chain.depth + 1
+    SELECT p.status, p.deleted_at, p.customer_id, ${markerUuid('p.extracted_data')}, chain.depth + 1
     FROM chain JOIN leads p ON p.id = chain.parent_id
     WHERE chain.status = 'duplicate' AND chain.deleted_at IS NULL AND chain.depth < 8
   )
-  SELECT 1 FROM chain WHERE chain.status = 'won' AND chain.deleted_at IS NULL
+  SELECT 1 FROM chain
+  WHERE chain.status = 'won' AND chain.deleted_at IS NULL
+    AND (chain.customer_id IS NULL OR leads.customer_id IS NULL OR chain.customer_id = leads.customer_id)
 ))`;
 function scopeToProspects(qb) {
   return qb.whereNotIn('status', NON_ENGAGED_LEAD_STATUSES).whereRaw(SECOND_WIN_SQL);

@@ -94,7 +94,7 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     // through live duplicate hops only, on the uuid primary key.
     expect(SECOND_WIN_SQL).toMatch(/WITH RECURSIVE chain AS/);
     expect(SECOND_WIN_SQL).toMatch(/WHERE chain\.status = 'duplicate' AND chain\.deleted_at IS NULL AND chain\.depth < 8/);
-    expect(SECOND_WIN_SQL).toMatch(/SELECT 1 FROM chain WHERE chain\.status = 'won' AND chain\.deleted_at IS NULL/);
+    expect(SECOND_WIN_SQL).toMatch(/WHERE chain\.status = 'won' AND chain\.deleted_at IS NULL\n\s+AND \(chain\.customer_id IS NULL OR leads\.customer_id IS NULL OR chain\.customer_id = leads\.customer_id\)/);
     expect(statusExclusion[3]).toEqual(expect.arrayContaining(['duplicate', 'spam', 'cancelled']));
   });
 

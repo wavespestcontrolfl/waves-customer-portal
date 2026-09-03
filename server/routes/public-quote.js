@@ -2205,8 +2205,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (duplicateOfLeadId) {
           const root = await followDuplicateLink(db, await db('leads').where({ id: duplicateOfLeadId }).first());
           // The root's row is the ORIGINAL touch rebuilt from what the root
-          // row stored and belongs to the ROOT's customer (r11 P2, r13 P2s):
-          // stampLeadFunnelRow. A vanished root (dead marker) gets nothing.
+          // row stored, belongs to the ROOT's customer, and starts at the
+          // stage the root's current status maps to (r11 P2, r13 P2s, r15
+          // P2): stampLeadFunnelRow. A vanished root (dead marker) gets nothing.
           keeperId = root ? root.id : null;
           stampedId = root ? await stampLeadFunnelRow(db, root, { customerId, serviceInterest }) : null;
         } else if (touch) {
@@ -2234,7 +2235,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         }
         if (stampedId) {
           const keeper = await db('leads').where({ id: keeperId }).first('status');
-          if (keeper?.status === 'duplicate') await db('ad_service_attribution').where({ id: stampedId, funnel_stage: 'lead' }).del();
+          if (keeper?.status === 'duplicate') await db('ad_service_attribution').where({ id: stampedId }).del();
         }
       }
     } catch (attrErr) {

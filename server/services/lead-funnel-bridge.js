@@ -42,6 +42,12 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 
+// The click ids a lead row stores (routes/lead-webhook.js, public-quote.js).
+// The ambient _fbp cookie is never paid evidence — Meta sets it on every
+// pixel visit, organic included — so it rides along as a match key only.
+const CLICK_ID_COLUMNS = ['gclid', 'wbraid', 'gbraid', 'fbclid', 'fbc', 'fbp'];
+const PAID_CLICK_ID_COLUMNS = CLICK_ID_COLUMNS.filter((col) => col !== 'fbp');
+
 // Rank order mirrors lead-funnel.js REACHED / ad-attribution-sync ADVANCEABLE_STAGES.
 const FUNNEL_STAGE_RANK = {
   lead: 0,
@@ -166,7 +172,10 @@ async function bridgeLeadsFunnelStage(leadIds, leadStatus, database = null) {
  *   • the quote wizard's repeat-run root repair (routes/public-quote.js): a
  *     repeat skips its own row because the chain root carries the prospect,
  *     and rebuilds the root's row when the root's own best-effort insert
- *     never landed (codex #3834 r10 P2);
+ *     never landed (codex #3834 r10 P2) — at the stage the root's CURRENT
+ *     status maps to, since the transitions it already made bridged
+ *     nothing while no row existed and a later same-stage event is a
+ *     monotonic no-op (codex #3834 r15 P2);
  *   • a duplicate row taking a win whose root is not ours to book
  *     (lead-estimate-link.js): the win would otherwise reach no funnel row at
  *     all (codex #3834 r14 P2) — stamped straight at 'booked', the stage the
@@ -175,44 +184,41 @@ async function bridgeLeadsFunnelStage(leadIds, leadStatus, database = null) {
  * belongs to ITS customer (codex #3834 r13 P2). Paid means the channel is a
  * paid one AND the row stored a click id (fbc included). A stored source with
  * no channel gets no row, exactly as the row's own intake would have.
- * Idempotent on the UNIQUE lead_id; returns the id of the row THIS call
- * inserted, or null when one already existed / nothing applied / the write
- * failed (best-effort, like the bridge).
+ * `funnelStage` overrides the status-derived stage (the winner is stamped
+ * at 'booked' while its row still reads 'duplicate'). Idempotent on the
+ * UNIQUE lead_id; returns the id of the row THIS call inserted, or null when
+ * one already existed / nothing applied / the write failed (best-effort,
+ * like the bridge).
  */
-async function stampLeadFunnelRow(database, lead, { customerId = null, serviceInterest = null, funnelStage = 'lead' } = {}) {
+async function stampLeadFunnelRow(database, lead, { customerId = null, serviceInterest = null, funnelStage = null } = {}) {
   const db = database || require('../models/db');
   try {
-    if (!lead || !lead.id) return null;
+    if (!lead) return null;
+    const stage = funnelStage || LEAD_STATUS_TO_FUNNEL_STAGE[lead.status] || 'lead';
     // Lazy: call-attribution loads the db module at require time.
     const { attributionForSourceType } = require('./ads/call-attribution');
     const source = lead.lead_source_id ? await db('lead_sources').where({ id: lead.lead_source_id }).first('source_type') : null;
     const channel = attributionForSourceType(source?.source_type);
     if (!channel) return null;
-    const interest = lead.service_interest || serviceInterest || null;
-    const rows = await db('ad_service_attribution').insert({
-      customer_id: lead.customer_id || customerId || null,
+    const interest = lead.service_interest || serviceInterest;
+    const [inserted] = await db('ad_service_attribution').insert({
+      customer_id: lead.customer_id || customerId,
       lead_id: lead.id,
       service_line: inferServiceLine(interest),
       specific_service: inferSpecificService(interest),
       service_bucket: inferServiceBucket(interest),
-      lead_date: etDateString(lead.created_at ? new Date(lead.created_at) : undefined),
+      lead_date: etDateString(new Date(lead.created_at || Date.now())),
       lead_source: channel.leadSource,
       lead_source_detail: null,
-      gclid: lead.gclid || null,
-      wbraid: lead.wbraid || null,
-      gbraid: lead.gbraid || null,
-      fbclid: lead.fbclid || null,
-      fbc: lead.fbc || null,
-      fbp: lead.fbp || null,
+      ...Object.fromEntries(CLICK_ID_COLUMNS.map((col) => [col, lead[col] || null])),
       utm_campaign: null,
       utm_term: null,
-      funnel_stage: funnelStage,
-      is_paid: !!channel.isPaid && !!(lead.gclid || lead.wbraid || lead.gbraid || lead.fbclid || lead.fbc),
+      funnel_stage: stage,
+      is_paid: !!channel.isPaid && PAID_CLICK_ID_COLUMNS.some((col) => !!lead[col]),
     }).onConflict('lead_id').ignore().returning('id');
-    const inserted = Array.isArray(rows) ? rows[0] : null;
-    return inserted ? (inserted.id ?? inserted) : null;
+    return inserted ? inserted.id : null;
   } catch (err) {
-    logger.warn(`[lead-funnel-bridge] funnel row stamp failed for lead ${lead && lead.id} (${funnelStage}): ${err.message}`);
+    logger.warn(`[lead-funnel-bridge] funnel row stamp failed for lead ${lead?.id}: ${err.message}`);
     return null;
   }
 }

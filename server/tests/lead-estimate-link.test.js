@@ -681,7 +681,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   }
 
   test('matches by estimate link and passes estimate value hints', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       estimate: { id: 'e1', customer_id: 'c1', monthly_total: 125, onetime_total: 99, waveguard_tier: 'Gold' },
       leadsByEstimate: [{ id: 'L1', status: 'estimate_sent' }],
@@ -705,7 +705,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('matches the unconverted originating lead by contact, preserves values', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       customer: { id: 'c1', phone: '+19412269100', email: 'holly@example.com' },
       contactLeads: [{ id: 'L3', status: 'new', customer_id: null }],
@@ -728,7 +728,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('enforceOriginating converts a contact lead first contacted before the customer signed up', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       customer: { id: 'c1', phone: '+19412269100', member_since: '2026-01-01' },
       contactLeads: [{ id: 'Lold', status: 'new', customer_id: null, first_contact_at: '2025-12-15T10:00:00Z' }],
@@ -746,7 +746,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('appointment_booked (one-time admin booking) converts the originating lead like the recurring trigger', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       customer: { id: 'c1', phone: '+19412269100', member_since: '2026-01-01' },
       contactLeads: [{ id: 'Lold', status: 'new', customer_id: null, first_contact_at: '2025-12-15T10:00:00Z' }],
@@ -770,7 +770,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     // enforceOriginating contact fallback would reject it — but the estimate
     // link is authoritative (the booking rode in on exactly this quote), so
     // tier 1 converts it, with the estimate's value hints.
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       estimate: { id: 'e9', customer_id: 'c1', monthly_total: null, onetime_total: 450, waveguard_tier: null },
       leadsByEstimate: [{ id: 'Laddon', status: 'estimate_sent', customer_id: 'c1', first_contact_at: '2026-06-20T10:00:00Z' }],
@@ -797,7 +797,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('enforceOriginating does NOT convert a contact lead created AFTER the customer signed up (later add-on)', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       customer: { id: 'c1', phone: '+19412269100', member_since: '2026-01-01' },
       contactLeads: [{ id: 'Lnew', status: 'new', customer_id: null, first_contact_at: '2026-05-01T10:00:00Z' }],
@@ -816,7 +816,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('without enforceOriginating, the live-trigger path still converts that same later contact lead', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       customer: { id: 'c1', phone: '+19412269100', member_since: '2026-01-01' },
       contactLeads: [{ id: 'Lnew', status: 'new', customer_id: null, first_contact_at: '2026-05-01T10:00:00Z' }],
@@ -833,7 +833,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('skips already-closed leads and reports no_open_lead', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       customer: { id: 'c1', phone: '+19412269100' },
       contactLeads: [{ id: 'Lwon', status: 'won', customer_id: null }],
@@ -866,7 +866,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('requireAcceptedEstimate skips when the estimate is not yet accepted', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       estimate: { id: 'e1', status: 'sent', customer_id: 'c1' },
       leadsByEstimate: [{ id: 'L1', status: 'estimate_sent' }],
@@ -885,7 +885,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('requireAcceptedEstimate converts once the estimate is accepted', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       estimate: { id: 'e1', status: 'accepted', customer_id: 'c1', monthly_total: 80 },
       leadsByEstimate: [{ id: 'L1', status: 'estimate_sent' }],
@@ -904,7 +904,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('skips an AMBIGUOUS contact-fallback match (2+ open leads) rather than mass-converting', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       customer: { id: 'c1', phone: '+19412269100' },
       contactLeads: [
@@ -925,7 +925,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('converts ALL leads FK-linked to the estimate (authoritative, not ambiguous)', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       estimate: { id: 'e1', customer_id: 'c1' },
       leadsByEstimate: [
@@ -948,7 +948,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   // Tier 2 — customer-link match (the Holly case): an open lead already carrying
   // a customer_id, which the contact fallback (customer_id IS NULL) can't see.
   test('converts a customer-linked open lead on the customer FIRST close', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       // Originating, and an ET-vs-UTC boundary case: first contacted 8:30pm EDT on
       // Jun 1 (= Jun 2 00:30 UTC) — the SAME ET day the customer became one. A UTC
@@ -970,7 +970,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('does NOT convert an add-on lead created AFTER the customer became a customer', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       // Established customer (member_since long ago); the open lead is a later
       // add-on inquiry (first contacted well after) — must not be swept.
@@ -1021,7 +1021,53 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     });
     const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
     expect(markConverted).toHaveBeenCalledWith('L-root-r', expect.objectContaining({ onlyIfStatusIn: OPEN_LEAD_STATUSES }));
-    expect(result).toEqual({ converted: false, reason: 'root_claim_lost' });
+    expect(result).toEqual({ converted: false, reason: 'customer_link_claim_lost' });
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+  });
+
+  test('self-booking: a repeat filed a day after its LOST original is judged originating by its ancestry — the inquiry began with the original, so the repeat converts', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-08-30' },
+      customerOpenLeads: [],
+      customerDuplicateLead: { id: 'L-rep-late', status: 'duplicate', customer_id: 'c1', extracted_data: { duplicate_of_lead_id: 'L-root-lost' }, first_contact_at: '2026-09-02T12:00:00Z' },
+      leadsById: { 'L-root-lost': { id: 'L-root-lost', status: 'lost', customer_id: 'c1', first_contact_at: '2026-08-30T12:00:00Z' } },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep-late'] });
+    expect(markConverted).toHaveBeenCalledWith('L-rep-late', expect.objectContaining({ customerId: 'c1', onlyIfStatusIn: ['duplicate'] }));
+    expect(markConverted).not.toHaveBeenCalledWith('L-root-lost', expect.anything());
+  });
+
+  test('self-booking: the ancestry date is never borrowed from ANOTHER customer\'s root — a repeat filed after this customer signed up is still a later add-on', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c2', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLead: { id: 'L-rep-addon', status: 'duplicate', customer_id: 'c2', extracted_data: { duplicate_of_lead_id: 'L-other-old' }, first_contact_at: '2026-09-02T12:00:00Z' },
+      leadsById: { 'L-other-old': { id: 'L-other-old', status: 'new', customer_id: 'c-OTHER', first_contact_at: '2026-08-01T12:00:00Z' } },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c2', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: false, reason: 'customer_link_not_originating' });
+    expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('self-booking: a directly customer-linked open lead converts on the open-status claim too (one rule for the tier)', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [{ id: 'L-direct', status: 'contacted', customer_id: 'c1', first_contact_at: '2026-08-30T12:00:00Z' }],
+      customerDuplicateLeads: [],
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-direct'] });
+    expect(markConverted).toHaveBeenCalledWith('L-direct', expect.objectContaining({ onlyIfStatusIn: OPEN_LEAD_STATUSES }));
     expect(stampLeadFunnelRow).not.toHaveBeenCalled();
   });
 
@@ -1057,7 +1103,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       contactLeads: [],
     });
     const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c2', enforceOriginating: true, database, leadAttributionService: { markConverted } });
-    expect(result).toEqual({ converted: false, reason: 'duplicate_claim_lost' });
+    expect(result).toEqual({ converted: false, reason: 'customer_link_claim_lost' });
     expect(stampLeadFunnelRow).not.toHaveBeenCalled();
   });
 
@@ -1105,7 +1151,8 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     });
     const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c6', enforceOriginating: true, database, leadAttributionService: { markConverted } });
     expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-root6'] });
-    expect(markConverted).toHaveBeenCalledWith('L-root6', expect.not.objectContaining({ onlyIfStatusIn: expect.anything() }));
+    // One claim rule for the tier (r15): the root converts on the open statuses.
+    expect(markConverted).toHaveBeenCalledWith('L-root6', expect.objectContaining({ onlyIfStatusIn: OPEN_LEAD_STATUSES }));
   });
 
   test('self-booking: two repeats of one VANISHED original group by their recorded marker — one opportunity, the newest repeat wins', async () => {
@@ -1190,7 +1237,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('for an estimate-scoped event, does NOT convert a lead tied to a DIFFERENT estimate', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       estimate: { id: 'estA', customer_id: 'c1' }, // deposit paid on estimate A
       leadsByEstimate: [], // no lead FK-linked to estimate A
@@ -1214,7 +1261,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('does NOT convert when the customer already has a won lead (established → add-on not swept)', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       customer: { id: 'c1', phone: '+19412269100' },
       customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1' }],
@@ -1233,7 +1280,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   });
 
   test('skips when the customer has 2+ open leads (ambiguous which one closed)', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
+    const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({
       customer: { id: 'c1', phone: '+19412269100' },
       customerOpenLeads: [
