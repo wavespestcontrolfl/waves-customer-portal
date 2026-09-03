@@ -557,17 +557,28 @@ function callConfirmedUnbooked(item, ctx) {
   return !ctx.bookedCallIds.has(item.call_log_id);
 }
 
-// The CARD's answer to the same question, for the authorization arm: its
-// filing-time scheduling status (scheduling_window.status, snapshotted for
-// caller_not_authorized cards from this PR on) — never the rolling
-// extraction a force-reprocess rewrites from confirmed to requested. A
-// card with no snapshot cannot prove the appointment was not confirmed and
-// fails closed.
-function cardConfirmedUnbooked(item, ctx) {
-  const window = parseMaybeJson(item.payload)?.scheduling_window;
-  if (!window || typeof window !== 'object') return true;
-  if (window.status !== 'confirmed') return false;
-  return !ctx.bookedCallIds.has(item.call_log_id);
+// The CARD's answer to the same question, for the evidence arms: its
+// filing-time scheduling status (scheduling_window.status when the card
+// carries the window, else the base payload's scheduling_status every card
+// records) — never the rolling extraction a force-reprocess rewrites from
+// confirmed to requested. A confirmed call counts as booked ONLY when the
+// booking arm found a live booking answering the card's snapshotted ask
+// (service, address, days — `booking_after_card`), not any row that
+// happens to point at the call: a skipped visit or a reprocessed booking
+// for another service is not the appointment the caller confirmed. A card
+// with no status at all cannot prove the appointment was not confirmed
+// and fails closed.
+function cardSchedulingStatus(item) {
+  const payload = parseMaybeJson(item.payload);
+  const window = payload?.scheduling_window;
+  if (window && typeof window === 'object' && window.status !== undefined) return window.status;
+  return payload?.scheduling_status;
+}
+function cardConfirmedUnbooked(item, ev) {
+  const status = cardSchedulingStatus(item);
+  if (status === undefined) return true;
+  if (status !== 'confirmed') return false;
+  return !(ev && ev.booking_after_card);
 }
 
 // Does the customer's current surname match what THIS call's extractions
@@ -655,16 +666,21 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
     // created, and no not_confirmed sibling exists) read as fully resolved
     // — the promised appointment is still owed.
     if (code === 'caller_not_authorized' && ev.caller_phone_added && callerPhoneOnFile(item)
-        && !cardConfirmedUnbooked(item, ctx)) {
+        && !cardConfirmedUnbooked(item, ev)) {
       return { action: 'resolve', rule: 'caller_phone_added' };
     }
     if (code === 'not_confirmed' && ev.booking_after_card) {
       return { action: 'resolve', rule: 'booking_created' };
     }
+    // A confirmed call held solely on its address card has no not_confirmed
+    // sibling: an unrelated recurring visit completing at the address must
+    // not close the call's only trace while the confirmed appointment was
+    // never created.
     if (ADDRESS_MOOT_CODES.has(code)
         && !item.customer_deleted_at
         && ev.visit_completed_at_address
-        && heardAddressMatchesOnFile(item)) {
+        && heardAddressMatchesOnFile(item)
+        && !cardConfirmedUnbooked(item, ev)) {
       return { action: 'resolve', rule: 'visit_completed_at_address' };
     }
   }
@@ -908,7 +924,11 @@ function bookingCoversRequest(item, mine, { multiProperty, places }) {
 // `lock`, the scheduled_services rows are held FOR UPDATE until commit,
 // the same contract loadBookedCallIds applies.
 async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
-  const visitItems = items.filter((i) => (i.reason_code === 'not_confirmed' || ADDRESS_MOOT_CODES.has(i.reason_code)) && i.call_customer_id);
+  // not_confirmed cards, address cards, and every card whose call CONFIRMED
+  // an appointment (the confirmed-unbooked guard is answered only by a
+  // booking matching the card's snapshotted ask).
+  const needsBooking = (i) => i.reason_code === 'not_confirmed' || cardSchedulingStatus(i) === 'confirmed';
+  const visitItems = items.filter((i) => (needsBooking(i) || ADDRESS_MOOT_CODES.has(i.reason_code)) && i.call_customer_id);
   if (!visitItems.length) return;
   const customerIds = [...new Set(visitItems.map((i) => i.call_customer_id))];
   // ACTIVE rows only — the uniqueness customer-properties'
@@ -955,11 +975,11 @@ async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
 
   for (const item of visitItems) {
     const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
-    if (item.reason_code === 'not_confirmed') {
-      if (bookingCoversRequest(item, mine, { multiProperty: multiProperty(item.call_customer_id), places })) {
-        flag(item.id, 'booking_after_card');
-      }
-    } else if (!multiProperty(item.call_customer_id)) {
+    if (needsBooking(item)
+      && bookingCoversRequest(item, mine, { multiProperty: multiProperty(item.call_customer_id), places })) {
+      flag(item.id, 'booking_after_card');
+    }
+    if (ADDRESS_MOOT_CODES.has(item.reason_code) && !multiProperty(item.call_customer_id)) {
       // Address cards: a visit COMPLETED after the card, positively at the
       // on-file address, for a single-property customer. The classifier
       // adds the heard-address ↔ on-file match.
@@ -1069,6 +1089,15 @@ async function sweep({ now = new Date() } = {}) {
     if (allCallIds.length) {
       await trx('triage_items')
         .whereIn('call_log_id', allCallIds)
+        .orderBy('id', 'asc')
+        .forUpdate()
+        .select('id');
+      // The call rows too: the admin relink route moves call_log.customer_id
+      // (holding the target customer, never lockTriageCall), and the fresh
+      // reload below must read the link this transaction will commit
+      // against — not one that changes between the read and the write.
+      await trx('call_log')
+        .whereIn('id', allCallIds)
         .orderBy('id', 'asc')
         .forUpdate()
         .select('id');

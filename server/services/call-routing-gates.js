@@ -328,6 +328,11 @@ function buildTriageItem({
     // appointment is still unbooked, and a reprocess can rewrite the
     // rolling extraction's status underneath the open card.
     'caller_not_authorized',
+    // Address-review cards too: when a confirmed call is held solely on its
+    // address card, the sweep's completed-visit rule must keep the card
+    // until a booking answers the snapshotted ask.
+    'missing_service_address', 'low_confidence_address', 'address_unverifiable',
+    'address_unverified', 'address_validation_unavailable',
   ]);
   if (SCHEDULING_PAYLOAD_FLAGS.has(flag) && extraction?.scheduling) {
     const s = extraction.scheduling;
@@ -422,7 +427,10 @@ function buildTriageItem({
     payload: JSON.stringify({
       flag,
       confidence: extraction?.confidence?.overall,
-      scheduling_status: extraction?.scheduling?.status,
+      // Always present (null = the call made no scheduling claim): the
+      // evidence sweep's confirmed-unbooked guard fails closed on a card
+      // with no status key at all.
+      scheduling_status: extraction?.scheduling?.status ?? null,
       ...flagPayload,
       ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {}),
     }),

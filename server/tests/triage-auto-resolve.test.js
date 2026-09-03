@@ -375,9 +375,17 @@ describe('evidence rules', () => {
     // (a reprocess may have rewritten it to 'requested') is never read.
     const confirmed = { ...base, customer_phone: '+19415550123', payload: { scheduling_window: { status: 'confirmed' } }, call_extraction: { ...NO_ADDR_EXTRACTION, scheduling: { status: 'requested' } } };
     expect(classifyTriageItem(item(confirmed), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
-    expect(classifyTriageItem(item(confirmed), { bookedCallIds: new Set(['call-1']), evidence: new Map([['t1', { caller_phone_added: true }]]) }, { now: NOW }))
+    // Only a booking answering the snapshotted ask (the booking arm's
+    // evidence) counts as the confirmed appointment — not any row pointing
+    // at the call.
+    expect(classifyTriageItem(item(confirmed), { bookedCallIds: new Set(['call-1']), evidence: new Map([['t1', { caller_phone_added: true }]]) }, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item(confirmed), evidenceFor('t1', { caller_phone_added: true, booking_after_card: true }), { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'caller_phone_added' });
-    // No snapshot (a pre-snapshot card) → cannot prove it was not confirmed → stays open.
+    // The base payload's scheduling_status serves when the card has no window.
+    expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123', payload: { flag: 'caller_not_authorized', scheduling_status: 'confirmed' } }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123', payload: { flag: 'caller_not_authorized', scheduling_status: 'requested' } }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'caller_phone_added' });
+    // No status at all (a pre-snapshot card) → cannot prove it was not confirmed → stays open.
     expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123', payload: { flag: 'caller_not_authorized' } }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
   });
 
@@ -394,9 +402,16 @@ describe('evidence rules', () => {
       customer_address_line1: '1234 Palm Ave',
       customer_address_line2: 'Apt 2', // the raw reading names unit 2 — units are identity
       customer_created_at: CUSTOMER_AFTER, // customer born from the call — address_moot cannot fire
-      payload: { flag: 'address_unverifiable', address_as_heard: '1234 Palm Avenue', heard_address: { street_line_1: '1234 Palm Ave', raw_text: '1234 palm ave unit 2' } },
+      payload: { scheduling_status: null, flag: 'address_unverifiable', address_as_heard: '1234 Palm Avenue', heard_address: { street_line_1: '1234 Palm Ave', raw_text: '1234 palm ave unit 2' } },
     };
     expect(classifyTriageItem(item(heard), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'visit_completed_at_address' });
+    // A confirmed call held solely on its address card keeps it until a
+    // booking answers the snapshotted ask — an unrelated visit completing
+    // at the address is not the confirmed appointment.
+    const confirmedHeard = { ...heard, payload: { ...heard.payload, scheduling_status: 'confirmed' } };
+    expect(classifyTriageItem(item(confirmedHeard), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item(confirmedHeard), evidenceFor('t1', { visit_completed_at_address: true, booking_after_card: true }), { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'visit_completed_at_address' });
     // A different house number anywhere in the heard set fails closed.
     expect(classifyTriageItem(item({ ...heard, payload: { ...heard.payload, address_as_heard: '1236 Palm Ave' } }), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
