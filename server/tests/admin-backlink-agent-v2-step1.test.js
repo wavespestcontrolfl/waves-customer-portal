@@ -62,10 +62,16 @@ describe('rolling-deploy compatibility of the board unique key', () => {
     }
     expect(hits.length).toBeGreaterThanOrEqual(5);
   });
+  test('a status edit that reopens the outreach lifecycle drops the conversation closure stamp (the §13 inbox guard reads it)', () => {
+    const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
+    expect(s).toContain("if (ACTIVE_OUTREACH_STATUSES.includes(resultStatus) && ('status' in patch || entersOutreach)) patch.conversation_closed_at = null;"); // a status edit or a lane entry (link_type alone) reopens; an unrelated edit never clears it
+    // … and an edit whose RESULT is an open conversation (a reopened row with its pitch out included) runs the inbox guard
+    expect(s).toContain('const opensConversation = Outreach.conversationOpen({ ...current, ...patch }) && !Outreach.conversationOpen(current);');
+  });
   test('the PATCH page-move probe is scoped to the row\'s OWN location_key (step 2 dropped the legacy 2-column key: identity is (domain, page, location))', () => {
     const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
     expect(s).toMatch(/findPlacementRow\(trx, current\.target_domain, patch\.target_page, \{ excludeId: current\.id, location: current\.location_key \}\)/);
-    expect(s).toMatch(/first\('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key'\)/);
+    expect(s).toMatch(/first\('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'conversation_closed_at'\)/);
   });
 });
 
