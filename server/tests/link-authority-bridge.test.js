@@ -299,6 +299,17 @@ describe('outreach-lane paths', () => {
     expect(placements(db)[0]).toMatchObject({ id: manual.id, domain_id: d.id, path_id: p.id, link_type: 'resource', target_url: null, automation_policy: null, last_classified_at: null, outreach_status: 'none', outreach_subject: null, outreach_send_token: null, authority: 'OWNER_OUTREACH' });
     expect(rows(db)[0]).toMatchObject({ prospect_id: manual.id, path_id: p.id, dimension: 'communication' });
   });
+  test('an unbound manual row advanced to contacted BY HAND (no outreach markers) is adopted with its send satisfied — the worker could never satisfy it', async () => {
+    const { db, d, p } = scenario({ make: outreachPath });
+    const manual = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: null, path_id: null, status: 'contacted', link_type: 'resource', outreach_status: null, outreach_sent_at: null, source: 'manual', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(manual);
+    const r = await run(db);
+    expect(r).toMatchObject({ decided: 1, placementsCreated: 0, rowsWritten: 1, parked: 0, errors: [] });
+    expect(placements(db)[0]).toMatchObject({ id: manual.id, domain_id: d.id, path_id: p.id, status: 'contacted' });
+    expect(rows(db)[0]).toMatchObject({ prospect_id: manual.id, dimension: 'communication', instance_key: '-:1', satisfied_at: NOW, satisfied_reason: 'sent' });
+    expect(domainState(db)).toBe('acquiring'); // the conversation is in flight, not owner-held
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+  });
   test('an approved send with the fee DEFERRED to checkout reads ready_to_acquire — the deferred payment row holds nothing back', async () => {
     const { db, p } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
     await run(db);
@@ -405,6 +416,26 @@ describe('re-decision', () => {
     db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 120000);
     await run(db, { now: new Date(NOW.getTime() + 180000) });
     expect(domainState(db)).toBe('acquired');
+  });
+  test('the verifier demoting the last live link to LOST re-selects the acquired domain once and converges; a live-check touch alone does not', async () => {
+    const { db, d } = scenario();
+    await run(db);
+    const [pl, ...others] = placements(db);
+    Object.assign(pl, { status: 'live' });
+    for (const r of rows(db)) Object.assign(r, { satisfied_at: NOW, satisfied_reason: 'placed' });
+    for (const x of others) Object.assign(x, { status: 'rejected' });
+    await run(db, { domainIds: [d.id], now: new Date(NOW.getTime() + 60000) }); // forced: every row is satisfied, nothing else would revisit
+    expect(domainState(db)).toBe('acquired');
+    // the nightly live check touches updated_at on a link that is still live: nothing to revisit
+    Object.assign(pl, { last_live_check: new Date(NOW.getTime() + 120000), updated_at: new Date(NOW.getTime() + 120000) });
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+    // the definitive crawl loses the link (link-prospect-verifier: status → lost, rows untouched)
+    Object.assign(pl, { status: 'lost', updated_at: new Date(NOW.getTime() + 180000) });
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([{ id: d.id, domain: 'example.org', why: 'stale' }]);
+    const r = await run(db, { now: new Date(NOW.getTime() + 240000) });
+    expect(r).toMatchObject({ selected: 1, aggregateChanges: 1, redecided: 0, ended: 0, errors: [] }); // the satisfied history stands
+    expect(domainState(db)).toBe('qualified'); // no link, nothing active, nothing owner-held
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // converged
   });
   test('a superseded best path is skipped with a reason and writes nothing', async () => {
     const { db } = scenario({ path: { superseded_by: 'x' } });

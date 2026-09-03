@@ -64,6 +64,10 @@ const PARKABLE = 'prospect';
 const PARKED = 'awaiting_owner';
 // §3.1 active intermediates (plus any leased placement): the domain reads `acquiring`
 const ACQUIRING_STATUSES = Object.freeze(['placed', 'contacted', 'negotiating', 'ready_for_credentials', 'ready_for_payment']);
+// Statuses a placement reaches only AFTER its conversation happened: durable
+// evidence of a send even without the outreach markers (the admin route lets
+// a manual row be advanced to contacted/negotiating by hand)
+const CONVERSED_STATUSES = Object.freeze(['contacted', 'negotiating', 'placed', 'live', 'indexed']);
 
 const isOwner = (l) => typeof l === 'string' && l.startsWith('OWNER_');
 const isAuto = (l) => typeof l === 'string' && l.startsWith('AUTO_');
@@ -262,11 +266,14 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       const floorWaiverId = waiver ? waiver.id : null;
       if (!existing) {
         // an adopted conversation whose initial email already went out (durable
-        // `outreach_sent_at` / `sent`) gets its FIRST communication instance
-        // satisfied from that evidence — the worker never re-sends a sent row,
-        // and the follow-up needs the initial send satisfied
+        // `outreach_sent_at` / `sent`, or a status only reached after contact —
+        // a manual row advanced to contacted/negotiating by hand carries no
+        // markers) gets its FIRST communication instance satisfied from that
+        // evidence — the worker only sends `prospect` rows, so an unsatisfied
+        // instance here could never be satisfied, and the follow-up needs the
+        // initial send satisfied
         const sentBefore = inst.dimension === 'communication' && inst.instance_kind === '-' && !history.some((r) => key(r) === key(inst))
-          && Boolean(placement.outreach_sent_at || placement.outreach_status === 'sent');
+          && Boolean(placement.outreach_sent_at || placement.outreach_status === 'sent' || CONVERSED_STATUSES.includes(placement.status));
         const [row] = await trx(AUTH).insert({
           prospect_id: placement.id, path_id: path.id, dimension: inst.dimension, instance_kind: inst.instance_kind, instance_key: instanceKey,
           level: inst.level, reason: inst.reason, decision_inputs_hash: hash, path_revision: pathRevision,
