@@ -425,3 +425,19 @@ describe('category-seed-seeder: affiliate_products (pilot briefs)', () => {
     expect(new Set(manifest.briefs.flatMap((b) => b.affiliate_products.map((p) => p.product_id))).size).toBe(6);
   });
 });
+
+describe('seedAll initialStatus (listen lane)', () => {
+  test('rejects anything but pending / pending_review', async () => {
+    const seeder = require('../services/content/category-seed-seeder');
+    await expect(seeder.seedAll({ initialStatus: 'claimed', dryRun: true })).rejects.toThrow(/initialStatus/);
+  });
+
+  test('pending_review rows are minted at pending_review in the dry-run plan', async () => {
+    const seeder = require('../services/content/category-seed-seeder');
+    const result = await seeder.seedAll({ dryRun: true, initialStatus: 'pending_review' });
+    expect(result.rows.length).toBeGreaterThan(0);
+    expect(result.rows.every((r) => r.status === 'pending_review')).toBe(true);
+    const plain = await seeder.seedAll({ dryRun: true });
+    expect(plain.rows.every((r) => r.status === 'pending')).toBe(true);
+  });
+});

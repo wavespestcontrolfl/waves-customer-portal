@@ -315,9 +315,17 @@ function rowForBrief(brief, manifest, { now = new Date() } = {}) {
  * status CASE mirrors the sibling seeders — claimed / done / pending_review
  * rows are never reset, while skipped/expired rows revive to pending.
  */
-async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new Date() } = {}) {
+// initialStatus: 'pending' (curated manifests — claimable by the runner) or
+// 'pending_review' (ops/agents/listen-transcripts.js — LLM-extracted session
+// ideas that an operator must approve in the review queue before the runner
+// may claim them; requeue flips them to 'pending'). Nothing else is accepted:
+// a seeder must never mint claimed/done rows.
+const SEED_STATUSES = new Set(['pending', 'pending_review']);
+
+async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new Date(), initialStatus = 'pending' } = {}) {
+  if (!SEED_STATUSES.has(initialStatus)) throw new Error(`category seed: initialStatus must be pending or pending_review (got "${initialStatus}")`);
   const manifest = loadManifest(file);
-  const rows = manifest.briefs.map((brief) => rowForBrief(brief, manifest, { now }));
+  const rows = manifest.briefs.map((brief) => ({ ...rowForBrief(brief, manifest, { now }), status: initialStatus }));
   if (dryRun) return { dryRun: true, count: rows.length, rows };
 
   let count = 0;
@@ -340,9 +348,12 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
              page_url = EXCLUDED.page_url,
              service = EXCLUDED.service,
              city = EXCLUDED.city,
-             status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review')
+             -- A row the operator already approved (pending) is never
+             -- demoted back to pending_review by a re-seed; skipped/expired
+             -- rows revive at the seeder's own initial status.
+             status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'pending')
                            THEN opportunity_queue.status
-                           ELSE 'pending'
+                           ELSE EXCLUDED.status
                       END,
              -- Reviving a skipped/expired row is a fresh explicit operator
              -- signal — reset the lifetime claim budget, or a re-seeded
@@ -537,6 +548,7 @@ module.exports = {
     affiliateBindingLines,
     MAX_AFFILIATE_PRODUCTS,
     serviceForBrief,
+    SERVICE_BY_SLUG_PREFIX,
     blockedTopicIdFor,
     briefRequestsFaq,
     availableAtFor,
