@@ -203,27 +203,57 @@ function customerAddressLine(row) {
 // customer_id, and the lead that call minted — leads.twilio_call_sid), never
 // from the generic linkage a later merged ask may have re-pointed (codex r2
 // P1 on #3785).
+// The unit call's CURRENT linkage — the source of truth for the reply's
+// targets. `lock` takes the row FOR UPDATE (customers → call_log order).
+async function unitCallLinkage(trx, callLogId, { lock = false } = {}) {
+  let q = trx('call_log').where({ id: String(callLogId) });
+  if (lock) q = q.forUpdate();
+  const row = await q.first('customer_id', 'twilio_call_sid', 'metadata');
+  if (!row) return null;
+  const parse = (v) => { if (!v) return null; if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } } return v; };
+  const meta = parse(row.metadata);
+  return {
+    customerId: row.customer_id ? String(row.customer_id) : null,
+    // The call's durable lead linkage is the metadata stamp — a call that
+    // REUSED an existing lead leaves that lead's twilio_call_sid on its
+    // original call (codex r3 P1; context-builder follows the stamp first).
+    stampedLeadId: meta?.lead_id ? String(meta.lead_id) : null,
+    twilioCallSid: row.twilio_call_sid || null,
+    // PUT /calls/:id/customer stamps this on every operator relink/unlink.
+    operatorOverride: !!(meta && meta.customer_link_override),
+  };
+}
+// Whether the call still claims the cached lead. An operator UNLINK
+// (PUT /calls/:id/customer with null) deliberately drops the call's lead
+// stamp and clears the lead's twilio_call_sid arm — the lead is detached
+// from this call, and a later reply must not write the unit into it
+// (codex r4 P1 on #3788). Until an operator has touched the linkage the
+// producer's own target stands; after one, the call must POSITIVELY claim
+// the lead through either arm.
+function leadStillLinked(leadRow, linkage) {
+  if (!linkage || !linkage.operatorOverride) return true;
+  const leadId = String(leadRow?.id || '');
+  if (linkage.stampedLeadId && linkage.stampedLeadId === leadId) return true;
+  return !!linkage.twilioCallSid && String(leadRow?.twilio_call_sid || '') === linkage.twilioCallSid;
+}
 async function legacyUnitTargets(trx, flags) {
   const callLogId = flags.unit_call_log_id ? String(flags.unit_call_log_id) : null;
-  if (!callLogId) return { leadId: null, customerId: null };
-  const callRow = await trx('call_log').where({ id: callLogId })
-    .first('customer_id', 'twilio_call_sid', 'metadata');
-  if (!callRow) return { leadId: null, customerId: null };
-  const parse = (v) => { if (!v) return null; if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } } return v; };
-  // The call's durable lead linkage is the metadata stamp — a call that
-  // REUSED an existing lead leaves that lead's twilio_call_sid on its
-  // original call (codex r3 P1; context-builder follows the stamp first).
-  const stampedLeadId = parse(callRow.metadata)?.lead_id || null;
-  const leadRow = stampedLeadId
-    ? await trx('leads').where({ id: String(stampedLeadId) }).whereNull('deleted_at').first('id')
-    : (callRow.twilio_call_sid
-      ? await trx('leads').where({ twilio_call_sid: callRow.twilio_call_sid }).whereNull('deleted_at').first('id')
+  if (!callLogId) return { leadId: null, customerId: null, linkage: null };
+  const linkage = await unitCallLinkage(trx, callLogId);
+  if (!linkage) return { leadId: null, customerId: null, linkage: null };
+  const leadRow = linkage.stampedLeadId
+    ? await trx('leads').where({ id: linkage.stampedLeadId }).whereNull('deleted_at').first('id')
+    : (linkage.twilioCallSid
+      ? await trx('leads').where({ twilio_call_sid: linkage.twilioCallSid }).whereNull('deleted_at').first('id')
       : null);
   return {
     leadId: leadRow?.id ? String(leadRow.id) : null,
-    customerId: callRow.customer_id ? String(callRow.customer_id) : null,
+    customerId: linkage.customerId,
+    linkage,
   };
 }
+// Unlocked targets: the candidate customer to lock and the cached lead.
+// applyUnitWriteback re-reads the call FOR UPDATE and settles both.
 async function unitTargets(trx, flags) {
   // A legacy row is recognized by its ABSENT target fields plus the unit
   // item's own call id — never by the generic call_origin flag, which a
@@ -237,13 +267,15 @@ async function unitTargets(trx, flags) {
   // must follow it, never write to the former customer (codex r2 P1 on
   // #3788). The call row is the source of truth when it exists.
   let customerId = flags.unit_customer_id || null;
+  let linkage = null;
   if (flags.unit_call_log_id) {
-    const callRow = await trx('call_log').where({ id: String(flags.unit_call_log_id) }).first('customer_id');
-    if (callRow) customerId = callRow.customer_id ? String(callRow.customer_id) : null;
+    linkage = await unitCallLinkage(trx, flags.unit_call_log_id);
+    if (linkage) customerId = linkage.customerId;
   }
   return {
     leadId: flags.unit_lead_id || null,
     customerId,
+    linkage,
   };
 }
 
@@ -260,17 +292,24 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
   let customerRow = customerId
     ? await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first()
     : null;
-  // The target customer came from an UNLOCKED read of the call row. With
-  // the customer row now held, re-read the call linkage FOR UPDATE
-  // (customers → call_log — the call pipeline's claim-fence order, never
-  // the reverse) and hold it through the writes: a PUT /calls/:id/customer
-  // relink/unlink landing between the two reads is the durable correction,
-  // so the write to the former customer is skipped, not raced (codex r3 P1
-  // on #3788).
-  if (customerRow && flags.unit_call_log_id) {
-    const cur = await trx('call_log').where({ id: String(flags.unit_call_log_id) }).forUpdate().first('customer_id');
-    if (cur && String(cur.customer_id || '') !== String(customerId)) {
+  // The targets came from an UNLOCKED read of the call row. With the
+  // customer row (if any) now held, the call row is taken FOR UPDATE —
+  // ALWAYS when the ask has a unit call, a null initial linkage included
+  // (codex r4 P1 on #3788) — in customers → call_log order (the call
+  // pipeline's claim-fence order, never the reverse) and held through the
+  // writes, so a PUT /calls/:id/customer relink/unlink serializes against
+  // this reply instead of landing between two reads. One that committed
+  // first is the durable correction: the former (or absent) customer is
+  // skipped, never raced (codex r3 P1). A customer the lock reveals is NOT
+  // locked here — that would be call_log → customers, the reverse of the
+  // route's and the pipeline's order, and a deadlock rolls the whole reply
+  // back; the audit names them for the office instead.
+  let linkage = null;
+  if (flags.unit_call_log_id) {
+    linkage = await unitCallLinkage(trx, flags.unit_call_log_id, { lock: true });
+    if (linkage && linkage.customerId !== (customerId ? String(customerId) : null)) {
       out.customer = 'call_relinked';
+      out.relinkedTo = linkage.customerId;
       customerRow = null;
     }
   }
@@ -280,7 +319,10 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
     // r3 P2). Customer lock first (above), then the lead: fanout order.
     const leadRow = await trx('leads').where({ id: leadId }).whereNull('deleted_at').forUpdate().first();
     const leadAddress = String(leadRow?.address || '').trim();
-    if (leadRow && !leadAddress) {
+    if (leadRow && !leadStillLinked(leadRow, linkage)) {
+      // The operator detached this lead from the call after the ask parked.
+      out.lead = 'call_unlinked';
+    } else if (leadRow && !leadAddress) {
       const formatted = normalizeLeadAddress({ line1: building.street_line_1, line2: unitLine, city: building.city, state: 'FL', zip: building.postal_code });
       await trx('leads').where({ id: leadId }).whereNull('deleted_at').update({ address: formatted.fullAddress });
       out.lead = 'filled';
@@ -413,7 +455,7 @@ async function unitOnFileAtBuilding(trx, flags) {
   const building = flags.unit_ask_building || null;
   if (!building?.street_line_1) return false;
   const { splitStreetLineUnit, unitLineValueKey } = require('../utils/address-normalizer');
-  const { leadId, customerId } = await unitTargets(trx, flags);
+  const { leadId, customerId, linkage } = await unitTargets(trx, flags);
   const units = new Set();
   const add = (unit) => { const key = unitLineValueKey(String(unit || '')); if (key) units.add(key); };
   if (leadId) {
@@ -421,8 +463,9 @@ async function unitOnFileAtBuilding(trx, flags) {
     const line = String(leadRow?.address || '').trim();
     // The unit item's OWN lead is definitive for this ask — a unit staff
     // entered there answers it regardless of a property manager's other
-    // units on the account (codex r1 P2 on #3788).
-    if (line && splitStreetLineUnit(line).unit && sameBuildingForWrite(line, building)) return true;
+    // units on the account (codex r1 P2 on #3788) — unless an operator
+    // has detached that lead from the call since (same rule as the write).
+    if (leadRow && leadStillLinked(leadRow, linkage) && line && splitStreetLineUnit(line).unit && sameBuildingForWrite(line, building)) return true;
   }
   if (customerId) {
     const customerRow = await trx('customers').where({ id: customerId }).whereNull('deleted_at').first();

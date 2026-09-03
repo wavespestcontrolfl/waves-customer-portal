@@ -1417,9 +1417,10 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     // linkage is the target), customer (locked first), lead; later flag stamps re-read the draft
     // row (existingDraft) once the queue drains.
     mockState.existingDraft = a;
-    // The call row is read twice: unlocked for the target, then FOR UPDATE under the customer lock as the recheck.
+    // The call row is read twice: unlocked for the target, then FOR UPDATE (after the customer
+    // lock when there is a customer; ALWAYS, a null linkage included) as the recheck.
     const callRow = { id: 'call-1', customer_id: customerRow?.id || null };
-    mockState.firstQueue = [a, a, callRow, customerRow, ...(customerRow ? [callRow] : []), leadRow];
+    mockState.firstQueue = [a, a, callRow, ...(customerRow ? [customerRow] : []), callRow, leadRow];
     const result = await handleClarifyReply({ phone: '+17735550142', body });
     await result.repricePromise;
     return result;
@@ -1465,12 +1466,54 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
     expect(writeback().customer).toBe('call_relinked');
     expect(mockState.firsts.filter((t) => ['customers', 'call_log'].includes(t)).slice(-2)).toEqual(['customers', 'call_log']);
-    jest.clearAllMocks(); mockState.updates = [];
-    mockState.firstQueue = [a, a, { id: 'call-1', customer_id: null }, { id: 'lead-1', address: null }];
+    expect(writeback().relinkedTo).toBe('cust-Q');
+    // Unlinked (null) before the reply: no customer lock, the call row is STILL taken FOR UPDATE, no customer write.
+    jest.clearAllMocks(); mockState.updates = []; mockState.firsts = [];
+    mockState.firstQueue = [a, a, { id: 'call-1', customer_id: null }, { id: 'call-1', customer_id: null }, { id: 'lead-1', address: null }];
     r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
     expect(mockRecordCallProperty).not.toHaveBeenCalled();
     expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
     expect(writeback()).toEqual(expect.objectContaining({ lead: 'filled', customer: 'skipped' }));
+    expect(mockState.firsts.filter((t) => t === 'call_log')).toHaveLength(2);
+    expect(mockState.firsts).not.toContain('customers');
+    // A relink landing between the null read and the call lock (the relink committed first): the
+    // locked read sees the new customer; that customer is NOT locked after the call (reverse order)
+    // — the write is skipped and the audit names them.
+    jest.clearAllMocks(); mockState.updates = []; mockState.firsts = [];
+    mockState.firstQueue = [a, a, { id: 'call-1', customer_id: null }, { id: 'call-1', customer_id: 'cust-Q' }, { id: 'lead-1', address: null }];
+    r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockRecordCallProperty).not.toHaveBeenCalled();
+    expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
+    expect(writeback()).toEqual(expect.objectContaining({ lead: 'filled', customer: 'call_relinked', relinkedTo: 'cust-Q' }));
+    expect(mockState.firsts).not.toContain('customers');
+  });
+
+  test('an operator UNLINK after the ask parked detaches the lead too: the cached unit_lead_id is not written; a relink that keeps the stamp still is', async () => {
+    const a = AWAITING();
+    mockState.existingDraft = a;
+    // Unlink: customer null, lead stamp keys dropped, the lead's twilio_call_sid cleared.
+    const unlinked = { id: 'call-1', customer_id: null, twilio_call_sid: 'CA-1', metadata: { customer_link_override: { customer_id: null } } };
+    mockState.firstQueue = [a, a, unlinked, unlinked, { id: 'lead-1', address: null, twilio_call_sid: null }];
+    let r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(r.handled).toBe(true);
+    expect(mockState.updates.find((u) => u.table === 'leads')).toBeUndefined();
+    expect(mockRecordCallProperty).not.toHaveBeenCalled();
+    expect(writeback()).toEqual(expect.objectContaining({ lead: 'call_unlinked', customer: 'skipped' }));
+    // Unlinked, then re-linked to a person: the lead stays detached (the stamp is not restored).
+    jest.clearAllMocks(); mockState.updates = [];
+    const relinkedLater = { id: 'call-1', customer_id: 'cust-Z', twilio_call_sid: 'CA-1', metadata: { customer_link_override: { customer_id: 'cust-Z' } } };
+    mockState.firstQueue = [a, a, relinkedLater, { id: 'cust-Z', address_line1: null }, relinkedLater, { id: 'lead-1', address: null, twilio_call_sid: null }];
+    r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockState.updates.find((u) => u.table === 'leads')).toBeUndefined();
+    expect(mockRecordCallProperty).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-Z' }));
+    expect(writeback().lead).toBe('call_unlinked');
+    // A relink BETWEEN customers keeps the lead stamp: the lead is still the call's and gets the unit.
+    jest.clearAllMocks(); mockState.updates = [];
+    const moved = { id: 'call-1', customer_id: 'cust-Z', twilio_call_sid: 'CA-1', metadata: { lead_id: 'lead-1', customer_link_override: { customer_id: 'cust-Z' } } };
+    mockState.firstQueue = [a, a, moved, { id: 'cust-Z', address_line1: null }, moved, { id: 'lead-1', address: null, twilio_call_sid: 'CA-1' }];
+    r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockState.updates.find((u) => u.table === 'leads').payload.address).toMatch(/Apt 204/);
+    expect(writeback().lead).toBe('filled');
   });
 
   test('a primary property CREATED from the mirror during write-back carries the clarify source and is enqueued for enrichment', async () => {
@@ -1737,6 +1780,15 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
       const cust = { id: 'cust-1', first_name: 'Pat', address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204', city: null, zip: null };
       mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, cust];
       mockState.selectQueue = [[{ address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204', city: null, zip: null }]];
+      expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
+    });
+
+    test('a lead the operator detached from the call (unlink) is not evidence for this ask — the ask stands', async () => {
+      const lead = { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232', first_name: 'Anna', twilio_call_sid: null };
+      const cust = { id: 'cust-1', first_name: 'Anna', address_line1: '9 Home St', address_line2: null };
+      const unlinked = { id: 'call-1', customer_id: null, twilio_call_sid: 'CA-1', metadata: { customer_link_override: { customer_id: null } } };
+      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, unlinked, lead];
+      mockState.selectQueue = [[]];
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
     });
 
