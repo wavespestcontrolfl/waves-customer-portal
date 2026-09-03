@@ -877,37 +877,13 @@ async function parkClarifyAsk({
  * never lapses on its own: a draft whose dollars are KNOWN stale stays
  * unsendable until either the replacement lands (the row is archived by
  * the supersede) or the operator explicitly re-prices it (admin PUT /:id
- * → clearEstimateRepricePending). A crash mid-re-draft therefore leaves
+ * → the revision's own locked write). A crash mid-re-draft therefore leaves
  * the draft blocked with the bell/409 pointing at it — never sendable at
  * the old price.
  */
 function repricePendingActive(engineData) {
   const at = engineData && typeof engineData === 'object' ? engineData.reprice_pending_at : null;
   return typeof at === 'string' && at.length > 0;
-}
-
-/**
- * Explicit operator price correction (admin PUT /:id ran the full server
- * re-price): the stale-price block is lifted. Atomic JSONB path delete —
- * no other key is touched. `attempt` scopes the clear to the marker the
- * revision OBSERVED (the token on the row it wrote): a reply that stamped
- * a newer attempt between the revision's commit and this call — one the
- * revision never priced in — must keep its guard, or its detached supersede
- * and unschedule both fail the token predicate and a scheduled
- * whole-building draft goes out (codex r2 P1 on #3796).
- */
-async function clearEstimateRepricePending(estimateId, database = db, { attempt } = {}) {
-  const changed = await database('estimates')
-    .where({ id: estimateId })
-    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') <> ''")
-    .modify((q) => {
-      if (attempt !== undefined && attempt !== null) q.whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_attempt', '') = ?", [String(attempt)]);
-    })
-    .update({
-      estimate_data: database.raw("jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) - 'reprice_pending_at' - 'reprice_attempt')"),
-      updated_at: new Date(),
-    });
-  return Number(changed) > 0;
 }
 
 // A failed re-price on a SCHEDULED draft: lifting the guard alone would
@@ -2151,6 +2127,5 @@ module.exports = {
   clarifyPreDispatchCheck,
   reopenClarifyAfterFailedSend,
   repricePendingActive,
-  clearEstimateRepricePending,
   _private: { composeClarifyBody, extractAddressReply, extractBedroomReply, extractUnitReply, applyUnitWriteback, unitOnFileAtBuilding, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
 };

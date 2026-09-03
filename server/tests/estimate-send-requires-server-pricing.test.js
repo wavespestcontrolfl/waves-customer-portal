@@ -47,7 +47,7 @@ jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({})),
   notifyCustomer: jest.fn(async () => ({})),
 }));
-jest.mock('../services/estimate-clarify-asks', () => ({ clearEstimateRepricePending: jest.fn(async () => ({})) }));
+jest.mock('../services/estimate-clarify-asks', () => ({}));
 jest.mock('../routes/estimate-public', () => ({ acceptanceServiceLists: jest.fn(), bookingServiceFor: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => false) }));

@@ -585,9 +585,17 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     expect(src('../services/estimator-engine/index.js')).toContain('if (context && !context.error && !unitLineOverride) {');
     // The admin revision lifts only the marker it observed on the row it wrote.
     const route = src('../routes/admin-estimates.js');
-    expect(route).toContain('clearEstimateRepricePending(estimate.id, undefined, { attempt: observedRepriceAttempt })');
+    expect(route).not.toContain('clearEstimateRepricePending');
     const persistence = src('../services/admin-estimate-persistence.js');
     expect(persistence).toMatch(/REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS = \[[^\]]*'reprice_pending_at',\s*'reprice_attempt',/);
+    // …and the observed marker is lifted INSIDE the locked write, before the UPDATE.
+    const liftAt = persistence.indexOf('delete lockedEngine.reprice_pending_at;');
+    expect(liftAt).toBeGreaterThan(-1);
+    expect(persistence.indexOf('revisedFields.estimate_data = JSON.stringify(pendingData);')).toBeGreaterThan(liftAt);
+    // A guarded 'sending' target is not a same-call duplicate for the replacement insert.
+    for (const rel of ['../services/estimator-engine/draft-builder.js', '../services/estimator-engine/commercial-proposal.js']) {
+      expect(src(rel)).toContain("held.whereIn('id', supersedeEstimateIds)");
+    }
     const lockAt = clarify.indexOf("unitCallLinkage(trx, flags.unit_call_log_id, { lock: true })");
     const stampAt = clarify.indexOf('stampCallUnitAnswer(trx, flags.unit_call_log_id');
     expect(lockAt).toBeGreaterThan(-1);

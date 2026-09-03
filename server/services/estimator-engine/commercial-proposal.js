@@ -435,7 +435,15 @@ async function maybeBuildCommercialProposalDraft({
           // (codex P1, PR #3304 GH r6).
           .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
           .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'superseded_at', '') = ''")
-          .modify((q) => { if (supersedeTargets.length) q.whereNotIn('id', supersedeTargets.map((t) => t.id)); })
+          // Same exclusion as the residential creator, a guarded 'sending'
+          // target included (codex r3 P2 on #3796).
+          .modify((q) => {
+            if (supersedeTargets.length) q.whereNotIn('id', supersedeTargets.map((t) => t.id));
+            if (supersedeEstimateIds.length && context?.supersedeAttempt) {
+              q.whereNot((held) => held.whereIn('id', supersedeEstimateIds)
+                .whereRaw("estimate_data->'estimatorEngine'->>'reprice_attempt' = ?", [String(context.supersedeAttempt)]));
+            }
+          })
           .first();
         if (existingForCall) return { duplicate: existingForCall };
         // LIVE call-linkage fence, same as the residential creator (codex

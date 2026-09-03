@@ -2543,6 +2543,19 @@ async function reviseAdminEstimate({
   dryRun = false,
 }) {
   const estimate = await database('estimates').where({ id: estimateId }).first();
+  // The clarify re-price marker this revision OBSERVES before recomputing —
+  // the only attempt its prices can claim to incorporate. It is removed
+  // INSIDE the locked write below (never after commit: a detached re-draft
+  // resuming in that gap could still match the token, lock the revised
+  // row and archive the operator's correction — codex r3 P1 on #3796); a
+  // DIFFERENT attempt the locked row carries was stamped after this
+  // pre-read and survives the rewrite. null = none observed.
+  let observedRepriceAttempt = null;
+  try {
+    const preData = typeof estimate?.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate?.estimate_data || {});
+    const preEngine = preData?.estimatorEngine || {};
+    if (preEngine.reprice_pending_at) observedRepriceAttempt = String(preEngine.reprice_attempt || '');
+  } catch { observedRepriceAttempt = null; }
   if (!estimate) throw errorWithStatus('Estimate not found', 404);
   const block = estimateReviseBlock(estimate, undefined, now());
   if (block) throw errorWithStatus(block.message, block.statusCode);
@@ -2911,6 +2924,14 @@ async function reviseAdminEstimate({
               [key]: lockedValue,
             };
           }
+          // The observed re-price marker is lifted HERE, atomically with the
+          // revision that incorporates it (see observedRepriceAttempt).
+          const lockedEngine = pendingData.estimatorEngine && typeof pendingData.estimatorEngine === 'object' ? pendingData.estimatorEngine : null;
+          if (lockedEngine && observedRepriceAttempt !== null && lockedEngine.reprice_pending_at
+            && String(lockedEngine.reprice_attempt || '') === observedRepriceAttempt) {
+            delete lockedEngine.reprice_pending_at;
+            delete lockedEngine.reprice_attempt;
+          }
           revisedFields.estimate_data = JSON.stringify(pendingData);
         }
       } catch { /* unparseable on either side: fall through to the predicates */ }
@@ -2965,14 +2986,6 @@ async function reviseAdminEstimate({
   try {
     require('./estimate-slot-availability').invalidateEstimate(estimate.id);
   } catch { /* best-effort */ }
-  // The re-price marker this revision OBSERVED before recomputing — the
-  // only one its prices can claim to incorporate. null = none observed.
-  let observedRepriceAttempt = null;
-  try {
-    const preData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
-    const preEngine = preData?.estimatorEngine || {};
-    if (preEngine.reprice_pending_at) observedRepriceAttempt = String(preEngine.reprice_attempt || '');
-  } catch { observedRepriceAttempt = null; }
   return { estimate: updated, memberLinkageWarning, pricingFallbackReason: pricingOut.fallbackReason || null, observedRepriceAttempt };
 }
 

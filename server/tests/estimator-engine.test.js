@@ -784,6 +784,12 @@ describe('review fixes', () => {
     expect(idxPriv.addressFromContext(staleInline)).toBe('5 Other Rd Apt 204, Venice, FL 34285');
     const staleComma = { extraction: null, lead: { address: '5 Other Rd, Apt 9, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Unit 204' };
     expect(idxPriv.addressFromContext(staleComma)).toBe('5 Other Rd Unit 204, Venice, FL 34285');
+    // The UNIT-FIRST form is kept, never doubled: same unit untouched, a different one replaced in place.
+    const unitFirstSame = { extraction: null, lead: { address: 'Unit 204, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(unitFirstSame)).toBe('Unit 204, 5 Other Rd, Venice, FL 34285');
+    const unitFirstStale = { extraction: null, lead: { address: 'Apt 9, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(unitFirstStale)).toBe('Apt 204, 5 Other Rd, Venice, FL 34285');
+    expect(idxPriv.addressFromContext({ ...unitFirstStale, lead: { address: '#9, 5 Other Rd, Venice, FL 34285' } })).toBe('Apt 204, 5 Other Rd, Venice, FL 34285');
   });
 
   test('serviceAddressOverride (the item-bound building) outranks the extraction AND the lead/customer lines of an extraction-less fallback context', () => {

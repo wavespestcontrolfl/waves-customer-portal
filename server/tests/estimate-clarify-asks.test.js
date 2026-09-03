@@ -1057,20 +1057,13 @@ describe('bedroom_count ask (unit-band lane)', () => {
     expect(args.supersedeEstimateId).toBeUndefined();
   });
 
-  test('repricePendingActive never lapses on its own — only a replacement or an explicit operator re-price clears it', async () => {
-    const { repricePendingActive, clearEstimateRepricePending } = require('../services/estimate-clarify-asks');
+  test('repricePendingActive never lapses on its own — only a replacement or an operator revision (inside its own locked write) clears it', async () => {
+    const { repricePendingActive } = require('../services/estimate-clarify-asks');
     expect(repricePendingActive({ reprice_pending_at: '2026-08-28T11:50:00Z' })).toBe(true);
     expect(repricePendingActive({ reprice_pending_at: '2020-01-01T00:00:00Z' })).toBe(true);
     expect(repricePendingActive({})).toBe(false);
     expect(repricePendingActive(null)).toBe(false);
-    // The explicit correction is an atomic one-key JSONB delete.
-    await clearEstimateRepricePending('est-1');
-    const upd = mockState.updates.find((u) => u.table === 'estimates');
-    expect(upd.payload.estimate_data.__raw).toMatch(/- 'reprice_pending_at' - 'reprice_attempt'\)/);
-    // Scoped to the attempt the revision observed: a newer reply's marker is not this revision's to lift.
-    mockState.raws = [];
-    await clearEstimateRepricePending('est-1', undefined, { attempt: 'att-seen' });
-    expect(mockState.raws.some((r) => /reprice_attempt', ''\) = \?/.test(r.sql) && Array.isArray(r.params) && r.params[0] === 'att-seen')).toBe(true);
+    expect(require('../services/estimate-clarify-asks').clearEstimateRepricePending).toBeUndefined();
   });
 
   test('the linked ESTIMATE carries reprice_pending_at from the locked phase; a failed re-draft lifts it (bell stands)', async () => {

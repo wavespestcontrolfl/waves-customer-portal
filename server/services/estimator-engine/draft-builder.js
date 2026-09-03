@@ -1090,9 +1090,19 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         // duplicate_call_draft with no replacement ever produced.
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'superseded_at', '') = ''")
-        // The draft this re-run supersedes carries the same call — it is
-        // the row being replaced, not a concurrent duplicate.
-        .modify((q) => { if (supersedeTargets.length) q.whereNotIn('id', supersedeTargets.map((t) => t.id)); })
+        // The draft(s) this re-run supersedes carry the same call — the
+        // rows being replaced, not concurrent duplicates. A requested
+        // target the supersede could not TAKE (already 'sending') is still
+        // held by this attempt's guard and stays live beside the
+        // replacement (the caller bells it); only a same-call row carrying
+        // NEITHER is a duplicate (codex r3 P2 on #3796).
+        .modify((q) => {
+          if (supersedeTargets.length) q.whereNotIn('id', supersedeTargets.map((t) => t.id));
+          if (supersedeEstimateIds.length && context?.supersedeAttempt) {
+            q.whereNot((held) => held.whereIn('id', supersedeEstimateIds)
+              .whereRaw("estimate_data->'estimatorEngine'->>'reprice_attempt' = ?", [String(context.supersedeAttempt)]));
+          }
+        })
         .first();
       if (existingForCall) {
         return {

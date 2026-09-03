@@ -336,10 +336,20 @@ function draftAmountLabel({ monthly, oneTime }) {
 // own comma segment, "street, Apt 204, city") is left alone; a DIFFERENT
 // unit is the stale or misheard one the customer's answer corrects, so it
 // is replaced — never kept beside the answer.
+const UNIT_FIRST_SEGMENT_RE = /^(?:(?:apt|apartment|unit|ste|suite|bldg|building|fl|floor|spc|space|lot)\.?\s*#?\s*[A-Za-z0-9-]+|#\s*[A-Za-z0-9-]+)$/i;
 function withUnitOverride(line, context) {
   const unit = String(context?.unitLineOverride || '').trim();
   if (!unit || !line) return line;
-  const { splitStreetLineUnitParts, unitLineValueKey } = require('../../utils/address-normalizer');
+  const { splitStreetLineUnitParts, unitLineValueKey, normalizeUnitLine } = require('../../utils/address-normalizer');
+  const segments = String(line).split(',').map((p) => p.trim());
+  // The supported UNIT-FIRST form ("Apt 204, 123 Main St, …"): the splitter
+  // would read the leading unit as the street and the override would be
+  // doubled in front of it (codex r3 P2 on #3796). Same-unit = untouched;
+  // a different one is replaced in place, the form kept.
+  if (segments.length > 1 && UNIT_FIRST_SEGMENT_RE.test(segments[0])) {
+    if (unitLineValueKey(normalizeUnitLine(segments[0])) === unitLineValueKey(unit)) return line;
+    return [unit, ...segments.slice(1)].join(', ');
+  }
   const parsed = splitStreetLineUnitParts(String(line));
   if (parsed.unit) {
     if (unitLineValueKey(parsed.unit) === unitLineValueKey(unit)) return line;
