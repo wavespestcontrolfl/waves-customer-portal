@@ -66,6 +66,28 @@ async function followDuplicateLink(database, lead) {
   return current;
 }
 
+// The ancestry a repeat belongs to, for grouping repeats of one inquiry: the
+// live non-duplicate root the marker chain reaches, or — when the chain
+// dead-ends (a vanished or deleted hop) — the LAST recorded marker on it, so
+// every repeat of the same dead end (B → A → O with O gone: A's marker O, and
+// B's chain through A to that same O) shares one key instead of each falling
+// back to its own immediate marker and reading as two opportunities (codex
+// #3834 r17 P1). The same bounded, cycle-safe walk through live duplicate
+// hops as followDuplicateLink.
+async function resolveAncestry(database, repeat) {
+  const seen = new Set([repeat.id]);
+  let marker = duplicateMarkerOf(repeat);
+  while (marker && seen.size < 8) {
+    const parent = await database('leads').where({ id: marker }).first();
+    if (!parent || parent.deleted_at) return { root: null, key: marker };
+    if (parent.status !== 'duplicate') return { root: parent, key: parent.id };
+    if (seen.has(parent.id)) break;
+    seen.add(parent.id);
+    marker = duplicateMarkerOf(parent);
+  }
+  return { root: null, key: marker || repeat.id };
+}
+
 function leadMatchesEstimateContact(lead, estimate) {
   if (!lead || !estimate) return false;
   if (lead.customer_id && estimate.customer_id) {
@@ -608,7 +630,12 @@ async function markLinkedLeadEstimateAccepted({
     let stamped = 0;
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
-      if (claim) stamp.whereNull('estimate_id').whereIn('status', claim);
+      // ...and, for a claimed row, the identity it was read with (customer
+      // link, phone, email): an original staff re-assigned or re-contacted
+      // after the identity check but before the stamp is no longer this
+      // opportunity, and the stamp must lose rather than let markConverted
+      // overwrite the row's customer with this one (codex #3834 r17 P1).
+      if (claim) stamp.whereNull('estimate_id').whereIn('status', claim).where({ customer_id: lead.customer_id ?? null, phone: lead.phone ?? null, email: lead.email ?? null });
       stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
       if (claim && !stamped) {
         const current = await database('leads').where({ id: lead.id }).first();
@@ -986,14 +1013,23 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
   // in, since the sibling that created the customer row is the one that
   // says when this customer's inquiry began (codex #3834 r16 P1).
   const keepers = new Map(); // ancestry key → keeper
+  let wonAncestry = false;
   for (const repeat of repeats) {
-    const marker = duplicateMarkerOf(repeat);
-    if (!marker) continue;
-    const root = await followDuplicateLink(database, repeat);
-    const resolved = root.id !== repeat.id;
-    const ancestryKey = resolved ? root.id : marker;
+    if (!duplicateMarkerOf(repeat)) continue;
+    const { root, key: ancestryKey } = await resolveAncestry(database, repeat);
     if (linked.some((l) => l.id === ancestryKey)) continue;
-    const rootIsOurs = resolved && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at && ownedByUs(root);
+    // A root already WON as this customer's opportunity (linked to them, or
+    // unlinked with a still-matching contact — the accept path's rule) is
+    // the deal closed: its repeats are add-ons, never a stand-in, and the
+    // customer is established even when that win carries no customer link
+    // (customerHasWonLead cannot see it) — codex #3834 r17 P1. A root won
+    // through a DIFFERENT estimate than this event's is a different deal, as
+    // the accept path judges it, and the repeat stands in as before.
+    if (root && root.status === 'won' && ownedByUs(root) && (!estimateId || !root.estimate_id || root.estimate_id === estimateId)) {
+      wonAncestry = true;
+      continue;
+    }
+    const rootIsOurs = !!root && !CLOSED_LEAD_STATUSES.has(root.status) && ownedByUs(root);
     if (rootIsOurs) {
       if (!keepers.has(ancestryKey)) keepers.set(ancestryKey, root);
       continue;
@@ -1009,14 +1045,16 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
   // misattribute this estimate's value hints. (Tier 1 already handled a
   // lead linked to THIS estimate.)
   const scoped = estimateId ? linked.filter((l) => !l.estimate_id || l.estimate_id === estimateId) : linked;
-  if (!scoped.length) return { candidates: [] };
+  // A won ancestry with nothing else open IS the established customer, not
+  // a customer with no lead (the reason the caller logs).
+  if (!scoped.length) return wonAncestry ? { reason: 'customer_link_established' } : { candidates: [] };
   if (scoped.length > 1) {
     logger.warn(`[lead-trigger] ${source} customer-link skip — ${scoped.length} open leads (ambiguous)`, {
       source, customerId, leadIds: scoped.map((l) => l.id),
     });
     return { reason: 'ambiguous_customer_link' };
   }
-  const established = await customerHasWonLead(database, customerId);
+  const established = wonAncestry || await customerHasWonLead(database, customerId);
   const originating = await isOriginatingLead(database, customerId, scoped[0]);
   if (established || !originating) {
     logger.warn(`[lead-trigger] ${source} customer-link skip (established=${established}, originating=${originating})`, {

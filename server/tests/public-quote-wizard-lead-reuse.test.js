@@ -137,7 +137,11 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // a keeper that filed as a duplicate meanwhile loses the row this request
     // added (codex r14 P1) — on both the current-touch and root-repair paths.
     expect(src).toMatch(/\}\)\.onConflict\('lead_id'\)\.ignore\(\)\.returning\('id'\);\n\s+stampedId = stamped \? stamped\.id : null;/);
-    expect(src).toMatch(/if \(stampedId\) \{\n\s+const keeper = await db\('leads'\)\.where\(\{ id: keeperId \}\)\.first\('status'\);\n\s+if \(keeper\?\.status === 'duplicate'\) await db\('ad_service_attribution'\)\.where\(\{ id: stampedId \}\)\.del\(\);/);
+    expect(src).toMatch(/if \(stampedId\) \{[\s\S]*?const keeper = await db\('leads'\)\.where\(\{ id: keeperId \}\)\.first\('status'\);\n\s+if \(keeper\?\.status === 'duplicate'\) await db\('ad_service_attribution'\)\.where\(\{ id: stampedId \}\)\.del\(\);/);
+    // ...and a keeper staff moved on while the repair was in flight has the
+    // fresh row brought to its current stage (won → booked, lost → lost), so
+    // the status bridge that found nothing to advance is caught up (codex r17 P1).
+    expect(src).toMatch(/else if \(keeper && LEAD_STATUS_TO_FUNNEL_STAGE\[keeper\.status\]\) await bridgeLeadFunnelStage\(keeperId, keeper\.status, db\);/);
     // A submission that adds properties is a wider inquiry, never a repeat
     // (codex r10 P1) — on both paths.
     expect(src).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
@@ -178,7 +182,11 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(block).toMatch(/if \(relabelled && duplicateOfLeadId\) \{[\s\S]*?await db\('ad_service_attribution'\)\.where\(\{ lead_id: lead\.id, funnel_stage: 'lead' \}\)\.del\(\);/);
     // ...and a relabel that did not land leaves the request on the marker
     // the row actually carries (pre-push P1 on r9).
-    expect(block).toMatch(/if \(!relabelled\) duplicateOfLeadId = stored;/);
+    // ...re-read from the database, not the marker this request read before
+    // the race: a concurrent request on the same token may have just filed
+    // this row as a repeat (codex r17 P1).
+    expect(block).toMatch(/if \(!relabelled\) \{[\s\S]*?const current = await db\('leads'\)\.where\(\{ id: lead\.id \}\)\.first\('status', 'extracted_data'\);\n\s+if \(current\) Object\.assign\(lead, current\);\n\s+duplicateOfLeadId = lead\.status === 'duplicate' \? duplicateOfFromExtracted\(lead\.extracted_data\) : null;/);
+    expect(block).not.toMatch(/duplicateOfLeadId = stored;/);
     expect(block).toMatch(/\? \{ status: 'duplicate', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) \|\| \?::jsonb"/);
     expect(block).toMatch(/status: 'new', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) - 'duplicate_of_lead_id'"\)/);
   });
@@ -197,6 +205,6 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // no query selects the original for update from /calculate or /upsell.
     expect(src).not.toMatch(/where\(\{ id: originalId \}\)/);
     expect(src).not.toMatch(/const draftLeadIds/); // the /upsell draft sync never widens past the authenticated lead
-    expect(src.match(/duplicateOfFromExtracted\(/g).length).toBe(2); // the definition + the token-path read
+    expect(src.match(/duplicateOfFromExtracted\(/g).length).toBe(3); // the definition + the token-path read + the lost-relabel re-read
   });
 });

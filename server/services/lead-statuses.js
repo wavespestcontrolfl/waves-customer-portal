@@ -35,7 +35,10 @@ const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewe
 // repeat's — a repeat promoted BECAUSE its root is another customer's
 // already-won lead (a shared household contact), or an unlinked root whose
 // contact staff corrected since, is that customer's own conversion (codex
-// #3834 r15 P2, r16 P2). NULL-safe: no marker, or a marker naming nothing,
+// #3834 r15 P2, r16 P2) — and never through a DIFFERENT estimate: a root
+// won on estimate X while the repeat was won on estimate Y is a different
+// deal, exactly as the accept path promotes it (r17 P2). NULL-safe: no
+// marker, or a marker naming nothing,
 // never excludes; a malformed marker fails the uuid guard rather than the
 // cast. Applied through knex .modify() on an unaliased `leads` query, or
 // spliced raw (PROSPECT_SCOPE_SQL) into a correlated subquery over `leads`.
@@ -46,16 +49,17 @@ const phoneDigits = (col) => `right(regexp_replace(COALESCE(${col}, ''), '[^0-9]
 const markerUuid = (extracted) => `(CASE WHEN ${extracted}->>'duplicate_of_lead_id' ~ '${UUID_RE}' THEN (${extracted}->>'duplicate_of_lead_id')::uuid END)`;
 const SECOND_WIN_SQL = `(leads.status IS DISTINCT FROM 'won' OR NOT EXISTS (
   WITH RECURSIVE chain AS (
-    SELECT o.status, o.deleted_at, o.customer_id, o.phone, o.email, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
+    SELECT o.status, o.deleted_at, o.customer_id, o.estimate_id, o.phone, o.email, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
     FROM leads o
     WHERE o.id = ${markerUuid('leads.extracted_data')}
     UNION ALL
-    SELECT p.status, p.deleted_at, p.customer_id, p.phone, p.email, ${markerUuid('p.extracted_data')}, chain.depth + 1
+    SELECT p.status, p.deleted_at, p.customer_id, p.estimate_id, p.phone, p.email, ${markerUuid('p.extracted_data')}, chain.depth + 1
     FROM chain JOIN leads p ON p.id = chain.parent_id
     WHERE chain.status = 'duplicate' AND chain.deleted_at IS NULL AND chain.depth < 8
   )
   SELECT 1 FROM chain
   WHERE chain.status = 'won' AND chain.deleted_at IS NULL
+    AND NOT (chain.estimate_id IS NOT NULL AND leads.estimate_id IS NOT NULL AND chain.estimate_id <> leads.estimate_id)
     AND CASE
       WHEN chain.customer_id IS NOT NULL AND leads.customer_id IS NOT NULL THEN chain.customer_id = leads.customer_id
       ELSE (${phoneDigits('chain.phone')} <> '' AND ${phoneDigits('chain.phone')} = ${phoneDigits('leads.phone')})

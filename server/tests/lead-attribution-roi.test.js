@@ -100,6 +100,11 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(SECOND_WIN_SQL).toMatch(/WHEN chain\.customer_id IS NOT NULL AND leads\.customer_id IS NOT NULL THEN chain\.customer_id = leads\.customer_id/);
     expect(SECOND_WIN_SQL).toMatch(/right\(regexp_replace\(COALESCE\(chain\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\) = right\(regexp_replace\(COALESCE\(leads\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\)/);
     expect(SECOND_WIN_SQL).toMatch(/LOWER\(TRIM\(chain\.email\)\) = LOWER\(TRIM\(leads\.email\)\)/);
+    // ...and never through a DIFFERENT estimate: a root won on estimate X
+    // while the repeat won on estimate Y is a different deal, exactly as the
+    // accept path promotes it (codex r17 P2).
+    expect(SECOND_WIN_SQL).toMatch(/AND NOT \(chain\.estimate_id IS NOT NULL AND leads\.estimate_id IS NOT NULL AND chain\.estimate_id <> leads\.estimate_id\)/);
+    expect(SECOND_WIN_SQL).toMatch(/SELECT o\.status, o\.deleted_at, o\.customer_id, o\.estimate_id, o\.phone, o\.email/);
     // The sources summary counts (GET /leads/sources) splice the same scope
     // into every COUNT subquery, so the client-derived source conversion
     // rate agrees with the ROI (codex r16 P2).

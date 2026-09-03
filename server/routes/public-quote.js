@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { followDuplicateLink } = require('../services/lead-estimate-link');
-const { stampLeadFunnelRow } = require('../services/lead-funnel-bridge');
+const { stampLeadFunnelRow, bridgeLeadFunnelStage, LEAD_STATUS_TO_FUNNEL_STAGE } = require('../services/lead-funnel-bridge');
 // A wizard re-run of the same inquiry inside this window lands as a
 // 'duplicate' of the prior open lead instead of a second 'new' one.
 const WIZARD_LEAD_REUSE_DAYS = 30;
@@ -1939,7 +1939,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             .update(duplicateOfLeadId
             ? { status: 'duplicate', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }
             : { status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
-          if (!relabelled) duplicateOfLeadId = stored;
+          if (!relabelled) {
+            // 0 rows: a staff transition, or a concurrent request on this
+            // token, won. Follow the row AS IT IS NOW — not the marker this
+            // request read before the race: the other request may have just
+            // filed this row as a repeat (and dropped its lead-stage funnel
+            // row), and trusting the stale read would re-validate a null
+            // marker and re-insert that row (codex #3834 r17 P1).
+            const current = await db('leads').where({ id: lead.id }).first('status', 'extracted_data');
+            if (current) Object.assign(lead, current);
+            duplicateOfLeadId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
+          }
           if (relabelled && duplicateOfLeadId) {
             // The row just filed as a repeat: a funnel row it carries at the
             // lead stage — its own earlier stamp, or a concurrent repeat's
@@ -2238,8 +2248,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           stampedId = stamped ? stamped.id : null;
         }
         if (stampedId) {
+          // ...and reconciled with the keeper's CURRENT status: a keeper that
+          // filed as a duplicate meanwhile loses the row (r14 P1); a keeper
+          // staff moved on (won / lost / contacted) while the repair was in
+          // flight — whose own status bridge found no row to advance yet —
+          // has the fresh row brought to that stage, so a won root never
+          // sits at 'lead' and a lost one never advances (codex #3834 r17 P1).
           const keeper = await db('leads').where({ id: keeperId }).first('status');
           if (keeper?.status === 'duplicate') await db('ad_service_attribution').where({ id: stampedId }).del();
+          else if (keeper && LEAD_STATUS_TO_FUNNEL_STAGE[keeper.status]) await bridgeLeadFunnelStage(keeperId, keeper.status, db);
         }
       }
     } catch (attrErr) {
