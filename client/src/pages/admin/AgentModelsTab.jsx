@@ -6,7 +6,7 @@ import { useHubParams } from "./agents/hubParams";
 import LaneModelCard from "./agents/LaneModelCard";
 import MigrationSetDialog from "./agents/MigrationSetDialog";
 import PickModelDialog from "./agents/PickModelDialog";
-import { UNPIN, computeChanges, destinationLabel, discoveredEntry, effectiveLegFor, envBlockOf, envForLeg as envForLegIn, holdsFor, legsOf, modelLabel, movesOnEnv, selectorDraftFor, selectorUnpinnedModel } from "./agents/modelDraft";
+import { UNPIN, computeChanges, destinationLabel, discoveredEntry, sourceLabel, effectiveLegFor, envBlockOf, envForLeg as envForLegIn, holdsFor, legsOf, modelLabel, movesOnEnv, selectorDraftFor, selectorUnpinnedModel } from "./agents/modelDraft";
 
 // Agents → Models: one card per AI lane, grouped by product area (the area
 // strip in the hub header filters them), each with a plain-English line, the
@@ -92,7 +92,10 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   const uncheckedMoving = data ? data.lanes.filter((l) => laneChanged(l) && l.continuity === "unchecked").length : 0;
   // Moving lanes with nothing to degrade to: a model that passes the probe can
   // still reject the lane's request shape, and these fail rather than fall back.
-  const noBackupMoving = data ? data.lanes.filter((l) => laneChanged(l) && !l.fallback).map((l) => l.name) : [];
+  // A moving lane is covered only by a backup that is NOT itself moving: when
+  // the drafted model is the backup, a bad id there means the lane fails the
+  // moment the primary does.
+  const noBackupMoving = data ? data.lanes.filter((l) => laneChanged(l) && (!l.fallback || effectiveLeg(l.fallback) !== l.fallback.model)).map((l) => l.name) : [];
 
   // Inbound-content lanes that a change lands on Gemini (the adapter folds the
   // system prompt into the user turn — no instruction boundary yet).
@@ -318,7 +321,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
             {changes.map((c) => (
               <li key={c.env} className="flex flex-col gap-0.5 text-13">
                 <span className="text-zinc-900">
-                  <span className="font-medium">{c.label}</span>: {c.hold ? `stays ${modelLabel(catalog, c.from)}` : `${modelLabel(catalog, c.from)} → ${destinationLabel(c, catalog)}`}
+                  <span className="font-medium">{c.label}</span>: {c.hold ? `stays ${modelLabel(catalog, c.from)}` : `${sourceLabel(c, catalog)} → ${destinationLabel(c, catalog)}`}
                   {c.unpin ? " · delete the variable" : ""}
                   {c.destinations?.length > 1 ? " · differs by lane" : ""}
                   {c.lanes > 1 ? ` · ${c.lanes} lanes` : ""}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { UNPIN, buildMigrationSet, computeChanges, discoveredEntry, effectiveLegFor, envBlockOf, holdsFor, modelsInUse, selectorDraftFor } from "./modelDraft";
+import { UNPIN, buildMigrationSet, computeChanges, discoveredEntry, effectiveLegFor, envBlockOf, holdsFor, modelsInUse, selectorDraftFor, sourceLabel } from "./modelDraft";
 import { CATALOG, makeData } from "./modelDraft.fixture";
 
 const resolve = (data, draft) => {
@@ -96,6 +96,19 @@ describe("computeChanges", () => {
     const changes = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
     expect(changes[0]).toMatchObject({ lanes: 2, lockedLanes: [] });
     expect(changes[0].laneNames).toEqual(["SMS intent", "SMS draft"]);
+  });
+});
+
+describe("computeChanges · shared unset pin", () => {
+  it("names every model the shared env currently moves, not just the first lane's", () => {
+    const data = makeData();
+    const report = data.lanes.find((l) => l.id === "report_copy");
+    report.primary = { ...report.primary, selector: null, pinned: false, setEnv: null };
+    data.lanes.push({ id: "wdo_history", name: "WDO history", describe: "Prior history", area: "reports", continuity: "verified", inbound: false, lock: null, fanout: false, applies: "restart", primary: { model: "m3", selector: null, pinEnv: "PIN_REPORT", setEnv: null, pinned: false, unpinnedModel: "m3", accepts: { providers: ["anthropic", "openai"], cap: "text", deep: false }, live: false }, fallback: null, retry: null, also: [] });
+    const draft = { PIN_REPORT: "m2" };
+    const [c] = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
+    expect(c).toMatchObject({ env: "PIN_REPORT", from: "m1", sources: ["m1", "m3"], to: "m2", lanes: 2 });
+    expect(sourceLabel(c, CATALOG)).toBe("Claude Opus 4.8 / GPT-5.6 Terra");
   });
 });
 

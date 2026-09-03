@@ -145,8 +145,11 @@ export function computeChanges({ data, draft, selectorDraft }) {
       const unpin = next === UNPIN;
       const sharing = data.lanes.filter((x) => legsOf(x).some((g) => g.pinEnv === env));
       const legOf = (x) => legsOf(x).find((g) => g.pinEnv === env);
-      // Unpinning a shared env can land its lanes on different models.
+      // Unpinning a shared env can land its lanes on different models — and
+      // an UNSET shared env's lanes may sit on different models today (one on
+      // its selector, one on a literal default), so setting it moves them all.
       const destinations = unpin ? [...new Set(sharing.map((x) => baseAfterDraft(legOf(x))))] : [next];
+      const sources = [...new Set(sharing.map((x) => legOf(x).model))];
       if (!unpin && sharing.every((x) => next === baseAfterDraft(legOf(x)) && !legOf(x).pinned)) continue;
       const hold = !unpin && !leg.pinned && next === leg.model;
       const label = hold
@@ -155,6 +158,7 @@ export function computeChanges({ data, draft, selectorDraft }) {
       byEnv.set(env, {
         env,
         from: leg.model,
+        sources,
         to: destinations[0],
         destinations,
         unpin,
@@ -174,6 +178,7 @@ export function computeChanges({ data, draft, selectorDraft }) {
 }
 
 export const destinationLabel = (change, catalog) => (change.destinations || [change.to]).map((id) => modelLabel(catalog, id)).join(" / ");
+export const sourceLabel = (change, catalog) => (change.sources || [change.from]).map((id) => modelLabel(catalog, id)).join(" / ");
 
 // Unpins are deletions: Railway has no "unset" syntax, so the line is an
 // instruction rather than an assignment.

@@ -91,6 +91,21 @@ describe("AgentModelsTab", () => {
     expect(await screen.findByText(/# delete MODEL_FLAGSHIP \(unpin → Claude Opus 5\)/)).toBeInTheDocument();
   });
 
+  it("moving a lane's backup never promises that backup as coverage", async () => {
+    renderTab();
+    await screen.findByText("SMS intent");
+    const card = screen.getAllByText("Intelligence Bar").map((e) => e.closest(".p-4")).find(Boolean); // the lane card, not the area heading
+    fireEvent.click(within(card).getByRole("button", { name: "Show details for Intelligence Bar" }));
+    const change = within(card).getAllByRole("button", { name: "Change" });
+    fireEvent.click(change[change.length - 1]); // the backup leg (OPENAI_FAST)
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/agents/models/probe", expect.objectContaining({ method: "POST" })));
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
+    expect(await screen.findByText(/No backup for SMS intent, Intelligence Bar/)).toBeInTheDocument();
+    expect(screen.queryByText(/Every moving lane keeps its backup/)).toBeNull();
+  });
+
   it("a fan-out lane shows its second model as running alongside, not as a backup", async () => {
     adminFetch.mockImplementation(async (path) => {
       if (path === "/admin/agents/models") {
