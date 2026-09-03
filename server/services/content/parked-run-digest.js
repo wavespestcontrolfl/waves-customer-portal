@@ -62,6 +62,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { deliverOpsDigest } = require('../ops-digest');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 // Shared classifier — kinds email-approvals already covers with per-item
@@ -512,11 +513,17 @@ async function runParkedRunDigest(opts = {}) {
   const mailer = opts.email || require('../email');
   let result;
   try {
-    result = await mailer.send({
-      to,
+    result = await deliverOpsDigest({
+      key: 'parked-run-digest',
       subject: composed.subject,
-      heading: 'Parked content drafts',
-      body: composed.bodyHtml,
+      html: composed.bodyHtml,
+      link: '/admin/blog?tab=autopilot',
+      sendEmail: () => mailer.send({
+        to,
+        subject: composed.subject,
+        heading: 'Parked content drafts',
+        body: composed.bodyHtml,
+      }),
     });
   } catch (err) {
     result = { ok: false, error: err.message };

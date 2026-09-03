@@ -192,7 +192,11 @@ describe('glassRowInclusions', () => {
   });
 
   it('returns the glass rewrite for known service rows and null for unknown ones', () => {
-    expect(glassRowInclusions('lawn_care').some((b) => /money-back/.test(b))).toBe(true);
+    // Lawn keeps its three program bullets; the guarantee + no-contract lines
+    // were trimmed (owner 2026-09-02) because the CTA micro states both.
+    expect(glassRowInclusions('lawn_care')).toHaveLength(3);
+    expect(glassRowInclusions('lawn_care').some((b) => /money-back|long-term contract/.test(b))).toBe(false);
+    expect(glassRowInclusions('pest_control').some((b) => /money-back/.test(b))).toBe(true);
     expect(glassRowInclusions('mosquito').length).toBeGreaterThanOrEqual(3);
     expect(glassRowInclusions('palm_injection').length).toBeGreaterThanOrEqual(3);
     // Fail-safe: no glass list means the caller keeps the baseline list.

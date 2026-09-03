@@ -110,6 +110,19 @@ const {
   savedFloorReplaySignals,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
+const { describeLawnProgramCadence } = require('../services/self-booking-plan-sync');
+
+function lawnCalendarBlock(services) {
+  if (!featureGates.isEnabled('estimateLawnCalendar')) return {};
+  const lawn = (Array.isArray(services) ? services : [])
+    .find((section) => section && section.key === 'lawn_care' && section.isRecurring === true);
+  const programs = {};
+  for (const frequency of Array.isArray(lawn?.frequencies) ? lawn.frequencies : []) {
+    const program = frequency?.key ? describeLawnProgramCadence(frequency.visitsPerYear) : null;
+    if (program) programs[frequency.key] = program;
+  }
+  return Object.keys(programs).length ? { lawnCalendar: { programs } } : {};
+}
 const acceptanceTerms = require('../services/acceptance-terms-text');
 const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
@@ -25466,14 +25479,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       ...(propertyGroup ? { propertyGroup } : {}),
       ...returnVisitBlock,
       ...(successReferral ? { referral: successReferral } : {}),
-      // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): the page draws
-      // the strip from visitsPerYear already in the section payload, so this
-      // is a render flag only. Include-when-true; a recurring lawn section
-      // must exist or there is nothing to draw.
-      ...(featureGates.isEnabled('estimateLawnCalendar')
-        && (Array.isArray(pricingBundle.services) ? pricingBundle.services : [])
-          .some((section) => section && section.key === 'lawn_care' && section.isRecurring === true)
-        ? { lawnCalendar: true } : {}),
+      // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): per lawn
+      // frequency key, the cadence line and the projected application months
+      // from the scheduling catalog (describeLawnProgramCadence) — the page
+      // only buckets months into seasons, so it can never promise an interval
+      // the scheduler does not keep (GH Codex P1 on #3755). A frequency with
+      // no catalog plan is omitted and renders nothing; the key is absent
+      // when nothing resolves.
+      ...lawnCalendarBlock(pricingBundle.services),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.

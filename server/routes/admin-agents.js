@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const leadAttribution = require('../services/lead-attribution');
+const agentActivity = require('../services/agent-activity');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
@@ -988,6 +989,17 @@ function uuidOrNull(value) {
     ? value
     : null;
 }
+
+// Activity feed (GATE_AGENT_ACTIVITY). ?hours=24|168 window; gate off →
+// { available: false }. Read-only; see server/services/agent-activity.js.
+router.get('/activity', async (req, res, next) => {
+  try {
+    const feed = await agentActivity.getActivity({ windowHours: req.query.hours });
+    res.json(feed);
+  } catch (err) {
+    next(err);
+  }
+});
 
 // ── Ops queue (GATE_ADMIN_OPS_QUEUE) — read-only, admin-only (router-level
 // requireAdmin). Availability is a separate probe so the hub can decide

@@ -11,6 +11,7 @@
 const path = require('path');
 const logger = require('../logger');
 
+const { deliverOpsDigest } = require('../ops-digest');
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'call-extraction-eval', 'reviewed-calls.json');
 const MANUAL_RERUN = 'node server/scripts/run-call-extraction-replay-eval.js --json';
 
@@ -142,11 +143,19 @@ async function emailFailure({ sendEmail, subject, textBody }) {
   const recipient = process.env.EVAL_REGRESSION_EMAIL || DEFAULT_EVAL_EMAIL;
   if (recipient === 'off') return;
   try {
-    const result = await sendEmail({
-      to: recipient,
+    // The eval_regression bell from notifyFailure / notifyInconclusive
+    // stays; in-app mode adds the ops_digest row the Activity feed lists.
+    const result = await deliverOpsDigest({
+      key: 'call-extraction-eval',
       subject,
-      heading: 'Call extraction replay eval',
-      body: `<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap;margin:0;">${escapeHtml(textBody)}</pre>`,
+      text: textBody,
+      link: '/admin/communications',
+      sendEmail: () => sendEmail({
+        to: recipient,
+        subject,
+        heading: 'Call extraction replay eval',
+        body: `<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap;margin:0;">${escapeHtml(textBody)}</pre>`,
+      }),
     });
     if (result && result.ok === false) {
       logger.warn(`[call-replay-eval] failure email not sent: ${result.error || 'unknown error'}`);

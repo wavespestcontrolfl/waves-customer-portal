@@ -3,6 +3,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
+const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
 const { nextEtMidnight } = require('./application-conditions');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('./pdf');
 const { applyLawnReportReconciliation } = require('./report-consistency');
@@ -109,7 +110,10 @@ async function loadServiceRecordForPdf(recordId, knex = db) {
       'technicians.avatar_url as technician_avatar_url',
       'technicians.photo_s3_key as technician_photo_s3_key',
     )
-    .first();
+    .first()
+    // Frozen identity overlays the join before the canonical lawn pin and
+    // the storage-key signature read the row (report-identity-snapshot.js).
+    .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 }
 
 async function renderAndStoreServiceReportPdf(recordId, {

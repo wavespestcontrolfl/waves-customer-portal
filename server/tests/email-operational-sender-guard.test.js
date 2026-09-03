@@ -35,6 +35,14 @@ describe('email shouldSkipAutoAction — operational-sender guard', () => {
     expect(shouldSkipAutoAction('marketing_newsletter', 'noreply@google.com', GOOG('google.com'))).toBe(true);
   });
 
+  test('Capital One Zelle payment notices are operational — never trashed/unsubscribed by a verdict (2026-09-02)', () => {
+    expect(isOperationalDomain(domainFromAddress('capitalone@notification.capitalone.com'))).toBe(true);
+    expect(shouldSkipAutoAction('spam', 'capitalone@notification.capitalone.com', GOOG('notification.capitalone.com'))).toBe(true);
+    expect(shouldSkipAutoAction('marketing_newsletter', 'alerts@capitalone.com', GOOG('capitalone.com'))).toBe(true);
+    // A spoof that fails auth still falls through to quarantine.
+    expect(shouldSkipAutoAction('spam', 'alerts@capitalone.com', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example; dkim=none')).toBe(false);
+  });
+
   test('external newsletters and spam still get auto-actioned', () => {
     expect(shouldSkipAutoAction('marketing_newsletter', 'deals@retailer.example.com')).toBe(false);
     expect(shouldSkipAutoAction('spam', 'winner@lottery.example.biz')).toBe(false);

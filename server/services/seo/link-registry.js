@@ -50,6 +50,11 @@ const ACQUISITION_TYPES = Object.freeze([
 const PAID_ACQUISITION_TYPES = Object.freeze(['paid_listing', 'membership', 'association', 'sponsorship']);
 const OUTREACH_ACQUISITION_TYPES = Object.freeze(['resource_outreach', 'editorial_outreach', 'partnership', 'content_submission']);
 const EXPECTED_REL = Object.freeze(['dofollow', 'nofollow', 'sponsored', 'unknown']);
+// §3.2 — the currency an investigated fee is attested in: USD proven on the
+// page, a declared foreign currency, or unknown (never a default).
+const CURRENCIES = Object.freeze(['USD', 'unknown', 'foreign']);
+// §3.2 — payment scope of a paid path's fee (required when payment_required).
+const FEE_SCOPES = Object.freeze(['per_location', 'account_wide']);
 const EXPECTED_INDEXABILITY = Object.freeze(['indexable', 'noindex', 'unknown']);
 const EXPECTED_PERSISTENCE = Object.freeze(['durable', 'rotating', 'unknown']);
 const RENEWAL_PERIODS = Object.freeze(['annual', 'monthly', 'none']);
@@ -70,11 +75,16 @@ const ATTEMPT_OUTCOMES = Object.freeze([
 
 // §3.3b / §6.1 — dimension levels. OWNER_OVERRIDE is deliberately absent: it is
 // only ever the `authority` of a floor-waiver approval row, never a level.
+// Step 4a appended OWNER_INPUT_REQUIRED (payment dimension only: a valid path
+// whose price is unparseable or whose currency is unknown parks for a
+// price-entry card, §6.1); its migration swaps the CHECK — the step-1 literal
+// stays a prefix of this list.
 const AUTHORITY_DIMENSIONS = Object.freeze(['execution', 'payment', 'communication']);
 const AUTHORITY_LEVELS = Object.freeze([
   'AUTO_FREE', 'AUTO_ACCOUNT', 'AUTO_OUTREACH', 'AUTO_PAID_WITHIN_POLICY',
   'OWNER_FREE', 'OWNER_ACCOUNT', 'OWNER_OUTREACH', 'OWNER_PAYMENT', 'OWNER_MANUAL_PAYMENT',
   'OWNER_MEMBERSHIP', 'OWNER_LEGAL', 'OWNER_HUMAN_STEP', 'DENY', 'INVALID',
+  'OWNER_INPUT_REQUIRED',
 ]);
 
 // §4 step 1 — hosts that are references to opportunities or our own, never a
@@ -544,7 +554,7 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
 
 module.exports = {
   LINK_SOURCES, AGENT_STATES, DISCOVERY_PRIORITIES, ACQUISITION_TYPES, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES,
-  EXPECTED_REL, EXPECTED_INDEXABILITY, EXPECTED_PERSISTENCE, RENEWAL_PERIODS, PATH_LINK_TYPES,
+  EXPECTED_REL, EXPECTED_INDEXABILITY, EXPECTED_PERSISTENCE, RENEWAL_PERIODS, PATH_LINK_TYPES, CURRENCIES, FEE_SCOPES,
   ATTEMPT_PROVIDERS, ATTEMPT_ACTIONS, ATTEMPT_OUTCOMES, AUTHORITY_DIMENSIONS, AUTHORITY_LEVELS,
   INTAKE_ITEM_STATES, INTAKE_DROP_REASONS, normalizeRawUrl, intakeItemKey,
   NEVER_TARGET_HOSTS, isNeverTargetHost,

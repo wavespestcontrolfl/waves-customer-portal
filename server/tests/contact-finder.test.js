@@ -8,6 +8,28 @@ function mockFetch(map) {
   };
 }
 
+describe('fetchPage DNS preflight', () => {
+  test('a host lookup that never answers is bounded by the fetch timeout → dns_error, the fetch never starts (hung investigator sweep 2026-09-02)', async () => {
+    const { fetchPage } = require('../services/seo/contact-finder');
+    const fetchFn = jest.fn();
+    const started = Date.now();
+    const r = await fetchPage('https://slow-dns.example/join', { fetchFn, timeoutMs: 50, resolveHostFn: () => new Promise(() => {}) });
+    expect(r).toMatchObject({ status: 0, blocked: false, error: 'dns_error', html: null });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  test('a lookup that rejects is dns_error too, and a fast public answer still fetches', async () => {
+    const { fetchPage } = require('../services/seo/contact-finder');
+    const rejecting = await fetchPage('https://x.example/', { fetchFn: jest.fn(), timeoutMs: 50, resolveHostFn: async () => { throw new Error('EAI_AGAIN'); } });
+    expect(rejecting.error).toBe('dns_error');
+    const fetchFn = jest.fn(async () => ({ status: 200, headers: { get: (n) => (n === 'content-type' ? 'text/html' : null) }, body: null, text: async () => '<html>ok</html>' }));
+    const ok = await fetchPage('https://x.example/', { fetchFn, timeoutMs: 500, resolveHostFn: async () => true });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(ok.status).toBe(200);
+  });
+});
+
 describe('contact-finder', () => {
   test('extracts a mailto email from the homepage and marks contactable', async () => {
     const fetchFn = mockFetch({

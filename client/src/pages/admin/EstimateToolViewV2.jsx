@@ -363,6 +363,22 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
   return warnings;
 }
 
+// Triage reason codes that mean the lead's address itself is still owed
+// or unverified (call-routing-gates address_review lane, validation half).
+const ADDRESS_ASK_REASONS = new Set([
+  "missing_unit_number",
+  "address_unverified",
+  "missing_service_address",
+  "low_confidence_address",
+  "address_validation_unavailable",
+  "address_unverifiable",
+  "address_not_validated",
+]);
+
+// A dwelling unit designator anywhere in a typed address (the server's
+// unit-scope model reads the same forms; "#" alone counts).
+const UNIT_DESIGNATOR_RE = /\b(?:apt|apartment|unit)\.?\s*#?\s*[\w-]+|#\s*\w+/i;
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...options,
@@ -2714,6 +2730,11 @@ export default function EstimateToolViewV2({
   // never autofill — or stamp its customer match onto — a newer one.
   const lookupSeqRef = useRef(0);
   const lookupAbortRef = useRef(null);
+  // The address a unit-scoped lookup was run for — the satellite guard
+  // below keys on it, not on the (possibly stale) profile alone, so editing
+  // the address after a unit lookup re-enables the standalone analysis
+  // (codex r2 P2).
+  const unitLookupAddressRef = useRef("");
   // Live mirror of form.address for the in-flight lookup's apply gate: the
   // seq only advances when ANOTHER lookup starts, so an address
   // edit/select/clear during a lookup needs its own invalidation — the
@@ -3195,6 +3216,43 @@ export default function EstimateToolViewV2({
         if (!cancelled) setCustomerSpend(d);
       } catch {
         if (!cancelled) setCustomerSpend(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [existingCustomerMatch?.id, form.customerId]);
+  // The linked customer's OPEN address-review cards (an owed unit number,
+  // an unverified address) from the call that created the lead. Without
+  // this the property panel prices whatever address the lead carries and
+  // nothing on this page says the office still owes a callback for it —
+  // the Triage Inbox knew, the estimate tool didn't (2026-09-02: a tenant's
+  // bare complex address quoted as a 358-unit commercial property).
+  // Read-only context, same fail-open contract as customerSpend.
+  const [openAddressAsks, setOpenAddressAsks] = useState([]);
+  useEffect(() => {
+    setOpenAddressAsks([]);
+    const customerId = existingCustomerMatch?.id || form.customerId;
+    if (!customerId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await adminFetch(
+          // active = open OR in_progress: a card the office already claimed
+          // is still an owed callback (pre-push codex P1).
+          `/admin/triage?status=active&customer_id=${encodeURIComponent(customerId)}`,
+        );
+        if (!r.ok) return;
+        const d = await r.json();
+        if (cancelled) return;
+        // Validation-ask cards only: the address_review lane also files
+        // multi-property / second-address / property-role / dropped-call
+        // cards, which are not "this address may be wrong" (codex r1 P2).
+        setOpenAddressAsks(
+          (Array.isArray(d.items) ? d.items : []).filter((i) => ADDRESS_ASK_REASONS.has(i.reason_code)),
+        );
+      } catch {
+        if (!cancelled) setOpenAddressAsks([]);
       }
     })();
     return () => {
@@ -3775,6 +3833,7 @@ export default function EstimateToolViewV2({
       const ep = data.enriched;
       setEnrichedProfile(ep);
       setVerifySaveState("");
+      unitLookupAddressRef.current = ep.residentialUnitLookup ? address : "";
 
       const upd = {};
       if (ep.homeSqFt) upd.homeSqFt = String(ep.homeSqFt);
@@ -3784,6 +3843,32 @@ export default function EstimateToolViewV2({
         Object.assign(upd, resolveLookupPropertyTypeAutofill(ep.propertyType, ep.category));
       }
       if (ep.commercialSubtype) upd.commercialSubtype = ep.commercialSubtype;
+      if (ep.residentialUnitLookup) {
+        // One unit inside a building: the server already blanked the
+        // parcel's dims and dropped its parcel-wide reads, but the copies
+        // above only land TRUTHY values — so a bare-building lookup run a
+        // moment earlier (the usual sequence: address first, then "which
+        // apartment?") would keep the complex's sqft / lot / stories /
+        // pool / landscape in the form through the spread below and price
+        // the whole property anyway (codex r1 P1). Reset those to the form
+        // defaults; the operator supplies the unit's own figures.
+        Object.assign(upd, {
+          homeSqFt: ep.homeSqFt ? String(ep.homeSqFt) : "",
+          lotSqFt: "",
+          stories: ep.stories ? String(ep.stories) : "1",
+          hasPool: "NO",
+          hasPoolCage: "NO",
+          poolCageSize: "MEDIUM",
+          shrubDensity: "MODERATE",
+          treeDensity: "MODERATE",
+          landscapeComplexity: "MODERATE",
+          nearWater: "NO",
+          bedArea: "",
+          // Parcel-wide canopy count from the earlier bare-building lookup
+          // (pre-push codex P1 r4); palms clear through palmPrefillAllowed.
+          treeCount: "",
+        });
+      }
       if (ep.pool === "YES" || ep.pool === "POSSIBLE") upd.hasPool = "YES";
       if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
@@ -3834,7 +3919,10 @@ export default function EstimateToolViewV2({
         // With derivation suppressed nothing would refresh a previous
         // address's auto-derived footprint — clear it (manual entries keep
         // the same never-overwritten contract as the boxes below).
-        if (ep.footprintUnknown === true && f._termiteFootprintAuto) {
+        // A unit lookup has no building footprint to offer either, and the
+        // bare-building lookup's auto-derived one must not survive as a
+        // "manual" termite measurement (codex r2 P1).
+        if ((ep.footprintUnknown === true || ep.residentialUnitLookup) && f._termiteFootprintAuto) {
           next.termiteFootprintSqFt = "";
           next._termiteFootprintAuto = false;
         }
@@ -4015,6 +4103,19 @@ export default function EstimateToolViewV2({
     const address = form.address.trim();
     if (!address) {
       setSatelliteStatus({ type: "err", msg: "Enter an address first" });
+      return;
+    }
+    // A unit lookup dropped every parcel-wide read on purpose; this action
+    // would write them straight back (lot, bed area, canopy, densities,
+    // pool, water) — pre-push codex P1 r4.
+    // …the same address, OR any address still carrying a dwelling unit
+    // ("Apt 204" corrected to "Apt 205" is the same parcel — codex r4 P1).
+    if (enrichedProfile?.residentialUnitLookup
+      && (unitLookupAddressRef.current === address || UNIT_DESIGNATOR_RE.test(address))) {
+      setSatelliteStatus({
+        type: "err",
+        msg: "Satellite analysis reads the whole parcel — not applied to a single-unit lookup. Enter the unit's own figures.",
+      });
       return;
     }
     setSatelliteStatus({
@@ -6004,6 +6105,25 @@ export default function EstimateToolViewV2({
                   form.isRecurringCustomer === "YES"
                     ? " · 15% loyalty discount applied"
                     : ""}
+                </div>
+              )}
+              {openAddressAsks.length > 0 && (
+                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
+                  <strong>Address still being confirmed</strong>
+                  {" — "}
+                  {openAddressAsks.some((i) => i.reason_code === "missing_unit_number")
+                    ? "the caller gave the building but no unit number"
+                    : "the address from the call did not validate"}
+                  {(() => {
+                    const b = openAddressAsks.find((i) => i.payload?.unit_ask_building?.street_line_1)?.payload
+                      ?.unit_ask_building;
+                    return b
+                      ? ` (${[b.street_line_1, b.city, b.postal_code].filter(Boolean).join(", ")})`
+                      : "";
+                  })()}
+                  . Callback pending in the Triage Inbox — this lookup may be the whole building, not
+                  the unit.
                 </div>
               )}
               {/* Gated on the DATA, not on existingCustomerMatch — the

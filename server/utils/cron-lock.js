@@ -488,6 +488,10 @@ async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn, 
  * Non-mutating check of whether a job's advisory lock is currently held (i.e. a
  * runExclusive('<jobName>') body is executing — possibly on another instance).
  * Acquires the lock momentarily and releases it: if we got it, nothing holds it.
+ * Returns true (held), false (free), or null when the probe itself could not
+ * run (no connection / query failure) — falsy for "is it running?" callers,
+ * but distinguishable by a caller that must not start work on an unknown
+ * lease (a null is "could not check", never "free").
  */
 async function isLocked(jobName) {
   const lockKey = `cron:${jobName}`;
@@ -496,7 +500,7 @@ async function isLocked(jobName) {
     conn = await db.client.acquireConnection();
   } catch (err) {
     logger.error(`[cron-lock] isLocked(${jobName}): could not acquire DB connection (${err.message})`);
-    return false;
+    return null;
   }
   let acquired = false;
   try {
@@ -508,7 +512,7 @@ async function isLocked(jobName) {
     return !acquired; // we acquired it → free (nothing running); couldn't → held
   } catch (err) {
     logger.warn(`[cron-lock] isLocked(${jobName}) check failed: ${err.message}`);
-    return false;
+    return null;
   } finally {
     if (acquired) {
       try {

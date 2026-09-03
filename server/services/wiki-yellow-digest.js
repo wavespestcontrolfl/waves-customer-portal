@@ -12,6 +12,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { runExclusive } = require('../utils/cron-lock');
@@ -155,16 +156,23 @@ async function sendYellowDigestLocked(opts = {}) {
   }
 
   try {
-    await mailer.sendOne({
-      to,
-      fromEmail: fromEmail(),
-      fromName: FROM_NAME,
+    await deliverOpsDigest({
+      key: 'wiki-yellow-digest',
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      categories: ['wiki-brain', 'yellow-digest'],
-      // A SendGrid validation body echoes the address — PII in Railway logs.
-      suppressErrorLog: true,
+      link: '/admin/knowledge?area=base&kbTab=field',
+      sendEmail: () => mailer.sendOne({
+        to,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: composed.subject,
+        html: composed.html,
+        text: composed.text,
+        categories: ['wiki-brain', 'yellow-digest'],
+        // A SendGrid validation body echoes the address — PII in Railway logs.
+        suppressErrorLog: true,
+      }),
     });
   } catch (err) {
     // Never interpolate err.message here (may echo the recipient address).

@@ -63,7 +63,22 @@ already on it (no homeowner PII/links); settlement happens via the webhook,
 not the route,
 `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
-`/api/public/estimates/:token/find-slots`, `/api/reports/:token/*`,
+`/api/public/estimates/:token/find-slots`, `/api/reports/:token/*` (the
+service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
+the queued PDF / report-email renders that share `buildReportV1Data` —
+renders the report's IDENTITY facts from the completion-time snapshot on
+`service_records.service_data.reportIdentitySnapshot` when the record
+carries one: `customerName`, `serviceAddress` / `propertyAddress` /
+`cityState` and the `mapCenter` those resolved to, `technicianName`, the
+`serviceDisplayName` title, and each application's approved product facts
+(EPA number, precaution / re-entry / summary copy, approval). Records
+completed before the snapshot shipped carry none and keep the live
+customers / scheduled_services / technicians / products_catalog joins; a
+snapshot leg that could not be frozen (missing customer or technician row)
+is omitted and that leg stays live. The PDF filename and the canonical lawn
+pin read the same overlaid row. Presentation (technician photo URL, copy
+config) and the deliberately live sections (next visit, review CTA,
+cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
@@ -529,6 +544,18 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+`/data` carries an optional `lawnCalendar` block behind
+`GATE_ESTIMATE_LAWN_CALENDAR` (dev-open, prod dark): `{ programs: {
+[frequencyKey]: { visitsPerYear, cadence, months } } }` for the recurring
+lawn section's frequencies, where `cadence` is the customer-facing interval
+line and `months` the 0-based ET month indices of the program's projected
+applications from the current month — both derived server-side by
+`describeLawnProgramCadence` (self-booking-plan-sync.js) from the catalog
+plan matching the frequency's visitsPerYear through the scheduler's own
+`buildRecurringOccurrenceDates`; no customer data, no dates. A frequency
+with no catalog plan is omitted; the key is ABSENT when the gate is off or
+nothing resolves (it was boolean `true` from 2026-08 until #3755). The page
+only buckets months into seasons — it never derives an interval itself.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,

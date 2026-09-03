@@ -36,7 +36,8 @@ const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispat
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
-const { buildCompletionAdvisory } = require('../services/service-report/report-data');
+const { buildCompletionAdvisory, approvedReportProductFacts } = require('../services/service-report/report-data');
+const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { tipsForVisit, freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue } = require('../config/feature-gates');
 const {
@@ -6759,6 +6760,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // a correction slipping between the two missed the fresh record
           // and was then overwritten. Locking up front makes finalization
           // and correction strictly ordered whichever starts first.
+          //
+          // Customer FOR SHARE is taken BEFORE the visit lock — the same
+          // customer → visit order customer-dedupe's executeMerge uses
+          // (customers locked first, then the loser's scheduled visits
+          // updated), so a merge racing a completion cannot form a lock
+          // cycle (codex P1 #3742 r4). Feeds the report identity snapshot.
+          const snapshotCustomerRow = await trx('customers')
+            .where({ id: svc.customer_id })
+            .forShare()
+            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
           const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
           // Linked-timer snapshot under the same lock (codex P2 #3152
           // round 23): the post-commit sync's version boundary is THIS
@@ -7051,7 +7062,69 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // (service-closeout-requirements.js frozenCloseoutRequirements).
             ...(closeoutRequirementsSnapshot ? { closeoutRequirements: closeoutRequirementsSnapshot } : {}),
           };
+          // Report identity snapshot (report-identity-snapshot.js): the
+          // customer name, visit address, technician name, linked service
+          // title, and each applied product's approved report facts are
+          // frozen INSIDE the transaction so later customer / schedule /
+          // technician / catalog edits cannot rewrite this visit's report.
+          // Customer and technician are re-read HERE against the locked row
+          // (not the handler's pre-transaction join): a rename, move, or
+          // reassignment that committed between the preflight read and this
+          // lock must freeze as it stands at commit, not as it stood when the
+          // tech opened the panel (pre-push codex P1). Product facts come
+          // from the catalog rows the product loop below re-validates; a
+          // failed read leaves productFacts undefined so the renderer keeps
+          // its live fallback for this record only.
+          // These reads run INSIDE the transaction and propagate like every
+          // other in-trx read here: a failed statement aborts the Postgres
+          // transaction, so a swallowed rejection could not make the leg
+          // "fail-soft" — it would only rename the rollback (pre-push codex
+          // P1). A missing row (deleted customer, no technician) still just
+          // omits that leg via buildReportIdentitySnapshot.
+          // The visit row (stamped address, service_type) is the LOCKED row;
+          // the customer and technician are looked up by the SAME ids
+          // recordInsert persists below (svc.customer_id / svc.technician_id),
+          // so the frozen name can never disagree with the FK the report
+          // routes join for the photo (pre-push codex P1).
+          const snapshotVisitRow = lockedSvcRow || svc;
+          // Lock order is customer (FOR SHARE, taken above before the visit
+          // FOR UPDATE) → visit → technician → catalog, so a concurrent
+          // rename / reassignment / catalog edit cannot commit between these
+          // reads and the completion commit — the frozen values are the
+          // rows as they stand at commit (pre-push codex P1).
+          const snapshotTechnicianRow = svc.technician_id
+            ? await trx('technicians').where({ id: svc.technician_id }).forShare().first('name')
+            : null;
+          // ONE catalog read set inside the trx serves both the frozen report
+          // facts and the product loop's validation below, so the facts the
+          // report freezes are the rows the completion actually validated
+          // against (pre-push codex P1). Keys are canonical lower-case uuids:
+          // Postgres returns ids lower-case however the request spelled them.
+          const snapshotProductIds = [...new Set((products || []).map((p) => canonicalProductId(p?.productId)).filter(Boolean))];
+          const completionCatalogRowsById = new Map(
+            (snapshotProductIds.length
+              // FOR UPDATE, not FOR SHARE: deductProductInventory below
+              // upgrades to FOR UPDATE on these same rows, and two
+              // completions holding compatible share locks would deadlock
+              // on the upgrade (codex P1).
+              ? await trx('products_catalog').whereIn('id', snapshotProductIds).forUpdate().select('*')
+              : []
+            ).map((row) => [canonicalProductId(row.id), row]),
+          );
+          const reportProductFactsSnapshot = {};
+          for (const productId of snapshotProductIds) {
+            reportProductFactsSnapshot[productId] = approvedReportProductFacts(
+              completionCatalogRowsById.get(productId) || null,
+            );
+          }
+          const reportIdentitySnapshot = buildReportIdentitySnapshot({
+            visit: snapshotVisitRow,
+            customer: snapshotCustomerRow || null,
+            technicianName: snapshotTechnicianRow ? snapshotTechnicianRow.name : null,
+            productFacts: reportProductFactsSnapshot,
+          });
           const serviceData = {
+            reportIdentitySnapshot,
             protocol: {
               visitOutcome,
               actions: reportProtocolActions,
@@ -7925,7 +7998,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               err.isOperational = true; err.statusCode = 400;
               throw err;
             }
-            const product = await trx('products_catalog').where({ id: p.productId }).first();
+            // Same read set the report identity snapshot froze from.
+            const product = completionCatalogRowsById.get(canonicalProductId(p.productId));
             if (!product) {
               const err = new Error(`Product not found: ${p.productId}`);
               err.isOperational = true; err.statusCode = 400;

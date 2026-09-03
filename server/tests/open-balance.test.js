@@ -53,14 +53,14 @@ describe('open-balance selection', () => {
     mockResolveForInvoice.mockImplementation(async () => ({ payerId: null }));
   });
 
-  test('issues the portalPayNow-shaped query: delivered statuses, payer-free, statement-free, positive remainder, oldest first, bounded', async () => {
+  test('issues the portalPayNow-shaped query (table-qualified since the predicates are shared with the Zelle amount-lookup join): delivered statuses, payer-free, statement-free, positive remainder, oldest first, bounded', async () => {
     await openBalanceInvoices('cust-1', { excludeInvoiceId: 'inv-current' });
     expect(tableResults.lastCalls).toEqual(expect.arrayContaining([
       ['where', [{ customer_id: 'cust-1' }]],
-      ['whereIn', ['status', ['sent', 'viewed', 'overdue']]],
-      ['whereNull', ['payer_id']],
-      ['whereNull', ['payer_statement_id']],
-      ['whereRaw', ['GREATEST(total - COALESCE(credit_applied, 0), 0) > 0']],
+      ['whereIn', ['invoices.status', ['sent', 'viewed', 'overdue']]],
+      ['whereNull', ['invoices.payer_id']],
+      ['whereNull', ['invoices.payer_statement_id']],
+      ['whereRaw', ['GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) > 0']],
       ['orderBy', ['created_at', 'asc']],
       ['limit', [MAX_OPEN_INVOICES]],
       ['whereNot', ['id', 'inv-current']],
@@ -102,7 +102,7 @@ describe('open-balance selection', () => {
     ];
     mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-default' });
     expect(await openBalanceInvoices('cust-1')).toEqual([]);
-    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-1', throwOnError: true });
+    expect(mockResolveForInvoice).toHaveBeenCalledWith({ database: expect.any(Function), customerId: 'cust-1', throwOnError: true });
   });
 
   test('drops rows whose cents-safe remainder is zero even when SQL admitted them', async () => {

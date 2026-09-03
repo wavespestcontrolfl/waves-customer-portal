@@ -8,6 +8,7 @@ const { claimProspectDomain, lockProspectDomain, findPlacementRow, ACTIVE_OUTREA
 const linkIntake = require('../services/seo/link-registry-intake');
 const { etDateString } = require('../utils/datetime-et');
 const { SIGNUP_TYPES } = require('../services/seo/link-prospect-worker');
+const linkPolicy = require('../services/seo/link-authority-policy');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -281,6 +282,33 @@ const REGISTRY_JOBS = Object.freeze({
   },
   gap: (opts) => require('../services/seo/link-registry-gap-ingest').ingestCompetitorGap(db, { dryRun: opts.dryRun, limit: opts.limit || null }),
   enrich: (opts) => require('../services/seo/link-registry-enrich').enrichDomains(db, { dryRun: opts.dryRun, limit: opts.limit || 200, force: opts.force === true }),
+  // Step 3: fetches + one WORKHORSE call per domain; gated by
+  // GATE_LINK_INVESTIGATOR inside the service (reports `gated: true` when off).
+  // A LIVE run can hold a request open for many minutes (per domain: up to 8
+  // page fetches + a 60s model call + retries), so it is started in the
+  // background and the response returns immediately — the service's own
+  // session lock serializes runs (a second click reports the held lease via
+  // the next run's `skipped`), and the summary lands in the server log.
+  // dryRun and the gated case are fast and stay synchronous.
+  investigate: async (opts) => {
+    const svc = require('../services/seo/link-path-investigator');
+    const args = { dryRun: opts.dryRun, ...(opts.limit ? { limit: opts.limit } : {}) };
+    if (opts.dryRun || !isEnabled('linkInvestigator')) return svc.investigatePaths(db, args);
+    // Probe the lease BEFORE reporting startup: a held lease means no work
+    // will run, and the operator must not read "started" off a no-op. (The
+    // probe races the background acquire by design — a lease taken in the
+    // gap still lands as a logged skip, never a false failure.) A probe that
+    // could not run (null: pool exhausted, DB blip) is NOT a free lease — the
+    // detached run would fail the same way with only a log to show for it,
+    // so report it as not started and let the operator retry.
+    const held = await require('../utils/cron-lock').isLocked(svc.LOCK_KEY);
+    if (held === null) return { started: false, skipped: 'probe_failed' };
+    if (held) return { started: false, skipped: 'lease_held' };
+    void svc.investigatePaths(db, args)
+      .then((r) => logger.info(`[link-investigator] admin run: ${r.skipped ? `SKIPPED (${r.skipped}) ` : ''}selected ${r.selected} investigated ${r.investigated} (qualified ${r.qualified} watching ${r.watching} not_reproducible ${r.notReproducible} refreshes ${r.pathRefreshes}) paths ${r.pathsWritten} failed ${r.failed.length} fetches ${r.fetches} llm ${r.llmCalls}`))
+      .catch((err) => logger.error(`[link-investigator] admin run failed: ${err.message}`));
+    return Promise.resolve({ started: true });
+  },
 });
 router.post('/registry/jobs/:job', async (req, res, next) => {
   try {
@@ -306,7 +334,146 @@ router.get('/registry', async (req, res, next) => {
     const items = await query.clone()
       .orderByRaw("CASE discovery_priority WHEN 'owner_seed' THEN 0 ELSE 1 END") // owner seeds first (§3.5: investigate-first)
       .orderBy('created_at', 'desc').limit(lim).offset(offset);
+    // Best-path summary for the Registry table (§11: type · cost · expected rel).
+    const bestIds = items.map((d) => d.best_path_id).filter(Boolean);
+    if (bestIds.length) {
+      const paths = await db('seo_link_acquisition_paths').whereIn('id', bestIds)
+        .select('id', 'acquisition_type', 'submission_url', 'estimated_cost_cents', 'currency', 'expected_rel', 'confidence', 'payment_required');
+      const byId = new Map(paths.map((p) => [p.id, p]));
+      for (const d of items) d.best_path = byId.get(d.best_path_id) || null;
+    }
     res.json({ items });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/backlink-agent/registry/:id — one domain: active paths first,
+// provenance touches, placements summary (Registry row expand, §11).
+router.get('/registry/:id', async (req, res, next) => {
+  try {
+    const domain = await db('seo_link_domains').where({ id: req.params.id }).first();
+    if (!domain) return res.status(404).json({ error: 'not found' });
+    const [paths, touches, placements] = await Promise.all([
+      db('seo_link_acquisition_paths').where({ domain_id: domain.id })
+        .orderByRaw('CASE WHEN superseded_by IS NULL THEN 0 ELSE 1 END').orderBy('updated_at', 'desc'),
+      db('seo_link_domain_sources').where({ domain_id: domain.id }).orderBy('seen_at', 'asc'),
+      db('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'target_page', 'location_key', 'link_type', 'live_url'),
+    ]);
+    // Attempt history (§11: the drilldown audits what previous attempts did).
+    // Attempts key on path/prospect, not domain — collect via both.
+    const pathIds = paths.map((p) => p.id);
+    const prospectIds = placements.map((pl) => pl.id);
+    const attempts = (pathIds.length || prospectIds.length)
+      ? await db('seo_link_attempts')
+        .where((b) => {
+          if (pathIds.length) b.orWhereIn('path_id', pathIds);
+          if (prospectIds.length) b.orWhereIn('prospect_id', prospectIds);
+        })
+        .orderBy('created_at', 'desc').limit(50)
+        .select('id', 'path_id', 'prospect_id', 'provider', 'action', 'outcome', 'cost_cents', 'sandbox', 'evidence_url', 'created_at')
+      : [];
+    res.json({ domain, paths, touches, placements, attempts });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/backlink-agent/registry/:id — owner registry actions (§11:
+// Watch / Reject / Reopen). acquiring/acquired are lane-owned aggregates the
+// investigator/bridge recompute — never hand-set; "Acquire anyway" is step 4
+// (it needs a stamped authority, not a state flip).
+const REGISTRY_ACTIONS = Object.freeze({ watch: 'watching', reject: 'rejected', reopen: 'investigating' });
+router.patch('/registry/:id', async (req, res, next) => {
+  try {
+    const { action } = req.body || {};
+    const nextState = REGISTRY_ACTIONS[action];
+    if (!nextState) return res.status(400).json({ error: `invalid action; must be one of ${Object.keys(REGISTRY_ACTIONS).join(', ')}` });
+    const domain = await db('seo_link_domains').where({ id: req.params.id }).first('id', 'domain', 'agent_state', 'score_reasons');
+    if (!domain) return res.status(404).json({ error: 'not found' });
+    const now = new Date();
+    const patch = { agent_state: nextState, updated_at: now };
+    patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
+    // A manual Watch starts a LONG-TERM watch generation exactly like the
+    // investigator's own parks: the probe-coverage mask resets, so the
+    // resumed pass a month later re-earns coverage instead of closing on
+    // routes credited before the park.
+    if (action === 'watch') patch.probe_coverage_mask = 0;
+    // An explicit Reopen is a fresh mandate: clear the failure backoff so the
+    // very next sweep picks the domain up instead of honoring a stale defer —
+    // and the probe-tail deferral marker with it, so the reopened
+    // investigation gets its own rotated tail pass before a terminal close.
+    if (action === 'reopen') {
+      patch.investigate_after = null;
+      patch.investigate_failures = 0;
+      patch.probe_coverage_mask = 0; // the reopened investigation re-earns probe coverage
+      // …and a run claimed BEFORE this reopen must not finish on top of it:
+      // its claim token no longer matches, so its write phase aborts stale
+      patch.investigate_claim_token = null;
+      const cleared = String(domain.score_reasons || '').replace(/\s*·?\s*downgraded: terminal verdict deferred: unfetched candidate URLs remain/, '').trim();
+      if (cleared !== String(domain.score_reasons || '').trim()) patch.score_reasons = cleared || null;
+    }
+    // Guard is IN the update: a lane can move the row to a lane-owned
+    // aggregate (ready_to_acquire = a placement holds stamped pending
+    // authority; acquiring/acquired) between read and write, so the
+    // condition rides the UPDATE and a zero count means the race (or a
+    // delete) was lost — never overwrite it: a domain-only flip would
+    // contradict the placements and authority behind it.
+    // A new generation (Watch park, Reopen) is ONE atomic write: the domain
+    // state/mask and the provenance-hint coverage — BOTH halves, the stamp
+    // (covered_at) and the per-URL accrual (covered_urls), on every touch —
+    // reset together, exactly like the investigator's own generation resets.
+    // A partially covered touch carries no stamp but does carry covered_urls,
+    // and the resumed pass would credit those URLs as observed without
+    // re-fetching them; so a failure can never leave a reset mask beside
+    // stale hint coverage, and a fresh generation never inherits any.
+    const n = await db.transaction(async (trx) => {
+      const updated = await trx('seo_link_domains')
+        .where({ id: domain.id }).whereNotIn('agent_state', ['ready_to_acquire', 'acquiring', 'acquired'])
+        .update(patch);
+      if (updated && patch.probe_coverage_mask === 0) {
+        await trx('seo_link_domain_sources').where({ domain_id: domain.id }).update({ covered_at: null, covered_urls: null });
+      }
+      return updated;
+    });
+    if (!n) {
+      const current = await db('seo_link_domains').where({ id: domain.id }).first('agent_state');
+      if (!current) return res.status(404).json({ error: 'not found' });
+      return res.status(409).json({ error: `agent_state '${current.agent_state}' is lane-owned; registry actions apply to pre-acquisition states only` });
+    }
+    logger.info(`[backlink-registry] admin ${action}: ${domain.domain} (${domain.agent_state} -> ${nextState})`);
+    res.json({ id: domain.id, domain: domain.domain, agent_state: nextState, watch_recheck_at: patch.watch_recheck_at });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// §3.8 / §6.2 / §11 item 4 — acquisition-authority policy (step 4a). The DB row
+// is the only source of thresholds; env may only tighten (reported as
+// `overrides`); every edit is audited. Nothing consumes the row until the
+// step-4 bridge/claim PRs, and GATE_LINK_AUTHORITY is display-only here.
+// ---------------------------------------------------------------------------
+// GET /api/admin/backlink-agent/policy
+router.get('/policy', async (req, res, next) => {
+  try {
+    const { stored, policy, overrides, updated_at, updated_by } = await linkPolicy.loadPolicy(db);
+    const audit = await db('seo_link_policy_audit').orderBy('changed_at', 'desc').limit(25)
+      .select('id', 'field', 'old_value', 'new_value', 'changed_by', 'changed_at');
+    res.json({
+      stored, policy, overrides, updated_at, updated_by, audit,
+      fields: linkPolicy.POLICY_FIELDS,
+      gateOn: isEnabled('linkAuthority'),
+    });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/backlink-agent/policy — { field: value, ... }; whole patch
+// rejected on any invalid field; changed fields audited.
+router.patch('/policy', async (req, res, next) => {
+  try {
+    const patch = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+    if (!patch || !Object.keys(patch).length) return res.status(400).json({ error: 'a non-empty object of policy fields is required' });
+    const actor = req.technician ? (req.technician.name || String(req.technician.id)) : null;
+    const r = await linkPolicy.updatePolicy(db, patch, { actor });
+    if (r.errors) return res.status(400).json({ error: r.errors.join('; '), errors: r.errors });
+    if (r.changed.length) logger.info(`[backlink-policy] ${actor || 'admin'} changed ${r.changed.map((c) => `${c.field}: ${c.old} -> ${c.new}`).join(', ')}`);
+    const { policy, overrides } = await linkPolicy.loadPolicy(db);
+    res.json({ changed: r.changed, stored: r.policy, policy, overrides });
   } catch (err) { next(err); }
 });
 

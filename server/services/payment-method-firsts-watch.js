@@ -25,6 +25,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
+const { deliverOpsDigest } = require('./ops-digest');
 const OPS_TO = 'contact@wavespestcontrol.com';
 // ops_email_send_state.email_key is varchar(60); longest key here is 35 chars.
 const MARKER_PREFIX = 'pm-guard-first:';
@@ -159,13 +160,20 @@ async function runPaymentMethodFirstsWatch() {
     const when = new Date(hit.at).toLocaleString('en-US', { timeZone: 'America/New_York' });
     let res;
     try {
-      res = await require('./email').send({
-        to: OPS_TO,
+      const firstBody = `Seen ${when} ET.<ul style="padding-left:20px;margin:12px 0;">${hit.lines.map((l) => `<li>${l}</li>`).join('')}</ul>`
+        + 'This is a one-time notice from the #3556 payment-method guard watch; it will not repeat for this event. '
+        + `Kill switch: PM_GUARD_FIRSTS_WATCH=off.`;
+      res = await deliverOpsDigest({
+        key: `pm-guard-first:${first.name}`,
         subject: `FIRST: ${first.label}`,
-        heading: first.label,
-        body: `Seen ${when} ET.<ul style="padding-left:20px;margin:12px 0;">${hit.lines.map((l) => `<li>${l}</li>`).join('')}</ul>`
-          + 'This is a one-time notice from the #3556 payment-method guard watch; it will not repeat for this event. '
-          + `Kill switch: PM_GUARD_FIRSTS_WATCH=off.`,
+        html: firstBody,
+        link: '/admin/invoices',
+        sendEmail: () => require('./email').send({
+          to: OPS_TO,
+          subject: `FIRST: ${first.label}`,
+          heading: first.label,
+          body: firstBody,
+        }),
       });
     } catch (err) {
       res = { ok: false, error: err.message };
