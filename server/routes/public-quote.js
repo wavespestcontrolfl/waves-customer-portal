@@ -1751,8 +1751,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // run's snapshot is what the visitor just saw — but as a 'duplicate' of
     // the open lead it repeats, so the pipeline, the sweep, and the digest
     // count one prospect once. Non-destructive by design (hook P0): nothing
-    // on the earlier lead changes. Two concurrent first runs can still both
-    // land 'new' — the office merges those by hand, as before.
+    // on the earlier lead changes, and nothing later follows the marker to
+    // it from this public surface — the duplicate row owns its own
+    // lifecycle and upsells like any lead; folding it into the original is
+    // a trusted-path job (the office merge). Two concurrent first runs can
+    // still both land 'new' — the office merges those by hand, as before.
     if (!lead) {
       duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey });
     }
@@ -2918,32 +2921,6 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
       extracted_data: JSON.stringify(updatedData),
       updated_at: new Date(),
     });
-
-    // A repeat-run duplicate is the token the widget holds, but the office
-    // works the OPEN original it duplicates — mirror the added interest
-    // there too (codex #3834 r3 P1). Same ownership evidence as this route
-    // (row id + the typed email, which the original shares by construction
-    // of the link), same open-status guard as the pipeline views.
-    const originalId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
-    if (originalId) {
-      const original = await db('leads')
-        .where({ id: originalId })
-        .whereNull('deleted_at')
-        .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
-        .whereIn('status', OPEN_LEAD_STATUSES)
-        .first('id', 'service_interest', 'extracted_data');
-      if (original) {
-        const originalInterest = Array.from(new Set([...(original.service_interest || '').split(' + ').filter(Boolean), ...addLabels])).join(' + ');
-        let originalData = original.extracted_data && typeof original.extracted_data === 'object' ? original.extracted_data : {};
-        if (typeof original.extracted_data === 'string') { try { originalData = JSON.parse(original.extracted_data); } catch { originalData = {}; } }
-        const originalUpsells = Array.from(new Set([...(Array.isArray(originalData.upsell_interests) ? originalData.upsell_interests : []), ...valid]));
-        await db('leads').where({ id: original.id }).update({
-          service_interest: originalInterest,
-          extracted_data: JSON.stringify({ ...originalData, upsell_interests: originalUpsells, upsell_added_at: new Date().toISOString() }),
-          updated_at: new Date(),
-        });
-      }
-    }
 
     // Keep the quote_wizard estimate row in sync — admins viewing the pipeline
     // should see the merged service_interest after an upsell add, not the

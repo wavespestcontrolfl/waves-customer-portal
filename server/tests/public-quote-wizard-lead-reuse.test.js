@@ -81,8 +81,11 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(src).toMatch(/'duplicate_of_lead_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'duplicate_of_lead_id'/);
   });
 
-  test('/upsell mirrors the added interest onto the OPEN original a duplicate points at', () => {
-    expect(src).toMatch(/const originalId = lead\.status === 'duplicate' \? duplicateOfFromExtracted\(lead\.extracted_data\) : null;/);
-    expect(src).toMatch(/\.where\(\{ id: originalId \}\)[\s\S]{0,300}\.whereIn\('status', OPEN_LEAD_STATUSES\)/);
+  test('nothing on the public surface follows the marker to the original (label only — the merge is a trusted-path job)', () => {
+    // The marker is read only to label THIS row and skip its attribution;
+    // no query selects the original for update from /calculate or /upsell.
+    expect(src).not.toMatch(/where\(\{ id: originalId \}\)/);
+    expect(src).not.toMatch(/duplicateOfFromExtracted\(lead\.extracted_data\) : null/);
+    expect(src.match(/duplicateOfFromExtracted\(/g).length).toBe(2); // the definition + the token-path read
   });
 });

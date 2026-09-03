@@ -291,63 +291,6 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-qw', patch: expect.objectContaining({ estimate_id: 'estimate-2' }) }]);
   });
 
-  test('a repeat-run duplicate lead named in estimate_data resolves to the OPEN original it duplicates and converts THAT lead', async () => {
-    const database = makeAcceptDb({
-      linked: [],
-      estimate: { id: 'estimate-2b', estimate_data: { lead_id: 'lead-dup' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
-      leadsById: {
-        'lead-dup': { id: 'lead-dup', status: 'duplicate', customer_id: 'customer-1', extracted_data: JSON.stringify({ duplicate_of_lead_id: 'lead-orig' }) },
-        'lead-orig': { id: 'lead-orig', status: 'new', customer_id: 'customer-1', phone: '(941) 555-0142', email: 'A@example.com' },
-      },
-    });
-
-    await markLinkedLeadEstimateAccepted({
-      estimateId: 'estimate-2b', customerId: 'customer-1', monthlyValue: 60, database,
-    });
-
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-orig', expect.objectContaining({ customerId: 'customer-1' }));
-    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-dup', expect.anything());
-    expect(database._updates).toEqual([{ id: 'lead-orig', patch: expect.objectContaining({ estimate_id: 'estimate-2b' }) }]);
-  });
-
-  test('an indirectly resolved original that belongs to a DIFFERENT customer is never converted', async () => {
-    const database = makeAcceptDb({
-      linked: [],
-      estimate: { id: 'estimate-2d', estimate_data: { lead_id: 'lead-dup3' }, customer_id: 'customer-1', customer_phone: '9415550142', customer_email: 'a@example.com' },
-      leadsById: {
-        'lead-dup3': { id: 'lead-dup3', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-orig3' } },
-        'lead-orig3': { id: 'lead-orig3', status: 'new', customer_id: 'customer-OTHER', phone: '9415550142', email: 'a@example.com' },
-      },
-    });
-    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2d', customerId: 'customer-1', database });
-    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
-    expect(database._updates).toEqual([]);
-  });
-
-  test('an indirectly resolved original whose contact does not match the estimate is never converted', async () => {
-    const database = makeAcceptDb({
-      linked: [],
-      estimate: { id: 'estimate-2e', estimate_data: { lead_id: 'lead-dup4' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
-      leadsById: {
-        'lead-dup4': { id: 'lead-dup4', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-orig4' } },
-        'lead-orig4': { id: 'lead-orig4', status: 'new', customer_id: null, phone: '9415559999', email: 'someone-else@example.com' },
-      },
-    });
-    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2e', customerId: 'customer-1', database });
-    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
-  });
-
-  test('a duplicate lead whose original is gone stays closed (no conversion, no fallback sweep)', async () => {
-    const database = makeAcceptDb({
-      linked: [],
-      estimate: { id: 'estimate-2c', estimate_data: { lead_id: 'lead-dup2' } },
-      leadsById: { 'lead-dup2': { id: 'lead-dup2', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-missing' } } },
-    });
-    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2c', customerId: 'customer-1', database });
-    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
-    expect(database._updates).toEqual([]);
-  });
-
   test('standalone estimate: rescues a single unlinked lead by contact and stamps the link', async () => {
     const database = makeAcceptDb({
       linked: [],
