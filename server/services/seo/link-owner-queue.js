@@ -252,9 +252,13 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     }).returning('*');
     const attached = [row.id];
     if (shared) {
-      const siblings = (await trx('seo_link_prospects').where({ domain_id: domain.id, payment_group_id: placement.payment_group_id }).select('id')).map((s) => s.id).filter((id) => id !== placement.id);
+      // only siblings that are themselves CARDS on THIS path: parked from prospect, unleased, bound to the best path
+      // (the hash carries no path identity, so a stale-path or in-flight row with an equal hash must never inherit
+      // the owner's spending authority) — locked, like the clicked placement
+      const siblings = (await trx('seo_link_prospects').where({ domain_id: domain.id, payment_group_id: placement.payment_group_id, path_id: path.id, status: PARKED, parked_from_status: PARKABLE }).whereNull('claimed_at').forUpdate().select('id'))
+        .map((s) => s.id).filter((id) => id !== placement.id);
       if (siblings.length) {
-        const candidates = await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', siblings).where({ dimension: 'payment', instance_key: row.instance_key, level: row.level, decision_inputs_hash: hash }).whereNull('ended_at').whereNull('satisfied_at'));
+        const candidates = await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', siblings).where({ path_id: path.id, dimension: 'payment', instance_key: row.instance_key, level: row.level, decision_inputs_hash: hash }).whereNull('ended_at').whereNull('satisfied_at'));
         for (const c of candidates) if (!c.approved) attached.push(c.id);
       }
     }
@@ -323,6 +327,10 @@ async function acquireAnyway(db, { domainId, actor, note = null, now = new Date(
     await lockProspectDomain(trx, named.domain);
     const domain = await trx('seo_link_domains').where({ id: domainId }).forUpdate().first();
     if (!domain) refuse(404, 'registry domain not found');
+    // waivable = the DENY verdict the bridge wrote (or the owner's own Reject): a lane-owned, new, investigating or
+    // watching domain has nothing a floor waiver may override, and a forged / stale request must not force a
+    // bridge run over an authorized or in-flight lane
+    if (domain.agent_state !== 'rejected') refuse(409, `only a rejected domain can be acquired anyway (this one is ${String(domain.agent_state).replace(/_/g, ' ')})`);
     if (!domain.best_path_id) refuse(409, 'no reproducible acquisition path yet — investigate first');
     const path = await trx('seo_link_acquisition_paths').where({ id: domain.best_path_id }).first();
     if (!path || path.superseded_by || path.baseline === true) refuse(409, 'the best path is superseded or a baseline placeholder — re-investigate first');

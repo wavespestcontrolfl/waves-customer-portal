@@ -254,6 +254,27 @@ describe('approveRow', () => {
     await expect(Q.approveRow(db, { authorityId: sibling.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/approved/) });
   });
 
+  test('account-wide fee: a stale-path or in-flight sibling with an equal hash never inherits the approval', async () => {
+    const { db, p } = await parked({ make: paidPath, path: { fee_scope: 'account_wide' } });
+    const groupId = placements(db)[0].payment_group_id;
+    const primaryId = (await Q.listOwnerQueue(db)).cards.find((c) => c.rows.some((r) => r.dimension === 'payment' && r.approvable)).placement.id;
+    const pay = openRows(db, 'payment').find((r) => r.prospect_id === primaryId);
+    // a sibling still bound to a superseded path, and one a worker has leased — both carry the same hash / level / key
+    const stalePath = uid();
+    const staleP = { id: uid(), domain_id: db._tables.seo_link_domains[0].id, path_id: stalePath, target_domain: 'example.org', target_page: '/', location_key: 'stale', status: 'awaiting_owner', parked_from_status: 'prospect', payment_group_id: groupId, link_type: 'directory', updated_at: NOW };
+    const leasedP = placements(db).find((x) => x.id !== primaryId);
+    leasedP.claimed_at = NOW;
+    placements(db).push(staleP);
+    rows(db).push({ ...pay, id: uid(), prospect_id: staleP.id, path_id: stalePath, approval_id: undefined });
+    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, now: LATER, bridge: inline });
+    expect(r.attached).toHaveLength(N - 1); // primary + the unleased in-shape siblings; not the leased one, not the stale-path one
+    const staleRow = rows(db).find((x) => x.prospect_id === staleP.id);
+    const leasedRow = rows(db).find((x) => x.prospect_id === leasedP.id && x.dimension === 'payment');
+    expect(staleRow.approval_id).toBeUndefined();
+    expect(leasedRow.approval_id).toBeUndefined();
+    expect(p.id).toBe(pay.path_id);
+  });
+
   test('accept_terms binds the agreement hash; the row and its terms url land in the snapshot', async () => {
     const { db } = await parked({ path: { legal_attestation: true, legal_terms_hash: HASH, investigation: JSON.stringify({ legal_terms_url: 'https://example.org/terms' }) } });
     const terms = openRows(db, 'execution').find((r) => r.instance_kind === 'terms');
@@ -357,7 +378,10 @@ describe('acquireAnyway', () => {
     expect(row).toMatchObject({ level: 'OWNER_FREE', floor_waiver_id: waivers(s.db)[0].id });
     expect(placements(s.db).every((x) => x.status === 'awaiting_owner')).toBe(true);
     expect(approvals(s.db)).toHaveLength(0);
-    // a second click replaces the first waiver
+    // lifted ⇒ qualified: a re-click is refused until the bridge rejects the domain again (inputs moved, waiver stale)
+    await expect(Q.acquireAnyway(s.db, { domainId: s.d.id, actor: ACTOR, now: LATER, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/only a rejected domain/) });
+    storedDomain(s.db).agent_state = 'rejected'; storedDomain(s.db).rejected_by = 'bridge';
+    // a second click from rejected replaces the (still open) first waiver
     const r2 = await Q.acquireAnyway(s.db, { domainId: s.d.id, actor: ACTOR, now: LATER, bridge: inline });
     expect(r2.replaced).toBe(1);
     expect(waivers(s.db).filter((w) => !w.invalidated_at)).toHaveLength(1);
@@ -365,14 +389,20 @@ describe('acquireAnyway', () => {
   });
 
   test('INVALID is never waivable; passing floors leave nothing to waive; no path refuses', async () => {
-    const inv = scenario({ path: { last_investigated_at: null } });
+    const inv = scenario({ domain: { agent_state: 'rejected', rejected_by: 'owner' }, path: { last_investigated_at: null } });
     await expect(Q.acquireAnyway(inv.db, { domainId: inv.d.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/not actionable/) });
-    const ok = scenario();
+    const ok = scenario({ domain: { agent_state: 'rejected', rejected_by: 'owner' } });
     await expect(Q.acquireAnyway(ok.db, { domainId: ok.d.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/nothing to waive/) });
-    const none = scenario();
+    const none = scenario({ domain: { agent_state: 'rejected', rejected_by: 'bridge' } });
     storedDomain(none.db).best_path_id = null;
     await expect(Q.acquireAnyway(none.db, { domainId: none.d.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/investigate first/) });
     await expect(Q.acquireAnyway(ok.db, { domainId: ok.d.id, actor: null, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 400 });
+    // not waivable at all: a lane-owned / qualified / watching domain has no DENY to override
+    for (const state of ['qualified', 'ready_to_acquire', 'acquiring', 'acquired', 'watching', 'investigating', 'new']) {
+      const s = scenario({ domain: { agent_state: state, spam_score: 30 } });
+      await expect(Q.acquireAnyway(s.db, { domainId: s.d.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/only a rejected domain/) });
+      expect(waivers(s.db)).toHaveLength(0);
+    }
     for (const s of [inv, ok, none]) expect(waivers(s.db)).toHaveLength(0);
   });
 
