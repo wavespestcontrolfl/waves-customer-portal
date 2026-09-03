@@ -150,7 +150,14 @@ function hardscapeOf(lotSqFt, propertyType = 'single_family', features = {}) {
 }
 
 // PEST — documented formula: max(floor, base + round(footprintAdj) + featureAdj + propAdj) × freqMult
-function expectPest({ homeSqFt, stories = 1, features = {}, propertyType = 'single_family', frequency = 'quarterly' }) {
+// Year-built pressure bump — frozen mirror of modifiers.js pestAgeAdj (no constant
+// exists for it): age ≥ 60 → $8, ≥ 40 → $5, ≥ 20 → $2, else $0 (codex r14 P2).
+function pestAgeAdjOf(yearBuilt) {
+  if (!yearBuilt) return 0;
+  const age = new Date().getFullYear() - Number(yearBuilt);
+  return age >= 60 ? 8 : age >= 40 ? 5 : age >= 20 ? 2 : 0;
+}
+function expectPest({ homeSqFt, stories = 1, features = {}, propertyType = 'single_family', frequency = 'quarterly', yearBuilt = null }) {
   const { PEST, PROPERTY_TYPE_ADJ } = constants;
   const footprint = footprintOf(homeSqFt, stories);
   const footprintAdj = Math.round(interp(footprint, PEST.footprintBrackets.map((b) => [b.sqft, b.adj])));
@@ -168,7 +175,8 @@ function expectPest({ homeSqFt, stories = 1, features = {}, propertyType = 'sing
   if (features.nearWater) featureAdj += a.nearWater;
   if (features.attachedGarage) featureAdj += a.attachedGarage;
   const propAdj = PROPERTY_TYPE_ADJ[propertyType] || 0;
-  const basePrice = Math.max(PEST.floor, PEST.base + footprintAdj + featureAdj + propAdj);
+  const ageAdj = pestAgeAdjOf(yearBuilt);
+  const basePrice = Math.max(PEST.floor, PEST.base + footprintAdj + featureAdj + propAdj + ageAdj);
   const freqMult = PEST.frequencyDiscounts.v2[frequency] || 1;
   const visits = PEST.frequencies[frequency] || 4;
   const perApp = round2(basePrice * freqMult);
@@ -190,7 +198,8 @@ function lawnMonthlyUncapped(track, sqft, tierIndex) {
   if (sqft >= rows[rows.length - 1][0]) return rows[rows.length - 1][tierIndex + 1];
   return Math.round(interp(sqft, rows.map((r) => [r[0], r[tierIndex + 1]])));
 }
-function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced' }) {
+// Market monthly for one tier: bracket cell + cadence caps / edge-parity floors.
+function lawnMarketMonthly({ track, lawnSqFt, tier }) {
   const { LAWN_TIERS, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO, LAWN_TABLE_MAX_SQFT, LAWN_PRICING_V2 } = constants;
   const tc = LAWN_TIERS[tier];
   const std = lawnMonthlyUncapped(track, lawnSqFt, LAWN_TIERS.standard.index);
@@ -212,9 +221,41 @@ function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced' }) {
       monthly = Math.min(monthly, Math.floor(enhFloored * (12 / 9)));
     }
   }
-  const annual = Math.round(monthly * 12);
-  const perApp = round2(annual / tc.freq);
-  return { monthly: round2(annual / 12), annual, perApp, visits: tc.freq, marketMonthly: monthly };
+  return monthly;
+}
+// Sold price = market, lifted by the ARMED cost floor (annualCost ÷ (1 − target
+// margin), ceiled to a whole-dollar per-app), then the program minimum, then —
+// under armed floors inside the table — the cadence-ladder lift that keeps
+// pa12 ≤ pa9 ≤ 0.96·pa6 / pa12 ≤ 0.92·pa6 on floored legs (service-pricing.js
+// priceLawnCare). In-code defaults disarm both; the parity run simulates an
+// overlay to exercise them (codex r14 P2).
+function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced' }) {
+  const { LAWN_TIERS, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO, LAWN_TABLE_MAX_SQFT, LAWN_PRICING_V2 } = constants;
+  const useFloor = LAWN_PRICING_V2.useLawnCostFloor === true;
+  const pmm = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  const programMinimumAnnual = Number.isFinite(pmm) && pmm > 0 ? round2(pmm * 12) : 0;
+  const ladderArmed = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false && (lawnSqFt <= LAWN_TABLE_MAX_SQFT || LAWN_PRICING_V2.edgeParityFloorArmed === false);
+  const legs = {};
+  for (const t of ['standard', 'enhanced', 'premium']) {
+    const freq = LAWN_TIERS[t].freq;
+    const marketMonthly = lawnMarketMonthly({ track, lawnSqFt, tier: t });
+    const marketAnnual = Math.round(marketMonthly * 12);
+    const floorAnnual = round2(lawnCostStack({ track, lawnSqFt, visits: freq, routeDensity: LAWN_PRICING_V2.defaultRouteDensity }).annualCost / (1 - LAWN_PRICING_V2.targetCollectedMarginFloor));
+    const floored = useFloor && floorAnnual > marketAnnual;
+    let ann = floored ? Math.ceil(floorAnnual / freq) * freq : marketAnnual;
+    if (programMinimumAnnual > 0 && ann < programMinimumAnnual) ann = Math.ceil(programMinimumAnnual / freq) * freq;
+    legs[t] = { freq, marketMonthly, marketAnnual, floorAnnual, floored, ann, lifted: false };
+  }
+  if (useFloor && ladderArmed && Object.values(legs).some((l) => l.floored)) {
+    const lift = (leg, needed) => { if (needed > leg.ann) { leg.ann = Math.ceil(needed / leg.freq) * leg.freq; leg.lifted = true; } };
+    lift(legs.enhanced, legs.premium.ann * (legs.enhanced.freq / legs.premium.freq));
+    lift(legs.standard, legs.enhanced.ann / LAWN_ENHANCED_MONTHLY_CAP_RATIO);
+    lift(legs.standard, legs.premium.ann / LAWN_PREMIUM_MONTHLY_CAP_RATIO);
+  }
+  const leg = legs[tier];
+  const annual = leg.ann;
+  const perApp = round2(annual / leg.freq);
+  return { monthly: round2(annual / 12), annual, perApp, visits: leg.freq, marketMonthly: leg.marketMonthly, floorAnnual: leg.floorAnnual, floored: leg.floored, lifted: leg.lifted };
 }
 // Lawn cost stack (shared package arithmetic, re-implemented here)
 function lawnCostStack({ track, lawnSqFt, visits, onSiteMinutesOverride = null, routeDensity = 'DENSE' }) {
@@ -437,23 +478,43 @@ function expectPlugging(lawnSqFt, spacing = 12) {
   const price = Math.max(250, Math.round(cost / 0.55));
   return { plugs, cost: round2(cost), price, targetMargin: 0.45 };
 }
-function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, appsPerYear = null }) {
+// Every supported treatment family (codex r14 P2): fixed, tiered, fungal (quote:
+// floor / custom, apps from appsPerYear or 12/intervalMonths), lethal bronzing
+// (quote: floor / custom, fixed 4 apps, eligible statuses only) and Tree-Age
+// (DBH tier floor / custom, quote-only above the last priced tier, 0.5 apps/yr).
+// A branch the engine must refuse returns null; pricing it is a P1 below.
+function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, appsPerYear = null, intervalMonths = null, customPricePerPalm = null, diagnosisConfirmed = false, selectedProduct = null, palmStatus = null, dbhInches = null }) {
   const P = constants.PALM;
   const t = P.treatments[treatmentType];
-  let perPalm;
-  if (t.pricingType === 'fixed') perPalm = t.pricePerPalm;
+  if (!t) return null;
+  const quote = (floor) => (customPricePerPalm == null ? floor : Math.max(Number(customPricePerPalm), floor));
+  let perPalm; let apps;
+  if (t.pricingType === 'fixed') { perPalm = t.pricePerPalm; apps = appsPerYear || t.defaultAppsPerYear; }
   else if (t.pricingType === 'tiered') {
     // The engine fails closed on a tiered treatment without a palm size
     // (getTierByPalmSize) — expect NO price, never a defaulted medium tier.
     if (!palmSize) return null;
     const tier = t.tiers.find((x) => x.size === palmSize);
     if (!tier) return null;
-    perPalm = tier.pricePerPalm;
+    perPalm = tier.pricePerPalm; apps = t.defaultAppsPerYear;
+  } else if (treatmentType === 'fungal') {
+    if (diagnosisConfirmed !== true || !t.products.includes(selectedProduct)) return null;
+    if (appsPerYear == null && intervalMonths == null) return null;
+    apps = appsPerYear != null ? Number(appsPerYear) : round2(12 / Number(intervalMonths));
+    perPalm = quote(t.floorPerPalm);
+  } else if (treatmentType === 'lethalBronzing') {
+    if (!t.eligibleStatuses.includes(palmStatus)) return null;
+    apps = t.appsPerYear; perPalm = quote(t.floorPerPalm);
+  } else if (treatmentType === 'treeAge') {
+    if (!(Number(dbhInches) > 0)) return null;
+    const tier = t.tiers.find((x) => x.dbhMax === null || Number(dbhInches) <= x.dbhMax);
+    if (tier.quoteBased && customPricePerPalm == null) return null;
+    apps = t.appsPerYear; perPalm = quote(tier.pricePerPalm || 110);
   } else return null;
-  const apps = appsPerYear || t.defaultAppsPerYear;
   const rawPerVisit = round2(perPalm * palmCount);
   const perVisit = Math.max(rawPerVisit, P.minPerVisit);
-  const annual = round2(perVisit * apps);
+  // the engine rounds the palm line's annual to whole dollars (estimate-engine.js)
+  const annual = Math.round(round2(perVisit * apps));
   return { perPalm, apps, rawPerVisit, perVisit, annual, minimumApplied: perVisit > rawPerVisit };
 }
 
@@ -470,9 +531,11 @@ function expectTier(serviceKeys) {
 // ── Unit-economics calculator (the audit's own definitions) ──
 // gross margin = (rev − direct) / rev ; markup = (rev − direct) / direct
 // contribution = (rev − cardFee − direct) / rev, card fee = 2.9% on credit-card payers
-function unitEconomics({ revenuePerVisit, visits, onSiteMinutes, driveMinutes = constants.GLOBAL.DRIVE_TIME, technicians = 1, materialPerVisit = 0, consumablesPerVisit = 0, adminAnnual = constants.GLOBAL.ADMIN_ANNUAL, callbackRate = 0, callbackMinutes = 0, callbackMaterial = 0, discountPct = 0, cardFeeRate = 0.029, laborRate = constants.GLOBAL.LABOR_RATE }) {
+function unitEconomics({ revenuePerVisit, visits, onSiteMinutes, driveMinutes = constants.GLOBAL.DRIVE_TIME, technicians = 1, materialPerVisit = 0, consumablesPerVisit = 0, adminAnnual = constants.GLOBAL.ADMIN_ANNUAL, callbackRate = 0, callbackMinutes = 0, callbackDriveMinutes = driveMinutes, callbackMaterial = 0, discountPct = 0, cardFeeRate = 0.029, laborRate = constants.GLOBAL.LABOR_RATE }) {
   const labor = ((onSiteMinutes + driveMinutes) / 60) * laborRate * technicians;
-  const expectedCallback = callbackRate * (((callbackMinutes + driveMinutes) / 60) * laborRate + callbackMaterial);
+  // callbackMinutes is a RECORDED span (check-in → check-out, drive included) —
+  // callers pass callbackDriveMinutes: 0 so drive is never re-added (codex r14 P2).
+  const expectedCallback = callbackRate * (((callbackMinutes + callbackDriveMinutes) / 60) * laborRate + callbackMaterial);
   const directPerVisit = labor + materialPerVisit + consumablesPerVisit + expectedCallback;
   const directAnnual = directPerVisit * visits + adminAnnual;
   const revenueAnnual = revenuePerVisit * visits * (1 - discountPct);
@@ -538,7 +601,9 @@ function flagIf(cond, severity, section, name, detail) { if (cond) findings.push
 
 function runPestMatrix() {
   const section = 'pest_control';
-  const boundaries = [800, 1200, 1500, 1750, 2000, 2500, 3000, 4000, 5500];
+  // Boundaries come from the LIVE bracket array (DB overlay included), never a
+  // hardcoded list, so an off-by-one at a new breakpoint is tested (codex r14 P2).
+  const boundaries = constants.PEST.footprintBrackets.map((b) => Number(b.sqft)).filter((n) => Number.isFinite(n) && n > 0);
   const sizes = new Set([500, 799, ...boundaries, ...boundaries.map((b) => b - 1), ...boundaries.map((b) => b + 1), 6500, 10000, 20000]);
   for (const sqft of [...sizes].sort((a, b) => a - b)) {
     for (const frequency of ['quarterly', 'bimonthly', 'monthly']) {
@@ -567,6 +632,16 @@ function runPestMatrix() {
     const r = runEngine({ ...BASE, propertyType, services: { pest: { frequency: 'quarterly' } } });
     const li = line(r.result, 'pest_control');
     record(section, `propertyType ${propertyType}`, { propertyType }, exp.perApp, li ? li.perApp : null);
+  }
+  // year built → age adjustment at every boundary ±1 (codex r14 P2); 3,000 sf so the
+  // floor cannot mask the adder
+  const thisYear = new Date().getFullYear();
+  for (const age of [0, 19, 20, 21, 39, 40, 41, 59, 60, 61, 120]) {
+    const yearBuilt = thisYear - age;
+    const exp = expectPest({ homeSqFt: 3000, yearBuilt });
+    const r = runEngine({ ...BASE, homeSqFt: 3000, yearBuilt, services: { pest: { frequency: 'quarterly' } } });
+    const li = line(r.result, 'pest_control');
+    record(section, `yearBuilt ${yearBuilt} (age ${age}) quarterly (3000 sf)`, { homeSqFt: 3000, yearBuilt }, exp.perApp, li ? li.perApp : null, { extra: { ageAdjExpected: pestAgeAdjOf(yearBuilt) } });
   }
   // stories
   for (const stories of [1, 2, 3]) {
@@ -600,6 +675,23 @@ function runPestMatrix() {
 
 function runLawnMatrix() {
   const section = 'lawn_care';
+  // Simulated overlay (codex r14 P2): arm the cost floor and a program minimum the
+  // way a pricing_config row would, price the same sizes, restore. The engine reads
+  // LAWN_PRICING_V2 at call time, so this is exactly what --db exercises.
+  const V = constants.LAWN_PRICING_V2;
+  const saved = { useLawnCostFloor: V.useLawnCostFloor, programMinimumMonthly: V.programMinimumMonthly };
+  for (const overlay of [{ useLawnCostFloor: true, programMinimumMonthly: 0 }, { useLawnCostFloor: false, programMinimumMonthly: 150 }, { useLawnCostFloor: true, programMinimumMonthly: 150 }]) {
+    Object.assign(V, overlay);
+    try {
+      for (const track of ['st_augustine', 'bahia']) for (const sqft of [1000, 2500, 4500, 8000, 20000, 25000]) for (const tier of ['standard', 'enhanced', 'premium']) {
+        const exp = expectLawn({ track, lawnSqFt: sqft, tier });
+        const r = runEngine({ ...BASE, lawnSqFt: sqft, services: { lawn: { track, tier } } });
+        const li = line(r.result, 'lawn_care');
+        record(section, `[overlay floor=${overlay.useLawnCostFloor} min=${overlay.programMinimumMonthly}/mo] ${track} ${sqft}sf ${tier}`, { track, lawnSqFt: sqft, tier, overlay }, exp.perApp, li ? li.perApp : null, { extra: { annualExpected: exp.annual, annualActual: li ? li.annual : null, floorAnnual: exp.floorAnnual, floored: exp.floored, lifted: exp.lifted, engineBasis: li ? li.pricingBasis ?? null : null, engineLift: li ? li.cadenceLadderLiftApplied ?? null : null } });
+        if (li) flagIf(Math.abs(li.annual - exp.annual) > 0.005, 'P1', section, `[overlay] annual ${track} ${sqft} ${tier}`, `annual ${li.annual} vs ${exp.annual}`);
+      }
+    } finally { Object.assign(V, saved); }
+  }
   const rowEdges = constants.LAWN_BRACKETS.st_augustine.map((r) => r[0]);
   const sizes = new Set([500, 1499, ...rowEdges, ...rowEdges.map((x) => x - 1), ...rowEdges.map((x) => x + 1), 4250, 12500, 20000, 20001, 25000, 30000]);
   for (const track of Object.keys(constants.LAWN_BRACKETS)) {
@@ -829,7 +921,26 @@ function runSpecialtyMatrix() {
     record(section, `plugging ${sqft}sf ${spacing}in`, { sqft, spacing }, exp.price, li ? li.price : null, { extra: { plugs: exp.plugs, cost: exp.cost } });
   }
   // Palm injection
-  for (const c of [{ treatmentType: 'nutrition', palmCount: 1 }, { treatmentType: 'nutrition', palmCount: 2 }, { treatmentType: 'nutrition', palmCount: 3 }, { treatmentType: 'insecticide', palmCount: 5, palmSize: 'large' }, { treatmentType: 'combo', palmCount: 10, palmSize: 'small' }, { treatmentType: 'nutrition', palmCount: 0 }, { treatmentType: 'nutrition', palmCount: -2 }, { treatmentType: 'nutrition', palmCount: 2.5 }, { treatmentType: 'combo', palmCount: 3 }]) {
+  const palmCases = [{ treatmentType: 'nutrition', palmCount: 1 }, { treatmentType: 'nutrition', palmCount: 2 }, { treatmentType: 'nutrition', palmCount: 3 }, { treatmentType: 'insecticide', palmCount: 5, palmSize: 'large' }, { treatmentType: 'combo', palmCount: 10, palmSize: 'small' }, { treatmentType: 'nutrition', palmCount: 0 }, { treatmentType: 'nutrition', palmCount: -2 }, { treatmentType: 'nutrition', palmCount: 2.5 }, { treatmentType: 'combo', palmCount: 3 },
+    // fungal: floor, custom above / below the floor, interval-derived apps, refusals (codex r14 P2)
+    { treatmentType: 'fungal', palmCount: 2, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet', appsPerYear: 2 },
+    { treatmentType: 'fungal', palmCount: 2, diagnosisConfirmed: true, selectedProduct: 'Propizol', appsPerYear: 2, customPricePerPalm: 80 },
+    { treatmentType: 'fungal', palmCount: 3, diagnosisConfirmed: true, selectedProduct: 'Propizol', appsPerYear: 3, customPricePerPalm: 20 },
+    { treatmentType: 'fungal', palmCount: 1, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet', intervalMonths: 4 },
+    { treatmentType: 'fungal', palmCount: 2, diagnosisConfirmed: false, selectedProduct: 'PHOSPHO-Jet', appsPerYear: 2 },
+    { treatmentType: 'fungal', palmCount: 2, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet' },
+    // lethal bronzing: each eligible status, custom above / below the floor, an ineligible status
+    { treatmentType: 'lethalBronzing', palmCount: 1, palmStatus: 'healthy_preventive' },
+    { treatmentType: 'lethalBronzing', palmCount: 4, palmStatus: 'near_infected', customPricePerPalm: 150 },
+    { treatmentType: 'lethalBronzing', palmCount: 2, palmStatus: 'tested_negative_preventive', customPricePerPalm: 100 },
+    { treatmentType: 'lethalBronzing', palmCount: 2, palmStatus: 'symptomatic' },
+    // Tree-Age: every DBH tier edge ±1, custom above the last priced tier, quote-only without a custom price
+    ...[9, 10, 11, 15, 16, 20].map((dbhInches) => ({ treatmentType: 'treeAge', palmCount: 1, dbhInches })),
+    { treatmentType: 'treeAge', palmCount: 3, dbhInches: 12, customPricePerPalm: 40 },
+    { treatmentType: 'treeAge', palmCount: 2, dbhInches: 25, customPricePerPalm: 200 },
+    { treatmentType: 'treeAge', palmCount: 2, dbhInches: 25 },
+  ];
+  for (const c of palmCases) {
     const exp = c.palmCount > 0 && Number.isInteger(c.palmCount) ? expectPalm(c) : null;
     const r = runEngine({ ...BASE, services: { palmInjection: c } });
     const li = line(r.result, 'palm_injection');
@@ -945,9 +1056,9 @@ function runAnnualEconomics() {
   for (const row of rows) {
     for (const tier of ['bronze', 'silver', 'gold', 'platinum']) {
       const discount = constants.WAVEGUARD.tiers[tier].discount;
-      const modeled = unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.modeledMinutes, driveMinutes: row.driveMinutes ?? constants.GLOBAL.DRIVE_TIME, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount });
-      const observed = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.median, driveMinutes: 0 /* recorded span already contains drive — never re-added (MON-004) */, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount }) : null;
-      const observedP75 = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.p75, driveMinutes: 0 /* recorded span already contains drive — never re-added (MON-004) */, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount }) : null;
+      const modeled = unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.modeledMinutes, driveMinutes: row.driveMinutes ?? constants.GLOBAL.DRIVE_TIME, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, callbackDriveMinutes: 0 /* recorded callback span already contains drive (MON-004) */, discountPct: discount });
+      const observed = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.median, driveMinutes: 0 /* recorded span already contains drive — never re-added (MON-004) */, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, callbackDriveMinutes: 0 /* recorded callback span already contains drive (MON-004) */, discountPct: discount }) : null;
+      const observedP75 = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.p75, driveMinutes: 0 /* recorded span already contains drive — never re-added (MON-004) */, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, callbackDriveMinutes: 0 /* recorded callback span already contains drive (MON-004) */, discountPct: discount }) : null;
       const setupThisYear = row.setupFee && !(row.setupStandaloneOnly && tier !== 'bronze') ? row.setupFee : 0;
       const firstYearRevenue = round2(modeled.revenueAnnual + setupThisYear);
       out.push({ service: row.service, tier, discount, perVisitList: row.revenuePerVisit, visits: row.visits, renewalRevenue: modeled.revenueAnnual, firstYearRevenue, setupFee: setupThisYear, modeledMinutes: row.modeledMinutes, observedMinutes: row.observed ? row.observed.median : null, observedN: row.observed ? row.observed.n : null, modeled, observed, observedP75 });
@@ -994,6 +1105,12 @@ function runPrepayAndCadence() {
     { services: { treeShrub: { tier: 'standard', treeCount: 3 } }, key: 'tree_shrub', visits: 6 },
     { services: { treeShrub: { tier: 'enhanced', treeCount: 3 } }, key: 'tree_shrub', visits: 9 },
     { services: { rodentBait: {} }, key: 'rodent_bait', visits: 4 },
+    // termite bait (quarterly, 4 visits) and recurring foam on all three cadences —
+    // foam is non-discountable (cadence multiplier is its only discount) (codex r14 P2)
+    { services: { termite: { system: 'trelona' } }, key: 'termite_bait', visits: 4 },
+    { services: { foamRecurring: { points: 5, cadence: 'quarterly' } }, key: 'foam_recurring', visits: 4 },
+    { services: { foamRecurring: { points: 5, cadence: 'bimonthly' } }, key: 'foam_recurring', visits: 6 },
+    { services: { foamRecurring: { points: 5, cadence: 'monthly' } }, key: 'foam_recurring', visits: 12 },
   ];
   for (const c of cases) {
     const li = line(runEngine({ ...BASE, bedArea: 2000, services: c.services }).result, c.key);
@@ -1010,11 +1127,16 @@ function runPrepayAndCadence() {
     // here, so the lawn program's protected floor is not exercised (that needs a
     // stored estimate shape; noted, not claimed).
     const feeMix = ['pest_control', 'mosquito'].includes(c.key);
-    const prepayRate = feeMix ? 0 : PREPAY_PCT;
+    // foam_recurring earns NO prepay % by owner directive (its cadence multiplier is
+    // its only discount); the converter finds it through the saved estimate's line
+    // items, so the estimateData carries the priced line (codex r14 P2).
+    const nonDiscountable = c.key === 'foam_recurring';
+    const prepayRate = feeMix || nonDiscountable ? 0 : PREPAY_PCT;
     const svc = { service: c.key, service_key: c.key, serviceKey: c.key, name: li.name || c.key, frequency: li.frequency || null, visits_per_year: visits, visitsPerYear: visits, annual: li.annual, perApp };
+    const estimateData = nonDiscountable ? { lineItems: [li] } : {};
     let resolved = null; let resolveErr = null;
-    try { resolved = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual: li.annual, recurringServices: [svc], estimateData: {} }); } catch (e) { resolveErr = e.message; }
-    record(section, `${c.key} annual prepay total (converter resolver, ${feeMix ? 'fee mix: 0%' : `${PREPAY_PCT * 100}%`})`, { key: c.key }, round2(li.annual * (1 - prepayRate)), resolved ? resolved.amount : null, { extra: { rate: resolved ? resolved.rate : null, discount: resolved ? resolved.discount : null, error: resolveErr, note: 'protected lawn floor not exercised (empty estimateData)' } });
+    try { resolved = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual: li.annual, recurringServices: [svc], estimateData }); } catch (e) { resolveErr = e.message; }
+    record(section, `${c.key} (${c.visits}/yr) annual prepay total (converter resolver, ${feeMix ? 'fee mix: 0%' : nonDiscountable ? 'non-discountable: 0%' : `${PREPAY_PCT * 100}%`})`, { key: c.key }, round2(li.annual * (1 - prepayRate)), resolved ? resolved.amount : null, { extra: { rate: resolved ? resolved.rate : null, discount: resolved ? resolved.discount : null, error: resolveErr, note: 'protected lawn floor not exercised (empty estimateData)' } });
     let coverage = null; let coverageErr = null;
     try { coverage = converter.annualPrepayCoverageCadence(svc, li.frequency || null); } catch (e) { coverageErr = e.message; }
     // Independent expectation (codex r6 P1): the cadence whose shared coverage

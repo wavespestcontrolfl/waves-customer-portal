@@ -1,7 +1,7 @@
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-03T20:25:34.851Z. Constants source: **constants.js (in-code defaults)**.
-Scenarios: 1288 · independent-vs-engine matches: 1246 · mismatches: 1 · expected a price but the engine returned none: 0 · engine-only observations: 41 (1246 + 1 + 0 + 41 = 1288) · commercial engine errors: 0
+Generated 2026-09-03T20:40:06.219Z. Constants source: **constants.js (in-code defaults)**.
+Scenarios: 1446 · independent-vs-engine matches: 1400 · mismatches: 1 · expected a price but the engine returned none: 0 · engine-only observations: 45 (1400 + 1 + 0 + 45 = 1446) · commercial engine errors: 0
 
 ## Findings raised by this run
 
@@ -31,10 +31,10 @@ Recorded span = check-in → check-out, which often includes driving to the next
 
 | service | tier | list/visit | renewal revenue | year-1 revenue | modeled min | gross margin (modeled) | markup (modeled) | recorded span median min (n) | gross margin at recorded median span | gross margin at recorded p75 span | contribution at recorded span (card: debit / credit+surcharge) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| pest_control quarterly (2,000 sf) | bronze | $112.00 | $448.00 | $547.00 | 25 | 58.6% | 141.4% | 44 (98) | 59.4% | 49.5% | 56.2% / 59.0% |
-| pest_control quarterly (2,000 sf) | silver | $112.00 | $403.20 | $502.20 | 25 | 54.0% | 117.2% | 44 (98) | 54.8% | 43.9% | 51.7% / 54.5% |
-| pest_control quarterly (2,000 sf) | gold | $112.00 | $380.80 | $479.80 | 25 | 51.3% | 105.2% | 44 (98) | 52.2% | 40.6% | 49.0% / 51.8% |
-| pest_control quarterly (2,000 sf) | platinum | $112.00 | $358.40 | $457.40 | 25 | 48.2% | 93.1% | 44 (98) | 49.2% | 36.8% | 46.0% / 48.8% |
+| pest_control quarterly (2,000 sf) | bronze | $112.00 | $448.00 | $547.00 | 25 | 58.8% | 143.0% | 44 (98) | 59.4% | 49.5% | 56.2% / 59.0% |
+| pest_control quarterly (2,000 sf) | silver | $112.00 | $403.20 | $502.20 | 25 | 54.3% | 118.7% | 44 (98) | 54.8% | 43.9% | 51.7% / 54.5% |
+| pest_control quarterly (2,000 sf) | gold | $112.00 | $380.80 | $479.80 | 25 | 51.6% | 106.5% | 44 (98) | 52.2% | 40.6% | 49.0% / 51.8% |
+| pest_control quarterly (2,000 sf) | platinum | $112.00 | $358.40 | $457.40 | 25 | 48.6% | 94.4% | 44 (98) | 49.2% | 36.8% | 46.0% / 48.8% |
 | lawn_care 9x st_augustine (4,500 sf) | bronze | $64.00 | $576.00 | $576.00 | 23.25 | 30.7% | 44.3% | 44 (17) | 16.3% | 10.9% | 13.0% / 15.8% |
 | lawn_care 9x st_augustine (4,500 sf) | silver | $64.00 | $518.40 | $518.40 | 23.25 | 23.0% | 29.8% | 44 (17) | 7.0% | 0.9% | 3.6% / 6.4% |
 | lawn_care 9x st_augustine (4,500 sf) | gold | $64.00 | $489.60 | $489.60 | 23.25 | 18.4% | 22.6% | 44 (17) | 1.6% | -4.9% | -1.9% / 0.9% |
@@ -98,6 +98,10 @@ Recorded span = check-in → check-out, which often includes driving to the next
 - [specialty] palm {"treatmentType":"nutrition","palmCount":-2}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"Palm count is required for palm injection pricing.","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"nutrition","palmCount":2.5}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"Palm count is required for palm injection pricing.","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"combo","palmCount":3}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"palmSize is required for this palm treatment","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"fungal","palmCount":2,"diagnosisConfirmed":false,"selectedProduct":"PHOSPHO-Jet","appsPerYear":2}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"diagnosisConfirmed must be true for fungal palm treatment pricing","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"fungal","palmCount":2,"diagnosisConfirmed":true,"selectedProduct":"PHOSPHO-Jet"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"fungal palm treatment pricing requires appsPerYear or intervalMonths","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"lethalBronzing","palmCount":2,"palmStatus":"symptomatic"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"Palm is not eligible for lethal bronzing injection pricing and should be handled outside this service","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"treeAge","palmCount":2,"dbhInches":25}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"customPricePerPalm is required for Tree-Age pricing above 20 DBH inches","palmSizeUsed":null}
 - [commercial] commercial pest office 5,000 sf: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_pest","annual":715.83,"price":null,"perApp":178.96,"visits":4,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}
 - [commercial] commercial lawn 60,000 sf turf: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_lawn","annual":6231.52,"price":null,"perApp":778.94,"visits":8,"manualQuote":false,"taxable":false,"taxCategory":"lawn_spraying_or_treatment","margin":0.45,"review":false}]}
 - [commercial] commercial mosquito 40,000 sf lot: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_mosquito","annual":1321.09,"price":null,"perApp":146.79,"visits":9,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}
