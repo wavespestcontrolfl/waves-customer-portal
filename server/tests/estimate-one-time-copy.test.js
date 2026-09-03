@@ -120,7 +120,11 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(legacy.assurance).toBeNull();
     expect(legacy.terms).toBe('Pay on service day. No recurring schedule, no contract.');
     // Hero subline follows the same scope.
-    expect(oneTimeOnlyIntelligenceCopy([{ ...one, service: 'flea_knockdown_single', amount: 200, exteriorStatus: 'not_included' }]).hero.sub).toMatch(/^Interior treatment/);
+    const singleHero = oneTimeOnlyIntelligenceCopy([{ service: 'flea_knockdown_single', label: 'Flea Knockdown', amount: 200, visits: 1, exteriorStatus: 'not_included' }]).hero.sub;
+    expect(singleHero).toMatch(/^Interior treatment priced from your home — approve/);
+    expect(singleHero).not.toMatch(/follow-up/);
+    const twoHero = oneTimeOnlyIntelligenceCopy([{ service: 'flea_package', label: 'Flea Elimination Package', amount: 350, visits: 2, exteriorStatus: 'priced' }]).hero.sub;
+    expect(twoHero).toMatch(/^Interior and yard treatment priced from your home, with the follow-up built in/);
   });
 
   test('wasp: physical removal is promised only when the removal add-on was priced', () => {
@@ -198,6 +202,9 @@ describe('oneTimeOnlyIntelligenceCopy', () => {
   test('discount rows do not break the single-key rule; mixed services return null; hero-only packs carry no AI copy', () => {
     expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'one_time_adjustment', kind: 'discount', amount: -50 }]).key).toBe('german_roach');
     expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'wasp', label: 'Wasp Nest Treatment', amount: 150 }])).toBeNull();
+    // Included (service-credit) and quote-required rows are services too — their presence makes the quote mixed.
+    expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'wasp', label: 'Wasp Nest Treatment', amount: 0, kind: 'included', serviceSpecificDiscountApplied: true }])).toBeNull();
+    expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'trenching', label: 'Termite Trenching', amount: null, kind: 'quote_required', quoteRequired: true }])).toBeNull();
     const foam = oneTimeOnlyIntelligenceCopy([{ service: 'termite_foam', label: 'Termite Foam', amount: 180 }]);
     expect(foam.hero.eyebrow).toBe('Your termite foam treatment');
     expect(foam.aiTitle).toBeUndefined();

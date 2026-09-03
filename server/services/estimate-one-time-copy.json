@@ -89,13 +89,12 @@
     "hero": {
       "eyebrow": "Your flea treatment",
       "h1": "Hello {first}, your flea treatment quote is ready!",
-      "sub": "Interior and yard treatment priced from your home, with the follow-up built in — approve online and pick a day. Licensed & insured."
+      "sub": "{Scope} treatment priced from your home{FollowUp} — approve online and pick a day. Licensed & insured."
     },
     "outcomeInteriorOnly": "Fleas out of the house, with the egg cycle broken so they don’t come back.",
     "yardBullet": "Yard treatment focused on shaded harborage where flea larvae develop",
     "assuranceNone": null,
-    "termsNoWarranty": "Pay on service day. Single visit — no retreat warranty; add the follow-up visit for the guarantee.",
-    "heroSubInteriorOnly": "Interior treatment priced from your home — approve online and pick a day. Licensed & insured."
+    "termsNoWarranty": "Pay on service day. Single visit — no retreat warranty; add the follow-up visit for the guarantee."
   },
   "wasp": {
     "outcome": "The nest gone and the yard yours again — usually the same day.",

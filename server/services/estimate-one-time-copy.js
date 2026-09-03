@@ -208,10 +208,12 @@ function resolveOneTimeServiceCopy(item = {}) {
 // here from the row's visit count.
 function oneTimeOnlyIntelligenceCopy(items = []) {
   // Raw (un-normalized) rows carry no `kind` — a member-discount row is a
-  // negative price, and an adjustment row is never a service.
+  // negative price, and an adjustment row is never a service. Included
+  // (service-credit) and quote-required rows ARE services: they resolve to
+  // null below, so their presence makes the quote mixed and the page keeps
+  // the generic copy (codex pre-push P1 — fail closed).
   const rows = (Array.isArray(items) ? items : []).filter((item) => item
-    && item.kind !== 'discount' && item.kind !== 'included'
-    && item.quoteRequired !== true && item.kind !== 'quote_required'
+    && item.kind !== 'discount'
     && String(item.service || '').toLowerCase() !== 'one_time_adjustment'
     && !(Number(item.amount ?? item.price) < 0));
   if (!rows.length) return null;
@@ -221,14 +223,20 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
   const entry = key ? PACK[key] : null;
   if (!entry || !entry.hero) return null;
   const visits = Number(rows[0].visits) || (key === 'flea' && String(rows[0].offerKey || '').includes('two_visit') ? 2 : 0);
-  const fleaInteriorOnly = key === 'flea'
-    && !['priced', 'requires_confirmation'].includes(String(rows[0].exteriorStatus || ''));
+  // Flea hero subline follows the priced scope: exterior only when priced,
+  // "follow-up built in" only on the two-visit package (codex pre-push P1).
+  const fleaExteriorPriced = ['priced', 'requires_confirmation'].includes(String(rows[0].exteriorStatus || ''));
+  const heroSub = key === 'flea'
+    ? entry.hero.sub
+      .replace('{Scope}', fleaExteriorPriced ? 'Interior and yard' : 'Interior')
+      .replace('{FollowUp}', visits >= 2 ? ', with the follow-up built in' : '')
+    : entry.hero.sub;
   return {
     key,
     hero: {
       eyebrow: entry.hero.eyebrow,
       h1: fillVisits(entry.hero.h1, visits),
-      sub: fillVisits(fleaInteriorOnly && entry.heroSubInteriorOnly ? entry.heroSubInteriorOnly : entry.hero.sub, visits),
+      sub: fillVisits(heroSub, visits),
     },
     ...(entry.aiTitle ? { aiTitle: entry.aiTitle, aiBody: entry.aiBody } : {}),
     askChips: Array.isArray(entry.askChips) ? [...entry.askChips] : [],
