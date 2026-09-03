@@ -782,9 +782,13 @@ function callEndedAt(call) {
 // triage evidence sweep's batch form of resolveFulfillment's direct branch
 // below (same two routes: the estimator's own callLogId stamp, and an
 // estimate on a lead THIS call minted — carrying its SID — by the lead FK or
-// the estimate_data.lead_id mirror; same delivery witness: sent_at after the
-// boundary, and for report/plan_restart mints deliveryState.lastDeliveredAt
-// after it too). Never association-strength matches. Keep the two in step.
+// the estimate_data.lead_id mirror). The delivery witness is STRICTER than
+// the single-call path: deliveryState.lastDeliveredAt after the boundary
+// for EVERY source, because sendEstimateNow advances sent_at on a
+// suppression-only attempt (SMS gate or template off — sent:true,
+// real:false) while lastDeliveredAt moves only on a real handoff. Never
+// association-strength matches. Keep the routes in step with the branch
+// below.
 //
 // probes: [{ key, callId, twilioCallSid, after }] — one per card, with its
 // own boundary. Returns Map key → the EARLIEST qualifying direct proof.
@@ -804,8 +808,7 @@ async function directEstimatesSentAfter(conn, probes) {
     conn.raw("estimate_data #>> '{estimatorEngine,callLogId}' as stamped_call_id"),
     conn.raw("estimate_data ->> 'lead_id' as mirror_lead_id"),
   ];
-  const delivered = (row, after) => !["service_report_cta", "plan_restart"].includes(String(row.source || ""))
-    || (row.delivered_at && new Date(row.delivered_at) > after);
+  const delivered = (row, after) => Boolean(row.delivered_at) && new Date(row.delivered_at) > after;
   const consider = (callId, row, basis) => {
     for (const p of probesByCall.get(String(callId)) || []) {
       const after = new Date(p.after);

@@ -189,48 +189,81 @@ function addressKey(text) {
 }
 
 // Every address the CALL supplied (payload as-heard, V2 street/raw, V1
-// street) must agree with the on-file street address. Fail closed: no heard
-// address (nothing to prove), an unparseable extraction, or any heard
-// address that keys differently keeps the card.
+// street) must agree with the on-file address — street key AND whatever
+// locality the reading carries (city, ZIP). Fail closed: no heard address
+// (nothing to prove), an unparseable extraction, or any heard address that
+// keys or localizes differently keeps the card.
+const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+const zip5 = (v) => (String(v || '').match(/\b\d{5}\b/) || [null])[0];
+
+// City / ZIP hints from a raw "123 Main St, Bradenton, FL 34205" reading:
+// the segment after the first comma (state tokens and digits stripped) and
+// any 5-digit group past the street segment.
+function localityOfRaw(text) {
+  const s = String(text || '');
+  const comma = s.indexOf(',');
+  if (comma === -1) return { city: null, zip: null };
+  const rest = s.slice(comma + 1);
+  const seg = rest.split(',')[0].replace(/\b(fl|florida)\b/i, '').replace(/\d/g, '').trim();
+  return { city: seg || null, zip: zip5(rest) };
+}
+
+// Does a reading's locality agree with the on-file one? Only the fields the
+// reading carries are compared; a reading with neither city nor ZIP still
+// has to pass the street key.
+function localityMatches(item, { city, zip }) {
+  const onZip = zip5(item.customer_zip);
+  const heardZip = zip5(zip);
+  if (heardZip && onZip && heardZip !== onZip) return false;
+  const onCity = cityKey(item.customer_city);
+  const heardCity = cityKey(city);
+  if (heardCity && onCity && heardCity !== onCity) return false;
+  return true;
+}
+
 function heardAddressMatchesOnFile(item) {
   const onFile = addressKey(item.customer_address_line1);
   if (!onFile) return false;
   const heard = [];
   const payload = parseMaybeJson(item.payload);
   if (payload === undefined) return false;
-  if (payload?.address_as_heard) heard.push(payload.address_as_heard);
+  if (payload?.address_as_heard) heard.push({ text: payload.address_as_heard, ...localityOfRaw(payload.address_as_heard) });
   const v2 = parseMaybeJson(item.call_extraction);
   if (v2 === undefined) return false;
   const addr = v2?.property?.service_address || {};
-  if (addr.street_line_1) heard.push(addr.street_line_1);
-  if (addr.raw_text) heard.push(addr.raw_text);
+  if (addr.street_line_1) heard.push({ text: addr.street_line_1, city: addr.city, zip: addr.postal_code });
+  if (addr.raw_text) heard.push({ text: addr.raw_text, ...localityOfRaw(addr.raw_text) });
   const v1 = parseMaybeJson(item.call_extraction_v1);
   if (v1 === undefined) return false;
-  if (v1?.address_line1) heard.push(v1.address_line1);
-  const heardValues = heard.map((h) => String(h || '').trim()).filter(Boolean);
-  if (!heardValues.length) return false;
-  // Every heard value must key AND agree — one unkeyable representation
-  // (a bare street, a fragment) is unverified evidence, not ignorable.
-  return heardValues.every((h) => addressKey(h) === onFile);
+  if (v1?.address_line1) heard.push({ text: v1.address_line1, city: v1.city, zip: v1.zip });
+  const readings = heard.filter((h) => String(h.text || '').trim());
+  if (!readings.length) return false;
+  // Every reading must key AND agree — one unkeyable representation (a bare
+  // street, a fragment) is unverified evidence, not ignorable.
+  return readings.every((h) => addressKey(h.text) === onFile && localityMatches(item, h));
 }
 
 // The requested service categories the CARD snapshotted at filing time
 // (call-routing-gates writes scheduling_window.requested_service_categories),
-// as match tokens. Never the call's ai_extraction_enriched: that column is a
-// rolling snapshot a force-reprocess overwrites while the open card keeps
-// its original ask. A card filed before the snapshot existed yields no
-// tokens, so its association arm stays closed.
+// as match tokens — ONE token list PER CATEGORY, because a multi-service ask
+// (pest + lawn) is fulfilled only when bookings cover every category. Never
+// the call's ai_extraction_enriched: that column is a rolling snapshot a
+// force-reprocess overwrites while the open card keeps its original ask. A
+// card filed before the snapshot existed yields no categories, so its
+// association arm stays closed.
 function requestedServiceTokens(item) {
   const payload = parseMaybeJson(item.payload);
   const cats = payload?.scheduling_window?.requested_service_categories;
   if (!Array.isArray(cats)) return [];
-  const tokens = new Set();
+  const out = [];
   for (const c of cats) {
+    const tokens = new Set();
     for (const t of String(c || '').toLowerCase().split(/[^a-z]+/)) {
       if (t && !SERVICE_STOPWORDS.has(t)) tokens.add(t);
     }
+    if (tokens.size) out.push([...tokens]);
   }
-  return [...tokens];
+  return out;
 }
 
 function serviceTypeMatches(serviceType, requestedTokens) {
@@ -572,6 +605,7 @@ function loadCandidateItems(conn, itemIds = null) {
       'c.pipeline_stage as customer_pipeline_stage',
       'c.address_line1 as customer_address_line1',
       'c.zip as customer_zip',
+      'c.city as customer_city',
       'c.first_name as customer_first_name',
       'c.last_name as customer_last_name',
       'c.phone as customer_phone',
@@ -692,15 +726,15 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
   if (visitItems.length) {
     const customerIds = [...new Set(visitItems.map((i) => i.call_customer_id))];
     const propertyIds = new Map();
-    const propertyKeys = new Map();
+    const propertyPlaces = new Map();
     const propRows = await conn('customer_properties')
       .whereIn('customer_id', customerIds)
-      .select('id', 'customer_id', 'address_line1');
+      .select('id', 'customer_id', 'address_line1', 'city', 'zip');
     for (const r of propRows) {
       const list = propertyIds.get(String(r.customer_id)) || [];
       list.push(String(r.id));
       propertyIds.set(String(r.customer_id), list);
-      propertyKeys.set(String(r.id), addressKey(r.address_line1));
+      propertyPlaces.set(String(r.id), { key: addressKey(r.address_line1), city: r.city, zip: r.zip });
     }
     const multiProperty = (customerId) => (propertyIds.get(String(customerId)) || []).length > 1;
 
@@ -712,37 +746,50 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
       // rows prove nothing.
       .whereIn('status', [...LIVE_BOOKING_STATUSES])
       .orderBy('id', 'asc')
-      .select('id', 'customer_id', 'source_call_log_id', 'status', 'service_type', 'scheduled_date', 'created_at', 'completed_at', 'service_address_line1', 'property_id');
+      .select('id', 'customer_id', 'source_call_log_id', 'status', 'service_type', 'scheduled_date', 'created_at', 'completed_at', 'service_address_line1', 'service_address_city', 'service_address_zip', 'property_id');
     if (lock) q.forUpdate();
     const visits = await q;
+    // Indexed once — the backlog is cards × a customer's own visits, not
+    // cards × every fetched visit.
+    const visitsByCustomer = new Map();
+    for (const v of visits) {
+      const list = visitsByCustomer.get(String(v.customer_id)) || [];
+      list.push(v);
+      visitsByCustomer.set(String(v.customer_id), list);
+    }
 
     for (const item of visitItems) {
-      const mine = visits.filter((v) => String(v.customer_id) === String(item.call_customer_id));
+      const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
       if (item.reason_code === 'not_confirmed') {
         // Direct: a live booking THIS call minted, created after the card
         // (a booking that predates the card belongs to an earlier pass of
         // the same call and is exactly the stale-provenance case the header
         // refuses to trust).
-        const direct = mine.some((v) => String(v.source_call_log_id) === String(item.call_log_id)
+        const direct = mine.filter((v) => String(v.source_call_log_id) === String(item.call_log_id)
           && strictlyAfter(v.created_at, item.created_at));
-        if (direct) {
+        const categories = requestedServiceTokens(item);
+        // A single-service (or unsnapshotted) ask is answered by this
+        // call's own booking outright.
+        if (categories.length <= 1 && direct.length) {
           flag(item.id, 'booking_after_card');
           continue;
         }
+        if (!categories.length) continue;
         // Association: single-property customer, booking created after the
-        // card, inside the requested window, for the requested service.
-        if (multiProperty(item.call_customer_id)) continue;
-        const window = requestedWindow(item);
-        if (!window) continue;
-        const tokens = requestedServiceTokens(item);
-        const assoc = mine.some((v) => {
+        // card, inside the requested days exactly — no association horizon
+        // around them, or an unrelated recurring visit nearby would count.
+        const window = multiProperty(item.call_customer_id) ? null : requestedWindow(item);
+        const inWindow = window ? mine.filter((v) => {
           if (!strictlyAfter(v.created_at, item.created_at) || !toDate(v.scheduled_date)) return false;
-          // Inside the requested days exactly — no association horizon
-          // around them, or an unrelated recurring visit nearby would count.
           const day = etCalendarDayOf(v.scheduled_date);
-          return day >= window.start && day <= window.end && serviceTypeMatches(v.service_type, tokens);
-        });
-        if (assoc) flag(item.id, 'booking_after_card');
+          return day >= window.start && day <= window.end;
+        }) : [];
+        // The bookings must COLLECTIVELY cover every requested category —
+        // a pest-only booking leaves a pest + lawn ask open.
+        const pool = [...direct, ...inWindow];
+        if (categories.every((tokens) => pool.some((v) => serviceTypeMatches(v.service_type, tokens)))) {
+          flag(item.id, 'booking_after_card');
+        }
       } else {
         // Address cards: a visit COMPLETED after the card for a
         // single-property customer. The classifier adds the heard-address
@@ -758,9 +805,13 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
           // else the address of the account's own property row it points
           // at. A visit with neither is only associated with the customer
           // and proves nothing about where service happened.
-          if (v.service_address_line1) return addressKey(v.service_address_line1) === onFile;
+          if (v.service_address_line1) {
+            return addressKey(v.service_address_line1) === onFile
+              && localityMatches(item, { city: v.service_address_city, zip: v.service_address_zip });
+          }
           if (!v.property_id || !ownProperties.includes(String(v.property_id))) return false;
-          return propertyKeys.get(String(v.property_id)) === onFile;
+          const place = propertyPlaces.get(String(v.property_id));
+          return Boolean(place) && place.key === onFile && localityMatches(item, place);
         });
         if (done) flag(item.id, 'visit_completed_at_address');
       }

@@ -405,6 +405,13 @@ describe('evidence helpers', () => {
   test('heardAddressMatchesOnFile uses the shared suffix-aware street key, fails closed on unparseable input', () => {
     const heard = (line) => item({ customer_address_line1: '77 Oak St', call_extraction_v1: JSON.stringify({ address_line1: line }), call_extraction: NO_ADDR_EXTRACTION, payload: {} });
     expect(heardAddressMatchesOnFile(heard('77 oak street, bradenton'))).toBe(true);
+    // Locality is compared when the reading carries it and the file has it.
+    const located = (line, extra = {}) => item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({ address_line1: line, ...extra }), call_extraction: NO_ADDR_EXTRACTION, payload: {} });
+    expect(heardAddressMatchesOnFile(located('77 Oak St', { city: 'Bradenton', zip: '34205-1234' }))).toBe(true);
+    expect(heardAddressMatchesOnFile(located('77 Oak St', { city: 'Tampa' }))).toBe(false);
+    expect(heardAddressMatchesOnFile(located('77 Oak St', { zip: '33601' }))).toBe(false);
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({}), call_extraction: NO_ADDR_EXTRACTION, payload: { address_as_heard: '77 Oak St, Tampa FL 33601' } }))).toBe(false);
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction_v1: JSON.stringify({}), call_extraction: NO_ADDR_EXTRACTION, payload: { address_as_heard: '77 Oak Street, Bradenton, FL 34205' } }))).toBe(true);
     expect(heardAddressMatchesOnFile(heard('77 Oak St Apt 4'))).toBe(true);
     // Same number, different street type = a different street.
     expect(heardAddressMatchesOnFile(heard('77 Oak Ave'))).toBe(false);
@@ -440,8 +447,10 @@ describe('evidence helpers', () => {
   });
 
   test('requested service tokens ignore generic words; service types match on a specific token', () => {
-    const tokens = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_control', 'mosquito_control'] } } }));
-    expect(tokens.sort()).toEqual(['mosquito', 'pest']);
+    const categories = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_control', 'mosquito_control', 'control'] } } }));
+    // One token list per category (a stopword-only category yields none).
+    expect(categories).toEqual([['pest'], ['mosquito']]);
+    const tokens = categories.flat();
     // The call's rolling extraction is never the source (a reprocess rewrites it).
     expect(requestedServiceTokens(item({ payload: { scheduling_window: {} }, call_extraction: { service_request: { primary_service_category: 'pest_control' } } }))).toEqual([]);
     expect(serviceTypeMatches('Quarterly Pest Control', tokens)).toBe(true);
