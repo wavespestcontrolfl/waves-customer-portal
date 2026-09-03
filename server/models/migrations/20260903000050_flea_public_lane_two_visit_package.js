@@ -28,9 +28,10 @@
  *    route to the typed flea completion profile above. Same guarded pattern
  *    as 20260826000003: table lock across the check-then-stamp span, another
  *    active owner of the key elsewhere skips the stamp (no duplicate owners
- *    for the linker to refuse), only the exact seeded value is touched (an
- *    admin-edited engine_keys survives), ownership RECORDED by row id in
- *    system_settings, and down() reverses only recorded rows, value-guarded.
+ *    for the linker to refuse), the retired key is replaced IN PLACE so an
+ *    operator-added alias on the row survives, ownership RECORDED by row id
+ *    (with the exact before/after arrays) in system_settings, and down()
+ *    reverses only recorded rows, value-guarded.
  *    The description said "full yard broadcast … interior as an add-on", the
  *    reverse of the package (interior + follow-up; yard as the add-on);
  *    rewritten to match.
@@ -139,20 +140,27 @@ exports.up = async function up(knex) {
     // Serialize the owner-check → stamp span against concurrent admin edits
     // (same reasoning as 20260825000011 / 20260826000003).
     await knex.raw('LOCK TABLE services IN SHARE ROW EXCLUSIVE MODE');
+    // The retired key is replaced IN PLACE inside the array — an operator-
+    // added alias on the same row survives, and the package still resolves
+    // (GH codex #3845 r2 P0). Ownership records the exact before/after
+    // arrays so down() restores the row only while it still carries what
+    // up() wrote.
     const svc = await knex('services')
       .where({ service_key: SERVICE_KEY })
-      .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(OLD_ENGINE_KEYS)])
-      .first('id', 'description');
-    if (svc && !(await activeOwnerElsewhere(knex, svc.id, NEW_ENGINE_KEYS))) {
+      .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify(OLD_ENGINE_KEYS)])
+      .first('id', 'description', 'engine_keys');
+    const before = svc ? parseData(svc.engine_keys) : null;
+    if (svc && Array.isArray(before) && !(await activeOwnerElsewhere(knex, svc.id, NEW_ENGINE_KEYS))) {
+      const after = [...new Set(before.map((k) => (k === SINGLE_OFFER_KEY ? NEW_ENGINE_KEYS[0] : k)))];
       const count = await knex('services')
         .where({ id: svc.id })
-        .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(OLD_ENGINE_KEYS)])
+        .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(before)])
         .update({
-          engine_keys: JSON.stringify(NEW_ENGINE_KEYS),
+          engine_keys: JSON.stringify(after),
           ...(svc.description === OLD_DESCRIPTION ? { description: NEW_DESCRIPTION } : {}),
           updated_at: knex.fn.now(),
         });
-      if (count) state.stamped.push({ id: svc.id, description: svc.description === OLD_DESCRIPTION });
+      if (count) state.stamped.push({ id: svc.id, before, after, description: svc.description === OLD_DESCRIPTION });
     }
   }
 
@@ -198,12 +206,12 @@ exports.down = async function down(knex) {
 
   if (await knex.schema.hasTable('services') && await knex.schema.hasColumn('services', 'engine_keys')) {
     for (const rec of (Array.isArray(state.stamped) ? state.stamped : [])) {
-      if (!rec || !rec.id) continue;
+      if (!rec || !rec.id || !Array.isArray(rec.before) || !Array.isArray(rec.after)) continue;
       await knex('services')
         .where({ id: rec.id, service_key: SERVICE_KEY })
-        .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(NEW_ENGINE_KEYS)])
+        .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(rec.after)])
         .update({
-          engine_keys: JSON.stringify(OLD_ENGINE_KEYS),
+          engine_keys: JSON.stringify(rec.before),
           ...(rec.description ? { description: OLD_DESCRIPTION } : {}),
           updated_at: knex.fn.now(),
         });
