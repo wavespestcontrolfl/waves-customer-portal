@@ -10,6 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.wavespestcontrol.com' }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (longUrl) => longUrl),
+  existingShortUrlFor: jest.fn(async () => null),
   invoiceShortCodePrefix: jest.fn(() => 'wpc-test'),
 }));
 jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn() }));
@@ -156,6 +157,60 @@ describe('buildLatestEstimateLink', () => {
     const r = await buildLatestEstimateLink(['c1']);
     expect(r.url).toContain('/estimate/tk-old');
     expect(b.offset).toHaveBeenCalledWith(15);
+  });
+
+  test('short-link purpose defaults to the composer insert and a caller can label its own send', async () => {
+    const { shortenOrPassthrough } = require('../services/short-url');
+    const rows = [{ id: 'e-ok', token: 'tk-ok', customer_id: 'c1', status: 'sent', service_type: 'Pest' }];
+    mockBuilders = { estimates: chainBuilder({ rows }) };
+    isEstimateCustomerViewable.mockReturnValue(true);
+
+    await buildLatestEstimateLink(['c1']);
+    expect(shortenOrPassthrough).toHaveBeenLastCalledWith(
+      expect.stringContaining('/estimate/tk-ok'),
+      expect.objectContaining({ purpose: 'composer_insert' }),
+    );
+
+    mockBuilders = { estimates: chainBuilder({ rows }) };
+    await buildLatestEstimateLink(['c1'], { purpose: 'call_booking_confirmation' });
+    expect(shortenOrPassthrough).toHaveBeenLastCalledWith(
+      expect.stringContaining('/estimate/tk-ok'),
+      expect.objectContaining({ purpose: 'call_booking_confirmation' }),
+    );
+  });
+
+  test('findLatestOpenEstimate resolves the row without minting a short link', async () => {
+    const { findLatestOpenEstimate } = require('../services/composer-customer-links');
+    const { shortenOrPassthrough } = require('../services/short-url');
+    shortenOrPassthrough.mockClear();
+    const rows = [{ id: 'e-ok', token: 'tk-ok', customer_id: 'c1', status: 'sent', service_type: 'Pest' }];
+    mockBuilders = { estimates: chainBuilder({ rows }) };
+    isEstimateCustomerViewable.mockReturnValue(true);
+
+    const r = await findLatestOpenEstimate(['c1']);
+    expect(r.estimate).toEqual(expect.objectContaining({ id: 'e-ok', token: 'tk-ok' }));
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+  });
+
+  test('mintEstimateLink reuses the estimate\'s existing short code when asked, else mints', async () => {
+    const { mintEstimateLink } = require('../services/composer-customer-links');
+    const { shortenOrPassthrough, existingShortUrlFor } = require('../services/short-url');
+    shortenOrPassthrough.mockClear();
+    const estimate = { id: 'e-ok', token: 'tk-ok', customer_id: 'c1', status: 'sent', service_type: 'Pest' };
+
+    existingShortUrlFor.mockResolvedValueOnce('https://l.example/abc');
+    const reused = await mintEstimateLink(estimate, { purpose: 'call_booking_confirmation', reuseExisting: true });
+    expect(reused.url).toBe('https://l.example/abc');
+    // Scoped to THIS workflow's codes — never a composer/campaign link.
+    expect(existingShortUrlFor).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: 'estimate', entityId: 'e-ok', purpose: 'call_booking_confirmation' }),
+    );
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+
+    existingShortUrlFor.mockResolvedValueOnce(null);
+    const minted = await mintEstimateLink(estimate, { purpose: 'call_booking_confirmation', reuseExisting: true });
+    expect(minted.url).toContain('/estimate/tk-ok');
+    expect(shortenOrPassthrough).toHaveBeenCalledTimes(1);
   });
 
   test('no viewable open estimate answers a plain reason', async () => {

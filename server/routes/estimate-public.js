@@ -1095,9 +1095,27 @@ function makeAdoptionPropertyScope(conn, estimate) {
   };
 }
 
+// Statuses an estimate accept may adopt as the plan's first visit. An
+// in-progress row (en_route/on_site) is admitted only behind the gate: the
+// on-site accept — the customer accepting from the phone while the tech is
+// at the property — otherwise fell through to the slot picker and minted a
+// duplicate visit while the real one completed unpriced (owner case
+// 2026-09-03). The env is re-read per call so the flag is a live kill; the
+// accept handler snapshots the set ONCE and threads it through the preflight
+// and the under-lock UPDATE (pre-push codex P1: a flip between the two reads
+// must not 409 a row this request offered).
+function adoptableAppointmentStatuses() {
+  return featureGates.gateEnvValue('GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT')
+    ? ['pending', 'confirmed', 'en_route', 'on_site']
+    : ['pending', 'confirmed'];
+}
+
 async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts = {}) {
   const conn = opts.database || db;
   const requestedId = opts.appointmentId ? String(opts.appointmentId) : '';
+  const adoptableStatuses = Array.isArray(opts.adoptableStatuses) && opts.adoptableStatuses.length
+    ? opts.adoptableStatuses
+    : adoptableAppointmentStatuses();
   const data = estData || parseEstimateDataSafe(estimate);
   const linkedId = data?.scheduled_service_id ? String(data.scheduled_service_id) : '';
   const today = etDateString();
@@ -1107,7 +1125,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // `services` for catalog identity (codex #3228 r5), and unqualified `id`
   // in ORDER BY would be ambiguous on that query.
   const baseQuery = () => conn('scheduled_services')
-    .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+    .whereIn('scheduled_services.status', adoptableStatuses)
     .where('scheduled_services.scheduled_date', '>=', today)
     .where((builder) => {
       if (estimate.customer_id) {
@@ -9268,10 +9286,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // row stays adoptable under ANY of them; cross-family protection (codex
     // #3228 r4/r8) is preserved because the intersection is a subset of each
     // single mode's family set.
+    // ONE snapshot of the adoptable status set for this request (preflight
+    // + under-lock UPDATE) — see adoptableAppointmentStatuses.
+    const acceptAdoptableStatuses = adoptableAppointmentStatuses();
     const existingAppointmentRow = existingAppointmentId
       ? await findLinkedUpcomingAppointment(estimate, estData, {
         appointmentId: existingAppointmentId,
         serviceModes: adoptionServiceModesForContract(estimate, estData),
+        adoptableStatuses: acceptAdoptableStatuses,
       })
       : null;
     if (existingAppointmentId && !existingAppointmentRow) {
@@ -11123,7 +11145,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
           const updatedCount = await trx('scheduled_services')
             .where({ id: existingAppointmentRow.id })
-            .whereIn('status', ['pending', 'confirmed'])
+            // The SAME snapshot the preflight offered (the gate must not
+            // admit a row there and 409 it here).
+            .whereIn('status', acceptAdoptableStatuses)
             .where('scheduled_date', '>=', etDateString())
             .where((builder) => {
               builder.whereNull('customer_id').orWhere('customer_id', customerId);

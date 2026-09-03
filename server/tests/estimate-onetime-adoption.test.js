@@ -17,6 +17,7 @@
 
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  gateEnvValue: jest.fn(() => false),
   gates: {},
 }));
 
