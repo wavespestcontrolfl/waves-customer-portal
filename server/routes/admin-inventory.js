@@ -3696,16 +3696,20 @@ router.put('/:id', async (req, res, next) => {
     // Auto-reorder + per-completion consumable fields (supplies lane). The
     // vendor must exist; quantities are non-negative numbers or null.
     if (req.body.autoReorderEnabled !== undefined) upd.auto_reorder_enabled = req.body.autoReorderEnabled === true;
-    if (req.body.reorderQuantity !== undefined) {
-      const q = numberOrNull(req.body.reorderQuantity);
-      if (q != null && q < 0) return res.status(400).json({ error: 'Reorder quantity must be zero or more' });
-      upd.reorder_quantity = q;
-    }
-    if (req.body.perCompletionUsage !== undefined) {
-      const u = numberOrNull(req.body.perCompletionUsage);
-      if (u != null && u < 0) return res.status(400).json({ error: 'Per-visit usage must be zero or more' });
-      upd.per_completion_usage = u;
-    }
+    // Blank/null clears the field; anything else must be a finite number >= 0
+    // (a typo must never silently disable auto-reorder by becoming null).
+    const nonNegativeOrNull = (raw, label) => {
+      if (raw == null || raw === '') return null;
+      const n = numberOrNull(raw);
+      if (n == null || n < 0) {
+        const err = new Error(`${label} must be a number zero or more`);
+        err.statusCode = 400;
+        throw err;
+      }
+      return n;
+    };
+    if (req.body.reorderQuantity !== undefined) upd.reorder_quantity = nonNegativeOrNull(req.body.reorderQuantity, 'Reorder quantity');
+    if (req.body.perCompletionUsage !== undefined) upd.per_completion_usage = nonNegativeOrNull(req.body.perCompletionUsage, 'Per-visit usage');
     if (req.body.autoReorderVendorId !== undefined) {
       const vendorId = req.body.autoReorderVendorId || null;
       if (vendorId) {
