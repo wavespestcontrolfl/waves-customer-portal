@@ -340,6 +340,25 @@ function latestByOpportunity(rows = []) {
   return out;
 }
 
+function summarizeSeedBrief(signalMetadata) {
+  const b = signalMetadata && typeof signalMetadata === 'object' ? signalMetadata.category_brief : null;
+  if (!b || typeof b !== 'object' || !b.working_title) return null;
+  const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+  return {
+    source: signalMetadata.manifest_set || signalMetadata.source || null,
+    working_title: b.working_title,
+    slug: b.slug || null,
+    city: b.city || null,
+    primary_kw: b.primary_kw || null,
+    thesis: b.thesis || null,
+    outline: list(b.outline),
+    sources: list(b.sources),
+    verify_notes: list(b.verify_notes),
+    window: b.window || null,
+    confidence: typeof b.listen?.confidence === 'number' ? b.listen.confidence : null,
+  };
+}
+
 function prNumberFromUrl(url) {
   const match = String(url || '').match(/\/pull\/(\d+)/);
   return match ? Number(match[1]) : null;
@@ -379,6 +398,11 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
     completed_at: opportunity.completed_at,
     updated_at: opportunity.updated_at,
     skip_reason: opportunity.skip_reason || run?.skip_reason || null,
+    // Operator-seeded rows (category / listen seeds) park at pending_review
+    // BEFORE any content_briefs or autonomous_runs row exists, so the
+    // curated brief in signal_metadata is the only thing there is to
+    // approve — surface it instead of a blank title/target (Codex, #3789).
+    seed_brief: summarizeSeedBrief(signalMetadata),
     brief: brief ? {
       id: brief.id,
       version: brief.version,

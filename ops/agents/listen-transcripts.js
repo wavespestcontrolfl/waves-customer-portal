@@ -16,7 +16,8 @@
  *             asks the FAST text policy for candidate topics, applies the
  *             waves-content topic-targeting rules, and writes a category-seed
  *             MANIFEST (same schema as server/data/category-seed-topics-v1.json)
- *             to --out. No DB. Prints the candidates.
+ *             to --out when given (no --out ⇒ printed only, nothing written).
+ *             No DB. Prints the candidates.
  *
  *   seed      --file=<manifest> [--only=id,id] [--execute]: validates the
  *             manifest through category-seed-seeder.loadManifest, flags rows
@@ -62,6 +63,29 @@ const CHUNK_CHARS = 14000;
 const MAX_CHUNKS = Number(flag('max-chunks', 20));
 const EVIDENCE_MAX = 200;
 const { etDateString } = require(path.join(REPO_ROOT, 'server/utils/datetime-et'));
+
+// pii-redactor knows people, not credentials: a pasted key or token comes
+// back unchanged at confidence 'high'. Any turn that still carries one after
+// redaction is withheld whole (Codex r2 P1). Deliberately broad — a false
+// positive costs one turn of context, a miss ships a secret to a provider.
+const SECRET_RES = [
+  /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}/,          // Stripe
+  /\bwhsec_[A-Za-z0-9]{8,}/,                                // Stripe webhook
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/, // JWT
+  /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}/,           // GitHub
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/,                         // Slack
+  /\bAKIA[0-9A-Z]{16}\b/,                                   // AWS
+  /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}/,                 // Anthropic / OpenAI
+  /\bAIza[0-9A-Za-z_-]{30,}/,                               // Google
+  /\bAC[0-9a-f]{32}\b|\bSK[0-9a-f]{32}\b/,                 // Twilio SID / key
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|DATABASE_URL)\s*[=:]\s*['"]?[^\s'"]{8,}/, // FOO_TOKEN=…
+  /\bpostgres(?:ql)?:\/\/[^\s]+:[^\s@]+@/,                // DSN with password
+  /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{20,}/i,          // Authorization header values
+];
+function containsSecret(text) {
+  return SECRET_RES.some((re) => re.test(text));
+}
 
 // ── transcript readers ───────────────────────────────────────────────
 
@@ -161,7 +185,7 @@ function redactedChunks(sources, { redact }) {
       // cannot safely tokenise (all-lowercase names, suspicious unstructured
       // runs). That text never leaves the machine — the turn is withheld
       // whole (Codex r1 P1).
-      if (clean.confidence === 'low') { stats.withheld += 1; continue; }
+      if (clean.confidence === 'low' || containsSecret(clean.text)) { stats.withheld += 1; continue; }
       const piece = `[${turn.role}] ${clean.text.trim()}\n\n`;
       if (buf.length + piece.length > CHUNK_CHARS) flush();
       // A single oversized turn is truncated, not split — an idea rarely
@@ -242,6 +266,16 @@ function targetingViolation(idea) {
 
 function normalizeTitle(t) {
   return String(t || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Inverse of briefFor, so seed mode can re-run targetingViolation on a brief
+// the owner edited by hand.
+function ideaFromBrief(b) {
+  return {
+    working_title: b.working_title, slug: b.slug, city: b.city || null, primary_kw: b.primary_kw || '',
+    secondary_kws: Array.isArray(b.secondary_kws) ? b.secondary_kws : [], thesis: b.thesis,
+    outline: Array.isArray(b.outline) ? b.outline : [], sources: Array.isArray(b.sources) ? b.sources : [],
+  };
 }
 
 function briefFor(idea, { now }) {
@@ -388,6 +422,15 @@ async function runSeed({ file, only, execute }) {
   const briefs = manifest.briefs.filter((b) => !onlyIds || onlyIds.has(b.id));
   if (!briefs.length) { console.error('no briefs selected'); process.exit(2); }
 
+  // The owner edits manifests in place during the brainstorm; loadManifest
+  // checks shape, not rulings. Re-run the extraction predicate on every
+  // selected brief before any DB work (Codex r2 P2).
+  const violations = briefs.map((b) => [b.id, targetingViolation(ideaFromBrief(b))]).filter(([, why]) => why);
+  if (violations.length) {
+    console.error(`refusing to seed — targeting rulings failed: ${violations.map(([id, why]) => `${id}=${why}`).join(', ')}`);
+    await db.destroy();
+    process.exit(2);
+  }
   const flags = await seedFlags(db, briefs);
   const skip = new Set(flags.filter((f) => f.already_queued || f.title_in_queue || f.title_is_live_post).map((f) => f.id));
   console.log(`\n${execute ? 'EXECUTE' : 'DRY RUN'} — ${briefs.length} selected, ${briefs.length - skip.size} to seed at pending_review\n`);
@@ -425,8 +468,13 @@ async function runExtract({ hours, out }) {
 
   const { ideas, failures } = await extractIdeas(chunks, { dispatch: dispatchWithFallback, policy: MODELS.TEXT_POLICIES.fastStructured });
   const { manifest, dropped } = buildManifest(ideas, { now });
-  fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, JSON.stringify(manifest, null, 2));
+  // MUTATES contract: nothing touches the filesystem unless --out names a
+  // path (Codex r2 P1). Without it the manifest is printed as JSON so the
+  // operator can still pipe it somewhere deliberately.
+  if (out) {
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    fs.writeFileSync(out, JSON.stringify(manifest, null, 2));
+  }
 
   console.log(`\nideas: ${ideas.length} raw → ${manifest.briefs.length} kept, ${dropped.length} dropped${failures.length ? `, ${failures.length} chunk(s) failed (${failures.map((f) => f.reason).join(', ')})` : ''}`);
   for (const b of manifest.briefs) {
@@ -436,14 +484,20 @@ async function runExtract({ hours, out }) {
     console.log('\ndropped:');
     for (const d of dropped) console.log(`  - ${d.reason}: ${d.title}`);
   }
-  console.log(`\nmanifest → ${out}\nnext: railway run --service Postgres node ops/agents/listen-transcripts.js seed --file=${out} [--only=id,id] [--execute]`);
+  if (out) {
+    console.log(`\nmanifest → ${out}\nnext: railway run --service Postgres node ops/agents/listen-transcripts.js seed --file=${out} [--only=id,id] [--execute]`);
+  } else if (manifest.briefs.length) {
+    console.log(`\nno --out given — manifest NOT written. Re-run with --out=${path.join(os.tmpdir(), `listen-${etDateString(now)}.json`)} to keep it:\n`);
+    console.log(JSON.stringify(manifest, null, 2));
+  }
 }
 
 if (require.main === module) {
   (async () => {
     if (mode === 'extract') {
-      const out = flag('out', path.join(os.tmpdir(), `listen-${etDateString(new Date())}.json`));
-      await runExtract({ hours: Number(flag('hours', 24)), out });
+      const outFlag = flag('out', null);
+      if (outFlag === true) { console.error('--out needs a path (--out=/tmp/listen-<date>.json)'); process.exit(2); }
+      await runExtract({ hours: Number(flag('hours', 24)), out: outFlag ? path.resolve(outFlag) : null });
     } else if (mode === 'seed') {
       const file = flag('file');
       if (!file || file === true) { console.error('seed needs --file=<manifest.json>'); process.exit(2); }
@@ -458,6 +512,6 @@ if (require.main === module) {
 module.exports = {
   _internals: {
     textBlocks, readClaudeTranscript, readCodexTranscript, redactedChunks, extractIdeas,
-    targetingViolation, buildManifest, briefFor, normalizeTitle, sourceAllowed, shapeIdea, SYSTEM_PROMPT,
+    targetingViolation, buildManifest, briefFor, ideaFromBrief, normalizeTitle, sourceAllowed, shapeIdea, containsSecret, SYSTEM_PROMPT,
   },
 };

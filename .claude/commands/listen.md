@@ -17,14 +17,17 @@ Arguments: $ARGUMENTS
 ## 1. Extract (no DB, one FAST-tier LLM pass over redacted prose)
 
 ```sh
-node ops/agents/listen-transcripts.js extract --hours=24
+node ops/agents/listen-transcripts.js extract --hours=24 --out=/tmp/listen-<date>.json
 ```
 
 The script keeps only user/assistant prose (tool results, tool inputs and
 thinking blocks are dropped whole), runs `pii-redactor` on every chunk before
-dispatch, then writes a manifest to `/tmp/listen-<date>.json` and prints each
-kept idea with its slug, thesis, why-now, and the ideas it dropped (with the
+dispatch, then writes the manifest to `--out` (without `--out` nothing is
+written — the manifest is only printed) and prints each kept idea with its slug, thesis, why-now, and the ideas it dropped (with the
 targeting rule that dropped them). Pass `--hours=48` after a day off.
+Turns the redactor cannot clear with confidence (lowercase-heavy prose
+where a name could hide, digit runs, pasted credentials) are withheld whole
+— the "withheld" count tells you how much of the day never left the Mac.
 
 ## 2. Brainstorm (the evening sit-down)
 
@@ -41,6 +44,9 @@ Show the owner the kept list, one line per idea: id, title, why-now. Then:
   entity, propose a refresh instead of a seed).
 - Offer angles the transcript suggests but the model missed — the point of
   the sit-down is the owner's judgement, not the model's list.
+
+Seed mode re-runs every targeting ruling on the edited manifest and refuses
+the whole selection if any brief fails — fix the brief, do not bypass.
 
 ## 3. Seed the keepers (dry run, then execute)
 

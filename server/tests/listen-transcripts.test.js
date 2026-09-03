@@ -42,6 +42,20 @@ describe('redaction before dispatch', () => {
     expect(chunks.join('')).not.toContain('john smith');
   });
 
+  test('a turn carrying a credential the redactor does not know is withheld whole', () => {
+    const turns = [
+      { role: 'user', text: 'Here is the env: STRIPE_SECRET_KEY=sk_live_51Habcdefghijklmnop and it still 500s' },
+      { role: 'user', text: 'Auth header was Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefGHIJKL' },
+      { role: 'assistant', text: 'Gray Leaf Spot on St. Augustine lawns in Sarasota after the fertilizer week.' },
+    ];
+    const { chunks, stats } = _internals.redactedChunks([{ turns }], { redact });
+    expect(stats.withheld).toBe(2);
+    expect(chunks.join('')).not.toMatch(/sk_live|eyJ/);
+    expect(chunks.join('')).toContain('Gray Leaf Spot');
+    expect(_internals.containsSecret('DATABASE_URL=postgres://u:p@host/db')).toBe(true);
+    expect(_internals.containsSecret('the lawn needs 1 inch of water')).toBe(false);
+  });
+
   test('the chunk cap keeps the newest chunks of the newest source', () => {
     const big = (tag, n) => Array.from({ length: n }, (_, i) => ({ role: 'user', text: `Turn ${tag}-${i} ` + 'Lawn note. '.repeat(1200) }));
     const { chunks, truncated } = _internals.redactedChunks([{ turns: big('new', 40) }, { turns: big('old', 40) }], { redact });
@@ -70,6 +84,15 @@ describe('redaction before dispatch', () => {
     expect(stats.findings.email).toBeGreaterThan(0);
     // The business insight survives redaction.
     expect(sent).toContain('brown patches');
+  });
+});
+
+describe('seed-time re-gating', () => {
+  test('ideaFromBrief round-trips so an edited manifest is judged by the same predicate', () => {
+    const good = _internals.briefFor({ working_title: 'Sarasota chinch bug season', slug: '/lawn-care/chinch-bugs-sarasota-fl/', city: 'Sarasota', primary_kw: 'chinch bugs sarasota', secondary_kws: [], thesis: 't', outline: ['a'], sources: ['https://edis.ifas.ufl.edu/x'], confidence: 0.6 }, { now: new Date('2026-09-03T12:00:00Z') });
+    expect(_internals.targetingViolation(_internals.ideaFromBrief(good))).toBeNull();
+    expect(_internals.targetingViolation(_internals.ideaFromBrief({ ...good, working_title: 'Chinch bugs in Tampa' }))).toBe('out_of_footprint_geo');
+    expect(_internals.targetingViolation(_internals.ideaFromBrief({ ...good, sources: ['https://randomblog.example.com'] }))).toBe('no_allowed_source');
   });
 });
 

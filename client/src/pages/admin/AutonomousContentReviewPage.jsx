@@ -390,7 +390,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
                             <div className="truncate text-14 font-medium text-zinc-900">
-                              {item.target_keyword || item.query || item.target_url || "Untitled"}
+                              {item.seed_brief?.working_title || item.target_keyword || item.query || item.target_url || "Untitled"}
                             </div>
                             {meta && <div className="mt-0.5 truncate text-12 text-zinc-500">{meta}</div>}
                           </div>
@@ -419,7 +419,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                   <CardBody className={cn("flex flex-col gap-4", detailLoading && "opacity-60")}>
                     <div>
                       <div className="text-16 font-medium leading-snug text-zinc-900">
-                        {selected.draft?.title || selected.target_keyword || "Untitled review"}
+                        {selected.draft?.title || selected.seed_brief?.working_title || selected.target_keyword || "Untitled review"}
                       </div>
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         <Tag>{selected.status}</Tag>
@@ -435,6 +435,24 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                       <Field label="Reason" value={selected.skip_reason || "—"} />
                       <Field label="Run" value={selected.run?.outcome || "—"} />
                     </div>
+
+                    {selected.seed_brief && (
+                      <div className="grid gap-2 border-t border-zinc-200 pt-4">
+                        <div className="text-12 font-medium uppercase tracking-wide text-zinc-400">Seeded brief{selected.seed_brief.source ? ` · ${selected.seed_brief.source}` : ""}</div>
+                        <Field label="Slug" value={selected.seed_brief.slug || "—"} />
+                        <Field label="Thesis" value={selected.seed_brief.thesis || "—"} />
+                        <Field label="Outline" value={selected.seed_brief.outline.length ? (
+                          <ol className="list-decimal pl-4">{selected.seed_brief.outline.map((line, i) => <li key={i}>{line}</li>)}</ol>
+                        ) : "—"} />
+                        <Field label="Sources" value={selected.seed_brief.sources.length ? (
+                          <ul className="list-disc pl-4">{selected.seed_brief.sources.map((line, i) => <li key={i} className="break-all">{line}</li>)}</ul>
+                        ) : "—"} />
+                        <Field label="Verify" value={selected.seed_brief.verify_notes.length ? (
+                          <ul className="list-disc pl-4">{selected.seed_brief.verify_notes.map((line, i) => <li key={i}>{line}</li>)}</ul>
+                        ) : "—"} />
+                        {selected.seed_brief.confidence != null && <Field label="Confidence" value={selected.seed_brief.confidence.toFixed(2)} />}
+                      </div>
+                    )}
 
                     {selected.run?.astro_pr_url && <ExternalAnchor href={selected.run.astro_pr_url} label="Open Astro PR" />}
 
