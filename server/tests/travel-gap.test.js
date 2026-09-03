@@ -12,7 +12,7 @@ const travelGap = require('../services/scheduling/travel-gap');
 
 const {
   DEFAULT_TRAVEL_BUFFER_MINUTES, travelBufferMinutes, requiredGapMinutes,
-  travelGapViolation, violatesTravelGap, resolveStopCoords,
+  travelGapViolation, travelGapConflicts, violatesTravelGap, resolveStopCoords,
 } = travelGap;
 
 // Rod (Palmetto) → Paul (Bradenton 34211): ~11.7 straight-line miles.
@@ -102,6 +102,37 @@ describe('travelGapViolation', () => {
   test('malformed windows never violate', () => {
     expect(travelGapViolation({ startMin: null, endMin: 600 }, { startMin: 600, endMin: 660 })).toBeNull();
     expect(travelGapViolation(null, { startMin: 600, endMin: 660 })).toBeNull();
+  });
+});
+
+describe('travelGapConflicts — route neighbours only', () => {
+  // ~24 straight-line miles south of Palmetto: ~67 modeled minutes + 15.
+  const FAR_SOUTH = { lat: 27.20, lng: -82.545 };
+  const candidate = { startMin: 675, endMin: 735, ...PALMETTO }; // 11:15–12:15
+  const farEarlier = { startMin: 540, endMin: 600, ...FAR_SOUTH, id: 'far' }; // 9–10, 75 free min
+  const adjacent = { startMin: 615, endMin: 660, ...PALMETTO, id: 'adjacent' }; // 10:15–11:00, 15 free min
+
+  test('alone, the far stop is inside its required gap (pre-push P1 baseline)', () => {
+    expect(travelGapConflicts(candidate, [farEarlier]).map((c) => [c.stop.id, c.reason]))
+      .toEqual([['far', 'travel_gap']]);
+  });
+
+  test('with a stop between them, only the immediate neighbour is measured — the far stop is skipped', () => {
+    expect(travelGapConflicts(candidate, [farEarlier, adjacent])).toEqual([]);
+    // Same on the other side of the candidate.
+    const farLater = { startMin: 810, endMin: 870, ...FAR_SOUTH, id: 'far-later' }; // 13:30, 75 free min
+    const adjacentAfter = { startMin: 750, endMin: 795, ...PALMETTO, id: 'adj-after' }; // 12:30, 15 free min
+    expect(travelGapConflicts(candidate, [farLater, adjacentAfter])).toEqual([]);
+    expect(travelGapConflicts(candidate, [farLater]).map((c) => c.stop.id)).toEqual(['far-later']);
+  });
+
+  test('every overlapping stop is a conflict regardless of position; malformed stops are skipped', () => {
+    const overlapA = { startMin: 700, endMin: 720, id: 'a' };
+    const overlapB = { startMin: 730, endMin: 800, id: 'b' };
+    const out = travelGapConflicts(candidate, [overlapA, adjacent, { startMin: null, endMin: 5 }, overlapB]);
+    expect(out.map((c) => [c.stop.id, c.reason])).toEqual([['a', 'overlap'], ['b', 'overlap']]);
+    expect(travelGapConflicts(candidate, [])).toEqual([]);
+    expect(travelGapConflicts({ startMin: NaN, endMin: 1 }, [adjacent])).toEqual([]);
   });
 });
 

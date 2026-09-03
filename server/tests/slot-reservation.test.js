@@ -756,6 +756,71 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('the same-slot refresh probe carries the hold pin when GATE_SLOT_TRAVEL_GAP is on (pre-push P1)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    const savedGate = process.env.GATE_SLOT_TRAVEL_GAP;
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    estimateSlotAvailability.resolveEstimateCoords = jest.fn().mockResolvedValue({ lat: 27.545, lng: -82.545 });
+    // Only the hold-coords pre-read needs a real estimates row; other
+    // pre-transaction reads keep whatever the suite's db mock returns.
+    const prevDbImpl = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'estimates'
+      ? {
+        where: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ id: 'estimate-456', customer_id: null, address: '1 Main St' }),
+      }
+      : (prevDbImpl ? prevDbImpl(table) : undefined)));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Generic estimate service',
+        address: '1 Main St',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const liveHoldsBuilder = makeLiveHoldsBuilder([{
+        id: 'held-1',
+        scheduled_date: '2027-05-20',
+        window_start: '09:00:00',
+        technician_id: 'tech-1',
+        estimated_duration_minutes: 90,
+        reservation_expires_at: '2027-05-20T13:05:00.000Z',
+      }]);
+      // Gate on + travel → the guarded-coord date scan (customers join, no
+      // overlap SQL) — the same predicate the fresh reserve and commit run.
+      const refreshProbeBuilder = makeGlobalProbeBuilder([]);
+      refreshProbeBuilder.leftJoin = jest.fn().mockReturnThis();
+      const refreshBuilder = {
+        where: jest.fn().mockReturnThis(),
+        update: jest.fn().mockReturnThis(),
+        returning: jest.fn().mockResolvedValue([{ id: 'held-1', reservation_expires_at: '2027-05-20T13:30:00.000Z' }]),
+      };
+      const scheduledBuilders = [liveHoldsBuilder, refreshProbeBuilder, refreshBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+        selectedFrequency: 'quarterly',
+      })).resolves.toEqual({ scheduledServiceId: 'held-1', expiresAt: '2027-05-20T13:30:00.000Z' });
+
+      expect(estimateSlotAvailability.resolveEstimateCoords).toHaveBeenCalled();
+      expect(refreshProbeBuilder.leftJoin).toHaveBeenCalledWith('customers', 'scheduled_services.customer_id', 'customers.id');
+      expect(refreshProbeBuilder.where).toHaveBeenCalledWith('scheduled_services.scheduled_date', '2027-05-20');
+      expect(refreshProbeBuilder.whereNotIn).toHaveBeenCalledWith('scheduled_services.id', ['held-1']);
+      expect(refreshProbeBuilder.whereRaw).not.toHaveBeenCalled();
+      expect(scheduledBuilders).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+      db.mockImplementation(prevDbImpl);
+      delete estimateSlotAvailability.resolveEstimateCoords;
+      if (savedGate === undefined) delete process.env.GATE_SLOT_TRAVEL_GAP;
+      else process.env.GATE_SLOT_TRAVEL_GAP = savedGate;
+    }
+  });
+
   test('reserveSlot refuses to refresh a hold whose window a COMMITTED visit has since taken (codex P1)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));

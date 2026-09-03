@@ -899,6 +899,10 @@ async function reserveSlot({
           windowEnd,
           excludeServiceIds: [sameSlotHold.id],
           includeHolds: false,
+          // Travel gap (GATE_SLOT_TRAVEL_GAP): the same pin the fresh reserve
+          // and commitReservation measure with — a refresh that skipped it
+          // would hand back a hold the commit is guaranteed to reject.
+          travel: holdCoords || { lat: null, lng: null },
         });
         if (refreshClash.length) {
           // Do NOT refresh a doomed hold — supersede it (same narrow

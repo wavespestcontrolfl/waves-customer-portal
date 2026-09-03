@@ -37,7 +37,7 @@
  */
 const defaultDb = require('../../models/db');
 const { guardedCoordSelects } = require('./day-stops');
-const { travelGapEnabled, travelGapViolation } = require('./travel-gap');
+const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
 
 const DEFAULT_DURATION_MINUTES = 60;
 
@@ -399,9 +399,11 @@ async function findConflictingVisits({
 /**
  * Travel-gap variant (GATE_SLOT_TRAVEL_GAP): every occupying row on the date,
  * with divergence-guarded coordinates, filtered in JS to the rows that either
- * overlap the window (same half-open predicate as the SQL path) or sit closer
- * than modeled drive + buffer. Same status / hold / exclusion conventions as
- * the SQL path; windowless placeholder rows stay inert (whereNotNull).
+ * overlap the window (same half-open predicate as the SQL path) or are the
+ * candidate's immediate route neighbours sitting closer than modeled drive +
+ * buffer (scheduling/travel-gap.js travelGapConflicts). Same status / hold /
+ * exclusion conventions as the SQL path; windowless placeholder rows stay
+ * inert (whereNotNull).
  */
 async function findConflictingVisitsWithTravel({
   db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel,
@@ -436,7 +438,7 @@ async function findConflictingVisitsWithTravel({
     .orderBy('scheduled_services.window_start', 'asc');
   if (!Array.isArray(rows)) return [];
 
-  const out = [];
+  const stops = [];
   for (const row of rows) {
     const startMin = timeToMinutes(row.window_start);
     if (startMin == null) continue;
@@ -444,14 +446,11 @@ async function findConflictingVisitsWithTravel({
     const durationMin = Number(row.estimated_duration_minutes) > 0
       ? Number(row.estimated_duration_minutes)
       : DEFAULT_DURATION_MINUTES;
-    const stop = { startMin, endMin: explicitEnd != null ? explicitEnd : startMin + durationMin, lat: row.lat, lng: row.lng };
-    if (windowsOverlap(candStart, candEnd, stop.startMin, stop.endMin)) {
-      out.push({ ...row, conflict_reason: 'overlap' });
-    } else if (travelGapViolation(candidate, stop)) {
-      out.push({ ...row, conflict_reason: 'travel_gap' });
-    }
+    stops.push({ startMin, endMin: explicitEnd != null ? explicitEnd : startMin + durationMin, lat: row.lat, lng: row.lng, row });
   }
-  return out;
+  const reasonByRow = new Map(travelGapConflicts(candidate, stops).map(({ stop, reason }) => [stop.row, reason]));
+  // Query order (window_start asc), not conflict order.
+  return rows.filter((row) => reasonByRow.has(row)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row) }));
 }
 
 /**

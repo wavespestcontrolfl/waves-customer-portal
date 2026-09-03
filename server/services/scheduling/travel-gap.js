@@ -21,8 +21,14 @@
  * Deliberate boundaries:
  *   - Gate: GATE_SLOT_TRAVEL_GAP, read at CALL time. Off → violatesTravelGap
  *     always returns false and every caller is byte-for-byte legacy overlap.
- *   - Tech-blind, like occupancy.js: one active technician, so any two stops
- *     on a date are consecutive-route neighbours regardless of technician_id.
+ *   - Tech-blind, like occupancy.js: one active technician, so every stop on
+ *     a date is on the same route regardless of technician_id.
+ *   - Route NEIGHBOURS only. The gap is a rule between consecutive stops, so
+ *     a candidate is measured against the latest-ending stop before it and
+ *     the earliest-starting stop after it — never a farther stop with another
+ *     visit in between (that pair's gap is the intermediate stop's problem,
+ *     and measuring it rejected valid windows on calendars whose existing
+ *     legs pre-date the rule). Overlaps count regardless of position.
  *   - Fail-open on coordinates: a coordless side (ungeocoded customer, a
  *     divergent stamped rental with no pin) contributes ZERO drive minutes,
  *     exactly find-time's convention, but the fixed buffer still applies. A
@@ -78,11 +84,45 @@ function travelGapViolation(candidate, stop) {
   return gapMin < requiredMin ? { gapMin, requiredMin } : null;
 }
 
-/** True when the gate is on and ANY stop sits closer than the required gap. */
+function windowsOverlap(a, b) {
+  return a.startMin < b.endMin && b.startMin < a.endMin;
+}
+
+/**
+ * The stops a candidate fails against, in the order given: every overlapping
+ * stop (reason 'overlap'), plus — of the non-overlapping stops — ONLY the
+ * immediate route neighbours (latest-ending before, earliest-starting after)
+ * when they sit closer than the required gap (reason 'travel_gap').
+ * Gate-agnostic like travelGapViolation; malformed stops are skipped.
+ * Returns [{ stop, reason }].
+ */
+function travelGapConflicts(candidate, stops) {
+  if (!candidate || ![candidate.startMin, candidate.endMin].every(Number.isFinite)) return [];
+  if (!Array.isArray(stops) || stops.length === 0) return [];
+  const overlaps = [];
+  let before = null;
+  let after = null;
+  for (const stop of stops) {
+    if (!stop || ![stop.startMin, stop.endMin].every(Number.isFinite)) continue;
+    if (windowsOverlap(candidate, stop)) {
+      overlaps.push({ stop, reason: 'overlap' });
+    } else if (stop.endMin <= candidate.startMin) {
+      if (!before || stop.endMin > before.endMin) before = stop;
+    } else if (!after || stop.startMin < after.startMin) {
+      after = stop;
+    }
+  }
+  const neighbours = [];
+  for (const stop of [before, after]) {
+    if (stop && travelGapViolation(candidate, stop)) neighbours.push({ stop, reason: 'travel_gap' });
+  }
+  return overlaps.concat(neighbours);
+}
+
+/** True when the gate is on and a stop overlaps or a route neighbour sits closer than the required gap. */
 function violatesTravelGap(candidate, stops) {
   if (!travelGapEnabled()) return false;
-  if (!Array.isArray(stops) || stops.length === 0) return false;
-  return stops.some((stop) => travelGapViolation(candidate, stop) != null);
+  return travelGapConflicts(candidate, stops).length > 0;
 }
 
 /**
@@ -106,7 +146,7 @@ async function resolveStopCoords(db, scheduledServiceId) {
       .select(...guardedCoordSelects(db))
       .first();
     return coordsOf(row) || none;
-  } catch (_err) {
+  } catch {
     return none;
   }
 }
@@ -117,6 +157,7 @@ module.exports = {
   travelBufferMinutes,
   requiredGapMinutes,
   travelGapViolation,
+  travelGapConflicts,
   violatesTravelGap,
   resolveStopCoords,
 };
