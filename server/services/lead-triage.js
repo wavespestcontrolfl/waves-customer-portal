@@ -3,6 +3,30 @@ const MODELS = require('../config/models');
 const { dispatch } = require('./llm/call');
 const { stripThinkingBlocks } = require('./llm/deep');
 
+// Structured-output contract for the live (dispatcher) leg. The direct-SDK
+// Claude fallback below has no schema path, so the prompt keeps its field
+// list and mapTriage still defaults every field for both legs.
+const TRIAGE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['serviceInterest', 'urgency', 'extractedData', 'suggestedReply'],
+  properties: {
+    serviceInterest: { type: 'string', description: 'The primary service they need, e.g. "General Pest Control", "Lawn Care", "Termite Inspection", "Mosquito Treatment", "Rodent Exclusion"' },
+    urgency: { type: 'string', enum: ['urgent', 'high', 'normal', 'low'] },
+    extractedData: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['pestType', 'location', 'propertyType'],
+      properties: {
+        pestType: { type: ['string', 'null'], description: 'Specific pest mentioned, e.g. "ants", "roaches", "rats", "mosquitoes", or null' },
+        location: { type: ['string', 'null'], description: 'Area/neighborhood if identifiable from address or message, or null' },
+        propertyType: { type: ['string', 'null'], description: '"residential", "commercial", or null' },
+      },
+    },
+    suggestedReply: { type: 'string', description: 'A warm, personalized SMS reply under 300 characters signed "Adam, Waves Pest Control"' },
+  },
+};
+
 function mapTriage(parsed) {
   return {
     serviceInterest: parsed.serviceInterest || null,
@@ -44,7 +68,7 @@ Return ONLY valid JSON, no markdown.`;
 
   // Live model — GPT-5.5. On any miss, fall through to Claude below (never a gap).
   {
-    const r = await dispatch(MODELS.ROUTES.leadClassify, { text: prompt, jsonMode: true, maxTokens: 300 });
+    const r = await dispatch(MODELS.ROUTES.leadClassify, { text: prompt, jsonMode: true, jsonSchema: TRIAGE_SCHEMA, maxTokens: 300 });
     if (r.ok && r.json) return mapTriage(r.json);
   }
 

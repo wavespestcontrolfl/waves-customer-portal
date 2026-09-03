@@ -173,7 +173,12 @@ async function buildPayBalanceLink(customerIds) {
   };
 }
 
-async function buildLatestEstimateLink(customerIds) {
+// The newest OPEN, customer-viewable, pricing-gate-deliverable estimate on
+// the account — resolved WITHOUT minting anything, so a caller can decide
+// whether the link will actually be sent before a permanent short_codes row
+// exists (GH codex #3814 r1 P2). Answers { estimate } or { estimate: null,
+// reason }; buildLatestEstimateLink below is resolve + mint.
+async function findLatestOpenEstimate(customerIds) {
   const { isEstimateCustomerViewable } = require('../routes/estimate-public');
   // Viewability (expiry, linkage-invalidation) is a predicate the query can't
   // express, and a filter applied AFTER a limit lets newer hidden rows mask an
@@ -197,7 +202,7 @@ async function buildLatestEstimateLink(customerIds) {
     if (estimate || rows.length < PAGE) break;
   }
   if (!estimate?.token) {
-    return { url: null, line: '', reason: 'No open estimate on this account' };
+    return { estimate: null, reason: 'No open estimate on this account' };
   }
   // Engine-authoritative pricing gate (#3750, GH codex P1 r22): the composer
   // link is a customer send like any other. While the gate is on, the newest
@@ -207,7 +212,29 @@ async function buildLatestEstimateLink(customerIds) {
   {
     const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
     if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
-      return { url: null, line: '', reason: 'The latest open estimate has no engine-verified price — re-save it from the estimate tool before linking it' };
+      return { estimate: null, reason: 'The latest open estimate has no engine-verified price — re-save it from the estimate tool before linking it' };
+    }
+  }
+  return { estimate };
+}
+
+// Mint the customer-facing short link for an estimate findLatestOpenEstimate
+// resolved. createShortCode always inserts a fresh row, so a caller whose
+// send can retry (the call-booking confirmation) passes reuseExisting to
+// take the earliest code THIS purpose already minted for the estimate
+// instead of accumulating bearer links across retries (pre-push codex P1);
+// never another workflow's code — click attribution stays with the send
+// that minted it. The composer insert keeps its own per-insert code.
+async function mintEstimateLink(estimate, { purpose = 'composer_insert', reuseExisting = false } = {}) {
+  if (reuseExisting) {
+    const { existingShortUrlFor } = require('./short-url');
+    const reused = await existingShortUrlFor({ kind: 'estimate', entityType: 'estimates', entityId: estimate.id, purpose });
+    if (reused) {
+      return {
+        url: reused,
+        line: `You can view your estimate here: ${reused}\n\n`,
+        estimate: { id: estimate.id, serviceType: estimate.service_type || null, status: estimate.status },
+      };
     }
   }
   const url = await shortenOrPassthrough(`${publicPortalUrl()}/estimate/${estimate.token}`, {
@@ -216,13 +243,60 @@ async function buildLatestEstimateLink(customerIds) {
     entityId: estimate.id,
     customerId: estimate.customer_id,
     channel: 'sms',
-    purpose: 'composer_insert',
+    // Click-tracking label only (short-url row.purpose): the composer
+    // insert by default; the call-booking confirmation passes its own.
+    purpose,
   });
   return {
     url,
     line: `You can view your estimate here: ${url}\n\n`,
     estimate: { id: estimate.id, serviceType: estimate.service_type || null, status: estimate.status },
   };
+}
+
+// The call-booking confirmation's accept line resolves the NEWEST open
+// estimate, and only when the accept page would adopt this very visit
+// (findLinkedUpcomingAppointment pinned to it). `estimateId` pins a choice
+// already persisted on the reminder row (appointment_reminders
+// .confirmation_estimate_id): the stranded-confirmation sweep re-delivering
+// a held text must not switch to an estimate created since — a stale pin
+// yields no line, never a different estimate's.
+async function resolveConfirmationEstimate({ customerId, scheduledServiceId, estimateId = null }) {
+  const { estimate } = await findLatestOpenEstimate([customerId]);
+  if (!estimate) return null;
+  if (estimateId && String(estimate.id) !== String(estimateId)) return null;
+  const { findLinkedUpcomingAppointment, adoptionServiceModesForContract } = require('../routes/estimate-public');
+  let estData = estimate.estimate_data;
+  if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = {}; } }
+  estData = estData || {};
+  const offered = await findLinkedUpcomingAppointment(estimate, estData, {
+    appointmentId: String(scheduledServiceId),
+    serviceModes: adoptionServiceModesForContract(estimate, estData),
+  });
+  return offered && String(offered.id) === String(scheduledServiceId) ? estimate : null;
+}
+
+// Accept line for a confirmation text, minted at SEND time: callers resolve
+// (never mint) the estimate up front, so the permanent short_codes row
+// exists only for a text that is actually going out (GH codex #3814 r1
+// P2). Best-effort — a mint failure sends the plain confirmation rather
+// than losing it.
+async function appendEstimateAcceptLine(body, estimate, { scheduledServiceId = null } = {}) {
+  if (!estimate || !body) return body;
+  try {
+    const { url } = await mintEstimateLink(estimate, { purpose: 'call_booking_confirmation', reuseExisting: true });
+    if (!url) return body;
+    return `${String(body).trimEnd()}\n\nYou can accept your estimate and choose your plan here: ${url}`;
+  } catch (err) {
+    logger.warn(`[composer-links] open-estimate accept line skipped for visit ${scheduledServiceId}: ${err.message}`);
+    return body;
+  }
+}
+
+async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert' } = {}) {
+  const found = await findLatestOpenEstimate(customerIds);
+  if (!found.estimate) return { url: null, line: '', reason: found.reason };
+  return mintEstimateLink(found.estimate, { purpose });
 }
 
 async function buildReferralLink(customerId) {
@@ -289,5 +363,9 @@ module.exports = {
   buildReviewRequestLink,
   buildPayBalanceLink,
   buildLatestEstimateLink,
+  findLatestOpenEstimate,
+  mintEstimateLink,
+  resolveConfirmationEstimate,
+  appendEstimateAcceptLine,
   buildReferralLink,
 };

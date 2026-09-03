@@ -80,7 +80,7 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
 // needs inputs the website does not collect or returns a manual line:
 //   palm_injection (palm count) · bed_bug_treatment (method) ·
 //   dethatching / termite_trenching / termite_slab_pretreat (quote-required
-//   lines) · pest_general_semiannual · lawn_care_quarterly · mosquito_one_time ·
+//   lines) · lawn_care_quarterly · mosquito_one_time ·
 //   lawn_care_one_time (manually scoped: fert / weed / insect — the keyed
 //   request carries no treatment type) · rodent_sanitation_light/standard/heavy
 //   (one engine key covers three rows, so acceptance could stamp no service_id).
@@ -89,6 +89,9 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
 //   depth options move the price ~4× and the site does not collect them) ·
 //   rodent_exclusion_only (per-entry-point pricing; with no counts the
 //   engine returns the floor) — all pre-push / GH codex findings.
+//   Office-only rows (cadence variants, termite riders, the rodent job
+//   decomposition, species tiers) are no longer selectable at all — see
+//   migration 20260903000020 (owner rulings 2026-09-03).
 // The contract test runs every instant key through the engine and requires
 // a positive, non-manual line.
 const PUBLIC_INSTANT_QUOTE_KEYS = new Set(Object.keys(PUBLIC_QUOTE_REQUESTS));
@@ -192,16 +195,36 @@ async function loadPublicServicesMenu(conn = db) {
 // NEW customer may choose; null otherwise. Callers derive the lead's display
 // label from `name` so key and label can never disagree (pre-push codex P1:
 // serviceKey and serviceInterest are independently attacker-controlled).
+// Keys the menu advertised until migration 20260903000020 hid them. A visitor
+// on a cached quote page, or on the astro fallback snapshot until it is
+// refreshed, can still post one; it must keep resolving (AGENTS.md: astro
+// form posts are an external contract, breaking them is P0) — as a
+// quote-on-request lead, never instant. Kept in step with the migration's
+// HIDE_KEYS by public-quote-menu-tier-c-hide.test.js. Drop entries once the
+// snapshot has shipped without them for a release.
+const FORMERLY_PUBLIC_KEYS = new Set([
+  'pest_general_semiannual', 'palm_injection_semiannual', 'lawn_care_quarterly',
+  'german_roach_initial', 'tick_control', 'mud_dauber_removal',
+  'termite_bond_10yr', 'termite_bond_5yr', 'termite_bond_1yr', 'termite_monitoring', 'foam_recurring',
+  'foam_drill', 'termite_pretreatment', 'termite_spot_treatment',
+  'rodent_exclusion_only', 'rodent_trapping_exclusion', 'rodent_trapping_sanitation',
+  'rodent_trapping_exclusion_sanitation', 'rodent_wire_mesh', 'rodent_bird_box', 'rodent_general_one_time',
+  'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
+]);
+
 async function publicSelectableService(serviceKey, conn = db) {
   if (!serviceKey) return null;
   try {
     if (!(await conn.schema.hasColumn('services', 'public_quote_selectable'))) return null;
     const row = await conn('services')
-      .where({ service_key: serviceKey, is_active: true, is_archived: false, public_quote_selectable: true })
-      .first('id', 'service_key', 'name', 'billing_type', 'visits_per_year', 'frequency', 'booking_enabled');
+      .where({ service_key: serviceKey, is_active: true, is_archived: false })
+      .first('id', 'service_key', 'name', 'billing_type', 'visits_per_year', 'frequency', 'booking_enabled', 'public_quote_selectable');
+    if (!row) return null;
+    const selectable = row.public_quote_selectable === true;
+    if (!selectable && !FORMERLY_PUBLIC_KEYS.has(serviceKey)) return null;
     // booking_enabled rides along so /calculate never mints a self-book slot
     // for a product the Service Library has turned off (GH codex #3585).
-    return row ? { service_key: row.service_key, name: row.name, instant: instantForRow(row), booking_enabled: row.booking_enabled !== false } : null;
+    return { service_key: row.service_key, name: row.name, instant: selectable && instantForRow(row), booking_enabled: row.booking_enabled !== false };
   } catch {
     // Fail closed to a prose-only lead: a keyed lead must never be created
     // from an unverified key, and a catalog read failure must not fail intake.
@@ -213,4 +236,4 @@ async function isPublicSelectableServiceKey(serviceKey, conn = db) {
   return !!(await publicSelectableService(serviceKey, conn));
 }
 
-module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS };
+module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS };

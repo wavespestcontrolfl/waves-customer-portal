@@ -159,16 +159,28 @@ Interpret relative phrases against today:
 - A bare weekday ("Tuesday") = the next upcoming one. "next Tuesday" = the one in the following week.
 - "early/mid/late <month>" = days 1-10 / 11-20 / 21-end of that month.
 - A single requested day uses the same value for date_from and date_to.
-- If no specific date is mentioned, set understood=false and use a sensible near-term window (today through ~14 days out).
-
-Return only JSON with this shape:
-{"date_from":"YYYY-MM-DD","date_to":"YYYY-MM-DD","time_of_day":"morning|afternoon|evening|any","understood":true}`;
+- If no specific date is mentioned, set understood=false and use a sensible near-term window (today through ~14 days out).`;
 }
+
+// Structured-output contract (llm/call.js jsonSchema): the provider constrains
+// the reply to this shape; isYmd below still rejects a malformed date.
+const WHEN_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['date_from', 'date_to', 'time_of_day', 'understood'],
+  properties: {
+    date_from: { type: 'string', description: 'Window start, YYYY-MM-DD Eastern Time, on or after today' },
+    date_to: { type: 'string', description: 'Window end, YYYY-MM-DD Eastern Time, on or after date_from' },
+    time_of_day: { type: 'string', enum: ['morning', 'afternoon', 'evening', 'any'] },
+    understood: { type: 'boolean', description: 'false when no specific date was mentioned' },
+  },
+};
 
 async function parseWithAI(query, now) {
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
     maxTokens: 300,
     jsonMode: true,
+    jsonSchema: WHEN_SCHEMA,
     system: buildSystemPrompt(now),
     text: String(query || '').slice(0, 500),
   });

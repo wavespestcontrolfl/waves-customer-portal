@@ -204,14 +204,15 @@ const LANES = [
   L('footprint_claim', 'Service-footprint claim classifier', 'content/footprint-claim-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('estimator_sms_signal', 'Estimator SMS thread quote signal', 'estimator-engine/sms-thread.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('sms_pathology', 'SMS pathology clustering', 'sms-pathology-ledger.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'summary pass rides DEEP' }),
-  L('contact_correction', 'SMS contact-correction extraction', 'contact-correction.js', 'fastText', T('FAST'), null, { inbound: true }),
-  L('bounce_rescue', 'Email bounce address decode', 'email-bounce-rescue.js', 'fastText', T('FAST'), null, { inbound: true }),
+  L('contact_correction', 'SMS contact-correction extraction', 'contact-correction.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('bounce_rescue', 'Email bounce address decode', 'email-bounce-rescue.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('seo_intent', 'SEO query-intent classification', 'seo/seo-diagnosis-tools.js', 'fastText', T('FAST')),
   L('prospect_score', 'Backlink prospect scoring', 'seo/prospect-scorer.js', 'fastText', T('FAST')),
   L('signup_classifier', 'Backlink signup classifier', 'seo/signup-classifier.js', 'fastText', E('MODEL_SIGNUP_CLASSIFIER', T('FAST'))),
   L('mentions_sentiment', 'LLM-mention sentiment classification', 'seo/llm-mention-prober.js', 'fastText', T('FAST')),
-  L('events', 'Community events ingestion, curation, normalizing', 'event-ingestion.js, event-curation.js, event-normalizer.js', 'fastText', T('WORKHORSE')),
-  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', T('FLAGSHIP'), null, { note: 'routine categories on the flagship tier' }),
+  L('events', 'Community events ingestion', 'event-ingestion.js', 'fastText', T('WORKHORSE')),
+  L('events_editorial', 'Community events curation + normalizing', 'event-curation.js, event-normalizer.js', 'fastText', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
+  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'routine categories on the flagship tier' }),
 
   // ── Multimodal ──
   L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
@@ -286,7 +287,7 @@ const LANES = [
   L('seo_advisor', 'SEO weekly advisor + action drafts', 'seo/seo-advisor.js, seo/seo-action-generator.js', 'qa', T('FLAGSHIP')),
   L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', T('FLAGSHIP')),
   L('chart_builder_image', 'AI chart builder · image intent read', 'ai-chart-builder.js', 'qa', T('GEMINI_VISION_BEST'), T('FLAGSHIP'), { note: 'image-backed charts only; stage 1 of 2' }),
-  L('chart_builder_sql', 'AI chart builder · SQL + chart spec', 'ai-chart-builder.js', 'qa', T('FLAGSHIP'), null, { note: 'every chart; stage 2 — an Anthropic outage fails the lane' }),
+  L('chart_builder_sql', 'AI chart builder · SQL + chart spec', 'ai-chart-builder.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'every chart; stage 2' }),
 
   // ── High-stakes reasoner ──
   L('ib_admin', 'Intelligence Bar · admin', 'routes/admin-intelligence-bar.js', 'reason', E('INTELLIGENCE_BAR_MODEL', T('FLAGSHIP'))),
@@ -301,7 +302,7 @@ const LANES = [
   L('lead_synopsis', 'Lead synopsis from call', 'call-recording-processor.js', 'reason', T('FLAGSHIP'), null, { inbound: true }),
   L('codex_remediation', 'Content finding auto-fix', 'content/codex-remediation.js', 'reason', T('FLAGSHIP')),
   L('portal_assistant', 'Customer portal assistant', 'ai-assistant/assistant.js', 'reason', T('FLAGSHIP')),
-  L('signup_worker', 'Backlink signup worker', 'backlink-agent/signup-worker.js', 'reason', T('FLAGSHIP')),
+  L('signup_worker', 'Backlink signup worker', 'backlink-agent/signup-worker.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('form_filler', 'Backlink browser form filler (vision)', 'seo/browser-form-filler.js', 'reason', E('MODEL_SIGNUP_FILLER', T('FLAGSHIP'))),
 
   // ── Deep audit ──
@@ -466,6 +467,7 @@ const LANE_AREA = {
   image_gen: 'content',
   video_gen: 'content',
   events: 'content',
+  events_editorial: 'content',
   ads_advisor: 'content',
   ib_admin: 'ib',
   ib_tech: 'ib',
@@ -590,7 +592,8 @@ const LANE_DESCRIBE = {
   mentions_sentiment: 'Scores those mentions',
   image_gen: 'Generates blog and social images',
   video_gen: 'Generates Reels clips',
-  events: 'Finds and curates community events',
+  events: 'Finds community events',
+  events_editorial: 'Scores community events and cleans up their venue details',
   ads_advisor: 'Daily Google Ads advice',
   ib_admin: 'The admin command bar',
   ib_tech: 'The tech command bar',

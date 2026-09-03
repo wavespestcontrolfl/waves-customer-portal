@@ -1,5 +1,4 @@
 const { chromium } = require('playwright');
-const Anthropic = require('@anthropic-ai/sdk');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -7,8 +6,63 @@ const os = require('os');
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { dispatchWithFallback } = require('../llm/call');
 
-const anthropic = new Anthropic();
+// Structured-output contracts for the three screenshot reads (llm/call.js
+// jsonSchema). Every call runs on TEXT_POLICIES.highStakes — FLAGSHIP first,
+// the OpenAI leg on a miss — instead of a bare Anthropic client with no
+// fallback and a blind content[0] read.
+const FIND_SIGNUP_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['has_signup', 'signup_selector', 'signup_url', 'notes'],
+  properties: {
+    has_signup: { type: 'boolean' },
+    signup_selector: { type: ['string', 'null'], description: 'CSS selector for the signup link/button, or null' },
+    signup_url: { type: ['string', 'null'], description: 'Direct URL to the signup page if visible, or null' },
+    notes: { type: 'string', description: 'Any relevant observations' },
+  },
+};
+const FILL_FORM_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['actions'],
+  properties: {
+    actions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['action', 'selector', 'value', 'file', 'notes'],
+        properties: {
+          action: { type: 'string', enum: ['fill', 'click', 'select', 'check', 'upload', 'submit', 'captcha_detected'] },
+          selector: { type: ['string', 'null'], description: 'CSS selector the action targets; null for captcha_detected' },
+          value: { type: ['string', 'null'], description: 'Text to type (fill) or option value (select); otherwise null' },
+          file: { type: ['string', 'null'], enum: ['logo', 'screenshot', null], description: 'upload only' },
+          notes: { type: ['string', 'null'], description: 'captcha_detected only' },
+        },
+      },
+    },
+  },
+};
+const VERIFY_SIGNUP_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['success', 'needs_email_verification', 'profile_url', 'error_message'],
+  properties: {
+    success: { type: 'boolean' },
+    needs_email_verification: { type: 'boolean' },
+    profile_url: { type: ['string', 'null'], description: 'URL to the new profile if visible, or null' },
+    error_message: { type: ['string', 'null'], description: 'Any error shown on the page, or null' },
+  },
+};
+
+// A dispatcher miss (both legs failed or no JSON) aborts the queue item the
+// same way the old SDK throw did — the caller's catch marks it failed.
+function requireJson(res, step) {
+  if (!res?.ok || !res.json) throw new Error(`${step}: LLM unavailable (${res?.reason || 'no_json'})`);
+  return res.json;
+}
 
 async function submitToOmegaIndexer(domain, urls) {
   const apiKey = process.env.OMEGA_INDEXER_API_KEY;
@@ -96,11 +150,6 @@ const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
 ];
 
-function parseClaudeJson(text) {
-  const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-  return JSON.parse(cleaned);
-}
-
 async function processSignup(queueItem) {
   const browser = await chromium.launch({
     headless: true,
@@ -125,29 +174,17 @@ async function processSignup(queueItem) {
     // Step 2: Screenshot and ask Claude to find signup
     const screenshot1 = (await page.screenshot({ fullPage: false, type: 'png' })).toString('base64');
 
-    const findResponse = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 1024,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: screenshot1 } },
-          { type: 'text', text: `You are a web automation agent. Look at this screenshot of ${queueItem.url}.
+    const findResponse = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      jsonMode: true,
+      jsonSchema: FIND_SIGNUP_SCHEMA,
+      maxTokens: 1024,
+      images: [{ data: screenshot1, mimeType: 'image/png' }],
+      text: `You are a web automation agent. Look at this screenshot of ${queueItem.url}.
 
-I need to create an account/profile on this site. Find the signup, register, or create account link/button.
-
-Respond in JSON only, no markdown:
-{
-  "has_signup": true/false,
-  "signup_selector": "CSS selector for the signup link/button, or null",
-  "signup_url": "direct URL to signup page if visible, or null",
-  "notes": "any relevant observations"
-}` },
-        ],
-      }],
+I need to create an account/profile on this site. Find the signup, register, or create account link/button: report whether one exists, its CSS selector, the direct signup URL if visible, and any relevant observations.`,
     });
 
-    const signupInfo = parseClaudeJson(findResponse.content[0].text);
+    const signupInfo = requireJson(findResponse, 'find signup');
 
     if (!signupInfo.has_signup) {
       await db('backlink_agent_queue').where({ id: queueItem.id }).update({ status: 'skipped', error_message: signupInfo.notes || 'No signup found', updated_at: new Date() });
@@ -174,14 +211,12 @@ Respond in JSON only, no markdown:
     const formScreenshot = (await page.screenshot({ fullPage: true, type: 'png' })).toString('base64');
     const password = PROFILE.generatePassword();
 
-    const fillResponse = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 2048,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: formScreenshot } },
-          { type: 'text', text: `You are a web automation agent. Look at this signup/registration form.
+    const fillResponse = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      jsonMode: true,
+      jsonSchema: FILL_FORM_SCHEMA,
+      maxTokens: 2048,
+      images: [{ data: formScreenshot, mimeType: 'image/png' }],
+      text: `You are a web automation agent. Look at this signup/registration form.
 
 Fill it out using this profile information:
 - Business Name / Display Name: ${PROFILE.business_name}
@@ -198,7 +233,7 @@ Fill it out using this profile information:
 
 For username fields, use: wavespestcontrol (or wavespestcontrol_fl if that seems taken)
 
-Return a JSON array of actions to take, in order. No markdown:
+List the actions to take, in order, one object per action:
 [
   { "action": "fill", "selector": "CSS selector", "value": "text to type" },
   { "action": "click", "selector": "CSS selector" },
@@ -215,12 +250,10 @@ Important:
 - Include checking any "I agree to terms" checkboxes
 - End with the submit button click
 - Use robust selectors (prefer input[name=...], input[type=...], #id over fragile class selectors)
-- If there's a CAPTCHA, set the last action to: { "action": "captcha_detected", "notes": "description" }` },
-        ],
-      }],
+- If there's a CAPTCHA, set the last action to: { "action": "captcha_detected", "notes": "description" }`,
     });
 
-    const actions = parseClaudeJson(fillResponse.content[0].text);
+    const { actions } = requireJson(fillResponse, 'fill form');
 
     // Step 5: Execute the actions
     let captchaDetected = false;
@@ -274,27 +307,15 @@ Important:
     await page.waitForTimeout(3000);
     const resultScreenshot = (await page.screenshot({ fullPage: false, type: 'png' })).toString('base64');
 
-    const verifyResponse = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 512,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: resultScreenshot } },
-          { type: 'text', text: `Did the signup/registration succeed? Look at this result page.
-
-Respond in JSON only, no markdown:
-{
-  "success": true/false,
-  "needs_email_verification": true/false,
-  "profile_url": "URL to the new profile if visible, or null",
-  "error_message": "any error shown on page, or null"
-}` },
-        ],
-      }],
+    const verifyResponse = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      jsonMode: true,
+      jsonSchema: VERIFY_SIGNUP_SCHEMA,
+      maxTokens: 512,
+      images: [{ data: resultScreenshot, mimeType: 'image/png' }],
+      text: 'Did the signup/registration succeed? Look at this result page and report whether it succeeded, whether email verification is needed, the new profile URL if visible, and any error shown.',
     });
 
-    const result = parseClaudeJson(verifyResponse.content[0].text);
+    const result = requireJson(verifyResponse, 'verify signup');
 
     if (result.success) {
       await db('backlink_agent_queue').where({ id: queueItem.id }).update({ status: 'signup_complete', updated_at: new Date() });

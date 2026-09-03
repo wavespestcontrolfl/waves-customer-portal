@@ -555,6 +555,24 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+`/accept` existing-appointment adoption (`existingAppointmentId` in the
+body, offered by the view contract instead of the slot picker): the row
+must belong to this customer, be unclaimed or claimed by THIS estimate,
+never a reservation hold or a callback visit, dated today or later, and
+in an adoptable status. Adoptable statuses are `pending`/`confirmed`;
+behind `GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT` (fail-closed in every
+environment — off unless the var is a `gateEnvValue` true: `true`, `1`
+or `on`, case-insensitive; re-read per accept request, so a flip is a
+live kill) `en_route`/`on_site` rows are adoptable too, so an on-site accept prices and claims the visit in
+progress instead of minting a duplicate. The status set is snapshotted
+ONCE per accept request and feeds both the preflight offer and the
+under-lock UPDATE (a gate flip mid-request cannot 409 an offered row);
+a row that stops qualifying between them answers 409 `existing appointment is no longer available`.
+Adoption stamps `source_estimate_id`, the customer, the accepted plan's
+per-visit price (or clears a stale one), and the catalog identity — it
+never changes the row's status or date. The customer-wide fallback that
+OFFERS an unlinked same-family row stays behind
+`GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE`.
 `/data` carries an optional `lawnCalendar` block behind
 `GATE_ESTIMATE_LAWN_CALENDAR` (dev-open, prod dark): `{ programs: {
 [frequencyKey]: { visitsPerYear, cadence, months } } }` for the recurring

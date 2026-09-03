@@ -12343,6 +12343,9 @@ const CallRecordingProcessor = {
           // the row (and its reschedule_token) must exist before a real
           // appointment-page link can be minted for the v2 body (codex r4).
           let alreadySent = false;
+          // Open estimate the confirmation may link (resolved below, minted
+          // at send time inside smsAttempt).
+          let estimateForConfirmationLink = null;
 
           // Create the scheduled_services record FIRST. Previously we sent
           // the SMS first and inserted the schedule row afterward — if the
@@ -13994,6 +13997,63 @@ const CallRecordingProcessor = {
                 entity_id: customer.id,
               });
 
+              // Open-estimate accept link (GATE_CALL_CONFIRMATION_ESTIMATE_LINK,
+              // env re-read at call time = live kill): a booking taken
+              // against a sent-but-unaccepted estimate lands unpriced on
+              // purpose (the per-visit price is fixed by the frequency the
+              // customer picks at accept), so the visit would otherwise
+              // complete unbilled or be accepted on the doorstep (owner case
+              // 2026-09-03). Carrying the link lets the customer accept,
+              // pick the plan, and add the card before the visit.
+              // RESOLVE ONLY here — nothing is minted until the SMS leg is
+              // actually about to send (smsAttempt below), so an email-only
+              // preference or a withheld link never leaves a permanent
+              // bearer short_codes row behind (GH codex #3814 r1 P2).
+              // Three gates, all fail closed:
+              //  1. Recipient IS the account's saved phone (customers.phone,
+              //     compared last-10) — never an implied-consent redirect to
+              //     the inbound ANI, and never the validation fallback that
+              //     fills a phone-less account's slot from the extracted or
+              //     caller number (pre-push codex P0): a spouse, tenant or
+              //     service contact who called must not receive the account
+              //     holder's bearer estimate link (r1 P1).
+              //  2. The composer's resolver picks the newest OPEN estimate
+              //     (viewability + pricing-authority gates).
+              //  3. Tied to THIS booking (pre-push P1): accepting that
+              //     estimate must ADOPT the row just booked — the accept
+              //     contract's own resolver pinned to this visit id under
+              //     the estimate page's contract modes. A cross-family or
+              //     other-property estimate would send the customer to the
+              //     slot picker and mint the very duplicate this lane exists
+              //     to prevent, so it gets no link.
+              const recipientIsSavedCustomerPhone = smsLast10(customer?.phone).length === 10
+                && smsLast10(customer.phone) === smsLast10(smsRecipient);
+              const estimateLinkGateOn = require('../config/feature-gates').gateEnvValue('GATE_CALL_CONFIRMATION_ESTIMATE_LINK');
+              // EXPLICIT prerequisite (GH codex #3814 r2 P1): a call-booked
+              // visit carries no source_estimate_id, so the accept contract
+              // can reach it only through the customer-wide adoption
+              // fallback behind GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE.
+              // With that gate off the accept page could not honor the
+              // link, so the link gate is inert — say so once per booking
+              // rather than withhold silently.
+              const estimateLinkPrereqOn = !estimateLinkGateOn
+                || require('../config/feature-gates').isEnabled('estimateExistingApptCustomerWide');
+              if (estimateLinkGateOn && !estimateLinkPrereqOn) {
+                logger.warn(`[call-proc] GATE_CALL_CONFIRMATION_ESTIMATE_LINK is on but GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE is off — the accept page could not adopt visit ${scheduledServiceId}, so no estimate link is sent`);
+              }
+              if (smsBody && !redirectImpliedToAni && recipientIsSavedCustomerPhone
+                && estimateLinkGateOn && estimateLinkPrereqOn) {
+                try {
+                  const { resolveConfirmationEstimate } = require('./composer-customer-links');
+                  estimateForConfirmationLink = await resolveConfirmationEstimate({ customerId, scheduledServiceId });
+                  if (!estimateForConfirmationLink) {
+                    logger.info(`[call-proc] open-estimate link withheld for visit ${scheduledServiceId}: no open estimate, or the accept would not adopt this booking`);
+                  }
+                } catch (estErr) {
+                  logger.warn(`[call-proc] open-estimate link skipped for customer ${customerId}: ${estErr.message}`);
+                }
+              }
+
               // Content-level dedup: even if the concurrent-run guard
               // misses (e.g., admin reprocess inside the same minute),
               // don't fire an identical confirmation the customer just got.
@@ -14003,7 +14063,10 @@ const CallRecordingProcessor = {
               try {
                 const existing = await db('sms_log')
                   .where({ to_phone: smsRecipient, message_type: 'confirmation' })
-                  .where('message_body', smsBody)
+                  // PREFIX match: the sent body may carry the open-estimate
+                  // line appended in smsAttempt (minted only at send time),
+                  // and a reprocess must still find that send.
+                  .whereRaw('left(message_body, ?) = ?', [smsBody.length, smsBody])
                   .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
                   .first();
                 if (existing) alreadySent = true;
@@ -14091,7 +14154,7 @@ const CallRecordingProcessor = {
                     }
                     : await sendCustomerMessage({
                       to: smsRecipient,
-                      body: smsBody,
+                      body: await require('./composer-customer-links').appendEstimateAcceptLine(smsBody, estimateForConfirmationLink, { scheduledServiceId }),
                       channel: 'sms',
                       audience: 'customer',
                       purpose: 'appointment_confirmation',
@@ -14127,7 +14190,15 @@ const CallRecordingProcessor = {
                           .where({ scheduled_service_id: scheduledServiceId })
                           // never re-open a sibling-suppressed row (codex)
                           .where({ cancelled: false, suppressed_by_sibling: false })
-                          .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                          // The held text owed an estimate accept line: stamp
+                          // the estimate so the sweep's canonical renderer can
+                          // re-verify and append it (GH codex #3814 r2 P2).
+                          .update({
+                            confirmation_sent: false,
+                            confirmation_sent_at: null,
+                            confirmation_estimate_id: estimateForConfirmationLink?.id || null,
+                            updated_at: new Date(),
+                          });
                         if (rearmed > 0) {
                           // The sweep's canonical confirmation fans out to
                           // EVERY appointment contact — the secondary loop

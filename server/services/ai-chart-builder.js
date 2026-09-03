@@ -7,8 +7,9 @@
  * (services/llm/call.js → callAnthropic), with jsonMode for a structured reply.
  */
 
-const { callAnthropic, callGemini } = require('./llm/call');
-const { FLAGSHIP, GEMINI_VISION_BEST } = require('../config/models');
+const { callAnthropic, callGemini, dispatchWithFallback } = require('./llm/call');
+const MODELS = require('../config/models');
+const { FLAGSHIP, GEMINI_VISION_BEST } = MODELS;
 const logger = require('./logger');
 
 const CHART_TYPES = ['line', 'bar', 'donut', 'kpi', 'table'];
@@ -36,9 +37,8 @@ ai_kpi_snapshots(snapshot_date date, metric text, value numeric, captured_at)`;
 function buildSystemPrompt() {
   return `You are a careful analytics engineer for Waves, a pest-control & lawn-care business (SW Florida). Turn the user's question (and any attached reference image) into ONE read-only PostgreSQL query and a chart spec.
 
-Return JSON only, no prose:
-{ "sql": "<single SELECT, may begin with a read-only WITH>", "chartType": "line|bar|donut|kpi|table", "title": "<short>", "x": "<column alias or null>", "y": ["<column alias>", ...], "yFormat": "currency|percent|count|hours|rating|number", "explanation": "<one sentence — STATE the exact time window you used>" }
-If the question cannot be answered from the schema below, return { "error": "<short reason>" } instead.
+Fill "sql" (a single SELECT, may begin with a read-only WITH), "chartType", a short "title", "x" (column alias or null), "y" (column aliases), "yFormat", and a one-sentence "explanation" that STATES the exact time window you used; leave "error" null.
+If the question cannot be answered from the schema below, set "error" to a short reason and leave "sql" null instead.
 
 Hard rules for "sql" (queries that break these are rejected):
 - A SINGLE statement: a SELECT, optionally led by a read-only WITH/CTE. No semicolons, no comments, no DDL/DML, no catalog/system functions (pg_*, information_schema, current_setting).
@@ -120,9 +120,30 @@ async function extractImageIntent(images) {
   };
 }
 
+// Structured-output contract for the SQL leg (llm/call.js jsonSchema). The
+// answer / cannot-answer branches share one shape: an answer has sql set and
+// error null, an unanswerable question has error set and sql null. The field
+// checks below still enforce chartType / yFormat / y and the alias rules.
+const CHART_SPEC_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['sql', 'chartType', 'title', 'x', 'y', 'yFormat', 'explanation', 'error'],
+  properties: {
+    sql: { type: ['string', 'null'], description: 'Single read-only SELECT (may begin with WITH), or null when error is set' },
+    chartType: { type: ['string', 'null'], enum: [...CHART_TYPES, null] },
+    title: { type: ['string', 'null'], description: 'Short chart title' },
+    x: { type: ['string', 'null'], description: 'Output alias for the category/time axis, or null' },
+    y: { type: 'array', items: { type: 'string' }, description: 'Output aliases for the numeric series' },
+    yFormat: { type: ['string', 'null'], enum: [...Y_FORMATS, null] },
+    explanation: { type: ['string', 'null'], description: 'One sentence stating the exact time window used' },
+    error: { type: ['string', 'null'], description: 'Short reason when the question cannot be answered from the schema; otherwise null' },
+  },
+};
+
 /**
  * Generate a chart spec from a natural-language prompt and/or pre-extracted image
- * intent. The SQL is ALWAYS written by FLAGSHIP. Single-shot; the caller
+ * intent. The SQL is written on TEXT_POLICIES.highStakes (FLAGSHIP first, Sol
+ * on an Anthropic miss) so a provider outage no longer fails the lane. Single-shot; the caller
  * validates/executes the SQL and may request a repair on failure.
  * @param {string} prompt
  * @param {{ errorContext?: string, intent?: object }} [opts]
@@ -143,8 +164,9 @@ async function generateChartSpec(prompt, opts = {}) {
 
   let res;
   try {
-    // SQL is always written by FLAGSHIP — text or image, the strongest SQL model.
-    res = await callAnthropic({ model: FLAGSHIP, system: buildSystemPrompt(), text, jsonMode: true, maxTokens: 1200 });
+    res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      system: buildSystemPrompt(), text, jsonMode: true, jsonSchema: CHART_SPEC_SCHEMA, maxTokens: 1200,
+    });
   } catch (err) {
     logger.error(`[ai-chart-builder] LLM call threw: ${err.message}`);
     return { ok: false, reason: 'llm_error' };

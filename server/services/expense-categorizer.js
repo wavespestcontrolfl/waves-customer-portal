@@ -9,9 +9,23 @@
  * which is how prod reached 138/138 uncategorized expenses (0% Schedule C
  * coverage) while the categorizer sat unused on a path nothing exercised.
  */
-const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../models/db');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('./llm/call');
+
+// Structured-output contract (llm/call.js jsonSchema). The category-name
+// match and sanitizeDeductiblePercent still decide what is trusted.
+const CATEGORIZE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['categoryName', 'irsLine', 'deductiblePercent', 'reasoning'],
+  properties: {
+    categoryName: { type: 'string', description: 'Exact category name from the list' },
+    irsLine: { type: 'string', description: 'The IRS line number' },
+    deductiblePercent: { type: 'integer' },
+    reasoning: { type: 'string', description: 'One sentence why' },
+  },
+};
 
 /**
  * Returns { categoryId?, categoryName, irsLine, deductiblePercent, reasoning }.
@@ -19,8 +33,6 @@ const MODELS = require('../config/models');
  * row. Throws on API failure — callers decide whether that blocks the insert.
  */
 async function autoCategorizeExpense(vendorName, description, amount) {
-  const client = new Anthropic();
-
   const categories = await db('expense_categories').orderBy('sort_order');
   const categoryList = categories.map(c =>
     `- ${c.name} (IRS Line ${c.irs_line}): ${c.irs_description}${c.notes ? ` — ${c.notes}` : ''}`
@@ -38,13 +50,7 @@ Expense details:
 Available categories:
 ${categoryList}
 
-Respond ONLY with valid JSON (no markdown, no explanation):
-{
-  "categoryName": "exact category name from the list above",
-  "irsLine": "the IRS line number",
-  "deductiblePercent": 100,
-  "reasoning": "one sentence why"
-}
+Give the exact category name from the list above, its IRS line number, the deductible percent, and one sentence of reasoning.
 
 Rules:
 - Business meals are 50% deductible
@@ -53,23 +59,16 @@ Rules:
 - Chemicals, PPE, equipment supplies: use "Supplies"
 - If truly unclear, use "Office Expenses" as default`;
 
-  const response = await client.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 200,
-    messages: [{ role: 'user', content: prompt }],
+  // FLAGSHIP first, Sol on a miss. A two-leg miss throws like the old SDK
+  // path did — callers decide whether that blocks the insert.
+  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+    text: prompt,
+    jsonMode: true,
+    jsonSchema: CATEGORIZE_SCHEMA,
+    maxTokens: 200,
   });
-
-  // A reasoning-capable model can lead with thinking/redacted-thinking
-  // blocks — content[0] would then have no .text and every categorization
-  // would silently parse '{}'. Read the FIRST TEXT block, wherever it sits.
-  const text = response.content?.find(b => b.type === 'text')?.text || '{}';
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    parsed = match ? JSON.parse(match[0]) : {};
-  }
+  if (!res.ok || !res.json) throw new Error(`expense categorizer LLM unavailable (${res.reason || 'no_json'})`);
+  const parsed = res.json;
 
   if (parsed.categoryName) {
     const match = categories.find(c =>

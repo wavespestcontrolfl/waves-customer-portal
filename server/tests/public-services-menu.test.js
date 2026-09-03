@@ -16,7 +16,7 @@ function fakeConn(rows, { hasColumn = true, throws = false } = {}) {
       where(cond) { filters = { ...filters, ...cond }; return q; },
       orderBy() { return q; },
       async select() { if (throws) throw new Error('db down'); return rows.filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v)).map((r) => ({ ...r })); },
-      async first() { if (throws) throw new Error('db down'); const r = rows.find((r) => Object.entries(filters).every(([k, v]) => r[k] === v)); return r ? { id: r.id, service_key: r.service_key, name: r.name, billing_type: r.billing_type, visits_per_year: r.visits_per_year, frequency: r.frequency, booking_enabled: r.booking_enabled } : null; },
+      async first() { if (throws) throw new Error('db down'); const r = rows.find((r) => Object.entries(filters).every(([k, v]) => r[k] === v)); return r ? { id: r.id, service_key: r.service_key, name: r.name, billing_type: r.billing_type, visits_per_year: r.visits_per_year, frequency: r.frequency, booking_enabled: r.booking_enabled, public_quote_selectable: r.public_quote_selectable } : null; },
     };
     return q;
   };
@@ -72,6 +72,18 @@ describe('keyed leads', () => {
     expect(await publicSelectableService('wdo_inspection', fakeConn(rows))).toEqual({ service_key: 'wdo_inspection', name: 'WDO Inspection Service', instant: false, booking_enabled: true });
     expect((await publicSelectableService('wdo_inspection', fakeConn([row({ service_key: 'wdo_inspection', name: 'WDO Inspection Service', booking_enabled: false })]))).booking_enabled).toBe(false);
     expect(await publicSelectableService('pest_re_service', fakeConn(rows))).toBeNull();
+  });
+  test('a key the menu used to advertise still resolves as quote-on-request, never instant (cached pages, stale snapshot)', async () => {
+    const rows = [
+      row({ service_key: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4, public_quote_selectable: false }),
+      row({ service_key: 'pest_general_semiannual', name: 'Semiannual Pest Control Service', public_quote_selectable: false, is_archived: true, is_active: false }),
+    ];
+    expect(await publicSelectableService('lawn_care_quarterly', fakeConn(rows))).toEqual({ service_key: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', instant: false, booking_enabled: true });
+    // Archived rows are gone for good — the compat window is for hidden rows only.
+    expect(await publicSelectableService('pest_general_semiannual', fakeConn(rows))).toBeNull();
+    // A hidden row that WAS instant is not instant any more.
+    const wasInstant = [row({ service_key: 'pest_general_bimonthly', name: 'Bi-Monthly Pest Control Service', billing_type: 'recurring', frequency: 'bimonthly', visits_per_year: 6 })];
+    expect((await publicSelectableService('pest_general_bimonthly', fakeConn(wasInstant))).instant).toBe(true);
   });
 });
 
