@@ -100,10 +100,11 @@ const EVAL_FAMILY = Object.freeze([
  * `research_schema_invalid` (call research), `missing_is_service_claim`
  * (footprint claim), `unmappable_screen` (job screen), `invalid_sms_draft`
  * (admin SMS draft), `no_json` / `findings_not_array` / `finding_not_object`
- * (compliance gate), `empty_response`. The dispatcher suffixes a rejection
- * with `(response truncated at max_tokens=N)` when the reply hit the token
- * budget — that suffix wins: the answer is incomplete, whatever the validator
- * then said about its shape.
+ * (compliance gate), `empty_response`. A reply that hit the token budget
+ * never reaches a validator: the adapter fails that leg as
+ * `<provider>_incomplete` (OpenAI's `incomplete` status, Anthropic's
+ * stop_reason 'max_tokens') — the answer is incomplete, whatever a validator
+ * would have said about its shape.
  *
  * ctx.pastBudget — the chain had already used its time budget when the code
  *   was produced (turns `openai_incomplete` into a timeout instead of an
@@ -128,21 +129,24 @@ function classifyFailure(errorCode, ctx = {}) {
   const code = String(errorCode || '').toLowerCase();
   if (ctx.tool === true || code.startsWith('tool_')) return 'tool';
   // The validate hook THREW (llm/call.js records `validator_error:<msg>`):
-  // broken validation plumbing, not a rejected answer — whatever ctx says,
-  // and before the truncation suffix the dispatcher appends to any rejection
-  // (a thrown validator on a max_tokens response is still plumbing) — Codex r23.
+  // broken validation plumbing, not a rejected answer — whatever ctx says — Codex r23.
   if (code.startsWith('validator_error:')) return 'infrastructure';
-  if (code.includes('(response truncated at max_tokens')) return 'incomplete';
   if (ctx.validator === true) return /^(empty_|no_|missing_)|_empty$|_missing$/.test(code) ? 'incomplete' : 'instruction';
   if (code === 'judge_failed') return 'incorrect';
   if (code === 'eval_regression') return 'regression';
   // 401/403/404 are provider-side too (credentials, access, model not found) — Codex r12.
   // `session_error_event`: the Managed Agents stream emitted an error event.
-  if (code === 'no_key' || code === 'all_providers_failed' || code === 'session_error_event' || /_(5\d\d|429|529|503|401|403|404)$/.test(code)) return 'provider';
+  // `session_stream_eof`: the stream closed before any terminal event — the
+  // session never said it ended, so the runner does not get to call it a
+  // success (Codex r7 on #3846).
+  if (code === 'no_key' || code === 'all_providers_failed' || code === 'session_error_event' || code === 'session_stream_eof' || /_(5\d\d|429|529|503|401|403|404)$/.test(code)) return 'provider';
   // status-qualified 408s (Codex r13) and the adapters' own deadlines —
   // `<provider>_timeout` from llm/call.js providerErrorReason (Codex on #3793).
   if (code === 'timeout_budget_exhausted' || code === 'timeout' || /_(408|timeout)$/.test(code)) return 'timeout';
-  if (code === 'openai_incomplete') return ctx.pastBudget ? 'timeout' : 'incomplete';
+  // `<provider>_incomplete`: the output was cut off — OpenAI's `incomplete`
+  // status, Anthropic's stop_reason 'max_tokens' — the same outcome on either
+  // provider (Codex r7 on #3846).
+  if (/_incomplete$/.test(code)) return ctx.pastBudget ? 'timeout' : 'incomplete';
   // `max_events`: a Managed Agents runner's own SSE event cap ended the
   // stream before the session did — our budget, not the provider's fault.
   if (code === 'budget_exhausted' || code === 'max_cost' || code === 'max_tool_calls' || code === 'max_events') return 'budget';

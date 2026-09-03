@@ -240,13 +240,15 @@ class ManagedAssistant {
    * Stream session events, execute custom tool calls, return the final text
    * with this turn's stream outcome. `failure` is null when the agent ended
    * the turn, `session_error_event` when the stream emitted an error (the
-   * reply is then whatever text arrived first, else the fallback copy) and
-   * `max_events` when our own event cap ended it. The caller sends the reply
-   * either way; the call ledger records the turn as failed.
+   * reply is then whatever text arrived first, else the fallback copy),
+   * `session_stream_eof` when the stream closed before any terminal event
+   * and `max_events` when our own event cap ended it. The caller sends the
+   * reply either way; the call ledger records the turn as failed.
    */
   async processSessionEvents(sessionId, conversation, customerId) {
     let finalReply = '';
     let failure = null;
+    let sessionEnded = false; // set only by a terminal event: any other stream exit is a failure
     let maxIterations = 30; // expanded assistant needs more room for multi-step workflows
 
     for await (const { event, data } of streamSessionEvents(sessionId)) {
@@ -322,11 +324,12 @@ class ManagedAssistant {
 
       // ── Session complete ──
       if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') {
+        sessionEnded = true;
         break;
       }
 
       // ── Error from agent ──
-      if (event === 'error') {
+      if (event === 'error' || event === 'session.error') {
         logger.error(`[managed-assistant] Agent error: ${JSON.stringify(data)}`);
         failure = 'session_error_event';
         if (!finalReply) {
@@ -334,6 +337,13 @@ class ManagedAssistant {
         }
         break;
       }
+    }
+    // The stream closed before the session said it ended: the customer still
+    // gets whatever was said, but the turn is not a success, whatever the
+    // session GET reports later.
+    if (!failure && !sessionEnded) {
+      logger.error(`[managed-assistant] Stream ended without a terminal event for session ${sessionId}`);
+      failure = 'session_stream_eof';
     }
 
     return { reply: finalReply || "I'm here to help! Could you tell me a bit more about what you need? — Waves Pest Control", failure };

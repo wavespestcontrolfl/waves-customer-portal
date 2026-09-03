@@ -377,6 +377,15 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'anthropic_refusal' });
       return { ok: false, reason: 'anthropic_refusal' };
     }
+    // A stop_reason 'max_tokens' is an incomplete leg, exactly as an OpenAI
+    // `incomplete` status is above: the output was cut off, so the call row
+    // and the caller agree it failed and the caller's fallback runs instead
+    // of a truncated answer shipping (Codex r7 on #3846).
+    if (resp?.stop_reason === 'max_tokens') {
+      logger.warn(`[llm] Anthropic response stopped at max_tokens (${maxTokens})`);
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'anthropic_incomplete' });
+      return { ok: false, reason: 'anthropic_incomplete' };
+    }
     if (jsonMode && !json) {
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json' });
       return { ok: false, reason: 'empty_json' };
@@ -492,16 +501,13 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
       }
     }
     if (rejection) {
-      // A response truncated at max_tokens is indistinguishable from
-      // malformed output by the time a validator rejects it ("unparseable"),
-      // which mislabels a budget problem as a model-quality problem in the
-      // dispatch digest. Anthropic responses carry stop_reason; tag it so the
-      // recorded failure reason says which one actually happened.
-      const truncated = result.response?.stop_reason === 'max_tokens';
+      // A max_tokens-truncated Anthropic answer never reaches the validator:
+      // callAnthropic fails that leg as anthropic_incomplete first, so a
+      // rejection here is a judgement on a complete answer.
       failures.push({
         provider: route.provider,
         model: route.model,
-        reason: truncated ? `${rejection} (response truncated at max_tokens=${payload.maxTokens ?? '?'})` : String(rejection),
+        reason: String(rejection),
         ...(fromValidator ? { validator: true } : {}),
       });
       continue;

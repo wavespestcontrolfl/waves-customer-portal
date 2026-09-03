@@ -139,6 +139,11 @@ const ContentAgent = {
     // carrying this runner's own outcome. Upserted by session id, so
     // re-billing is safe.
     let failure = null;
+    // Set only by a terminal event: any other stream exit is a failure.
+    let sessionEnded = false;
+    // The run's own end — the ledger's usage GET after it is observability
+    // time, not agent time, and stays out of the reported duration.
+    let runEndedAt = null;
     try {
       // Send the user prompt
       await apiCall('POST', `/sessions/${sessionId}/events`, {
@@ -214,25 +219,33 @@ const ContentAgent = {
 
         // ── Session complete ──
         if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') {
+          sessionEnded = true;
           break;
         }
 
         // ── Error ──
-        if (event === 'error') {
+        if (event === 'error' || event === 'session.error') {
           logger.error(`[content-agent] Agent error: ${JSON.stringify(data)}`);
           failure = 'session_error_event';
           break;
         }
+      }
+      // The stream closed (or was left) before the session said it ended:
+      // not a success, whatever the session GET reports later.
+      if (!failure && !sessionEnded) {
+        logger.error(`[content-agent] Stream ended without a terminal event for session ${sessionId}`);
+        failure = 'session_stream_eof';
       }
 
     } catch (err) {
       failure = err;
       throw err;
     } finally {
+      runEndedAt = Date.now();
       await recordSessionUsage({ laneId: 'agent_content', sessionId, agentId: CONTENT_AGENT_ID, model: CONTENT_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
 
-    const durationMs = Date.now() - startTime;
+    const durationMs = runEndedAt - startTime;
     notify('complete', `Finished in ${Math.round(durationMs / 1000)}s`);
 
     // Gather results from the post record

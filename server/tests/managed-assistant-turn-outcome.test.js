@@ -84,6 +84,19 @@ describe('managed assistant — the turn recorder sees how the stream ended', ()
     expect(recorded()).toMatchObject({ failure: 'session_error_event' });
   });
 
+  it('a session.error event is the same failed turn as an error event', async () => {
+    global.fetch = fetchFor([{ event: 'session.error', data: { type: 'overloaded_error' } }, text('never read')]);
+    const res = await turn();
+    expect(res.reply).toMatch(/having trouble right now/);
+    expect(recorded()).toMatchObject({ failure: 'session_error_event' });
+  });
+
+  it('a stream that closes before any terminal event is a failed turn (session_stream_eof) — the partial reply still goes out', async () => {
+    global.fetch = fetchFor([text('Thursday at 9am.')]);
+    await expect(turn()).resolves.toMatchObject({ reply: 'Thursday at 9am.' });
+    expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: 'session_stream_eof' });
+  });
+
   it("the runner's own event cap is a failed turn (max_events), not a success", async () => {
     // 30 events never reach a terminal frame: the 30th trips the cap
     global.fetch = fetchFor(Array.from({ length: 40 }, () => text('x')));

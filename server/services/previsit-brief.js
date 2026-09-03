@@ -2417,13 +2417,12 @@ async function generateBriefBody(grounding, deps = {}) {
     }, { validate });
     if (!resp || !resp.ok || !resp.json) {
       logger.warn(`[previsit-brief] LLM miss (${resp?.reason || 'no json'}); using deterministic template`);
-      // Every leg rejected by OUR validator (and none merely truncated —
-      // the dispatcher suffixes '(response truncated at max_tokens=…)' onto
-      // the verdict, a budget problem) = deterministic for this grounding;
-      // provider errors, no_json and truncation stay transient.
+      // Every leg rejected by OUR validator = deterministic for this
+      // grounding; provider errors, no_json and truncation (an
+      // `<provider>_incomplete` leg the adapter fails before any validator
+      // runs — a budget problem) stay transient.
       const legReasons = (resp?.failures || []).map((f) => String(f?.reason || ''));
-      const fromValidator = (r) => !r.includes('response truncated')
-        && [...validatorVerdicts].some((v) => r === v || r.startsWith(`${v} `));
+      const fromValidator = (r) => validatorVerdicts.has(r);
       const deterministic = legReasons.length > 0 && legReasons.every(fromValidator);
       return fallback(deterministic ? 'validator' : 'transient');
     }

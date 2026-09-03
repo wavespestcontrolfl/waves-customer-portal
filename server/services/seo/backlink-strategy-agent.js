@@ -190,6 +190,11 @@ const BacklinkStrategyAgent = {
     // carrying this runner's own outcome. Upserted by session id, so
     // re-billing is safe.
     let failure = null;
+    // Set only by a terminal event: any other stream exit is a failure.
+    let sessionEnded = false;
+    // The run's own end — the ledger's usage GET after it is observability
+    // time, not agent time, and stays out of the reported duration.
+    let runEndedAt = null;
     try {
       await sendSessionEvents(sessionId, [buildUserMessageEvent(prompt)]);
 
@@ -309,6 +314,7 @@ const BacklinkStrategyAgent = {
         }
 
         if (event === 'done' || event === 'session_complete' || stopReason?.type === 'end_turn') {
+          sessionEnded = true;
           break;
         }
 
@@ -318,15 +324,22 @@ const BacklinkStrategyAgent = {
           break;
         }
       }
+      // The stream closed (or was left) before the session said it ended:
+      // not a success, whatever the session GET reports later.
+      if (!failure && !sessionEnded) {
+        logger.error(`[backlink-strategy] Stream ended without a terminal event for session ${sessionId}`);
+        failure = 'session_stream_eof';
+      }
 
     } catch (err) {
       failure = err;
       throw err;
     } finally {
+      runEndedAt = Date.now();
       await recordSessionUsage({ laneId: 'agent_backlink', sessionId, agentId: BACKLINK_STRATEGY_AGENT_ID, model: BACKLINK_STRATEGY_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
 
-    const durationSeconds = Math.round((Date.now() - startTime) / 1000);
+    const durationSeconds = Math.round((runEndedAt - startTime) / 1000);
     notify('complete', `Finished in ${durationSeconds}s`);
 
     const result = {

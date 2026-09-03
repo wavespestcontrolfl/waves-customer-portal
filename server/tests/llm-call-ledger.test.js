@@ -222,6 +222,16 @@ describe('llm call ledger', () => {
       expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'anthropic_refusal', 'instruction', 200], [false, 'anthropic_refusal', 'instruction', 200]]);
     });
 
+    it('a max_tokens stop is a FAILED leg in both modes — anthropic_incomplete recorded AND returned, like openai_incomplete', async () => {
+      const { call } = load();
+      mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"c":' }] });
+      expect(await call.callAnthropic({ model: 'a', text: 't' })).toEqual({ ok: false, reason: 'anthropic_incomplete' });
+      mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'max_tokens', content: [{ type: 'text', text: 'The first half of' }] });
+      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'anthropic_incomplete' });
+      await flush();
+      expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'anthropic_incomplete', 'incomplete', 200], [false, 'anthropic_incomplete', 'incomplete', 200]]);
+    });
+
     it('files a statusless SDK timeout as anthropic_timeout / timeout', async () => {
       mockAnthropicCreate.mockRejectedValue(Object.assign(new Error('Request timed out.'), { name: 'APIConnectionTimeoutError' }));
       const { call } = load();
@@ -262,6 +272,14 @@ describe('llm call ledger', () => {
       expect(await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(refusal))).toBe(refusal);
       await flush();
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_refusal', error_class: 'instruction', input_tokens: 200, output_tokens: 40 });
+    });
+
+    it('records an Anthropic max_tokens stop as an incomplete call (anthropic_incomplete / incomplete) with its usage, value unchanged', async () => {
+      const { metrics } = load();
+      const cut = { ...ANTHROPIC_MESSAGE, stop_reason: 'max_tokens' };
+      expect(await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(cut))).toBe(cut);
+      await flush();
+      expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_incomplete', error_class: 'incomplete', input_tokens: 200, output_tokens: 40 });
     });
 
     it('DEEP helper: a refusal is a failed Anthropic leg and the OpenAI backup a successful one, same chain', async () => {

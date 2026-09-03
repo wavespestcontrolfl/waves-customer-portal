@@ -412,8 +412,15 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
   }
   // An Anthropic Message that resolved with stop_reason 'refusal' is a
   // failed call (the model declined; the DEEP helper falls over to OpenAI),
-  // billed for its tokens like any other answered request.
-  const errorCode = provider === 'anthropic' && value?.stop_reason === 'refusal' ? 'anthropic_refusal' : null;
+  // billed for its tokens like any other answered request. 'max_tokens' is
+  // an incomplete one — the output was cut off (the DEEP helper warns and
+  // hands it back unchanged) — filed the way OpenAI's `incomplete` status
+  // already is, so the ledger's success rate and failure classes do not
+  // depend on which provider truncated (Codex r7 on #3846).
+  const errorCode = provider !== 'anthropic' ? null
+    : value?.stop_reason === 'refusal' ? 'anthropic_refusal'
+    : value?.stop_reason === 'max_tokens' ? 'anthropic_incomplete'
+    : null;
   const callId = recordCall({
     provider,
     requestedModel,
