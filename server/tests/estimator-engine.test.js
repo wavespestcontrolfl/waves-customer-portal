@@ -761,6 +761,123 @@ describe('review fixes', () => {
     expect(reasons.join(' ')).toMatch(/lot sqft from fallback/);
   });
 
+  test('unitLineOverride composes the texted unit into the service address without doubling one already there', () => {
+    const base = {
+      extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir', city: 'Sarasota', postal_code: '34232' } } },
+      unitLineOverride: 'Apt 204',
+    };
+    expect(idxPriv.addressFromContext(base)).toBe('1048 Example Lakes Cir Apt 204, Sarasota, FL 34232');
+    // The SAME unit already inline: untouched. A different one: replaced (the customer's answer wins).
+    const sameUnit = { ...base, extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir Unit 204', city: 'Sarasota', postal_code: '34232' } } } };
+    expect(idxPriv.addressFromContext(sameUnit)).toBe('1048 Example Lakes Cir Unit 204, Sarasota, FL 34232');
+    const withUnit = { ...base, extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir Apt 9', city: 'Sarasota', postal_code: '34232' } } } };
+    expect(idxPriv.addressFromContext(withUnit)).toBe('1048 Example Lakes Cir Apt 204, Sarasota, FL 34232');
+    const leadOnly = { extraction: null, lead: { address: '5 Other Rd', city: 'Venice', zip: '34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(leadOnly)).toBe('5 Other Rd Apt 204, Venice, 34285');
+    expect(idxPriv.addressFromContext({ ...leadOnly, unitLineOverride: null })).toBe('5 Other Rd, Venice, 34285');
+    // A lead line the write-back already formatted carries the unit as its
+    // own comma segment — never doubled.
+    const commaForm = { extraction: null, lead: { address: '5 Other Rd, Apt 204, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(commaForm)).toBe('5 Other Rd, Apt 204, Venice, FL 34285');
+    // A DIFFERENT unit on the line is the stale/misheard one — replaced by the answer, never kept beside it.
+    const staleInline = { extraction: null, lead: { address: '5 Other Rd Apt 9, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(staleInline)).toBe('5 Other Rd Apt 204, Venice, FL 34285');
+    const staleComma = { extraction: null, lead: { address: '5 Other Rd, Apt 9, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Unit 204' };
+    expect(idxPriv.addressFromContext(staleComma)).toBe('5 Other Rd Unit 204, Venice, FL 34285');
+    // The UNIT-FIRST form is kept, never doubled: same unit untouched, a different one replaced in place.
+    const unitFirstSame = { extraction: null, lead: { address: 'Unit 204, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(unitFirstSame)).toBe('Unit 204, 5 Other Rd, Venice, FL 34285');
+    const unitFirstStale = { extraction: null, lead: { address: 'Apt 9, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(unitFirstStale)).toBe('Apt 204, 5 Other Rd, Venice, FL 34285');
+    expect(idxPriv.addressFromContext({ ...unitFirstStale, lead: { address: '#9, 5 Other Rd, Venice, FL 34285' } })).toBe('Apt 204, 5 Other Rd, Venice, FL 34285');
+    // The shared helper reads the unit in either position.
+    const { unitAnywhereOnLine, splitUnitFirstLine, dwellingUnitOnLine, structuralUnitPart } = require('../utils/address-normalizer');
+    expect(unitAnywhereOnLine('Apt 204, 5 Other Rd, Venice, FL 34285')).toBe('Apt 204');
+    expect(unitAnywhereOnLine('5 Other Rd Apt 204, Venice, FL 34285')).toBe('Apt 204');
+    expect(unitAnywhereOnLine('5 Other Rd, Venice, FL 34285')).toBe('');
+    expect(splitUnitFirstLine('4501 Space Coast Blvd, Venice, FL')).toBeNull();
+    expect(splitUnitFirstLine('Apt 204')).toBeNull();
+    // Multi-part and structural leading units are the same vocabulary as the trailing peel (codex r6 P1).
+    expect(splitUnitFirstLine('Bldg 9 Apt 204, 123 Main St, Sarasota, FL 34232')).toEqual({ unit: 'Bldg 9 Apt 204', rest: '123 Main St, Sarasota, FL 34232' });
+    expect(unitAnywhereOnLine('Bldg 9 Apt 204, 123 Main St, Sarasota, FL 34232')).toBe('Bldg 9 Apt 204');
+    expect(unitAnywhereOnLine('Floor 2, 123 Main St')).toBe('Floor 2');
+    // A STRUCTURAL component is preserved beside the answered dwelling unit (pre-push codex P1 on #3804).
+    const multiStale = { extraction: null, lead: { address: 'Bldg 9 Apt 9, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(multiStale)).toBe('Bldg 9 Apt 204, 5 Other Rd, Venice, FL 34285');
+    const structuralOnly = { extraction: null, lead: { address: 'Bldg 9, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(structuralOnly)).toBe('Bldg 9 Apt 204, 5 Other Rd, Venice, FL 34285');
+    const structuralTrailing = { extraction: null, lead: { address: '5 Other Rd Bldg 9, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(structuralTrailing)).toBe('5 Other Rd Bldg 9 Apt 204, Venice, FL 34285');
+    expect(dwellingUnitOnLine('Bldg 9, 5 Other Rd')).toBe('');
+    expect(dwellingUnitOnLine('Bldg 9 Apt 204, 5 Other Rd')).toBe('Apt 204');
+    expect(dwellingUnitOnLine('5 Other Rd #204')).toBe('Unit 204');
+    expect(structuralUnitPart('Bldg 9 Apt 9')).toBe('Bldg 9');
+    expect(structuralUnitPart('Apt 9')).toBe('');
+    // The comma-free unit-first forms the canonical matcher supports (codex r1 P2 on #3804).
+    expect(splitUnitFirstLine('Apt 204 at 123 Main St, Sarasota, FL 34232')).toEqual({ unit: 'Apt 204', rest: '123 Main St, Sarasota, FL 34232' });
+    expect(splitUnitFirstLine('Unit 204 123 Main St')).toEqual({ unit: 'Unit 204', rest: '123 Main St' });
+    expect(splitUnitFirstLine('#204 900 Bayview Ter, Venice')).toEqual({ unit: 'Unit 204', rest: '900 Bayview Ter, Venice' });
+    expect(splitUnitFirstLine('123 Main St Apt 204')).toBeNull();
+    // Longer designator spellings win over their prefixes in the comma-free form (codex r2 P2 on #3804).
+    expect(splitUnitFirstLine('Floor 2 123 Main St, Sarasota')).toEqual({ unit: 'Floor 2', rest: '123 Main St, Sarasota' });
+    expect(splitUnitFirstLine('Building 9 Apt 204 123 Main St')).toEqual({ unit: 'Building 9 Apt 204', rest: '123 Main St' });
+    // Every consecutive leading unit segment folds into one unit (codex r3 P2 on #3804).
+    expect(splitUnitFirstLine('Bldg 9, Apt 204, 123 Main St, Sarasota')).toEqual({ unit: 'Bldg 9 Apt 204', rest: '123 Main St, Sarasota' });
+    expect(dwellingUnitOnLine('Bldg 9, Apt 204, 123 Main St')).toBe('Apt 204');
+    const segmentedSame = { extraction: null, lead: { address: 'Bldg 9, Apt 204, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(segmentedSame)).toBe('Bldg 9, Apt 204, 5 Other Rd, Venice, FL 34285');
+    const segmentedStale = { extraction: null, lead: { address: 'Bldg 9, Apt 9, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(segmentedStale)).toBe('Bldg 9 Apt 204, 5 Other Rd, Venice, FL 34285');
+    const inlineSame = { extraction: null, lead: { address: 'Apt 204 at 123 Main St, Sarasota, FL 34232' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(inlineSame)).toBe('Apt 204 at 123 Main St, Sarasota, FL 34232');
+    const inlineStale = { extraction: null, lead: { address: 'Unit 9 123 Main St, Sarasota, FL 34232' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(inlineStale)).toBe('Apt 204, 123 Main St, Sarasota, FL 34232');
+  });
+
+  test('serviceAddressOverride (the item-bound building) outranks the extraction AND the lead/customer lines of an extraction-less fallback context', () => {
+    const building = { street_line_1: '1048 Example Lakes Cir', city: 'Sarasota', postal_code: '34232' };
+    const noExtraction = { extraction: null, lead: { address: '5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, serviceAddressOverride: building, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(noExtraction)).toBe('1048 Example Lakes Cir Apt 204, Sarasota, FL 34232');
+    const otherExtraction = { extraction: { property: { service_address: { street_line_1: '9 Elsewhere Ave', city: 'Venice', postal_code: '34285' } } }, serviceAddressOverride: building };
+    expect(idxPriv.addressFromContext(otherExtraction)).toBe('1048 Example Lakes Cir, Sarasota, FL 34232');
+    // A street-only building: no "…, FL" stub (pre-push codex P1, r9) — the
+    // bare street, or the locality of a record naming the SAME street.
+    expect(idxPriv.addressFromContext({ extraction: null, lead: null, serviceAddressOverride: { street_line_1: '1048 Example Lakes Cir' } })).toBe('1048 Example Lakes Cir');
+    const streetOnly = { street_line_1: '1048 Example Lakes Cir' };
+    expect(idxPriv.addressFromContext({ extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Circle', city: 'Sarasota', postal_code: '34232' } } }, serviceAddressOverride: streetOnly }))
+      .toBe('1048 Example Lakes Cir, Sarasota, FL 34232');
+    expect(idxPriv.addressFromContext({ extraction: null, lead: { address: '1048 Example Lakes Cir, Sarasota, FL 34232', city: 'Sarasota', zip: '34232' }, leadIsForThisCall: true, serviceAddressOverride: streetOnly }))
+      .toBe('1048 Example Lakes Cir, Sarasota, FL 34232');
+    // A record for ANOTHER street lends nothing — its locality could be another parcel's.
+    expect(idxPriv.addressFromContext({ extraction: { property: { service_address: { street_line_1: '9 Elsewhere Ave', city: 'Venice', postal_code: '34285' } } }, lead: { address: '5 Other Rd', city: 'Venice', zip: '34285' }, leadIsForThisCall: true, serviceAddressOverride: streetOnly }))
+      .toBe('1048 Example Lakes Cir');
+    // An ambiguous shared-phone profile never lends locality either.
+    expect(idxPriv.addressFromContext({ extraction: null, lead: null, customer: { address_line1: '1048 Example Lakes Cir', city: 'Sarasota', zip: '34232' }, customerPhoneAmbiguous: true, serviceAddressOverride: streetOnly }))
+      .toBe('1048 Example Lakes Cir');
+  });
+
+  test('the unit-adoption compare judges the street the run HEARD, not a locality-borrowed composition (codex r9 P1 on #3804)', () => {
+    // Street-only extraction + this call's lead on another property: the
+    // composed line borrows Venice/34285, but the adoption compare must
+    // still see the asked street.
+    const ctx = { extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir' } } }, lead: { address: '5 Other Rd', city: 'Venice', zip: '34285' }, leadIsForThisCall: true };
+    expect(idxPriv.addressFromContext(ctx)).toBe('1048 Example Lakes Cir, Venice, FL 34285');
+    expect(idxPriv.ownStreetForUnitAdoption(ctx)).toBe('1048 Example Lakes Cir');
+    expect(idxPriv.sameStreetAddress(idxPriv.ownStreetForUnitAdoption(ctx), '1048 Example Lakes Cir, Sarasota, FL 34232')).toBe(true);
+    // No extraction: the composed line (lead / customer records carry their own locality).
+    expect(idxPriv.ownStreetForUnitAdoption({ extraction: null, lead: { address: '5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true })).toBe('5 Other Rd, Venice, FL 34285');
+    expect(idxPriv.ownStreetForUnitAdoption({ extraction: null, lead: null })).toBe('');
+  });
+
+  test('the unit-adoption compare keeps the extraction\'s OWN locality — the same numbered street heard in ANOTHER city never adopts the fence (codex r14 P1 on #3804)', () => {
+    const heard = { extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir', city: 'Venice', postal_code: '34285' } } }, lead: null };
+    expect(idxPriv.ownStreetForUnitAdoption(heard)).toBe('1048 Example Lakes Cir, Venice, FL 34285');
+    expect(idxPriv.sameStreetAddress(idxPriv.ownStreetForUnitAdoption(heard), '1048 Example Lakes Cir, Sarasota, FL 34232')).toBe(false);
+    // The same street in the SAME city still matches; a ZIP alone rides along too.
+    expect(idxPriv.sameStreetAddress(idxPriv.ownStreetForUnitAdoption(heard), '1048 Example Lakes Cir, Venice, FL 34285')).toBe(true);
+    expect(idxPriv.ownStreetForUnitAdoption({ extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir', postal_code: '34232' } } } })).toBe('1048 Example Lakes Cir, FL 34232');
+  });
+
   test('existing-customer address beats a stale phone-matched lead', () => {
     const context = {
       extraction: null,

@@ -47,6 +47,14 @@ async function listOpenEstimatesByPhone(phone, options = {}) {
   if (options.excludeEstimateId) {
     query.whereNot('id', options.excludeEstimateId);
   }
+  // A clarify re-run's own attempt: the rows the SAME reply held (one
+  // token per reply) are the drafts being corrected, not concurrent
+  // duplicates — they stay held for the operator and must not block the
+  // replacement (codex r13 P2 on #3804; the same-call probe already
+  // excludes them).
+  if (options.excludeRepriceAttempt) {
+    query.whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_attempt', '') <> ?", [String(options.excludeRepriceAttempt)]);
+  }
 
   return query;
 }
@@ -74,6 +82,14 @@ async function listOpenEstimatesByCustomerId(customerId, options = {}) {
 
   if (options.excludeEstimateId) {
     query.whereNot('id', options.excludeEstimateId);
+  }
+  // A clarify re-run's own attempt: the rows the SAME reply held (one
+  // token per reply) are the drafts being corrected, not concurrent
+  // duplicates — they stay held for the operator and must not block the
+  // replacement (codex r13 P2 on #3804; the same-call probe already
+  // excludes them).
+  if (options.excludeRepriceAttempt) {
+    query.whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_attempt', '') <> ?", [String(options.excludeRepriceAttempt)]);
   }
 
   return query;

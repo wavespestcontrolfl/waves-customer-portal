@@ -247,7 +247,11 @@ estimate+service+day, suppression-blocked addresses return 409 with no
 send, generic errors — no PII in responses or logs; while
 GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
 the engine-pricing-authority verdict (#3750) answers the same generic 404
-before either provider path).
+before either provider path; both provider paths re-read the row and repeat
+the customer-viewable + call-side-hold check as the LAST step before the
+SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
+PDF render withholds the packet with the same generic 404 and releases the
+SMS dedup claim so a later legitimate retap can send).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
@@ -459,16 +463,44 @@ set by two keys: `oneTimeMosquito` (menu `mosquito_one_time`; priced by
 treatable lot area; station / dunk add-ons are staff-scoped and never
 site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
 (turf-priced on the forwarded track; a lot-only lookup routes it to manual
-review like the lawn programs). Both are additive — no existing key or
-response field changed. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
+review like the lawn programs). Catalog `cockroach_control` → `pestInitialRoach`
+(owner ruling 2026-09-03: the two-treatment package priced as one
+regular_standalone knockdown on the home footprint; species / severity /
+price override stay staff-scoped, the site prices the native scale; the
+included second visit is booked at completion at no charge). It prices
+instantly but never mints a self-book slot (`bookingUrl` null, like bed
+bug): the self-book funnel collapses it to the generic pest visit with no
+catalog `service_id`, which the included second visit's scheduling needs —
+the owner books the first visit. Instant eligibility also requires the live
+`regular_standalone.treatments` display count to still read 2 — read from the persisted `pricing_config`
+row itself (never process-local engine constants), on the menu build, on
+the first eligibility read, and again immediately before the engine. The engine input freezes `packageTreatments: 2` and
+`catalogServiceKey: cockroach_control` on the request, so the stored draft
+regenerates the two-visit promise on every send / view and the accepted
+visit resolves `service_id` by that exact key. All three are
+additive — no existing key or response field changed. **Menu `flea_tick` changed product on 2026-09-03**
+(owner ruling "flea is two visits"; PR #3845): the keyed request now
+expands to the two-visit Flea Elimination Package (`flea_package`, 2
+visits, conditional retreat guarantee) — previously the single-visit
+knockdown. The retired `services.flea.offerKey = flea_knockdown_single`
+is still accepted on the direct-`services` shape, but the engine prices
+the package and routes the line to manual review
+(`flea_single_visit_offer_retired`), so a stale caller gets a review
+response, never an instant two-visit price it did not ask for. A
+site-collected `services.flea.fleaComplexity` (`light` / `moderate` /
+`heavy`) is forwarded on both shapes; absent, the package prices at the
+base (light) rate. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
 `treeShrub`) park as `lot_size_requires_verification` when the lookup
 flagged the lot verify-first; the response is then a manual quote, never a
-price built from the synthetic sqft×4 fallback. `oneTimeMosquito` goes one
-step further: the engine line itself routes to review whenever the route
-passes `lotSizeMeasured:false` (lookup miss, or a direct-API lot posted
-without `lotSizeConfirmed`), the same caller contract commercial mosquito
-already enforces — a one-time mosquito price is only ever built from a
-lookup-measured or customer-confirmed lot).
+price built from the synthetic sqft×4 fallback. Every mosquito line
+(`mosquito`, `oneTimeMosquito`, commercial) goes one step further: the
+engine line itself routes to review whenever the route passes
+`lotSizeMeasured:false` (lookup miss, or a direct-API lot posted without
+`lotSizeConfirmed`) — a mosquito price is only ever built from a
+lookup-measured or customer-confirmed lot (owner ruling 2026-09-03; the
+recurring program joined this contract then, so a direct-API caller that
+posts an unconfirmed `lotSqFt` with `mosquito` now receives a manual
+quote where it previously received a price)).
 `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
 marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on
@@ -564,6 +596,43 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+A clarify RE-PRICE HOLD (`estimate_data.estimatorEngine.reprice_pending_at`
+non-empty — stamped by `estimate-clarify-asks` when a customer's unit or
+bedroom reply proves the row's address or dollars stale; lifted only by the
+operator's revision / proposal save or by the replacement draft's supersede
+archive) takes the row out of the customer surface for as long as the
+marker is on the row, whatever the row's status becomes afterwards. The
+marker is stamped on UNSENT rows only (draft / scheduled / send_failed /
+sending — a delivery that has not published yet); a building-level quote
+staff already SENT before the customer's reply is NOT retracted by this
+mechanism (the office is belled and the unit lands on the CRM record; an
+automatic retract-and-replace is the C2b follow-up). While the marker is on:
+the GET view (React `/data`, the legacy SSR page, `/pdf`, the slots
+routes, every `isEstimateCustomerViewable` consumer) answers the same
+generic 404 as an unknown token, and the two writes refuse with 409
+`{ error: 'This estimate is being re-priced — please try again in a few
+minutes' }` — `/accept` inside its locked read, `/decline` at the
+guard AND on the UPDATE's own predicate (a hold landing between the two
+parks the decline on that 409, never a stale 'declined' terminal); the
+pricing mutations (`/select-tier`, `/bond`, `/interior-service`,
+`/service-opt-out`, `/preferences`) and the ask endpoint treat a held
+row as not accept-active / not answerable at the pre-read, and the five
+mutations predicate their whole-blob writes on the marker's absence, so
+none of them can overwrite the hold off the row; `/extension-request`
+treats a held row as ineligible (the generic 404), and the auto-grant
+claim, the notify-only claim, the guarded expiry write, and the sibling
+revive all carry the marker predicate — a hold that lands after the
+eligibility read never burns the grant, texts a link the renderer
+refuses, or pages the office with a 201 (the zero-row claim re-reads and
+answers the generic 404); `/bundle-inquiry` judges the locked row with
+the same verdict (409 "no longer active", the route's existing shape for
+an inactive row); the slots `/reserve` write re-judges the LOCKED row
+with the same verdict before minting a hold (generic 404, no
+reservation). A
+group's held siblings are skipped at preflight, claim and publication;
+a held ANCHOR parks as `send_failed`. No enumeration signal: the hold
+is unobservable from outside beyond the accept/decline 409, which a held
+row can only reach through a link that went out before the hold.
 `/select-tier` refuses any tier above the tier the ENGINE wrote for the
 estimate's qualifying services (400 `tier_not_available_for_current_services`
 + `maxTier`; downgrades stay allowed): the ceiling is the last opt-out

@@ -126,7 +126,7 @@ function howToRequestQuote() {
       },
       optionalFields: {
         city: 'string', zip: 'string', homeSqFt: 'number', lotSqFt: 'number', stories: 'number (1-3)', propertyType: "string (e.g. 'Single Family')",
-        lotSizeConfirmed: 'boolean — set true when the customer stated or verified the lot size themselves; a confirmed lot takes precedence over property-record data',
+        lotSizeConfirmed: 'boolean — set true when the customer stated or verified the lot size themselves; a confirmed lot takes precedence over property-record data. REQUIRED for an instant mosquito price on this endpoint: mosquito and oneTimeMosquito price only from a lot the customer confirmed (this endpoint never reads the server property record), so send lotSqFt WITH lotSizeConfirmed:true; an unconfirmed lotSqFt returns a manual-review outcome for them and is not stored as the customer\'s lot.',
       },
       responseSummary: 'JSON with monthly_total, annual_total, variance_low/high, confidence, and per-service recurring_lines. One-time services (e.g. rodent exclusion, sanitation, bed bug) return the quoted amount in one_time_total, and monthly_total/annual_total can be 0 in that case — check one_time_total before reporting a price. Some properties (notably commercial) return a manual-review outcome instead of an instant price.',
       rateLimit: '10 requests per hour per IP',

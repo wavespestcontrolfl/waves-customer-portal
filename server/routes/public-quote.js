@@ -70,7 +70,7 @@ async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKe
     .first('id');
   return prior ? prior.id : null;
 }
-const { publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
+const { COCKROACH_PACKAGE_VISITS, publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
 const logger = require('../services/logger');
 const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
@@ -611,9 +611,11 @@ function normalizePublicQuotePestFrequency(value) {
 // admin-editable display config the engine's line item uses
 // (pest_base.initial_roach.display via db-bridge — pricingConstants.PEST is
 // the live merged object, so admin renames apply here without a restart).
-// A quote-wizard roach fee always prices at the recurring-add-on scale keys
-// (regular / german), never regular_standalone. Fallbacks mirror
-// pricePestInitialRoach's, for a stale config row predating the display key.
+// Takes a SCALE key: the recurring roach add-on prices at regular / german,
+// the standalone cockroach package (catalog cockroach_control) at
+// regular_standalone — pass the key the engine line actually uses. Fallbacks
+// mirror pricePestInitialRoach's, for a stale config row predating the
+// display key.
 function publicQuoteRoachDisplayName(roachType) {
   const configured = pricingConstants.PEST?.pestInitialRoach?.display?.[roachType]?.name;
   if (typeof configured === 'string' && configured.trim()) return configured.trim();
@@ -694,6 +696,13 @@ const NO_SELF_BOOK_LINE_SERVICES = new Set([
   // never a self-book slot (GH codex #3585).
   'plugging',
   'top_dressing',
+  // Standalone cockroach package (catalog cockroach_control): the self-book
+  // funnel collapses the product to the generic pest_control key and persists
+  // a visit with no catalog service_id, so completion could never resolve the
+  // two-treatment profile that schedules the included second visit. Same
+  // rule as bed_bug, the other TWO_TREATMENT_PACKAGE_KEYS member: instant
+  // price, the owner books the first visit (codex #3842 r1 P1).
+  'pest_initial_roach',
 ]);
 function estimateBlocksSelfBookLink(estimate) {
   return estimateBlocksBookingHandoff(estimate)
@@ -804,6 +813,17 @@ function quoteOnRequestEstimate(keyedService, engineInput = {}) {
   };
 }
 
+// Keyed quotes carry the catalog name as the lead label — identity wins —
+// EXCEPT the standalone cockroach package, whose engine line renders the
+// admin-editable regular_standalone display name: the lead, notifications
+// and the customer's compact interest must read what the estimate line the
+// customer saw says, not a catalog name renamed independently of it (codex
+// #3842 r1 P2). Null ⇒ derive both labels from the expanded services.
+function keyedLeadLabel(keyedService, services = {}) {
+  if (!keyedService || services.pestInitialRoach) return null;
+  return keyedService.name;
+}
+
 function buildPublicQuoteServiceInterest(services = {}) {
   return [
     services.pest ? publicQuotePestLabel(services.pest) : null,
@@ -827,6 +847,10 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.topDressing ? 'Lawn Top Dressing Service' : null,
     services.lawnPestControl ? 'Lawn Pest Control' : null,
     services.oneTimeMosquito ? 'One-Time Mosquito Treatment' : null,
+    // Standalone package: the engine prices AND renders the regular_standalone
+    // scale, so the lead label reads that scale's configured name (pre-push
+    // codex P1 — the two names are admin-editable independently).
+    services.pestInitialRoach ? publicQuoteRoachDisplayName('regular_standalone') : null,
     services.bedBug ? 'Bed Bug Treatment Service' : null,
     services.rodentInspection ? 'Rodent Inspection Service' : null,
   ].filter(Boolean).join(' + ');
@@ -890,6 +914,9 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
     services.topDressing ? 'Top Dressing' : null,
     services.lawnPestControl ? 'Lawn Pest' : null,
     services.oneTimeMosquito ? 'One-Time Mosquito' : null,
+    // Through the compactor, so the 32-char customer interest follows the
+    // configured standalone name like the full label does (codex #3842 r2 P2).
+    services.pestInitialRoach ? compactServiceInterestPart(publicQuoteRoachDisplayName('regular_standalone')) : null,
     services.bedBug ? 'Bed Bug' : null,
     services.rodentInspection ? 'Rodent Inspection' : null,
   ]);
@@ -944,6 +971,18 @@ async function sendQuoteRequestEmail({
 // The service keys /calculate accepts in its `services` map — hoisted to
 // module scope (and exported) so the public MCP `how_to_request_quote` tool
 // documents the exact same list instead of a divergent copy.
+// Manual-quote reasons that park a RESIDENTIAL quote pending a property
+// confirmation (lot / turf / unit). They share the customer-facing
+// "outdoor area needs a quick confirmation" copy and must not be labelled
+// commercial in the office bell (GH codex P2 on #3839).
+const RESIDENTIAL_VERIFICATION_REASONS = new Set([
+  'lot_size_requires_verification',
+  'mosquito_treatable_area_unverified',
+  'unit_in_multi_unit_building',
+  'low_confidence_turf_requires_field_verification',
+  'unknown_grass_type_priced_st_augustine',
+]);
+
 const PUBLIC_QUOTE_SERVICE_KEYS = [
   'pest', 'oneTimePest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
   'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
@@ -956,6 +995,21 @@ const PUBLIC_QUOTE_SERVICE_KEYS = [
   // (service-menu phase 2, 2026-09-03).
   'oneTimeMosquito',
 ];
+// Engine keys a keyed catalog request expands to but the site may NEVER
+// compose directly: the standalone cockroach package (cockroach_control →
+// pestInitialRoach, owner ruling 2026-09-03) is instant only while the
+// catalog row AND the live display count still describe the two-treatment
+// package, and only the keyed path runs those checks
+// (publicSelectableService → requestMatchesCatalogRow). A direct body is
+// stripped of them before anything reads `services` (pre-push codex P0).
+const KEYED_ONLY_SERVICE_KEYS = ['pestInitialRoach'];
+function dropKeyedOnlyServices(bodyServices) {
+  if (!bodyServices || typeof bodyServices !== 'object') return bodyServices;
+  if (!KEYED_ONLY_SERVICE_KEYS.some((k) => k in bodyServices)) return bodyServices;
+  const out = { ...bodyServices };
+  for (const k of KEYED_ONLY_SERVICE_KEYS) delete out[k];
+  return out;
+}
 
 const quoteLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
@@ -990,15 +1044,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     let keyedService = null;
     if (requestedServiceKey) {
       if (!/^[a-z0-9_]{1,80}$/.test(requestedServiceKey)) return res.status(400).json({ error: 'Unknown service.' });
+      // publicSelectableService reads BOTH of the cockroach package's
+      // authorities from the database (catalog row + persisted display
+      // count) — never this process's engine constants.
       keyedService = await publicSelectableService(requestedServiceKey);
       if (!keyedService) return res.status(400).json({ error: 'Unknown service.' });
     }
     const keyedInstant = !!(keyedService && keyedService.instant && quoteServicesForKey(requestedServiceKey));
     // Keyed but not instant: no engine services — the request flows through
     // the standard manual-quote lifecycle on a synthetic quote-required estimate.
-    const keyedQuoteOnRequest = !!(keyedService && !keyedInstant);
-    const services = keyedInstant ? mergeKeyedRequestOptions(quoteServicesForKey(requestedServiceKey), bodyServices)
-      : (keyedQuoteOnRequest ? {} : bodyServices);
+    // `let`: a keyed instant request demotes to quote-on-request right
+    // before generateEstimate when the catalog row or the live display
+    // config moved during the awaited lookups (see the re-check there).
+    let keyedQuoteOnRequest = !!(keyedService && !keyedInstant);
+    let services = keyedInstant ? mergeKeyedRequestOptions(quoteServicesForKey(requestedServiceKey), bodyServices)
+      : (keyedQuoteOnRequest ? {} : dropKeyedOnlyServices(bodyServices));
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
       line1: req.body.address_line1 || req.body.addressLine1,
@@ -1040,7 +1100,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (!contactFirstName || !contactLastName || !contactEmail || !contactPhone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
     }
-    if (!keyedQuoteOnRequest && (!services || !PUBLIC_QUOTE_SERVICE_KEYS.some(k => services[k]))) {
+    // A keyed request always carries its product (quoteServicesForKey, or the
+    // synthetic quote-on-request line) — only a site-composed body must name
+    // at least one site-composable key.
+    if (!keyedService && (!services || !PUBLIC_QUOTE_SERVICE_KEYS.some(k => services[k]))) {
       return res.status(400).json({ error: 'Select at least one service.' });
     }
 
@@ -1107,7 +1170,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // Two DISTINCT verdicts (pre-push codex P0 r2/r3 + P1):
     //   lotVerifyFlagged — a returned profile whose lot the lookup flagged
     //     verify-first. Only this parks lot-priced services below; an
-    //     ordinary cache miss keeps today's synthetic-lot pricing.
+    //     ordinary cache miss keeps the synthetic-lot fallback for lot-derived
+    //     lawn / tree lines, while every mosquito line (recurring, one-time,
+    //     commercial) reads lotSizeMeasured in the engine and routes to
+    //     review on it (owner ruling 2026-09-03).
     //   The measured VALUE is server-or-confirmed ONLY — the posted
     //     lotSqFt never reaches pricing without lotSizeConfirmed, so a
     //     caller cannot select rodent-bait brackets by attesting a lot.
@@ -1152,13 +1218,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // public confirmed value like 1e100 would overflow the integer column
     // and fail the insert, dropping the quote's customer linkage (codex
     // P1). Synthetic fallbacks still persist as null.
-    // Direct-API requests keep their legacy persistence too (GH codex P1
-    // r7): the documented contract sends lotSqFt without lotSizeConfirmed,
-    // and those callers' customer-provided lot always reached
-    // customers.lot_sqft. Wizard requests persist only server-measured or
-    // confirmed values — their posted field carries the synthetic seed.
-    const persistLotSource = realLotSqFt
-      ?? (!wizardShaped && Number(lotSqFt) > 0 ? Number(lotSqFt) : null);
+    // Only a MEASURED or CONFIRMED lot reaches customers.lot_sqft on every
+    // channel. The direct-API legacy leg (an unconfirmed posted lotSqFt
+    // persisted as the customer's lot) is gone: customer-pricing-ai reads
+    // customers.lot_sqft as a trusted measurement and prices mosquito from
+    // it without lotSizeMeasured:false, so persisting the value the quote
+    // just refused to price would have re-surfaced it as a one-tap
+    // cross-sell price (GH codex P1 on #3839). customers has no lot
+    // provenance column, so the unverified value is simply not promoted.
+    const persistLotSource = realLotSqFt;
     const persistLotSqFt = persistLotSource != null
       ? Math.round(Math.max(500, Math.min(LOT_CAP, persistLotSource)))
       : null;
@@ -1407,11 +1475,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
     }
     if (services.flea) {
-      // Offer key is a whitelisted engine identity (single-visit knockdown vs
-      // the two-visit package); anything else falls to the engine default.
+      // Offer key is a whitelisted engine identity; anything else falls to
+      // the engine default (the two-visit package). The retired single-visit
+      // key is still whitelisted ON PURPOSE: priceFlea prices the package
+      // and routes the line to review, so a cached form that still asks for
+      // one visit fails closed instead of silently instant-quoting two.
       const FLEA_OFFERS = ['flea_knockdown_single', 'flea_elimination_two_visit'];
       const fleaOffer = FLEA_OFFERS.includes(String(services.flea.offerKey || '').toLowerCase()) ? String(services.flea.offerKey).toLowerCase() : null;
-      engineInput.services.flea = fleaOffer ? { offerKey: fleaOffer } : {};
+      const fleaComplexity = ['light', 'moderate', 'heavy'].includes(String(services.flea.fleaComplexity || '').toLowerCase())
+        ? String(services.flea.fleaComplexity).toLowerCase() : null;
+      engineInput.services.flea = {
+        ...(fleaOffer ? { offerKey: fleaOffer } : {}),
+        ...(fleaComplexity ? { fleaComplexity } : {}),
+      };
     }
     if (services.stinging) {
       engineInput.services.stinging = {
@@ -1492,6 +1568,23 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // self-selected from an unauthenticated body (they move the price).
       engineInput.services.oneTimeMosquito = {};
     }
+    if (services.pestInitialRoach) {
+      // Standalone cockroach package: species, severity and the per-estimate
+      // price override are staff-scoped (they move the price / scale) — the
+      // site always prices the native regular_standalone scale. The
+      // promised count and the verified catalog identity are FROZEN into
+      // the input (the draft stores engineInput verbatim and regenerates
+      // from it on send / view), so the estimate the customer accepts says
+      // two visits and the accepted visit resolves to cockroach_control's
+      // two-treatment completion profile whatever the display config says
+      // later (codex #3842 r3 P1 ×2). Reachable only through the keyed
+      // path, so keyedService is always the verified row here.
+      engineInput.services.pestInitialRoach = {
+        roachType: 'regular',
+        packageTreatments: COCKROACH_PACKAGE_VISITS,
+        catalogServiceKey: keyedService.service_key,
+      };
+    }
     if (services.bedBug) {
       engineInput.services.bedBug = publicQuoteBedBugInput(services.bedBug);
     }
@@ -1543,6 +1636,30 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       } catch (lookupErr) {
         logger.error(`[public-quote] rodent setup-waiver account lookup failed: ${lookupErr.message}`);
         return res.status(503).json({ error: 'Account lookup is temporarily unavailable — please retry in a moment.' });
+      }
+    }
+    // Keyed instant: publicSelectableService passed the catalog-row gate
+    // (visits / cadence / selectability, and for the cockroach package the
+    // live display count) before the property / account lookups above
+    // yielded. An admin catalog edit or pricing-config save in that window
+    // would still price the product the row no longer describes — for the
+    // cockroach package, "Includes 3 treatment visits" for an obligation
+    // that stops after visit 2. Re-read the row through the SAME gate
+    // immediately before the engine (nothing yields between the answer and
+    // generateEstimate) and demote to the quote-on-request lifecycle; a
+    // catalog read failure fails closed the same way (codex #3842 r2 P1 +
+    // pre-push P1).
+    if (keyedInstant && !keyedQuoteOnRequest) {
+      // The cockroach gate's second authority lives in this process's
+      // engine constants, which only the admin save's own worker resyncs —
+      // pull the pricing_config row into THIS worker first (coalesced,
+      // one read) so a replica cannot pass the gate on a stale count
+      // (codex #3842 r3 P1).
+      const fresh = await publicSelectableService(requestedServiceKey);
+      if (!fresh?.instant) {
+        keyedQuoteOnRequest = true;
+        services = {};
+        engineInput.services = {};
       }
     }
     const estimate = keyedQuoteOnRequest ? quoteOnRequestEstimate(keyedService, engineInput) : generateEstimate(engineInput);
@@ -1654,8 +1771,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? (commercialEstimatedLines[0].disclaimer || 'Estimated from property data — final price confirmed on site.')
       : null;
 
-    // Keyed quotes carry the catalog name as the label — identity wins.
-    const serviceInterest = keyedService ? keyedService.name : buildPublicQuoteServiceInterest(services);
+    const keyedLabel = keyedLeadLabel(keyedService, services);
+    const serviceInterest = keyedLabel || buildPublicQuoteServiceInterest(services);
     const leadServiceKey = keyedService ? keyedService.service_key : null;
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
@@ -1893,8 +2010,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // A keyed quote (instant or on-request) names its product from the
       // catalog — never derived from `services`, which is {} for on-request
       // (pre-push codex P1: that erased the customer's interest).
-      const serviceInterestForCustomer = keyedService
-        ? String(compactServiceInterestPart(keyedService.name) || keyedService.name).slice(0, 32)
+      const serviceInterestForCustomer = keyedLabel
+        ? String(compactServiceInterestPart(keyedLabel) || keyedLabel).slice(0, 32)
         : buildCompactPublicQuoteServiceInterest(services);
       // landing_page_url is varchar(500); UTM-heavy URLs can creep past it.
       const landingForCustomer = attr?.landing_url ? String(attr.landing_url).slice(0, 500) : null;
@@ -2297,6 +2414,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // (price + persisted costs) — the audit splits it into its own
             // row (GH codex on #3628).
             installation: item.installation ?? null,
+            // Package presentation the customer was quoted (standalone
+            // cockroach: treatments = 2, "Includes 2 treatment visits."):
+            // the saved-estimate renderer reads detail off this mirror and
+            // the one-time fee card reads treatments (codex #3842 r2 P2).
+            treatments: item.treatments ?? null,
+            detail: item.detail ?? null,
+            // Verified catalog identity a keyed public quote froze into the
+            // line (see engineInput above) — the accept path resolves
+            // service_id by it (codex #3842 r3 P1).
+            catalogServiceKey: item.catalogServiceKey ?? null,
             // Residential T&S has no bed-area INPUT — the engine resolves a
             // lot-derived area and stores it on the line; the audit's
             // dimension picker reads it from here (GH codex on #3628).
@@ -2315,6 +2442,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // the mirrored estimate can render per-application pricing.
             perVisit: item.perVisit ?? null,
             visits: item.visits ?? null,
+            // Sold-scope flags the estimate's one-time copy pack reads
+            // (flea retreat terms + yard scope) — dropped here, the public
+            // flea quote could never show its exact guarantee (GH codex
+            // #3845 r1 P2).
+            warrantyType: item.warrantyType ?? null,
+            guaranteeWindowDaysAfterFollowUp: item.guaranteeWindowDaysAfterFollowUp ?? null,
+            maxIncludedRetreats: item.maxIncludedRetreats ?? null,
+            exteriorStatus: item.exteriorStatus ?? null,
             // Palm-injection lines carry cadence ONLY as appsPerYear (the
             // palm pricer emits no visits/frequency) — dropping it here
             // left the mirrored draft cadence-less, so a palm-only handoff
@@ -2561,7 +2696,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         `${quoteRequired
           ? (quoteRequiredReason === 'quote_on_request'
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
-            : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
+            : RESIDENTIAL_VERIFICATION_REASONS.has(quoteRequiredReason)
+              ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
+              : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
             : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`}${duplicateOfLeadId ? ' · repeat of an open lead (filed as duplicate)' : ''}`,
@@ -2886,8 +3023,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Lawn pricing depends on your treatable turf area, and we could not measure it reliably from records alone — the Waves team will confirm it and send your exact price shortly.'
           : quoteRequiredReason === 'unknown_grass_type_priced_st_augustine'
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
-          : quoteRequiredReason === 'lot_size_requires_verification'
+          : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
+          // A stale single-visit flea request (retired offer key) prices the
+          // two-visit package but parks for review — say so, never the
+          // commercial fallback (GH codex #3845 r5 P2).
+          : quoteRequiredReason === 'flea_single_visit_offer_retired'
+          ? 'Flea control is now our two-visit Flea Elimination Package rather than a single treatment — the Waves team will confirm your package price shortly.'
           : lowConfidenceForcesSiteQuote && !manualQuoteLine
             ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
             : 'Commercial properties require a manual quote. The Waves team has been notified.',
@@ -3111,6 +3253,9 @@ module.exports._internals = {
   publicQuoteBedBugInput,
   estimateBlocksBookingHandoff,
   estimateBlocksSelfBookLink,
+  keyedLeadLabel,
+  dropKeyedOnlyServices,
+  compactServiceInterestPart,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   quoteOnRequestEstimate,
@@ -3131,3 +3276,4 @@ module.exports._internals = {
   lotPricedServiceRequested,
 };
 module.exports.PUBLIC_QUOTE_SERVICE_KEYS = PUBLIC_QUOTE_SERVICE_KEYS;
+module.exports.KEYED_ONLY_SERVICE_KEYS = KEYED_ONLY_SERVICE_KEYS;

@@ -423,6 +423,16 @@ async function markEstimateManuallyAccepted({
         } catch { return null; }
       })();
       const eng = manualAcceptData?.estimatorEngine;
+      // A clarify re-price hold on the LOCKED row: the dollars or address
+      // are known stale, so a verbal yes must not mint the money-bearing
+      // terminal at them either — the same refusal the admin PATCH gives a
+      // held row (codex r11 sweep on #3804).
+      {
+        const { repricePendingActive } = require('./estimate-clarify-asks');
+        if (repricePendingActive(eng)) {
+          throw httpError('This estimate is held for a re-price (a customer clarify reply). Revise it with the answered unit before accepting.', 409);
+        }
+      }
       if (eng?.callLogId) {
         const quarantined = httpError('This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.', 409);
         // An engine draft that is archived or marker-bearing was pulled by

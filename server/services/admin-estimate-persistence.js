@@ -2523,6 +2523,14 @@ const REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS = [
   'invalidation_pending_reason',
   'invalidation_pending_generation',
   'identity_conflict',
+  // The clarify re-price guard (estimate-clarify-asks): a reply can stamp
+  // it between this revision's pre-read and its row lock, and a wholesale
+  // rewrite that dropped it would let the whole-building draft go out
+  // unpriced. The LOCKED row's marker survives; the route lifts only the
+  // attempt the revision observed BEFORE recomputation (pre-push codex P1
+  // on #3796).
+  'reprice_pending_at',
+  'reprice_attempt',
 ];
 
 // Revise an existing estimate in place: same body + pricing pipeline as
@@ -2544,6 +2552,19 @@ async function reviseAdminEstimate({
   dryRun = false,
 }) {
   const estimate = await database('estimates').where({ id: estimateId }).first();
+  // The clarify re-price marker this revision OBSERVES before recomputing —
+  // the only attempt its prices can claim to incorporate. It is removed
+  // INSIDE the locked write below (never after commit: a detached re-draft
+  // resuming in that gap could still match the token, lock the revised
+  // row and archive the operator's correction — codex r3 P1 on #3796); a
+  // DIFFERENT attempt the locked row carries was stamped after this
+  // pre-read and survives the rewrite. null = none observed.
+  let observedRepriceAttempt = null;
+  try {
+    const preData = typeof estimate?.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate?.estimate_data || {});
+    const preEngine = preData?.estimatorEngine || {};
+    if (preEngine.reprice_pending_at) observedRepriceAttempt = String(preEngine.reprice_attempt || '');
+  } catch { observedRepriceAttempt = null; }
   if (!estimate) throw errorWithStatus('Estimate not found', 404);
   const block = estimateReviseBlock(estimate, undefined, now());
   if (block) throw errorWithStatus(block.message, block.statusCode);
@@ -2885,10 +2906,19 @@ async function reviseAdminEstimate({
     // callLogId survives a payload that never carried it.
     const revisedFields = { ...writeFields };
     if (typeof revisedFields.estimate_data === 'string') {
+      // Only the PARSE is guarded (unparseable on either side: fall through
+      // to the predicates). The hold check below is a DB read and runs
+      // OUTSIDE the catch — a swallowed failure there would continue with
+      // the pre-lock blob, dropping a hold stamped between the pre-read and
+      // the row lock (pre-push codex P0 on #3804 r4).
+      let lockedData = null;
+      let pendingData = null;
       try {
-        const lockedData = typeof lockedPrior.estimate_data === 'string'
+        lockedData = typeof lockedPrior.estimate_data === 'string'
           ? JSON.parse(lockedPrior.estimate_data) : (lockedPrior.estimate_data || {});
-        const pendingData = JSON.parse(revisedFields.estimate_data);
+        pendingData = JSON.parse(revisedFields.estimate_data);
+      } catch { lockedData = null; pendingData = null; }
+      {
         if (pendingData && typeof pendingData === 'object' && lockedData && typeof lockedData === 'object') {
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
@@ -2912,9 +2942,24 @@ async function reviseAdminEstimate({
               [key]: lockedValue,
             };
           }
+          // The observed re-price marker is lifted HERE, atomically with the
+          // revision that incorporates it (see observedRepriceAttempt).
+          const lockedEngine = pendingData.estimatorEngine && typeof pendingData.estimatorEngine === 'object' ? pendingData.estimatorEngine : null;
+          if (lockedEngine && observedRepriceAttempt !== null && lockedEngine.reprice_pending_at
+            && String(lockedEngine.reprice_attempt || '') === observedRepriceAttempt) {
+            // A UNIT hold is lifted only once the revised address carries the
+            // answered unit — a pricing-only edit keeps the whole-building
+            // quote held (codex r1 P1 on #3804).
+            const { unitHoldSatisfied } = require('../utils/estimate-claim-sql');
+            const revisedAddress = revisedFields.address !== undefined ? revisedFields.address : lockedPrior.address;
+            if (await unitHoldSatisfied(trx, lockedEngine.callLogId || null, revisedAddress)) {
+              delete lockedEngine.reprice_pending_at;
+              delete lockedEngine.reprice_attempt;
+            }
+          }
           revisedFields.estimate_data = JSON.stringify(pendingData);
         }
-      } catch { /* unparseable on either side: fall through to the predicates */ }
+      }
     }
     const [row] = await trx('estimates')
       .where({ id: estimate.id })
@@ -2966,7 +3011,7 @@ async function reviseAdminEstimate({
   try {
     require('./estimate-slot-availability').invalidateEstimate(estimate.id);
   } catch { /* best-effort */ }
-  return { estimate: updated, memberLinkageWarning, pricingFallbackReason: pricingOut.fallbackReason || null };
+  return { estimate: updated, memberLinkageWarning, pricingFallbackReason: pricingOut.fallbackReason || null, observedRepriceAttempt };
 }
 
 module.exports = {
