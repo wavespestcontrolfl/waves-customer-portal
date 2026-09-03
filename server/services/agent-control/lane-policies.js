@@ -62,7 +62,9 @@ const LANE_RUNTIME = {
   sms_save_sale: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M0' },
   sms_tone: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
   sms_suggest: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
-  response_drafter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
+  // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity (two switchboard lanes since #3769 b21f45aeb).
+  response_drafter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
+  response_drafter_high_stakes: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   estimate_followup: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // offline: one bounded Anthropic call; a miss returns null so the durable
