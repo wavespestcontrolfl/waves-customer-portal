@@ -67,6 +67,7 @@
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
+ *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
  *     AND GATE_AUTO_APPLY_ACCOUNT_CREDIT=true are BOTH also set — the prod
@@ -298,6 +299,16 @@ const gates = {
   // environment. Gate off: the pay page and all pay flows are byte-
   // identical to today. Kill switch: unset or any non-'true' value.
   payIncludeBalance: process.env.GATE_PAY_INCLUDE_BALANCE === 'true',
+
+  // Pay-page FAQ (2026-09-03): a short accordion under the Pay button that
+  // restates facts the page already carries — the credit-card surcharge and
+  // how to avoid it, how long a bank (ACH) payment takes, Zelle, and whether
+  // the card is saved. Display-only; no money moves and no new data rides
+  // the public /pay payload beyond a boolean. Customer-facing copy, so
+  // fail-closed ==='true' in EVERY environment. Gate off: the GET payload
+  // and the page are byte-identical to today. Kill switch: unset or any
+  // non-'true' value.
+  payPageFaq: process.env.GATE_PAY_PAGE_FAQ === 'true',
 
   // Visit groups (docs/design/visit-group-scope.md rev 5): parent
   // service_visits rows grouping same-stop scheduled_services. CREATION
