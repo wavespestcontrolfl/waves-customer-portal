@@ -709,6 +709,10 @@ describe('draftReviewReply — fallback ladder', () => {
     const noText = grounding({ firstName: '', text: '', mentionedTechNames: [], topics: [], account: null });
     expect(Drafter.safeCopyReply(noText, 'no_text', [])).toBe(good('Hello there,\n\nThanks for the five stars. Glad to be your pest and lawn team.'));
     expect(Drafter.safeCopyReply(grounding({ rating: 2 }), 'low_rating', [])).toBeNull();
+    // A tech named in a complaint clause gets the plain variant, even at 4 stars.
+    const mixed = grounding({ rating: 4, text: 'Marcus was not on time, but the ants are gone and the yard looks good.' });
+    expect(Drafter.safeCopyReply(mixed, 'tech_praise', [])).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
+    expect(Drafter.safeCopyReply(grounding(), 'results', [])).not.toContain('Marcus');
   });
   test('the first prompt names the reviewer phrases the reply may not echo, and the relationship rule', () => {
     const g = grounding({ text: 'If you want to be bug free call Marcus, absolutely the best pest control around.', account: null });
