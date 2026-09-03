@@ -1120,6 +1120,7 @@ function mapV1ToLegacyShape(v1Result) {
         ...(li.pricingBreakdown?.removal !== undefined || li.removal !== undefined
           ? { nestRemovalSelected: Number(li.pricingBreakdown?.removal) > 0 || !!li.removal } : {}),
         ...(li.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: li.debrisRemovalIncluded === true } : {}),
+        ...(Number(li.creditableWithinDays) > 0 ? { creditableWithinDays: Number(li.creditableWithinDays) } : {}),
         fleaExteriorZones: li.fleaExteriorZones || [],
         addOns: li.addOns || [],
         serviceSpecificDiscountApplied: !!li.serviceSpecificDiscountApplied,
@@ -1326,6 +1327,7 @@ function mapV1ToLegacyShape(v1Result) {
           ...(s.warrantyEligible !== undefined ? { warrantyEligible: s.warrantyEligible === true } : {}),
           ...(s.nestRemovalSelected !== undefined ? { nestRemovalSelected: s.nestRemovalSelected === true } : {}),
           ...(s.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: s.debrisRemovalIncluded === true } : {}),
+          ...(Number(s.creditableWithinDays) > 0 ? { creditableWithinDays: Number(s.creditableWithinDays) } : {}),
           source: s.source,
           pricingModel: s.pricingModel,
           legacyPricingModel: s.legacyPricingModel,

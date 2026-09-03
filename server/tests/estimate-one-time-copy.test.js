@@ -56,7 +56,9 @@ describe('oneTimeCopyKeyFor', () => {
     expect(oneTimeCopyKeyFor({ service: 'rodent_bait_setup', label: 'Rodent Bait Station Setup' })).toBe('rodent_bait_setup');
     expect(oneTimeCopyKeyFor({ service: 'termite_bait', label: 'Termite Bait Station Installation' })).toBe('termite_bait');
     expect(oneTimeCopyKeyFor({ service: 'termite_bait_installation', label: 'Sentricon Installation' })).toBe('termite_bait');
-    expect(oneTimeCopyKeyFor({ service: 'pre_slab_termiticide', label: 'Pre-Slab Termite Treatment' })).toBe('pre_slab_termiticide');
+    expect(oneTimeCopyKeyFor({ service: 'exclusion_v2', label: 'Full Rodent Exclusion' })).toBe('rodent_exclusion');
+    // Pre-slab is a regulated certificate surface like WDO — never a pack.
+    expect(oneTimeCopyKeyFor({ service: 'pre_slab_termiticide', label: 'Pre-Slab Termite Treatment' })).toBeNull();
     expect(oneTimeCopyKeyFor({ service: 'bora_care', label: 'Bora-Care Wood Treatment' })).toBe('bora_care');
     expect(oneTimeCopyKeyFor({ service: 'plugging', label: 'Lawn Plugging Service' })).toBe('plugging');
     expect(oneTimeCopyKeyFor({ service: 'dethatching', label: 'Lawn Dethatching' })).toBe('dethatching');
@@ -165,6 +167,18 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(ONE_TIME_SERVICE_COPY.dethatching.hero.sub).not.toMatch(/debris/);
   });
 
+  test('rodent inspection: the fee-credit bullet carries the row\'s configured window, or is absent', () => {
+    const with14 = resolveOneTimeServiceCopy({ service: 'rodent_inspection', label: 'Rodent Inspection', creditableWithinDays: 14 });
+    expect(with14.includes).toContain('Inspection fee credited toward the recommended service when you book it within 14 days');
+    const noWindow = resolveOneTimeServiceCopy({ service: 'rodent_inspection', label: 'Rodent Inspection' });
+    expect(noWindow.includes.join(' ')).not.toMatch(/credited/);
+  });
+
+  test('sanitation never promises insulation replacement; termite bait spacing is system-neutral', () => {
+    expect(resolveOneTimeServiceCopy({ service: 'rodent_sanitation', label: 'Rodent Sanitation' }).includes.join(' ')).not.toMatch(/insulation/i);
+    expect(resolveOneTimeServiceCopy({ service: 'termite_bait', label: 'Termite Bait Station Installation' }).includes.join(' ')).not.toMatch(/8–10 feet/);
+  });
+
   test('resolveOneTimeRowCopies: one copy per logical job, included rows bare', () => {
     const rows = [
       { service: 'rodent_exclusion', label: 'Exclusion — wire mesh', amount: 400 },
@@ -182,6 +196,7 @@ describe('resolveOneTimeServiceCopy', () => {
         { service: 'bed_bug', name: 'Bed Bug Heat Treatment — 2 room(s)', price: 1450, warrantyEligible: true },
         { service: 'wasp', name: 'Wasp Nest Treatment', price: 225, pricingBreakdown: { subtotal: 225, removal: 75 } },
         { service: 'dethatching', name: 'Lawn Dethatching', price: 300, debrisRemovalIncluded: false, cleanupLevel: 'none' },
+        { service: 'rodent_inspection', name: 'Rodent Inspection', price: 149, creditableWithinDays: 14 },
       ],
       total: { oneTime: 1975, monthly: 0, annual: 0 },
     });
@@ -191,6 +206,7 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(byService.bed_bug.warrantyEligible).toBe(true);
     expect(byService.wasp.nestRemovalSelected).toBe(true);
     expect(byService.dethatching.debrisRemovalIncluded).toBe(false);
+    expect(byService.rodent_inspection.creditableWithinDays).toBe(14);
   });
 
   test('bed bug: the treatment-method bullet leads and follows the priced method', () => {
@@ -209,7 +225,6 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(resolveOneTimeServiceCopy({ service: 'one_time_pest', label: 'One-Time Pest Control' }).assurance).toMatch(/^30-day callback/);
     for (const row of [
       { service: 'termite_bait', label: 'Termite Bait Station Installation' },
-      { service: 'pre_slab_termiticide', label: 'Pre-Slab Termite Treatment' },
       { service: 'bora_care', label: 'Bora-Care Wood Treatment' },
       { service: 'termite_foam', label: 'Termite Foam Treatment' },
       { service: 'trenching', label: 'Termite Trenching' },

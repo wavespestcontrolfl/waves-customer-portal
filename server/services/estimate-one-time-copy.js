@@ -19,8 +19,9 @@
 //
 // A row that resolves to no key renders exactly as before (fail-safe: no
 // pack entry means no new claims). Pre-slab and Bora-Care keep their
-// existing dedicated hero/legacy-note copy in estimate-public.js; their
-// packs here add the row bullets only.
+// existing dedicated hero/legacy-note copy in estimate-public.js. Pre-slab
+// is a regulated certificate surface like WDO and deliberately has NO pack;
+// Bora-Care's pack adds the row bullets only.
 // ============================================================
 
 const PACK = require('./estimate-one-time-copy.json');
@@ -57,6 +58,7 @@ const SERVICE_KEY_TO_COPY = {
   rodent_trapping_followup: 'rodent_trapping',
   rodent_exclusion: 'rodent_exclusion',
   exclusion: 'rodent_exclusion',
+  exclusion_v2: 'rodent_exclusion',
   // rodent_plugging / rodent_wire_mesh price a component (N entry points,
   // measured linear feet) — never the whole-home exclusion pack (codex
   // #3823 r1 P1); they stay unresolved until they get their own copy.
@@ -75,8 +77,6 @@ const SERVICE_KEY_TO_COPY = {
   rodent_sanitation: 'rodent_sanitation',
   rodent_bait_setup: 'rodent_bait_setup',
   termite_bait: 'termite_bait',
-  pre_slab_termiticide: 'pre_slab_termiticide',
-  termite_slab_pretreat: 'pre_slab_termiticide',
   bora_care: 'bora_care',
   boracare: 'bora_care',
   plugging: 'plugging',
@@ -200,6 +200,12 @@ function resolveOneTimeServiceCopy(item = {}) {
   // bullet rides only when the row says it is included (codex #3823 r3 P1).
   if (key === 'dethatching' && item.debrisRemovalIncluded !== true) {
     lines = lines.filter((line) => line !== entry.debrisBullet);
+  }
+  // Rodent inspection: the fee credit carries the row's configured window
+  // (creditableWithinDays); no window on the row ⇒ no credit promise.
+  if (key === 'rodent_inspection') {
+    const days = Number(item.creditableWithinDays) || 0;
+    if (days > 0 && entry.creditBullet) lines.push(entry.creditBullet.replace('{creditDays}', String(days)));
   }
   return {
     key,

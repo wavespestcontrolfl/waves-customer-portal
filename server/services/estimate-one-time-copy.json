@@ -19,7 +19,7 @@
     "assurance": "If they come back, so do we — 100% guaranteed with the Waves Guarantee",
     "terms": "Pay on service day. No recurring schedule, no contract.",
     "aiTitle": "Waves AI sized this cleanout to your infestation",
-    "aiBody": "We priced this program from how established the activity is — how many rooms and how heavy — so the visit count fits the job, not a generic average.",
+    "aiBody": "We priced this program from how established the activity is — the severity you described — so the visit count fits the job, not a generic average.",
     "askChips": [
       "How do you get rid of German roaches?",
       "How long until the roaches are gone?",
@@ -304,8 +304,7 @@
     "includes": [
       "Exterior entry-point survey — roofline, soffits, utility penetrations, garage",
       "Interior and attic evidence check: droppings, rub marks, nesting, gnaw damage",
-      "Written findings with a trapping and exclusion recommendation",
-      "Inspection fee credited when you book the recommended service"
+      "Written findings with a trapping and exclusion recommendation"
     ],
     "assurance": null,
     "terms": "Pay on service day. No contract.",
@@ -313,14 +312,14 @@
       "eyebrow": "Your rodent inspection",
       "h1": "Hello {first}, your rodent inspection quote is ready!",
       "sub": "A flat-priced technician visit that maps the entry points and puts the plan in writing — approve online and pick a day. Licensed & insured."
-    }
+    },
+    "creditBullet": "Inspection fee credited toward the recommended service when you book it within {creditDays} days"
   },
   "rodent_sanitation": {
     "outcome": "The droppings, nesting, and the scent trail that draws the next ones — gone, so the exclusion is not wasted.",
     "includes": [
       "PPE-protected removal of droppings and nesting material",
       "Disinfection with an EPA-registered antimicrobial — professional-grade, not household cleaner",
-      "Optional contaminated insulation removal and replacement",
       "Coordinated with exclusion so the cleanup holds",
       "Sized to light, standard, or heavy contamination"
     ],
@@ -351,7 +350,7 @@
   "termite_bait": {
     "outcome": "Stations on duty around the whole perimeter — termites work around the clock, so do the stations.",
     "includes": [
-      "In-ground station installation every 8–10 feet around the structure",
+      "In-ground stations installed around the whole structure at the spacing your system specifies",
       "Always-on monitoring — not just at scheduled visits",
       "Automatic bait switch when termites hit a station",
       "Annual inspection and renewal pricing built in",
@@ -363,23 +362,6 @@
       "eyebrow": "Your termite bait stations",
       "h1": "Hello {first}, your termite bait station quote is ready!",
       "sub": "In-ground stations installed around the structure with monitoring built in — approve online and pick your install day. Licensed & insured."
-    }
-  },
-  "pre_slab_termiticide": {
-    "outcome": "The cheapest termite protection a home will ever get — applied before the slab is poured.",
-    "includes": [
-      "Pre-pour Termidor application across the slab footprint",
-      "Treatment of plumbing penetrations and expansion joints",
-      "Coordinated with your builder’s pour schedule",
-      "Treatment certificate issued for the lender and the CO",
-      "Optional extended warranty add-on"
-    ],
-    "assurance": null,
-    "terms": "Warranty terms depend on the selected warranty option.",
-    "hero": {
-      "eyebrow": "Your pre-slab termite treatment",
-      "h1": "Hello {first}, your pre-slab termite treatment quote is ready!",
-      "sub": "Soil treatment across the measured slab footprint, timed to the pour, certificate included — approve online and we coordinate the day with your builder. Licensed & insured."
     }
   },
   "bora_care": {

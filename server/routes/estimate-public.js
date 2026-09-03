@@ -17254,6 +17254,7 @@ function normalizeOneTimeBreakdown(estData) {
         nestRemovalSelected: item.nestRemovalSelected === true || Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal,
         warrantyEligible: item.warrantyEligible === true,
         debrisRemovalIncluded: item.debrisRemovalIncluded === true,
+        creditableWithinDays: Number(item.creditableWithinDays) > 0 ? Number(item.creditableWithinDays) : null,
       });
     }
   };
