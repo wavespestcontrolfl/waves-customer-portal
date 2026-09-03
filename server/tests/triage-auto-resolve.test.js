@@ -583,6 +583,10 @@ describe('evidence helpers', () => {
     expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-04T14:00:00Z' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-04' });
     // 01:00Z is still the previous ET evening.
     expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-05T01:00:00Z' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-04' });
+    // An ET offset is the agreed wall clock verbatim, even a wrong-season
+    // one (the booking path's reading): 23:30 with a winter offset in
+    // August is still the 4th, not the instant's 5th.
+    expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-04T23:30:00-05:00' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-04' });
     expect(requestedWindow(item({ payload: { scheduling_window: { requested_date_range_start: '2026-08-04', requested_date_range_end: '2026-08-06' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-06' });
     expect(requestedWindow(item({ payload: { scheduling_window: { status: 'requested' } } }))).toBeNull();
   });

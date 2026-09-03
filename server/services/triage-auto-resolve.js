@@ -366,18 +366,21 @@ function serviceTypeMatches(serviceText, requestedTokens) {
   return requestedTokens.every((t) => words.has(t));
 }
 
-// The ET wall-clock start ('HH:MM') the call CONFIRMED, from the card's
-// snapshot — null when the snapshot carries no clock time. The same reading
-// the processor books window_start from (v2IsoToEtWallClock: an ET offset is
-// the agreed wall clock verbatim, any other encoding is an instant rendered
-// in ET), so the hour compares to what that booking path wrote.
-function confirmedWallClock(item) {
+// The ET wall clock ('YYYY-MM-DDTHH:MM') the call CONFIRMED, from the
+// card's snapshot — null when the snapshot carries no clock time. ONE
+// reading for both the day and the hour, and the same one the processor
+// books scheduled_date / window_start from (v2IsoToEtWallClock: an ET
+// offset is the agreed wall clock verbatim even when the seasonal offset is
+// wrong, any other encoding is an instant rendered in ET) — rendering the
+// day as an instant instead would compare a different calendar day than
+// the booking path wrote near midnight.
+function confirmedWall(item) {
   const raw = parseMaybeJson(item.payload)?.scheduling_window?.confirmed_start_at;
   if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)) return null;
   const { v2IsoToEtWallClock } = require('./call-recording-processor');
-  const wall = v2IsoToEtWallClock(raw);
-  return wall ? wall.slice(11, 16) : null;
+  return v2IsoToEtWallClock(raw) || null;
 }
+const confirmedWallClock = (item) => confirmedWall(item)?.slice(11, 16) || null;
 
 // Does a booking's cadence answer the card's snapshotted service intent? A
 // recurring-plan ask is answered only by a recurring series — a one-time
@@ -393,12 +396,15 @@ function cadenceMatches(item, visit) {
 
 // The calendar days (ET, YYYY-MM-DD) the caller asked for, from the card's
 // scheduling payload. Inclusive; a single requested date is a one-day window.
+// A confirmed start is the day of the confirmed wall clock above; only the
+// requested range is read as instants.
 function requestedWindow(item) {
   const payload = parseMaybeJson(item.payload);
   const w = payload?.scheduling_window || {};
-  const startRaw = w.confirmed_start_at || w.requested_date_range_start;
-  if (!startRaw || !toDate(startRaw)) return null;
-  const start = etCalendarDayOf(startRaw);
+  const wall = confirmedWall(item);
+  const startRaw = wall ? null : w.requested_date_range_start;
+  if (!wall && (!startRaw || !toDate(startRaw))) return null;
+  const start = wall ? wall.slice(0, 10) : etCalendarDayOf(startRaw);
   const end = w.requested_date_range_end && toDate(w.requested_date_range_end) ? etCalendarDayOf(w.requested_date_range_end) : start;
   return end >= start ? { start, end } : { start: end, end: start };
 }
