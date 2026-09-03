@@ -239,21 +239,28 @@ export default function AgentModelsTab() {
       const next = draft[s.env];
       if (next && next !== s.current) {
         // Followers = this selector plus any selector that derives from it and
-        // is not set or drafted on its own (the registry alias).
-        const keys = [s.key, ...data.selectors.filter((d) => d.derived && d.derivesFrom === s.key && !draft[d.env]).map((d) => d.key)];
+        // is not set or drafted on its own (the registry alias). A LOCKED
+        // derived selector must not move with its parent: the composer holds
+        // it by emitting a pin to its current model alongside the change.
+        const derived = data.selectors.filter((d) => d.derived && d.derivesFrom === s.key && !draft[d.env]);
+        const held = derived.filter((d) => d.lock);
+        const moving = derived.filter((d) => !d.lock);
+        const keys = [s.key, ...moving.map((d) => d.key)];
         const follows = (leg) => leg && keys.includes(leg.selector) && !pinnedAfterDraft(leg);
         const following = data.lanes.filter((l) => follows(l.primary) || follows(l.fallback));
         const lockedLanes = following.filter((l) => l.lock).map((l) => l.name);
-        const derivedKeys = keys.slice(1);
         byEnv.set(s.env, {
           env: s.env,
           from: s.current,
           to: next,
-          label: `${s.key} selector${derivedKeys.length ? ` (+ ${derivedKeys.join(", ")}, unset so it follows)` : ""}`,
+          label: `${s.key} selector${moving.length ? ` (+ ${moving.map((d) => d.key).join(", ")}, unset so it follows)` : ""}`,
           lanes: following.length,
           lockedLanes,
           restart: true,
         });
+        for (const d of held) {
+          byEnv.set(d.env, { env: d.env, from: d.current, to: d.current, hold: true, label: `${d.key} held at its current model (locked; it would otherwise follow ${s.key})`, lanes: 0, restart: true });
+        }
       }
     }
     for (const l of data.lanes) {
@@ -339,7 +346,7 @@ export default function AgentModelsTab() {
   // Unpins are deletions: Railway has no "unset" syntax, so the line is an
   // instruction rather than an assignment.
   const envBlock = changes.map((c) => (c.unpin ? `# delete ${c.env}  (unpin → ${destLabel(c)})` : `${c.env}=${c.to}`)).join("\n");
-  const restartCount = changes.filter((c) => c.restart).length;
+  const restartCount = changes.filter((c) => c.restart && !c.hold).length;
   const affectedLanes = data ? data.lanes.filter(laneChanged).length : 0;
 
   const setDraftValue = (env, value) => {
@@ -837,7 +844,7 @@ export default function AgentModelsTab() {
               return (
                 <li key={c.env} className="flex flex-col gap-0.5 text-13">
                   <span className="text-zinc-900">
-                    <span className="font-medium">{c.label}</span>: {modelLabel(catalog, c.from)} → {destLabel(c)}
+                    <span className="font-medium">{c.label}</span>: {c.hold ? `stays ${modelLabel(catalog, c.from)}` : `${modelLabel(catalog, c.from)} → ${destLabel(c)}`}
                     {c.unpin ? " · delete the variable" : ""}
                     {c.destinations?.length > 1 ? " · differs by lane" : ""}
                     {c.lanes > 1 ? ` · ${c.lanes} lanes` : ""}
