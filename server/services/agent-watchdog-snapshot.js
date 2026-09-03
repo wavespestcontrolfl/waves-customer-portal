@@ -116,16 +116,13 @@ async function readJobs() {
 
 // Counts only — never the items (customer names live in the titles) and not
 // even the lane label: keys only, so the payload holds no free text at all.
-// `disabled` (boolean, never text) separates "the queue gate is off" from a
-// failed read: only the latter is an attention reason.
+// GATE_ADMIN_OPS_QUEUE only decides whether the admin Queue TAB renders; the
+// watchdog's coverage of failed lanes must not depend on a UI gate, so the
+// read runs under the watchdog's own gate (the route) regardless.
 async function readOpsQueue() {
-  if (!gateEnvValue('GATE_ADMIN_OPS_QUEUE')) {
-    return { available: false, disabled: true, pending: 0, parked: 0, failed: 0, lanes: [] };
-  }
   const q = await getOpsQueue();
   return {
     available: true,
-    disabled: false,
     pending: q.totals.pending,
     parked: q.totals.parked,
     failed: q.totals.failed,
@@ -168,7 +165,7 @@ function judge({ database, scheduler, jobs, ops_queue: ops, link_worker: lw }) {
   else if (scheduler && scheduler.ok === false) reasons.push('scheduler:silent');
   if (jobs && jobs.available === false) reasons.push('jobs:unavailable');
   for (const j of (jobs && jobs.items) || []) reasons.push(`job:${j.job}:${j.state}`);
-  if (ops && ops.available === false && !ops.disabled) reasons.push('ops:unavailable');
+  if (ops && ops.available === false) reasons.push('ops:unavailable');
   if (ops && ops.available) {
     for (const l of ops.lanes || []) {
       if (l.error) reasons.push(`ops:${l.key}:error`);
@@ -185,7 +182,7 @@ async function buildWatchdogSnapshot() {
     contain('database', readDatabase, { ok: false, latency_ms: null }),
     contain('scheduler', readScheduler, { heartbeat_job: SCHEDULER_HEARTBEAT_JOB, last_tick_at: null, age_minutes: null, silent_after_minutes: SCHEDULER_SILENT_AFTER_MINUTES, ok: false }),
     contain('jobs', readJobs, { total: 0, unhealthy: 0, items: [] }),
-    contain('ops_queue', readOpsQueue, { disabled: false, pending: 0, parked: 0, failed: 0, lanes: [] }),
+    contain('ops_queue', readOpsQueue, { pending: 0, parked: 0, failed: 0, lanes: [] }),
     contain('link_worker', readLinkWorker, { last_claim_at: null, last_report_at: null, open_leases: 0, stale_leases: 0 }),
   ]);
   const parts = { database, scheduler, jobs, ops_queue: opsQueue, link_worker: linkWorker };

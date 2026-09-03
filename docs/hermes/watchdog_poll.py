@@ -10,8 +10,8 @@ something changed. Silence is the normal output.
 
 Exit code is always 0 on a completed poll (an unreachable portal is a
 FINDING, not a script failure). Exit 2 only for a local misconfiguration
-(missing secret file, non-http PORTAL_URL, unbuildable request, unwritable
-state file) so the cron's own error path surfaces it. A page assembled before
+(signer module missing, secret file missing, non-http PORTAL_URL, unbuildable
+request, unwritable state file) so the cron's own error path surfaces it. A page assembled before
 a state-write failure is still printed first.
 
 State lives in /data/workspace/.waves-watchdog-state.json:
@@ -28,7 +28,8 @@ decides whether it is NEWS):
     naming the fix.
   * unreachable / other non-200 / database.ok == false → failure streak += 1;
     page at exactly 3 consecutive (~30 min), then at most every 6 h while it
-    stays down; one "back" page on recovery.
+    stays down; one "back" page on recovery. The reason baseline is cleared
+    (no snapshot was seen), so the recovery poll re-announces what still fails.
   * 200 + verdict=attention                         → page only for reason keys
     NOT in last_reasons. Cleared reasons are not announced (the admin bell
     and the Agents → Queue tab already show them).
@@ -42,7 +43,12 @@ import urllib.request
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sign_request import signed_headers, SECRET_FILES  # noqa: E402
+try:
+    from sign_request import signed_headers, SECRET_FILES  # noqa: E402
+except ImportError as _e:  # the rollout copies sign-request.py AS sign_request.py — a common miss
+    print(f"watchdog_poll: sign_request.py not importable next to this script ({_e}); "
+          "copy the portal's sign-request.py as sign_request.py", file=sys.stderr)
+    sys.exit(2)
 
 PORTAL_URL = os.environ.get("PORTAL_URL", "https://portal.wavespestcontrol.com").rstrip("/")
 STATE_FILE = os.environ.get("WAVES_WATCHDOG_STATE", "/data/workspace/.waves-watchdog-state.json")
@@ -220,6 +226,9 @@ def main():
         state["consecutive_failures"] += 1
         if not state["down_since"]:
             state["down_since"] = now_iso()
+        # No snapshot was observed: the baseline is stale from here (same as
+        # the configuration branch), so the recovery poll catches up.
+        state["last_reasons"] = []
         n = state["consecutive_failures"]
         since_page = hours_since(state["last_paged_at"])
         if n == PAGE_AFTER_FAILURES or (n > PAGE_AFTER_FAILURES and (since_page is None or since_page >= REPAGE_DOWN_HOURS)):

@@ -68,12 +68,12 @@ test('a stale observed row → one alert bell keyed to the ET day', async () => 
   expect(opts.metadata).toMatchObject({ age_minutes: 90, limit_minutes: DEFAULT_STALE_MINUTES });
 });
 
-test('never polled → bell says so; env override sets the limit; failed persist reports alerted 0', async () => {
+test('never polled → bell says so; env override sets the limit; a failed persist THROWS so job_health marks the job failing', async () => {
   process.env.HERMES_WATCHDOG_STALE_MINUTES = '20';
   NotificationService.notifyAdmin.mockResolvedValueOnce(null);
-  const r = await runWatchdogLivenessCheck({ now: NOW });
-  expect(r).toEqual({ skipped: false, alerted: 0, ageMinutes: null, limit: 20 });
+  await expect(runWatchdogLivenessCheck({ now: NOW })).rejects.toThrow('did not persist');
   expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('never polled');
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ age_minutes: null, limit_minutes: 20 });
 });
 
 test('a deduped bell (same ET day) reports alerted 0 — the row already exists', async () => {

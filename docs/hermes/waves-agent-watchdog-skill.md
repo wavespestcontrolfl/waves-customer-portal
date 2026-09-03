@@ -47,8 +47,8 @@ then the only remedy is a human.
 - `ops_queue` is **counts only**. Item titles never cross the wire (customer
   names live there), and neither does a job's error text — open the portal's
   Agents → Queue tab for both. A sub-read that fails says `available: false`
-  and nothing else (and becomes a `<read>:unavailable` reason); `ops_queue`
-  with `disabled: true` just means the Queue gate is off, which is not a reason.
+  and nothing else (and becomes a `<read>:unavailable` reason). The queue is
+  read whether or not the admin Queue tab's own gate is on.
 - `reasons` are stable keys with **no counts inside** (one incident keeps one
   identity while it worsens or drains). The script diffs them against the
   previous poll and reads the current numbers from the body when it pages.

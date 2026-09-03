@@ -62,7 +62,13 @@ async function runWatchdogLivenessCheck({ now = new Date() } = {}) {
       metadata: { last_observed_at: last ? last.toISOString() : null, age_minutes: ageMinutes, limit_minutes: limit },
     },
   );
-  if (!notif) logger.error('[hermes-watchdog-liveness] bell did not persist — silence is unannounced');
+  if (!notif) {
+    // Throw, don't just log: runExclusive then records THIS job as failing in
+    // job_health, so the snapshot (and Hermes) can see that the reciprocal
+    // alarm itself is broken — otherwise silence would be unannounced twice.
+    logger.error('[hermes-watchdog-liveness] bell did not persist — silence is unannounced');
+    throw new Error('hermes watchdog silent bell did not persist');
+  }
   // notifyAdmin returns the EXISTING row with deduped:true on every later
   // tick of the same ET day; that is not a new alert (or the scheduler
   // would log a warning every 23 min all day).

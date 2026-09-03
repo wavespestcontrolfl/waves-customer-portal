@@ -67,7 +67,6 @@ describe('buildWatchdogSnapshot', () => {
     expect(snap.scheduler).toMatchObject({ available: true, heartbeat_job: SCHEDULER_HEARTBEAT_JOB, age_minutes: 5, ok: true });
     expect(snap.ops_queue.lanes[0]).toEqual({ key: 'calls', pending: 3, parked: 4, failed: 0, error: false });
     expect(JSON.stringify(snap)).not.toContain('Call processing');
-    expect(snap.ops_queue.disabled).toBe(false);
     expect(JSON.stringify(snap)).not.toContain('Jane Customer');
     expect(snap.link_worker).toEqual({ available: true, last_claim_at: '2026-09-03T10:00:00.000Z', last_report_at: '2026-09-03T10:00:00.000Z', open_leases: 0, stale_leases: 0 });
     expect(snap.environment).toBe('test');
@@ -113,18 +112,22 @@ describe('buildWatchdogSnapshot', () => {
     expect(JSON.stringify(snap)).not.toContain('ECONNRESET');
   });
 
-  test('the ops queue is omitted (not failed) when its gate is off', async () => {
+  test('the ops queue is still read (and its failed lanes still judged) when the Queue TAB gate is off', async () => {
     gateEnvValue.mockImplementation((name) => name !== 'GATE_ADMIN_OPS_QUEUE');
+    getOpsQueue.mockResolvedValue({
+      totals: { pending: 0, parked: 0, failed: 1 },
+      lanes: [{ key: 'calls', label: 'Call processing', pending: 0, parked: 0, failed: 1, error: null, items: [] }],
+    });
     const snap = await buildWatchdogSnapshot();
-    expect(getOpsQueue).not.toHaveBeenCalled();
-    expect(snap.ops_queue).toEqual({ available: false, disabled: true, pending: 0, parked: 0, failed: 0, lanes: [] });
-    expect(snap.verdict).toBe('healthy');
+    expect(getOpsQueue).toHaveBeenCalledTimes(1);
+    expect(snap.reasons).toEqual(['ops:calls:failed']);
+    expect(snap.verdict).toBe('attention');
   });
 
-  test('a FAILED ops-queue read (gate on) is an attention reason, with no message', async () => {
+  test('a FAILED ops-queue read is an attention reason, with no message', async () => {
     getOpsQueue.mockRejectedValue(new Error('relation "ops" does not exist for 941-555-0100'));
     const snap = await buildWatchdogSnapshot();
-    expect(snap.ops_queue).toEqual({ available: false, disabled: false, pending: 0, parked: 0, failed: 0, lanes: [] });
+    expect(snap.ops_queue).toEqual({ available: false, pending: 0, parked: 0, failed: 0, lanes: [] });
     expect(snap.reasons).toEqual(['ops:unavailable']);
     expect(snap.verdict).toBe('attention');
     expect(JSON.stringify(snap)).not.toContain('relation');
