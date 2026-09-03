@@ -1874,7 +1874,12 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
       logger.warn('[estimate-card-holds] hold-state lookup for cancel preview failed — reporting undetermined', { error: err.message });
       // Rail ownership is unknown here (the appointment rail may own this
       // visit and park review), so promise neither outcome (pre-push P1).
-      return { held: false, feeApplies: false, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'card hold lookup failed' }) };
+      // Exposure-compatible shape (held + feeApplies + unresolved, amount
+      // unknown): admin-cancellation's previewVisitFees keeps only held,
+      // fee-applying results, so a held:false verdict here would silently
+      // drop the unresolved hold from the plan-cancel preview (pre-push P1
+      // on the r7 fix) — same posture as the in-flight branch below.
+      return { held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'card hold lookup failed' }) };
     }
     if (!latest) return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
     const state = String(latest.status || '');

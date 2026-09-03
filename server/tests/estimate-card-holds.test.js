@@ -771,10 +771,10 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: 49, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
     expect(res.rule.text).toMatch(/already in progress or under billing review/);
   });
-  it('hold-state lookup FAILURE → undetermined, promising neither release nor review (rail ownership unknown)', async () => {
+  it('hold-state lookup FAILURE → undetermined in the exposure shape (previewVisitFees keeps it), promising neither release nor review', async () => {
     stubDb([null, new Error('db blip')]);
     const res = await cardHoldCancelPreview('svc1', now);
-    expect(res).toMatchObject({ held: false, feeApplies: false, unresolved: true, rule: { code: 'unresolved', willCharge: null } });
+    expect(res).toEqual({ held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: expect.objectContaining({ code: 'unresolved', willCharge: null }) });
     expect(res.rule.text).not.toMatch(/released free|billing review\./);
     expect(res.rule.text).toMatch(/check the visit's billing after cancelling/);
   });
