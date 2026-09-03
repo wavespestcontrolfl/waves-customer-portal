@@ -180,7 +180,8 @@ const LANE_RUNTIME = {
   // ── Service reports ──
   // draft_for_human + M2 (Codex r19): /generate-report copy lands in the tech's editable notes and reaches the customer only through the later completion action.
   report_copy: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
-  treatment_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
+  // M3 (Codex r21): buildTreatmentNarrative runs on report read with no staff step and caches the copy in service_report_ai_summaries.
+  treatment_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
   rodent_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   // M2 (Codex r20): both admin-projects AI-write endpoints return copy into the editable Recommendations field; delivery is a separate admin action.
   project_report: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
@@ -190,10 +191,12 @@ const LANE_RUNTIME = {
   lawn_visit_narratives: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   // event: the half-hourly sweep returns cached briefs unchanged, so a stable
   // route (or a day with no eligible visits) makes no model call.
-  previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa' },
+  // M3 (Codex r21): the generator writes body + provenance straight into scheduled_services.pre_service_brief; no approval boundary.
+  previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
   // M2 (Codex r20): notes / email copy land in the editable invoice fields, never saved or sent directly.
   invoice_summary: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
-  wdo_appt_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: null },
+  // M3 (Codex r21): appointment-tagger generates and persists the brief the moment the appointment is tagged.
+  wdo_appt_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: null, maturity: 'M3' },
 
   // ── Email ──
   // irreversible_external + M3 (Codex r16): a marketing_newsletter verdict runs executeAutoAction — Gmail archive and a one-click
@@ -210,7 +213,8 @@ const LANE_RUNTIME = {
   // ── Content & SEO ──
   // M3 (Codex r19): a scheduled draft can ride the 'publishing' claim through pages-poll auto-merge after the preview + Codex gates.
   blog_draft: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', ...LONG_BATCH },
-  blog_optimize: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', ...LONG_BATCH },
+  // draft_for_human + M2 (Codex r21): optimizeExistingPost only stores optimization_suggestions; the operator applies them to the draft by hand.
+  blog_optimize: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M2', ...LONG_BATCH },
   newsletter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M2', ...LONG_BATCH },
   // irreversible_external + M3 (Codex r20): generateNewsletterSocialContent feeds publishToAll in the gated newsletter auto-share with no per-post
   // approval, outcome persisted on the newsletter row — the shared lane is classified by its worst-case path.
@@ -271,11 +275,12 @@ const LANE_RUNTIME = {
   ib_admin: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
   // internal_write: every tech IB request logs an intelligence_bar_queries row and tool use a tool_health_events row — Codex r10.
   ib_tech: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'sql_tool' },
-  ib_tools: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'routine_copy' },
+  // M2 (Codex r21): the email tool returns a marked draft and procurement research inserts pending price-approval rows — nothing acts without the later approval.
+  ib_tools: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M2' },
   chart_builder_image: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },
-  // offline, not interactive: one callAnthropic() with no cross-provider chain and no
-  // deterministic safe answer — an Anthropic outage fails the request (model-switchboard) — Codex r9.
-  chart_builder_sql: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool' },
+  // interactive (Codex r21, reversing r9): generateChartSpec now runs the bounded cross-provider dispatchWithFallback(highStakes)
+  // and the /ai-chart/preview handler answers a miss with a 422 — a synchronous UI request, not a retried queue.
+  chart_builder_sql: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'sql_tool' },
   // internal_write: knowledge_qa's only caller writes lawn_assessments
   // ai_summary / recommendations; every WikiQA query logs to knowledge_queries.
   // direct_sdk (Codex r17): knowledge-bridge.js callClaude falls back through its own Anthropic client after an OpenAI miss.
