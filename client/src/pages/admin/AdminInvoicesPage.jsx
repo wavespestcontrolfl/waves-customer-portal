@@ -78,6 +78,7 @@ import { launchTapToPay } from "../../lib/tapToPay";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import { computeCardTotal } from "../../lib/cardSurcharge";
 import { invoiceDateOnly, formatInvoiceDate } from "../../lib/invoiceDates";
+import { formatETDate } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
@@ -761,7 +762,7 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
               </div>
               <div style={{ fontSize: 13, color: D.muted, marginTop: 2, overflowWrap: "anywhere" }}>
                 {n.memo ? `Memo: ${n.memo}` : "No memo"}
-                {n.received_at ? ` · ${new Date(n.received_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : ""}
+                {n.received_at ? ` · ${formatETDate(n.received_at, { month: "short", day: "numeric" })}` : ""}
               </div>
               <div style={{ marginTop: 6 }}>
                 <span style={sBadge(alert ? "#FEE2E2" : "#FEF3C7", alert ? D.red : D.amber)}>
