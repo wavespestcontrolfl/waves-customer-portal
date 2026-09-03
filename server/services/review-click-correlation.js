@@ -355,20 +355,23 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
       if (eligible(only) && only.pairTrusted === true && only.locationMatch === true) return decision(only, 'sole_click');
     }
 
-    // click_name — exactly one in-window clicker carries the reviewer's
-    // surname. Two same-surname clickers = a human decides. A legacy pair
-    // is fine (the surname corroborates); a pair stamped with a different
-    // location is not.
-    const named = candidates.filter((c) => c.nameMatch === true);
-    if (named.length === 1 && eligible(named[0]) && named[0].locationMatch !== false) {
-      return decision(named[0], 'click_name');
+    // click_name — exactly one clicker in the RAW window carries the
+    // reviewer's surname (a linked same-surname clicker still competes —
+    // their click may aim at another location's profile; pre-push P1), and
+    // that one must be an unlinked candidate. Two same-surname clickers = a
+    // human decides. A legacy pair is fine (the surname corroborates); a
+    // pair stamped with a different location is not.
+    const all = meta.allCandidates || [];
+    const namedAll = all.filter((c) => c.nameMatch === true);
+    const named = namedAll.length === 1 ? candidates.find((c) => c.customerId === namedAll[0].customerId) : null;
+    if (named && eligible(named) && named.locationMatch !== false) {
+      return decision(named, 'click_name');
     }
 
     // click_near — the nearest click is minutes before the review and every
     // other clicker in the window (linked ones included) is hours away or
     // after it. The nearest must itself be an unlinked, trusted,
     // location-matched candidate.
-    const all = meta.allCandidates || [];
     const before = all.filter((c) => c.clickOffsetMs >= 0).sort((a, b) => a.clickOffsetMs - b.clickOffsetMs);
     const nearest = before[0];
     if (!nearest || nearest.clickOffsetMs > AUTO_LINK_NEAR_MS) return null;

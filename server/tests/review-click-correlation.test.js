@@ -367,6 +367,15 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
   });
 
+  test('refuses when the second same-surname clicker is already linked to another review (raw-window ambiguity, pre-push P1)', async () => {
+    const conn = makeConn({
+      clickRows: [berry(), berry({ customer_id: 'cust-berry-2', first_name: 'Blake', redirected_at: '2026-08-07T16:00:00.000Z' })],
+      linkedRows: [{ customer_id: 'cust-berry-2' }],
+    });
+    expect((await findLikelyReviewers(REVIEW, { conn })).map((c) => c.customerId)).toEqual(['cust-berry']);
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
   test('refuses a surname match whose pair is stamped with a DIFFERENT location', async () => {
     const conn = makeConn({ clickRows: [berry({ google_location: 'parrish', last_google_location: 'parrish' }), other()] });
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
