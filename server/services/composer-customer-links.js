@@ -496,7 +496,9 @@ function canonicalSecureToken(run, host) {
   } catch {
     return null;
   }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  // HTTPS or the schemeless canonical form only — an explicit http:// would
+  // expose the 30-day bearer before any redirect reaches HTTPS.
+  if (url.protocol !== 'https:') return null;
   if (url.host.toLowerCase() !== host) return null;
   const m = /^\/secure\/([A-Za-z0-9_-]{16,})$/i.exec(url.pathname);
   return m ? m[1] : null;

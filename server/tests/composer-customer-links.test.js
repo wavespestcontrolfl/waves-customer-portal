@@ -603,6 +603,7 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
     ['fragment', 'https://evil.example/#portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY'],
     ['userinfo', 'https://portal.wavespestcontrol.com@evil.example/secure/abcDEF123_-xyz789QWERTY'],
     ['secure path in the query, not the path', 'https://portal.wavespestcontrol.com/?r=/secure/abcDEF123_-xyz789QWERTY'],
+    ['explicit http', 'http://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY'],
   ])('the secure path inside a hostile or non-path position (%s) is refused — the run is parsed, not substring-matched', async (_label, body) => {
     wire({ row: live });
     const r = await autopayLinkSendCheck(body, '9415550184');
