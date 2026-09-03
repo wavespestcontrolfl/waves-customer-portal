@@ -111,8 +111,9 @@ New attention reasons (only the NEW ones; cleared ones are not announced):
 > • ops queue lane calls (Call processing): 2 failed row(s)
 > https://portal.wavespestcontrol.com/admin/agents?tab=queue
 
-Configuration, not an outage (HTTP 401 / 403 / 404 — the lane gate off, the
-worker gate off, or a wrong secret). Once per 24 h, and it never advances the
+Configuration, not an outage (HTTP 401 / 403 / 404, or 503 "worker key not
+configured" — the lane gate off, the worker gate off, a wrong secret, or the
+portal-side secret env missing). Once per 24 h, and it never advances the
 outage streak:
 
 > 🔧 Waves watchdog not configured: HTTP 404: the watchdog lane is off

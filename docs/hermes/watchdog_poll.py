@@ -18,7 +18,7 @@ State lives in /data/workspace/.waves-watchdog-state.json:
 
 Paging rules (deterministic — the portal computes the health, this only
 decides whether it is NEWS):
-  * HTTP 401 / 403 / 404                            → CONFIGURATION, not an
+  * HTTP 401 / 403 / 404, or 503 "worker key not configured" → CONFIGURATION, not an
     outage (the lane gate is off, the worker gate is off, or the key/secret is
     wrong). The portal answered, so the outage streak RESETS; one page per
     24 h naming the fix.
@@ -55,6 +55,10 @@ CONFIG_STATUSES = {
     403: "the worker integration is off (GATE_HERMES_WORKER) or this key lacks the watchdog capability",
     404: "the watchdog lane is off (GATE_HERMES_WATCHDOG unset) — flip the gate or pause this cron",
 }
+# 503 is ambiguous: the portal's own health probe answers 503 when its database
+# is down (an outage), but link-worker-auth also answers 503 with this exact
+# body when the portal-side secret env is missing (configuration).
+KEY_UNCONFIGURED_BODY = "worker key not configured"
 QUEUE_LINK = f"{PORTAL_URL}/admin/agents?tab=queue"
 
 
@@ -102,6 +106,8 @@ def poll():
         if e.code in CONFIG_STATUSES:
             return "config", None, f"HTTP {e.code}: {CONFIG_STATUSES[e.code]}"
         body = (e.read() or b"")[:120].decode("utf-8", "replace").replace("\n", " ")
+        if e.code == 503 and KEY_UNCONFIGURED_BODY in body:
+            return "config", None, "HTTP 503: LINK_WORKER_SECRET_HERMES_WATCHDOG is not set on the portal (Railway)"
         return "down", None, f"HTTP {e.code} {body}"
     except (urllib.error.URLError, OSError) as e:
         return "down", None, f"unreachable ({e.__class__.__name__})"
