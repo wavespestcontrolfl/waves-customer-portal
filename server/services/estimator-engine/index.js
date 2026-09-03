@@ -385,7 +385,17 @@ function addressFromContext(context) {
 // their own locality.
 function ownStreetForUnitAdoption(context) {
   const sa = context?.extraction?.property?.service_address;
-  if (sa?.street_line_1) return String(sa.street_line_1).trim();
+  if (sa?.street_line_1) {
+    // The extraction's OWN city/ZIP ride along (codex r14 P1 on #3804):
+    // sameStreetAddress treats a missing locality as a match, so a bare
+    // street would let a reprocess that heard the same numbered street in
+    // ANOTHER city adopt the old fence and draft the old building. Only
+    // BORROWED locality is excluded; a genuinely street-only extraction
+    // still compares on the street alone.
+    const zip = sa.postal_code ? String(sa.postal_code).trim() : '';
+    return [String(sa.street_line_1).trim(), sa.city ? String(sa.city).trim() : null, zip ? `FL ${zip}` : null]
+      .filter(Boolean).join(', ');
+  }
   return String(addressFromContextBase(context) || '').trim();
 }
 

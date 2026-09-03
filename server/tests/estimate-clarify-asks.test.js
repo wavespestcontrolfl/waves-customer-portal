@@ -1954,20 +1954,49 @@ describe('unit hold (GATE_CLARIFY_UNIT_WRITEBACK — PR C2a: call-row fence + ev
   });
 
   test('a bedroom answer on the same ask keeps main\'s bedroom re-price path (the unit hold never touches it); the re-run adopts the fence on its own', async () => {
+    const uuid = jest.spyOn(require('crypto'), 'randomUUID');
     mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'green', created: true, estimateId: 'est-new' });
     const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-1' });
     mockState.existingDraft = a;
     const callRow = { id: 'call-1', customer_id: 'cust-1' };
-    // …then the hold + bedroom flag stamps re-read the ask row, and voiceOriginCallLogId reads the bedroom draft row.
-    mockState.firstQueue = [a, a, callRow, { id: 'cust-1', address_line1: null }, callRow, { id: 'lead-1', address: null }, a, a, { estimate_data: { estimatorEngine: { callLogId: 'call-1' } } }];
+    // …then estimateComposedFromCall reads the bedroom draft row (same call ⇒ the hold's token), the hold +
+    // bedroom flag stamps re-read the ask row, and voiceOriginCallLogId reads the bedroom draft row again.
+    const bedroomDraft = { estimate_data: { estimatorEngine: { callLogId: 'call-1' } } };
+    mockState.firstQueue = [a, a, callRow, { id: 'cust-1', address_line1: null }, callRow, { id: 'lead-1', address: null }, bedroomDraft, a, a, bedroomDraft];
     mockState.selectQueue = [[{ id: 'est-1', status: 'draft' }], [{ id: 'est-1', status: 'draft' }], []];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204, 2 bedrooms' });
     await result.repricePromise;
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ callLogId: 'call-1', supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: 2 }));
     // The unit hold still fired on the same row (the bedroom attempt is the newer marker).
     expect(fenceRaw()).toBeDefined();
+    // Same call ⇒ the re-run carries the unit hold's attempt token — the first UUID minted — so the
+    // call's other held rows pass the replacement instead of reading as duplicate_call_draft (codex r4 P2).
+    const holdAttempt = uuid.mock.results[0].value;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeAttempt: holdAttempt }));
+    expect(guardStampAttempt(mockState)).toBe(holdAttempt);
+    uuid.mockRestore();
   });
-});
+
+  test('a bedroom draft composed from ANOTHER call (phone-scoped merge) gets its OWN re-price token, never the unit hold\'s (codex r14 P2 on #3804)', async () => {
+    const uuid = jest.spyOn(require('crypto'), 'randomUUID');
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'green', created: true, estimateId: 'est-new' });
+    const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-1' });
+    mockState.existingDraft = a;
+    const callRow = { id: 'call-1', customer_id: 'cust-1' };
+    // call B's draft is not among call A's unsent drafts, so the hold guards nothing.
+    const otherCallDraft = { estimate_data: { estimatorEngine: { callLogId: 'call-2' } } };
+    // Nothing held ⇒ no hold re-read of the ask row: one fewer `a` than the same-call case.
+    mockState.firstQueue = [a, a, callRow, { id: 'cust-1', address_line1: null }, callRow, { id: 'lead-1', address: null }, otherCallDraft, a, otherCallDraft];
+    mockState.selectQueue = [[], [], []];
+    const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204, 2 bedrooms' });
+    await result.repricePromise;
+    const holdAttempt = uuid.mock.results[0].value;
+    const bedroomAttempt = guardStampAttempt(mockState);
+    expect(bedroomAttempt).toBeTruthy();
+    expect(bedroomAttempt).not.toBe(holdAttempt);
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-1', supersedeAttempt: bedroomAttempt }));
+    uuid.mockRestore();
+  });});
 
 describe('clarifyPreDispatchCheck — write-back evidence (gate ON)', () => {
   test('a unit recorded at the building while validators ran aborts the send', async () => {

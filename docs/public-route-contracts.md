@@ -247,7 +247,11 @@ estimate+service+day, suppression-blocked addresses return 409 with no
 send, generic errors — no PII in responses or logs; while
 GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
 the engine-pricing-authority verdict (#3750) answers the same generic 404
-before either provider path).
+before either provider path; both provider paths re-read the row and repeat
+the customer-viewable + call-side-hold check as the LAST step before the
+SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
+PDF render withholds the packet with the same generic 404 and releases the
+SMS dedup claim so a later legitimate retap can send).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes

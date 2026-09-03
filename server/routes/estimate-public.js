@@ -24662,6 +24662,17 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     const contact = await resolveEstimateContactFields(estimate);
     const firstName = String(contact.customerName || estimate.customer_name || '').trim().split(/\s+/)[0] || 'there';
     const serviceTitle = SERVICE_DETAILS_COPY[serviceKey].title.replace(/ — Service Details$/, '');
+    // The pre-read verdict above is re-asserted IMMEDIATELY before each
+    // provider handoff (codex r14 P0 on #3804): a clarify re-price hold —
+    // or a linkage invalidation — stamped between the pre-read and the
+    // SendGrid/Twilio call would otherwise deliver a stale packet and an
+    // estimate link the renderer now refuses. Same generic 404 as the
+    // pre-read, the family's door; a fresh row, never the stale object.
+    const stillOnCustomerSurface = async () => {
+      const fresh = await db('estimates').where({ id: estimate.id }).first();
+      if (!fresh || !isEstimateCustomerViewable(fresh)) return false;
+      return !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(fresh)));
+    };
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
     const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
@@ -24671,6 +24682,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       const content = await buildServiceDetailsContent(serviceKey, estimate);
       const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
       const buffer = await renderServiceDetailsPdf(content);
+      if (!(await stillOnCustomerSurface())) return res.status(404).json({ error: 'Estimate not found' });
       const EmailTemplateLibrary = require('../services/email-template-library');
       let result;
       try {
@@ -24783,6 +24795,9 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           return { success: true, deduped: true };
         }
       } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup check skipped: ${e.message}`); }
+      // Last read before the handoff — inside the claim, so a withheld send
+      // releases it below and a later legitimate retap can send.
+      if (!(await stillOnCustomerSurface())) return { success: false, withheld: true };
       return TwilioService.sendSMS(
         contact.customerPhone,
         `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
@@ -24832,6 +24847,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // claim would reopen the duplicate window it is guarding.
       if (smsResult?.claimHeldElsewhere) serviceDetailsSmsClaims.delete(dedupKey);
       else releaseClaims();
+      if (smsResult?.withheld) return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     // Confirmed success only: start the dedup window and prune stale entries

@@ -1,6 +1,7 @@
 const {
   normalizeLeadAddress, parseRawAddress, formatAddress,
   normalizeUnitLine, unitLineValueKey, splitStreetLineUnit,
+  dwellingUnitOnLine,
 } = require('../utils/address-normalizer');
 
 describe('address normalizer', () => {
@@ -369,6 +370,17 @@ describe('normalizeUnitLine', () => {
     expect(normalizeUnitLine('Apt #4')).toBe('Apt 4');
     expect(normalizeUnitLine('Suite #210')).toBe('Suite 210');
     expect(unitLineValueKey(normalizeUnitLine('Apt #4'))).toBe(unitLineValueKey(normalizeUnitLine('#4')));
+  });
+
+  test('a hash AFTER a designator pair is an implicit dwelling designator — "Bldg 9 #204" carries apartment 204 (codex r14 P2 on #3804)', () => {
+    expect(normalizeUnitLine('Bldg 9 #204')).toBe(normalizeUnitLine('Bldg 9 Unit 204'));
+    expect(unitLineValueKey(normalizeUnitLine('Bldg 9 #204'))).toBe(unitLineValueKey('Bldg 9 Apt 204'));
+    // The record shape the reprocess reads: a full line carrying the structural pair and the hash.
+    expect(dwellingUnitOnLine('1048 Example Lakes Cir, Bldg 9 #204, Sarasota, FL 34232')).toBe(normalizeUnitLine('Unit 204'));
+    expect(dwellingUnitOnLine('1048 Example Lakes Cir Bldg 9 #204, Sarasota, FL 34232')).toBe(normalizeUnitLine('Unit 204'));
+    // A hash right after a bare designator or a leading hash is unchanged.
+    expect(normalizeUnitLine('Apt #4')).toBe('Apt 4');
+    expect(normalizeUnitLine('#204')).toBe(normalizeUnitLine('Unit 204'));
   });
 });
 

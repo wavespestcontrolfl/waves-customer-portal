@@ -1677,9 +1677,22 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
 async function releaseGroupSiblingClaims(claimedSiblings = []) {
   for (const sibling of claimedSiblings) {
     try {
-      await db('estimates')
+      const restored = await db('estimates')
         .where({ id: sibling.id, status: 'sending' })
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         .update({ status: sibling.status, updated_at: db.fn.now() });
+      // A sibling HELD while claimed (a clarify reply stamps the hold on a
+      // 'sending' row by design, past the reach of the reply's own
+      // unschedule, which touches 'scheduled' rows only) goes back as an
+      // INERT draft with no due time — restoring its pre-claim 'scheduled'
+      // with scheduled_at intact would re-enter the cron, which the hold
+      // promised to pull it off (codex r14 P2 on #3804). A row already
+      // moved off 'sending' (accepted) keeps its terminal state either way.
+      if (!restored) {
+        await db('estimates')
+          .where({ id: sibling.id, status: 'sending' })
+          .update({ status: 'draft', scheduled_at: null, updated_at: db.fn.now() });
+      }
     } catch (e) {
       logger.warn(`[admin-estimates] failed to release group sibling claim ${sibling.id}: ${e.message}`);
     }

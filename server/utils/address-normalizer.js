@@ -316,7 +316,15 @@ function normalizeUnitToken(token) {
 // — "Apt #4", "#4", and "Apt 4" all mean unit 4 — so it's stripped globally
 // to keep stored values comparable across notations.
 function normalizeUnitLine(value) {
-  const cleaned = cleanString(value).replace(/[#,]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60).trim();
+  // A hash AFTER another designator pair ("Bldg 9 #204") is an implicit
+  // dwelling designator, not punctuation: stripping it left "Bldg 9 204"
+  // with no apartment for dwellingUnitOnLine to find, so a correct "Bldg 9
+  // #204" draft read as unitless — asked again, held, or fenced (codex
+  // r14 P2 on #3804). A hash right after a bare designator ("Apt #4") or a
+  // LEADING hash keeps the existing path.
+  const cleaned = cleanString(value).replace(/,/g, ' ')
+    .replace(/\b([A-Za-z.]+\s+[A-Za-z0-9-]+)\s*#\s*(?=[A-Za-z0-9])/g, '$1 unit ')
+    .replace(/#/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60).trim();
   if (!cleaned) return '';
   const tokens = cleaned.split(' ').filter(Boolean);
   const firstKey = tokens[0].replace(/\./g, '').toLowerCase();

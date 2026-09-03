@@ -869,6 +869,15 @@ describe('review fixes', () => {
     expect(idxPriv.ownStreetForUnitAdoption({ extraction: null, lead: null })).toBe('');
   });
 
+  test('the unit-adoption compare keeps the extraction\'s OWN locality — the same numbered street heard in ANOTHER city never adopts the fence (codex r14 P1 on #3804)', () => {
+    const heard = { extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir', city: 'Venice', postal_code: '34285' } } }, lead: null };
+    expect(idxPriv.ownStreetForUnitAdoption(heard)).toBe('1048 Example Lakes Cir, Venice, FL 34285');
+    expect(idxPriv.sameStreetAddress(idxPriv.ownStreetForUnitAdoption(heard), '1048 Example Lakes Cir, Sarasota, FL 34232')).toBe(false);
+    // The same street in the SAME city still matches; a ZIP alone rides along too.
+    expect(idxPriv.sameStreetAddress(idxPriv.ownStreetForUnitAdoption(heard), '1048 Example Lakes Cir, Venice, FL 34285')).toBe(true);
+    expect(idxPriv.ownStreetForUnitAdoption({ extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Cir', postal_code: '34232' } } } })).toBe('1048 Example Lakes Cir, FL 34232');
+  });
+
   test('existing-customer address beats a stale phone-matched lead', () => {
     const context = {
       extraction: null,

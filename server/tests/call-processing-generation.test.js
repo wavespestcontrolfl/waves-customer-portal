@@ -666,7 +666,14 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // as send_failed (codex r3 P1 on #3804).
     // …plus the scheduled-send claim (codex r13 P2 on #3804): a hold landing
     // after the pre-read 409s instead of reporting "scheduled".
-    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(5);
+    // …plus the sibling-claim RELEASE (codex r14 P2 on #3804): a sibling held
+    // while claimed goes back as an inert draft, never a scheduled row the
+    // cron would re-enter.
+    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(6);
+    const releaseAt = route.indexOf('async function releaseGroupSiblingClaims');
+    expect(releaseAt).toBeGreaterThan(-1);
+    expect(route.indexOf('.whereRaw(REPRICE_PENDING_ABSENT_SQL)', releaseAt)).toBeGreaterThan(releaseAt);
+    expect(route.indexOf(".update({ status: 'draft', scheduled_at: null, updated_at: db.fn.now() });", releaseAt)).toBeGreaterThan(releaseAt);
     expect(route).toContain('if (!verdict.noop && siblingRepricePending(estimate)) {');
     // The customer DECLINE carries the hold predicate on its UPDATE too, and its guard answers the
     // accept path's 409; the legacy SSR renderer checks the hold beside the linkage markers (codex r4 P1).
@@ -696,7 +703,9 @@ describe('generation fence + call-lock wiring (source pins)', () => {
       expect(src(rel)).toContain("if (context?.supersedeAttempt) {");
       expect(src(rel)).not.toContain("context?.supersedeReason === 'unit_answer_adopted' && context?.supersedeAttempt");
     }
-    expect(src('../services/estimate-clarify-asks.js')).toContain("? (unitHold?.attempt || require('crypto').randomUUID())");
+    // …and only when the bedroom draft was composed from the hold's OWN call (codex r14 P2 on #3804).
+    expect(src('../services/estimate-clarify-asks.js')).toContain("const sameCall = !!unitHold?.attempt && await estimateComposedFromCall(trx, lockedEstimateId, unitHold.callLogId);");
+    expect(src('../services/estimate-clarify-asks.js')).toContain("repriceAttempt = sameCall ? unitHold.attempt : require('crypto').randomUUID();");
     // A force-reprocess whose adopted answer meets the held whole-building draft supersedes it.
     expect(engine).toContain("context.supersedeReason = 'unit_answer_adopted';");
     expect(engine).toContain('sameStreetAddress(splitUnitFirstLine(own)?.rest || own, buildingLine)');

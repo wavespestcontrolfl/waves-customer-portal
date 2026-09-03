@@ -857,6 +857,17 @@ function repricePendingActive(engineData) {
 // let the scheduler claim the due row and send the stale fallback price
 // — so the schedule is cancelled (inert draft, no due time) and the bell
 // hands it to the operator.
+// Whether an engine draft was composed from THIS call (estimator_engine
+// .callLogId) — inside the caller's transaction.
+async function estimateComposedFromCall(trx, estimateId, callLogId) {
+  if (!estimateId || !callLogId) return false;
+  const row = await trx('estimates').where({ id: estimateId }).first('estimate_data');
+  if (!row) return false;
+  let data = row.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { return false; } }
+  return String(data?.estimatorEngine?.callLogId || '') === String(callLogId);
+}
+
 async function unscheduleForOperatorReprice(trx, estimateId, attempt) {
   const changed = await trx('estimates')
     .where({ id: estimateId, status: 'scheduled' })
@@ -1320,9 +1331,15 @@ async function handleClarifyReply({ phone, body }) {
       // this token — a fresh one would make them duplicate_call_draft and
       // the corrected unit-and-bedroom replacement would never insert
       // (codex r4 P2 on #3804).
-      const repriceAttempt = recorded.includes('bedroom_count') && lockedEstimateId
-        ? (unitHold?.attempt || require('crypto').randomUUID())
-        : null;
+      // …but ONLY when the bedroom draft belongs to the unit hold's call: a
+      // phone-scoped merge can pair call A's unit question with call B's
+      // bedroom draft, and A's token on B's re-run would let B's
+      // replacement pass A's held rows (codex r14 P2 on #3804).
+      let repriceAttempt = null;
+      if (recorded.includes('bedroom_count') && lockedEstimateId) {
+        const sameCall = !!unitHold?.attempt && await estimateComposedFromCall(trx, lockedEstimateId, unitHold.callLogId);
+        repriceAttempt = sameCall ? unitHold.attempt : require('crypto').randomUUID();
+      }
       if (repriceAttempt) {
         repriceGuarded = await setEstimateRepricePending(trx, lockedEstimateId, new Date().toISOString(), repriceAttempt);
       }
