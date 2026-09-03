@@ -645,8 +645,12 @@ async function markLinkedLeadEstimateAccepted({
     // not a lost/won decision, and the acceptance is stronger evidence. It
     // converts with the accepted estimate stamped, so nothing on the
     // original is overwritten and the office still sees one open lead to
-    // merge. A named row closed by any OTHER status stays closed.
-    if (named && named.status === 'duplicate' && !named.deleted_at) await convert(named);
+    // merge. A named row closed by any OTHER status stays closed, and an
+    // original that is ALREADY won (the office closed the inquiry before
+    // this acceptance) means the deal is credited once — a second won row
+    // would double-count it in the raw lead KPIs (codex #3834 r6 P1).
+    const originalAlreadyWon = indirect && lead.status === 'won';
+    if (named && named.status === 'duplicate' && !named.deleted_at && !originalAlreadyWon) await convert(named);
     return;
   }
 

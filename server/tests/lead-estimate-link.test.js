@@ -387,6 +387,20 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-dup5', patch: expect.objectContaining({ estimate_id: 'estimate-2f' }), conditional: false }]);
   });
 
+  test('an indirectly resolved original that is ALREADY won records no second win on the duplicate row', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2h', estimate_data: { lead_id: 'lead-dup7' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-dup7': { id: 'lead-dup7', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-orig7' } },
+        'lead-orig7': { id: 'lead-orig7', status: 'won', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' },
+      },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2h', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    expect(database._updates).toEqual([]);
+  });
+
   test('a duplicate lead whose original is gone takes the win itself (no contact-fallback sweep)', async () => {
     const database = makeAcceptDb({
       linked: [],
