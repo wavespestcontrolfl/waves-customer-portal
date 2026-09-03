@@ -386,8 +386,9 @@ async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLo
   if (open) return { ok: false, code: 'inbox_in_flight', error: `another placement already has a conversation with this recipient (${open.status}${open.outreach_status ? ` / ${open.outreach_status}` : ''}) — one conversation per inbox` };
   // prospect → path lock order, same as saveDraft (settlement locks the path)
   await trx('seo_link_prospects').where({ id: prospectId }).forUpdate().first('id');
-  // the policy row read under the lock: the §6.4 cap below and the §7 authority hash
-  const { policy } = await P.loadPolicy(trx);
+  // the policy row LOCKED for the claim (prospect → policy → path): the §6.4 cap below and the §7 authority decide under
+  // it, and `updatePolicy` locks the same row — a tightening cannot commit between this read and the send
+  const { policy } = await P.loadPolicy(trx, { lock: true });
   const locked = await lockedSendRow(trx, { prospectId, prospect, mode, inbox });
   if (!locked.ok) return locked;
   const { current, onPath, draft } = locked;

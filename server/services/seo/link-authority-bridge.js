@@ -662,8 +662,9 @@ async function runAuthorityBridge(db, {
     }
     return true;
   });
-  if (ran && ran.skipped) { out.skipped = ran.reason || 'lease_held'; return out; }
-
+  if (ran && ran.skipped) out.skipped = ran.reason || 'lease_held';
+  // the §6.4 sweep runs even when the DECISION lease was held (a manual / inline run holds it with autoSend false, so
+  // no other holder would send): the sender claims every row under its own locks and needs no bridge lease
   if (autoSend) await dispatchAutoSends(db, out, { send, now });
   await bellForParked(notify, out, parkedDomains, now);
   return out;

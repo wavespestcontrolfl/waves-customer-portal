@@ -405,6 +405,7 @@ describe('one conversation per inbox (§13)', () => {
     expect(at(/lost_recovery:example\.org/)).toBeGreaterThan(0);
     expect(at(/link_outreach_inbox:editor@example\.org/)).toBeGreaterThan(at(/lost_recovery:example\.org/));
     expect(at(/FOR UPDATE seo_link_prospects/)).toBeGreaterThan(at(/link_outreach_inbox:editor@example\.org/));
+    expect(at(/FOR UPDATE seo_link_policy/)).toBeGreaterThan(at(/FOR UPDATE seo_link_prospects/)); // the policy the claim decides under is locked with it
   });
   test('a CLOSED conversation releases the inbox: a completed placement (placed / live / indexed / watching / lost / rejected) or one carrying the closure stamp; an active one with its pitch out holds it until then', async () => {
     const s = scenario({ policy: AUTO_POLICY });

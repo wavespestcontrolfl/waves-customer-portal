@@ -111,8 +111,10 @@ function applyEnvTightening(policy, env = process.env) {
   return { policy: effective, overrides };
 }
 
-async function loadPolicy(db, { env = process.env } = {}) {
-  const row = await db('seo_link_policy').where({ id: 1 }).first();
+// `lock`: read FOR UPDATE — a writer deciding under the policy (the send claim) serializes with `updatePolicy`, which
+// locks the same row, so a tightening committed during the claim is seen by it (or waits for it), never raced past
+async function loadPolicy(db, { env = process.env, lock = false } = {}) {
+  const row = await (lock ? db('seo_link_policy').where({ id: 1 }).forUpdate().first() : db('seo_link_policy').where({ id: 1 }).first());
   const stored = normalizePolicyRow(row);
   const { policy, overrides } = applyEnvTightening(stored, env);
   return { stored, policy, overrides, updated_at: row?.updated_at || null, updated_by: row?.updated_by || null };

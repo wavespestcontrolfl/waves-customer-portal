@@ -75,9 +75,12 @@ describe('gate / dryRun', () => {
   });
   test('a held lease is reported and nothing is written', async () => {
     const { db } = scenario();
-    const r = await run(db, { exclusive: async () => ({ skipped: true, reason: 'lease_held' }) });
+    const send = jest.fn(async () => ({ ok: true }));
+    const r = await run(db, { exclusive: async () => ({ skipped: true, reason: 'lease_held' }), autoSend: true, send });
     expect(r.skipped).toBe('lease_held');
     expect(placements(db)).toHaveLength(0);
+    // the send sweep still ran (nothing to send here): the lease holder was a manual run with autoSend false
+    expect(r.autoSend).toEqual({ attempted: 0, sent: 0, skipped: [] });
   });
 });
 
