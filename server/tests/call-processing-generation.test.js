@@ -448,6 +448,62 @@ describe('callPassStillOwned — the every-call-origin-insert fence', () => {
   });
 });
 
+describe('unit-answer fence (clarify write-back) — stamp, read, decide', () => {
+  const { unitAnswerFenceReason, callUnitAnswerFence, callUnitAnswer, stampCallUnitAnswer } = require('../utils/estimate-claim-sql');
+  const FENCE = { unit: 'Apt 204', building: { street_line_1: '1048 Example Lakes Cir', city: 'Sarasota', postal_code: '34232' }, at: '2026-09-03T12:00:00Z' };
+  const dbcFor = (metadata) => {
+    const dbc = (table) => {
+      const b = {};
+      b.where = () => b;
+      b.first = async () => (table === 'call_log' ? { metadata } : null);
+      b.update = async (payload) => { dbc.updates.push({ table, payload }); return 1; };
+      return b;
+    };
+    dbc.updates = [];
+    dbc.raw = (sql, params) => ({ __raw: sql, params });
+    return dbc;
+  };
+
+  test('no fence = nothing to compare', () => {
+    expect(unitAnswerFenceReason(null, { address: '1048 Example Lakes Cir, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason({}, { address: '1048 Example Lakes Cir' })).toBeNull();
+  });
+
+  test('a whole-building draft at the asked building is blocked; one carrying the answer passes', () => {
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Circle, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Sarasota, FL 34232', unitLineOverride: 'Apt 204' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 204, Sarasota, FL 34232' })).toBeNull();
+  });
+
+  test('a draft for ANOTHER building, or one already naming some unit, is not the fence\'s business', () => {
+    expect(unitAnswerFenceReason(FENCE, { address: '5 Other Rd, Venice, FL 34285' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 9, Sarasota, FL 34232' })).toBeNull();
+  });
+
+  test('no address at all did not see the answer — blocked; a fence with no building blocks any unitless draft', () => {
+    expect(unitAnswerFenceReason(FENCE, { address: '' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason({ unit: 'Apt 204' }, { address: '5 Other Rd, Venice, FL 34285' })).toBe('unit_answer_pending');
+  });
+
+  test('read + decide from the call row (string or object metadata); a missing row or key is no fence', async () => {
+    expect(await callUnitAnswerFence(dbcFor({ unit_answer: FENCE }), 'call-1', { address: '1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(await callUnitAnswerFence(dbcFor(JSON.stringify({ unit_answer: FENCE })), 'call-1', { address: '1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(await callUnitAnswerFence(dbcFor({ lead_id: 'lead-1' }), 'call-1', { address: '1048 Example Lakes Cir' })).toBeNull();
+    expect(await callUnitAnswer(dbcFor(null), 'call-1')).toBeNull();
+    expect(await callUnitAnswer((table) => ({ where: () => ({ first: async () => null }) }), 'call-1')).toBeNull();
+  });
+
+  test('the stamp is an atomic JSONB path write of exactly the unit_answer key', async () => {
+    const dbc = dbcFor({});
+    expect(await stampCallUnitAnswer(dbc, 'call-1', { unit: 'Apt 204', building: FENCE.building, askDraftId: 'draft-1' })).toBe(true);
+    const [{ payload }] = dbc.updates;
+    expect(payload.metadata.__raw).toMatch(/jsonb_set\(COALESCE\(metadata, '\{\}'::jsonb\)/);
+    expect(payload.metadata.params[0]).toBe('{unit_answer}');
+    expect(JSON.parse(payload.metadata.params[1])).toEqual(expect.objectContaining({ unit: 'Apt 204', building: FENCE.building, ask_draft_id: 'draft-1' }));
+    expect(await stampCallUnitAnswer(dbc, 'call-1', { unit: '' })).toBe(false);
+  });
+});
+
 describe('generation fence + call-lock wiring (source pins)', () => {
   // The creators' fences and the reservation's call lock live inside heavily
   // mocked transactions no unit suite executes end-to-end — pin the wiring in
@@ -477,6 +533,35 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     expect(source).toContain("staleLinkage: 'stale_processing_generation'");
     expect(source.indexOf('callRejectedForDrafting(trx, call.id')).toBeLessThan(fenceAt);
     expect(source.indexOf("['sid', 'stamp'].includes(context?.leadLinkage)", fenceAt)).toBeGreaterThan(fenceAt);
+  });
+
+  test('both creators check the unit-answer fence under the call-row lock: after the rejected check, before the generation fence', () => {
+    for (const rel of ['../services/estimator-engine/draft-builder.js', '../services/estimator-engine/commercial-proposal.js']) {
+      const source = src(rel);
+      const unitFenceAt = source.indexOf('callUnitAnswerFence(trx, call.id');
+      expect(unitFenceAt).toBeGreaterThan(-1);
+      expect(source.indexOf('callRejectedForDrafting(trx, call.id')).toBeLessThan(unitFenceAt);
+      expect(source.indexOf('callPassStillOwned(trx, call.id', unitFenceAt)).toBeGreaterThan(unitFenceAt);
+    }
+    // The engine neither bells "an estimate already covers this" nor retries a fenced insert.
+    expect(src('../services/estimator-engine/index.js')).toContain("draft.duplicateBlock?.reason === 'unit_answer_pending'");
+  });
+
+  test('the residential creator supersedes a SET: every locked target is excluded from the call recheck and archived after the insert', () => {
+    const source = src('../services/estimator-engine/draft-builder.js');
+    expect(source).toContain("q.whereNotIn('id', supersedeTargets.map((t) => t.id))");
+    expect(source).toContain('for (const target of supersedeTargets) {');
+    expect(source.indexOf('for (const target of supersedeTargets) {')).toBeGreaterThan(source.indexOf(".returning(['id', 'token'])"));
+    expect(source).toContain('supersedeTargetIds.has(String(row.id))');
+  });
+
+  test('the reply handler stamps the fence under the same call-row lock the creators hold, and the engine adopts it', () => {
+    const clarify = src('../services/estimate-clarify-asks.js');
+    const lockAt = clarify.indexOf("unitCallLinkage(trx, flags.unit_call_log_id, { lock: true })");
+    const stampAt = clarify.indexOf('stampCallUnitAnswer(trx, flags.unit_call_log_id');
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(stampAt).toBeGreaterThan(lockAt);
+    expect(src('../services/estimator-engine/index.js')).toContain('callUnitAnswer(db, callLogId)');
   });
 
   test('slot reservation locks the call row FOR UPDATE before its verdict and holds it through the commit', () => {

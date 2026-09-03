@@ -11632,6 +11632,11 @@ const CallRecordingProcessor = {
                 customerId: customerId || null,
                 leadId,
                 callLogId: call.id,
+                // The call's OWN quote signals ride with the unit item so the
+                // write-back lane re-drafts only when a quote was asked for,
+                // with the true promise value.
+                quotePromised: callQuotePromised === true,
+                quoteRequested: callQuoteRequested === true,
                 source: unitOwed ? 'call_missing_unit_number' : 'call_missing_service_address',
                 channelProvenance: 'voice',
                 unitAskBuilding,

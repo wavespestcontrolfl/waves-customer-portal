@@ -428,6 +428,19 @@ async function maybeBuildCommercialProposalDraft({
           const rejected = await callRejectedForDrafting(trx, call.id, { lockCallRow: true });
           if (rejected) return { staleLinkage: rejected };
         }
+        // UNIT-ANSWER fence, same as the residential creator (clarify
+        // write-back, codex r5 P1 on #3785): a scaffold composed for the
+        // whole building before the caller texted their unit is blocked
+        // under the call-row lock; the unit re-run composes the
+        // replacement.
+        {
+          const { callUnitAnswerFence } = require('../../utils/estimate-claim-sql');
+          const fenceReason = await callUnitAnswerFence(trx, call.id, {
+            address: intent.address,
+            unitLineOverride: context?.unitLineOverride || null,
+          });
+          if (fenceReason) return { staleLinkage: fenceReason };
+        }
         // GENERATION fence for EVERY call-origin insert — commercial
         // scaffolds included (codex P1, PR #3304 — generation-rework GH
         // round, mirrors the residential creator): lead-less and

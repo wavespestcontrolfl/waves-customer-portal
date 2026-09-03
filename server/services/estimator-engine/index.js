@@ -329,7 +329,27 @@ function draftAmountLabel({ monthly, oneTime }) {
   return 'amount TBD';
 }
 
+// A unit the customer supplied AFTER the call (clarify write-back): the
+// re-run composes the address WITH it, since the original extraction and
+// the lead line may still describe the whole building. Never doubles a
+// unit the line already carries.
+function withUnitOverride(line, context) {
+  const unit = String(context?.unitLineOverride || '').trim();
+  if (!unit || !line) return line;
+  const { splitStreetLineUnit } = require('../../utils/address-normalizer');
+  // The WHOLE line: a lead line the write-back already formatted carries
+  // the unit as its own comma segment ("street, Apt 204, city").
+  if (splitStreetLineUnit(String(line)).unit) return line;
+  const parts = String(line).split(',');
+  parts[0] = `${parts[0].trim()} ${unit}`;
+  return parts.map((p, i) => (i === 0 ? p : ` ${p.trim()}`)).join(',');
+}
+
 function addressFromContext(context) {
+  return withUnitOverride(addressFromContextBase(context), context);
+}
+
+function addressFromContextBase(context) {
   const sa = context.extraction?.property?.service_address;
   if (sa?.street_line_1) {
     // Street-only extractions (city/ZIP nullable in the schema) borrow
@@ -1232,6 +1252,19 @@ async function maybeDraftEstimateForCall({
   // evidence lives there, not in the SMS thread) with the customer's
   // answer applied; the stale draft is retired atomically on insert.
   supersedeEstimateId = null, supersedeReason = null, supersedeAttempt = null, bedroomCountOverride = null,
+  // …or a SET of them (the unit write-back guards every live unsent draft
+  // for the call and retires all of them with one replacement); the first
+  // is the primary the new row names.
+  supersedeEstimateIds = null,
+  // Clarify write-back: the apartment/unit the customer texted after the
+  // call ("Apt 204"), composed into the service address and stamped on the
+  // extraction's street_line_2 so the unit-scope model sees the subpremise.
+  unitLineOverride = null,
+  // …and the BUILDING the ask was about ({ street_line_1, city,
+  // postal_code }): a reprocessed call's rolling extraction may name a
+  // different building than the surviving card, so the item-bound building
+  // wins over the call row's latest extraction.
+  serviceAddressOverride = null,
 }) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
@@ -1247,12 +1280,62 @@ async function maybeDraftEstimateForCall({
     // generation is the arm that stays valid after that claim finalizes.
     if (context && ownerProcToken) context.ownerProcToken = ownerProcToken;
     if (context && ownerProcGeneration != null) context.ownerProcGeneration = ownerProcGeneration;
-    if (context && !context.error && supersedeEstimateId) {
-      context.supersedeEstimateId = String(supersedeEstimateId);
+    const supersedeSet = Array.isArray(supersedeEstimateIds) && supersedeEstimateIds.length
+      ? supersedeEstimateIds.map(String)
+      : (supersedeEstimateId ? [String(supersedeEstimateId)] : []);
+    if (context && !context.error && supersedeSet.length) {
+      context.supersedeEstimateId = supersedeSet[0];
+      context.supersedeEstimateIds = supersedeSet;
       context.supersedeReason = supersedeReason || null;
       context.supersedeAttempt = supersedeAttempt || null;
     }
     if (context && !context.error && bedroomCountOverride != null) context.bedroomCountOverride = bedroomCountOverride;
+    // A unit answer already stamped on the call (the clarify write-back's
+    // fence) is ADOPTED by any later composer that was not handed one — a
+    // force-reprocess weeks after the reply must draft the unit, not the
+    // building, and must not be blocked by the fence it never saw. Only
+    // when this run's own address is the asked building (or it has none):
+    // a reprocess that heard a different property keeps its own address.
+    if (context && !context.error && !unitLineOverride && !dryRun) {
+      try {
+        const { callUnitAnswer } = require('../../utils/estimate-claim-sql');
+        const fence = await callUnitAnswer(db, callLogId);
+        if (fence?.unit) {
+          const own = String(addressFromContextBase(context) || '').trim();
+          const b = fence.building;
+          const buildingLine = b?.street_line_1
+            ? [b.street_line_1, b.city, b.postal_code ? `FL ${b.postal_code}` : null].filter(Boolean).join(', ')
+            : null;
+          if (!own || !buildingLine || sameStreetAddress(own, buildingLine)) {
+            unitLineOverride = fence.unit;
+            if (!serviceAddressOverride?.street_line_1 && b?.street_line_1) serviceAddressOverride = b;
+            result.unitAnswerAdopted = true;
+          }
+        }
+      } catch (fenceErr) {
+        logger.warn(`[estimator-engine] unit-answer fence read failed (composing without it): ${fenceErr.message}`);
+      }
+    }
+    if (context && !context.error && (unitLineOverride || serviceAddressOverride?.street_line_1)) {
+      if (unitLineOverride) context.unitLineOverride = String(unitLineOverride);
+      if (context.extraction && typeof context.extraction === 'object') {
+        context.extraction.property = context.extraction.property && typeof context.extraction.property === 'object'
+          ? context.extraction.property : {};
+        const prop = context.extraction.property;
+        prop.service_address = prop.service_address && typeof prop.service_address === 'object' ? prop.service_address : {};
+        const sa = prop.service_address;
+        if (serviceAddressOverride?.street_line_1) {
+          sa.street_line_1 = String(serviceAddressOverride.street_line_1);
+          sa.city = serviceAddressOverride.city || null;
+          sa.postal_code = serviceAddressOverride.postal_code || null;
+          sa.state = 'FL';
+        }
+        // The customer's texted unit REPLACES whatever the rolling extraction
+        // holds on line 2 — after a reprocess that may be another property's
+        // unit (codex r3 P1 on #3785).
+        if (unitLineOverride) sa.street_line_2 = String(unitLineOverride);
+      }
+    }
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.
     if (!dryRun && context && !context.error) {
       await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration });
@@ -1329,8 +1412,7 @@ async function maybeDraftEstimateForCall({
       const existing = await existingDraftForCall(callLogId);
       // The draft a re-run supersedes IS the existing draft for this call —
       // it is replaced inside the dedupe transaction, not returned as-is.
-      const supersedesExisting = existing && supersedeEstimateId
-        && String(existing.id) === String(supersedeEstimateId);
+      const supersedesExisting = existing && supersedeSet.includes(String(existing.id));
       if (existing && !supersedesExisting) {
         // Stale-linkage reconciliation (codex P1, PR #3304) — shared with
         // the duplicate-guard exit below, where a corrected retry that
@@ -2134,6 +2216,17 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
       membershipSnapshot, priorQualifyingServices, origin,
     });
+
+    if (draft.blocked && draft.duplicateBlock?.reason === 'unit_answer_pending') {
+      // The caller texted their unit while this whole-building draft was
+      // composing (clarify write-back fence): the unit re-run owns the
+      // replacement and its own bell — no "an estimate already covers this
+      // prospect" bell, no reconcile retry (it would be fenced again).
+      result.blocked = true;
+      result.reasons = ['unit_answer_pending'];
+      logger.info('[estimator-engine] draft blocked — the caller answered the unit after this run composed; the unit re-draft replaces it', { callLogId: context?.call?.id || null });
+      return result;
+    }
 
     if (draft.blocked && !dryRun && context?.call?.id) {
       // The corrected retry can LOSE the insert race to a stale detached

@@ -116,19 +116,24 @@ function withClarifyLock(digits, callback) {
 }
 
 // Item-specific linkage for the unit ask: the call whose card it serves,
-// the building it names, and the lead/customer the answer is written to
-// (GATE_CLARIFY_UNIT_WRITEBACK; gate off = the card stamp only).
-function unitAskFlags({ callLogId, unitAskBuilding, leadId, customerId }) {
+// the building it names, the lead/customer the answer is written to, and
+// the call's own quote signals that decide whether the answer re-drafts
+// the call's estimate (GATE_CLARIFY_UNIT_WRITEBACK; gate off = the card
+// stamp only).
+function unitAskFlags({ callLogId, unitAskBuilding, leadId, customerId, quotePromised, quoteRequested }) {
   return {
     ...(callLogId ? { unit_call_log_id: String(callLogId) } : {}),
     ...(unitAskBuilding ? { unit_ask_building: unitAskBuilding } : {}),
-    // Write-back targets bound to the unit item (a later merged ask for
-    // another lead on the same phone cannot re-point them). ALWAYS emitted
-    // — null when the producer has none — so a newer unit ask with a
-    // deliberately-null customer (ambiguous shared phone) CLEARS a prior
-    // ask's target instead of inheriting it (codex r1 P1 on #3785).
+    // Write-back targets + quote signals bound to the unit item (a later
+    // merged ask for another lead on the same phone cannot re-point them).
+    // ALWAYS emitted — null/false when the producer has none — so a newer
+    // unit ask with a deliberately-null customer (ambiguous shared phone)
+    // CLEARS a prior ask's target instead of inheriting it (codex r1 P1 on
+    // #3785).
     unit_lead_id: leadId ? String(leadId) : null,
     unit_customer_id: customerId ? String(customerId) : null,
+    unit_quote_promised: quotePromised === true,
+    unit_quote_requested: quoteRequested === true,
   };
 }
 
@@ -208,12 +213,23 @@ function customerAddressLine(row) {
 async function unitCallLinkage(trx, callLogId, { lock = false } = {}) {
   let q = trx('call_log').where({ id: String(callLogId) });
   if (lock) q = q.forUpdate();
-  const row = await q.first('customer_id', 'twilio_call_sid', 'metadata');
+  const row = await q.first('customer_id', 'twilio_call_sid', 'metadata', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status');
   if (!row) return null;
   const parse = (v) => { if (!v) return null; if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } } return v; };
   const meta = parse(row.metadata);
+  const v1 = parse(row.ai_extraction) || {};
+  // A schema-failed V2 payload is persisted for audit but excluded from
+  // side effects (call-recording-processor) — its quote signals count only
+  // when the extraction is valid (codex r3 P1 on #3785).
+  const svc = row.v2_extraction_status === 'valid'
+    ? (parse(row.ai_extraction_enriched)?.service_request || {})
+    : {};
   return {
     customerId: row.customer_id ? String(row.customer_id) : null,
+    // The call's own quote signals — a legacy ask (parked before the item
+    // carried them) recovers them from here.
+    quotePromised: v1.quote_promised === true || svc.quote_promised === true,
+    quoteRequested: v1.quote_requested === true || svc.quote_requested === true,
     // The call's durable lead linkage is the metadata stamp — a call that
     // REUSED an existing lead leaves that lead's twilio_call_sid on its
     // original call (codex r3 P1; context-builder follows the stamp first).
@@ -238,9 +254,10 @@ function leadStillLinked(leadRow, linkage) {
 }
 async function legacyUnitTargets(trx, flags) {
   const callLogId = flags.unit_call_log_id ? String(flags.unit_call_log_id) : null;
-  if (!callLogId) return { leadId: null, customerId: null, linkage: null };
+  const none = { leadId: null, customerId: null, linkage: null, quotePromised: false, quoteRequested: false };
+  if (!callLogId) return none;
   const linkage = await unitCallLinkage(trx, callLogId);
-  if (!linkage) return { leadId: null, customerId: null, linkage: null };
+  if (!linkage) return none;
   const leadRow = linkage.stampedLeadId
     ? await trx('leads').where({ id: linkage.stampedLeadId }).whereNull('deleted_at').first('id')
     : (linkage.twilioCallSid
@@ -250,6 +267,8 @@ async function legacyUnitTargets(trx, flags) {
     leadId: leadRow?.id ? String(leadRow.id) : null,
     customerId: linkage.customerId,
     linkage,
+    quotePromised: linkage.quotePromised === true,
+    quoteRequested: linkage.quoteRequested === true,
   };
 }
 // Unlocked targets: the candidate customer to lock and the cached lead.
@@ -276,10 +295,61 @@ async function unitTargets(trx, flags) {
     leadId: flags.unit_lead_id || null,
     customerId,
     linkage,
+    quotePromised: flags.unit_quote_promised === true,
+    quoteRequested: flags.unit_quote_requested === true,
   };
 }
 
-async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
+// EVERY live unsent engine draft for the call, newest first, taken FOR
+// UPDATE: the reply guards all of them (historical composer races can
+// leave several rows carrying one callLogId, and guarding only the newest
+// leaves the rest sendable with the building-level address — codex r5 P1
+// on #3785). Same predicate the engine's own existing-draft lookups use.
+// Locked BEFORE the reply's customer/lead/call rows: the invalidation
+// finalizer's order is estimates → leads → call_log, and the creators'
+// is estimates (supersede target) → call_log (codex r4 P1 on #3785).
+async function unsentDraftsForCall(trx, callLogId) {
+  if (!callLogId) return [];
+  const rows = await trx('estimates')
+    .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(callLogId)])
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+    // Every LIVE-unsent status the re-price guard covers — a scheduled
+    // building-level draft is exactly the one that must not auto-send, and
+    // a row already claimed 'sending' is still a GUARD target: the send
+    // path re-checks the re-price marker immediately before the provider
+    // call (codex r2 P1 on #3785). The supersede itself only lands on a
+    // superseded-able row; a 'sending' row fails it and takes the
+    // operator path with the guard standing.
+    .whereIn('status', ['draft', 'scheduled', 'send_failed', 'sending'])
+    .whereNull('sent_at')
+    .whereNull('archived_at')
+    .orderBy('created_at', 'desc')
+    .forUpdate()
+    .select('id', 'status', 'created_at');
+  return Array.isArray(rows) ? rows : [];
+}
+
+// Guard (re-price marker + this reply's attempt token) every live unsent
+// draft for the call that is not guarded yet. Returns the FULL live set,
+// newest first — the first is the supersede primary.
+async function guardLiveDraftsForCall(trx, callLogId, redraft) {
+  const rows = await unsentDraftsForCall(trx, callLogId);
+  const at = new Date().toISOString();
+  const ids = [];
+  for (const row of rows) {
+    const id = String(row.id);
+    if (!redraft.guardedIds.has(id)) {
+      const ok = await setEstimateRepricePending(trx, id, at, redraft.attempt);
+      if (!ok) continue;
+      redraft.guardedIds.add(id);
+    }
+    ids.push(id);
+  }
+  redraft.supersedeEstimateIds = ids;
+  return ids;
+}
+
+async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = null, redraft = null }) {
   const building = flags.unit_ask_building || null;
   const out = { lead: 'skipped', customer: 'skipped', at: new Date().toISOString() };
   if (!building?.street_line_1) return { ...out, reason: 'no_building' };
@@ -311,6 +381,22 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
       out.customer = 'call_relinked';
       out.relinkedTo = linkage.customerId;
       customerRow = null;
+    }
+    if (linkage) {
+      // The DURABLE call-level unit-answer fence, written under the call
+      // row lock every draft creator also holds through its insert: a
+      // composer that built a whole-building draft before this reply is
+      // blocked at its insert, and a later reprocess adopts the unit
+      // (codex r5 P1 on #3785; estimate-claim-sql.callUnitAnswerFence).
+      const { stampCallUnitAnswer } = require('../utils/estimate-claim-sql');
+      out.fence = (await stampCallUnitAnswer(trx, flags.unit_call_log_id, { unit: unitLine, building, askDraftId })) ? 'stamped' : 'missing';
+      if (redraft) {
+        // Second pass, now serialized against every creator: a draft a
+        // composer committed between the first lookup and this lock is
+        // seen here and guarded too, and nothing can be inserted after
+        // this transaction commits without carrying the unit.
+        await guardLiveDraftsForCall(trx, flags.unit_call_log_id, redraft);
+      }
     }
   }
   if (leadId) {
@@ -574,6 +660,8 @@ async function parkClarifyAsk({
   contextSummary = null,
   callLogId = null,
   unitAskBuilding = null,
+  quotePromised = null,
+  quoteRequested = null,
 }) {
   try {
     if (!clarifyAsksEnabled()) return { parked: false, skipped: 'gate_off' };
@@ -591,7 +679,7 @@ async function parkClarifyAsk({
     if (!digits) return { parked: false, skipped: 'no_usable_phone' };
 
     const sourceRef = `clarify:${digits}`;
-    const linkage = { customerId, leadId, estimateId, source, channelProvenance, callLogId, unitAskBuilding };
+    const linkage = { customerId, leadId, estimateId, source, channelProvenance, callLogId, unitAskBuilding, quotePromised, quoteRequested };
     // The whole dedupe→merge→insert sequence holds the clarify lock, so
     // producers for one phone serialize completely — no lost merges, no
     // 23505 recovery dance (the unique index remains as the DB backstop;
@@ -692,7 +780,7 @@ async function parkClarifyAsk({
           lead_id: leadId || null,
           estimate_id: estimateId || null,
           call_origin: String(source || '').startsWith('call_'),
-          ...(askable.includes('unit_number') ? unitAskFlags({ callLogId, unitAskBuilding, leadId, customerId }) : {}),
+          ...(askable.includes('unit_number') ? unitAskFlags({ callLogId, unitAskBuilding, leadId, customerId, quotePromised, quoteRequested }) : {}),
           // Item-specific target for the bedroom re-price (see mergePendingClarify).
           ...(askable.includes('bedroom_count') && estimateId ? { bedroom_estimate_id: String(estimateId) } : {}),
           source,
@@ -1122,6 +1210,7 @@ async function handleClarifyReply({ phone, body }) {
     // missing set; the ask is consumed (answered_at) only when nothing
     // remains — a partial answer keeps the draft routable for its
     // remainder, and the park-time cooldown exception lets it be re-asked.
+    let unitRedraft = null;
     const locked = await withClarifyLock(digits, async (trx) => {
       const fresh = await trx('message_drafts')
         .where({ id: awaiting.id })
@@ -1159,9 +1248,9 @@ async function handleClarifyReply({ phone, body }) {
       if (recorded.includes('unit_number')) {
         // The answer lands on the Triage Inbox card (which keeps its human
         // verdict — AGENTS.md: no auto-resolution for missing_unit_number)
-        // and, gate ON, in the record. Nothing re-drafts here: the call's
-        // building-level estimate is the office's from the card until the
-        // re-draft lane ships (PR C2 of the #3775 split).
+        // and, gate ON, in the record; when a quote was asked for on the
+        // call, its unsent building-level draft is guarded here and
+        // re-drafted with the unit after commit.
         let cardStamped = false;
         if (freshFlags.unit_call_log_id) {
           const stamped = await trx('triage_items')
@@ -1180,12 +1269,32 @@ async function handleClarifyReply({ phone, body }) {
             // for missing_unit_number). A sent ask stays routable for days,
             // so a unit texted AFTER staff resolved or dismissed the card
             // — e.g. the whole building IS the service address — must not
-            // mutate the record (codex r4 P1 on #3785): the answer is kept
-            // on the ask for the audit only.
+            // mutate the record or supersede the draft (codex r4 P1 on
+            // #3785): the answer is kept on the ask for the audit only.
             freshFlags.unit_writeback = { lead: 'skipped', customer: 'skipped', at: new Date().toISOString(), reason: freshFlags.unit_call_log_id ? 'card_closed' : 'no_card' };
           } else {
             const targets = await unitTargets(trx, freshFlags);
-            freshFlags.unit_writeback = await applyUnitWriteback(trx, { unitLine, flags: freshFlags, targets });
+            // Re-draft targets: EVERY live-unsent draft for the call, guarded
+            // exactly like the bedroom re-price (the send guard is stamped in
+            // THIS locked phase so no stale draft can go out first). Looked
+            // up — and row-locked — BEFORE the CRM rows below (finalizer and
+            // creator lock order, see unsentDraftsForCall); a second pass
+            // runs under the call-row lock inside applyUnitWriteback. Quote
+            // signals: the item's own, or recovered from the call row for a
+            // legacy ask.
+            if (freshFlags.unit_call_log_id && (targets.quotePromised || targets.quoteRequested)) {
+              unitRedraft = {
+                callLogId: String(freshFlags.unit_call_log_id),
+                quotePromised: targets.quotePromised === true,
+                attempt: require('crypto').randomUUID(),
+                guardedIds: new Set(),
+                supersedeEstimateIds: [],
+                // The item-bound building, not the call row's rolling extraction.
+                building: freshFlags.unit_ask_building || null,
+              };
+              await guardLiveDraftsForCall(trx, unitRedraft.callLogId, unitRedraft);
+            }
+            freshFlags.unit_writeback = await applyUnitWriteback(trx, { unitLine, flags: freshFlags, targets, askDraftId: fresh.id, redraft: unitRedraft });
           }
         }
       }
@@ -1196,18 +1305,37 @@ async function handleClarifyReply({ phone, body }) {
       // The bedroom re-price targets the unit draft the ASK was parked for
       // (bedroom_estimate_id) — never the generic estimate_id, which a
       // merged later ask may have re-pointed at an unrelated draft.
-      const lockedEstimateId = freshFlags.bedroom_estimate_id ? String(freshFlags.bedroom_estimate_id) : null;
+      // Re-draft targets are per ITEM (codex r1 P1 on #3785): the unit
+      // item's targets are the call's live-unsent drafts (primary = the
+      // newest); the bedroom item's is its own unit draft. Both are guarded
+      // here; when they are the same row one re-run carries both overrides,
+      // when they differ the unit re-run supersedes ITS set and the bedroom
+      // target is handed to the operator (unscheduled + bell) — never left
+      // sendable.
+      const bedroomTargetId = recorded.includes('bedroom_count') && freshFlags.bedroom_estimate_id
+        ? String(freshFlags.bedroom_estimate_id) : null;
+      const unitTargetId = unitRedraft?.supersedeEstimateIds[0] || null;
+      // With a unit re-draft in play the guarded/superseded target is the
+      // UNIT's own (possibly none — the call's draft has not committed
+      // yet); the bedroom target is never promoted into its place (codex
+      // r3 P1 on #3785). Without a unit re-draft, the bedroom behavior stands.
+      const lockedEstimateId = unitRedraft ? unitTargetId : bedroomTargetId;
+      const extraBedroomTarget = unitRedraft && bedroomTargetId && !unitRedraft.guardedIds.has(bedroomTargetId) ? bedroomTargetId : null;
       // Estimate-level send guard, stamped in the SAME locked phase that
       // records the answer: the linked draft's dollars are about to be
       // replaced, so admin send / schedule / public accept refuse it
-      // until the replacement lands (repricePendingActive — time-boxed so
-      // a process restart can never strand a draft).
-      let repriceGuarded = false;
-      const repriceAttempt = recorded.includes('bedroom_count') && lockedEstimateId
-        ? require('crypto').randomUUID()
-        : null;
-      if (repriceAttempt) {
+      // until the replacement lands (repricePendingActive). The unit set
+      // was guarded above under the same attempt token.
+      let repriceGuarded = !!(unitRedraft && unitTargetId);
+      const repriceAttempt = unitRedraft
+        ? unitRedraft.attempt
+        : (recorded.includes('bedroom_count') && lockedEstimateId ? require('crypto').randomUUID() : null);
+      if (repriceAttempt && !unitRedraft && lockedEstimateId) {
         repriceGuarded = await setEstimateRepricePending(trx, lockedEstimateId, new Date().toISOString(), repriceAttempt);
+      }
+      let extraBedroomGuarded = false;
+      if (repriceAttempt && extraBedroomTarget) {
+        extraBedroomGuarded = await setEstimateRepricePending(trx, extraBedroomTarget, new Date().toISOString(), repriceAttempt);
       }
       const remaining = freshMissing.filter((item) => !recorded.includes(item));
       const answeredFlagsObj = {
@@ -1249,7 +1377,9 @@ async function handleClarifyReply({ phone, body }) {
       return {
         recorded, estimateId: lockedEstimateId, repriceGuarded, repriceAttempt,
         callOrigin: freshFlags.call_origin === true,
+        unitRedraft,
         unitWriteback: freshFlags.unit_writeback || null,
+        extraBedroomTarget: extraBedroomGuarded ? extraBedroomTarget : null,
       };
     });
     if (!locked.recorded.length) return { handled: false };
@@ -1276,12 +1406,17 @@ async function handleClarifyReply({ phone, body }) {
     // (red/blocked/skip), not by throwing, and the answer is already
     // recorded above — without this stamp a failed re-draft would leave
     // the fallback-priced draft standing with nothing pointing at it.
-    const repriceTarget = recorded.includes('bedroom_count') && locked.estimateId
-      ? locked.estimateId
-      : null;
+    const unitSupersedeIds = locked.unitRedraft?.supersedeEstimateIds || [];
+    const repriceTarget = locked.estimateId || null;
+    const repriceReason = locked.unitRedraft && repriceTarget && unitSupersedeIds.includes(repriceTarget) ? 'clarify_unit_reply' : 'clarify_bedroom_reply';
     if (repriceTarget) {
       await stampClarifyFlags(digits, awaiting.id, {
-        reprice_pending: { estimate_id: repriceTarget, bedroom_count: bedroomCount, at: new Date().toISOString() },
+        reprice_pending: {
+          estimate_id: repriceTarget,
+          ...(unitSupersedeIds.length > 1 ? { estimate_ids: unitSupersedeIds } : {}),
+          ...(repriceReason === 'clarify_unit_reply' ? { unit: unitLine } : { bedroom_count: bedroomCount }),
+          at: new Date().toISOString(),
+        },
       });
     }
 
@@ -1309,13 +1444,49 @@ async function handleClarifyReply({ phone, body }) {
         // SMS-origin draft re-drafts from the thread. Address/service
         // answers have no linked draft (red-path asks) and resume as before.
         const supersedeEstimateId = repriceTarget;
-        const voiceCallLogId = supersedeEstimateId ? await voiceOriginCallLogId(supersedeEstimateId) : null;
-        if (!supersedeEstimateId && locked.callOrigin) {
-          // A completed-call ask: the answer is recorded and stamped on the
-          // triage card; nothing re-drafts automatically. The SMS-thread
-          // composer lacks the call's transcript/extraction, and the call
-          // re-run belongs to the write-back lane this PR deliberately
-          // excludes — the office works it from the card.
+        const unitRedraft = locked.unitRedraft;
+        const voiceCallLogId = unitRedraft
+          ? unitRedraft.callLogId
+          : (supersedeEstimateId ? await voiceOriginCallLogId(supersedeEstimateId) : null);
+        if (unitRedraft) {
+          // Write-back lane (gate ON, quote requested/promised on the call):
+          // re-run the CALL context — the V2 extraction + transcript carry
+          // the service and quote evidence — superseding every live unsent
+          // building-level draft (the newest is the primary the new row
+          // names; the rest retire with it) under the same send guard as the
+          // bedroom re-price, else drafting fresh. The creators' unit-answer
+          // fence (stamped in the locked phase) keeps a composer that never
+          // saw the answer from inserting behind this run.
+          const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
+          if (estimatorEngineEnabled()) {
+            repriceOutcome = await maybeDraftEstimateForCall({
+              callLogId: unitRedraft.callLogId,
+              quotePromised: unitRedraft.quotePromised === true,
+              // The texted unit reaches the composer explicitly — the
+              // original extraction and a drifted/absent lead line may still
+              // describe the whole building (codex r1 P1 on #3785).
+              unitLineOverride: unitLine,
+              ...(unitRedraft.building?.street_line_1 ? { serviceAddressOverride: unitRedraft.building } : {}),
+              // The bedroom answer rides along ONLY when both items target the
+              // SAME estimate (codex r2 P1 on #3785) — a bedroom count bound
+              // to another property's draft never reaches this call's re-draft.
+              ...(recorded.includes('bedroom_count') && bedroomCount !== null && !locked.extraBedroomTarget
+                && locked.estimateId && unitSupersedeIds.includes(String(locked.estimateId))
+                ? { bedroomCountOverride: bedroomCount } : {}),
+              ...(unitSupersedeIds.length ? {
+                supersedeEstimateIds: unitSupersedeIds,
+                supersedeReason: 'clarify_unit_reply',
+                supersedeAttempt: locked.repriceAttempt,
+              } : {}),
+            });
+          } else {
+            logger.warn('[estimate-clarify] unit answer recorded but the estimator engine is gated off — draft from the call manually', { draftId: awaiting.id, callLogId: unitRedraft.callLogId });
+          }
+        } else if (!supersedeEstimateId && locked.callOrigin) {
+          // A completed-call ask with the write-back gate OFF (or no quote
+          // asked for on the call): the answer is recorded and stamped on
+          // the triage card; nothing re-drafts automatically — the office
+          // works it from the card.
           logger.info('[estimate-clarify] call-origin answer recorded — no automatic re-draft', { draftId: awaiting.id });
         } else if (voiceCallLogId) {
           const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
@@ -1351,35 +1522,62 @@ async function handleClarifyReply({ phone, body }) {
         if (resumeErr.expected) logger.info(`[estimate-clarify] ${resumeErr.message}`);
         else logger.warn(`[estimate-clarify] resume failed (answer recorded): ${resumeErr.message}`);
       }
+      if (locked.extraBedroomTarget) {
+        // A DISTINCT bedroom draft could not ride the unit re-run: its send
+        // guard stands, it is pulled off the cron, and the operator gets
+        // the one bell — same exception path as a failed re-price.
+        await withClarifyLock(digits, (trx) => unscheduleForOperatorReprice(trx, locked.extraBedroomTarget, locked.repriceAttempt))
+          .catch((err) => logger.warn(`[estimate-clarify] unschedule (bedroom target) failed: ${err.message}`));
+        try {
+          await require('./notification-service').notifyAdmin(
+            'lead',
+            'Bedroom count received — re-price the unit draft',
+            `The customer answered the bedroom question (${bedroomCount === 0 ? 'studio' : `${bedroomCount} bedroom${bedroomCount === 1 ? '' : 's'}`}) in the same text as their unit; the unit re-draft targeted a different estimate, so this draft still carries its fallback price — re-price it before sending.`,
+            { link: `/admin/estimates/${locked.extraBedroomTarget}`, metadata: { estimate_clarify: true, reprice_pending: true, draftId: awaiting.id, estimateId: locked.extraBedroomTarget, bedroomCount } },
+          );
+        } catch (bellErr) {
+          logger.warn(`[estimate-clarify] bedroom-target bell failed (guard stands): ${bellErr.message}`);
+        }
+      }
       if (!repriceTarget) return repriceOutcome;
       if (repriceOutcome?.created === true) {
-        // The superseded draft is archived by the replacement insert; its
-        // guard is moot. The ask row records the outcome.
+        // The superseded draft(s) are archived by the replacement insert;
+        // their guards are moot. The ask row records the outcome — and a
+        // bedroom item still OPEN on the same ask re-points to the
+        // replacement, or its later answer would guard the archived row
+        // (codex r2 P1 on #3785).
+        const bedroomStillOpen = !recorded.includes('bedroom_count') && repriceReason === 'clarify_unit_reply';
         await stampClarifyFlags(digits, awaiting.id, {
           reprice_pending: null,
           repriced_at: new Date().toISOString(),
           repriced_estimate_id: repriceOutcome.estimateId || null,
+          ...(bedroomStillOpen && repriceOutcome.estimateId ? { bedroom_estimate_id: String(repriceOutcome.estimateId) } : {}),
         });
       } else {
         // No replacement: the draft's dollars are KNOWN stale, so the send
         // guard STAYS (only the operator's explicit re-price clears it);
-        // a scheduled row is pulled off the cron so it cannot auto-send.
-        await withClarifyLock(digits, (trx) => unscheduleForOperatorReprice(trx, repriceTarget, locked.repriceAttempt))
-          .catch((err) => logger.warn(`[estimate-clarify] unschedule for operator re-price failed: ${err.message}`));
+        // a scheduled row is pulled off the cron so it cannot auto-send —
+        // every guarded row of a unit set, not just the primary.
+        const staleIds = repriceReason === 'clarify_unit_reply' && unitSupersedeIds.length ? unitSupersedeIds : [repriceTarget];
+        await withClarifyLock(digits, async (trx) => {
+          for (const id of staleIds) await unscheduleForOperatorReprice(trx, id, locked.repriceAttempt);
+        }).catch((err) => logger.warn(`[estimate-clarify] unschedule for operator re-price failed: ${err.message}`));
         // Exception-based (CLAUDE.md rule 14): the pending stamp stays on
         // the ask row and the operator gets the one bell that names the
         // draft to re-price — the customer's answer is never lost silently.
-        logger.warn('[estimate-clarify] bedroom answer recorded but the draft could not be re-priced automatically', {
+        logger.warn(`[estimate-clarify] ${repriceReason === 'clarify_unit_reply' ? 'unit' : 'bedroom'} answer recorded but the draft could not be re-priced automatically`, {
           draftId: awaiting.id, estimateId: repriceTarget, outcome: repriceOutcome?.lane || repriceOutcome?.skipped || repriceOutcome?.reasons || 'no_outcome',
         });
         try {
           await require('./notification-service').notifyAdmin(
             'lead',
-            'Bedroom count received — re-price the unit draft',
-            `The customer answered the bedroom question (${bedroomCount === 0 ? 'studio' : `${bedroomCount} bedroom${bedroomCount === 1 ? '' : 's'}`}) but the automated re-draft did not produce a replacement. The draft still carries its fallback price — re-price it before sending.`,
+            repriceReason === 'clarify_unit_reply' ? 'Unit number received — re-draft the estimate' : 'Bedroom count received — re-price the unit draft',
+            repriceReason === 'clarify_unit_reply'
+              ? `The customer texted their unit (${unitLine}) but the automated re-draft did not produce a replacement. The draft still describes the whole building${staleIds.length > 1 ? ` (${staleIds.length} unsent drafts for this call are held)` : ''} — re-draft it before sending.`
+              : `The customer answered the bedroom question (${bedroomCount === 0 ? 'studio' : `${bedroomCount} bedroom${bedroomCount === 1 ? '' : 's'}`}) but the automated re-draft did not produce a replacement. The draft still carries its fallback price — re-price it before sending.`,
             {
               link: `/admin/estimates/${repriceTarget}`,
-              metadata: { estimate_clarify: true, reprice_pending: true, draftId: awaiting.id, estimateId: repriceTarget, bedroomCount },
+              metadata: { estimate_clarify: true, reprice_pending: true, draftId: awaiting.id, estimateId: repriceTarget, ...(repriceReason === 'clarify_unit_reply' ? { unit: unitLine, estimateIds: staleIds } : { bedroomCount }) },
             },
           );
         } catch (bellErr) {

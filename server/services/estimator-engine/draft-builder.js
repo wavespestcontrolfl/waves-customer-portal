@@ -1057,13 +1057,23 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // then archived only AFTER the replacement insert (same transaction)
     // — a duplicate block or any other early return leaves it standing,
     // never archived-without-successor (codex pre-push P0).
-    const supersedeEstimateId = context?.supersedeEstimateId || null;
-    const supersedeTarget = supersedeEstimateId
-      ? await lockSupersededDraftInTx(trx, { estimateId: supersedeEstimateId, attempt: context?.supersedeAttempt || null })
-      : null;
-    if (supersedeEstimateId && !supersedeTarget) {
-      logger.info('[estimator-engine] supersede target no longer an unsent draft — left alone', { estimateId: supersedeEstimateId });
+    // The unit write-back re-draft supersedes a SET: historical composer
+    // races can leave several live unsent drafts carrying one callLogId,
+    // and replacing only the newest would leave the rest sendable with the
+    // building-level address (codex r5 P1 on #3785). Every id is locked in
+    // the caller's order (the reply handler already holds none of them);
+    // the first that still qualifies is the primary the new row names.
+    const supersedeEstimateIds = Array.isArray(context?.supersedeEstimateIds) && context.supersedeEstimateIds.length
+      ? context.supersedeEstimateIds.map(String)
+      : (context?.supersedeEstimateId ? [String(context.supersedeEstimateId)] : []);
+    const supersedeTargets = [];
+    for (const estimateId of supersedeEstimateIds) {
+      const target = await lockSupersededDraftInTx(trx, { estimateId, attempt: context?.supersedeAttempt || null });
+      if (target) supersedeTargets.push(target);
+      else logger.info('[estimator-engine] supersede target no longer an unsent draft — left alone', { estimateId });
     }
+    const supersedeTarget = supersedeTargets[0] || null;
+    const supersedeTargetIds = new Set(supersedeTargets.map((t) => String(t.id)));
     // Call-scoped in-lock recheck on EVERY serialization path (codex P1,
     // PR #3304 r18): the phone-lock path used to skip it, so a stale and
     // a corrected composer with DIFFERENT lead addresses could both pass
@@ -1082,7 +1092,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'superseded_at', '') = ''")
         // The draft this re-run supersedes carries the same call — it is
         // the row being replaced, not a concurrent duplicate.
-        .modify((q) => { if (supersedeTarget) q.whereNot('id', supersedeTarget.id); })
+        .modify((q) => { if (supersedeTargets.length) q.whereNotIn('id', supersedeTargets.map((t) => t.id)); })
         .first();
       if (existingForCall) {
         return {
@@ -1117,6 +1127,30 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
               blocked: true,
               reason: 'call_rejected',
               message: `This call was rejected by the pipeline (${rejected}) — no draft is created.`,
+            },
+          };
+        }
+      }
+      // UNIT-ANSWER fence for EVERY call-origin insert (clarify write-back,
+      // codex r5 P1 on #3785): the customer's texted unit is stamped on the
+      // call row under the same lock this transaction holds (above), so a
+      // composer that built a whole-building draft before the answer
+      // arrived is blocked here instead of inserting it unguarded after
+      // the reply's own lookup ran; the unit re-run carries the answer and
+      // passes. A draft for another building, or one already naming a
+      // unit, is untouched.
+      {
+        const { callUnitAnswerFence } = require('../../utils/estimate-claim-sql');
+        const fenceReason = await callUnitAnswerFence(trx, call.id, {
+          address: intent.address,
+          unitLineOverride: context?.unitLineOverride || null,
+        });
+        if (fenceReason) {
+          return {
+            duplicateBlock: {
+              blocked: true,
+              reason: fenceReason,
+              message: 'The caller texted their unit after this draft was composed — the unit re-draft replaces it.',
             },
           };
         }
@@ -1209,7 +1243,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     const seenEstimateIds = new Set();
     const absorb = (rows) => {
       for (const row of rows) {
-        if (supersedeTarget && String(row.id) === String(supersedeTarget.id)) continue;
+        if (supersedeTargetIds.has(String(row.id))) continue;
         if (seenEstimateIds.has(row.id)) continue;
         seenEstimateIds.add(row.id);
         allOpen.push(row);
@@ -1273,6 +1307,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           callLogId: call?.id || null,
           callSid: call?.twilio_call_sid || null,
           ...(supersedeTarget ? { supersedesEstimateId: supersedeTarget.id } : {}),
+          ...(supersedeTargets.length > 1 ? { supersedesEstimateIds: supersedeTargets.map((t) => t.id) } : {}),
           // The processing generation whose claim composed this draft —
           // lets any later reconciler prove the draft predates (or
           // matches) the call's current pass without wall clocks or
@@ -1339,8 +1374,8 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 
     // Replacement inserted — NOW retire the draft it supersedes (same
     // transaction; a rollback un-archives it together with the insert).
-    if (supersedeTarget) {
-      await archiveSupersededDraftInTx(trx, supersedeTarget, {
+    for (const target of supersedeTargets) {
+      await archiveSupersededDraftInTx(trx, target, {
         reason: context?.supersedeReason || 'superseded_by_redraft',
       });
     }
