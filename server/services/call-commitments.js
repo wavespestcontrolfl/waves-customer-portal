@@ -1352,8 +1352,11 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
   try {
     if (!callSid) return summary;
     return await conn.transaction(async (trx) => {
-      const call = await trx('call_log').where({ twilio_call_sid: callSid }).forUpdate().first('id', 'metadata');
+      const call = await trx('call_log').where({ twilio_call_sid: callSid }).forUpdate().first('id', 'metadata', 'source');
       if (!call) return summary;
+      // A voice-agent sandbox call is a test: a promise Sandy makes on it
+      // must never become office work in the Owed queue.
+      if (call.source === require('./voice-agent/relay-protocol').VOICE_RELAY_SANDBOX_SOURCE) return { ...summary, sandbox: true };
       if (sessionKey) {
         const owner = relayClaimOwner(call.metadata);
         if (owner && owner !== String(sessionKey)) return { ...summary, superseded: true };
