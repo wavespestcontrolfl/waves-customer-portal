@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * listen-transcripts.js — MUTATES (dry-run default; `seed --execute` writes)
+ * listen-transcripts.js — MUTATES (dry-run default; --execute writes: extract → the --out file, seed → the DB)
  *
  * "/listen": mines the operator's OWN Claude Code + Codex session transcripts
  * on this machine for blog-topic ideas and hands them to the existing content
@@ -16,7 +16,7 @@
  *             asks the FAST text policy for candidate topics, applies the
  *             waves-content topic-targeting rules, and writes a category-seed
  *             MANIFEST (same schema as server/data/category-seed-topics-v1.json)
- *             to --out when given (no --out ⇒ printed only, nothing written).
+ *             to --out with --execute (without --execute ⇒ printed only, nothing written).
  *             No DB. Prints the candidates.
  *
  *   seed      --file=<manifest> [--only=id,id] [--execute]: validates the
@@ -217,6 +217,7 @@ Hard rules (drop an idea rather than bend these):
 
 Return ONLY JSON: {"ideas":[{"working_title":string,"slug":string,"city":string|null,"primary_kw":string,"secondary_kws":[string],"thesis":string,"outline":[string,...],"sources":[string,...],"why_now":string,"evidence":string(<=200 chars, quoted or paraphrased from the transcript),"confidence":0.0-1.0}]}. Return {"ideas":[]} when nothing qualifies. At most 4 ideas per transcript.`;
 
+const PINNED_SLUG_RE = /^\/(pest-control|lawn-care|tree-shrub|mosquito)\/[a-z0-9-]+\/$/;
 const NEAR_ME_RE = /\bnear me\b|\bnearby\b/i;
 const DOOR_TO_DOOR_RE = /door[\s-]to[\s-]door/i;
 const SOURCE_HOSTS = ['edis.ifas.ufl.edu', 'gardeningsolutions.ifas.ufl.edu', 'entnemdept.ufl.edu', 'epa.gov', 'fdacs.gov', 'cdc.gov'];
@@ -248,7 +249,11 @@ function targetingViolation(idea) {
   const title = String(idea.working_title || '');
   const slug = String(idea.slug || '');
   if (!title || !slug || !idea.thesis || !Array.isArray(idea.outline) || !idea.outline.length) return 'incomplete';
-  if (!/^\/(pest-control|lawn-care|tree-shrub|mosquito)\//.test(slug)) return 'slug_prefix';
+  // The runner honours an operator pin only as an exact lowercase two-segment
+  // /category/leaf/ path (autonomous-runner applyOperatorSlugRepair); anything
+  // else survives review and then parks at generation, so reject it here
+  // (Codex r3 P2).
+  if (!PINNED_SLUG_RE.test(slug)) return 'slug_shape';
   if (NEAR_ME_RE.test(text)) return 'near_me_phrasing';
   if (DOOR_TO_DOOR_RE.test(text) || bannedTopicFinding(text)) return 'banned_topic';
   // Framing parts only (title / slug / keyword) — an outline may MENTION
@@ -377,17 +382,21 @@ function buildManifest(ideas, { now }) {
 
 // ── seed mode ────────────────────────────────────────────────────────
 
+const TERMINAL_QUEUE_STATUSES = new Set(['skipped', 'expired']);
+
 async function seedFlags(db, briefs) {
   const keys = briefs.map((b) => `catseed:v1:${b.id}`);
   const queued = keys.length ? await db('opportunity_queue').whereIn('dedupe_key', keys).select('dedupe_key', 'status') : [];
   const byKey = new Map(queued.map((r) => [r.dedupe_key, r.status]));
   const titles = briefs.map((b) => normalizeTitle(b.working_title));
   const liveTitles = new Set(
-    (await db('blog_posts').whereRaw("workflow_status IS DISTINCT FROM 'archived'").select('title')).map((r) => normalizeTitle(r.title)),
+    // blog_posts keeps its archive state in `status` (workflow_status is a
+    // content_registry column — Codex r3 P1).
+    (await db('blog_posts').whereRaw("status IS DISTINCT FROM 'archived'").select('title')).map((r) => normalizeTitle(r.title)),
   );
   const queuedTitles = new Set(
     (await db('opportunity_queue')
-      .whereNotIn('status', ['skipped', 'expired'])
+      .whereNotIn('status', [...TERMINAL_QUEUE_STATUSES])
       .whereRaw("signal_metadata->'category_brief'->>'working_title' IS NOT NULL")
       .select(db.raw("signal_metadata->'category_brief'->>'working_title' AS title")))
       .map((r) => normalizeTitle(r.title)),
@@ -432,10 +441,15 @@ async function runSeed({ file, only, execute }) {
     process.exit(2);
   }
   const flags = await seedFlags(db, briefs);
-  const skip = new Set(flags.filter((f) => f.already_queued || f.title_in_queue || f.title_is_live_post).map((f) => f.id));
+  // A dismissed (skipped) or expired row is the seeder's own revival case
+  // (category-seed-seeder ON CONFLICT revives it at the initial status with
+  // a reset claim budget) — only a live queue status blocks a reseed
+  // (Codex r3 P2).
+  const blocksReseed = (status) => status && !TERMINAL_QUEUE_STATUSES.has(status);
+  const skip = new Set(flags.filter((f) => blocksReseed(f.already_queued) || f.title_in_queue || f.title_is_live_post).map((f) => f.id));
   console.log(`\n${execute ? 'EXECUTE' : 'DRY RUN'} — ${briefs.length} selected, ${briefs.length - skip.size} to seed at pending_review\n`);
   for (const f of flags) {
-    const why = f.already_queued ? `already queued (${f.already_queued})` : f.title_is_live_post ? 'live post with this title' : f.title_in_queue ? 'same title already in queue' : 'seed';
+    const why = blocksReseed(f.already_queued) ? `already queued (${f.already_queued})` : f.title_is_live_post ? 'live post with this title' : f.title_in_queue ? 'same title already in queue' : f.already_queued ? `revive (${f.already_queued})` : 'seed';
     console.log(`  ${skip.has(f.id) ? 'SKIP' : 'SEED'}  ${f.id}  ${f.title}  — ${why}`);
   }
   const toSeed = briefs.filter((b) => !skip.has(b.id));
@@ -454,7 +468,7 @@ async function runSeed({ file, only, execute }) {
 
 // ── extract mode ─────────────────────────────────────────────────────
 
-async function runExtract({ hours, out }) {
+async function runExtract({ hours, out, execute }) {
   const { redact } = require(path.join(REPO_ROOT, 'server/services/content/pii-redactor'));
   const MODELS = require(path.join(REPO_ROOT, 'server/config/models'));
   const { dispatchWithFallback } = require(path.join(REPO_ROOT, 'server/services/llm/call'));
@@ -468,10 +482,11 @@ async function runExtract({ hours, out }) {
 
   const { ideas, failures } = await extractIdeas(chunks, { dispatch: dispatchWithFallback, policy: MODELS.TEXT_POLICIES.fastStructured });
   const { manifest, dropped } = buildManifest(ideas, { now });
-  // MUTATES contract: nothing touches the filesystem unless --out names a
-  // path (Codex r2 P1). Without it the manifest is printed as JSON so the
-  // operator can still pipe it somewhere deliberately.
-  if (out) {
+  // MUTATES contract: --out names the destination, --execute authorizes the
+  // write (Codex r2+r3 P1). Without --execute the manifest is printed as JSON
+  // and nothing touches the filesystem.
+  const write = !!(out && execute);
+  if (write) {
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, JSON.stringify(manifest, null, 2));
   }
@@ -484,10 +499,11 @@ async function runExtract({ hours, out }) {
     console.log('\ndropped:');
     for (const d of dropped) console.log(`  - ${d.reason}: ${d.title}`);
   }
-  if (out) {
+  if (write) {
     console.log(`\nmanifest → ${out}\nnext: railway run --service Postgres node ops/agents/listen-transcripts.js seed --file=${out} [--only=id,id] [--execute]`);
   } else if (manifest.briefs.length) {
-    console.log(`\nno --out given — manifest NOT written. Re-run with --out=${path.join(os.tmpdir(), `listen-${etDateString(now)}.json`)} to keep it:\n`);
+    const dest = out || path.join(os.tmpdir(), `listen-${etDateString(now)}.json`);
+    console.log(`\nDRY RUN — manifest NOT written. Re-run with --out=${dest} --execute to keep it:\n`);
     console.log(JSON.stringify(manifest, null, 2));
   }
 }
@@ -497,7 +513,9 @@ if (require.main === module) {
     if (mode === 'extract') {
       const outFlag = flag('out', null);
       if (outFlag === true) { console.error('--out needs a path (--out=/tmp/listen-<date>.json)'); process.exit(2); }
-      await runExtract({ hours: Number(flag('hours', 24)), out: outFlag ? path.resolve(outFlag) : null });
+      const execute = flag('execute', false) === true;
+      if (execute && !outFlag) { console.error('--execute needs --out=<path> to write to'); process.exit(2); }
+      await runExtract({ hours: Number(flag('hours', 24)), out: outFlag ? path.resolve(outFlag) : null, execute });
     } else if (mode === 'seed') {
       const file = flag('file');
       if (!file || file === true) { console.error('seed needs --file=<manifest.json>'); process.exit(2); }

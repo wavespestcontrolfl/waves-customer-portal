@@ -139,7 +139,11 @@ describe('targeting filters', () => {
     ['reentry_safety_claim', { thesis: 'Our pet-safe fungicide fixes it.' }],
     ['reentry_safety_claim', { thesis: 'This pesticide is completely safe for the whole family.' }],
     ['reentry_safety_claim', { outline: ['Re-entry is fine after 30 minutes of drying'] }],
-    ['slug_prefix', { slug: '/blog/brown-patches/' }],
+    ['slug_shape', { slug: '/blog/brown-patches/' }],
+    // The runner honours a pin only as an exact two-segment /category/leaf/ path.
+    ['slug_shape', { slug: '/lawn-care/chinch-bugs' }],
+    ['slug_shape', { slug: '/lawn-care/pests/chinch-bugs/' }],
+    ['slug_shape', { slug: '/lawn-care/Chinch-Bugs/' }],
     ['no_allowed_source', { sources: ['https://randomblog.example.com/lawns'] }],
     ['no_allowed_source', { sources: ['Pull the current Wikipedia article on lawn fungus'] }],
     ['city_slug_mismatch', { city: 'Bradenton' }],
