@@ -387,6 +387,18 @@ describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 20
     ["rodent bait 2,000 sf", { ...BASE, services: { rodentBait: {} } }, "rodent_bait", { perVisit: 89, annual: 356, monthly: 29.67, visitsPerYear: 4 }],
     ["termite bait (Trelona) 2,000 sf monitoring", { ...BASE, services: { termite: { system: "trelona" } } }, "termite_bait", { perApp: 72, annual: 288, monthly: 24, visitsPerYear: 4 }],
     ["one-time pest 2,000 sf", { ...BASE, services: { oneTimePest: {} } }, "one_time_pest", { price: 246, priceAfterDiscount: 246, multiplier: 2.2, basePrice: 112, selectedFloor: 199 }],
+    // The remaining independently audited customer-price families (codex r18 P2):
+    // tree & shrub tiers, palm injection, German roach, WDO — an edit to
+    // TREE_SHRUB.tiers, PALM or SPECIALTY moves the engine AND the formula-parity
+    // helper together; only a literal catches it.
+    ["tree & shrub standard 2,000 sf beds, 6 trees", { ...BASE, bedArea: 2000, services: { treeShrub: { tier: "standard", treeCount: 6 } } }, "tree_shrub", { perApp: 106.17, annual: 637, monthly: 53.08, visitsPerYear: 6 }],
+    ["tree & shrub enhanced 1,000 sf beds, 3 trees", { ...BASE, bedArea: 1000, services: { treeShrub: { tier: "enhanced", treeCount: 3 } } }, "tree_shrub", { perApp: 70.22, annual: 632, monthly: 52.67, visitsPerYear: 9 }],
+    ["tree & shrub light 4,000 sf beds, 10 trees, difficult access", { ...BASE, bedArea: 4000, services: { treeShrub: { tier: "light", treeCount: 10, access: "difficult" } } }, "tree_shrub", { perApp: 189, annual: 756, monthly: 63, visitsPerYear: 4 }],
+    ["palm injection insecticide, 4 medium palms", { ...BASE, services: { palmInjection: { treatmentType: "insecticide", palmCount: 4, palmSize: "medium" } } }, "palm_injection", { pricePerPalm: 55, perVisit: 220, annual: 440, monthly: 36.67 }],
+    ["palm injection Tree-Age, 1 palm at 12 in DBH", { ...BASE, services: { palmInjection: { treatmentType: "treeAge", palmCount: 1, dbhInches: 12 } } }, "palm_injection", { pricePerPalm: 85, perVisit: 85, annual: 43, monthly: 3.58 }],
+    ["German roach moderate", { ...BASE, services: { germanRoach: { severity: "moderate" } } }, "german_roach", { price: 450, priceAfterDiscount: 450 }],
+    ["German roach severe", { ...BASE, services: { germanRoach: { severity: "severe" } } }, "german_roach", { price: 550, priceAfterDiscount: 550 }],
+    ["WDO inspection 2,000 sf", { ...BASE, services: { wdo: {} } }, "wdo_inspection", { price: 250, priceAfterDiscount: 250 }],
   ];
   test.each(FROZEN)("%s prices exactly as frozen", (_name, input, service, expected) => {
     const li = line(generateEstimate(input), service);

@@ -40,6 +40,7 @@ const ENGINE_DIR = path.join(ROOT, 'server', 'services', 'pricing-engine');
 const constants = require(path.join(ENGINE_DIR, 'constants'));
 const { generateEstimate } = require(path.join(ENGINE_DIR, 'estimate-engine'));
 const converter = require(path.join(ROOT, 'server', 'services', 'estimate-converter'));
+const { etParts } = require(path.join(ROOT, 'server', 'utils', 'datetime-et'));
 const { computeChargeAmount } = require(path.join(ROOT, 'server', 'services', 'stripe-pricing'));
 const PREPAY_PCT = Number(converter.ANNUAL_PREPAY_DISCOUNT_PCT ?? constants.ANNUAL_PREPAY_DISCOUNT_PCT ?? 0.05);
 // Stripe's fixed per-transaction component; not surchargeable (stripe-pricing.js header).
@@ -152,9 +153,16 @@ function hardscapeOf(lotSqFt, propertyType = 'single_family', features = {}) {
 // PEST — documented formula: max(floor, base + round(footprintAdj) + featureAdj + propAdj) × freqMult
 // Year-built pressure bump — frozen mirror of modifiers.js pestAgeAdj (no constant
 // exists for it): age ≥ 60 → $8, ≥ 40 → $5, ≥ 20 → $2, else $0 (codex r14 P2).
+// Age is taken from the EASTERN calendar year (server/utils/datetime-et.js
+// etParts — AGENTS.md America/New_York discipline). Production's pestAgeAdj
+// uses the UTC year on a TZ=UTC Railway box, so for the five hours after
+// 00:00 UTC on 1 January — still 31 December in Eastern time — this
+// expectation legitimately DISAGREES with the engine at an age threshold
+// (report finding AGE-001) instead of mirroring the drift (codex r18 P1).
+const currentETYear = () => etParts(new Date()).year;
 function pestAgeAdjOf(yearBuilt) {
   if (!yearBuilt) return 0;
-  const age = new Date().getFullYear() - Number(yearBuilt);
+  const age = currentETYear() - Number(yearBuilt);
   return age >= 60 ? 8 : age >= 40 ? 5 : age >= 20 ? 2 : 0;
 }
 function expectPest({ homeSqFt, stories = 1, features = {}, propertyType = 'single_family', frequency = 'quarterly', yearBuilt = null }) {
@@ -622,7 +630,19 @@ function record(section, name, input, expected, actual, opts = {}) {
   if (status === 'NO_PRICE') findings.push({ severity: 'P1', section, name, detail: `independent ${expected} but the engine returned no price for this line` });
   return row;
 }
-function flagIf(cond, severity, section, name, detail) { if (cond) findings.push({ severity, section, name, detail }); }
+// A failed P0/P1 invariant is a COUNTED discrepancy, not a note (codex r18 P1):
+// flagIf records a MISMATCH scenario row — so it lands in the mismatch count,
+// the discrepancy list and the exit code — as well as the finding. Passing
+// invariants are not enumerated separately; they ride the record they
+// accompany. P2 flags stay advisory (finding only).
+function flagIf(cond, severity, section, name, detail) {
+  if (!cond) return;
+  findings.push({ severity, section, name, detail });
+  // A flag that accompanies a row of the same name (e.g. the prepay-cadence
+  // check pushes its own MISMATCH row first) is already counted through it.
+  const rowed = scenarios.some((s) => s.section === section && s.name === name);
+  if (!rowed && (severity === 'P0' || severity === 'P1')) scenarios.push({ section, name, input: null, expected: 'invariant holds', actual: detail, diff: null, status: 'MISMATCH', extra: { invariant: true } });
+}
 
 function runPestMatrix() {
   const section = 'pest_control';
@@ -660,7 +680,7 @@ function runPestMatrix() {
   }
   // year built → age adjustment at every boundary ±1 (codex r14 P2); 3,000 sf so the
   // floor cannot mask the adder
-  const thisYear = new Date().getFullYear();
+  const thisYear = currentETYear();
   for (const age of [0, 19, 20, 21, 39, 40, 41, 59, 60, 61, 120]) {
     const yearBuilt = thisYear - age;
     const exp = expectPest({ homeSqFt: 3000, yearBuilt });
@@ -1206,15 +1226,19 @@ function runAnnualEconomics() {
 function runCommercialMatrix() {
   const section = 'commercial';
   const cases = [
-    { name: 'commercial pest office 5,000 sf', input: { ...BASE, homeSqFt: 5000, lotSqFt: 20000, isCommercial: true, propertyType: 'commercial', commercialRiskType: 'office_low', services: { pest: { frequency: 'monthly' } } } },
-    { name: 'commercial lawn 60,000 sf turf', input: { ...BASE, homeSqFt: 5000, lotSqFt: 100000, lawnSqFt: 60000, isCommercial: true, propertyType: 'commercial', services: { lawn: {} } } },
-    { name: 'commercial mosquito 40,000 sf lot', input: { ...BASE, homeSqFt: 5000, lotSqFt: 40000, isCommercial: true, propertyType: 'commercial', services: { mosquito: {} } } },
-    { name: 'commercial one-time pest (manual quote?)', input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { oneTimePest: {} } } },
-    { name: 'commercial WDO', input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { wdo: {} } } },
-    { name: 'commercial german roach', input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { germanRoach: { severity: 'moderate' } } } },
-    { name: 'commercial rodent bait', input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { rodentBait: {} } } },
-    { name: 'commercial termite bait', input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { termite: { system: 'trelona' } } } },
-    { name: 'commercial tree & shrub', input: { ...BASE, homeSqFt: 5000, lotSqFt: 40000, bedArea: 6000, isCommercial: true, propertyType: 'commercial', services: { treeShrub: { tier: 'standard', treeCount: 20 } } } },
+    // `expect` = the main service line each case must return, and whether it is
+    // auto-priced or a manual quote (codex r18 P1): a dispatcher regression that
+    // drops the requested line, or downgrades an auto-priced program to a manual
+    // quote (or vice versa), must fail the run rather than record engine_only.
+    { name: 'commercial pest office 5,000 sf', expect: { service: 'commercial_pest', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 20000, isCommercial: true, propertyType: 'commercial', commercialRiskType: 'office_low', services: { pest: { frequency: 'monthly' } } } },
+    { name: 'commercial lawn 60,000 sf turf', expect: { service: 'commercial_lawn', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 100000, lawnSqFt: 60000, isCommercial: true, propertyType: 'commercial', services: { lawn: {} } } },
+    { name: 'commercial mosquito 40,000 sf lot', expect: { service: 'commercial_mosquito', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 40000, isCommercial: true, propertyType: 'commercial', services: { mosquito: {} } } },
+    { name: 'commercial one-time pest (manual quote)', expect: { service: 'commercial_pest', manual: true }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { oneTimePest: {} } } },
+    { name: 'commercial WDO (manual quote)', expect: { service: 'commercial_pest', manual: true }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { wdo: {} } } },
+    { name: 'commercial german roach (manual quote)', expect: { service: 'commercial_pest', manual: true }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { germanRoach: { severity: 'moderate' } } } },
+    { name: 'commercial rodent bait', expect: { service: 'commercial_rodent_bait', manual: false }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { rodentBait: {} } } },
+    { name: 'commercial termite bait', expect: { service: 'commercial_termite_bait', manual: false }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { termite: { system: 'trelona' } } } },
+    { name: 'commercial tree & shrub', expect: { service: 'commercial_tree_shrub', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 40000, bedArea: 6000, isCommercial: true, propertyType: 'commercial', services: { treeShrub: { tier: 'standard', treeCount: 20 } } } },
   ];
   // Auto-priced commercial lines must carry finite, POSITIVE amounts (codex r17
   // P1): this section bypasses record()/offBy, so a NaN / Infinity / missing
@@ -1235,8 +1259,13 @@ function runCommercialMatrix() {
     const r = runEngine(c.input);
     const lines = r.ok ? r.result.lineItems.map((l) => ({ service: l.service, annual: l.annual ?? null, price: l.price ?? null, perApp: l.perApp ?? l.perVisit ?? null, visits: l.visitsPerYear ?? l.visits ?? null, manualQuote: !!(l.quoteRequired || l.requiresCustomQuote || l.manualQuote), taxable: l.taxable ?? null, taxCategory: l.taxCategory ?? null, margin: l.margin ?? null, review: l.requiresManualReview ?? null })) : [];
     const badAmounts = lines.flatMap((l) => invalidAmounts(l).map((b) => `${l.service}: ${b}`));
-    const engineError = !r.ok ? r.error : (badAmounts.length ? `invalid amount(s) on an auto-priced line — ${badAmounts.join('; ')}` : null);
-    scenarios.push({ section, name: c.name, expected: null, actual: null, status: engineError ? 'engine_error' : 'engine_only', extra: { engineError, tier: r.ok ? r.result.waveGuard.tier : null, autoPricedLines: lines.filter((l) => !l.manualQuote).length, manualQuoteLines: lines.filter((l) => l.manualQuote).length, lines } });
+    if (r.ok) {
+      const main = lines.find((l) => l.service === c.expect.service);
+      if (!main) badAmounts.unshift(`expected line ${c.expect.service} missing (engine returned: ${lines.map((l) => l.service).join(', ') || 'no lines'})`);
+      else if (main.manualQuote !== c.expect.manual) badAmounts.unshift(`${c.expect.service}: expected ${c.expect.manual ? 'a manual quote' : 'an auto-priced line'}, got ${main.manualQuote ? 'a manual quote' : 'an auto-priced line'}`);
+    }
+    const engineError = !r.ok ? r.error : (badAmounts.length ? `expected-line / amount check failed — ${badAmounts.join('; ')}` : null);
+    scenarios.push({ section, name: c.name, expected: null, actual: null, status: engineError ? 'engine_error' : 'engine_only', extra: { engineError, expectedLine: c.expect, tier: r.ok ? r.result.waveGuard.tier : null, autoPricedLines: lines.filter((l) => !l.manualQuote).length, manualQuoteLines: lines.filter((l) => l.manualQuote).length, lines } });
     // A throwing commercial path, or an auto-priced line with an invalid amount,
     // is a P1 finding and a counted status, never a silent observation (codex r3
     // P1, r17 P1).
@@ -1470,7 +1499,7 @@ async function main() {
   md.push('# Independent estimator pricing audit — run output');
   md.push('');
   md.push(`Generated ${summary.generatedAt}. Constants source: **${summary.engineConstantsSource}**.`);
-  md.push(`Scenarios: ${summary.scenarioCount} · independent-vs-engine matches: ${summary.matches} · mismatches: ${summary.mismatches} · expected a price but the engine returned none: ${summary.noPrice} · engine-only observations: ${summary.engineOnly} (${summary.matches} + ${summary.mismatches} + ${summary.noPrice} + ${summary.engineOnly} = ${summary.matches + summary.mismatches + summary.noPrice + summary.engineOnly}) · commercial engine errors: ${summary.engineErrors}`);
+  md.push(`Scenarios: ${summary.scenarioCount} · independent-vs-engine matches: ${summary.matches} · mismatches: ${summary.mismatches} · expected a price but the engine returned none: ${summary.noPrice} · engine-only observations: ${summary.engineOnly} (${summary.matches} + ${summary.mismatches} + ${summary.noPrice} + ${summary.engineOnly} = ${summary.matches + summary.mismatches + summary.noPrice + summary.engineOnly}) · commercial engine errors: ${summary.engineErrors} · P0/P1 findings without a row: ${summary.unrowedP1Findings ?? 0}`);
   md.push('');
   md.push('## Findings raised by this run');
   md.push('');
@@ -1508,9 +1537,15 @@ async function main() {
   console.log(`\n(${summary.scenarioCount} scenarios, ${summary.mismatches} mismatches, ${summary.noPrice} expected-price-but-none, ${findings.length} findings)`);
   // A discrepancy is a failed verification, not a passing run with a note in
   // the report: exit nonzero so CI / a pre-push caller sees it (codex r6 P1).
-  const discrepancies = summary.mismatches + summary.noPrice + summary.engineErrors;
+  // Belt and braces (codex r18 P1): a P0/P1 finding pushed directly without a
+  // discrepancy row (e.g. a bundle whose engine lines are missing) still fails
+  // the run — every P0/P1 finding is a discrepancy, rowed or not.
+  const discrepancyRows = new Set(scenarios.filter((s) => s.status === 'MISMATCH' || s.status === 'NO_PRICE' || s.status === 'engine_error').map((s) => `${s.section}::${s.name}`));
+  const unrowedP1 = findings.filter((f) => (f.severity === 'P0' || f.severity === 'P1') && !discrepancyRows.has(`${f.section}::${f.name}`));
+  summary.unrowedP1Findings = unrowedP1.length;
+  const discrepancies = summary.mismatches + summary.noPrice + summary.engineErrors + unrowedP1.length;
   if (discrepancies > 0) {
-    console.error(`${discrepancies} discrepancy(ies): ${summary.mismatches} mismatches, ${summary.noPrice} expected-price-but-none, ${summary.engineErrors} commercial engine errors`);
+    console.error(`${discrepancies} discrepancy(ies): ${summary.mismatches} mismatches, ${summary.noPrice} expected-price-but-none, ${summary.engineErrors} commercial engine errors, ${unrowedP1.length} P0/P1 finding(s) without a row`);
     process.exitCode = 4;
   }
 }
