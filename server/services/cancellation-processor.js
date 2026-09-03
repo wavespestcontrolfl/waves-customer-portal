@@ -102,12 +102,14 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
   // same request dedupes against it below and must not retire it. Read
   // rows are never touched: an instruction staff already acted on is
   // history, not a duplicate.
-  // Retire + raise run under ONE account-scoped advisory lock (the same
-  // `admin:<key>` namespace notifyAdmin's per-key dedupe lock uses): two
-  // concurrent raises for different requests would otherwise each see no
-  // stale row, take only their distinct per-key locks, and both insert.
-  // notifyAdmin commits its own transaction inside the lock, so the second
-  // raiser's retire probe sees the first raiser's committed row.
+  // Retire + raise are ONE transaction under an account-scoped advisory
+  // lock (the same `admin:<key>` namespace notifyAdmin's per-key dedupe
+  // lock uses): two concurrent raises for different requests would
+  // otherwise each see no stale row, take only their distinct per-key
+  // locks, and both insert; and a retire committed apart from its
+  // replacement could leave the old instruction unread beside the new one
+  // (or neither standing). notifyAdmin runs on this trx, so both land or
+  // neither does, and the second raiser's probe sees the first's row.
   let superseded = null;
   await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:termite_station_retrieval:${customerId}`]);
@@ -172,6 +174,7 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
         link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
         dedupeKey,
         metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental, ...(retrieveAfter ? { retrieveAfter } : {}) },
+        trx,
       }
     );
   });

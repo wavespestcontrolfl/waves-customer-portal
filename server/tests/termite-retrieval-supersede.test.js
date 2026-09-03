@@ -73,6 +73,9 @@ test('the immediate task retires the dated one, then raises — under the accoun
   // Lock first, retire second, insert third: a concurrent raise for another
   // request waits on the lock and then sees this one's committed row.
   expect(mockLog).toEqual(['raw:admin:termite_station_retrieval:c1', 'update:notifications', 'notifyAdmin']);
+  // ...and the insert rides the SAME transaction as the retire.
+  expect(typeof mockNotifyAdmin.mock.calls[0][3].trx).toBe('function');
+  expect(mockNotifyAdmin.mock.calls[0][3].trx.raw).toBeDefined();
   expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/supersedes the earlier dated retrieval task/);
   expect(out).toEqual(expect.objectContaining({ raised: true }));
