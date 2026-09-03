@@ -1187,3 +1187,220 @@ describe('multifamily master-parcel guidance flag', () => {
     expect(profile.fieldVerifyFlags.find((f) => f.field === 'commercialSubtype')).toBeDefined();
   });
 });
+
+describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAILS)', () => {
+  // 2026-09-02: a tenant's roach-treatment lead at a 358-unit rental
+  // complex. The AI web search resolved the bare street address to the
+  // complex's listing (Multifamily, 358 units) and the estimate tool typed
+  // the lead Commercial — manual quote required. A unit designator on the
+  // lookup address is the operator saying "one unit": residential.
+  beforeEach(() => { process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true'; });
+  afterEach(() => { delete process.env.GATE_UNIT_SCOPE_GUARDRAILS; });
+
+  function rentalComplexRecord(overrides = {}) {
+    return {
+      formattedAddress: '1048 Example Lakes Cir, Sarasota, FL 34232',
+      propertyType: 'Multifamily',
+      unitCount: 358,
+      squareFootage: 0,
+      lotSize: 0,
+      stories: 3,
+      yearBuilt: 1996,
+      _source: 'ai_trio',
+      ...overrides,
+    };
+  }
+  const building = '1048 Example Lakes Cir, Sarasota, FL 34232';
+  const unit = '1048 Example Lakes Cir Apt 204, Sarasota, FL 34232';
+
+  test('bare building address: whole-property COMMERCIAL verdict stands', () => {
+    const profile = buildEnrichedProfile(rentalComplexRecord(), null, null, null, null, null, building);
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.commercialSubtype).toBe('multifamily_common_area_residential');
+    expect(profile.residentialUnitLookup).toBeNull();
+  });
+
+  test('unit address: one residential unit, condo pricing, building count kept as context', () => {
+    const profile = buildEnrichedProfile(rentalComplexRecord(), null, null, null, null, null, unit);
+    expect(profile.category).toBe('RESIDENTIAL');
+    expect(profile.isCommercial).toBe(false);
+    expect(profile.commercialSubtype).toBeNull();
+    expect(profile.commercialDetectionSource).toBeNull();
+    expect(profile.propertyType).toBe('Condo');
+    expect(profile.unitCount).toBe(358);
+    expect(profile.residentialUnitLookup).toEqual({
+      wholePropertyCategory: 'COMMERCIAL',
+      wholePropertySubtype: 'multifamily_common_area_residential',
+    });
+    const flag = profile.fieldVerifyFlags.find((f) => f.field === 'propertyType');
+    expect(flag).toBeDefined();
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toMatch(/358-unit/);
+    expect(flag.reason).toMatch(/ONE residential unit/);
+    // The pricing-time guard must not re-commercialize the profile.
+    expect(isCommercialProfile(profile, {})).toBe(false);
+  });
+
+  test('unit address: the building\'s dimensions are not carried into the unit quote; a field-verified save is surfaced, never auto-applied', () => {
+    const whole = buildEnrichedProfile(
+      rentalComplexRecord({ squareFootage: 63096, lotSize: 93940, stories: 3, hasPool: true, poolCageSqft: 900, _source: 'county' }),
+      null, null, null, null, null, unit,
+    );
+    expect(whole.isCommercial).toBe(false);
+    expect(whole.homeSqFt).toBe(0);
+    expect(whole.lotSqFt).toBe(0);
+    // The building's floor count would derive a fractional footprint from
+    // the unit's sqft; the complex pool is not the tenant's.
+    expect(whole.stories).toBe(1);
+    // …and that 1 is a DEFAULT nobody observed — the client's verified save
+    // must skip it.
+    expect(whole.storiesSource).toBe('default');
+    expect(whole.pool).not.toBe('YES');
+    expect(whole.poolCage).not.toBe('YES');
+    // The county master-parcel guidance (which asks to collect the unit
+    // number) stays quiet — the unit's own flag carries the instruction.
+    expect(whole.fieldVerifyFlags.find((f) => f.field === 'commercialSubtype')).toBeUndefined();
+
+    const verified = buildEnrichedProfile(
+      rentalComplexRecord({
+        squareFootage: 1100, lotSize: 93940, stories: 2, _source: 'county', _storiesSource: 'verified',
+        _fieldEvidence: {
+          squareFootage: { value: 1100, sourceType: 'verified', fieldVerify: false },
+          // A lot verified on this address before the reclassification
+          // existed can only be the parcel's — a unit has no lot.
+          lotSize: { value: 93940, sourceType: 'verified', fieldVerify: false },
+        },
+      }),
+      null, null, null, null, null, unit,
+    );
+    // The estimate tool's save persisted whatever the lookup pre-filled, so
+    // a "verified" figure under the unit address may be the building's
+    // (codex r4 P1): surfaced on the flag, not applied.
+    expect(verified.homeSqFt).toBe(0);
+    expect(verified.lotSqFt).toBe(0);
+    expect(verified.stories).toBe(1);
+    expect(verified.storiesSource).toBe('default');
+    expect(verified.fieldVerifyFlags.find((f) => f.field === 'propertyType').reason)
+      .toMatch(/field-verified 1,100 sq ft and 2 stories is saved on this unit address but was NOT applied/);
+  });
+
+  test('unit address on a stacked-association aggregate: one structure for the perimeter estimate', () => {
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord({
+        squareFootage: 1200, _source: 'county',
+        _fieldEvidence: { squareFootage: { value: 1200, sourceType: 'verified', fieldVerify: false } },
+        _parcel: { aggregated: true, residentialUnits: 48, buildingCount: 6, livingAreaSqft: 57600, lotSqft: 300000 },
+      }),
+      null, null, null, null, null, unit,
+    );
+    expect(profile.isCommercial).toBe(false);
+    expect(profile.buildingCount).toBe(1);
+    // Dims blank (the verified 1,200 is surfaced, not applied), so no
+    // perimeter is derived from the aggregate at all.
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile.estimatedPerimeterLF).toBeNull();
+  });
+
+  test('unit address: parcel-scale satellite areas are discarded with the building dims', () => {
+    const ai = {
+      estimatedTurfSf: 180000, estimatedBedAreaSf: 22000, imperviousSurfacePercent: 55,
+      shrubDensity: 'MODERATE', hasPool: 'YES',
+    };
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord({ lotSize: 900000, _source: 'county' }), ai, null, null, null, null, unit,
+    );
+    expect(profile.isCommercial).toBe(false);
+    expect(profile.estimatedTurfSf).toBe(0);
+    expect(Number(profile.estimatedBedAreaSf) || 0).toBe(0);
+    expect(profile.imperviousSurfacePercent == null || profile.imperviousSurfacePercent === 0).toBe(true);
+    // Density / pool reads describe the parcel too (codex r1 P1): the
+    // profile falls back to its synthesized defaults, marked unobserved.
+    expect(profile.pool).not.toBe('YES');
+    expect(profile._observed.shrubDensity).toBe(false);
+    expect(profile._observed.pool).toBeFalsy();
+    // The bare building keeps the parcel-scale read.
+    const whole = buildEnrichedProfile(
+      rentalComplexRecord({ lotSize: 900000, _source: 'county' }), ai, null, null, null, null, building,
+    );
+    expect(whole.estimatedTurfSf).toBe(180000);
+  });
+
+  test('unit address on a positive commercial-use record stays commercial ("Suite 200")', () => {
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord({ propertyType: 'Office Building', unitCount: 1 }),
+      null, null, null, null, null, '500 Example Pkwy Suite 200, Sarasota, FL 34232',
+    );
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.commercialSubtype).toBe('office_retail');
+    expect(profile.residentialUnitLookup).toBeNull();
+  });
+
+  test('unit address on a mixed-use record (multifamily type + a specific commercial use) stays commercial', () => {
+    for (const landUse of ['Retail Store', 'Business Park', 'Office Condominium']) {
+      const profile = buildEnrichedProfile(
+        rentalComplexRecord({ _raw: { landUse }, _source: 'county' }),
+        null, null, null, null, null, unit,
+      );
+      expect({ landUse, isCommercial: profile.isCommercial, audit: profile.residentialUnitLookup })
+        .toEqual({ landUse, isCommercial: true, audit: null });
+    }
+  });
+
+  test('unit address on a record labeled "Commercial Apartments" is still one residential unit (generic token is not a use)', () => {
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord({ propertyType: 'Commercial Apartments', _raw: { zoning: 'C-2 Commercial' }, _source: 'county' }),
+      null, null, null, null, null, unit,
+    );
+    expect(profile.isCommercial).toBe(false);
+    expect(profile.propertyType).toBe('Condo');
+  });
+
+  test('unit address with a structured satellite COMMERCIAL read stays commercial', () => {
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord(), { propertyUse: 'COMMERCIAL' }, null, null, null, null, unit,
+    );
+    expect(profile.isCommercial).toBe(true);
+    const office = buildEnrichedProfile(
+      rentalComplexRecord(), { propertyUse: 'COMMERCIAL', commercialUseType: 'OFFICE_RETAIL' }, null, null, null, null, unit,
+    );
+    expect(office.isCommercial).toBe(true);
+  });
+
+  test('vision\'s own MULTIFAMILY_COMMON_AREA read is the same whole-property verdict — the unit override still applies; MIXED use does not', () => {
+    const apartments = buildEnrichedProfile(
+      rentalComplexRecord(), { propertyUse: 'COMMERCIAL', commercialUseType: 'MULTIFAMILY_COMMON_AREA' },
+      null, null, null, null, unit,
+    );
+    expect(apartments.isCommercial).toBe(false);
+    expect(apartments.propertyType).toBe('Condo');
+    // A record with NO commercial text of its own, typed by vision alone
+    // (detection source satellite_ai_property_use) — still one unit.
+    const visionOnly = buildEnrichedProfile(
+      rentalComplexRecord({ propertyType: 'Residential', unitCount: 1 }),
+      { propertyUse: 'COMMERCIAL', commercialUseType: 'MULTIFAMILY_COMMON_AREA' },
+      null, null, null, null, unit,
+    );
+    expect(visionOnly.isCommercial).toBe(false);
+    // No record at all — vision's read is the only source; its parcel-wide
+    // areas still go.
+    const recordless = buildEnrichedProfile(
+      null, { propertyUse: 'COMMERCIAL', commercialUseType: 'MULTIFAMILY_COMMON_AREA', estimatedTurfSf: 180000, hasPool: 'YES' },
+      null, null, null, null, unit,
+    );
+    expect(recordless.isCommercial).toBe(false);
+    expect(recordless.estimatedTurfSf).toBe(0);
+    expect(recordless.pool).not.toBe('YES');
+    const mixed = buildEnrichedProfile(
+      rentalComplexRecord(), { propertyUse: 'MIXED', commercialUseType: 'MULTIFAMILY_COMMON_AREA' },
+      null, null, null, null, unit,
+    );
+    expect(mixed.isCommercial).toBe(true);
+  });
+
+  test('gate OFF: unit address changes nothing', () => {
+    delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+    const profile = buildEnrichedProfile(rentalComplexRecord(), null, null, null, null, null, unit);
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.residentialUnitLookup).toBeNull();
+  });
+});

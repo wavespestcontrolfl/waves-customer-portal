@@ -35,6 +35,7 @@ const {
 const {
   unitScopeGuardrailsEnabled,
   hasPrimaryStreetNumber,
+  residentialUnitLookupVerdict,
 } = require('../services/estimator-engine/unit-scope-model');
 // The estimator's own condo-record predicate (propertyType OR county
 // land-use text) — shared so the unit-lot verify flag and the unit-scope
@@ -870,7 +871,7 @@ async function performPropertyLookupCore(address, options = {}) {
   if (verifiedOverrides?.stories && result.propertyRecord) {
     result.propertyRecord._storiesSource = 'verified';
   }
-  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit);
+  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit, address);
 
   // Clean up internal fields before sending to client
   if (result.satellite) {
@@ -964,7 +965,7 @@ function buildResultFromCachedLookup(address, row, verifiedOverrides, t0) {
     avm: null,
     satellite: buildSatelliteUrlSet(lat, lng),
     aiAnalysis,
-    enriched: buildEnrichedProfile(record, aiAnalysis, lat, lng, null),
+    enriched: buildEnrichedProfile(record, aiAnalysis, lat, lng, null, null, address),
     errors: [],
     meta: {
       timestamp: new Date().toISOString(),
@@ -1684,7 +1685,23 @@ function applySatelliteAttachmentType(rc, ai) {
   return candidate;
 }
 
-function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null) {
+// Drop the satellite AREA reads (turf / bed / impervious) from an analysis
+// whose measurement does not describe the property being quoted — stale
+// imagery, or a parcel-scale read on a one-unit quote. Density and pool
+// reads stay: they are observations, not areas.
+function discardVisionAreaFields(ai) {
+  if (!ai) return ai;
+  const out = { ...ai };
+  delete out.estimatedTurfSf;
+  delete out.imperviousSurfacePercent;
+  delete out.imperviosSurfacePercent;
+  delete out.estimatedBedAreaSf;
+  delete out.estimatedBedAreaPercent;
+  delete out._bedAreaConfidence;
+  return out;
+}
+
+function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null, lookupAddress = null) {
   // Association aggregate dimensions survive in _parcel even when a
   // same-weight PAO record (a single condo unit) won the merge — prefer them
   // for EVERY downstream read (footprint, turf ceiling, termite boxes), not
@@ -1730,13 +1747,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // sanitize rows poisoned before this shipped, no backfill needed.
   const staleImageryConflict = detectStaleImageryTurfConflict(rc, ai);
   if (staleImageryConflict) {
-    ai = { ...ai };
-    delete ai.estimatedTurfSf;
-    delete ai.imperviousSurfacePercent;
-    delete ai.imperviosSurfacePercent;
-    delete ai.estimatedBedAreaSf;
-    delete ai.estimatedBedAreaPercent;
-    delete ai._bedAreaConfidence;
+    ai = discardVisionAreaFields(ai);
     // Fires on every profile build for a conflicted address (fresh + cache
     // hit) — greppable in Railway to judge how often the guard runs and,
     // against later confirmed sq ft, whether the lot-based fallback is
@@ -1751,6 +1762,81 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       yearBuilt: staleImageryConflict.yearBuilt,
     });
   }
+  // Runs BEFORE the footprint / impervious / turf reads below: they are
+  // computed off rc and ai, and the unit verdict rewrites both.
+  // detectCategory answers the WHOLE-property question (an apartment
+  // complex is commercial to the association or owner). A lookup run with a
+  // unit designator on such a building is one occupant's quote — a
+  // residential customer (unit-scope doctrine, owner ruling 2026-08-11).
+  // Until this, the manual estimate-tool lookup had no unit awareness at
+  // all: the estimator engine's draft path ran the unit-scope model, but a
+  // rep typing "Apt 204" into the tool still got the whole complex, typed
+  // Commercial, manual quote required (2026-09-02: a 358-unit rental
+  // complex for a tenant's roach treatment).
+  const wholePropertyCategory = detectCategory(rc, ai);
+  const wholePropertySubtype = wholePropertyCategory === 'COMMERCIAL' ? resolveCommercialSubtype(rc, ai) : null;
+  const residentialUnitLookup = residentialUnitLookupVerdict({
+    address: lookupAddress,
+    category: wholePropertyCategory,
+    commercialSubtype: wholePropertySubtype,
+    commercialDetectionSource: wholePropertyCategory === 'COMMERCIAL'
+      ? resolveCommercialDetectionSource(rc, ai) : null,
+    structuredCommercialSignal: visionCommercialUseSignal(ai),
+    commercialUseSignal: recordCommercialUseSignal(rc),
+  });
+  const category = residentialUnitLookup ? 'RESIDENTIAL' : wholePropertyCategory;
+  const commercialProfile = category === 'COMMERCIAL';
+  const commercialSubtype = commercialProfile ? wholePropertySubtype : null;
+  if (residentialUnitLookup) {
+    // Everything the record and the imagery say about SIZE and GROUNDS is
+    // the building's / the parcel's, not the unit's — carrying any of it
+    // into a one-unit quote is the whole-complex overquote the unit-scope
+    // lane exists to end (codex r1 P1 ×3 on top of the pre-push P1):
+    //  - sqft / stories: blank for the unit's own figures. A field-
+    //    verified value on this address is NOT auto-applied either: the
+    //    estimate tool's save persisted whatever the lookup pre-filled,
+    //    so a "verified" figure saved under the unit address before this
+    //    reclassification existed can be the building's (codex r4 P1).
+    //    It is surfaced on the flag instead — the operator confirms it is
+    //    the unit's and enters it, once.
+    //  - lot: ALWAYS 0 — a unit has no individual lot.
+    //  - stories: the building's floor count would derive a fractional
+    //    footprint from the unit's sqft (1,200 sf / 3 floors = 400 sf), so
+    //    a unit is single-level (1), stamped 'default'.
+    //  - pool / cage: the complex's amenities are not serviced for a
+    //    tenant's unit.
+    //  - satellite analysis: EVERY read (areas, densities, water, pool)
+    //    describes the parcel, so the analysis is dropped whole — the
+    //    profile synthesizes its neutral defaults with _observed=false.
+    // unitCount stays as whole-parcel context; the HIGH flag below owns
+    // the confirm-before-pricing posture.
+    // A RECORDLESS verdict (vision's multifamily read alone) still drops
+    // the parcel-wide analysis (pre-push codex P1 r13).
+    const isVerified = (field) => rc?._fieldEvidence?.[field]?.sourceType === 'verified';
+    if (rc) rc = {
+      ...rc,
+      // What a person saved on this address, for the flag only.
+      _unitVerifiedSaved: {
+        squareFootage: isVerified('squareFootage') ? Number(rc.squareFootage) || 0 : 0,
+        stories: (rc._storiesSource === 'verified' || isVerified('stories')) ? Number(rc.stories) || 0 : 0,
+      },
+      squareFootage: 0,
+      lotSize: 0,
+      stories: 1,
+      // The assumed 1 is a DEFAULT nobody observed: stamped so the client's
+      // "save as field-verified" skips it unless the operator touches the
+      // field (codex r2 P1 — same contract as the unknown-stories aggregate).
+      _storiesSource: 'default',
+      hasPool: null,
+      poolCageSqft: null,
+      // A stacked-association aggregate's building count multiplies the
+      // perimeter estimate (N buildings of footprint/N) — for ONE unit it
+      // is one structure (codex r4 P2). The association totals stay on
+      // profile.association as context.
+      _parcel: rc._parcel ? { ...rc._parcel, buildingCount: 1 } : rc._parcel,
+    };
+    ai = null;
+  }
   const footprintTurf = computeFootprintTurf(rc);
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
   const waterDistance = ai?.waterDistance || 'NONE';
@@ -1758,9 +1844,6 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     ai?.imperviousSurfacePercent,
     ai?.imperviosSurfacePercent
   );
-  const category = detectCategory(rc, ai);
-  const commercialProfile = category === 'COMMERCIAL';
-  const commercialSubtype = commercialProfile ? resolveCommercialSubtype(rc, ai) : null;
 
   // New-construction / weak-record fallback: surface a satellite-detected
   // townhome/condo when no authoritative source pinned the type. For fresh
@@ -1781,8 +1864,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // string as authoritative — undoing detectCategory's guard (codex P1). The
   // raw value stays visible for the operator via profile.fieldEvidence
   // .propertyType (which already carries the field-verify flag).
-  const residentialDisplayType =
-    (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) !== 'commercial')
+  const residentialDisplayType = residentialUnitLookup
+    // One unit inside an apartment/condo building. The estimator's
+    // pricing-safe vocabulary has no bare "apartment" entry; an unknown
+    // floor falls to the conservative condo_ground default the engine's
+    // source arbitration also uses (the HIGH flag below asks for the
+    // floor). 'Condo' is the client's display label for that key.
+    ? 'Condo'
+    : (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) !== 'commercial')
       ? rc.propertyType
       // Gate ON: with no record and no confident vision type there is no
       // classification — surface 'Unknown' (observable, recoverable)
@@ -1843,7 +1932,23 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     && parcelTurfBoundApplies
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
-  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies });
+  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup });
+  if (residentialUnitLookup) {
+    const wholeUnits = verifiedUnitCountOf(rc) ?? Math.max(Number(rc?.unitCount) || 0, Number(rc?._parcel?.residentialUnits) || 0);
+    // Name what a person's earlier field-verified save holds on this unit
+    // address — not auto-applied (it may be the building's figure saved
+    // under the unit address), so the operator confirms and enters it.
+    const saved = rc?._unitVerifiedSaved || {};
+    const keptVerified = [
+      saved.squareFootage ? `${saved.squareFootage.toLocaleString()} sq ft` : null,
+      saved.stories ? `${saved.stories} stor${saved.stories === 1 ? 'y' : 'ies'}` : null,
+    ].filter(Boolean);
+    fieldVerifyFlags.push({
+      field: 'propertyType',
+      reason: `Unit address inside a${wholeUnits > 1 ? ` ${wholeUnits.toLocaleString()}-unit` : 'n'} apartment/condo building — quoted as ONE residential unit (condo pricing, ground floor, single level, no lot, no pool assumed), not the whole property. Confirm the floor, and get the unit's own sq ft from the customer: the building's sq ft, lot, story count, pool, and every satellite read were dropped as parcel-wide${keptVerified.length ? `; a field-verified ${keptVerified.join(' and ')} is saved on this unit address but was NOT applied — enter it if it is the unit's own figure` : ''}. Quote the whole property only if the association, complex owner, or property manager is the customer`,
+      priority: 'HIGH',
+    });
+  }
   if (staleImageryConflict) {
     fieldVerifyFlags.push({
       field: 'estimatedTurfSf',
@@ -1933,6 +2038,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     propertyType: commercialProfile ? 'Commercial' : residentialDisplayType,
     isCommercial: commercialProfile,
     commercialSubtype,
+    // Unit-address reclassification audit: the whole-property verdict this
+    // unit lookup overrode, so a consumer can still see the building.
+    residentialUnitLookup: residentialUnitLookup
+      ? { wholePropertyCategory, wholePropertySubtype }
+      : null,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
     // On an aggregate, the association total wins over the merge's
     // unitCount (shapeAsPropertyRecord seeds every record with a truthy 1,
@@ -2828,11 +2938,41 @@ function countyAttestedSmallResidential(rc) {
   return counts.length > 0 && Math.max(...counts) <= 4;
 }
 
+// Positive commercial-USE text — the first (and strongest) COMMERCIAL vote
+// in detectCategory, and the mixed-use veto for the unit-address
+// reclassification (a record can read BOTH multifamily and retail).
+const COMMERCIAL_USE_RE = /(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/;
+
+// The mixed-use veto reads SPECIFIC uses only: the generic "commercial"
+// token is how listings and zoning label an apartment complex itself
+// ("Commercial Apartments", "C-2" zoning on a rental building), and vetoing
+// on it would re-commercialize the exact tenant quote the unit lane exists
+// for (pre-push codex P1 r5). Every OTHER use token detectCategory
+// recognizes still vetoes — the two lists differ by exactly that token.
+const COMMERCIAL_USE_VETO_RE = /(office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/;
+
+// The structured satellite read as a unit-override veto: vision's
+// MULTIFAMILY_COMMON_AREA / HOA_COMMON_AREA are the SAME whole-property
+// multifamily verdict residentialMultifamilyVerdict permits, not an office
+// or retail tenant — only a MIXED-use read, or a genuine commercial use
+// type, vetoes (codex r2 P1).
+const VISION_MULTIFAMILY_USE_TYPES = new Set(['MULTIFAMILY_COMMON_AREA', 'HOA_COMMON_AREA']);
+function visionCommercialUseSignal(ai) {
+  const propertyUse = String(ai?.propertyUse || '').trim().toUpperCase();
+  const useType = String(ai?.commercialUseType || '').trim().toUpperCase();
+  if (VISION_MULTIFAMILY_USE_TYPES.has(useType) && propertyUse !== 'MIXED') return false;
+  return hasStructuredCommercialAiSignal(ai);
+}
+
+function recordCommercialUseSignal(rc) {
+  return COMMERCIAL_USE_VETO_RE.test(commercialSignalText(commercialSignalRecord(rc), {}));
+}
+
 function detectCategory(rc, ai = {}) {
   if (!rc && !ai) return 'RESIDENTIAL';
   const signalRc = commercialSignalRecord(rc);
   const text = commercialSignalText(signalRc, ai);
-  if (/(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/.test(text)) return 'COMMERCIAL';
+  if (COMMERCIAL_USE_RE.test(text)) return 'COMMERCIAL';
   // Common-area parcels are association-owned regardless of unit count; the
   // multifamily-flavored strings alone defer to a county-attested small
   // residential count (≥5-unit ruling — duplex/guest house = residential).
@@ -3152,7 +3292,7 @@ function calcPestPressureMult(pressure) {
 // ─────────────────────────────────────────────
 // FIELD VERIFY FLAGS
 // ─────────────────────────────────────────────
-function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true } = {}) {
+function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false } = {}) {
   const flags = [];
 
   // Geocoder snapped the typed house number to a different premise — this
@@ -3499,7 +3639,11 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   const countyBackedType = Boolean(rc) && (typeEvidenceSource !== null
     ? COUNTY_ROLL_SOURCES.has(typeEvidenceSource)
     : (COUNTY_ROLL_SOURCES.has(String(rc._source || '')) || Boolean(rc._parcel?.aggregated)));
-  if (rc && countyBackedType
+  // A unit-address lookup already answered "which unit" — its own
+  // propertyType flag carries the unit-dimension instruction, so the
+  // master-parcel guidance (which asks to collect the unit number) stays
+  // quiet.
+  if (rc && countyBackedType && !residentialUnitLookup
       && detectCategory(rc, ai) === 'COMMERCIAL' && detectCategory(rc, {}) === 'COMMERCIAL') {
     const masterParcelSubtype = resolveCommercialSubtype(rc, {});
     // Positive master-parcel evidence, so a county match for ONE condo unit
