@@ -806,6 +806,18 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'competing_consent', willCharge: null } });
     expect(res.rule.text).toMatch(/two card agreements/);
   });
+  it('in-window hold beside a /secure row already mid-charge → charge_in_flight, not competing_consent', async () => {
+    stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'charging' } });
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+  });
+  it('hold committed between the two reads → re-runs the held preview instead of calling it settled', async () => {
+    stubDb([null, { ...holdRow, status: 'held' }, holdRow]);
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, rule: { code: 'in_window', willCharge: true } });
+  });
   it('parked hold → never a charge prompt, matching the handler\'s already_parked (no window math)', async () => {
     stubDb({ ...holdRow, parked_at: new Date('2026-07-05T12:00:00Z') });
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z')); // would be in-window

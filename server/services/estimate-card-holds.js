@@ -1848,7 +1848,7 @@ async function cardHoldReminderLine(scheduledServiceId) {
 // be noise). Mirrors handleCardHoldCancellation's decision inputs exactly;
 // feeApplies is false when the feature flag is off because chargeNoShowFee
 // would no-op anyway.
-async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
+async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { retried = false } = {}) {
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) {
     // No HELD row — but a hold in 'charging' / 'charge_review' is a
@@ -1869,6 +1869,13 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
     }
     if (!latest) return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
     const state = String(latest.status || '');
+    if (state === 'held') {
+      // A hold committed between the two reads (concurrent estimate
+      // acceptance): it is LIVE, not settled — run the held preview once
+      // (Codex #3800 r5 P2). A second miss is left undetermined.
+      if (!retried) return cardHoldCancelPreview(scheduledServiceId, now, { retried: true });
+      return { held: true, feeApplies: true, feeAmount: Number(latest.no_show_fee_amount) > 0 ? Number(latest.no_show_fee_amount) : cardHoldNoShowFee(), unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'hold state changed during the check' }) };
+    }
     const latestFee = Number(latest.no_show_fee_amount) > 0 ? Number(latest.no_show_fee_amount) : cardHoldNoShowFee();
     if (state === 'charging' || state === 'charge_review') {
       // Legacy shape stays fee-may-apply (held + feeApplies + unresolved):
@@ -1958,8 +1965,15 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
     try {
       const laneRow = await db('appointment_card_requests')
         .where({ scheduled_service_id: scheduledServiceId })
-        .first('id');
-      if (laneRow) return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('competing_consent') };
+        .first('id', 'fee_status');
+      if (laneRow) {
+        // The competing row may already be mid-charge (its fee claim won
+        // before the hold was recorded): that PaymentIntent can still land,
+        // so it is an in-flight charge, not "nothing charged" (Codex #3800
+        // r5 P1).
+        const inFlight = laneRow.fee_status === 'charging' || laneRow.fee_status === 'charge_review';
+        return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe(inFlight ? 'charge_in_flight' : 'competing_consent') };
+      }
     } catch (err) {
       logger.warn('[estimate-card-holds] competing-consent lookup for cancel preview failed — reporting undetermined', { error: err.message });
       return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'card consent lookup failed', onFailure: 'unknown' }) };
