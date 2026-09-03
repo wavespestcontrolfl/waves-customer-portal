@@ -199,6 +199,20 @@ test('run-level error releases the claim and propagates', async () => {
   expect(notify).not.toHaveBeenCalled();
 });
 
+test('vendor call outlives stale recovery: the parked row keeps needs_review, gains the order number, request goes ordered, no placed audit (pre-push P1)', async () => {
+  mockState.ledgerSettled = true; // recoverStalePlacing parked this row while place() ran
+  const a = mockAdapter();
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: 'SM-1' });
+  expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'placed').length).toBe(1); // the conditional attempt only — returned 0 rows
+  const attach = mockState.updates.filter((u) => u.table === 'vendor_orders' && !u.row.status).pop().row;
+  expect(attach.external_order_number).toBe('SM-1');
+  expect(requestStatus()).toBe('ordered');
+  expect(auditVendorOrder).toHaveBeenCalledTimes(1);
+  expect(auditVendorOrder.mock.calls[0][0].outcome).toBe('placed_after_stale_park');
+  expect(notify).not.toHaveBeenCalled();
+});
+
 test('request closed mid-flight: ledger still placed, request untouched, one reconcile bell', async () => {
   mockState.freshRequestStatus = 'cancelled';
   const r = await run(mockAdapter());

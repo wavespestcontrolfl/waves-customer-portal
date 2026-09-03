@@ -531,23 +531,43 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
       // an order exists that the tab no longer expects — say so once (the
       // bell is persisted with the outcome, like a park's).
       const bell = stillOpen ? null : { title: `Auto-order placed on a ${fresh?.status || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${fresh?.status || 'missing'}. Reconcile by hand.` };
-      await trx('vendor_orders').where({ id: ledger.id }).update({
-        status: 'placed',
+      const orderFacts = {
         external_order_number: placed.externalOrderNumber || null,
         amount_cents: finalCents,
         response_payload: placed.response ? JSON.stringify(placed.response) : null,
-        evidence: JSON.stringify({ ...(placed.evidence || {}), ...(bell ? { bell } : {}) }),
-        error: stillOpen ? null : `request_state_changed: request was ${fresh?.status || 'missing'} when the order landed`,
         placed_at: new Date(),
         updated_at: new Date(),
+      };
+      // Green transition only from a row still 'placing' (pre-push P1): a
+      // SiteOne run past the 30-minute mark may already have been parked
+      // needs_review by recoverStalePlacing ("may or may not have gone out").
+      const n = await trx('vendor_orders').where({ id: ledger.id, status: 'placing' }).update({
+        ...orderFacts,
+        status: 'placed',
+        evidence: JSON.stringify({ ...(placed.evidence || {}), ...(bell ? { bell } : {}) }),
+        error: stillOpen ? null : `request_state_changed: request was ${fresh?.status || 'missing'} when the order landed`,
       });
+      if (!n) {
+        // Now we KNOW it went out: attach the order's number/total to the
+        // parked row (status stays needs_review — its do-not-re-order bell
+        // is still the right instruction), move the request to ordered so
+        // the tab expects the stock, and audit the confirmation — never a
+        // second 'placed' outcome over the park.
+        await trx('vendor_orders').where({ id: ledger.id }).update({
+          ...orderFacts,
+          error: conn.raw("COALESCE(error, '') || ?", [` | order confirmed placed after stale recovery: ${placed.externalOrderNumber || '?'}`]),
+        });
+        if (stillOpen) await trx('product_restock_requests').where({ id: request.id }).update({ status: 'ordered', updated_at: new Date() });
+        await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, reason: 'the row was parked by stale recovery while the vendor call ran; the order exists', trx });
+        return { stillOpen, bell: null, settledElsewhere: true };
+      }
       if (stillOpen) await trx('product_restock_requests').where({ id: request.id }).update({ status: 'ordered', updated_at: new Date() });
       await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, trx });
       return { stillOpen, bell };
     });
     const bellDelivered = outcome.bell ? await deliverBell(conn, { notify, ledgerId: ledger.id, requestId: request.id, productName: product.name, vendorName: vendor.name, ...outcome.bell }) : true;
     logger.info(`[order-dispatch] placed ${vendor.name} order ${placed.externalOrderNumber || '?'} for ${product.name} (${dollars(placed.amountCents ?? quoteCents)})`);
-    return { requestId: request.id, ledgerId: ledger.id, status: 'placed', externalOrderNumber: placed.externalOrderNumber || null, amountCents: finalCents, ...(bellDelivered ? {} : { bellPending: true }) };
+    return { requestId: request.id, ledgerId: ledger.id, status: outcome.settledElsewhere ? 'needs_review' : 'placed', ...(outcome.settledElsewhere ? { reason: 'placed_after_stale_park' } : {}), externalOrderNumber: placed.externalOrderNumber || null, amountCents: finalCents, ...(bellDelivered ? {} : { bellPending: true }) };
   } catch (err) {
     if (err.runLevel) throw err;
     logger.error(`[order-dispatch] ${product.name}: ${err.message}`);
