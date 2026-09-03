@@ -378,7 +378,7 @@ severity noted.
 - **Simplest implementation that fully meets the current requirement.**
   No speculative config, single-call-site generic handlers,
   one-implementation interfaces, or future-proofing layers. P2.
-- **Structural lint is a signal, not a gate.** `eslint.config.js:25`
+- **Structural lint is a signal, not a gate.** `eslint.config.js:26`
   (`QUALITY_WARN`) warns, never errors, on `complexity` > 20 and
   `max-depth` > 4 in every production block. A warning on a function the
   diff adds or rewrites is P2 (remove decisions per CLAUDE.md rule 20 — not
