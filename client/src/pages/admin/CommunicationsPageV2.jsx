@@ -708,6 +708,7 @@ export const CUSTOMER_COMPOSER_LINKS = [
   { key: "pay_balance", name: "Pay balance link", keywords: "pay payment invoice bill billing owe money", dynamic: true },
   { key: "estimate", name: "Latest estimate link", keywords: "estimate proposal open pending price quote", dynamic: true },
   { key: "referral", name: "Referral link", keywords: "refer friend neighbor share reward", dynamic: true },
+  { key: "autopay_setup", name: "Auto Pay setup link", keywords: "autopay auto pay card on file save payment method bank ach enroll secure", dynamic: true },
   {
     key: "portal_login",
     name: "Portal login",
@@ -1708,6 +1709,7 @@ function SmsTab() {
         : "Pay link added.",
     estimate: (d) => `Estimate link added${d.estimate?.serviceType ? ` — ${d.estimate.serviceType}` : ""}.`,
     referral: (d) => `Referral link added${d.firstName ? ` — ${d.firstName}'s personal link` : ""}.`,
+    autopay_setup: () => "Auto Pay setup link added — nothing is charged until they save a payment method.",
   };
 
   // Withdrawal is NON-destructive: the pending review row is SHARED — every

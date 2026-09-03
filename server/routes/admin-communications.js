@@ -1614,7 +1614,7 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
 
 // POST /api/admin/communications/customer-link  { phone, customerId?, kind }
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
-// pay_balance | estimate | referral. Same fail-closed recipient contract as
+// pay_balance | estimate | referral | autopay_setup. Same fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
 // live in services/composer-customer-links.js; a kind with nothing to insert
@@ -1635,9 +1635,14 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       pay_balance: (ids) => builders.buildPayBalanceLink(ids),
       estimate: (ids) => builders.buildLatestEstimateLink(ids),
       referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
+      // Auto Pay is per customer row (the phone's owner), same as referral.
+      // The builder delegates to autopay-setup-link's single entry point —
+      // gate, payer exemption, dedup and the saved-card auto-secure all
+      // live there; a link_created outcome is the ONLY thing inserted.
+      autopay_setup: (ids, primaryId) => builders.buildAutopaySetupLink(primaryId),
     };
     if (!builderByKind[kind]) {
-      return res.status(400).json({ error: 'kind must be one of review_request, pay_balance, estimate, referral' });
+      return res.status(400).json({ error: 'kind must be one of review_request, pay_balance, estimate, referral, autopay_setup' });
     }
 
     const last10 = fullPhoneLast10(req.body?.phone);
@@ -1691,6 +1696,15 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
         .whereIn('id', customerIds)
         .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
         .select('id');
+      // Auto Pay is money-affecting and per row (a consented saved card can
+      // enroll on the spot) — never guess the row. Without an operator-
+      // selected customer, the phone must belong to exactly ONE sibling;
+      // otherwise 409 to the dropdown, same as the cross-account case.
+      if (kind === 'autopay_setup' && phoneRows.length !== 1) {
+        return res.status(409).json({
+          error: 'That number is on file for more than one customer on this account — pick the customer from the search dropdown before inserting an Auto Pay setup link',
+        });
+      }
       primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
     }
 

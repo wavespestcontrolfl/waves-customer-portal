@@ -1,7 +1,7 @@
 /**
  * Per-customer link builders for the SMS composer's Insert Link sheet —
- * the four link kinds beyond the existing reschedule/re-service pair:
- * review request, pay balance, latest estimate, referral.
+ * the link kinds beyond the existing reschedule/re-service pair:
+ * review request, pay balance, latest estimate, referral, Auto Pay setup.
  *
  * Contract mirrors reschedule-link/reservice-link: each builder returns
  * { url, line, ...context } with url null + a `reason` sentence when there
@@ -283,6 +283,54 @@ async function buildReferralLink(customerId) {
   };
 }
 
+// Every skip requestAutopaySetupLink can return, phrased for the composer
+// (same vocabulary as cardLinkStatus.describeAutopaySetupLinkResult on the
+// Customers page — one plain sentence per outcome, unknown reasons stay
+// visible rather than pretending a link exists).
+const AUTOPAY_SKIP_REASONS = {
+  gate_off: 'Auto Pay setup links are switched off (GATE_AUTOPAY_SETUP_LINK)',
+  customer_not_found: 'Customer not found',
+  payer_billed: 'This customer bills to a third-party payer — no Auto Pay setup link',
+  payer_check_uncertain: 'Could not confirm who this customer bills to — try again in a moment',
+  autopay_already_active: 'This customer is already on Auto Pay',
+  autopay_paused: 'Auto Pay is already set up but paused — resume it instead of sending a setup link',
+  unsupported_billing_lane: 'Auto Pay setup links are only for per-visit and per-application customers',
+  completion_in_progress: 'This customer is finishing an Auto Pay setup right now — try again in a few minutes',
+};
+
+/**
+ * Auto Pay setup link — delegates entirely to autopay-setup-link's ONE
+ * entry point (inline delivery: mint or reuse the live /secure/:token row,
+ * send nothing — the composer send is the only delivery). Every policy
+ * decision (gate, payer exemption, already-on-Auto-Pay, paused, lane,
+ * saved-method auto-secure, dedup) stays there; this only translates the
+ * outcome into the composer's { url, line } / reason contract.
+ *
+ * auto_secured is the one outcome that is neither a link nor a refusal: a
+ * consented saved card covered the ask and was enrolled (same behavior as
+ * the Customers page button) — there is nothing to insert, and the reason
+ * says so explicitly so the operator does not text a link that no longer
+ * matters.
+ */
+async function buildAutopaySetupLink(customerId) {
+  const { requestAutopaySetupLink } = require('./autopay-setup-link');
+  const result = await requestAutopaySetupLink({ customerId, delivery: 'inline', trigger: 'admin' });
+  if (result?.action === 'auto_secured') {
+    return { url: null, line: '', reason: 'A consented card was already on file — Auto Pay is now enrolled, no link needed' };
+  }
+  if (result?.action === 'link_created' && result.secureUrl) {
+    return {
+      url: result.secureUrl,
+      // Mirrors the seeded autopay_setup_link SMS template: no bank-option
+      // promise (ACH is gated at page time), nothing charged today.
+      line: `Set up Auto Pay for your Waves service here: ${result.secureUrl}\nSave a payment method and each visit is paid automatically after it is completed. Nothing is charged today.\n\n`,
+      expiresAt: result.expiresAt || null,
+    };
+  }
+  const reason = String(result?.reason || '');
+  return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS[reason] || `Could not build an Auto Pay setup link (${reason || 'unknown'})` };
+}
+
 module.exports = {
   OPEN_ESTIMATE_STATUSES,
   REVIEW_GATE_REASONS,
@@ -290,4 +338,6 @@ module.exports = {
   buildPayBalanceLink,
   buildLatestEstimateLink,
   buildReferralLink,
+  AUTOPAY_SKIP_REASONS,
+  buildAutopaySetupLink,
 };

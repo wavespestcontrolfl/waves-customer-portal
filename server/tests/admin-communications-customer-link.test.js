@@ -1,6 +1,7 @@
 /**
  * POST /admin/communications/customer-link — the Insert Link sheet's other
- * per-customer links (review_request | pay_balance | estimate | referral).
+ * per-customer links (review_request | pay_balance | estimate | referral |
+ * autopay_setup).
  * Pins the same fail-closed recipient contract as /reschedule-link
  * (admin-only, full 10-digit phone, kind allowlist), which builder each kind
  * dispatches to (account ids vs the phone-owning primary id), the response
@@ -77,6 +78,7 @@ jest.mock('../services/composer-customer-links', () => ({
   buildPayBalanceLink: jest.fn(),
   buildLatestEstimateLink: jest.fn(),
   buildReferralLink: jest.fn(),
+  buildAutopaySetupLink: jest.fn(),
 }));
 jest.mock('../services/review-request', () => ({
 }));
@@ -206,6 +208,44 @@ describe('POST /admin/communications/customer-link', () => {
       expect(body.firstName).toBe('PersonA');
       expect(body.url).toContain('/r/WAVES-ABC12345');
       expect(body.line).toContain('Share Waves here');
+    });
+  });
+
+  test('autopay_setup: dispatches the phone-owning customer id (Auto Pay is per row)', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildAutopaySetupLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/secure/tok123',
+      line: 'Set up Auto Pay for your Waves service here: https://portal.wavespestcontrol.com/secure/tok123\n\n',
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'autopay_setup' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildAutopaySetupLink).toHaveBeenCalledWith(CUSTOMER_UUID);
+      expect(body.kind).toBe('autopay_setup');
+      expect(body.url).toContain('/secure/tok123');
+      expect(body.line).toContain('Set up Auto Pay');
+    });
+  });
+
+  test('autopay_setup: 409 when the phone belongs to more than one sibling and no customer was picked', async () => {
+    // Two rows on one account share the number: referral falls back to the
+    // sorted first id, but Auto Pay must never guess (a consented card can
+    // enroll on the spot) — the operator picks from the dropdown first.
+    const siblingsSharingPhone = () => makeCustomersBuilder({
+      selectResults: [
+        [{ id: 'aaaa1111-0000-4000-8000-000000000001', account_id: 'acct-1' }, { id: 'aaaa1111-0000-4000-8000-000000000002', account_id: 'acct-1' }],
+        [{ id: 'aaaa1111-0000-4000-8000-000000000001' }, { id: 'aaaa1111-0000-4000-8000-000000000002' }],
+        [{ first_name: 'PersonA' }],
+        [{ id: 'aaaa1111-0000-4000-8000-000000000001' }, { id: 'aaaa1111-0000-4000-8000-000000000002' }],
+      ],
+    });
+    wireDb({ customers: siblingsSharingPhone() });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'autopay_setup' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/pick the customer/);
+      expect(builders.buildAutopaySetupLink).not.toHaveBeenCalled();
     });
   });
 

@@ -22,6 +22,7 @@ jest.mock('../services/referral-engine', () => ({
   getLiveSettings: jest.fn(async () => ({ program_active: true })),
 }));
 jest.mock('../routes/estimate-public', () => ({ isEstimateCustomerViewable: jest.fn() }));
+jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: jest.fn() }));
 jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
   checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
@@ -38,12 +39,14 @@ const { openBalanceSummary } = require('../services/open-balance');
 const { combinedEligibleSiblings } = require('../services/pay-combined');
 const { enrollPromoter, getLiveSettings } = require('../services/referral-engine');
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
+const { requestAutopaySetupLink } = require('../services/autopay-setup-link');
 const ReviewService = require('../services/review-request');
 const {
   buildPayBalanceLink,
   buildLatestEstimateLink,
   buildReviewRequestLink,
   buildReferralLink,
+  buildAutopaySetupLink,
 } = require('../services/composer-customer-links');
 
 function chainBuilder({ firstRow = null, rows = [] } = {}) {
@@ -253,5 +256,55 @@ describe('buildReferralLink', () => {
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/not active/);
     expect(enrollPromoter).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildAutopaySetupLink', () => {
+  beforeEach(() => requestAutopaySetupLink.mockReset());
+
+  test('delegates inline to the single entry point and inserts the secure link', async () => {
+    requestAutopaySetupLink.mockResolvedValue({
+      requested: true, action: 'link_created', reason: 'created',
+      secureUrl: 'https://portal.wavespestcontrol.com/secure/tok123', expiresAt: '2026-09-10T00:00:00.000Z',
+    });
+    const r = await buildAutopaySetupLink('c1');
+    expect(requestAutopaySetupLink).toHaveBeenCalledWith({ customerId: 'c1', delivery: 'inline', trigger: 'admin' });
+    expect(r.url).toBe('https://portal.wavespestcontrol.com/secure/tok123');
+    expect(r.line).toContain(r.url);
+    expect(r.line).toMatch(/Nothing is charged today/);
+    // ACH is judged at page time — the clause never promises a bank option.
+    expect(r.line).not.toMatch(/bank/i);
+  });
+
+  test('a reused live row (request_exists) still inserts — same link, no second mint', async () => {
+    requestAutopaySetupLink.mockResolvedValue({
+      requested: true, action: 'link_created', reason: 'request_exists',
+      secureUrl: 'https://portal.wavespestcontrol.com/secure/tok123',
+    });
+    const r = await buildAutopaySetupLink('c1');
+    expect(r.url).toContain('/secure/tok123');
+  });
+
+  test('auto_secured is not a link: says Auto Pay enrolled so the operator does not text a stale ask', async () => {
+    requestAutopaySetupLink.mockResolvedValue({ requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' });
+    const r = await buildAutopaySetupLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/Auto Pay is now enrolled/);
+  });
+
+  test.each([
+    ['gate_off', /GATE_AUTOPAY_SETUP_LINK/],
+    ['payer_billed', /third-party payer/],
+    ['autopay_already_active', /already on Auto Pay/],
+    ['autopay_paused', /paused/],
+    ['unsupported_billing_lane', /per-visit/],
+    ['completion_in_progress', /finishing/],
+    ['enrollment_refused:weird', /enrollment_refused:weird/],
+  ])('skip %s answers a plain reason and no url', async (reason, expected) => {
+    requestAutopaySetupLink.mockResolvedValue({ requested: false, action: 'skipped', reason });
+    const r = await buildAutopaySetupLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.line).toBe('');
+    expect(r.reason).toMatch(expected);
   });
 });
