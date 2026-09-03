@@ -4507,6 +4507,14 @@ router.patch('/:id', async (req, res, next) => {
       }
       const verdict = resolveEstimateStatusPatch(estimate.status, req.body.status);
       if (!verdict.ok) return res.status(verdict.httpStatus).json({ error: verdict.error });
+      // A clarify re-price HOLD refuses the generic decline (codex r5 P0 on
+      // #3804): a held row parked send_failed that staff flipped to
+      // 'declined' would keep its stale whole-building quote as a terminal
+      // nothing re-prices. Lift the hold first (revise the estimate with the
+      // answered unit, or archive it). Mirrored on the UPDATE below.
+      if (!verdict.noop && siblingRepricePending(estimate)) {
+        return res.status(409).json({ error: 'This estimate is held for a re-price (a customer clarify reply). Revise it with the answered unit, or archive it, instead of declining.' });
+      }
       // Same-status writes are a no-op for the status column (no declined_at
       // re-stamp); other fields in the same request still persist below.
       if (!verdict.noop) {
@@ -4529,7 +4537,7 @@ router.patch('/:id', async (req, res, next) => {
     // the row still holds the status we validated against, so a customer
     // accept racing this PATCH can't be silently overwritten.
     let updateQuery = db('estimates').where({ id: req.params.id });
-    if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status });
+    if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status }).whereRaw(REPRICE_PENDING_ABSENT_SQL);
     // Turning invoice mode OFF is predicated on the stored proposal STILL
     // having no structured payment term at write time — the pre-read guard
     // above can race a concurrent proposal PUT that saves one (the PUT's

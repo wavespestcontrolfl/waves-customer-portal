@@ -548,7 +548,13 @@ A clarify RE-PRICE HOLD (`estimate_data.estimatorEngine.reprice_pending_at`
 non-empty — stamped by `estimate-clarify-asks` when a customer's unit or
 bedroom reply proves the row's address or dollars stale; lifted only by the
 operator's revision / proposal save or by the replacement draft's supersede
-archive) takes the row out of the customer surface whatever its status:
+archive) takes the row out of the customer surface for as long as the
+marker is on the row, whatever the row's status becomes afterwards. The
+marker is stamped on UNSENT rows only (draft / scheduled / send_failed /
+sending — a delivery that has not published yet); a building-level quote
+staff already SENT before the customer's reply is NOT retracted by this
+mechanism (the office is belled and the unit lands on the CRM record; an
+automatic retract-and-replace is the C2b follow-up). While the marker is on:
 the GET view (React `/data`, the legacy SSR page, `/pdf`, the slots
 routes, every `isEstimateCustomerViewable` consumer) answers the same
 generic 404 as an unknown token, and the two writes refuse with 409

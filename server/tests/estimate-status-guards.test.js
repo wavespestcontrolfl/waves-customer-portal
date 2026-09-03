@@ -198,6 +198,31 @@ describe('PATCH /api/admin/estimates/:id status guard', () => {
     expect(res.json).toHaveBeenCalledWith({ success: true });
   });
 
+  test('409s on declining a row under a clarify re-price hold — the held stale quote must not become a terminal (codex r5 P0 on #3804)', async () => {
+    const held = JSON.stringify({ estimatorEngine: { reprice_pending_at: '2026-09-03T12:00:00Z', reprice_attempt: 'att-1' } });
+    const readBuilder = makeBuilder({ first: { id: 'e1', status: 'send_failed', estimate_data: held } });
+    db.mockImplementation(() => readBuilder);
+
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: { status: 'declined', declineReason: 'price' } }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('held for a re-price') });
+    expect(readBuilder.update).not.toHaveBeenCalled();
+  });
+
+  test('the status UPDATE itself carries the hold predicate (a hold landing after the pre-read parks as a 409)', async () => {
+    const readBuilder = makeBuilder({ first: { id: 'e1', status: 'sent' } });
+    const writeBuilder = makeBuilder({ updateCount: 0 });
+    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
+
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: { status: 'declined', declineReason: 'price' } }, res, jest.fn());
+
+    expect(writeBuilder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('reprice_pending_at'));
+    expect(res.status).toHaveBeenCalledWith(409);
+  });
+
   test('409s when a concurrent accept wins the race (0 rows updated)', async () => {
     const readBuilder = makeBuilder({ first: { id: 'e1', status: 'viewed' } });
     const writeBuilder = makeBuilder({ updateCount: 0 });

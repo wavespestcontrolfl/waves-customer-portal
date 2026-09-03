@@ -39,6 +39,9 @@ describe('isEstimateCustomerViewable (React /:token/data security gate)', () => 
     const held = JSON.stringify({ estimatorEngine: { reprice_pending_at: '2026-09-03T12:00:00Z', reprice_attempt: 'att-1' } });
     expect(isEstimateCustomerViewable({ status: 'sending', expires_at: FUTURE, estimate_data: held })).toBe(false);
     expect(isEstimateCustomerViewable({ status: 'sent', expires_at: FUTURE, estimate_data: held })).toBe(false);
+    // …including a held row staff flipped to a terminal (codex r5 P0 on #3804).
+    expect(isEstimateCustomerViewable({ status: 'declined', expires_at: FUTURE, estimate_data: held })).toBe(false);
+    expect(isEstimateCustomerViewable({ status: 'accepted', expires_at: FUTURE, estimate_data: held })).toBe(false);
     expect(isEstimateCustomerViewable({ status: 'sent', expires_at: FUTURE, estimate_data: JSON.stringify({ estimatorEngine: {} }) })).toBe(true);
     expect(isEstimateCustomerViewable({ status: 'sent', expires_at: FUTURE, archived_at: PAST })).toBe(false);
   });

@@ -614,9 +614,11 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     const heldThrowAt = route.indexOf("throw new Error('sibling is held for a re-price");
     expect(heldThrowAt).toBeGreaterThan(-1);
     expect(route.indexOf('published = true;', heldThrowAt)).toBeGreaterThan(heldThrowAt);
-    // The ANCHOR's final publication honors the hold too: three predicates (claim, sibling publish,
-    // anchor finalize) and the held anchor parks as send_failed (codex r3 P1 on #3804).
-    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(3);
+    // The ANCHOR's final publication honors the hold too: four predicates (claim, sibling publish,
+    // anchor finalize, and the generic PATCH status write — codex r5 P0) and the held anchor parks
+    // as send_failed (codex r3 P1 on #3804).
+    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(4);
+    expect(route).toContain('if (!verdict.noop && siblingRepricePending(estimate)) {');
     // The customer DECLINE carries the hold predicate on its UPDATE too, and its guard answers the
     // accept path's 409; the legacy SSR renderer checks the hold beside the linkage markers (codex r4 P1).
     const pub = src('../routes/estimate-public.js');

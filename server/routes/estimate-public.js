@@ -18163,13 +18163,14 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   // Before the accepted/declined early-allow: acceptance does not change
   // whose data the row was composed from — an invalidated row never renders.
   if (estimateLinkageInvalidated(estimate)) return false;
-  if (['accepted', 'declined'].includes(estimate.status)) return true;
   // A clarify re-price hold (estimate-clarify-asks): the row's dollars or
   // address are known stale — a link that slipped out while the hold
   // landed (a reply on a 'sending' row, by design) renders nothing until
   // the operator's correction lifts it; the accept path refuses it too
-  // (pre-push codex P0 on #3804).
+  // (pre-push codex P0 on #3804). BEFORE the terminal early-allow: a held
+  // row staff flip to 'declined' must not render again (codex r5 P0).
   if (require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) return false;
+  if (['accepted', 'declined'].includes(estimate.status)) return true;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (['expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
