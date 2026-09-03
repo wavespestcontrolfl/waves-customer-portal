@@ -2971,6 +2971,13 @@ function ExpandedProduct({
   const [qty, setQty] = useState("");
   const [movements, setMovements] = useState([]);
   const [movementLoading, setMovementLoading] = useState(true);
+  const [autoForm, setAutoForm] = useState({
+    autoReorderEnabled: !!product.autoReorderEnabled,
+    autoReorderVendorId: product.autoReorderVendorId || "",
+    reorderQuantity: product.reorderQuantity ?? "",
+    perCompletionUsage: product.perCompletionUsage ?? "",
+  });
+  const [autoSaving, setAutoSaving] = useState(false);
   const [adjustForm, setAdjustForm] = useState({
     movementType: "restock",
     quantity: "",
@@ -3028,6 +3035,27 @@ function ExpandedProduct({
       onInventoryChanged?.();
     } catch (e) {
       showToast?.(`Failed: ${e.message}`);
+    }
+  };
+
+  const saveAutoReorder = async () => {
+    setAutoSaving(true);
+    try {
+      await adminFetch(`/admin/inventory/${product.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          autoReorderEnabled: !!autoForm.autoReorderEnabled,
+          autoReorderVendorId: autoForm.autoReorderVendorId || null,
+          reorderQuantity: autoForm.reorderQuantity === "" ? null : Number(autoForm.reorderQuantity),
+          perCompletionUsage: autoForm.perCompletionUsage === "" ? null : Number(autoForm.perCompletionUsage),
+        }),
+      });
+      showToast?.("Auto-reorder settings saved");
+      onInventoryChanged?.();
+    } catch (e) {
+      showToast?.(`Failed: ${e.message}`);
+    } finally {
+      setAutoSaving(false);
     }
   };
 
@@ -3091,6 +3119,70 @@ function ExpandedProduct({
             </span>
           </span>
         )}
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <div
+          style={{
+            fontSize: 11,
+            color: D.muted,
+            textTransform: "uppercase",
+            letterSpacing: 1,
+            marginBottom: 6,
+          }}
+        >
+          Auto-reorder
+        </div>
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            flexWrap: "wrap",
+            fontSize: 12,
+          }}
+        >
+          <label style={{ color: D.text, display: "flex", alignItems: "center", gap: 4 }}>
+            <input
+              type="checkbox"
+              checked={!!autoForm.autoReorderEnabled}
+              onChange={(e) => setAutoForm((f) => ({ ...f, autoReorderEnabled: e.target.checked }))}
+            />
+            Reorder when low
+          </label>
+          <select
+            value={autoForm.autoReorderVendorId}
+            onChange={(e) => setAutoForm((f) => ({ ...f, autoReorderVendorId: e.target.value }))}
+            style={{ ...sInput, width: 160 }}
+          >
+            <option value="">No vendor</option>
+            {vendors.map((v) => (
+              <option key={v.id} value={v.id}>{v.name}</option>
+            ))}
+          </select>
+          <input
+            type="number"
+            step="0.0001"
+            min="0"
+            placeholder="Reorder qty"
+            title="Quantity to request when stock reaches the low-stock threshold"
+            value={autoForm.reorderQuantity}
+            onChange={(e) => setAutoForm((f) => ({ ...f, reorderQuantity: e.target.value }))}
+            style={{ ...sInput, width: 100 }}
+          />
+          <input
+            type="number"
+            step="0.0001"
+            min="0"
+            placeholder="Used per visit"
+            title="Units consumed by every completed visit (yard-sign kit items); blank = not a per-visit consumable"
+            value={autoForm.perCompletionUsage}
+            onChange={(e) => setAutoForm((f) => ({ ...f, perCompletionUsage: e.target.value }))}
+            style={{ ...sInput, width: 110 }}
+          />
+          <button type="button" onClick={saveAutoReorder} disabled={autoSaving} style={sBtn(D.teal, D.white)}>
+            {autoSaving ? "Saving…" : "Save"}
+          </button>
+        </div>
       </div>
       {product.vendorPricing.length > 0 && (
         <div style={{ marginBottom: 12 }}>

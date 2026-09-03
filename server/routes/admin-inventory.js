@@ -580,6 +580,10 @@ function mapProduct(product, vendorPricing = []) {
     inventoryUnit: product.inventory_unit || null,
     lowStockThreshold,
     lowStock,
+    autoReorderEnabled: product.auto_reorder_enabled === true,
+    autoReorderVendorId: product.auto_reorder_vendor_id || null,
+    reorderQuantity: numberOrNull(product.reorder_quantity),
+    perCompletionUsage: numberOrNull(product.per_completion_usage),
     vendorPricing: enrichedPricing,
     unitPrices,
     // Product Registry fields
@@ -3688,6 +3692,28 @@ router.put('/:id', async (req, res, next) => {
 
     if (req.body.inventoryUnit !== undefined) upd.inventory_unit = nextUnit;
     if (req.body.lowStockThreshold !== undefined) upd.low_stock_threshold = nextThreshold;
+
+    // Auto-reorder + per-completion consumable fields (supplies lane). The
+    // vendor must exist; quantities are non-negative numbers or null.
+    if (req.body.autoReorderEnabled !== undefined) upd.auto_reorder_enabled = req.body.autoReorderEnabled === true;
+    if (req.body.reorderQuantity !== undefined) {
+      const q = numberOrNull(req.body.reorderQuantity);
+      if (q != null && q < 0) return res.status(400).json({ error: 'Reorder quantity must be zero or more' });
+      upd.reorder_quantity = q;
+    }
+    if (req.body.perCompletionUsage !== undefined) {
+      const u = numberOrNull(req.body.perCompletionUsage);
+      if (u != null && u < 0) return res.status(400).json({ error: 'Per-visit usage must be zero or more' });
+      upd.per_completion_usage = u;
+    }
+    if (req.body.autoReorderVendorId !== undefined) {
+      const vendorId = req.body.autoReorderVendorId || null;
+      if (vendorId) {
+        const vendor = await db('vendors').where({ id: vendorId }).first().catch(() => null);
+        if (!vendor) return res.status(400).json({ error: 'Auto-reorder vendor not found' });
+      }
+      upd.auto_reorder_vendor_id = vendorId;
+    }
 
     const updated = await db.transaction(async (trx) => {
       const locked = await trx('products_catalog').where({ id: req.params.id }).forUpdate().first();

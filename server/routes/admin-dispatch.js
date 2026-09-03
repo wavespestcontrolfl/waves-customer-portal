@@ -13638,6 +13638,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       );
     } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
 
+    // Yard-sign kit consumption (sign card + stake + sticker per completed
+    // visit). Runs on the resume path too — the partial unique index on
+    // product_inventory_movements makes it at-most-once per (product, visit).
+    // Skipped for an incomplete visit (no sign is left). Never throws.
+    try {
+      const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+      await consumeCompletionSupplies(db, {
+        scheduledServiceId: svc.id,
+        serviceRecordId: record?.id || null,
+        customerId: svc.customer_id || null,
+        technicianId: svc.technician_id || null,
+        isIncompleteVisit,
+      });
+    } catch (e) { logger.error(`[dispatch] completion supplies consumption failed: ${e.message}`); }
+
     // Follow-up suggestion for the RESPONSE (success-overlay CTA). On the
     // normal path this is the pre-transaction verdict whose alert already
     // parked atomically inside the completion trx above. On crash-resume,

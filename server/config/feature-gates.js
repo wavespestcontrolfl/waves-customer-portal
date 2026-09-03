@@ -1807,6 +1807,15 @@ const gates = {
   // logGateStatus, and the sweep can never disagree.
   visionDelta: gateEnvValue('GATE_VISION_DELTA'),
 
+  // Supplies auto-reorder sweep (6:10 ET daily): a product with
+  // auto_reorder_enabled at/below its low_stock_threshold gets ONE open
+  // product_restock_requests row (source auto_reorder) + one deduped office
+  // bell. Off → the sweep returns {skipped:'gated'} before any DB read.
+  // CALL-time gateEnvValue in the sweep (same parser as this entry); kill
+  // switch = unset. No order is ever placed by this gate — that is PR 2's
+  // GATE_AUTO_ORDER.
+  autoReorder: gateEnvValue('GATE_AUTO_REORDER'),
+
   // Auto property-lookup on call-pipeline property creation — each NEWLY
   // created customer_properties row from a call fires one full property
   // lookup (county + LLM trio + satellite vision: real per-call spend) and

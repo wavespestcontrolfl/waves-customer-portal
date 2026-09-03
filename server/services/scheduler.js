@@ -898,6 +898,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:10AM ET — Supplies auto-reorder sweep. Low-stock auto-reorder
+  // products → one open restock request each + one deduped bell (no order
+  // is placed; PR 2 adds the adapters). Gate GATE_AUTO_REORDER is checked
+  // INSIDE the sweep at call time; kill = unset. runExclusive: a deploy
+  // overlap must not raise the same request twice.
+  // =========================================================================
+  cron.schedule('10 6 * * *', async () => {
+    if (!gateEnvValue('GATE_AUTO_REORDER')) return;
+    logger.info('Running: Supplies auto-reorder sweep');
+    try {
+      await runExclusive('supplies-auto-reorder', () =>
+        require('./procurement/auto-reorder').runSuppliesAutoReorderSweep());
+    } catch (err) {
+      logger.error(`Supplies auto-reorder sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Point-in-time MRR snapshot — keeps the MRR Trend honest: past months read
   // their real recorded MRR instead of being recomputed at today's prices.
   //  - DAILY 6:05AM ET: refresh the CURRENT month's row (in-progress month stays

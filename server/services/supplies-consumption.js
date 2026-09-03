@@ -1,0 +1,92 @@
+/**
+ * supplies-consumption.js — per-completion consumables (yard-sign kit).
+ *
+ * Every completed visit leaves a sign card + stake + sticker in the yard.
+ * The closeout hook calls consumeCompletionSupplies once per completion;
+ * each product with `per_completion_usage > 0` gets ONE usage movement per
+ * (product, visit) and its inventory_on_hand decremented by that usage.
+ *
+ * Contract:
+ *   - idempotent on the closeout RESUME path: the partial unique index
+ *     product_inventory_movements_completion_consumable_uniq (metadata.source
+ *     = 'completion_consumable') makes the insert at-most-once; the stock
+ *     decrement only runs when the insert actually happened.
+ *   - skipped entirely for an incomplete visit (no sign is left).
+ *   - a product with no inventory_on_hand is skipped (same posture as
+ *     deductProductInventory: no count → nothing to deduct).
+ *   - negative stock is allowed (advisory, matches the chemical policy).
+ *   - NEVER throws — the closeout must not depend on this.
+ */
+const logger = require('./logger');
+
+const SOURCE = 'completion_consumable';
+
+async function consumeCompletionSupplies(db, {
+  scheduledServiceId,
+  serviceRecordId = null,
+  customerId = null,
+  technicianId = null,
+  isIncompleteVisit = false,
+} = {}) {
+  const result = { consumed: [], skipped: [], errors: [] };
+  if (!scheduledServiceId) { result.skipped.push({ reason: 'no_scheduled_service_id' }); return result; }
+  if (isIncompleteVisit) { result.skipped.push({ reason: 'incomplete_visit' }); return result; }
+
+  let products;
+  try {
+    products = await db('products_catalog')
+      .whereNotNull('per_completion_usage')
+      .where('per_completion_usage', '>', 0)
+      .select('id', 'name', 'per_completion_usage', 'inventory_on_hand', 'inventory_unit');
+  } catch (err) {
+    logger.warn(`[supplies-consumption] product lookup failed (non-blocking): ${err.message}`);
+    result.errors.push({ reason: 'lookup_failed', message: err.message });
+    return result;
+  }
+
+  for (const product of products) {
+    try {
+      const outcome = await db.transaction(async (trx) => {
+        const locked = await trx('products_catalog').where({ id: product.id }).forUpdate().first();
+        if (!locked) return { skipped: 'missing' };
+        const usage = Number(locked.per_completion_usage);
+        if (!Number.isFinite(usage) || usage <= 0) return { skipped: 'no_usage' };
+        if (locked.inventory_on_hand == null || locked.inventory_on_hand === '') return { skipped: 'no_on_hand' };
+        const before = Number(locked.inventory_on_hand);
+        if (!Number.isFinite(before)) return { skipped: 'non_numeric_on_hand' };
+        const after = Number((before - usage).toFixed(4));
+        const unit = locked.inventory_unit || 'each';
+
+        const inserted = await trx('product_inventory_movements')
+          .insert({
+            product_id: locked.id,
+            scheduled_service_id: scheduledServiceId,
+            service_record_id: serviceRecordId,
+            customer_id: customerId,
+            technician_id: technicianId,
+            movement_type: 'usage',
+            quantity: usage,
+            unit,
+            stock_before: before,
+            stock_after: after,
+            metadata: { source: SOURCE, reason: 'Completed visit consumable' },
+          })
+          .onConflict(trx.raw("(product_id, scheduled_service_id) WHERE (metadata->>'source') = 'completion_consumable'"))
+          .ignore()
+          .returning('id');
+        if (!inserted || inserted.length === 0) return { skipped: 'already_consumed' };
+
+        await trx('products_catalog').where({ id: locked.id }).update({ inventory_on_hand: after, updated_at: new Date() });
+        return { consumed: { productId: locked.id, name: locked.name, usage, unit, before, after } };
+      });
+      if (outcome.consumed) result.consumed.push(outcome.consumed);
+      else result.skipped.push({ productId: product.id, reason: outcome.skipped });
+    } catch (err) {
+      logger.warn(`[supplies-consumption] ${product.name} failed for visit ${scheduledServiceId} (non-blocking): ${err.message}`);
+      result.errors.push({ productId: product.id, message: err.message });
+    }
+  }
+  return result;
+}
+
+module.exports = { consumeCompletionSupplies, COMPLETION_CONSUMABLE_SOURCE: SOURCE };
