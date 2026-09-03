@@ -2176,8 +2176,8 @@ const gates = {
   // Ops queue (2026-09-02): the Agents hub "Queue" tab — a read-only
   // projection of every long-running lane's persisted state (pending /
   // parked / failed) in one place. No actions live there. OFF unless set,
-  // dev AND prod — GET /api/admin/agents/queue/availability answers
-  // { available: false }, /queue is 404, and the tab is not rendered.
+  // dev AND prod — GET /api/admin/agents/control/hub (features.queue) answers
+  // features.queue false, /queue is 404, and the tab is not rendered.
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   adminOpsQueue: gateEnvValue('GATE_ADMIN_OPS_QUEUE'),
   // Intelligence Bar tool activity (2026-09-02): POST /query answers carry a

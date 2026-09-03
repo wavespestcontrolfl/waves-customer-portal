@@ -7,6 +7,8 @@
  *                            parked message_drafts; approve/revise sends)
  *   - "Shadow Drafts"      — AgentShadowDraftsPage (brand-voice loop:
  *                            silent SMS drafts + nightly judge scores)
+ *   - "Models"             — AgentModelsTab (model registry per AI lane +
+ *                            Railway env change composer)
  *
  * Per-tab URL state via ?tab=<key>; the URL is the single source of
  * truth (tab derives from useSearchParams on every render), so in-app
@@ -31,7 +33,7 @@
  */
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Activity, Bot, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw, Layers } from "lucide-react";
+import { Activity, Bot, Cpu, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw, Layers } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
@@ -39,9 +41,11 @@ import AgentShadowDraftsPage from "./AgentShadowDraftsPage";
 import PendingDraftsTab from "./PendingDraftsTab";
 import DataHygienePage from "./DataHygienePage";
 import AgentActivityTab from "./AgentActivityTab";
+import AgentModelsTab from "./AgentModelsTab";
 import AgentQueueTab from "./AgentQueueTab";
 import { adminFetch } from "../../utils/admin-fetch";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import { useHubParams } from "./agents/hubParams";
 
 const TAB_KEY = "tab";
 const TABS = {
@@ -51,32 +55,45 @@ const TABS = {
   DRAFTS: "drafts",
   SHADOW: "shadow",
   HYGIENE: "hygiene",
+  MODELS: "models",
   QUEUE: "queue",
 };
 const TAB_LIST = [
   { key: TABS.OVERVIEW, label: "Overview", Icon: LayoutGrid },
-  // Activity — GATE_AGENT_ACTIVITY; the tab renders a "not enabled" note
+  // Runs (URL key stays "activity" so links and the beacon suite keep
+  // working) — GATE_AGENT_ACTIVITY; the tab renders a "not enabled" note
   // while the gate is off (the endpoint answers { available: false }).
-  { key: TABS.ACTIVITY, label: "Activity", Icon: Activity },
+  { key: TABS.ACTIVITY, label: "Runs", Icon: Activity },
   { key: TABS.DECISIONS, label: "Triage & Decisions", Icon: ListChecks },
   { key: TABS.DRAFTS, label: "Pending Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow Drafts", Icon: MessageSquareDashed },
   { key: TABS.HYGIENE, label: "Data Hygiene", Icon: DatabaseZap },
+  // Models — which model every AI lane runs on today, and the Railway env
+  // change that moves it (server/services/model-switchboard.js).
+  { key: TABS.MODELS, label: "Models", Icon: Cpu },
 ];
 // GATE_ADMIN_OPS_QUEUE: the Queue tab exists only when the server says the
-// gate is on (availability probe), so a dark gate renders nothing new.
+// gate is on (hub probe), so a dark gate renders nothing new.
 const QUEUE_TAB = { key: TABS.QUEUE, label: "Queue", Icon: Layers };
+// Tabs that read ?area= get the product-area strip under the tab row
+// (AdminCommandHeader's secondary row). Grows as the control-center tabs land.
+const AREA_TABS = new Set([TABS.MODELS]);
+const ALL_AREAS = "all";
 
 export default function AgentsHubPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [queueAvailable, setQueueAvailable] = useState(false);
+  const { area, set: setHubParams } = useHubParams();
+  // One probe: which gated surfaces exist + the product areas the strip
+  // filters by (GET /admin/agents/control/hub). Fails closed to no extras.
+  const [hub, setHub] = useState({ features: {}, areas: [] });
   useEffect(() => {
     let disposed = false;
-    adminFetch("/admin/agents/queue/availability")
-      .then((d) => { if (!disposed) setQueueAvailable(d?.available === true); })
-      .catch(() => { if (!disposed) setQueueAvailable(false); });
+    adminFetch("/admin/agents/control/hub")
+      .then((d) => { if (!disposed) setHub({ features: d?.features || {}, areas: Array.isArray(d?.areas) ? d.areas : [] }); })
+      .catch(() => { if (!disposed) setHub({ features: {}, areas: [] }); });
     return () => { disposed = true; };
   }, []);
+  const queueAvailable = hub.features.queue === true;
   const tabList = queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST;
   const validTabs = tabList.map((t) => t.key);
   const paramTab = searchParams.get(TAB_KEY);
@@ -120,6 +137,10 @@ export default function AgentsHubPage() {
   }, []);
   const handleRefresh = () => refreshRef.current?.();
 
+  const showAreas = AREA_TABS.has(tab) && hub.areas.length > 0;
+  const areaSections = showAreas ? [{ key: ALL_AREAS, label: "All areas" }, ...hub.areas.map((a) => ({ key: a.key, label: a.label }))] : [];
+  const activeArea = hub.areas.some((a) => a.key === area) ? area : ALL_AREAS;
+
   return (
     <div className="flex flex-col bg-surface-page min-h-[calc(100vh-64px)] max-w-[1300px] mx-auto">
       <AdminCommandHeader
@@ -129,9 +150,14 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-7" : "grid-cols-2 md:grid-cols-6"}
+        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 lg:grid-cols-8" : "grid-cols-2 md:grid-cols-4 lg:grid-cols-7"}
+        secondarySections={areaSections}
+        secondaryActiveKey={activeArea}
+        onSecondaryChange={(key) => setHubParams({ area: key === ALL_AREAS ? null : key })}
+        secondaryAriaLabel="Product area"
+        secondaryNavGridClassName="grid-cols-2 md:grid-cols-4 lg:grid-cols-7"
         action={
-          tab === TABS.OVERVIEW
+          tab === TABS.OVERVIEW || tab === TABS.MODELS
             ? {
                 label: refreshState.busy ? "Refreshing" : "Refresh",
                 icon: RefreshCw,
@@ -152,6 +178,8 @@ export default function AgentsHubPage() {
           <PendingDraftsTab embedded />
         ) : tab === TABS.SHADOW ? (
           <AgentShadowDraftsPage embedded />
+        ) : tab === TABS.MODELS ? (
+          <AgentModelsTab setRefreshHandler={setRefreshHandler} />
         ) : tab === TABS.QUEUE ? (
           <AgentQueueTab embedded />
         ) : (
