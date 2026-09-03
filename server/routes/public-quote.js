@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+const { followDuplicateLink } = require('../services/lead-estimate-link');
 // A wizard re-run of the same inquiry inside this window lands as a
 // 'duplicate' of the prior open lead instead of a second 'new' one.
 const WIZARD_LEAD_REUSE_DAYS = 30;
@@ -1987,10 +1988,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // best-effort insert never landed, in which case this run backfills
         // the ONE attribution row for the prospect onto the original's id
         // (codex #3834 r10 P2): a transient write miss must not become a
-        // permanently missing funnel row.
-        const attributionLeadId = duplicateOfLeadId
-          ? ((await db('ad_service_attribution').where({ lead_id: duplicateOfLeadId }).first('id')) ? null : duplicateOfLeadId)
-          : lead.id;
+        // permanently missing funnel row. The check and the backfill target
+        // the open ROOT of the ancestry, not the immediate parent — two
+        // concurrent repeats can chain B → A → O, and the prospect gets one
+        // funnel row, on O (pre-push P1 on r10).
+        let attributionLeadId = lead.id;
+        if (duplicateOfLeadId) {
+          const root = await followDuplicateLink(db, await db('leads').where({ id: duplicateOfLeadId }).first('id', 'status', 'extracted_data'));
+          const rootId = root ? root.id : duplicateOfLeadId;
+          attributionLeadId = (await db('ad_service_attribution').where({ lead_id: rootId }).first('id')) ? null : rootId;
+        }
         if (attributionLeadId) await db('ad_service_attribution').insert({
           customer_id: customerId,
           lead_id: attributionLeadId,

@@ -1448,6 +1448,7 @@ module.exports = {
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
+  followDuplicateLink,
   stampFirstResponseByContact,
   resolveEstimateEventLeads,
   convertLeadFromEvent,
