@@ -74,15 +74,15 @@ function modelLabel(catalog, id) {
   return catalog[id]?.label || id;
 }
 
-// One model chip: label + provider, monochrome (admin stays zinc).
+// One model chip: the model's name only (owner 2026-09-03: no provider or
+// id text under the name — the name is what people recognise).
 function ModelChip({ catalog, id }) {
   if (!id) return <span className="text-ink-tertiary">—</span>;
   const m = catalog[id];
   return (
     <span className="inline-flex flex-wrap items-baseline gap-1.5">
       <span className="text-13 text-zinc-900">{m?.label || id}</span>
-      <span className="text-11 uppercase tracking-label text-ink-tertiary">{PROVIDER_LABEL[m?.provider] || m?.provider || ""}</span>
-      {m?.discovered && <Badge className="whitespace-nowrap">new · not rated</Badge>}
+      {m?.discovered && <Badge className="whitespace-nowrap">new</Badge>}
     </span>
   );
 }
@@ -134,7 +134,7 @@ function ModelOptions({ catalog, accepts, exclude }) {
       {options.map(([id, m]) => (
         <option key={id} value={id} disabled={m.status === "unavailable"}>
           {m.label}
-          {m.status === "unavailable" ? " · no adapter" : m.status === "legacy" ? " · legacy" : m.discovered ? " · new" : ""}
+          {m.status === "unavailable" ? " · no adapter" : m.discovered ? " · new" : ""}
         </option>
       ))}
       <option value={FIND}>Find a model… (live provider search)</option>
@@ -540,7 +540,6 @@ export default function AgentModelsTab() {
             </THead>
             <TBody>
               {modelsInUse.map((m) => {
-                const info = catalog[m.id];
                 const accepts = modelAccepts(m);
                 const open = !!openModels[m.id];
                 const envs = accepts?.envs || [];
@@ -558,10 +557,6 @@ export default function AgentModelsTab() {
                           <DisclosureButton open={open} onClick={() => toggle(setOpenModels, m.id)} label={`${open ? "Hide" : "Show"} selectors for ${modelLabel(catalog, m.id)}`} />
                           <div className="flex flex-col gap-0.5 pt-1.5">
                             <ModelChip catalog={catalog} id={m.id} />
-                            <span className="text-11 text-ink-tertiary u-nums">
-                              {m.id}
-                              {info?.status === "legacy" ? " · legacy" : ""}
-                            </span>
                           </div>
                         </div>
                       </TD>
