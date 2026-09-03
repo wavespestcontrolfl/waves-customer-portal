@@ -49,8 +49,9 @@
  *   place({ vendorSku, quantity, credentials, beforeSubmit, dryRun }) →
  *     { externalOrderNumber, amountCents, evidence, dryRun }
  *   RefusedError (err.refuse) = parked, nothing submitted.
- *   err.runLevel = true (no browser, login failed, host not public) = the
- *     run is broken, not this request: the dispatcher releases the claim.
+ *   err.runLevel = true (no browser or browser setup, login failed, host
+ *     not public) = the run is broken, not this request: the dispatcher
+ *     releases the claim.
  *   err.ambiguous = true = the submit click happened and the outcome is
  *     unknown: needs_review, never retried.
  */
@@ -284,9 +285,12 @@ async function openLockedBrowser({ launchBrowser, resolveHostIps, evidence }) {
     return await lockContext(browser, evidence, pinned);
   } catch (e) {
     // The launch succeeded but the context / page / route setup did not:
-    // close Chromium here, since place() never received the handle (Codex r5 P2).
+    // close Chromium here, since place() never received the handle (Codex r5
+    // P2), and classify it run-level like a launch failure — nothing reached
+    // the vendor, so the claim is released for the next run instead of the
+    // request parking as failed / "order manually" (Codex r6 P2).
     try { await browser.close(); } catch { /* noop */ }
-    throw e;
+    throw e.runLevel ? e : runLevel(`siteone bot: browser setup failed: ${String(e.message).slice(0, 120)}`);
   }
 }
 

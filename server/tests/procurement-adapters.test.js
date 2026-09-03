@@ -162,6 +162,13 @@ describe('siteone internals', () => {
     expect(launchBrowser).not.toHaveBeenCalled();
   });
 
+  test('context / page setup failing after launch → run-level (claim released, not parked), Chromium closed (Codex r6 P2)', async () => {
+    const browser = { newContext: async () => { throw new Error('context boom'); }, close: jest.fn(async () => {}) };
+    const deps = { launchBrowser: async () => browser, resolveHostIps: async () => ['203.0.113.10'] };
+    await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: { email: 'a', password: 'b', accountNumber: '1' }, approvedShipTo: '1 x' }, deps)).rejects.toMatchObject({ runLevel: true, message: expect.stringMatching(/browser setup failed: context boom/) });
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
   test('every selector lives in the frozen SELECTORS map', () => {
     expect(Object.isFrozen(SELECTORS)).toBe(true);
     for (const k of ['loginUser', 'loginPass', 'searchInput', 'qtyInput', 'addToCart', 'cartTotal', 'cardField', 'mfaField', 'billToAccount', 'placeOrder', 'orderNumber']) expect(typeof SELECTORS[k]).toBe('string');
