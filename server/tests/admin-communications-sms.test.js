@@ -430,47 +430,76 @@ describe('admin communications SMS route', () => {
       });
     });
 
-    test('a live visit-lane card request link: the send consumes the one-text claim (visit + request markers)', async () => {
-      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM2' });
-      const owner = { id: 'cust-A', phone: '+15551234567' };
-      const card = { id: 'r9', kind: 'visit', status: 'pending', customer_id: 'cust-A', scheduled_service_id: 'v-77' };
+    // Visit-lane card request in the body: the composer send runs the
+    // service's own one-text mechanics — claim the visit BEFORE the
+    // provider call, mark the request after a real send, release otherwise.
+    const CARD = { id: 'r9', kind: 'visit', status: 'pending', customer_id: 'cust-A', scheduled_service_id: 'v-77', sent_at: null };
+    function wireCardDb({ claimResult = 1 } = {}) {
       db.mockImplementation((table) => {
         const first = jest.fn();
-        if (table === 'customers') first.mockResolvedValue(owner);
-        else if (table === 'appointment_card_requests') first.mockResolvedValue(card);
+        if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+        else if (table === 'appointment_card_requests') first.mockResolvedValue(CARD);
         // The Auto Pay seam's token lookup sees the same visit-lane row and leaves it alone.
-        const select = jest.fn(async () => (table === 'appointment_card_requests' ? [{ token: 'abcDEF123_-xyz789QWERTY', ...card }] : []));
-        const update = jest.fn(async (payload) => { stamps.push({ table, payload }); return 1; });
+        const select = jest.fn(async () => (table === 'appointment_card_requests' ? [{ token: 'abcDEF123_-xyz789QWERTY', ...CARD }] : []));
+        const update = jest.fn(async (payload) => {
+          stamps.push({ table, payload, sent: sendCustomerMessage.mock.calls.length });
+          return table === 'scheduled_services' && payload.card_link_sent_at instanceof Date ? claimResult : 1;
+        });
         return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select, update };
       });
+    }
+
+    test('a live visit-lane card request link: the visit is claimed BEFORE the provider call and the request marked after a real send', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM2' });
+      wireCardDb();
       await withServer(async (baseUrl) => {
         const res = await send(baseUrl);
         expect(res.status).toBe(200);
         expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
           metadata: expect.objectContaining({ original_message_type: 'manual' }),
         }));
-        const visitStamp = stamps.find((s) => s.table === 'scheduled_services');
-        const requestStamp = stamps.find((s) => s.table === 'appointment_card_requests');
-        expect(Object.keys(visitStamp.payload).sort()).toEqual(['card_link_sent_at', 'updated_at']);
-        expect(Object.keys(requestStamp.payload).sort()).toEqual(['sent_at', 'updated_at']);
+        const claim = stamps.find((s) => s.table === 'scheduled_services');
+        expect(Object.keys(claim.payload).sort()).toEqual(['card_link_sent_at', 'updated_at']);
+        expect(claim.sent).toBe(0); // claimed before dispatch
+        const marker = stamps.find((s) => s.table === 'appointment_card_requests');
+        expect(Object.keys(marker.payload).sort()).toEqual(['sent_at', 'updated_at']);
+        expect(marker.sent).toBe(1); // marked after
+        expect(stamps.filter((s) => s.table === 'scheduled_services')).toHaveLength(1); // never released
       });
     });
 
-    test('a suppressed (non-provider) send leaves the card request claim open', async () => {
-      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, suppressed: true });
-      const card = { id: 'r9', kind: 'visit', status: 'pending', customer_id: 'cust-A', scheduled_service_id: 'v-77' };
-      db.mockImplementation((table) => {
-        const first = jest.fn();
-        if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
-        else if (table === 'appointment_card_requests') first.mockResolvedValue(card);
-        const select = jest.fn(async () => (table === 'appointment_card_requests' ? [{ token: 'abcDEF123_-xyz789QWERTY', ...card }] : []));
-        const update = jest.fn(async (payload) => { stamps.push({ table, payload }); return 1; });
-        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select, update };
+    test('a lost claim (another send owns the visit, or a text already went) refuses BEFORE any provider call', async () => {
+      wireCardDb({ claimResult: 0 });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/already being sent, or was already texted/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
       });
+    });
+
+    test('a suppressed (non-provider) send releases the claim and never marks the request', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, suppressed: true });
+      wireCardDb();
       await withServer(async (baseUrl) => {
         const res = await send(baseUrl);
         expect(res.status).toBe(200);
-        expect(stamps.find((s) => s.table === 'scheduled_services')).toBeUndefined();
+        const visitWrites = stamps.filter((s) => s.table === 'scheduled_services');
+        expect(visitWrites).toHaveLength(2);
+        expect(visitWrites[1].payload.card_link_sent_at).toBeNull();
+        expect(stamps.find((s) => s.table === 'appointment_card_requests')).toBeUndefined();
+      });
+    });
+
+    test('a blocked send releases the claim', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, reason: 'quiet hours' });
+      wireCardDb();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(422);
+        const visitWrites = stamps.filter((s) => s.table === 'scheduled_services');
+        expect(visitWrites).toHaveLength(2);
+        expect(visitWrites[1].payload.card_link_sent_at).toBeNull();
         expect(stamps.find((s) => s.table === 'appointment_card_requests')).toBeUndefined();
       });
     });

@@ -32,6 +32,7 @@ jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: je
 // pricing-authority send gate the estimate builder consults) stays off.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'autopayCustomerSms') }));
 jest.mock('../services/appointment-card-request', () => ({
+  CLAIM_PARK_DATE: new Date('2200-01-01T00:00:00Z'),
   renderTemplate: jest.fn(),
   requestCardForAppointment: jest.fn(),
   dateLineFor: jest.fn(() => ' on Tue, Sep 8'),
@@ -105,7 +106,9 @@ const {
   buildServiceReportLink,
   buildContractSigningLink,
   buildStatementLink,
-  consumeCardRequestClaims,
+  claimCardRequestSends,
+  releaseCardRequestSends,
+  markCardRequestSends,
 } = require('../services/composer-customer-links');
 
 function chainBuilder({ firstRow = null, rows = [] } = {}) {
@@ -1182,25 +1185,64 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     expect(await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, cards: [{ token: TOKEN, scheduledServiceId: 'v1' }] });
     wire({ card: { id: 'r1', kind: 'visit', status: 'completed', customer_id: 'c1' } });
     expect((await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer live/);
+    wire({ card: { id: 'r1', kind: 'visit', status: 'pending', customer_id: 'c1', sent_at: new Date() } });
+    expect((await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/already texted/);
     wire({ card: { id: 'r1', kind: 'visit', status: 'pending', customer_id: 'c1' }, owner: { id: 'c1', phone: '+15550000000' } });
     expect((await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/different customer/);
     wire({ card: { id: 'r1', kind: 'customer', status: 'pending', customer_id: 'c9' } });
     expect(await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
   });
 
-  test('consumeCardRequestClaims stamps the visit claim and the request marker, both value-guarded', async () => {
-    mockBuilders = {
-      scheduled_services: chainBuilder(),
-      appointment_card_requests: chainBuilder(),
-    };
-    await consumeCardRequestClaims([{ token: TOKEN, scheduledServiceId: 'v1' }]);
-    const visits = mockBuilders.scheduled_services;
-    expect(visits.where).toHaveBeenCalledWith({ id: 'v1' });
-    expect(visits.whereNull).toHaveBeenCalledWith('card_link_sent_at');
-    expect(Object.keys(visits.update.mock.calls[0][0]).sort()).toEqual(['card_link_sent_at', 'updated_at']);
-    const requests = mockBuilders.appointment_card_requests;
-    expect(requests.where).toHaveBeenCalledWith({ token: TOKEN, status: 'pending' });
-    expect(requests.whereNull).toHaveBeenCalledWith('sent_at');
-    expect(Object.keys(requests.update.mock.calls[0][0]).sort()).toEqual(['sent_at', 'updated_at']);
+  describe('card request send claim (the service\'s own one-text mechanics, run by the composer send)', () => {
+    const cards = [{ token: TOKEN, scheduledServiceId: 'v1' }, { token: 'tok2ABCDEF_-0123456789', scheduledServiceId: 'v2' }];
+
+    test('claim: the atomic NULL → stamp on each visit; both won → the claim rides back', async () => {
+      mockBuilders = { scheduled_services: chainBuilder() };
+      const r = await claimCardRequestSends(cards);
+      expect(r.ok).toBe(true);
+      expect(r.claim.cards).toEqual(cards);
+      const visits = mockBuilders.scheduled_services;
+      expect(visits.where).toHaveBeenCalledWith({ id: 'v1' });
+      expect(visits.where).toHaveBeenCalledWith({ id: 'v2' });
+      expect(visits.whereNull).toHaveBeenCalledWith('card_link_sent_at');
+      expect(Object.keys(visits.update.mock.calls[0][0]).sort()).toEqual(['card_link_sent_at', 'updated_at']);
+    });
+
+    test('claim: a visit already claimed refuses and hands back the claims won before it', async () => {
+      const visits = chainBuilder();
+      visits.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+      mockBuilders = { scheduled_services: visits };
+      const r = await claimCardRequestSends(cards);
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/already being sent, or was already texted/);
+      // Third update = the value-guarded release of v1.
+      expect(visits.update.mock.calls[2][0]).toEqual(expect.objectContaining({ card_link_sent_at: null }));
+      expect(visits.where).toHaveBeenCalledWith({ id: 'v1', card_link_sent_at: expect.any(Date) });
+    });
+
+    test('release: value-guarded on this claim\'s own stamp', async () => {
+      mockBuilders = { scheduled_services: chainBuilder() };
+      const stamp = new Date();
+      await releaseCardRequestSends({ stamp, cards: [cards[0]] });
+      expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ id: 'v1', card_link_sent_at: stamp });
+      expect(mockBuilders.scheduled_services.update.mock.calls[0][0]).toEqual(expect.objectContaining({ card_link_sent_at: null }));
+    });
+
+    test('mark: the request row\'s sent_at, value-guarded; a marker failure PARKS the claim so the lease can never re-text', async () => {
+      mockBuilders = { scheduled_services: chainBuilder(), appointment_card_requests: chainBuilder() };
+      const stamp = new Date();
+      await markCardRequestSends({ stamp, cards: [cards[0]] });
+      const requests = mockBuilders.appointment_card_requests;
+      expect(requests.where).toHaveBeenCalledWith({ token: TOKEN, status: 'pending' });
+      expect(requests.whereNull).toHaveBeenCalledWith('sent_at');
+      expect(requests.update).toHaveBeenCalledWith({ sent_at: stamp, updated_at: stamp });
+      expect(mockBuilders.scheduled_services.update).not.toHaveBeenCalled();
+
+      mockBuilders = { scheduled_services: chainBuilder(), appointment_card_requests: chainBuilder() };
+      mockBuilders.appointment_card_requests.update.mockRejectedValue(new Error('db down'));
+      await expect(markCardRequestSends({ stamp, cards: [cards[0]] })).rejects.toThrow('db down');
+      expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ id: 'v1', card_link_sent_at: stamp });
+      expect(mockBuilders.scheduled_services.update.mock.calls[0][0].card_link_sent_at.toISOString()).toBe('2200-01-01T00:00:00.000Z');
+    });
   });
 });

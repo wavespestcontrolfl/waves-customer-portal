@@ -205,6 +205,20 @@ router.post('/sms', async (req, res, next) => {
   let parkedThreadIds = [];
   let claimedReviewRequestId = null;
   let claimedReviewClaimToken = null;
+  // Composer-carried card request links: the visit-level send claim won
+  // before dispatch (claimCardRequestSends) — released on every no-send
+  // exit, marked after a real provider send.
+  let cardClaim = null;
+  const releaseCardClaim = async () => {
+    if (!cardClaim) return;
+    const claim = cardClaim;
+    cardClaim = null;
+    try {
+      await require('../services/composer-customer-links').releaseCardRequestSends(claim);
+    } catch (releaseErr) {
+      logger.warn(`[communications] card request claim release failed (the service's stale-claim lease recovers it): ${releaseErr.message}`);
+    }
+  };
   const clearManualReservation = async () => {
     if (!manualReservationId) return;
     const id = manualReservationId;
@@ -414,6 +428,7 @@ router.post('/sms', async (req, res, next) => {
     // Shared by the review-link and Auto Pay-link pre-send seams below.
     const abortUnsent = async (status, error) => {
       await clearManualReservation();
+      await releaseCardClaim();
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send was not attempted — suggestion reopened.',
@@ -439,14 +454,20 @@ router.post('/sms', async (req, res, next) => {
     }
     // The other per-row bearers (contract signing, visit-lane card request,
     // payer statement): liveness + recipient ownership NOW, fail closed —
-    // same bar as above. Live card requests ride back so the send below can
-    // consume their one-text-ever claim.
-    let cardLinks = null;
+    // same bar as above. A live card request is then CLAIMED before the
+    // provider call — the visit's one-text-ever claim, exactly as the
+    // service's own SMS path takes it (GH Codex #3844 r1 P1 + pre-push
+    // P1): a lost claim (another tab mid-send, or a text already out)
+    // refuses here; every later exit releases or marks it.
     try {
-      const { bearerLinkSendCheck } = require('../services/composer-customer-links');
+      const { bearerLinkSendCheck, claimCardRequestSends } = require('../services/composer-customer-links');
       const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), { trustedCustomerId: trustedCustomerId || null });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
-      if (bearerCheck.cards) cardLinks = bearerCheck.cards;
+      if (bearerCheck.cards) {
+        const claim = await claimCardRequestSends(bearerCheck.cards);
+        if (!claim.ok) return abortUnsent(409, claim.error);
+        cardClaim = claim.claim;
+      }
     } catch (bearerErr) {
       logger.warn(`[communications] bearer link pre-send check failed — aborting send: ${bearerErr.message}`);
       return abortUnsent(503, 'Could not verify a customer link in this message — try again in a moment.');
@@ -598,6 +619,7 @@ router.post('/sms', async (req, res, next) => {
     await clearManualReservation();
     if (result.blocked || result.sent === false) {
       // The reply never left — release the claims and the parked cards.
+      await releaseCardClaim();
       if (claimedReviewRequestId) {
         await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
@@ -641,18 +663,21 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] Auto Pay link sent_at stamp failed (text already sent): ${stampErr.message}`);
       }
     }
-    // Composer-carried card request links: the text that just left IS the
-    // visit's one card-request text — consume the claim the inline mint
-    // left open (GH Codex #3844 r1 P1), same real-send guard and fail-soft
-    // rule as the Auto Pay stamp above.
-    if (cardLinks && result?.sent) {
+    // Composer-carried card request links: a REAL provider send IS the
+    // visit's one card-request text — mark the request row (the claim
+    // stays); a suppressed send hands the claim back (same sentinel rule as
+    // the review seam). markCardRequestSends parks the claim itself when
+    // the marker cannot land, so a warn here never risks a second text.
+    if (cardClaim) {
+      const claim = cardClaim;
+      cardClaim = null;
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');
-        if (isRealProviderSend(result)) {
-          await require('../services/composer-customer-links').consumeCardRequestClaims(cardLinks);
-        }
-      } catch (stampErr) {
-        logger.warn(`[communications] card request claim stamp failed (text already sent): ${stampErr.message}`);
+        const links = require('../services/composer-customer-links');
+        if (isRealProviderSend(result)) await links.markCardRequestSends(claim);
+        else await links.releaseCardRequestSends(claim);
+      } catch (markErr) {
+        logger.warn(`[communications] card request sent marker failed (text already sent; claim parked): ${markErr.message}`);
       }
     }
     if (claimedReviewRequestId) {
@@ -809,6 +834,20 @@ router.post('/sms', async (req, res, next) => {
         }
       } catch (claimErr) {
         logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
+      }
+    }
+    // Same convention for the card request claim: accepted → mark, else release.
+    if (cardClaim) {
+      if (err?.providerOutcome?.sent === true) {
+        const claim = cardClaim;
+        cardClaim = null;
+        try {
+          await require('../services/composer-customer-links').markCardRequestSends(claim);
+        } catch (markErr) {
+          logger.warn(`[communications] card request sent marker failed after a throw (claim parked): ${markErr.message}`);
+        }
+      } else {
+        await releaseCardClaim();
       }
     }
     // Guarded reopen: anything the send actually resolved before the throw

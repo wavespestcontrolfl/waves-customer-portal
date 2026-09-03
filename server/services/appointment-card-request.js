@@ -3471,6 +3471,7 @@ module.exports = {
   dateLineFor,
   cancelFeeLine,
   LIVE_VISIT_STATUSES,
+  CLAIM_PARK_DATE,
   _test: {
     dateLineFor,
     resolveExemption,

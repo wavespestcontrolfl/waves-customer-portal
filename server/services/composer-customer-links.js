@@ -688,7 +688,8 @@ async function immediateOnlyLinkSendCheck(body) {
  * and — when the route trusts a customer id — be that customer. FAIL
  * CLOSED on any miss. { ok: true } when nothing applies or all checks out;
  * `cards` rides back with every live visit-lane link so the caller can
- * consume the card request's one-text-ever claim after a real send.
+ * CLAIM the card request's one-text-ever send before dispatch
+ * (claimCardRequestSends) — a row already texted (sent_at) refuses here.
  */
 async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
   const runs = decodedRuns(body);
@@ -743,9 +744,10 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
   for (const run of secureLinkRuns(runs)) {
     const token = canonicalSecureToken(run, host);
     if (!token) continue; // the Auto Pay seam already refused a non-canonical /secure run
-    const row = await db('appointment_card_requests').where({ token }).first('id', 'kind', 'status', 'customer_id', 'scheduled_service_id');
+    const row = await db('appointment_card_requests').where({ token }).first('id', 'kind', 'status', 'customer_id', 'scheduled_service_id', 'sent_at');
     if (!row || row.kind !== 'visit') continue; // unknown → the Auto Pay seam's verdict; customer-kind → its own
     if (row.status !== 'pending') return refuse('This card request link is no longer live — remove it and insert a fresh one.');
+    if (row.sent_at) return refuse('This card request was already texted — the customer gets one card request per appointment. Remove the link before sending.');
     const bad = await owned(row.customer_id, 'card request link');
     if (bad) return bad;
     if (!cards.some((c) => c.token === token)) cards.push({ token, scheduledServiceId: row.scheduled_service_id });
@@ -754,30 +756,65 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
 }
 
 /**
- * Consume a card request's one-text-ever claim after the composer's /sms
- * send actually left (GH Codex #3844 r1 P1). requestCardForAppointment's
- * inline delivery deliberately leaves both markers unconsumed (the /book
- * wizard's customer may abandon the step), so the operator's text has to
- * stamp them itself or the previsit / office triggers would reuse the
- * pending row and text the same payment-adjacent ask again. Same two
- * markers the service's own SMS path writes: the visit's card_link_sent_at
- * (the send claim every later trigger checks first) and the request row's
- * sent_at (the durable outcome marker the stale-claim lease reads).
- * Value-guarded: a visit already claimed, or a row that left 'pending'
- * meanwhile, is left alone. Throws on a write failure — the caller logs
- * (the text is already out).
+ * The composer's card-request send claim (GH Codex #3844 r1 P1 + pre-push
+ * P1): requestCardForAppointment's inline delivery deliberately leaves the
+ * one-text-ever markers unconsumed (the /book wizard's customer may
+ * abandon the step), so the operator's /sms send has to run the SAME
+ * claim mechanics the service's SMS path does — or two tabs, a resend, or
+ * a later previsit/office trigger would text the same payment-adjacent
+ * link again.
+ *   claimCardRequestSends — BEFORE dispatch: the atomic claim on the
+ *     visit's card_link_sent_at (NULL → stamp). A lost claim means another
+ *     send owns this visit right now, or one already went out; every claim
+ *     this call won is handed back and the send refuses.
+ *   releaseCardRequestSends — the text never left (blocked, failed,
+ *     suppressed, or a throw with no provider acceptance): value-guarded
+ *     release so only THIS claim is cleared.
+ *   markCardRequestSends — a REAL provider send: the request row's sent_at
+ *     (the durable outcome marker the service's stale-claim lease reads).
+ *     If the marker cannot land, the claim is PARKED (CLAIM_PARK_DATE, the
+ *     service's own rule) so the lease can never adopt it and re-text.
+ * A worker that dies between claim and send leaves the stamp with no
+ * marker — the service's stale-claim lease (STALE_CLAIM_MS) recovers that
+ * exactly as it does for its own sends.
  */
-async function consumeCardRequestClaims(cards) {
+async function claimCardRequestSends(cards) {
   const stamp = new Date();
-  for (const { token, scheduledServiceId } of cards) {
-    await db('scheduled_services')
-      .where({ id: scheduledServiceId })
+  const won = [];
+  for (const card of cards) {
+    const claimed = await db('scheduled_services')
+      .where({ id: card.scheduledServiceId })
       .whereNull('card_link_sent_at')
       .update({ card_link_sent_at: stamp, updated_at: stamp });
-    await db('appointment_card_requests')
-      .where({ token, status: 'pending' })
-      .whereNull('sent_at')
-      .update({ sent_at: stamp, updated_at: stamp });
+    if (claimed === 1) { won.push(card); continue; }
+    await releaseCardRequestSends({ stamp, cards: won });
+    return { ok: false, error: 'This card request is already being sent, or was already texted — the customer gets one card request per appointment. Remove the link before sending.' };
+  }
+  return { ok: true, claim: { stamp, cards: won } };
+}
+
+async function releaseCardRequestSends(claim) {
+  for (const { scheduledServiceId } of claim.cards) {
+    await db('scheduled_services')
+      .where({ id: scheduledServiceId, card_link_sent_at: claim.stamp })
+      .update({ card_link_sent_at: null, updated_at: new Date() });
+  }
+}
+
+async function markCardRequestSends(claim) {
+  for (const { token, scheduledServiceId } of claim.cards) {
+    try {
+      await db('appointment_card_requests')
+        .where({ token, status: 'pending' })
+        .whereNull('sent_at')
+        .update({ sent_at: claim.stamp, updated_at: claim.stamp });
+    } catch (err) {
+      const { CLAIM_PARK_DATE } = require('./appointment-card-request');
+      await db('scheduled_services')
+        .where({ id: scheduledServiceId, card_link_sent_at: claim.stamp })
+        .update({ card_link_sent_at: CLAIM_PARK_DATE, updated_at: new Date() });
+      throw err;
+    }
   }
 }
 
@@ -1095,7 +1132,9 @@ module.exports = {
   autopayLinkSendCheck,
   immediateOnlyLinkSendCheck,
   bearerLinkSendCheck,
-  consumeCardRequestClaims,
+  claimCardRequestSends,
+  releaseCardRequestSends,
+  markCardRequestSends,
   buildAppointmentPageLink,
   CARD_REQUEST_SKIP_REASONS,
   buildCardRequestLink,
