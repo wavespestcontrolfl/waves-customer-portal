@@ -291,12 +291,18 @@ async function unitTargets(trx, flags) {
     linkage = await unitCallLinkage(trx, flags.unit_call_log_id);
     if (linkage) customerId = linkage.customerId;
   }
+  // An ask parked by C1 (#3788) carries the item-bound targets but not the
+  // quote signals this lane added — recognized by BOTH quote fields being
+  // absent (never by their value: false is a real "no quote asked") — and
+  // recovers them from the unit call's own row like a fully legacy ask
+  // (pre-push codex P1).
+  const quoteLegacy = flags.unit_quote_promised === undefined && flags.unit_quote_requested === undefined;
   return {
     leadId: flags.unit_lead_id || null,
     customerId,
     linkage,
-    quotePromised: flags.unit_quote_promised === true,
-    quoteRequested: flags.unit_quote_requested === true,
+    quotePromised: quoteLegacy ? linkage?.quotePromised === true : flags.unit_quote_promised === true,
+    quoteRequested: quoteLegacy ? linkage?.quoteRequested === true : flags.unit_quote_requested === true,
   };
 }
 

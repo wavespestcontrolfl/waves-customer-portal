@@ -1990,6 +1990,25 @@ describe('unit re-draft (GATE_CLARIFY_UNIT_WRITEBACK — PR C2: fence + every-li
     expect(mockState.selects).not.toContain('estimates');
   });
 
+  test('an ask parked by C1 (targets bound, no quote fields): quote signals are recovered from the call row; an explicit false is honored', async () => {
+    const callRow = { id: 'call-1', customer_id: 'cust-1', twilio_call_sid: 'CA-1', metadata: { lead_id: 'lead-1' }, ai_extraction: { quote_promised: true }, v2_extraction_status: null };
+    let a = AWAITING({ unit_quote_promised: undefined, unit_quote_requested: undefined });
+    mockState.existingDraft = a;
+    mockState.firstQueue = [a, a, callRow, { id: 'cust-1', address_line1: null }, callRow, { id: 'lead-1', address: null }];
+    mockState.selectQueue = [[{ id: 'est-1', status: 'draft' }], [{ id: 'est-1', status: 'draft' }], []];
+    let r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ callLogId: 'call-1', quotePromised: true, supersedeEstimateIds: ['est-1'] }));
+    // Both fields present and false = the producer knew no quote was asked; the call row is not consulted.
+    jest.clearAllMocks(); mockState.updates = []; mockState.selects = [];
+    a = AWAITING({ unit_quote_promised: false, unit_quote_requested: false });
+    mockState.existingDraft = a;
+    mockState.firstQueue = [a, a, callRow, { id: 'cust-1', address_line1: null }, callRow, { id: 'lead-1', address: null }];
+    mockState.selectQueue = [[], [], []];
+    r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+    expect(mockState.selects).not.toContain('estimates');
+  });
+
   test('unit + bedroom answered in one text against the SAME draft: one call re-run carries both overrides', async () => {
     await reply({ flags: { missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-1' }, drafts: [{ id: 'est-1', status: 'draft' }], body: 'Apt 204, 2 bedrooms' });
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledTimes(1);
