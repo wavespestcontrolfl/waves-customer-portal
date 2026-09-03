@@ -8,9 +8,9 @@ import { fetchCardHoldCancelPreview } from '../../lib/cardHoldCancel';
 // the charge path all read the same verdict. Owner request 2026-09-03 after
 // a $75 warning fired on a visit a week out.
 //
-// `onPreview` hands the fetched preview to the parent so the fee-choice
-// prompt reuses it instead of fetching twice.
-export default function CancelFeeNotice({ serviceId, onPreview }) {
+// Display-only: the fee-choice prompt at confirm time fetches its own fresh
+// preview (a copy taken when the card opened can go stale).
+export default function CancelFeeNotice({ serviceId }) {
   const [state, setState] = useState({ status: 'loading', preview: null });
 
   useEffect(() => {
@@ -19,7 +19,6 @@ export default function CancelFeeNotice({ serviceId, onPreview }) {
     fetchCardHoldCancelPreview(serviceId).then((preview) => {
       if (cancelled) return;
       setState({ status: preview ? 'ready' : 'unavailable', preview });
-      onPreview?.(preview);
     });
     return () => { cancelled = true; };
   }, [serviceId]);

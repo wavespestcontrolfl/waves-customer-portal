@@ -136,9 +136,6 @@ export default function MobileAppointmentDetailSheet({
   // always chooses whether the customer gets the cancellation text.
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelNotificationType, setCancelNotificationType] = useState('text');
-  // Cancel-fee preview fetched by the card's CancelFeeNotice; reused by the
-  // fee-choice prompt so both read one verdict.
-  const [cancelFeePreview, setCancelFeePreview] = useState(null);
   const [showCustomer, setShowCustomer] = useState(false);
   const [showRainOut, setShowRainOut] = useState(false);
   const [estimateSource, setEstimateSource] = useState(null);
@@ -356,7 +353,7 @@ export default function MobileAppointmentDetailSheet({
     setActionBusy('cancel');
     // Card-hold visits inside the late-cancel window: ask whether this is a
     // business-initiated cancel (waive the fee) before committing.
-    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id, cancelFeePreview);
+    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id);
     if (!proceed) { setActionBusy(''); return; }
     try {
       const result = await adminFetch(`/admin/dispatch/${service.id}/status`, {
@@ -852,7 +849,7 @@ export default function MobileAppointmentDetailSheet({
                       Keep appointment
                     </button>
                   </div>
-                  <CancelFeeNotice serviceId={service.id} onPreview={setCancelFeePreview} />
+                  <CancelFeeNotice serviceId={service.id} />
                 </div>
               )}
             </>

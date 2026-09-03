@@ -46,14 +46,16 @@ export async function fetchCardHoldCancelPreview(serviceId) {
  * The preview is best-effort: if it can't be fetched the cancel proceeds
  * with today's behavior (no waive) rather than blocking the operator.
  *
- * `preloaded` — a preview the cancel card already fetched (CancelFeeNotice)
- * so the prompt reads the same verdict the operator just saw, without a
- * second round trip. Omit it to fetch here.
+ * Always fetches fresh at confirm time — the CancelFeeNotice at the foot of
+ * the cancel card fetched its own copy when the card opened, but that copy
+ * can go stale (card reopened later, visit crossing the window boundary,
+ * card removed) and a stale verdict here would skip the warning or waive
+ * revenue. The notice is display-only.
  *
  * @returns {Promise<{proceed: boolean, waiveCardHoldFee: boolean}>}
  */
-export async function confirmCardHoldFeeChoice(serviceId, preloaded = null) {
-  const preview = preloaded || await fetchCardHoldCancelPreview(serviceId);
+export async function confirmCardHoldFeeChoice(serviceId) {
+  const preview = await fetchCardHoldCancelPreview(serviceId);
 
   if (!preview?.feeApplies) return { proceed: true, waiveCardHoldFee: false };
 
