@@ -12518,6 +12518,50 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     };
 
+    // Third-party Bill-To delivery, callable from the resumable SMS exit as
+    // well as the ordinary finalization below: the payer AP channel does not
+    // depend on the homeowner text, so a retryable completion-SMS failure
+    // must not leave the payer invoice a draft until the tech retries
+    // (GitHub Codex #3745 r6 P1). Idempotent — the status check skips an
+    // invoice already sent/finalized on a resumed attempt.
+    const sendPayerInvoiceToApIfEligible = async () => {
+      // Third-party Bill-To: a payer-billed auto-invoice is intentionally NOT
+      // carried by the homeowner completion SMS (pay link suppressed) and is never
+      // collected in person, so the homeowner channel can't finalize it. Route it
+      // to the payer's AP inbox here and finalize on success — otherwise the
+      // third-party AR is silently stranded as an unsent draft. A payer with no
+      // usable AP email leaves the invoice unfinalized for operator correction
+      // (sendInvoiceEmail returns ok:false rather than mailing the homeowner).
+      // Only deliver to the payer when this invoice hasn't already been sent —
+      // `invoiceCreated` is also true when a completion REUSES an existing unpaid
+      // invoice (a pre-minted invoice already `sent`/`viewed`, or a request where
+      // invoiceAlreadySent suppressed the homeowner link). Re-sending would
+      // duplicate the AP billing email. Fresh completion invoices are `draft`.
+      const payerInvoiceAlreadyDelivered = !!invoiceAlreadySent
+        || ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
+          .includes(String(invoice?.status || '').toLowerCase());
+      // Backfill closeouts skip the automatic payer AP send too — the invoice
+      // stays unfinalized for the operator to review and send by hand (same
+      // recovery path as a failed AP send below).
+      if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion) {
+        try {
+          const InvoiceEmail = require('../services/invoice-email');
+          const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);
+          if (payerSend?.ok) {
+            const InvoiceService = require('../services/invoice');
+            invoice = await InvoiceService.markDeliverySent(invoice.id, {
+              email: true,
+              source: 'dispatch_completion_payer',
+            });
+          } else {
+            logger.warn(`[dispatch] Payer invoice ${invoice.id} not delivered to AP (${payerSend?.error || 'unknown'}) — left unfinalized for operator correction`);
+          }
+        } catch (payerSendErr) {
+          logger.error(`[dispatch] Payer invoice AP send failed for ${invoice.id}: ${payerSendErr.message}`);
+        }
+      }
+    };
+
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
       && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
       // Report-v1 visit with no public report token (mint failed above): the
@@ -12596,6 +12640,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // try and by the catch when a rejection's audit insert threw.
       const exitForCompletionSmsResume = async (sendErr) => {
         await queueServiceReportEmailIfEligible();
+        await sendPayerInvoiceToApIfEligible();
         const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, sendErr);
         if (!released) {
           logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
@@ -13521,41 +13566,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    // Third-party Bill-To: a payer-billed auto-invoice is intentionally NOT
-    // carried by the homeowner completion SMS (pay link suppressed) and is never
-    // collected in person, so the homeowner channel can't finalize it. Route it
-    // to the payer's AP inbox here and finalize on success — otherwise the
-    // third-party AR is silently stranded as an unsent draft. A payer with no
-    // usable AP email leaves the invoice unfinalized for operator correction
-    // (sendInvoiceEmail returns ok:false rather than mailing the homeowner).
-    // Only deliver to the payer when this invoice hasn't already been sent —
-    // `invoiceCreated` is also true when a completion REUSES an existing unpaid
-    // invoice (a pre-minted invoice already `sent`/`viewed`, or a request where
-    // invoiceAlreadySent suppressed the homeowner link). Re-sending would
-    // duplicate the AP billing email. Fresh completion invoices are `draft`.
-    const payerInvoiceAlreadyDelivered = !!invoiceAlreadySent
-      || ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
-        .includes(String(invoice?.status || '').toLowerCase());
-    // Backfill closeouts skip the automatic payer AP send too — the invoice
-    // stays unfinalized for the operator to review and send by hand (same
-    // recovery path as a failed AP send below).
-    if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion) {
-      try {
-        const InvoiceEmail = require('../services/invoice-email');
-        const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);
-        if (payerSend?.ok) {
-          const InvoiceService = require('../services/invoice');
-          invoice = await InvoiceService.markDeliverySent(invoice.id, {
-            email: true,
-            source: 'dispatch_completion_payer',
-          });
-        } else {
-          logger.warn(`[dispatch] Payer invoice ${invoice.id} not delivered to AP (${payerSend?.error || 'unknown'}) — left unfinalized for operator correction`);
-        }
-      } catch (payerSendErr) {
-        logger.error(`[dispatch] Payer invoice AP send failed for ${invoice.id}: ${payerSendErr.message}`);
-      }
-    }
+    // Third-party Bill-To: route the payer-billed auto-invoice to the AP inbox
+    // (closure defined beside exitForCompletionSmsResume, which also runs it).
+    await sendPayerInvoiceToApIfEligible();
 
     const finalRecordNotes = parseJsonObject(record.structured_notes);
     const completionSmsStatus = finalRecordNotes.completionSmsStatus
