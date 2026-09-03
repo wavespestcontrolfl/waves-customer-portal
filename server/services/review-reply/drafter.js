@@ -887,6 +887,10 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
   return lines.join('\n');
 }
 
+// Rejection codes whose span is contact-shaped (a phone number, an email, an
+// address, a link): the model is told the code, the row does not keep the words.
+const CONTACT_CODES = new Set(['email', 'url', 'phone', 'address']);
+
 const FEEDBACK_FOR = {
   too_long: 'too many words',
   too_short: 'too short to read as a real reply',
@@ -978,7 +982,9 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
       return { ok: true, text: normalized, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails, reviewOnly: step.reviewOnly };
     }
     rejections.push(verdict.code);
-    rejectionDetails.push({ attempt: attempts, code: verdict.code, span: verdict.span, text: normalized.slice(0, 400) });
+    // Stored on the row for diagnosis: attempt, code and the words that
+    // tripped it — never the whole rejected draft, and no contact-shaped span.
+    rejectionDetails.push({ attempt: attempts, code: verdict.code, span: CONTACT_CODES.has(verdict.code) ? null : verdict.span });
     // Code only in the log: a span can be a phone number, an address or a
     // name. The words live in rejectionDetails, stored on the review row.
     logger.info(`[review-reply-drafter] attempt ${attempts} rejected (${verdict.code}) review=${grounding.reviewId} mode=${mode}`);

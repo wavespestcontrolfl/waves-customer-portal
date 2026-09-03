@@ -667,12 +667,14 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(r.safeCopy).toBe(true);
     expect(r.text).toBe(good('Hi Dana,\n\nThanks for the review. We\'ll make sure Marcus hears it.'));
     expect(r.rejections).toEqual(['forbidden_name', 'phone', 'private_channel', 'banned_phrase']);
-    expect(r.rejectionDetails.map((d) => d.span)).toEqual(['tyler', '941-555-1212', 'our records', 'for good']);
+    expect(r.rejectionDetails.map((d) => d.span)).toEqual(['tyler', null, 'our records', 'for good']);
+    expect(r.rejectionDetails.every((d) => d.text === undefined)).toBe(true);
     expect(r.attempts).toBe(4);
     // Attempt 2 names the first violation with its words; attempt 4 lists all three prior ones.
     expect(mockDispatch.mock.calls[1][1].text).toContain('PREVIOUS ATTEMPTS WERE REJECTED');
     expect(mockDispatch.mock.calls[1][1].text).toContain('named a technician the reviewer did not name (the words: "tyler")');
     expect(mockDispatch.mock.calls[3][1].text).toContain('attempt 1:');
+    expect(mockDispatch.mock.calls[3][1].text).toContain('attempt 2: contained a phone number\n');
     expect(mockDispatch.mock.calls[3][1].text).toContain('attempt 3:');
     expect(mockDispatch.mock.calls[3][1].text).toContain('(the words: "our records")');
     // Attempts 3 and 4 are review-only: no account facts in the user text.
