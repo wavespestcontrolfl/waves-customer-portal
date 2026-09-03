@@ -1304,6 +1304,11 @@ describe('unit_number ask (call pipeline lane)', () => {
     expect(extractUnitReply("Apt 204 is wrong, it's 205")).toBeNull();
     expect(extractUnitReply('Unit 204 or 205')).toBeNull();
     expect(extractUnitReply('Apt 204, actually 206')).toBeNull();
+    expect(extractUnitReply('Apt 204 and 205')).toBeNull();
+    expect(extractUnitReply('Apt 204, should be 205')).toBeNull();
+    expect(extractUnitReply('Apt 204/205')).toBeNull();
+    expect(extractUnitReply('Apt 204 205')).toBeNull();
+    expect(extractUnitReply('Apt 204, 3 br')).toBe('Apt 204');
     expect(extractUnitReply("It's Apt 204")).toBe('Apt 204');
     expect(extractUnitReply('Apt 204, 2 bedrooms')).toBe('Apt 204');
     expect(extractUnitReply('Apt 204, apt 204')).toBe('Apt 204');
@@ -1408,10 +1413,11 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
   });
   const reply = async (leadRow, customerRow, flags = {}, body = 'Apt 204') => {
     const a = AWAITING(flags);
-    // first() order in the locked phase: fresh draft, customer (locked first), lead; later flag
-    // stamps re-read the draft row (existingDraft) once the queue drains.
+    // first() order in the locked phase: fresh draft, the unit call's row (its CURRENT customer
+    // linkage is the target), customer (locked first), lead; later flag stamps re-read the draft
+    // row (existingDraft) once the queue drains.
     mockState.existingDraft = a;
-    mockState.firstQueue = [a, a, customerRow, leadRow];
+    mockState.firstQueue = [a, a, { id: 'call-1', customer_id: customerRow?.id || null }, customerRow, leadRow];
     const result = await handleClarifyReply({ phone: '+17735550142', body });
     await result.repricePromise;
     return result;
@@ -1440,6 +1446,30 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
     expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
     expect(mockState.updates.find((u) => u.table === 'estimates')).toBeUndefined();
+  });
+
+  test('an operator relink of the call after the ask parked wins over the cached customer target; an unlink means no customer write', async () => {
+    const a = AWAITING();
+    mockState.existingDraft = a;
+    mockState.firstQueue = [a, a, { id: 'call-1', customer_id: 'cust-Z' }, { id: 'cust-Z', address_line1: null }, { id: 'lead-1', address: null }];
+    let r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockRecordCallProperty).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-Z' }));
+    expect(mockRecordCallProperty).not.toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
+    jest.clearAllMocks(); mockState.updates = [];
+    mockState.firstQueue = [a, a, { id: 'call-1', customer_id: null }, { id: 'lead-1', address: null }];
+    r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockRecordCallProperty).not.toHaveBeenCalled();
+    expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
+    expect(writeback()).toEqual(expect.objectContaining({ lead: 'filled', customer: 'skipped' }));
+  });
+
+  test('a primary property CREATED from the mirror during write-back carries the clarify source and is enqueued for enrichment', async () => {
+    mockEnsurePrimaryProperty.mockResolvedValue({ created: true, propertyId: 'prop-new-primary' });
+    mockState.selectQueue = [[]];
+    await reply({ id: 'lead-1', address: null }, { id: 'cust-1', address_line1: '1048 Example Lakes Cir', address_line2: null, city: 'Sarasota', zip: '34232' });
+    expect(mockEnsurePrimaryProperty).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1', address_line2: 'Apt 204' }), { conn: expect.anything(), source: 'clarify_unit_reply' });
+    expect(writeback()).toEqual(expect.objectContaining({ customer: 'line2_filled', propertyId: 'prop-new-primary', propertyCreated: true }));
+    expect(mockEnqueueCallPropertyLookup).toHaveBeenCalledWith({ propertyId: 'prop-new-primary' });
   });
 
   test('lock order: the customer row is locked before the lead row (customer-address-fanout order)', async () => {
@@ -1471,7 +1501,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     expect(mockState.updates.find((u) => u.table === 'customers').payload).toEqual({ address_line2: 'Apt 204' });
     expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1', address_line2: 'Apt 204' }), expect.anything(), { explicitLine2: true, preserveCoords: true });
     // A customer with no primary property row yet gets one from the mirror, WITH the unit, before the sync.
-    expect(mockEnsurePrimaryProperty).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1', address_line2: 'Apt 204' }), { conn: expect.anything() });
+    expect(mockEnsurePrimaryProperty).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1', address_line2: 'Apt 204' }), { conn: expect.anything(), source: 'clarify_unit_reply' });
     expect(mockEnsurePrimaryProperty.mock.invocationCallOrder[0]).toBeLessThan(mockSyncPrimaryAddress.mock.invocationCallOrder[0]);
     expect(mockRecordCallProperty).not.toHaveBeenCalled();
     expect(writeback()).toEqual(expect.objectContaining({ lead: 'unit_added', customer: 'line2_filled' }));
@@ -1646,7 +1676,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     test('a unit on the lead line AT the building retires the ask', async () => {
       const lead = { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232', first_name: 'Anna' };
       const cust = { id: 'cust-1', first_name: 'Anna', address_line1: '9 Home St', address_line2: null };
-      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, lead, cust];
+      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, cust];
       mockState.selectQueue = [[]];
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('retired');
     });
@@ -1654,7 +1684,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     test('the unit item\'s OWN lead carrying a unit at the building retires the ask even when the account has other units there', async () => {
       const lead = { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232', first_name: 'Pat' };
       const cust = { id: 'cust-1', first_name: 'Pat', address_line1: '9 Home St', address_line2: null };
-      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, lead, cust];
+      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, cust];
       mockState.selectQueue = [[{ address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 101', city: 'Sarasota', zip: '34232' }]];
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('retired');
     });
@@ -1662,7 +1692,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     test('SEVERAL units on file at the building (a property manager) do not answer WHICH one — the ask stands', async () => {
       const lead = { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Pat' };
       const cust = { id: 'cust-1', first_name: 'Pat', address_line1: '9 Home St', address_line2: null };
-      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, lead, cust];
+      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, cust];
       mockState.selectQueue = [[
         { address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 101', city: 'Sarasota', zip: '34232' },
         { address_line1: '1048 Example Lakes Cir Apt 202', address_line2: null, city: 'Sarasota', zip: '34232' },
@@ -1672,14 +1702,22 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     test('a unit on a DIFFERENT building, or the customer\'s home unit, is not evidence; a property row at the building is', async () => {
       const lead = { id: 'lead-1', status: 'new', address: '5 Other Rd, Apt 3, Venice, FL 34285', first_name: 'Anna' };
       const cust = { id: 'cust-1', first_name: 'Anna', address_line1: '9 Home St', address_line2: 'Apt 7', city: 'Venice', zip: '34285' };
-      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, lead, cust];
+      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, cust];
       mockState.selectQueue = [[]];
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
       mockState.updates = [];
-      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, lead, cust];
+      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, cust];
       mockState.selectQueue = [[{ address_line1: '1048 Example Lakes Circle', address_line2: 'Apt 204', city: 'Sarasota', zip: '34232' }]];
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('retired');
     });
+    test('a lone "same street" row with NO locality is not evidence that THIS building\'s unit is on file — the ask stands', async () => {
+      const lead = { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir Apt 204', first_name: 'Pat' };
+      const cust = { id: 'cust-1', first_name: 'Pat', address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204', city: null, zip: null };
+      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, cust];
+      mockState.selectQueue = [[{ address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204', city: null, zip: null }]];
+      expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
+    });
+
     test('gate OFF: CRM state is not read — only the card decides', async () => {
       mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks');
       const lead = { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232', first_name: 'Anna' };
@@ -1696,7 +1734,7 @@ describe('clarifyPreDispatchCheck — write-back evidence (gate ON)', () => {
     const row = { id: 'draft-1', status: 'approved', sent_at: null, customer_id: 'cust-1',
       flags: JSON.stringify({ missing: ['unit_number'], unit_call_log_id: 'call-1', unit_ask_building: BUILDING, unit_lead_id: 'lead-1', unit_customer_id: 'cust-1' }) };
     // first(): fresh, card (open), lead, customer; select(): properties.
-    mockState.firstQueue = [row, { id: 'card-1' }, { id: 'lead-1', address: '1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232' }, { id: 'cust-1', address_line1: '9 Home St' }];
+    mockState.firstQueue = [row, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, { id: 'lead-1', address: '1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232' }, { id: 'cust-1', address_line1: '9 Home St' }];
     mockState.selectQueue = [[]];
     const verdict = await clarifyPreDispatchCheck({ draftId: 'draft-1', sourceRef: 'clarify:7735550142', dispatchedMissing: ['unit_number'] })();
     expect(verdict.ok).toBe(false);

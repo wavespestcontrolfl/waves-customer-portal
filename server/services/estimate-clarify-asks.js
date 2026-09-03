@@ -231,9 +231,19 @@ async function unitTargets(trx, flags) {
   // #3788).
   const legacy = flags.unit_lead_id === undefined && flags.unit_customer_id === undefined && !!flags.unit_call_log_id;
   if (legacy) return legacyUnitTargets(trx, flags);
+  // The cached customer target is REVALIDATED against the unit call's
+  // current linkage: an operator relink/unlink (PUT /calls/:id/customer)
+  // after the ask parked is the durable correction, and a later reply
+  // must follow it, never write to the former customer (codex r2 P1 on
+  // #3788). The call row is the source of truth when it exists.
+  let customerId = flags.unit_customer_id || null;
+  if (flags.unit_call_log_id) {
+    const callRow = await trx('call_log').where({ id: String(flags.unit_call_log_id) }).first('customer_id');
+    if (callRow) customerId = callRow.customer_id ? String(callRow.customer_id) : null;
+  }
   return {
     leadId: flags.unit_lead_id || null,
-    customerId: flags.unit_customer_id || null,
+    customerId,
   };
 }
 
@@ -338,9 +348,16 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets }) {
             // model, or property persistence gated/failed at call time)
             // gets one from the mirror — WITH the unit — or the sync below
             // would silently have nothing to update (codex r1 P2 on #3788).
-            await ensurePrimaryProperty({ ...customerRow, address_line2: unitLine }, { conn: trx });
+            const ensured = await ensurePrimaryProperty({ ...customerRow, address_line2: unitLine }, { conn: trx, source: 'clarify_unit_reply' });
             await syncPrimaryAddress({ ...customerRow, address_line2: unitLine }, trx, { explicitLine2: true, preserveCoords: true });
             out.customer = 'line2_filled';
+            if (ensured?.created && ensured.propertyId) {
+              // Created from a mirror that may lack coordinates/type —
+              // enriched after commit like every other row this lane
+              // creates (codex r2 P2 on #3788).
+              out.propertyId = String(ensured.propertyId);
+              out.propertyCreated = true;
+            }
           }
         } else if (unitLineValueKey(ownUnit) === wanted || unitAlreadyOnFile) {
           out.customer = unitAlreadyOnFile && unitLineValueKey(ownUnit) !== wanted ? 'property_exists' : 'already_has_unit';
@@ -382,11 +399,14 @@ async function unitOnFileAtBuilding(trx, flags) {
     // The unit item's OWN lead is definitive for this ask — a unit staff
     // entered there answers it regardless of a property manager's other
     // units on the account (codex r1 P2 on #3788).
-    if (line && splitStreetLineUnit(line).unit && sameBuilding(line, building)) return true;
+    if (line && splitStreetLineUnit(line).unit && sameBuildingForWrite(line, building)) return true;
   }
   if (customerId) {
     const customerRow = await trx('customers').where({ id: customerId }).whereNull('deleted_at').first();
-    if (customerRow && sameBuilding(customerAddressLine(customerRow), building)) {
+    // Positive locality here as well: a lone "123 Main St Apt 4" row with
+    // no city/ZIP is not evidence that THIS building's unit is on file
+    // (codex r2 P1 on #3788).
+    if (customerRow && sameBuildingForWrite(customerAddressLine(customerRow), building)) {
       const own = String(customerRow.address_line2 || '').trim() || splitStreetLineUnit(String(customerRow.address_line1 || '')).unit;
       if (own) add(own);
     }
@@ -395,7 +415,7 @@ async function unitOnFileAtBuilding(trx, flags) {
       .select('address_line1', 'address_line2', 'city', 'zip');
     for (const p of props || []) {
       const unit = String(p.address_line2 || '').trim() || splitStreetLineUnit(String(p.address_line1 || '')).unit;
-      if (unit && sameBuilding(customerAddressLine(p), building)) add(unit);
+      if (unit && sameBuildingForWrite(customerAddressLine(p), building)) add(unit);
     }
   }
   return units.size === 1;
@@ -869,21 +889,28 @@ const BARE_UNIT_REPLY_RE = new RegExp(`^\\s*(?:it'?s\\s+|its\\s+|number\\s+)?(${
 // counts; anything else stays on the card for a human (codex r5 P1 on
 // #3785).
 // Correction/negation vocabulary ANYWHERE in the text ("Apt 204 is wrong,
-// it's 205" corrects after the designator), a disjunction between two
-// values ("Unit 204 or 205"), or an undesignated alternate introduced
-// after the designated one ("… it's 205") — all fail closed (codex r1 P1
-// on #3788).
-const UNIT_NEGATION_RE = /\b(?:not|isn'?t|wasn'?t|wrong|incorrect|instead|actually|correction|no longer|rather)\b/i;
-const UNIT_ALTERNATE_RE = new RegExp(`\\b(?:or|it'?s|its|\\/)\\s*#?\\s*(${UNIT_VALUE})\\b`, 'gi');
+// it's 205" corrects after the designator), or ANY other unit-shaped
+// value in the reply however it is introduced — "or 205", "and 205",
+// "should be 205", "it's 205", "204/205" — fails closed: only a reply
+// whose sole unit-shaped value is the designated one counts (codex r1 +
+// r2 P1 on #3788). The one carve-out is a bedroom count riding on the
+// same text ("Apt 204, 2 bedrooms"), which the bedroom item consumes.
+const UNIT_NEGATION_RE = /\b(?:not|isn'?t|wasn'?t|wrong|incorrect|instead|actually|correction|should be|no longer|rather)\b/i;
+const UNIT_SHAPED_TOKEN_RE = new RegExp(`(?<![a-z0-9#-])(${UNIT_VALUE})(?![a-z0-9-])(?!\\s*(?:-\\s*)?(?:bed|br\\b|bd\\b|bath))`, 'gi');
 function unitReplyIsAmbiguous(text, normalizeUnitLine) {
   const norm = (v) => String(normalizeUnitLine(`apt ${v}`) || '').toLowerCase();
+  if (UNIT_NEGATION_RE.test(text)) return true;
+  const values = new Set();
+  for (const m of text.matchAll(UNIT_SHAPED_TOKEN_RE)) {
+    if (!/\d/.test(m[1])) continue; // a lone letter ("a", "in") is only a unit when designated
+    const u = norm(m[1]); if (u) values.add(u);
+  }
   const designated = [
     ...text.matchAll(new RegExp(UNIT_REPLY_RE.source, 'gi')),
     ...text.matchAll(new RegExp(UNIT_HASH_REPLY_RE.source, 'gi')),
   ].map((m) => norm(m[1])).filter(Boolean);
-  const candidates = new Set(designated);
-  for (const m of text.matchAll(UNIT_ALTERNATE_RE)) { const u = norm(m[1]); if (u) candidates.add(u); }
-  return candidates.size > 1 || UNIT_NEGATION_RE.test(text);
+  for (const d of designated) values.add(d);
+  return values.size > 1;
 }
 function extractUnitReply(body, { bareOk = false } = {}) {
   const text = String(body || '').trim();
