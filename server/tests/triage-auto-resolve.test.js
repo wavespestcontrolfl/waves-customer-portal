@@ -631,6 +631,26 @@ describe('evidence helpers', () => {
     const wasps = card({ requested_service_categories: ['stinging_insect'], requested_specific_service: null });
     expect(estimateCoversAsk(wasps, est({ estimate_data: { result: { oneTime: { items: [{ service: 'stinging_insect', name: 'Stinging Insect — Paper Wasp', price: 150 }] } } } }))).toBe(true);
     expect(estimateCoversAsk(wasps, est({ estimate_data: { result: { oneTime: { items: [{ service: 'One-Time Pest Treatment', price: 120 }] } } } }))).toBe(false);
+    // The raw engine lineItems (no typed containers) mix cadences and are
+    // read row by row: annual / monthly money is a program, any other
+    // priced row a one-time job — a mixed quote keeps its one-time services
+    // (codex r23 P2).
+    const raw = est({ estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', name: 'Quarterly Pest Control', annual: 480, monthly: 40 }, { service: 'flea', name: 'Flea Treatment', price: 150 }, { service: 'rodent_exclusion', name: 'Rodent Exclusion', total: 900 }] } } });
+    expect(estimateCoversAsk(card({ requested_service_categories: ['pest_general'] }), raw)).toBe(true);
+    expect(estimateCoversAsk(card(plan), raw)).toBe(true);
+    expect(estimateCoversAsk(card({ ...plan, requested_specific_service: 'Flea Treatment' }), raw)).toBe(false);
+    expect(estimateCoversAsk(card({ requested_service_categories: ['rodent_exclusion'], requested_specific_service: null }), raw)).toBe(true);
+    expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['rodent_exclusion'] }), raw)).toBe(false);
+    // An estimate's address goes through the canonical estimates.address
+    // parser: "77 Oak St, Unit 4, Bradenton, FL 34205" is the street, the
+    // unit and the locality — not a city called "Unit 4" — so a unit
+    // customer's quote prices the asked address, another unit's does not,
+    // and a unit the file lacks cannot be established (codex r23 P2).
+    const unitCard = item({ ...base, customer_address_line2: 'Unit 4', reason_code: 'quote_promised', payload: { quote_scope: { requested_service_categories: ['pest_general'], requested_specific_service: 'Flea Treatment', requested_service_intent: 'preventative_one_time', requested_address: none } } });
+    expect(estimateCoversAsk(unitCard, est({ address: '77 Oak St, Unit 4, Bradenton, FL 34205' }))).toBe(true);
+    expect(estimateCoversAsk(unitCard, est({ address: '77 Oak St, Unit 5, Bradenton, FL 34205' }))).toBe(false);
+    expect(estimateCoversAsk(unitCard, est({}))).toBe(false);
+    expect(estimateCoversAsk(card({ requested_service_categories: ['pest_general'] }), est({ address: '77 Oak St, Unit 4, Bradenton, FL 34205' }))).toBe(false);
     // An annual-only recurring row (a termite bond: annual set, mo zero) is
     // a priced recurring line (codex r21 P2).
     const bond = est({ estimate_data: { result: { recurring: { services: [{ name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5', mo: 0, annual: 300 }, { name: 'Pest Control', mo: 40 }] } } } });

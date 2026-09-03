@@ -1078,18 +1078,27 @@ const ONE_TIME = { recurring: false, oneTime: true };
 // Where the engine result prices its lines and which field carries the
 // price: recurring programs (monthly — or annual / per-application for a
 // termite bond or a per-visit program, codex r21 P2), the one-time job
-// lists, commercial lineItems. An item included ON the program is priced
-// into the recurring plan and quotes no standalone job.
+// lists, and the raw lineItems read row by row. An item included ON the
+// program is priced into the recurring plan and quotes no standalone job.
 const RECURRING_AMOUNT_KEYS = ['mo', 'monthly', 'monthlyTotal', 'monthly_total', 'annual', 'annualTotal', 'annual_total', 'perApplication', 'pricePerApplication', 'amount'];
 const ONE_TIME_AMOUNT_KEYS = ['price', 'amount', 'total'];
-const ENGINE_LINE_SOURCES = [
-  { list: (root) => root.recurring?.services, cadence: RECURRING, amountKeys: RECURRING_AMOUNT_KEYS },
-  { list: (root) => root.oneTime?.items, cadence: ONE_TIME, amountKeys: ONE_TIME_AMOUNT_KEYS },
-  { list: (root) => root.oneTime?.specItems, cadence: ONE_TIME, amountKeys: ONE_TIME_AMOUNT_KEYS },
-  { list: (root) => root.specItems, cadence: ONE_TIME, amountKeys: ONE_TIME_AMOUNT_KEYS },
-  { list: (root) => root.lineItems, cadence: RECURRING, amountKeys: ['monthly', 'mo', 'amount'] },
-];
 const amountOf = (entry, keys) => keys.map((k) => Number(entry?.[k])).find((n) => Number.isFinite(n) && n > 0) || 0;
+const RECURRING_LINE = { cadence: RECURRING, amountKeys: RECURRING_AMOUNT_KEYS };
+const ONE_TIME_LINE = { cadence: ONE_TIME, amountKeys: ONE_TIME_AMOUNT_KEYS };
+// The raw engine result's lineItems — the shape the public quote and the
+// automated estimator persist, with no typed containers — mix cadences, so
+// each row is read by the engine's own rule (estimate-engine's
+// recurringItems / oneTimeItems, the pricing audit's normalizeEngineLineItems):
+// a row carrying recurring money (annual, monthly, per-application) is a
+// program; any other priced row is a one-time job (codex r23 P2).
+const rawLine = (entry) => (amountOf(entry, RECURRING_AMOUNT_KEYS) > 0 ? RECURRING_LINE : ONE_TIME_LINE);
+const ENGINE_LINE_SOURCES = [
+  { list: (root) => root.recurring?.services, line: () => RECURRING_LINE },
+  { list: (root) => root.oneTime?.items, line: () => ONE_TIME_LINE },
+  { list: (root) => root.oneTime?.specItems, line: () => ONE_TIME_LINE },
+  { list: (root) => root.specItems, line: () => ONE_TIME_LINE },
+  { list: (root) => root.lineItems, line: rawLine },
+];
 const isPlaceholder = (entry) => entry.quoteRequired === true || entry.requiresManualReview === true;
 const entryNames = (entry) => [entry.service, entry.serviceKey, entry.service_key, entry.name, entry.label, entry.description, entry.detail, entry.det];
 
@@ -1139,7 +1148,8 @@ function engineLines(data, add) {
       for (const entry of entries) {
         if (!entry || typeof entry !== 'object' || isPlaceholder(entry)) continue;
         const onProgram = entry.onProg === true || entry.includedOnProgram === true;
-        add(entryNames(entry), onProgram ? RECURRING : source.cadence, onProgram || amountOf(entry, source.amountKeys) > 0);
+        const { cadence, amountKeys } = source.line(entry);
+        add(entryNames(entry), onProgram ? RECURRING : cadence, onProgram || amountOf(entry, amountKeys) > 0);
       }
     }
     const injection = root.results?.injection || root.injection || {};
@@ -1178,14 +1188,17 @@ function estimateLines(row) {
 }
 
 // An estimate as the address-bearing record the booking rules understand:
-// its address column ("123 Main St, Bradenton, FL 34205") or, failing that,
-// the property row it prices. A street with no locality cannot prove WHICH
-// street, exactly as a street-only visit stamp cannot.
+// its address column through the canonical estimates.address parser (the
+// one property linkage reads — "77 Oak St, Unit 4, Bradenton, FL 34205" is a
+// street, a unit and a locality, never a city called "Unit 4", codex r23
+// P2) or, failing that, the property row it prices. A street with no
+// locality cannot prove WHICH street, exactly as a street-only visit stamp
+// cannot.
 function estimateAsVisit(row) {
-  const raw = String(row.address || '').trim();
-  if (raw) {
-    const { city, zip } = localityOfRaw(raw);
-    return { service_address_line1: raw.split(',')[0].trim(), service_address_line2: null, service_address_city: city, service_address_zip: zip };
+  const { parseEstimateAddress } = require('./estimate-property-linkage');
+  const parsed = parseEstimateAddress(row.address);
+  if (parsed) {
+    return { service_address_line1: parsed.address_line1, service_address_line2: parsed.address_line2 || null, service_address_city: parsed.city || null, service_address_zip: parsed.zip || null };
   }
   if (row.property_address_line1) {
     return { service_address_line1: row.property_address_line1, service_address_line2: row.property_address_line2 || null, service_address_city: row.property_city || null, service_address_zip: row.property_zip || null };
