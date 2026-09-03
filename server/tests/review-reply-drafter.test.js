@@ -667,8 +667,8 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(r.safeCopy).toBe(true);
     expect(r.text).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
     expect(r.rejections).toEqual(['forbidden_name', 'phone', 'private_channel', 'banned_phrase']);
-    expect(r.rejectionDetails.map((d) => d.span)).toEqual(['tyler', null, 'our records', 'for good']);
-    expect(r.rejectionDetails.every((d) => d.text === undefined)).toBe(true);
+    expect(r.rejectionDetails.map((d) => d.span)).toEqual([null, null, 'our records', 'for good']);
+    expect(r.rejectionDetails.every((d) => d.text === undefined && d.promptSpan === undefined)).toBe(true);
     expect(r.attempts).toBe(4);
     // Attempt 2 names the first violation with its words; attempt 4 lists all three prior ones.
     expect(mockDispatch.mock.calls[1][1].text).toContain('PREVIOUS ATTEMPTS WERE REJECTED');
@@ -689,7 +689,7 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(r.reason).toBe('verifier_reject');
     expect(r.attempts).toBe(4);
     expect(r.rejectionDetails).toHaveLength(4);
-    expect(r.rejectionDetails[0]).toMatchObject({ attempt: 1, code: 'forbidden_name', span: 'tyler' });
+    expect(r.rejectionDetails[0]).toEqual({ attempt: 1, code: 'forbidden_name', span: null });
   });
   test('safe copy never names a technician, and its variants dodge the non-repetition rule', () => {
     const g = grounding({ mentionedTechNames: [], topics: [] });

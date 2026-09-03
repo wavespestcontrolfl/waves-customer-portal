@@ -887,9 +887,10 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
   return lines.join('\n');
 }
 
-// Rejection codes whose span is contact-shaped (a phone number, an email, an
-// address, a link): the model is told the code, the row does not keep the words.
-const CONTACT_CODES = new Set(['email', 'url', 'phone', 'address']);
+// Rejection codes whose span is a person or a contact detail (a name, a phone
+// number, an email, an address, a link): the retry prompt sees the words, the
+// row and the audit log keep the code only.
+const REDACTED_SPAN_CODES = new Set(['email', 'url', 'phone', 'address', 'forbidden_name', 'unlisted_name']);
 
 const FEEDBACK_FOR = {
   too_long: 'too many words',
@@ -971,20 +972,21 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
   ];
   for (const step of ladder) {
     attempts++;
-    const feedback = rejectionDetails.length ? rejectionDetails : null;
+    const feedback = rejectionDetails.length ? rejectionDetails.map((d) => ({ code: d.code, span: d.promptSpan })) : null;
     const res = await requestDraft(grounding, mode, recentReplies, feedback, { reviewOnly: step.reviewOnly });
     if (!res.ok) {
-      return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails, reason: res.reason, error: res.error };
+      return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: res.reason, error: res.error };
     }
     const normalized = splitReply(res.text, grounding.locationName).full;
     const verdict = verifyReplyDetailed(normalized, grounding, { recentReplies, mode });
     if (!verdict) {
-      return { ok: true, text: normalized, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails, reviewOnly: step.reviewOnly };
+      return { ok: true, text: normalized, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reviewOnly: step.reviewOnly };
     }
     rejections.push(verdict.code);
-    // Stored on the row for diagnosis: attempt, code and the words that
-    // tripped it — never the whole rejected draft, and no contact-shaped span.
-    rejectionDetails.push({ attempt: attempts, code: verdict.code, span: CONTACT_CODES.has(verdict.code) ? null : verdict.span });
+    // Stored for diagnosis: attempt, code and the words that tripped it —
+    // never the whole rejected draft, and no name or contact-shaped span.
+    // The retry prompt is built from verdict.span directly.
+    rejectionDetails.push({ attempt: attempts, code: verdict.code, span: REDACTED_SPAN_CODES.has(verdict.code) ? null : verdict.span, promptSpan: verdict.span });
     // Code only in the log: a span can be a phone number, an address or a
     // name. The words live in rejectionDetails, stored on the review row.
     logger.info(`[review-reply-drafter] attempt ${attempts} rejected (${verdict.code}) review=${grounding.reviewId} mode=${mode}`);
@@ -996,10 +998,11 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
   const template = safeCopyReply(grounding, mode, recentReplies);
   if (template) {
     logger.info(`[review-reply-drafter] safe-copy reply used after ${attempts} rejected drafts review=${grounding.reviewId} mode=${mode}`);
-    return { ok: true, text: template, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails, reviewOnly: true, safeCopy: true };
+    return { ok: true, text: template, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reviewOnly: true, safeCopy: true };
   }
-  return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails, reason: 'verifier_reject' };
+  return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: 'verifier_reject' };
 }
+const stored = (details) => details.map(({ attempt, code, span }) => ({ attempt, code, span }));
 
 /**
  * Deterministic last-resort reply. Uses only the reviewer's first name and
