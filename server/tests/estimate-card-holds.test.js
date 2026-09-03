@@ -139,7 +139,7 @@ function stubDb(firstResults, { rescheduleLog = [], holdRows = null, visitRows =
   mockRescheduleLogChains = [];
   mockDbHandler = (table) => {
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select', 'forUpdate']) {
+    for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'andWhere', 'orWhere', 'orderBy', 'orderByRaw', 'modify', 'select', 'forUpdate']) {
       chain[m] = jest.fn(() => chain);
     }
     chain.first = jest.fn(() => {
@@ -777,6 +777,20 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     expect(res).toEqual({ held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: expect.objectContaining({ code: 'unresolved', willCharge: null }) });
     expect(res.rule.text).not.toMatch(/released free|billing review\./);
     expect(res.rule.text).toMatch(/check the visit's billing after cancelling/);
+  });
+  it('no HELD row but a never-held pending row → not_secured (nothing settled, nothing held), and an unknown state → undetermined (pre-push P1)', async () => {
+    stubDb([null, { id: 'h1', status: 'pending', no_show_fee_amount: 49 }]);
+    let res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: false, feeApplies: false, rule: { code: 'not_secured', willCharge: false } });
+    expect(res.rule.text).not.toMatch(/settled/);
+    stubDb([null, { id: 'h1', status: 'weird_new_state', no_show_fee_amount: 49 }]);
+    res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: { code: 'unresolved', willCharge: null } });
+    expect(res.rule.text).toMatch(/hold state weird_new_state/);
+  });
+  it('closed-hold fallback orders held_at DESC NULLS LAST so a pending row never outranks the real closed hold', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/estimate-card-holds'), 'utf8');
+    expect(src).toMatch(/orderByRaw\('held_at DESC NULLS LAST, created_at DESC'\)/);
   });
   it('no HELD row but a released/charged hold → fee settled, with the state named', async () => {
     stubDb([null, { id: 'h1', status: 'released', no_show_fee_amount: 49 }]);

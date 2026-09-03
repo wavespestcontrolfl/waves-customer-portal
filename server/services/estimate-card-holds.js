@@ -1854,6 +1854,18 @@ async function cardHoldReminderLine(scheduledServiceId) {
 // be noise). Mirrors handleCardHoldCancellation's decision inputs exactly;
 // feeApplies is false when the feature flag is off because chargeNoShowFee
 // would no-op anyway.
+// Verdict for the newest NON-held hold row on a visit, by status. 'pending'
+// = SetupIntent minted, card never saved; charging / charge_review = a
+// PaymentIntent running or parked; released / charged_* = the fee event
+// closed. Unlisted states are undetermined.
+const CLOSED_HOLD_RULE = {
+  pending: 'not_secured',
+  charging: 'charge_in_flight',
+  charge_review: 'charge_in_flight',
+  released: 'fee_settled',
+  charged_no_show: 'fee_settled',
+  charged_completion: 'fee_settled',
+};
 // Verdict for a /secure appointment-card row found beside a HELD hold, by the
 // row's fee_status; anything unlisted is a live competing consent.
 const COMPETING_LANE_RULE = { charging: 'charge_in_flight', charge_review: 'charge_in_flight', charged: 'fee_settled' };
@@ -1866,9 +1878,11 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
     // "no card saved" (Codex #3800 r1 P1). One extra read, only here.
     let latest = null;
     try {
+      // NULLS LAST (pre-push P1): a never-held 'pending' row has no held_at
+      // and would otherwise outrank the real closed hold on this visit.
       latest = await db('estimate_card_holds')
         .where({ scheduled_service_id: scheduledServiceId })
-        .orderBy('held_at', 'desc')
+        .orderByRaw('held_at DESC NULLS LAST, created_at DESC')
         .first();
     } catch (err) {
       logger.warn('[estimate-card-holds] hold-state lookup for cancel preview failed — reporting undetermined', { error: err.message });
@@ -1891,14 +1905,19 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
       return { held: true, feeApplies: true, feeAmount: Number(latest.no_show_fee_amount) > 0 ? Number(latest.no_show_fee_amount) : cardHoldNoShowFee(), unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'hold state changed during the check' }) };
     }
     const latestFee = Number(latest.no_show_fee_amount) > 0 ? Number(latest.no_show_fee_amount) : cardHoldNoShowFee();
-    if (state === 'charging' || state === 'charge_review') {
+    // Explicit by state (pre-push P1): a never-held 'pending' row settled
+    // nothing and holds nothing; an unknown state is undetermined, never
+    // "settled".
+    const code = CLOSED_HOLD_RULE[state] || 'unresolved';
+    if (code === 'charge_in_flight') {
       // Legacy shape stays fee-may-apply (held + feeApplies + unresolved):
       // admin-cancellation's previewVisitFees counts fee exposure from these
       // fields, and a PaymentIntent that may still land IS exposure (Codex
       // #3800 r2 P1). The rule's willCharge:null keeps the UI neutral.
-      return { held: true, feeApplies: true, feeAmount: latestFee, unresolved: true, rule: describeCancelFeeRule({ code: 'charge_in_flight', feeAmount: latestFee }) };
+      return { held: true, feeApplies: true, feeAmount: latestFee, unresolved: true, rule: describeCancelFeeRule({ code, feeAmount: latestFee }) };
     }
-    return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'fee_settled', feeAmount: latestFee, detail: state.replace(/_/g, ' ') || 'closed' }) };
+    if (code === 'unresolved') return { held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: describeCancelFeeRule({ code, onFailure: 'unknown', detail: `hold state ${state || 'blank'}` }) };
+    return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code, feeAmount: latestFee, detail: state.replace(/_/g, ' ') }) };
   }
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
   const windowHours = Number(hold.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
