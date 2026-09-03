@@ -203,6 +203,7 @@ const BacklinkStrategyAgent = {
         if (!toolUseId || resolvedToolUseIds.has(toolUseId)) return null;
         if (--maxToolCalls <= 0) {
           logger.warn(`[backlink-strategy] Hit max tool calls for session ${sessionId}`);
+          failure = 'max_tool_calls';
           return null;
         }
 

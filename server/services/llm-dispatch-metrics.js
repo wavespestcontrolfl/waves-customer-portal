@@ -297,6 +297,36 @@ async function writtenId(query) {
   return Number.isFinite(Number(id)) ? Number(id) : null;
 }
 
+// Every column a call or session row normalises: ONE place decides how a
+// value is clipped, counted or classified, so a schema change is audited
+// here and nowhere else. `ok` follows from the error code (a failed row
+// always carries one — `errorCode`, else `error`); `tokens` is an
+// extractUsage shape.
+const clip = (v, n) => (v === null || v === undefined || v === '' ? null : String(v).slice(0, n));
+function ledgerRow({ ctx, rowKind, laneId, policyLabel, provider, requestedModel, servedModel, ok, errorCode, tokens, latencyMs, promptVersion, providerRef }) {
+  const code = ok ? null : (errorCode || 'error');
+  return {
+    ...contextColumns(ctx),
+    lane_id: laneId,
+    row_kind: rowKind,
+    policy: clip(policyLabel, 120),
+    ok: !code,
+    provider: provider || null,
+    requested_model: clip(requestedModel, 120),
+    served_model: clip(servedModel, 120),
+    input_tokens: toCount(tokens.input_tokens),
+    cached_input_tokens: toCount(tokens.cached_input_tokens),
+    cache_write_tokens: toCount(tokens.cache_write_tokens),
+    output_tokens: toCount(tokens.output_tokens),
+    reasoning_tokens: toCount(tokens.reasoning_tokens),
+    latency_ms: toCount(latencyMs),
+    error_code: clip(code, 80),
+    error_class: code && classifyFailure(code),
+    prompt_version: clip(promptVersion, 60),
+    provider_ref: clip(providerRef, 120),
+  };
+}
+
 // The ledger's write path for call rows: one row, resolves the new id.
 async function insertLedgerRow(row) {
   try {
@@ -326,27 +356,21 @@ async function recordCall({
     if (!ledgerEnabled()) return null;
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
-    const tokens = usage || extractUsage(null, null);
-    return await insertLedgerRow({
-      ...contextColumns(ctx),
-      lane_id: lane,
-      row_kind: 'call',
-      policy: String(label || lane || `${provider}/${requestedModel}`).slice(0, 120),
-      ok: !!ok,
-      provider: provider || null,
-      requested_model: requestedModel ? String(requestedModel).slice(0, 120) : null,
-      served_model: servedModel ? String(servedModel).slice(0, 120) : null,
-      input_tokens: toCount(tokens.input_tokens),
-      cached_input_tokens: toCount(tokens.cached_input_tokens),
-      cache_write_tokens: toCount(tokens.cache_write_tokens),
-      output_tokens: toCount(tokens.output_tokens),
-      reasoning_tokens: toCount(tokens.reasoning_tokens),
-      latency_ms: toCount(latencyMs),
-      error_code: ok ? null : String(errorCode || 'error').slice(0, 80),
-      error_class: ok ? null : classifyFailure(errorCode || 'error'),
-      prompt_version: (promptVersion || ctx.promptVersion || null) && String(promptVersion || ctx.promptVersion).slice(0, 60),
-      provider_ref: providerRef ? String(providerRef).slice(0, 120) : null,
-    });
+    return await insertLedgerRow(ledgerRow({
+      ctx,
+      rowKind: 'call',
+      laneId: lane,
+      policyLabel: label || lane || `${provider}/${requestedModel}`,
+      provider,
+      requestedModel,
+      servedModel,
+      ok,
+      errorCode,
+      tokens: usage || extractUsage(null, null),
+      latencyMs,
+      promptVersion: promptVersion || ctx.promptVersion,
+      providerRef,
+    }));
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] recordCall skipped: ${err.message}`);
     return null;
@@ -369,32 +393,31 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
   try {
     value = await fn();
   } catch (err) {
+    // The adapters' own reason (`<provider>_<status>`, `<provider>_timeout`);
+    // llm/call.js requires this module, so its require is lazy.
     let errorCode = 'error';
-    try {
-      const { providerErrorReason } = require('./llm/call');
-      if (typeof providerErrorReason === 'function') errorCode = providerErrorReason(provider, err);
-    } catch { /* keep the generic code */ }
+    try { errorCode = require('./llm/call').providerErrorReason(provider, err); } catch { /* keep the generic code */ }
     void recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: label });
     throw err;
   }
   // An Anthropic Message that resolved with stop_reason 'refusal' is a
   // failed call (the model declined; the DEEP helper falls over to OpenAI),
   // billed for its tokens like any other answered request.
-  const refused = provider === 'anthropic' && value?.stop_reason === 'refusal';
+  const errorCode = provider === 'anthropic' && value?.stop_reason === 'refusal' ? 'anthropic_refusal' : null;
   const callId = recordCall({
     provider,
     requestedModel,
-    servedModel: value?.model || value?.modelVersion || null,
-    ok: !refused,
-    errorCode: refused ? 'anthropic_refusal' : null,
+    servedModel: value?.model || value?.modelVersion,
+    ok: !errorCode,
+    errorCode,
     usage: extractUsage(provider, value),
     latencyMs: Math.round(performance.now() - t0),
-    providerRef: value?.id || null,
+    providerRef: value?.id,
     promptVersion,
     laneId,
     policyLabel: label,
   });
-  if (trace) recordTrace(callId, { system: trace.system ?? null, prompt: trace.prompt ?? null, response: messageText(value), laneId });
+  if (trace) recordTrace(callId, { system: trace.system, prompt: trace.prompt, response: messageText(value), laneId });
   return value;
 }
 
@@ -476,30 +499,24 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
       logger.warn(`[llm-dispatch-metrics] session ${sessionId} usage unavailable (${err.message}) — recording the session without token counts`);
     }
     const tokens = extractUsage('anthropic', { usage: session?.usage });
-    const terminated = session?.status === 'terminated';
-    const errorCode = terminated ? 'session_terminated' : failureCode(failure);
+    const errorCode = session?.status === 'terminated' ? 'session_terminated' : failureCode(failure);
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
-    logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId || 'agent?'}) usage in=${tokens.input_tokens} out=${tokens.output_tokens}${errorCode ? ` ${errorCode}` : ''}`);
-    return await upsertSessionRow({
-      ...contextColumns(ctx),
-      lane_id: lane,
-      row_kind: 'session',
-      policy: String(lane || `anthropic/${model || 'session'}`).slice(0, 120),
-      ok: !errorCode,
+    logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId}) usage in=${tokens.input_tokens} out=${tokens.output_tokens} ${errorCode || 'ok'}`);
+    return await upsertSessionRow(ledgerRow({
+      ctx,
+      rowKind: 'session',
+      laneId: lane,
+      policyLabel: lane || `anthropic/${model || 'session'}`,
       provider: 'anthropic',
-      requested_model: model ? String(model).slice(0, 120) : null,
-      served_model: session?.model ? String(session.model).slice(0, 120) : null,
-      input_tokens: tokens.input_tokens,
-      cached_input_tokens: tokens.cached_input_tokens,
-      cache_write_tokens: tokens.cache_write_tokens,
-      output_tokens: tokens.output_tokens,
-      reasoning_tokens: tokens.reasoning_tokens,
-      latency_ms: latencyMs,
-      error_code: errorCode,
-      error_class: errorCode ? classifyFailure(errorCode) : null,
-      provider_ref: String(sessionId).slice(0, 120),
-    });
+      requestedModel: model,
+      servedModel: session?.model,
+      ok: !errorCode,
+      errorCode,
+      tokens,
+      latencyMs,
+      providerRef: sessionId,
+    }));
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] recordSessionUsage skipped: ${err.message}`);
     return null;
@@ -806,6 +823,20 @@ async function loadStats(db, start, end) {
  * Daily digest tick. Aggregates yesterday's ET day, emails the company inbox
  * ONLY when exceptions exist, then prunes rows past retention.
  */
+// One retention DELETE: the rows older than `days` ET days. Never throws —
+// the digest treats a failed prune as maintenance-only (see the call site).
+async function pruneOlderThan(db, table, days) {
+  try {
+    const pruned = await db(table).where('created_at', '<', etDayWindow(days).start).del();
+    logger.debug(`[llm-dispatch-metrics] pruned ${pruned} ${table} row(s) older than ${days} days`);
+    return { pruned, error: null };
+  } catch (err) {
+    const error = err.message || String(err);
+    logger.error(`[llm-dispatch-metrics] ${table} retention prune failed (maintenance only — digest continues): ${error}`);
+    return { pruned: 0, error };
+  }
+}
+
 async function runLlmDispatchDigest() {
   const db = require('../models/db');
 
@@ -819,8 +850,6 @@ async function runLlmDispatchDigest() {
   // cron-lock job health records the failed run too. Without this, the single
   // worst case (table gone) produced silence — the exact failure this whole
   // lane exists to eliminate.
-  let pruned = 0;
-  let pruneError = null;
   let yesterdayStats;
   let priorWeekStats;
   let recentStats;
@@ -828,26 +857,14 @@ async function runLlmDispatchDigest() {
   let priorHeartbeats = 0;
 
   // Retention pruning runs regardless of the gate (codex r2 P2: a kill-switch
-  // flip must not park rows forever) — and FAILS INDEPENDENTLY (codex r7): a
+  // flip must not park rows forever); traces age out on their own shorter
+  // window for the same reason. Each prune FAILS INDEPENDENTLY (codex r7): a
   // DELETE deadlock or lost DELETE grant says nothing about recorder health,
   // and must not abort the digest or masquerade as an outage while INSERT and
   // SELECT still work. Maintenance failure = log and carry on; a genuinely
   // dead table fails the stats reads below, which DO alert.
-  try {
-    const cutoff = etDayWindow(RETENTION_DAYS).start;
-    pruned = await db('llm_dispatch_log').where('created_at', '<', cutoff).del();
-  } catch (err) {
-    pruneError = err.message || String(err);
-    logger.error(`[llm-dispatch-metrics] retention prune failed (maintenance only — digest continues): ${pruneError}`);
-  }
-  // Traces age out on their own shorter window, gate-independent for the
-  // same reason; a failure here is likewise maintenance-only.
-  try {
-    const tracesPruned = await db('llm_call_traces').where('created_at', '<', etDayWindow(TRACE_RETENTION_DAYS).start).del();
-    if (tracesPruned) logger.info(`[llm-dispatch-metrics] pruned ${tracesPruned} llm_call_traces row(s) older than ${TRACE_RETENTION_DAYS} days`);
-  } catch (err) {
-    logger.error(`[llm-dispatch-metrics] trace prune failed (maintenance only — digest continues): ${err.message || err}`);
-  }
+  const { pruned, error: pruneError } = await pruneOlderThan(db, 'llm_dispatch_log', RETENTION_DAYS);
+  await pruneOlderThan(db, 'llm_call_traces', TRACE_RETENTION_DAYS);
 
   if (!isEnabled()) return { skipped: 'gate_off', pruned, ...(pruneError ? { pruneError } : {}) };
 

@@ -261,7 +261,7 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
     const data = await resp.json();
     // Latency includes the body read; usage is recorded on every billed
     // outcome below (incomplete and empty_json cost tokens too).
-    const served = { servedModel: data?.model || null, providerRef: data?.id || null, usage: usageOf('openai', data), latencyMs: elapsedMs(t0) };
+    const served = { servedModel: data?.model, providerRef: data?.id, usage: usageOf('openai', data), latencyMs: elapsedMs(t0) };
     // Extracted before the incomplete branch: the partial output of a
     // max_output_tokens cut-off is exactly what its trace needs to show.
     const out = extractOpenAIText(data);
@@ -314,7 +314,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
       return { ok: false, reason: `gemini_${resp.status}` };
     }
     const data = await resp.json();
-    const served = { servedModel: data?.modelVersion || null, providerRef: data?.responseId || null, usage: usageOf('gemini', data), latencyMs: elapsedMs(t0) };
+    const served = { servedModel: data?.modelVersion, providerRef: data?.responseId, usage: usageOf('gemini', data), latencyMs: elapsedMs(t0) };
     const out = (data?.candidates?.[0]?.content?.parts || []).map((p) => p && p.text).filter(Boolean).join('');
     const json = jsonMode ? parseLooseJson(out) : null;
     if (jsonMode && !json) {
@@ -367,7 +367,7 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
       : await client.messages.create(req);
     const out = anthropicText(resp);
     const json = jsonMode ? parseLooseJson(out) : null;
-    const served = { servedModel: resp?.model || null, providerRef: resp?.id || null, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
+    const served = { servedModel: resp?.model, providerRef: resp?.id, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
     // A stop_reason 'refusal' is a failed leg in BOTH modes — recorded as
     // such (billed) AND returned as such, so the call row, the chain row and
     // the caller agree. A refusal can carry partial text: returning it as ok
@@ -443,8 +443,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
   const failures = [];
   // The chain's registry name, so its call rows carry the same policy label
   // as the chain row (labels resolve in one place: policyLabel).
-  let chainLabel = null;
-  try { chainLabel = metrics.policyLabel(policy); } catch { /* unlabelled */ }
+  const chainLabel = metrics.policyLabel(policy);
   // Every chain runs under a shared wall-clock deadline. Callers with an
   // explicit timeoutMs keep their original semantics (each leg gets the full
   // remainder — fact-check's hard 60s ceiling). Callers WITHOUT one get
@@ -472,8 +471,8 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
       result = { ok: false, reason: 'error' };
     }
 
-    if (!result?.ok) {
-      failures.push({ provider: route.provider, model: route.model, reason: result?.reason || 'error' });
+    if (!result.ok) {
+      failures.push({ provider: route.provider, model: route.model, reason: result.reason || 'error' });
       continue;
     }
 
@@ -498,7 +497,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
       // which mislabels a budget problem as a model-quality problem in the
       // dispatch digest. Anthropic responses carry stop_reason; tag it so the
       // recorded failure reason says which one actually happened.
-      const truncated = result?.response?.stop_reason === 'max_tokens';
+      const truncated = result.response?.stop_reason === 'max_tokens';
       failures.push({
         provider: route.provider,
         model: route.model,
