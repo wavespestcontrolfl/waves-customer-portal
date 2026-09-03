@@ -2277,7 +2277,16 @@ export default function DispatchPageV2({
           selectedDate={date}
           hideUnassignedRail={false}
           refreshKey={scheduleRefreshKey}
-          onEdit={(svc) => setEditingService(svc)}
+          owesCompletion={completedVisitOwesCompletion}
+          onEdit={(svc) => {
+            // Owed closeouts resume through the completion panel, same as
+            // the day grid and the mobile list (pre-push Codex P1).
+            if (completedVisitOwesCompletion(svc)) {
+              handleComplete(svc);
+            } else {
+              setEditingService(svc);
+            }
+          }}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onViewCustomer={openCustomerSidebar}
           onChange={() => fetchSchedule(date)}
@@ -2299,7 +2308,16 @@ export default function DispatchPageV2({
           selectedDate={date}
           hideUnassignedRail={isMobile}
           refreshKey={scheduleRefreshKey}
-          onEdit={(svc) => setEditingService(svc)}
+          owesCompletion={completedVisitOwesCompletion}
+          onEdit={(svc) => {
+            // Owed closeouts resume through the completion panel, same as
+            // the day grid and the mobile list (pre-push Codex P1).
+            if (completedVisitOwesCompletion(svc)) {
+              handleComplete(svc);
+            } else {
+              setEditingService(svc);
+            }
+          }}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onViewCustomer={openCustomerSidebar}
           onChange={() => fetchSchedule(date)}
