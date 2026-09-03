@@ -1,8 +1,9 @@
 /**
  * ops/agents/skill-doctor.js — parser + clusterer contract on fixture Codex
  * comments (no gh, no network). Protects: severity/title/path parsing of the
- * bot's comment shape, rule resolution against the PR-head AGENTS.md (not the
- * local file), recurrence needs ≥2 PRs, and the home heuristic.
+ * bot's comment shape, rule resolution against AGENTS.md at each finding's
+ * reviewed commit (not the local file, not the final head), recurrence needs
+ * ≥2 PRs, and the home heuristic.
  */
 const { run, _internals } = require('../../ops/agents/skill-doctor');
 
@@ -12,7 +13,13 @@ const AGENTS_AT_HEAD = [
   '- **Public route surface.** Every unauthenticated route is documented.',
   '  more text',
   '- **Parameterized SQL only.** Never interpolate.',
+  '- **`scheduled_services.status` is gated by a CHECK constraint, not a',
+  '  helper.** Migration x defines the values.',
+  '- Before adding, sharpen the existing rule that covers the class. Before',
+  '  writing prose, ask whether it can be a scanner.',
   '',
+  '## Next section',
+  '- **Other.** x',
 ].join('\n');
 
 function codexComment({ pr, sev, title, path, line, cite, body = '' }) {
@@ -66,6 +73,26 @@ describe('parseFinding', () => {
     const f = _internals.parseFinding(COMMENTS[1][1], PRS[0]);
     expect(f).toMatchObject({ pr: 1, severity: 'P0', title: 'Document the new public field', path: 'server/routes/lead-webhook.js', line: 20, agentsLines: [3, 3] });
     expect(_internals.parseFinding(COMMENTS[1][2], PRS[0])).toBeNull();
+  });
+});
+
+describe('agentsRuleTitle', () => {
+  const lines = AGENTS_AT_HEAD.split('\n');
+  test('resolves the containing bullet: wrapped bold titles, plain bullets, and a citation inside a bullet\'s continuation', () => {
+    expect(_internals.agentsRuleTitle([3, 3], lines)).toBe('Public route surface');
+    expect(_internals.agentsRuleTitle([4, 4], lines)).toBe('Public route surface');
+    expect(_internals.agentsRuleTitle([6, 7], lines)).toBe('`scheduled_services.status` is gated by a CHECK constraint, not a helper');
+    expect(_internals.agentsRuleTitle([7, 7], lines)).toBe('`scheduled_services.status` is gated by a CHECK constraint, not a helper');
+    expect(_internals.agentsRuleTitle([8, 9], lines)).toBe('Before adding, sharpen the existing rule that covers the class');
+    // A citation into a section heading resolves to nothing, never to the previous section's last rule.
+    expect(_internals.agentsRuleTitle([11, 11], lines)).toBeNull();
+  });
+
+  test('a webhook route finding about money goes to billing, not the public-route contract', () => {
+    const money = _internals.parseFinding(codexComment({ pr: 9, sev: 'P1', title: 'Reconcile the charge amount', path: 'server/routes/stripe-webhook.js', line: 3, body: 'the invoice amount is not reconciled against the stripe charge' }), PRS[0]);
+    expect(_internals.candidateHome(money)).toBe('waves-billing');
+    const contract = _internals.parseFinding(codexComment({ pr: 9, sev: 'P1', title: 'Verify the signature', path: 'server/routes/stripe-webhook.js', line: 3, body: 'unauthenticated route: the webhook signature is not verified' }), PRS[0]);
+    expect(_internals.candidateHome(contract)).toBe('docs/public-route-contracts.md');
   });
 });
 

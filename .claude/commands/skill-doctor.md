@@ -17,8 +17,10 @@ node ops/agents/skill-doctor.js --days 14
 The report has three sections, in priority order:
 
 1. **Cited rules that keep being broken** — findings that cite an AGENTS.md
-   rule, grouped by the rule's title AT THE PR HEAD (AGENTS.md is
-   restructured often; local line numbers lie). A rule that exists and is
+   rule, grouped by the rule's title AT THE COMMIT EACH FINDING REVIEWED
+   (AGENTS.md is restructured often, even between rounds of one PR; local
+   line numbers lie). The label is the rule as it read THEN — find its
+   current wording in AGENTS.md before sharpening anything. A rule that exists and is
    broken across many PRs wants a sharper wording, a `file:line` it
    protects, or a scanner in `check:domain-rules` — never a duplicate.
 2. **Recurring finding classes with no cited rule** — the same finding

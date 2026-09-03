@@ -225,15 +225,27 @@ function agentsMdLines(agentsPath = path.join(REPO_ROOT, 'AGENTS.md')) {
 // rule bullet. Codex cites line numbers at the PR's own AGENTS.md SHA; the
 // local file may have drifted a few lines, which is why the title (not the
 // number) is the cluster key.
+// The CONTAINING bullet is resolved first (nearest preceding "- " at column
+// 0, bounded by the section heading), then its title is read from the
+// bullet's joined text: the leading bold span when there is one — bold
+// titles wrap across lines in AGENTS.md, so a single-line regex missed them
+// and fell through to the previous rule — else the bullet's first sentence,
+// so plain (unbolded) rule bullets resolve too (Codex r4 P1).
 function agentsRuleTitle(range, lines = agentsMdLines()) {
   if (!range || !lines.length) return null;
   const start = Math.min(range[0], lines.length) - 1;
+  let bullet = -1;
   for (let i = start; i >= 0; i--) {
-    const m = lines[i].match(/^- \*\*(.+?)\*\*/);
-    if (m) return m[1].replace(/\.$/, '');
-    if (/^## /.test(lines[i])) break;
+    if (/^- /.test(lines[i])) { bullet = i; break; }
+    if (/^## /.test(lines[i])) return null;
   }
-  return null;
+  if (bullet < 0) return null;
+  const parts = [lines[bullet].slice(2)];
+  for (let i = bullet + 1; i < lines.length && /^  \S/.test(lines[i]); i++) parts.push(lines[i].trim());
+  const text = parts.join(' ').trim();
+  const bold = text.match(/^\*\*(.+?)\*\*/);
+  const title = bold ? bold[1] : (text.match(/^(.+?[.:;])(\s|$)/) || [null, text.slice(0, 80)])[1];
+  return title.replace(/[.:;]$/, '').trim() || null;
 }
 
 // ---------------------------------------------------------------- candidate home
@@ -255,7 +267,10 @@ const HOME_FILES = {
 
 const HOME_RULES = [
   { home: 'waves-ship', test: (f) => /\bcommit (message|title|history)\b|\bpr (body|title)\b/i.test(f.title + ' ' + f.text) },
-  { home: 'docs/public-route-contracts.md', test: (f) => /^server\/routes\//.test(f.path || '') && /public|token|webhook|\/:token|unauth/i.test(f.text + ' ' + (f.path || '')) },
+  // The finding TEXT must speak to the public/unauthenticated contract — a
+  // route filename containing "webhook" alone sends Stripe amount or
+  // idempotency findings at the contracts doc instead of billing (Codex r4).
+  { home: 'docs/public-route-contracts.md', test: (f) => /^server\/routes\//.test(f.path || '') && /\bpublic\b|\/:token|\btoken(ized|-gated)?\b|unauth|signature|verif(y|ication)|by design/i.test(f.text) },
   { home: 'waves-db', test: (f) => /\b(sql|knex|migration|backfill|transaction|savepoint|for update|timestamp|timezone)\b/i.test(f.text) || /migrations\//.test(f.path || '') },
   { home: 'waves-billing', test: (f) => /\b(stripe|invoice|surcharge|refund|payment|autopay|deposit|prepay|charge)\b/i.test(f.text + ' ' + (f.path || '')) },
   { home: 'waves-llm', test: (f) => /\b(anthropic|openai|gemini|model|llm|prompt|max_tokens|fallback provider)\b/i.test(f.text + ' ' + (f.path || '')) || /services\/llm\//.test(f.path || '') },
