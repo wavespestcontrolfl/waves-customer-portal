@@ -1374,13 +1374,19 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 
     // Replacement inserted — NOW retire the draft it supersedes (same
     // transaction; a rollback un-archives it together with the insert).
+    const supersededEstimateIds = [];
     for (const target of supersedeTargets) {
-      await archiveSupersededDraftInTx(trx, target, {
+      const archived = await archiveSupersededDraftInTx(trx, target, {
         reason: context?.supersedeReason || 'superseded_by_redraft',
       });
+      if (archived) supersededEstimateIds.push(String(target.id));
     }
 
-    return { estimate };
+    // WHICH targets were actually retired rides the result: a row the
+    // supersede could not take (already 'sending', an operator revision
+    // dropped the attempt token) stays live and guarded, and the caller
+    // owes the operator a bell for it (pre-push codex P1).
+    return { estimate, supersededEstimateIds };
   });
 
   if (creationResult.duplicateBlock) {
@@ -1406,7 +1412,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     }
   }
 
-  return { created: true, estimate: creationResult.estimate };
+  return { created: true, estimate: creationResult.estimate, supersededEstimateIds: creationResult.supersededEstimateIds || [] };
 }
 
 module.exports = {

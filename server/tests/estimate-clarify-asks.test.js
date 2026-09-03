@@ -1843,7 +1843,8 @@ describe('unit re-draft (GATE_CLARIFY_UNIT_WRITEBACK — PR C2: fence + every-li
     gateOn();
     mockSmsThreadDraftsEnabled.mockReturnValue(true);
     mockStartSmsThreadDraft.mockResolvedValue({ started: true });
-    mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'green', created: true, estimateId: 'est-new' });
+    // The engine reports WHICH targets its insert retired; by default all of them.
+    mockMaybeDraftEstimateForCall.mockImplementation(async (args) => ({ lane: 'green', created: true, estimateId: 'est-new', supersededEstimateIds: args.supersedeEstimateIds || [] }));
   });
 
   test('quote requested, no draft yet: the unit is stamped on the call row as the creators\' fence and the call context is re-run fresh with the unit + the item-bound building', async () => {
@@ -1919,6 +1920,26 @@ describe('unit re-draft (GATE_CLARIFY_UNIT_WRITEBACK — PR C2: fence + every-li
     await reply({ drafts: [{ id: 'est-sending', status: 'sending' }] });
     expect(guardUpdates()).toHaveLength(1);
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateIds: ['est-sending'] }));
+  });
+
+  test('a guarded row the supersede could NOT retire (already sending / revised) stays held after the replacement lands: unscheduled, recorded on the ask, ONE bell naming it', async () => {
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'green', created: true, estimateId: 'est-new', supersededEstimateIds: ['est-older'] });
+    await reply({ drafts: [{ id: 'est-sending', status: 'sending' }, { id: 'est-older', status: 'scheduled' }] });
+    expect(guardUpdates()).toHaveLength(2);
+    // Only the un-retired row is unscheduled; the retired one is the engine's.
+    expect(unscheduleUpdates()).toHaveLength(1);
+    expect(stamps().at(-1)).toEqual(expect.objectContaining({ repriced_estimate_id: 'est-new', held_estimate_ids: ['est-sending'] }));
+    expect(stamps().at(-1).reprice_pending).toBeUndefined();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', expect.stringMatching(/older draft for this call is still held/), expect.stringMatching(/one older unsent draft/), expect.objectContaining({
+      link: '/admin/estimates/est-sending', metadata: expect.objectContaining({ estimateIds: ['est-sending'], replacementEstimateId: 'est-new' }),
+    }));
+    // When every target was retired there is nothing held and no bell.
+    jest.clearAllMocks(); mockState.updates = [];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'green', created: true, estimateId: 'est-new', supersededEstimateIds: ['est-a', 'est-b'] });
+    await reply({ drafts: [{ id: 'est-a', status: 'draft' }, { id: 'est-b', status: 'draft' }] });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(stamps().at(-1).held_estimate_ids).toBeUndefined();
   });
 
   test('no replacement produced: every held draft is pulled off the cron and the operator gets ONE bell naming the primary (guard stands)', async () => {

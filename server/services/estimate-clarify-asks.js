@@ -1547,12 +1547,37 @@ async function handleClarifyReply({ phone, body }) {
         // replacement, or its later answer would guard the archived row
         // (codex r2 P1 on #3785).
         const bedroomStillOpen = !recorded.includes('bedroom_count') && repriceReason === 'clarify_unit_reply';
+        // A guarded row the supersede could NOT retire — a row already in
+        // 'sending' (lockSupersededDraftInTx never takes one; its delivery
+        // verdict aborts on the marker), or one an operator revision
+        // released — is still live with the whole-building address. It
+        // stays held, is pulled off the cron, and the operator gets the one
+        // bell that names it (pre-push codex P1) — never silently cleared.
+        const retired = new Set((repriceOutcome.supersededEstimateIds || []).map(String));
+        const heldIds = repriceReason === 'clarify_unit_reply' ? unitSupersedeIds.filter((id) => !retired.has(String(id))) : [];
         await stampClarifyFlags(digits, awaiting.id, {
           reprice_pending: null,
           repriced_at: new Date().toISOString(),
           repriced_estimate_id: repriceOutcome.estimateId || null,
+          ...(heldIds.length ? { held_estimate_ids: heldIds } : {}),
           ...(bedroomStillOpen && repriceOutcome.estimateId ? { bedroom_estimate_id: String(repriceOutcome.estimateId) } : {}),
         });
+        if (heldIds.length) {
+          await withClarifyLock(digits, async (trx) => {
+            for (const id of heldIds) await unscheduleForOperatorReprice(trx, id, locked.repriceAttempt);
+          }).catch((err) => logger.warn(`[estimate-clarify] unschedule (held drafts) failed: ${err.message}`));
+          logger.warn('[estimate-clarify] unit re-draft landed but older draft(s) for the call could not be retired — held for the operator', { draftId: awaiting.id, heldIds, replacement: repriceOutcome.estimateId || null });
+          try {
+            await require('./notification-service').notifyAdmin(
+              'lead',
+              'Unit number received — an older draft for this call is still held',
+              `The customer texted their unit (${unitLine}) and a replacement estimate was drafted, but ${heldIds.length === 1 ? 'one older unsent draft' : `${heldIds.length} older unsent drafts`} for the same call could not be retired automatically (already sending, or revised since). ${heldIds.length === 1 ? 'It' : 'They'} still describe the whole building and stay held — archive or re-draft before sending.`,
+              { link: `/admin/estimates/${heldIds[0]}`, metadata: { estimate_clarify: true, reprice_pending: true, draftId: awaiting.id, estimateId: heldIds[0], estimateIds: heldIds, replacementEstimateId: repriceOutcome.estimateId || null, unit: unitLine } },
+            );
+          } catch (bellErr) {
+            logger.warn(`[estimate-clarify] held-draft bell failed (guard stands): ${bellErr.message}`);
+          }
+        }
       } else {
         // No replacement: the draft's dollars are KNOWN stale, so the send
         // guard STAYS (only the operator's explicit re-price clears it);

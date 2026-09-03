@@ -565,11 +565,13 @@ async function maybeBuildCommercialProposalDraft({
 
       // Replacement inserted — NOW retire what it supersedes (same
       // transaction; a rollback un-archives them together with the insert).
+      const supersededEstimateIds = [];
       for (const target of supersedeTargets) {
-        await archiveSupersededDraftInTx(trx, target, { reason: context?.supersedeReason || 'superseded_by_redraft' });
+        const archived = await archiveSupersededDraftInTx(trx, target, { reason: context?.supersedeReason || 'superseded_by_redraft' });
+        if (archived) supersededEstimateIds.push(String(target.id));
       }
 
-      return { estimate };
+      return { estimate, supersededEstimateIds };
     });
 
     if (creation.staleLinkage) {
@@ -601,7 +603,7 @@ async function maybeBuildCommercialProposalDraft({
       briefComposed: !!brief,
       buildings: scaffold.buildings.length,
     });
-    return { created: true, estimateId: creation.estimate.id, briefComposed: !!brief };
+    return { created: true, estimateId: creation.estimate.id, briefComposed: !!brief, supersededEstimateIds: creation.supersededEstimateIds || [] };
   } catch (err) {
     logger.warn(`[commercial-proposal] scaffold build failed (red bell takes over): ${err.message}`);
     return { created: false, skipped: 'error' };

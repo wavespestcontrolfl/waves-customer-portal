@@ -2055,6 +2055,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           if (proposalOutcome?.created) {
             result.created = true;
             result.estimateId = proposalOutcome.estimateId;
+            result.supersededEstimateIds = proposalOutcome.supersededEstimateIds || [];
             result.commercialProposal = true;
             // Unconditional like the created-draft bell below — an artifact
             // now exists either way; the scaffold deep-links the builder.
@@ -2113,6 +2114,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               if (commercialOutcome?.created) {
                 result.created = true;
                 result.estimateId = commercialOutcome.estimateId;
+                result.supersededEstimateIds = commercialOutcome.supersededEstimateIds || [];
                 result.commercialProposal = true;
                 await notify({
                   call: context.call,
@@ -2290,6 +2292,9 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
 
     result.created = true;
     result.estimateId = draft.estimate.id;
+    // The supersede targets the insert actually retired (a 'sending' row or
+    // one an operator revision released stays live + guarded).
+    result.supersededEstimateIds = draft.supersededEstimateIds || [];
     // One-question bedroom ask (ruling: the clarify mechanic asks for the
     // unit size the call didn't state). The draft already landed yellow
     // with the gap named; the clarify service parks the SMS for owner
