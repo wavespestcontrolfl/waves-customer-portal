@@ -997,29 +997,37 @@ class GoogleBusinessService {
       }
     }
     // Everything below is post-write: the row is stored and its synced_at
-    // token advanced. A failure here (reinstatement clear, suppression mark,
-    // thank-you enrollment, unlinked bell) must not read as a storage
-    // failure to the caller — the loop's per-row isolation skips the
-    // removal reconcile on storage failures precisely because the token did
-    // NOT advance, which is false here (pre-push audit P1).
-    try {
-      // Reinstatement clear — a review present in the feed is not missing. The
-      // main update above deliberately never touches missing_since; the clear
-      // is its own conditional UPDATE evaluated against the CURRENT column
-      // value, so a stamp committed by a newer reconciliation between our
-      // snapshot read and this statement survives (only stamps older than this
-      // runner's fetch start may be cleared). A fresh insert carries no stamp.
-      if (!result.inserted) {
+    // token advanced. A failure here must not read as a storage failure to
+    // the caller (the loop skips the removal reconcile on storage failures
+    // precisely because the token did NOT advance — false here), and each
+    // side effect runs independently so a failed reinstatement clear or
+    // suppression mark cannot skip the attribution-moment thank-you, which
+    // is never retried (existing.customer_id is set on the next sync).
+    const sideEffect = async (label, fn) => {
+      try { await fn(); } catch (sideErr) {
+        logger.error(`[gbp] post-write ${label} failed for review row ${result.id} (${normalized.gbp_review_name || normalized.google_review_id || '?'}): ${sideErr.message}`);
+        result.sideEffectError = result.sideEffectError || sideErr.message;
+      }
+    };
+    if (!result.inserted) {
+      // Reinstatement clear — a review present in the feed is not missing.
+      // The main update above deliberately never touches missing_since; the
+      // clear is its own conditional UPDATE evaluated against the CURRENT
+      // column value, so a stamp committed by a newer reconciliation between
+      // our snapshot read and this statement survives (only stamps older
+      // than this runner's fetch start may be cleared). A fresh insert
+      // carries no stamp.
+      await sideEffect('reinstatement clear', async () => {
         const clear = db('google_reviews')
           .where({ id: result.id })
           .whereNotNull('missing_since');
         if (syncStart) clear.where('missing_since', '<', new Date(syncStart).toISOString());
         const cleared = await clear.update({ missing_since: null }, ['id']);
-        // A stamped→clear transition means a review the removal alert reported
-        // gone is back on Google — tell the admin, or the "removed" bell is the
-        // last word they ever hear about it. Collected per run and flushed as
-        // one bell per location (a profile-wide reinstatement would otherwise
-        // ring dozens of bells).
+        // A stamped→clear transition means a review the removal alert
+        // reported gone is back on Google — tell the admin, or the "removed"
+        // bell is the last word they ever hear about it. Collected per run
+        // and flushed as one bell per location (a profile-wide reinstatement
+        // would otherwise ring dozens of bells).
         if ((cleared || []).length > 0 && Array.isArray(pendingRestoredNotifications)) {
           pendingRestoredNotifications.push({
             review_id: result.id,
@@ -1028,17 +1036,19 @@ class GoogleBusinessService {
             star_rating: normalized.star_rating,
           });
         }
-      }
-      if (row.customer_id) {
-        // A matched review means the customer left one — stop asking them.
-        await this._markCustomerLeftReview(row.customer_id);
-        // Thank-you sequence on the ATTRIBUTION moment only (a new review, or
-        // an existing one that just matched a customer) — not on every hourly
-        // re-sync; the helper's once-ever dedupe backstops replays anyway.
-        // Gate / 4-5-star bar / location mapping live in the shared helper so
-        // the manual-match flow (review-incentives) behaves identically.
-        const justAttributed = result.inserted || !existing?.customer_id;
-        if (justAttributed) {
+      });
+    }
+    if (row.customer_id) {
+      // A matched review means the customer left one — stop asking them.
+      await sideEffect('suppression mark', () => this._markCustomerLeftReview(row.customer_id));
+      // Thank-you sequence on the ATTRIBUTION moment only (a new review, or
+      // an existing one that just matched a customer) — not on every hourly
+      // re-sync; the helper's once-ever dedupe backstops replays anyway.
+      // Gate / 4-5-star bar / location mapping live in the shared helper so
+      // the manual-match flow (review-incentives) behaves identically.
+      const justAttributed = result.inserted || !existing?.customer_id;
+      if (justAttributed) {
+        await sideEffect('thank-you enrollment', async () => {
           const { enrollReviewThankYou } = require('./automation-enroll');
           await enrollReviewThankYou({
             customerId: row.customer_id,
@@ -1046,24 +1056,23 @@ class GoogleBusinessService {
             starRating: row.star_rating,
             source: 'google_review',
           });
-        }
-      } else if (result.inserted) {
-        // New review we couldn't tie to a customer — alert the office to match
-        // it. During a batch sync the notification is DEFERRED to the end of
-        // the run: the likely-reviewer exclusion inside it queries
-        // google_reviews.customer_id links, and a matched review later in the
-        // same provider response isn't inserted yet — notifying inline could
-        // name that customer as an earlier unlinked review's likely reviewer
-        // (codex #3264 r2).
-        if (Array.isArray(pendingUnlinkedNotifications)) {
-          pendingUnlinkedNotifications.push(row);
-        } else if (!(await this._attemptClickAutoLink(row))) {
-          await this._notifyUnlinkedReview(row);
-        }
+        });
       }
-    } catch (sideErr) {
-      logger.error(`[gbp] post-write side effect failed for review row ${result.id} (${normalized.gbp_review_name || normalized.google_review_id || '?'}): ${sideErr.message}`);
-      result.sideEffectError = sideErr.message;
+    } else if (result.inserted) {
+      // New review we couldn't tie to a customer — alert the office to match
+      // it. During a batch sync the notification is DEFERRED to the end of
+      // the run: the likely-reviewer exclusion inside it queries
+      // google_reviews.customer_id links, and a matched review later in the
+      // same provider response isn't inserted yet — notifying inline could
+      // name that customer as an earlier unlinked review's likely reviewer
+      // (codex #3264 r2).
+      if (Array.isArray(pendingUnlinkedNotifications)) {
+        pendingUnlinkedNotifications.push(row);
+      } else {
+        await sideEffect('unlinked-review bell', async () => {
+          if (!(await this._attemptClickAutoLink(row))) await this._notifyUnlinkedReview(row);
+        });
+      }
     }
     return result;
   }

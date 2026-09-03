@@ -374,12 +374,15 @@ describe('Google Business review sync', () => {
       ] });
     });
     const mark = jest.spyOn(service, '_markCustomerLeftReview').mockRejectedValue(new Error('suppression write failed'));
+    const enrollReviewThankYou = jest.spyOn(require('../services/automation-enroll'), 'enrollReviewThankYou').mockResolvedValue({ enrolled: true });
     const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
     const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
 
     const result = await service.syncAllReviews();
 
     expect(mark).toHaveBeenCalled();
+    // Independent side effects: the failed suppression mark must not skip the attribution-moment thank-you.
+    expect(enrollReviewThankYou).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', source: 'google_review' }));
     expect(result.synced).toBe(1);
     expect(result.errors).toEqual([]);
     expect(reconcile).toHaveBeenCalledTimes(1);
@@ -387,7 +390,7 @@ describe('Google Business review sync', () => {
     expect(db.__state.rows.google_reviews).toEqual(expect.arrayContaining([
       expect.objectContaining({ gbp_review_name: 'accounts/1/locations/2/reviews/rev-3', customer_id: 'cust-1' }),
     ]));
-    mark.mockRestore(); reconcile.mockRestore(); degraded.mockRestore();
+    mark.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); enrollReviewThankYou.mockRestore();
   });
 
   test('upgrades a legacy Places row to the GBP review resource identity', async () => {
