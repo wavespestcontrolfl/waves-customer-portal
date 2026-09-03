@@ -106,6 +106,7 @@ describe('agent-control taxonomy', () => {
     // The validator itself threw: broken plumbing, not a rejected answer.
     ['validator_error:Cannot read properties of undefined', { validator: true }, 'infrastructure'],
     ['validator_error:boom', {}, 'infrastructure'],
+    ['validator_error:boom (response truncated at max_tokens=4096)', { validator: true }, 'infrastructure'],
     ['summary_missing', { validator: true }, 'incomplete'],
     ['no_findings', { validator: true }, 'incomplete'],
     ['tool_timeout', {}, 'tool'],

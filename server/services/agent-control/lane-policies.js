@@ -63,8 +63,10 @@ const AGENT_SESSION = {
 
 const LANE_RUNTIME = {
   // ── SMS & messaging ──
-  sms_draft: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
-  sms_save_sale: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M0' },
+  // customer_visible + M3 (Codex r23): classified by the worst-case path — with GATE_SMS_AUTO_SEND on, an intent promoted to auto_send hands
+  // the drafted reply to maybeAutoSend() and it reaches the customer with no human step (deliveredAs 'auto_sent', judge-covered). Gate off = shadow rows.
+  sms_draft: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
+  sms_save_sale: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M3' },
   // M2 (Codex r20): both return text the comms client installs into the editable body; sending is the operator's separate action.
   sms_tone: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
   sms_suggest: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
@@ -224,7 +226,8 @@ const LANE_RUNTIME = {
   content_misc: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
   // M3: SOCIAL_RSS_AUTOPUBLISH publishes via publishToAll without approval and records the result in social_media_posts — Codex r11.
   social_copy: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3' },
-  social_judge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check' },
+  // M3 (Codex r23): judgeSocialCopy's verdict is applied unattended — a rejection flips the post to compliance_rejected or parks the GBP action.
+  social_judge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3' },
   // M2 (Codex r20): captions return to editable textareas; a separate Publish action posts the selected versions.
   tech_caption_copy: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
   review_ask: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
