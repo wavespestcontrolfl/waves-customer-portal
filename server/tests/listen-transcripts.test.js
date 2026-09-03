@@ -26,6 +26,14 @@ describe('transcript readers', () => {
     expect(joined).not.toContain('system-reminder');
   });
 
+  test('harness blocks are stripped wherever they sit in a block — after prose, behind whitespace, unterminated', () => {
+    const strip = _internals.stripHarnessBlocks;
+    expect(strip('Real question about chinch bugs.\n<system-reminder>injected file dump</system-reminder>')).toBe('Real question about chinch bugs.');
+    expect(strip('  <system-reminder>only harness</system-reminder>  ')).toBe('');
+    expect(strip('<command-name>/foo</command-name><command-message>bar</command-message>keep me')).toBe('keep me');
+    expect(strip('prose then <system-reminder>truncated line with no close')).toBe('prose then');
+  });
+
   test('the --hours window applies per turn, not per file: older turns in a recently touched session are dropped, unstamped lines fail closed', () => {
     const since = Date.parse('2026-09-03T04:03:00.000Z');
     const claude = _internals.readClaudeTranscript(FIX('listen-claude-session.jsonl'), { sinceMs: since });
@@ -99,11 +107,21 @@ describe('redaction before dispatch', () => {
 });
 
 describe('seed-time re-gating', () => {
+  test('liveCorpusVerdict runs the canonical topic-targeting gate against a corpus index: owned slug blocks, fresh topic passes', () => {
+    const gate = require('../services/content/topic-targeting-gate');
+    const index = gate.indexCorpus([{ url: '/lawn-care/chinch-bugs-st-augustine/', body: '---\ntitle: Chinch Bugs in St. Augustine Lawns\nslug: /lawn-care/chinch-bugs-st-augustine/\nprimary_keyword: chinch bugs st augustine\ncategory: lawn-care\n---\nChinch bugs feed on St. Augustine turf. Chinch bug damage shows as yellow patches. Chinch bugs thrive in heat.' }]);
+    const owned = { working_title: 'Chinch Bug Damage in St. Augustine Lawns', slug: '/lawn-care/chinch-bugs-st-augustine/', primary_kw: 'chinch bugs st augustine', city: null };
+    expect(_internals.liveCorpusVerdict(owned, index)).toEqual(expect.any(String));
+    const fresh = { working_title: 'Why Mosquito Barrier Treatments Still Work After Rain', slug: '/mosquito/mosquito-barrier-treatments-after-rain/', primary_kw: 'mosquito barrier treatment after rain', city: null };
+    expect(_internals.liveCorpusVerdict(fresh, index)).toBeNull();
+    expect(_internals.liveCorpusVerdict({ ...fresh, city: 'Tampa' }, index)).toMatch(/GEO/);
+  });
+
   test('ideaFromBrief round-trips so an edited manifest is judged by the same predicate', () => {
     const good = _internals.briefFor({ working_title: 'Sarasota chinch bug season', slug: '/lawn-care/chinch-bugs-sarasota-fl/', city: 'Sarasota', primary_kw: 'chinch bugs sarasota', secondary_kws: [], thesis: 't', outline: ['a'], sources: ['https://edis.ifas.ufl.edu/x'], confidence: 0.6 }, { now: new Date('2026-09-03T12:00:00Z') });
     expect(_internals.targetingViolation(_internals.ideaFromBrief(good))).toBeNull();
     expect(_internals.targetingViolation(_internals.ideaFromBrief({ ...good, working_title: 'Chinch bugs in Tampa' }))).toBe('out_of_footprint_geo');
-    expect(_internals.targetingViolation(_internals.ideaFromBrief({ ...good, sources: ['https://randomblog.example.com'] }))).toBe('no_allowed_source');
+    expect(_internals.targetingViolation(_internals.ideaFromBrief({ ...good, sources: ['https://randomblog.example.com'] }))).toBe('disallowed_source');
   });
 });
 
@@ -155,8 +173,11 @@ describe('targeting filters', () => {
     ['slug_shape', { slug: '/lawn-care/chinch-bugs' }],
     ['slug_shape', { slug: '/lawn-care/pests/chinch-bugs/' }],
     ['slug_shape', { slug: '/lawn-care/Chinch-Bugs/' }],
-    ['no_allowed_source', { sources: ['https://randomblog.example.com/lawns'] }],
-    ['no_allowed_source', { sources: ['Pull the current Wikipedia article on lawn fungus'] }],
+    ['disallowed_source', { sources: ['https://randomblog.example.com/lawns'] }],
+    ['disallowed_source', { sources: ['https://edis.ifas.ufl.edu/publication/LH044', 'https://randomblog.example.com/lawns'] }],
+    ['no_allowed_source', { sources: [] }],
+    ['out_of_footprint_geo', { working_title: 'Brown patches after summer rain', slug: '/lawn-care/brown-patches-after-rain/', primary_kw: 'brown patches after rain', city: 'Tampa' }],
+    ['disallowed_source', { sources: ['Pull the current Wikipedia article on lawn fungus'] }],
     ['city_slug_mismatch', { city: 'Bradenton' }],
   ])('drops %s', (reason, patch) => {
     expect(_internals.targetingViolation({ ...base, ...patch })).toBe(reason);

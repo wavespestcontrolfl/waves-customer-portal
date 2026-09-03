@@ -118,6 +118,19 @@ function inWindow(entry, sinceMs) {
   return Number.isFinite(t) && t >= sinceMs;
 }
 
+// Harness blocks (<system-reminder>, <command-…>) can sit after prose or
+// behind leading whitespace, not only at the start of a block; they carry
+// injected context and file-derived material the privacy contract says
+// never leaves the Mac, so they are stripped wherever they appear and a
+// block that was only harness text is dropped (Codex r4 P1).
+const HARNESS_BLOCK_RE = /<system-reminder>[\s\S]*?<\/system-reminder>|<(command-[a-z-]+)>[\s\S]*?<\/\1>/g;
+function stripHarnessBlocks(text) {
+  let out = String(text || '').replace(HARNESS_BLOCK_RE, ' ');
+  // An unterminated block (truncated line) is dropped to its end.
+  out = out.replace(/<system-reminder>[\s\S]*$|<command-[a-z-]+>[\s\S]*$/, ' ');
+  return out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function textBlocks(content) {
   if (typeof content === 'string') return [content];
   if (!Array.isArray(content)) return [];
@@ -141,9 +154,9 @@ function readClaudeTranscript(file, { sinceMs = 0 } = {}) {
     if (o.isMeta || !inWindow(o, sinceMs)) continue;
     const texts = textBlocks(o.message.content);
     // A user turn whose only content is tool_result yields nothing here.
-    for (const t of texts) {
-      if (t.startsWith('<system-reminder>') || t.startsWith('<command-')) continue;
-      turns.push({ role: o.message.role || o.type, text: t });
+    for (const raw of texts) {
+      const t = stripHarnessBlocks(raw);
+      if (t) turns.push({ role: o.message.role || o.type, text: t });
     }
   }
   return turns;
@@ -270,12 +283,17 @@ function targetingViolation(idea) {
   if (DOOR_TO_DOOR_RE.test(text) || bannedTopicFinding(text)) return 'banned_topic';
   // Framing parts only (title / slug / keyword) — an outline may MENTION
   // Tampa educationally; the post may not be built around it.
-  const geo = targetingGate.geoBlockReason(`${title} ${slug.replace(/[-/]/g, ' ')} ${idea.primary_kw || ''}`);
+  // The city is a semantic field the writer is bound to ("City: Tampa"), so
+  // it is framing even when title/slug/keyword are generic (Codex r4 P2).
+  const geo = targetingGate.geoBlockReason(`${title} ${slug.replace(/[-/]/g, ' ')} ${idea.primary_kw || ''} ${idea.city || ''}`);
   if (geo === targetingGate.CODES.GEO_OUT_OF_AREA) return 'out_of_footprint_geo';
   if (geo) return 'statewide_only';
   if (reentrySafetyClaimFinding(text)) return 'reentry_safety_claim';
-  const sources = Array.isArray(idea.sources) ? idea.sources.filter(sourceAllowed) : [];
+  const sources = Array.isArray(idea.sources) ? idea.sources : [];
   if (!sources.length) return 'no_allowed_source';
+  // The seeder turns EVERY listed source into a binding citation, so one
+  // unapproved URL next to an approved one is still a violation (Codex r4 P2).
+  if (sources.some((src) => !sourceAllowed(src))) return 'disallowed_source';
   const citySuffix = slug.match(/-(bradenton|sarasota|venice|parrish|palmetto|north-port|lakewood-ranch|port-charlotte)-fl\/$/);
   if (citySuffix && String(idea.city || '').trim().toLowerCase() !== citySuffix[1].replace(/-/g, ' ')) return 'city_slug_mismatch';
   return null;
@@ -296,7 +314,7 @@ function ideaFromBrief(b) {
 }
 
 function briefFor(idea, { now }) {
-  const sources = idea.sources.filter(sourceAllowed);
+  const sources = idea.sources;
   const id = `listen-${crypto.createHash('sha1').update(normalizeTitle(idea.working_title)).digest('hex').slice(0, 10)}`;
   return {
     id,
@@ -396,16 +414,35 @@ function buildManifest(ideas, { now }) {
 
 const TERMINAL_QUEUE_STATUSES = new Set(['skipped', 'expired']);
 
-async function seedFlags(db, briefs) {
+// Live-corpus verdict for one brief through the SAME topic-targeting gate
+// the runner applies pre-draft (geo framing, semantic city, entity / slug
+// ownership against the live Astro blog corpus). A title-only lookup let
+// candidates through that the runner would reject after the owner had
+// already released them (Codex r4 P1).
+function liveCorpusVerdict(brief, index) {
+  const r = targetingGate.evaluate({
+    actionType: 'new_supporting_blog',
+    query: brief.primary_kw || null,
+    title: brief.working_title || null,
+    slug: brief.slug || null,
+    city: brief.city || null,
+  }, { index, requireCorpus: true });
+  return r.ok ? null : r.findings.map((f) => f.code).join(',');
+}
+
+async function seedFlags(db, briefs, { index }) {
   const keys = briefs.map((b) => `catseed:v1:${b.id}`);
-  const queued = keys.length ? await db('opportunity_queue').whereIn('dedupe_key', keys).select('dedupe_key', 'status') : [];
-  const byKey = new Map(queued.map((r) => [r.dedupe_key, r.status]));
+  const queued = keys.length ? await db('opportunity_queue').whereIn('dedupe_key', keys).select('id', 'dedupe_key', 'status') : [];
+  const byKey = new Map(queued.map((r) => [r.dedupe_key, r]));
+  // A dismissed row whose latest run is still completed_pending_review must
+  // not be revived by a reseed: the review read model would surface that
+  // old draft with Approve & publish. Reopen it from the review queue
+  // instead (Codex r4 P1).
+  const terminalIds = queued.filter((r) => TERMINAL_QUEUE_STATUSES.has(r.status)).map((r) => r.id);
+  const reviewableRuns = new Set(terminalIds.length
+    ? (await db('autonomous_runs').whereIn('opportunity_id', terminalIds).where('outcome', 'completed_pending_review').select('opportunity_id')).map((r) => r.opportunity_id)
+    : []);
   const titles = briefs.map((b) => normalizeTitle(b.working_title));
-  const liveTitles = new Set(
-    // blog_posts keeps its archive state in `status` (workflow_status is a
-    // content_registry column — Codex r3 P1).
-    (await db('blog_posts').whereRaw("status IS DISTINCT FROM 'archived'").select('title')).map((r) => normalizeTitle(r.title)),
-  );
   const queuedTitles = new Set(
     (await db('opportunity_queue')
       .whereNotIn('status', [...TERMINAL_QUEUE_STATUSES])
@@ -413,13 +450,17 @@ async function seedFlags(db, briefs) {
       .select(db.raw("signal_metadata->'category_brief'->>'working_title' AS title")))
       .map((r) => normalizeTitle(r.title)),
   );
-  return briefs.map((b, i) => ({
-    id: b.id,
-    title: b.working_title,
-    already_queued: byKey.get(keys[i]) || null,
-    title_in_queue: !byKey.has(keys[i]) && queuedTitles.has(titles[i]),
-    title_is_live_post: liveTitles.has(titles[i]),
-  }));
+  return briefs.map((b, i) => {
+    const row = byKey.get(keys[i]) || null;
+    return {
+      id: b.id,
+      title: b.working_title,
+      already_queued: row ? row.status : null,
+      prior_run_reviewable: !!(row && reviewableRuns.has(row.id)),
+      title_in_queue: !row && queuedTitles.has(titles[i]),
+      live_corpus_block: liveCorpusVerdict(b, index),
+    };
+  });
 }
 
 async function runSeed({ file, only, execute }) {
@@ -452,16 +493,31 @@ async function runSeed({ file, only, execute }) {
     await db.destroy();
     process.exit(2);
   }
-  const flags = await seedFlags(db, briefs);
+  // The live Astro blog corpus is REQUIRED (fail closed): without it the
+  // ownership check cannot run and the owner would approve rows the runner
+  // rejects.
+  let index;
+  try {
+    index = await targetingGate.loadLiveIndex();
+  } catch (err) {
+    console.error(`refusing to seed — live blog corpus unavailable for the topic-targeting gate (${err.message})`);
+    await db.destroy();
+    process.exit(2);
+  }
+  const flags = await seedFlags(db, briefs, { index });
   // A dismissed (skipped) or expired row is the seeder's own revival case
   // (category-seed-seeder ON CONFLICT revives it at the initial status with
-  // a reset claim budget) — only a live queue status blocks a reseed
-  // (Codex r3 P2).
-  const blocksReseed = (status) => status && !TERMINAL_QUEUE_STATUSES.has(status);
-  const skip = new Set(flags.filter((f) => blocksReseed(f.already_queued) || f.title_in_queue || f.title_is_live_post).map((f) => f.id));
+  // a reset claim budget) — only a live queue status, or a prior run that
+  // is still reviewable, blocks a reseed (Codex r3 P2 + r4 P1).
+  const blocksReseed = (f) => f.already_queued && (!TERMINAL_QUEUE_STATUSES.has(f.already_queued) || f.prior_run_reviewable);
+  const skip = new Set(flags.filter((f) => blocksReseed(f) || f.title_in_queue || f.live_corpus_block).map((f) => f.id));
   console.log(`\n${execute ? 'EXECUTE' : 'DRY RUN'} — ${briefs.length} selected, ${briefs.length - skip.size} to seed at pending_review\n`);
   for (const f of flags) {
-    const why = blocksReseed(f.already_queued) ? `already queued (${f.already_queued})` : f.title_is_live_post ? 'live post with this title' : f.title_in_queue ? 'same title already in queue' : f.already_queued ? `revive (${f.already_queued})` : 'seed';
+    const why = f.already_queued && f.prior_run_reviewable ? `${f.already_queued} with a still-reviewable run — requeue it from the review queue, not a reseed`
+      : blocksReseed(f) ? `already queued (${f.already_queued})`
+        : f.live_corpus_block ? `topic-targeting gate: ${f.live_corpus_block}`
+          : f.title_in_queue ? 'same title already in queue'
+            : f.already_queued ? `revive (${f.already_queued})` : 'seed';
     console.log(`  ${skip.has(f.id) ? 'SKIP' : 'SEED'}  ${f.id}  ${f.title}  — ${why}`);
   }
   const toSeed = briefs.filter((b) => !skip.has(b.id));
@@ -541,7 +597,7 @@ if (require.main === module) {
 
 module.exports = {
   _internals: {
-    textBlocks, inWindow, readClaudeTranscript, readCodexTranscript, redactedChunks, extractIdeas,
+    textBlocks, stripHarnessBlocks, inWindow, readClaudeTranscript, liveCorpusVerdict, readCodexTranscript, redactedChunks, extractIdeas,
     targetingViolation, buildManifest, briefFor, ideaFromBrief, normalizeTitle, sourceAllowed, shapeIdea, containsSecret, SYSTEM_PROMPT,
   },
 };

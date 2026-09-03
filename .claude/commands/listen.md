@@ -55,8 +55,12 @@ railway run --service Postgres node ops/agents/listen-transcripts.js seed --file
 railway run --service Postgres node ops/agents/listen-transcripts.js seed --file=/tmp/listen-<date>.json --only=<id,id> --execute
 ```
 
-The dry run flags rows already in `opportunity_queue`, titles already queued,
-and titles that are already live posts. Execute seeds the rest at
+The dry run runs every selected brief through the runner's own
+topic-targeting gate against the LIVE Astro blog corpus (geo framing, the
+city as a served locality, entity / slug ownership — the corpus is required,
+so the seed refuses to run without GitHub access), and flags rows already in
+`opportunity_queue`, titles already queued, and dismissed rows whose old
+draft is still reviewable (requeue those from the review queue instead). Execute seeds the rest at
 `pending_review`; the owner releases each one from the admin content review
 queue (requeue → pending), after which the normal chain runs: brief → writer →
 gates → hero → Astro PR → Codex → poller.
