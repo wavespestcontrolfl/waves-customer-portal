@@ -403,12 +403,16 @@ function splitStreetLineUnit(value) {
 // Longer spellings before their prefixes (floor|fl, building|bldg) — the
 // comma-free form has no anchor after the designator, and "Floor 2 123
 // Main St" would otherwise match "fl" + "oor" (codex r2 P2 on #3804).
-const UNIT_FIRST_SEGMENT_RE = /^(?:(?:(?:apartment|apt|unit|ste|suite|building|bldg|floor|fl|space|spc|lot)\.?\s*#?\s*[A-Za-z0-9-]+\s*)+|#\s*[A-Za-z0-9-]+)$/i;
+// A hash pair AFTER a named pair ("Bldg 9 #204") is the implicit dwelling
+// designator normalizeUnitLine reads — accepted here too, or the unit-first
+// compound line never peels and the hold/fence reads the building as a
+// different address (codex r15 P2 on #3804).
+const UNIT_FIRST_SEGMENT_RE = /^(?:(?:(?:apartment|apt|unit|ste|suite|building|bldg|floor|fl|space|spc|lot)\.?\s*#?\s*[A-Za-z0-9-]+\s*)+(?:#\s*[A-Za-z0-9-]+\s*)?|#\s*[A-Za-z0-9-]+)$/i;
 // The comma-free forms the canonical matcher already supports ("Apt 204 at
 // 123 Main St", "Unit 204 123 Main St", "#204 900 Bayview Ter" — the street
 // begins at the first digit-leading token) canonicalize here too (codex r1
 // P2 on #3804), so the override never appends a second unit behind them.
-const UNIT_FIRST_INLINE_RE = /^\s*((?:(?:apartment|apt|unit|ste|suite|building|bldg|floor|fl|space|spc|lot)\.?\s*#?\s*[A-Za-z0-9-]+\s*)+|#\s*[A-Za-z0-9-]+)\s+(?:at\s+)?(\d.*)$/i;
+const UNIT_FIRST_INLINE_RE = /^\s*((?:(?:apartment|apt|unit|ste|suite|building|bldg|floor|fl|space|spc|lot)\.?\s*#?\s*[A-Za-z0-9-]+\s*)+(?:#\s*[A-Za-z0-9-]+\s*)?|#\s*[A-Za-z0-9-]+)\s+(?:at\s+)?(\d.*)$/i;
 function splitUnitFirstLine(value) {
   const segments = cleanString(value).split(',').map((s) => s.trim()).filter(Boolean);
   if (!segments.length) return null;

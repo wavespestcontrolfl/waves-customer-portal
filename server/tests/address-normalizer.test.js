@@ -1,7 +1,7 @@
 const {
   normalizeLeadAddress, parseRawAddress, formatAddress,
   normalizeUnitLine, unitLineValueKey, splitStreetLineUnit,
-  dwellingUnitOnLine,
+  dwellingUnitOnLine, splitUnitFirstLine,
 } = require('../utils/address-normalizer');
 
 describe('address normalizer', () => {
@@ -378,6 +378,10 @@ describe('normalizeUnitLine', () => {
     // The record shape the reprocess reads: a full line carrying the structural pair and the hash.
     expect(dwellingUnitOnLine('1048 Example Lakes Cir, Bldg 9 #204, Sarasota, FL 34232')).toBe(normalizeUnitLine('Unit 204'));
     expect(dwellingUnitOnLine('1048 Example Lakes Cir Bldg 9 #204, Sarasota, FL 34232')).toBe(normalizeUnitLine('Unit 204'));
+    // …and the UNIT-FIRST compound shape peels too (codex r15 P2 on #3804): the hold/fence reads the same building.
+    expect(splitUnitFirstLine('Bldg 9 #204, 1048 Example Lakes Cir, Sarasota, FL 34232')).toEqual({ unit: normalizeUnitLine('Bldg 9 Unit 204'), rest: '1048 Example Lakes Cir, Sarasota, FL 34232' });
+    expect(splitUnitFirstLine('Bldg 9 #204 1048 Example Lakes Cir, Sarasota, FL 34232')).toEqual({ unit: normalizeUnitLine('Bldg 9 Unit 204'), rest: '1048 Example Lakes Cir, Sarasota, FL 34232' });
+    expect(dwellingUnitOnLine('Bldg 9 #204, 1048 Example Lakes Cir, Sarasota, FL 34232')).toBe(normalizeUnitLine('Unit 204'));
     // A hash right after a bare designator or a leading hash is unchanged.
     expect(normalizeUnitLine('Apt #4')).toBe('Apt 4');
     expect(normalizeUnitLine('#204')).toBe(normalizeUnitLine('Unit 204'));

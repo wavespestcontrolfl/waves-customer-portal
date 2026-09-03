@@ -548,8 +548,9 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     expect(triage).toContain('clearCallUnitAnswer(trx, item.call_log_id)');
     // …AND the call-level Deny verdict, keyed on the rows the bulk update
     // actually resolved (codex r7 P1 on #3804).
-    expect(triage).toContain("verdict === 'deny' && resolvedRows.some((r) => r?.reason_code === 'missing_unit_number')");
-    expect(triage.split('clearCallUnitAnswer(trx, item.call_log_id)').length - 1).toBe(2);
+    // …and only when the deny rejects the address evidence — a field-scoped deny (service, scheduling …)
+    // leaves the customer's accepted unit standing (codex r15 P1 on #3804).
+    expect(triage).toContain("if (verdict === 'deny' && denyRejectsUnitEvidence(wrongFields) && resolvedRows.some((r) => r?.reason_code === 'missing_unit_number')) {");
   });
 
   test('the extension writes carry the hold predicate: the public auto-grant claim, the guarded expiry update, and the sibling revive (codex r7 P0 on #3804)', () => {
