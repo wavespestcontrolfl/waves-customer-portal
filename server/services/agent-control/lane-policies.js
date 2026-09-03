@@ -96,10 +96,11 @@ const LANE_RUNTIME = {
 
   // ── Calls ──
   call_extraction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0', ...CALL_PIPELINE },
-  call_extraction_v1: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', ...CALL_PIPELINE },
+  // direct_sdk (Codex r15): V1 extraction and transcript relabeling are raw Gemini / OpenAI fetches in call-recording-processor.js.
+  call_extraction_v1: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'structured_extraction', ...CALL_PIPELINE },
   call_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', ...LONG_BATCH },
   transcription: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
-  transcript_label: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
+  transcript_label: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   contact_pass: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   call_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   call_self_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
@@ -110,9 +111,10 @@ const LANE_RUNTIME = {
   // expense_categorize, tax_advisor call anthropic.messages.create directly — no adapter row until migrated (S2a).
   // offline (Codex r14): contact_pass, lead_synopsis, contact_dictation, address_recovery and tech_dictation each
   // run one provider and degrade to null / a review path / typed notes — no cross-provider answer. lead_synopsis is also direct_sdk.
+  // direct_sdk (Codex r15): contact_dictation and address_recovery are raw Gemini fetches (contact-dictation.js, address-validation/recovery.js).
   csr_coach: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null },
-  contact_dictation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'transcription_contact' },
-  address_recovery: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction' },
+  contact_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact' },
+  address_recovery: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction' },
   tech_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },
   parse_when: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
 
@@ -123,11 +125,15 @@ const LANE_RUNTIME = {
 
   // ── Photos & property ──
   // direct_sdk: the photo lanes call Anthropic directly and Gemini over raw HTTP, not llm/call.js (Codex r13);
-  // satellite, both property-lookup lanes and turf OCR do the same for every provider arm (Codex r14).
-  pest_id: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
-  lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
-  tree_shrub: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
-  treatment_zone: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'property_measurement' },
+  // satellite, both property-lookup lanes and turf OCR do the same for every provider arm (Codex r14);
+  // treatment_zone (raw Gemini fetch + anthropic.messages.create), lawn_quality_gate (new Anthropic()), the three
+  // lawn-diagnostic stages (raw Gemini / OpenAI fetches + the SDK) are direct_sdk too (Codex r15).
+  // offline (Codex r15): the pest / lawn / tree-shrub fetches and treatment_zone's Gemini attempts carry no AbortSignal,
+  // so a stalled provider hangs the request past any interactive hard timeout — same condition as chart_builder_image.
+  pest_id: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
+  lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
+  tree_shrub: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
+  treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   satellite: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
   property_trio: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
@@ -135,10 +141,10 @@ const LANE_RUNTIME = {
   turf_ocr: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
   photo_scoring: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   vision_delta: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
-  lawn_quality_gate: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
-  lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
-  lawn_challenge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check' },
-  lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
+  lawn_quality_gate: { side_effect_class: 'read_only', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
+  lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
+  lawn_challenge: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'compliance_check' },
+  lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'service_report' },
   wdo_project_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: null },
   // internal_write: a project-scoped lookup persists the answer to projects.wdo_history (admin-projects.js) — Codex r9.
   wdo_history: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'retrieval_qa' },
@@ -158,7 +164,9 @@ const LANE_RUNTIME = {
   treatment_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   rodent_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   project_report: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
-  completion_recap: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
+  // M3: admin-dispatch completion auto-generates the recap when the tech supplies none, persists it in structured_notes and
+  // sends it in the customer completion SMS with no approval step (Codex r15).
+  completion_recap: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
   lawn_visit_narratives: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   // event: the half-hourly sweep returns cached briefs unchanged, so a stable
   // route (or a day with no eligible visits) makes no model call.
@@ -170,7 +178,8 @@ const LANE_RUNTIME = {
   email_classify: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   email_reply: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
   bounce_rescue: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
-  invoice_pdf: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
+  // direct_sdk (Codex r15): email/invoice-processor.js parses through its own new Anthropic() client.
+  invoice_pdf: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
 
   // ── Content & SEO ──
   blog_draft: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', ...LONG_BATCH },
