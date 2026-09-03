@@ -603,8 +603,17 @@ async function markLinkedLeadEstimateAccepted({
   //    convert that exact lead by id — precise, no sweeping.
   const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id || null;
   if (dataLeadId) {
-    const lead = await followDuplicateLink(database, await database('leads').where({ id: dataLeadId }).first());
-    if (lead && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at) await convert(lead);
+    const named = await database('leads').where({ id: dataLeadId }).first();
+    const lead = await followDuplicateLink(database, named);
+    // An INDIRECTLY resolved original (via a duplicate marker) is validated
+    // like the send/view path validates the named lead: its contact must
+    // match the accepted estimate, and it must not already belong to a
+    // different customer — otherwise markConverted would overwrite an
+    // unrelated lead's customer linkage (codex #3834 r2 P1).
+    const indirect = lead && named && lead.id !== named.id;
+    const eligible = lead && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at
+      && (!indirect || (leadMatchesEstimateContact(lead, estimate) && (!lead.customer_id || !customerId || lead.customer_id === customerId)));
+    if (eligible) await convert(lead);
     return;
   }
 

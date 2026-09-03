@@ -1703,11 +1703,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // rule as the attach in public-property-lookup.js. CASE keeps the
         // ownership-predicated UPDATE atomic (no read-then-write).
         // The replace branch carries forward additional_properties and the
-        // declared timeline captured at the property-lookup stage
+        // declared timeline captured at the property-lookup stage, and the
+        // duplicate_of_lead_id ancestry a repeat run stamped (codex #3834
+        // r2 P1 — lifecycle events follow it to the open original)
         // (jsonb_strip_nulls drops a key the prior row never had); a value in
         // THIS stage's snapshot wins the merge.
         extracted_data: db.raw(
-          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
+          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
           [extractedData, extractedData]
         ),
         updated_at: new Date(),
@@ -1912,7 +1914,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const attachedCallLead = ['voicemail', 'inbound_call'].includes(lead?.lead_type);
       if (attachedCallLead) {
         await backfillCallLeadAttribution({ leadId: lead.id, customerId, serviceInterest });
-      } else if (channelAttr) {
+      } else if (channelAttr && !duplicateOfLeadId) {
+        // A repeat run is not a second marketing lead: the funnel and
+        // service-line queries count attribution rows without excluding
+        // duplicate lead statuses (codex #3834 r2 P1), and the original's
+        // row already carries this prospect.
         await db('ad_service_attribution').insert({
           customer_id: customerId,
           lead_id: lead.id,
@@ -2409,11 +2415,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         quoteRequired
           ? (quoteRequiredReason === 'quote_on_request' ? `Estimate requested: ${contactFirstName} ${contactLastName}` : `Manual quote needed: ${contactFirstName} ${contactLastName}`)
           : `Calculator quote: ${contactFirstName} ${contactLastName}`,
-        quoteRequired
+        `${quoteRequired
           ? (quoteRequiredReason === 'quote_on_request'
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
             : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
-          : `${isOneTimeOnly
+          : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
             : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`}${duplicateOfLeadId ? ' · repeat of an open lead (filed as duplicate)' : ''}`,
         { icon: '\u{1F4B0}', link: '/admin/leads', metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : {}) } }
