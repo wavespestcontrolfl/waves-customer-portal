@@ -98,11 +98,18 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
   // episode's dated row (cancel at term end, win-back before the date,
   // cancel the same still-current term again) or a repeat end-of-coverage
   // commit that opened a new request must not leave two identical
-  // instructions. A RETRY of an event that already holds a row (read or
-  // not) retires nothing: notifyAdmin dedupes it against that row and
-  // inserts none, so retiring a later event's unread row here would leave
-  // staff with NO open instruction. Read rows are never touched: an
-  // instruction staff already acted on is history, not a duplicate.
+  // instructions. Supersession follows REQUEST CHRONOLOGY, never call
+  // order: the raise for the NEWEST request wins. An open row raised by a
+  // newer request means this raise is stale (a lost-task repair of an
+  // older acceptance, or a retry after a later correction) — it retires
+  // nothing and inserts nothing, and the newer instruction stays the one
+  // open task. Otherwise every other open row is retired, and this
+  // event's own row — read because a later instruction retired it, or
+  // acted on before a correction was reverted — is reopened so the winning
+  // instruction is the open one (notifyAdmin dedupes against it without
+  // reopening). Read rows are otherwise never touched: an instruction
+  // staff already acted on is history, not a duplicate. Rows without a
+  // request (portal no-request raises, legacy rows) count as oldest.
   // Retire + raise are ONE transaction under an account-scoped advisory
   // lock (the same `admin:<key>` namespace notifyAdmin's per-key dedupe
   // lock uses): two concurrent raises for different requests would
@@ -111,30 +118,54 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
   // replacement could leave the old instruction unread beside the new one
   // (or neither standing). notifyAdmin runs on this trx, so both land or
   // neither does, and the second raiser's probe sees the first's row.
+  const requestKeyPrefix = `termite_station_retrieval:${customerId}:`;
+  const parseMeta = (row) => {
+    let meta = row.metadata;
+    if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+    return meta || {};
+  };
+  // The request a row was raised for: stamped in metadata since the term
+  // key shipped; earlier rows carry it only inside their request key.
+  const rowRequestId = (meta) => {
+    if (meta.requestId) return String(meta.requestId);
+    const key = String(meta.dedupeKey || '');
+    if (!key.startsWith(requestKeyPrefix)) return null;
+    const suffix = key.slice(requestKeyPrefix.length);
+    return suffix && suffix !== 'no-request' ? suffix : null;
+  };
   let superseded = null;
+  let yieldedTo = null;
   await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:termite_station_retrieval:${customerId}`]);
     try {
-      const own = await trx('notifications')
-        .where({ recipient_type: 'admin' })
-        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-        .first('id');
-      const stale = own ? [] : await trx('notifications')
+      const open = await trx('notifications')
         .where({ recipient_type: 'admin' })
         .whereNull('read_at')
         .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
         .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
-        .whereRaw("COALESCE(metadata->>'dedupeKey', '') <> ?", [dedupeKey])
         .select('id', 'metadata');
-      if (stale.length) {
-        await trx('notifications').whereIn('id', stale.map((row) => row.id)).update({ read_at: new Date() });
-        superseded = {
-          dated: stale.some((row) => {
-            let meta = row.metadata;
-            if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
-            return !!(meta && meta.retrieveAfter);
-          }),
-        };
+      const others = (open || []).map((row) => ({ row, meta: parseMeta(row) })).filter(({ meta }) => String(meta.dedupeKey || '') !== dedupeKey);
+      const requestIds = [...new Set([requestId, ...others.map(({ meta }) => rowRequestId(meta))].filter(Boolean).map(String))];
+      const openedAt = new Map();
+      if (requestIds.length) {
+        const rows = await trx('service_requests').whereIn('id', requestIds).select('id', 'created_at');
+        for (const r of rows || []) openedAt.set(String(r.id), new Date(r.created_at).getTime() || 0);
+      }
+      const ownOpenedAt = requestId ? (openedAt.get(String(requestId)) || 0) : 0;
+      const newer = others.find(({ meta }) => {
+        const rid = rowRequestId(meta);
+        return !!rid && (openedAt.get(rid) || 0) > ownOpenedAt;
+      });
+      if (newer) { yieldedTo = rowRequestId(newer.meta); return; }
+      if (others.length) {
+        await trx('notifications').whereIn('id', others.map(({ row }) => row.id)).update({ read_at: new Date() });
+        superseded = { dated: others.some(({ meta }) => !!meta.retrieveAfter) };
+        const ownRead = await trx('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereNotNull('read_at')
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+          .first('id');
+        if (ownRead) await trx('notifications').where({ id: ownRead.id }).update({ read_at: null });
       }
     } catch (supersedeErr) {
       // NOT swallowed: raising the new task while a stale one may still
@@ -178,11 +209,15 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
         bell: true,
         link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
         dedupeKey,
-        metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental, ...(retrieveAfter ? { retrieveAfter } : {}) },
+        metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental, ...(requestId ? { requestId } : {}), ...(retrieveAfter ? { retrieveAfter } : {}) },
         trx,
       }
     );
   });
+  if (yieldedTo) {
+    logger.info(`[cancellation-processor] retrieval task for request ${requestId || 'no-request'} yields to the open instruction of newer request ${yieldedTo} (${customerId})`);
+    return { raised: true, stationCount: count, deduped: true, supersededByNewer: yieldedTo };
+  }
   const result = raised;
   // notifyAdmin resolves null (never throws) when the deduped insert fails —
   // surface that as an error so the cancel is not reported fully processed
