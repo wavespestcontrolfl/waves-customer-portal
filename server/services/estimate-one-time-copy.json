@@ -1,0 +1,240 @@
+{
+  "german_roach": {
+    "outcome": "Your kitchen back. {Visits} targeted visits that clear the roaches and the eggs they left behind — 100% guaranteed.",
+    "includes": [
+      "Visit 1 — gel bait where German roaches actually live: kitchen, bath, hinges, appliances, and plumbing voids",
+      "Crack-and-crevice treatment plus an insect growth regulator (IGR), so the population collapses — not just the visible bugs",
+      "Monitors placed and counted — you see the activity drop in your service report"
+    ],
+    "includesByVisits": {
+      "2": [
+        "Visit 2 about 10–14 days later — confirm zero live activity and treat anything that surfaced"
+      ],
+      "default": [
+        "Follow-up visits every 10–14 days until the monitors read zero — {visits} in total"
+      ]
+    },
+    "assurance": "If they come back, so do we — 100% guaranteed with the Waves Guarantee",
+    "terms": "Pay on service day. No recurring schedule, no contract.",
+    "aiTitle": "Waves AI sized this cleanout to your infestation",
+    "aiBody": "We priced this program from how established the activity is — how many rooms and how heavy — so the visit count fits the job, not a generic average.",
+    "askChips": [
+      "How do you get rid of German roaches?",
+      "How long until the roaches are gone?",
+      "What precautions should I follow for pets and children?",
+      "What should I do before the first visit?",
+      "When am I charged?"
+    ]
+  },
+  "one_time_pest": {
+    "outcome": "One thorough visit that knocks the current problem down — no plan, no commitment.",
+    "includes": [
+      "Full exterior perimeter, entry points, eaves, and harborage zones treated",
+      "Targeted interior treatment where you're seeing activity — baits, gels, and crack-and-crevice, not baseboard spraying",
+      "Premium non-repellent + repellent products matched to the pest",
+      "Written service report with what we found and what we treated"
+    ],
+    "assurance": "30-day callback — if they're back within a month, so are we, free",
+    "terms": "Pay on service day. No recurring schedule, no tier discount.",
+    "aiTitle": "Waves AI priced this visit from your property",
+    "aiBody": "We reviewed your home, lot, and pest-risk factors before pricing this one-time visit — the same inputs a recurring plan would use.",
+    "askChips": [
+      "What does the visit include?",
+      "Can you treat inside?",
+      "What precautions should I follow for pets and children?",
+      "When am I charged?",
+      "What if I still see bugs?"
+    ]
+  },
+  "flea": {
+    "outcome": "Fleas out of the house and the yard, with the egg cycle broken so they don't come back — 100% guaranteed.",
+    "includes": [
+      "Indoor insect growth regulator (IGR) treatment to break the breeding cycle",
+      "Yard treatment focused on shaded harborage where flea larvae develop",
+      "Products chosen with pets in mind — treated areas are safe once dry, and your technician confirms the re-entry timing on the day",
+      "Coordination guidance with your pet's vet treatment — the pet is half the job"
+    ],
+    "includesByVisits": {
+      "2": [
+        "Follow-up visit at the 14-day egg-hatch window"
+      ],
+      "default": [
+        "Single knockdown visit — a follow-up at the 14-day egg-hatch window can be added if activity continues"
+      ]
+    },
+    "assurance": "If they come back, so do we — 100% guaranteed with the Waves Guarantee",
+    "terms": "Pay on service day. No recurring schedule, no contract.",
+    "aiTitle": "Waves AI sized this flea treatment to your home and yard",
+    "aiBody": "We priced the interior and the shaded yard areas where flea larvae develop, so the treatment covers the whole cycle — not just the rooms you're seeing bites in.",
+    "askChips": [
+      "Does my pet need to be treated too?",
+      "How many visits will it take?",
+      "Can I stay in the house after flea treatment?",
+      "Why do fleas seem to come back after treatment?",
+      "What precautions should I follow for pets and children?"
+    ]
+  },
+  "wasp": {
+    "outcome": "The nest gone and the yard yours again — usually the same day.",
+    "includes": [
+      "Nest treatment and physical removal",
+      "Eave, soffit, and roofline inspection for hidden nests",
+      "Ground-to-roof reach with extension equipment for high nests, plus a specific protocol for yellowjacket ground nests",
+      "Pesticide cleanup after treatment — treated areas are safe once dry, and your technician confirms when the yard is ready",
+      "Optional follow-up to verify the nest is dead"
+    ],
+    "assurance": "30-day callback — if activity returns within a month, so do we, free",
+    "terms": "Pay on service day. No recurring schedule.",
+    "aiTitle": "Waves AI priced this by species, nest location, and how aggressive the colony is",
+    "aiBody": "Wasp and hornet work is quoted by the nest — where it is, how high, and what's building it — not by a flat rate.",
+    "askChips": [
+      "How do you remove the nest?",
+      "What precautions should I follow for pets and children?",
+      "What if they come back?",
+      "When am I charged?"
+    ]
+  },
+  "bed_bug": {
+    "outcome": "Sleep in your own bed again. A full treatment cycle sized to the infestation, with a follow-up at the egg-hatch window.",
+    "includes": [
+      "On-site inspection and species confirmation — it's not always bed bugs",
+      "Mattress and box-spring encasements where appropriate",
+      "Interceptor traps under bed legs for post-treatment monitoring",
+      "Follow-up visit at the 10–14 day egg-hatch window"
+    ],
+    "includesByMethod": {
+      "heat": [
+        "Whole-room heat to 120°F+ eliminates every life stage in one session — the home is unoccupied while it runs; your technician confirms the timing"
+      ],
+      "chemical": [
+        "Liquid and dust treatment in every harborage zone — treated areas are safe once dry, and your technician confirms the re-entry timing"
+      ],
+      "hybrid": [
+        "Heat where the infestation is concentrated, liquid and dust in the surrounding harborage zones"
+      ],
+      "default": [
+        "Heat or chemical treatment cycle, sized to the infestation scope"
+      ]
+    },
+    "assurance": "Written 30-day guarantee on the treated areas",
+    "terms": "Pay on service day. No contract.",
+    "aiTitle": "Waves AI sized this treatment to the rooms with activity",
+    "aiBody": "We priced by room count and treatment method so the cycle covers everywhere bed bugs hide — not just the bed.",
+    "askChips": [
+      "Is it bed bugs or something else?",
+      "Do I need to throw out my mattress?",
+      "Can I stay home during treatment?",
+      "Why do bed bugs come back?"
+    ]
+  },
+  "rodent_exclusion": {
+    "outcome": "Sealed out, not just trapped — every entry point closed with the right material and photographed.",
+    "includes": [
+      "Full home inspection — roofline, soffits, vents, utility chases, garage",
+      "Sealing with materials matched to the entry point: steel mesh, mortar, sheet metal — not one-size-fits-all foam",
+      "Vent screening on dryer, attic, gable, and soffit vents",
+      "Photo documentation of every closure in your service report"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No contract.",
+    "aiTitle": "Waves AI priced this exclusion from your home's roofline and access points",
+    "aiBody": "We measured your roofline, vents, and utility penetrations from satellite imagery and property records — the same number a tech would quote in person.",
+    "askChips": [
+      "Trapping vs exclusion?",
+      "What materials do you use to seal?",
+      "Do I need sanitation?",
+      "Is the inspection fee credited?"
+    ]
+  },
+  "rodent_trapping": {
+    "outcome": "The fastest way to drop an active interior population — we set, monitor, and clear traps until the activity stops.",
+    "includes": [
+      "Interior snap and electronic traps in active areas — real interior trap lines, not just exterior bait",
+      "Trap-check visits during the active window",
+      "Documentation of what we catch and where",
+      "Handoff to exclusion to keep the next ones out"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No contract.",
+    "aiTitle": "Waves AI priced this trapping plan for your home's active areas",
+    "aiBody": "Trapping is sized to where the activity is — attic, garage, kitchen — and how long the active window usually runs, not a flat per-visit rate.",
+    "askChips": [
+      "How often are traps checked?",
+      "Trapping vs exclusion?",
+      "How long until they're gone?",
+      "What happens to what you catch?"
+    ]
+  },
+  "trap_only": {
+    "outcome": "Interior trap lines set, checked, and cleared on a schedule — monitoring you don't have to think about.",
+    "includes": [
+      "Setup and inspection visit — trap lines placed in the active areas",
+      "Scheduled trap-check visits on the plan's cadence",
+      "Documentation of what we catch and where",
+      "Handoff to exclusion to keep the next ones out"
+    ],
+    "assurance": null,
+    "terms": "Setup is billed once; the monitoring plan bills on its scheduled cadence."
+  },
+  "termite_foam": {
+    "outcome": "A targeted treatment at the exact spot termites are active — not a whole-house job you don't need.",
+    "includes": [
+      "Drill-and-foam application into the active gallery and void — the foam expands to reach where a liquid can't",
+      "Inspection of the treatment area for live activity and conducive conditions",
+      "Treatment area photographed and documented in your service report",
+      "Treatment recommendations if activity is found elsewhere — never a surprise upsell"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No contract."
+  },
+  "termite_trenching": {
+    "outcome": "A continuous liquid barrier around your foundation — termites pick it up and carry it back to the colony.",
+    "includes": [
+      "Excavation of a trench against the foundation perimeter",
+      "Application of Termidor or equivalent termiticide",
+      "Treatment of slab penetrations and expansion joints",
+      "Annual inspection during the warranty period",
+      "Renewal-cycle pricing built into the estimate"
+    ],
+    "assurance": null,
+    "terms": "Our team reviews the measured perimeter and confirms scheduling with you."
+  },
+  "wdo_inspection": {
+    "outcome": "The termite report Florida real-estate closings run on, delivered on your closing timeline.",
+    "includes": [
+      "Visual inspection of accessible interior, exterior, attic, and crawl areas",
+      "Evidence of active or previous infestation, damage, and conducive conditions",
+      "Completed Florida WDO inspection report (FDACS form) for the transaction file",
+      "Treatment recommendations if activity is found — never a surprise upsell"
+    ],
+    "assurance": null,
+    "terms": "Report turnaround built around your closing timeline."
+  },
+  "one_time_mosquito": {
+    "outcome": "One barrier treatment where mosquitoes actually rest — for a party, a bad stretch, or to try us out.",
+    "includes": [
+      "Barrier treatment on shaded foliage and harborage where mosquitoes rest — not a fog-and-go",
+      "Standing-water and breeding-pressure check while we're there",
+      "Weather-aware timing so the treatment works instead of washing away"
+    ],
+    "assurance": "30-day callback — if they're back within a month, so are we, free",
+    "terms": "Pay on service day. No recurring schedule, no tier discount."
+  },
+  "one_time_lawn": {
+    "outcome": "One targeted treatment for the problem in front of you — chinch bugs, weeds, or fungus — matched to your turf.",
+    "includes": [
+      "Treatment matched to your grass type and the issue on the lawn",
+      "Weed, fungus, and chinch-bug pressure checked while we're there",
+      "Treatment documented in your service report"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No recurring schedule, no tier discount.",
+    "aiTitle": "Waves AI reviewed your lawn before pricing this treatment",
+    "aiBody": "We measured your treatable turf from satellite imagery and property records to size this one-time application.",
+    "askChips": [
+      "How does your lawn assessment tech work?",
+      "When am I charged?",
+      "What if the problem comes back?"
+    ]
+  }
+}

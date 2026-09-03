@@ -30,7 +30,7 @@ import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
-import PriceCard from '../components/estimate/PriceCard';
+import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
@@ -1988,6 +1988,25 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                   <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
                     {item.detail}
                   </div>
+                ) : null}
+                {/* Service copy pack (server: estimate-one-time-copy.js) — the
+                    same outcome + bullet + terms shape the recurring
+                    PriceCard rows carry, so a one-time service reads like a
+                    plan card (owner 2026-09-03). */}
+                {item.copy ? (
+                  <>
+                    <div style={{ fontSize: 15, color: '#3F4A65', marginTop: 6, lineHeight: 1.5 }}>
+                      {item.copy.outcome}
+                    </div>
+                    {Array.isArray(item.copy.includes) && item.copy.includes.length ? (
+                      <RowInclusions items={item.copy.includes} />
+                    ) : null}
+                    {item.copy.terms ? (
+                      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 10, lineHeight: 1.5 }}>
+                        {item.copy.terms}
+                      </div>
+                    ) : null}
+                  </>
                 ) : null}
                 {quoteNote ? (
                   <div style={{ fontSize: 12, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
@@ -6805,12 +6824,23 @@ function EstimateViewPageInner() {
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
   // intelligence payload itself — metrics/signals/satellite stay untouched.
+  // One-time-only service copy (server contract pricing.oneTimeServiceCopy —
+  // roach cleanout, flea, wasp, bed bug, …) outranks the glass hero pack for
+  // the Waves AI card and the Ask Waves chips, so the card describes the
+  // service actually quoted instead of the generic pest plan copy.
+  const oneTimeServiceCopy = estimate.isOneTimeOnly === true && pricing.oneTimeServiceCopy?.aiTitle
+    ? pricing.oneTimeServiceCopy
+    : null;
   const intelligenceDisplay = isRegulatedCertificateSurface
     ? null
+    : oneTimeServiceCopy && estimate.intelligence
+    ? { ...estimate.intelligence, title: oneTimeServiceCopy.aiTitle, body: oneTimeServiceCopy.aiBody }
     : glassPack && estimate.intelligence
     ? { ...estimate.intelligence, title: fillGlassTokens(glassPack.aiTitle), body: glassPack.aiBody }
     : estimate.intelligence;
-  const askChips = glassPack?.askChips || pricing.askChips;
+  const askChips = oneTimeServiceCopy?.askChips?.length
+    ? oneTimeServiceCopy.askChips
+    : (glassPack?.askChips || pricing.askChips);
   const headerContactProps = {
     customerFirstName: estimate.customerFirstName,
     customerName: estimate.customerName,

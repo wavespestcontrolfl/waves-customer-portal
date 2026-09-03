@@ -36,6 +36,7 @@ function acceptBookingGateToken(estimate) {
   return token ? `&accept_token=${encodeURIComponent(token)}` : '';
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
+const { resolveOneTimeServiceCopy, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -4307,6 +4308,14 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   ]);
 
   const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
+  // One-time-ONLY estimate whose rows all resolve to one service copy pack
+  // (roach cleanout, flea, wasp, bed bug, …): the card describes THAT
+  // service instead of the generic "reviewed your property" line. Mixed
+  // one-time quotes and anything with a recurring service keep the
+  // category branches below.
+  const oneTimeOnlyCopy = recurringServices.length === 0
+    ? oneTimeOnlyIntelligenceCopy(intelligenceOneTimeItems)
+    : null;
   const intelligenceTitle = isLawnOnly
     ? 'Waves AI reviewed your lawn before pricing this estimate'
     : (isTreeShrubOnly
@@ -4341,8 +4350,8 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
               : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.')))));
   return {
     eyebrow: 'Waves AI',
-    title: intelligenceTitle,
-    body: intelligenceBody,
+    title: oneTimeOnlyCopy?.aiTitle || intelligenceTitle,
+    body: oneTimeOnlyCopy?.aiBody || intelligenceBody,
     satelliteUrl,
     metrics,
     signals: [],
@@ -4675,6 +4684,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `${germanRoachVisitPhrase(germanRoachCleanoutItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`
     : '';
   const germanRoachGuaranteeCopy = '100% guaranteed with the Waves Guarantee.';
+  // Service copy pack (estimate-one-time-copy.js) — the first row that
+  // resolves supplies the hero note; rows render their own bullets below.
+  const oneTimeHeroCopy = oneTimeItems.map(resolveOneTimeServiceCopy).find(Boolean) || null;
   const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
   const storedBaseMonthly = Number(recurringMonthlyParts.baseMonthly || est.monthlyTotal || 0);
 
@@ -5548,7 +5560,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           <span class="per">one-time</span>
         </div>
         <div class="onetime-note">
-          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (hasOnlyBoraCareServices ? boraCareCopy.note : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.')))}
+          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (hasOnlyBoraCareServices ? boraCareCopy.note : (oneTimeHeroCopy ? oneTimeHeroCopy.outcome : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.'))))}
         </div>
       </div>
     `;
@@ -5634,7 +5646,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
     const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
-    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceCell}</td></tr>`;
+    // What the visit involves — same outcome + bullet + terms shape the
+    // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
+    const rowCopy = resolveOneTimeServiceCopy(it);
+    const rowCopyHtml = rowCopy
+      ? `<div class="onetime-outcome">${escapeHtml(rowCopy.outcome)}</div><ul class="onetime-includes">${rowCopy.includes.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>${rowCopy.terms ? `<div class="onetime-terms">${escapeHtml(rowCopy.terms)}</div>` : ''}`
+      : '';
+    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}${rowCopyHtml}</td><td style="text-align:right">${priceCell}</td></tr>`;
   }).join('');
   const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
     ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">−${fmtMoney(manualOneTimeDiscount)}</td></tr>`
@@ -5878,12 +5896,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // nested-result estimates still surface service-specific chips like
   // "What does Bora-Care treat?". Duplicates are harmless — every chip is added on
   // a boolean, never per row.
-  const askPrompts = buildEstimateAskPrompts(
-    recurring,
-    [...oneTimeItems, ...boraCareOneTimeRows],
-    pestRecurring,
-    hasPestOneTime,
-  );
+  // One-time-only service copy pack chips lead (roach, flea, wasp, bed
+  // bug, …) — same source the React contract's askChips reads.
+  const oneTimeOnlyAskCopy = isOneTimeOnly ? oneTimeOnlyIntelligenceCopy(oneTimeItems) : null;
+  const askPrompts = oneTimeOnlyAskCopy?.askChips?.length
+    ? oneTimeOnlyAskCopy.askChips.slice(0, 6)
+    : buildEstimateAskPrompts(
+      recurring,
+      [...oneTimeItems, ...boraCareOneTimeRows],
+      pestRecurring,
+      hasPestOneTime,
+    );
   const estimateAskEnabled = !isRegulatedCertificateSurface && isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
@@ -6252,6 +6275,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   tr:last-child td{border-bottom:0}
   td.val{text-align:right;font-weight:500;color:#1B2C5B}
   .sub{font-size:12px;color:#475569;margin-top:2px}
+  .onetime-outcome{font-size:15px;font-weight:400;color:#3F4A65;margin-top:6px;line-height:1.5}
+  .onetime-includes{list-style:none;margin:10px 0 0;padding:10px 0 0;border-top:1px solid #E6EEF6;display:grid;gap:8px}
+  .onetime-includes li{position:relative;padding-left:18px;font-size:14px;font-weight:600;color:#3F4A65;line-height:1.35}
+  .onetime-includes li::before{content:"";position:absolute;left:0;top:7px;width:6px;height:6px;border-radius:999px;background:#1B2C5B}
+  .onetime-terms{font-size:14px;color:#6B7590;margin-top:10px;line-height:1.5}
   .cta{display:block;width:100%;padding:14px 22px;background:#1B2C5B;color:#fff;border:none;border-radius:10px;font-family:Inter,system-ui,sans-serif;font-weight:500;font-size:16px;cursor:pointer;transition:all .15s;text-align:center;text-decoration:none}
   .cta:hover:not([disabled]){background:#121E3D}
   .cta.secondary{background:transparent;color:#1B2C5B;border:1px solid #1B2C5B}
@@ -22546,7 +22574,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
       ...basePayload,
       oneTimeBreakdown: {
         ...basePayload.oneTimeBreakdown,
-        items: basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel),
+        items: basePayload.oneTimeBreakdown.items.map((row) => attachOneTimeRowCopy(normalizeBreakdownItemLabel(row))),
       },
     }
     : basePayload;
@@ -22614,14 +22642,22 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // Regulated check sees the RAW normalized rows too: the contract's aligned
   // breakdown (show_one_time_option) can drop a WDO row, and the Ask bar must
   // not surface on an FDACS certificate surface (pre-push codex P1).
+  // One-time-ONLY estimate on a single service copy pack: the Waves AI card
+  // and chips describe that service (mirrors the SSR askPrompts branch and
+  // buildWaveGuardIntelligencePayload). Regulated surfaces still get none.
+  const oneTimeServiceCopy = (contractPayload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate))
+    ? oneTimeOnlyIntelligenceCopy(oneTimeBreakdownItems)
+    : null;
   const askChips = hasRegulatedCertificateServiceMix(services, [
     ...oneTimeBreakdownItems,
     ...(normalizeOneTimeBreakdown(estData)?.items || []),
   ])
     ? []
-    : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
-      ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
-      : askChipsBase;
+    : oneTimeServiceCopy?.askChips?.length
+      ? oneTimeServiceCopy.askChips.slice(0, 6)
+      : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
+        ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
+        : askChipsBase;
   // (Breakdown labels were normalized up top, before sections were built —
   // the embedded contribution rows and this breakdown are the same objects.)
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
@@ -22638,6 +22674,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
       ...(manualDiscountItemizedInSections ? { manualDiscountItemizedInSections: true } : {}),
     },
     askChips,
+    ...(oneTimeServiceCopy ? { oneTimeServiceCopy } : {}),
     oneTimeBreakdown: contractPayload.oneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
   };
@@ -22646,6 +22683,15 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
 // A breakdown row whose only label is the raw engine service key (e.g. "bora_care")
 // is not customer-facing; map it to the friendly category label for the client
 // payload. Mirrors the raw-key guard in buildOneTimeInvoiceServiceLabel.
+// Resolved service copy (estimate-one-time-copy.js) rides the row so the
+// React OneTimeBreakdownCard renders the same outcome/bullets/terms the
+// server-rendered page does. Rows with no pack entry are returned as-is.
+function attachOneTimeRowCopy(item = {}) {
+  if (!item || typeof item !== 'object') return item;
+  const copy = resolveOneTimeServiceCopy(item);
+  return copy ? { ...item, copy } : item;
+}
+
 function normalizeBreakdownItemLabel(item = {}) {
   if (!item || typeof item !== 'object') return item;
   const label = String(item.label || '').trim();

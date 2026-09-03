@@ -405,6 +405,38 @@ describe('ServiceSection', () => {
 });
 
 describe('OneTimeBreakdownCard', () => {
+  it('renders the service copy pack a row carries — outcome, visit bullets, terms — like a plan card', () => {
+    render(<OneTimeBreakdownCard breakdown={{ total: 350, items: [{
+      service: 'german_roach',
+      label: 'German Roach Cleanout Service — 2 Visit Program',
+      amount: 350,
+      visits: 2,
+      copy: {
+        key: 'german_roach',
+        outcome: 'Your kitchen back. Two targeted visits that clear the roaches and the eggs they left behind — 100% guaranteed.',
+        includes: [
+          'Visit 1 — gel bait where German roaches actually live: kitchen, bath, hinges, appliances, and plumbing voids',
+          'If they come back, so do we — 100% guaranteed with the Waves Guarantee',
+        ],
+        assurance: 'If they come back, so do we — 100% guaranteed with the Waves Guarantee',
+        terms: 'Pay on service day. No recurring schedule, no contract.',
+      },
+    }] }} />);
+    expect(screen.getByText(/Your kitchen back\. Two targeted visits/)).toBeInTheDocument();
+    expect(screen.getByText(/Visit 1 — gel bait where German roaches actually live/)).toBeInTheDocument();
+    expect(screen.getByText('If they come back, so do we — 100% guaranteed with the Waves Guarantee')).toBeInTheDocument();
+    expect(screen.getByText('Pay on service day. No recurring schedule, no contract.')).toBeInTheDocument();
+    expect(screen.getByText('$350.00')).toBeInTheDocument();
+  });
+
+  it('a row without a copy pack renders exactly as before (no bullets, no outcome line)', () => {
+    const { container } = render(<OneTimeBreakdownCard breakdown={{ total: 257, items: [
+      { service: 'one_time_adjustment', label: 'Additional treatment area', amount: 257 },
+    ] }} />);
+    expect(container.querySelectorAll('li').length).toBe(0);
+    expect(screen.getByText('Additional treatment area')).toBeInTheDocument();
+  });
+
   it('presents trap-only recurring monitoring as a monitoring plan', () => {
     render(<OneTimeBreakdownCard breakdown={{ total: 694, items: [
       { service: 'trap_only_retainer', label: 'Standard Trap-Only Monitoring Retainer', amount: 495 },

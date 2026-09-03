@@ -147,7 +147,7 @@ function manualDiscountPerInterval(frequency = {}, intervalMonths = 1) {
 // an accordion, collapsed by default behind "See everything included (N)"
 // (approved blueprint behavior) — the full seven bullets are a wall on
 // first paint; the count is the hook.
-function RowInclusions({ items, collapsible = false }) {
+export function RowInclusions({ items, collapsible = false }) {
   const [open, setOpen] = useState(false);
   const list = (
     <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 8 }}>

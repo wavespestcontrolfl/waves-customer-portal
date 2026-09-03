@@ -567,6 +567,17 @@ plan matching the frequency's visitsPerYear through the scheduler's own
 with no catalog plan is omitted; the key is ABSENT when the gate is off or
 nothing resolves (it was boolean `true` from 2026-08 until #3755). The page
 only buckets months into seasons — it never derives an interval itself.
+`/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
+`copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
+and a one-time-ONLY estimate whose billable rows all resolve to one copy
+pack may carry `pricing.oneTimeServiceCopy` — `{ key, aiTitle, aiBody,
+askChips[] }` — both resolved server-side from the static pack in
+`server/services/estimate-one-time-copy.json` (owner-approved customer
+copy: what the visit includes + guarantee terms per service; no customer
+or pricing data). Rows with no pack entry and mixed/recurring estimates
+omit the keys. When `oneTimeServiceCopy` is present its `askChips` ARE
+`pricing.askChips` (regulated WDO surfaces still get `[]`), and the
+server-rendered page reads the same pack, so the two paths cannot drift.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,
