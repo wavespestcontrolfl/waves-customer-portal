@@ -15,7 +15,9 @@
  *   call         text / vision calls through the llm adapters — one row per call
  *   session      Anthropic Managed Agents — one row per session
  *   unrecordable no per-call row today; `unrecordable_reason` says why
- *                (audio | embedding | image | video | search)
+ *                (audio | embedding | image | video | search | direct_sdk —
+ *                the site calls the provider SDK directly, bypassing the
+ *                adapters; unrecordable until it is migrated)
  * `expected_cadence`: 'event' = candidate-driven, no silence alarm;
  *   hourly / daily / weekly = a cron lane that alarms when it goes quiet.
  *   Set only where the tick UNCONDITIONALLY calls the model; a queue worker,
@@ -29,7 +31,7 @@
  */
 
 const LEDGER = Object.freeze(['call', 'session', 'unrecordable']);
-const UNRECORDABLE_REASON = Object.freeze(['audio', 'embedding', 'image', 'video', 'search']);
+const UNRECORDABLE_REASON = Object.freeze(['audio', 'embedding', 'image', 'video', 'search', 'direct_sdk']);
 const CADENCE = Object.freeze(['hourly', 'daily', 'weekly', 'event']);
 
 const DEFAULT_RUNTIME = Object.freeze({
@@ -167,7 +169,8 @@ const LANE_RUNTIME = {
   blog_optimize: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', ...LONG_BATCH },
   newsletter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M2', ...LONG_BATCH },
   content_misc: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
-  social_copy: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy' },
+  // M3: SOCIAL_RSS_AUTOPUBLISH publishes via publishToAll without approval and records the result in social_media_posts — Codex r11.
+  social_copy: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3' },
   social_judge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check' },
   tech_caption_copy: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
   review_ask: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
@@ -180,7 +183,7 @@ const LANE_RUNTIME = {
   codex_remediation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', ...LONG_BATCH },
   footprint_claim: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   seo_intent: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  seo_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'weekly', ...LONG_BATCH },
+  seo_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, ...LONG_BATCH },
   prospect_score: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   // event, not weekly: a healthy weekly tick over an empty board (or only
   // known directories, handled heuristically) makes no model call.
@@ -208,7 +211,7 @@ const LANE_RUNTIME = {
   // internal_write: knowledge_qa's only caller writes lawn_assessments
   // ai_summary / recommendations; every WikiQA query logs to knowledge_queries.
   knowledge_qa: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
-  wiki_qa: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
+  wiki_qa: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa' },
   kb_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
   wiki_compiler: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
   embeddings: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'embedding', fallback_class: 'offline', eval_family: null },
@@ -229,10 +232,11 @@ const LANE_RUNTIME = {
   agent_assistant: { side_effect_class: 'customer_visible', ledger: 'session', fallback_class: 'interactive', eval_family: 'long_running_agent', maturity: 'M3', ...AGENT_SESSION },
 
   // ── Back office ──
-  expense_categorize: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  expense_categorize: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   tax_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'weekly', ...LONG_BATCH },
   // offline: direct Anthropic SDK calls, no second provider, failures reach the Express error path — Codex r10.
-  inventory_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 180_000 },
+  // unrecordable/direct_sdk: both workflows call anthropic.messages.create directly, bypassing the adapters the call ledger records — Codex r11.
+  inventory_research: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 180_000 },
   job_screen: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
 };
 
