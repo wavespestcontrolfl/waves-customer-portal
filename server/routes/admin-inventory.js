@@ -3078,6 +3078,10 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
     const outcome = await db.transaction(async (trx) => {
       const product = await trx('products_catalog').where({ id: req.params.productId }).forUpdate().first();
       if (!product) return { status: 404, body: { error: 'Product not found' } };
+      // An automatic order already claimed/placed for this product → 409
+      // (err.statusCode, caught below); the Restock tab carries the order
+      // line (pre-push P0).
+      await require('../services/procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id);
       const requestedQuantity = numberOrNull(req.body?.requestedQuantity);
       const unit = String(req.body?.unit || product.inventory_unit || product.rate_unit || '').trim();
       if (!requestedQuantity || requestedQuantity <= 0 || !unit) {

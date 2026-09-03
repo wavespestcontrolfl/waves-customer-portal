@@ -1234,6 +1234,11 @@ async function createRestockRequest(input) {
     const lockedVendor = input.vendor || fresh.best_vendor || null;
     const lockedStock = toNumber(fresh.inventory_on_hand);
 
+    // An automatic order already claimed/placed for this product: refuse —
+    // the Restock tab carries the order line (pre-push P0).
+    try { await require('../procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id); }
+    catch (err) { if (err.code === 'auto_order_live') return { error: err.message, auto_order_live: true }; throw err; }
+
     const approvedRequest = input._verified_request;
     const sameStock = (a, b) => (a == null && b == null) || (a != null && b != null && round4(a) === round4(b));
     if (approvedRequest && (!sameStock(lockedStock, toNumber(approvedRequest.current_stock))

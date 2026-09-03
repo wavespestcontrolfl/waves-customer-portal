@@ -985,6 +985,9 @@ async function createRestockRequest(knex, req, serviceId) {
       err.statusCode = 400;
       throw err;
     }
+    // An automatic order already claimed/placed for this product → 409; the
+    // Restock tab carries the order line (pre-push P0).
+    await require('../services/procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id);
     const actor = actorFromRequest(req);
     const currentStock = numberOrNull(product.inventory_on_hand);
     const lowStock = numberOrNull(product.low_stock_threshold);

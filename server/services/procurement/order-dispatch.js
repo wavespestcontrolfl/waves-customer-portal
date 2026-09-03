@@ -190,6 +190,35 @@ function vendorOrderQuantity({ adapter, request, pricing }) {
   return { quantity: Math.ceil(requestedOz / packOz - 1e-9), packSize: `${pack.amount} ${pack.unit}` };
 }
 
+/**
+ * Refuse a staff / forecast / Intelligence Bar restock request while an
+ * AUTOMATIC order for the product is live: an auto request still open|ordered
+ * whose vendor_orders row is 'placing' or was dispatched (placed_at set —
+ * placed, and the post-submit parks whose money may have moved). Call under
+ * the products_catalog row lock, in the same transaction as the insert. The
+ * dispatcher's own lock is released when its claim commits, BEFORE the vendor
+ * call, so the claim row — not the lock — is what carries the exclusion
+ * through dispatch (pre-push P0). Throws { statusCode: 409, code:
+ * 'auto_order_live' } with a message that points at the Restock tab.
+ */
+async function assertNoLiveAutoOrder(trx, productId) {
+  const live = await trx('product_restock_requests as prr')
+    .join('vendor_orders as vo', 'vo.restock_request_id', 'prr.id')
+    .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
+    .where('prr.product_id', productId)
+    .whereIn('prr.status', ['open', 'ordered'])
+    .whereRaw("(vo.status = 'placing' OR vo.placed_at IS NOT NULL)")
+    .first('vo.status', 'vo.external_order_number', 'v.name as vendor_name');
+  if (!live) return;
+  const vendor = live.vendor_name || 'vendor';
+  const err = new Error(live.status === 'placing'
+    ? `An automatic ${vendor} order for this product is being placed right now — check the Restock tab before ordering more.`
+    : `An automatic ${vendor} order${live.external_order_number ? ` (${live.external_order_number})` : ''} for this product is already out — receive it or revoke it on the Restock tab before requesting more.`);
+  err.statusCode = 409;
+  err.code = 'auto_order_live';
+  throw err;
+}
+
 // Month-to-date money that is spent OR may be: live reservations (placing)
 // and every row whose vendor call was dispatched (placed_at set — placed,
 // and the post-submit needs_review parks). A row parked BEFORE submission
@@ -398,8 +427,10 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
     // inside a transaction that first locks this products_catalog row FOR
     // UPDATE, so a staff request either commits before this read or waits
     // for this claim to commit — the read is serialized, not advisory
-    // (pre-push P0). A sibling that lands after this commit is the office's
-    // to reconcile via the tab's order line.
+    // (pre-push P0). And once this claim commits, those same paths call
+    // assertNoLiveAutoOrder under that lock and REFUSE (409) while the claim
+    // row is placing or dispatched: the lock covers the read, the claim row
+    // covers the vendor call — never both orders.
     const sibling = await trx('product_restock_requests').where({ product_id: request.product_id }).whereIn('status', ['open', 'ordered']).whereNot('id', request.id).first('id', 'source', 'status');
     if (sibling) return { skipped: 'sibling_live_request', sibling };
     const quantity = Number(request.requested_quantity);
@@ -613,6 +644,7 @@ module.exports = {
   monthlySpentCents,
   findDispatchable,
   vendorOrderQuantity,
+  assertNoLiveAutoOrder,
   AUTO_ORDER_GATE: GATE,
   _internals: { adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS },
 };

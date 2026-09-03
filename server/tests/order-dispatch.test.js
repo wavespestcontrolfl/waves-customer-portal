@@ -30,7 +30,7 @@ jest.mock('../services/vendor-credentials', () => ({ getVendorLoginCredentials: 
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/procurement/auto-reorder', () => ({ vendorPricingFor: jest.fn(async () => mockState.pricing) }));
 
-const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false };
+const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
@@ -38,6 +38,7 @@ jest.mock('../models/db', () => {
     for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
     q.whereIn = (col) => { if (col === 'vo.status') q._pendingBells = true; return q; };
     q.first = async (...cols) => {
+      if (cols[0] === 'vo.status') return mockState.liveAutoOrder; // assertNoLiveAutoOrder's aliased join
       if (table === 'product_restock_requests') {
         if (cols[0] === 'status') return { status: mockState.freshRequestStatus };
         if (cols[0] === 'id') return mockState.sibling; // the sibling live-request probe
@@ -84,7 +85,7 @@ function mockAdapter(overrides = {}) {
 
 let notify;
 beforeEach(() => {
-  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false });
+  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null });
   for (const k of Object.keys(ENV)) process.env[k] = ENV[k];
   notify = jest.fn(async () => ({ id: 'n1' }));
   auditVendorOrder.mockClear();
@@ -491,6 +492,15 @@ test('a placing row older than 30 minutes is parked needs_review with a do-not-r
   expect(row.error).toMatch(/stale_placing/);
   expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
   expect(a.place).not.toHaveBeenCalled();
+});
+
+test('assertNoLiveAutoOrder: a placing or dispatched auto claim refuses a staff request with a 409 that names the tab (pre-push P0)', async () => {
+  const dbFn = require('../models/db');
+  await expect(dispatch.assertNoLiveAutoOrder(dbFn, 'prod-sticker')).resolves.toBeUndefined();
+  mockState.liveAutoOrder = { status: 'placing', external_order_number: null, vendor_name: 'Sticker Mule' };
+  await expect(dispatch.assertNoLiveAutoOrder(dbFn, 'prod-sticker')).rejects.toMatchObject({ statusCode: 409, code: 'auto_order_live', message: expect.stringMatching(/Sticker Mule order.*being placed.*Restock tab/) });
+  mockState.liveAutoOrder = { status: 'placed', external_order_number: 'SM-1', vendor_name: 'Sticker Mule' };
+  await expect(dispatch.assertNoLiveAutoOrder(dbFn, 'prod-sticker')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/\(SM-1\).*already out.*receive it or revoke it/) });
 });
 
 test('stale recovery that loses the race to the live dispatcher leaves the settled row alone — no overwrite, no audit, no bell (pre-push P1)', async () => {
