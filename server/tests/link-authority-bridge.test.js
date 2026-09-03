@@ -36,7 +36,8 @@ function makeDb(seed = {}) {
     const project = (r) => (!st.cols || st.cols.includes('*') ? { ...r } : Object.fromEntries(st.cols.map((c) => [c, r[c]])));
     const resolve = () => {
       let out = rows.filter(matches);
-      if (st.order) out = [...out].sort((a, b) => (String(a[st.order.col]) < String(b[st.order.col]) ? -1 : 1) * (st.order.dir === 'desc' ? -1 : 1));
+      const sortKey = (v) => (v instanceof Date ? v.getTime() : typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v) ? Date.parse(v) : String(v));
+      if (st.order) out = [...out].sort((a, b) => (sortKey(a[st.order.col]) < sortKey(b[st.order.col]) ? -1 : 1) * (st.order.dir === 'desc' ? -1 : 1));
       if (st.limit != null) out = out.slice(0, st.limit);
       return out.map(project);
     };
@@ -52,6 +53,7 @@ function makeDb(seed = {}) {
       whereIn(col, arr) { st.preds.push((r) => arr.includes(r[col])); return q; },
       whereRaw(sql, bindings = []) {
         if (/split_part/.test(sql)) st.preds.push((r) => canonicalProspectDomain(r.target_domain) === bindings[0]);
+        else if (/COALESCE\(link_type, ''\) NOT IN/.test(sql)) st.preds.push((r) => !bindings.includes(r.link_type || ''));
         else throw new Error(`unsupported whereRaw: ${sql}`);
         return q;
       },
@@ -60,7 +62,7 @@ function makeDb(seed = {}) {
       select(...cols) { st.cols = cols.length ? cols : null; return q; },
       forUpdate() { return q; },
       async first(...cols) { if (cols.length) st.cols = cols; return resolve()[0]; },
-      async update(patch) { const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit.length; },
+      async update(patch) { if (db._failUpdate === table) throw new Error(`injected failure on ${table}`); const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit.length; },
       insert(row) {
         const created = { id: uid(), ...row };
         if (table === 'seo_link_placement_authorities' && rows.some((r) => r.prospect_id === row.prospect_id && r.dimension === row.dimension && r.instance_key === row.instance_key)) throw new Error('duplicate key value violates unique constraint "seo_link_placement_authorities_prospect_id_dimension_instance_key_unique"');
@@ -73,6 +75,7 @@ function makeDb(seed = {}) {
     return q;
   }
   const db = Object.assign((table) => builder(table), {
+    _failUpdate: null,
     raw: async (sql) => { raws.push(sql); return {}; },
     transaction: async (cb) => cb(db),
     _tables: tables,
@@ -151,7 +154,8 @@ describe('a qualified domain with a free signup-lane path', () => {
     const ps = placements(db);
     expect(ps.map((x) => x.location_key).sort()).toEqual(WAVES_LOCATIONS.map((l) => l.id).sort());
     for (const x of ps) {
-      expect(x).toMatchObject({ target_domain: 'example.org', target_page: bridge.HOMEPAGE, domain_id: d.id, path_id: p.id, link_type: 'directory', source: 'competitor_gap', status: 'awaiting_owner', parked_from_status: 'prospect', authority: 'OWNER_FREE' });
+      expect(x).toMatchObject({ target_domain: 'example.org', target_page: bridge.HOMEPAGE, target_url: 'https://example.org/add', domain_id: d.id, path_id: p.id, link_type: 'directory', source: 'competitor_gap', status: 'awaiting_owner', parked_from_status: 'prospect', authority: 'OWNER_FREE' });
+      expect(x.payment_group_id).toBeUndefined(); // a free path has no purchase to key
     }
     const rs = rows(db);
     expect(rs).toHaveLength(WAVES_LOCATIONS.length);
@@ -178,7 +182,10 @@ describe('a qualified domain with a free signup-lane path', () => {
     await run(db);
     const before = JSON.stringify([placements(db), rows(db)]);
     const r = await run(db);
-    expect(r).toMatchObject({ decided: 1, placementsCreated: 0, rowsWritten: 0, redecided: 0, parked: 0, released: 0 });
+    expect(r).toMatchObject({ selected: 0, decided: 0, placementsCreated: 0, rowsWritten: 0, redecided: 0, parked: 0, released: 0 }); // nothing moved ⇒ not even selected
+    expect(JSON.stringify([placements(db), rows(db)])).toBe(before);
+    const r2 = await run(db, { domainIds: [db._tables.seo_link_domains[0].id] }); // forced: re-decided, still a no-op
+    expect(r2).toMatchObject({ selected: 1, decided: 1, placementsCreated: 0, rowsWritten: 0, redecided: 0, parked: 0, released: 0 });
     expect(JSON.stringify([placements(db), rows(db)])).toBe(before);
   });
 });
@@ -201,6 +208,25 @@ describe('outreach-lane paths', () => {
     const r = await run(db);
     expect(r).toMatchObject({ placementsCreated: 0, parked: 1 }); // the existing row is matched by canonical host + page variant
     expect(placements(db)[0].status).toBe('awaiting_owner');
+  });
+  test('an outreach conversation already in flight for the inbox is ADOPTED, never doubled (the shared board guard)', async () => {
+    const { db, d, p } = scenario({ make: outreachPath });
+    const manual = { id: uid(), target_domain: 'example.org', target_page: 'https://www.wavespestcontrol.com/pest-control/', location_key: '-', domain_id: null, path_id: null, status: 'contacted', link_type: null, outreach_status: 'sent', source: 'manual', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(manual);
+    const r = await run(db);
+    expect(r).toMatchObject({ decided: 1, placementsCreated: 0, rowsWritten: 1, parked: 0 });
+    expect(placements(db)).toHaveLength(1);
+    expect(placements(db)[0]).toMatchObject({ id: manual.id, domain_id: d.id, path_id: p.id, link_type: 'resource', status: 'contacted', authority: 'OWNER_OUTREACH' });
+    expect(rows(db)[0]).toMatchObject({ prospect_id: manual.id, dimension: 'communication' });
+    expect(domainState(db)).toBe('acquiring');
+    // bound to ANOTHER live path ⇒ that path's placement: nothing is created
+    const other = outreachPath(d);
+    db._tables.seo_link_acquisition_paths.push(other);
+    Object.assign(manual, { path_id: other.id });
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 1000);
+    const r2 = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r2.errors).toEqual([{ domain: 'example.org', skipped: 'outreach conversation in flight on another path (contacted)' }]);
+    expect(placements(db)).toHaveLength(1);
   });
   test('legal attestation adds the accept_terms execution instance at OWNER_LEGAL', async () => {
     const { db } = scenario({ make: outreachPath, path: { acquisition_type: 'resource_outreach', link_type: 'resource', submission_url: null, legal_attestation: true, legal_terms_hash: HASH } });
@@ -236,7 +262,7 @@ describe('floors and waivers', () => {
     expect(rows(db).every((x) => x.level === 'OWNER_FREE' && x.floor_waiver_id === waiver.id && /floors waived/.test(x.reason))).toBe(true);
     // spam rises further ⇒ the waiver no longer matches the floors the owner looked at
     db._tables.seo_link_domains[0].spam_score = 40;
-    db._tables.seo_link_domains[0].updated_at = NOW;
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 500); // enrichment landed after the decision
     const r2 = await run(db, { now: new Date(NOW.getTime() + 1000) });
     expect(r2.invalidatedWaivers).toBe(1);
     expect(db._tables.seo_link_floor_waivers[0].invalidated_at).toBeTruthy();
@@ -256,8 +282,7 @@ describe('re-decision', () => {
     db._tables.seo_link_approvals.push(approval);
     target.approval_id = approval.id;
     // the owner flips auto_free on
-    Object.assign(db._tables.seo_link_policy[0], { auto_free_acquisition: true, updated_at: NOW });
-    db._tables.seo_link_domains[0].agent_state = 'qualified';
+    Object.assign(db._tables.seo_link_policy[0], { auto_free_acquisition: true, updated_at: new Date(NOW.getTime() + 1000) });
     const later = new Date(NOW.getTime() + 60000);
     const r = await run(db, { now: later });
     expect(r).toMatchObject({ selected: 1, redecided: WAVES_LOCATIONS.length, released: WAVES_LOCATIONS.length, invalidatedApprovals: 1, parked: 0 });
@@ -284,7 +309,7 @@ describe('re-decision', () => {
     Object.assign(pl, { status: 'live' });
     const row = rows(db).find((x) => x.prospect_id === pl.id);
     Object.assign(row, { satisfied_at: NOW, satisfied_reason: 'placed', level: 'OWNER_FREE' });
-    Object.assign(db._tables.seo_link_policy[0], { auto_free_acquisition: true, updated_at: NOW });
+    Object.assign(db._tables.seo_link_policy[0], { auto_free_acquisition: true, updated_at: new Date(NOW.getTime() + 1000) });
     await run(db, { now: new Date(NOW.getTime() + 60000) });
     expect(rows(db).find((x) => x.id === row.id).level).toBe('OWNER_FREE');
     expect(placements(db).find((x) => x.id === pl.id).status).toBe('live');
@@ -317,7 +342,22 @@ describe('re-decision', () => {
     expect(mine.filter((x) => x.ended_at).map((x) => x.end_outcome)).toEqual(['superseded']);
     expect(mine.filter((x) => !x.ended_at).map((x) => x.instance_key)).toEqual(['-:2']); // next generation — the ended row keeps '-:1' under the full unique
     expect(r.errors).toEqual([]);
-    expect(placements(db).find((x) => x.id === pl.id).path_id).toBe(p.id);
+    const moved = placements(db).find((x) => x.id === pl.id);
+    expect(moved).toMatchObject({ path_id: p.id, target_url: 'https://example.org/add', automation_policy: null }); // settleRetiredPlacements synced URL + cleared the classification
+  });
+  test('a placement still LEASED on its old path is left alone this run (the registry mover waits for claimed_at IS NULL)', async () => {
+    const { db, d, p } = scenario();
+    const old = pathRow(d, { superseded_by: p.id });
+    db._tables.seo_link_acquisition_paths.push(old);
+    const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: old.id, status: 'prospect', link_type: 'directory', claimed_at: NOW, updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(pl);
+    const row = { id: uid(), prospect_id: pl.id, dimension: 'execution', instance_kind: '-', instance_key: '-:1', level: 'OWNER_FREE', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: null };
+    db._tables.seo_link_placement_authorities.push({ ...row });
+    const r = await run(db);
+    expect(r.skippedLeased).toBe(1);
+    expect(placements(db).find((x) => x.id === pl.id).path_id).toBe(old.id);
+    expect(rows(db).filter((x) => x.prospect_id === pl.id)).toEqual([expect.objectContaining({ ...row, ended_at: null })]);
+    expect(placements(db)).toHaveLength(WAVES_LOCATIONS.length); // the other locations were still bridged
   });
 });
 
@@ -332,10 +372,17 @@ describe('payment grouping', () => {
     expect(ps.every((x) => x.payment_group_id === group && x.status === 'awaiting_owner' && x.authority === 'OWNER_MEMBERSHIP')).toBe(true);
     expect(rows(db).filter((x) => x.dimension === 'payment').every((x) => x.level === 'OWNER_PAYMENT')).toBe(true);
   });
-  test('a per_location paid listing gets no group', async () => {
+  test('a per_location paid listing is its own group; re-investigation to account_wide joins, back to per_location splits', async () => {
     const { db } = scenario({ make: paidPath });
     await run(db);
-    expect(placements(db).every((x) => x.payment_group_id == null)).toBe(true);
+    expect(placements(db).every((x) => x.payment_group_id === x.id)).toBe(true);
+    Object.assign(db._tables.seo_link_acquisition_paths[0], { fee_scope: 'account_wide', updated_at: new Date(NOW.getTime() + 1000) });
+    await run(db, { now: new Date(NOW.getTime() + 60000) });
+    const anchor = placements(db)[0].id;
+    expect(placements(db).every((x) => x.payment_group_id === anchor)).toBe(true);
+    Object.assign(db._tables.seo_link_acquisition_paths[0], { fee_scope: 'per_location', updated_at: new Date(NOW.getTime() + 120000) });
+    await run(db, { now: new Date(NOW.getTime() + 180000) });
+    expect(placements(db).every((x) => x.payment_group_id === x.id)).toBe(true);
   });
 });
 
@@ -344,6 +391,7 @@ describe('aggregateState (§3.1)', () => {
   test.each([
     ['authorized pending wins', [{ status: 'prospect', rows: [A('AUTO_FREE')] }, { status: 'live', rows: [A('OWNER_FREE', true)] }], 'ready_to_acquire'],
     ['satisfied rows count as authorized', [{ status: 'prospect', rows: [A('OWNER_FREE', true), A('OWNER_PAYMENT', true)] }], 'ready_to_acquire'],
+    ['an OWNER_* row with a valid approval is authorized', [{ status: 'prospect', rows: [{ level: 'OWNER_FREE', satisfied_at: null, approved: true }] }], 'ready_to_acquire'],
     ['acquired once live with nothing pending', [{ status: 'live', rows: [A('OWNER_FREE', true)] }, { status: 'rejected', rows: [] }], 'acquired'],
     ['acquiring for the active intermediates', [{ status: 'contacted', rows: [A('OWNER_OUTREACH')] }], 'acquiring'],
     ['qualified while the owner holds it', [{ status: 'awaiting_owner', rows: [A('OWNER_FREE')] }, { status: 'prospect', rows: [A('DENY')] }], 'qualified'],
@@ -355,8 +403,79 @@ describe('aggregateState (§3.1)', () => {
   ])('%s', (_, placementsIn, expected) => { expect(bridge.aggregateState(placementsIn)).toBe(expected); });
 });
 
+describe('approvals (PR 2b writes them; the bridge honours them)', () => {
+  test('an OWNER_* row with a valid approval is not re-parked, is released, and reads ready_to_acquire; an invalidated approval gates again', async () => {
+    const { db, p } = scenario();
+    await run(db);
+    const target = rows(db)[0];
+    const approval = { id: uid(), prospect_id: target.prospect_id, path_id: p.id, decision: 'approved', authority: 'OWNER_FREE', dimension: 'execution', instance_key: '-:1', invalidated_at: null };
+    db._tables.seo_link_approvals.push(approval);
+    target.approval_id = approval.id;
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 1000); // something moved ⇒ re-selected
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    const pl = placements(db).find((x) => x.id === target.prospect_id);
+    expect(pl).toMatchObject({ status: 'prospect', parked_from_status: null });
+    expect(r.released).toBe(1);
+    expect(r.parked).toBe(0);
+    expect(domainState(db)).toBe('ready_to_acquire');
+    approval.invalidated_at = NOW;
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 120000);
+    await run(db, { now: new Date(NOW.getTime() + 180000) });
+    expect(placements(db).find((x) => x.id === target.prospect_id).status).toBe('awaiting_owner');
+    expect(domainState(db)).toBe('qualified');
+  });
+});
+
+describe('a floor waiver on a rejected domain', () => {
+  test('the waiver alone re-selects the domain, passes the floors and lets it leave rejected', async () => {
+    const { db, d, p } = scenario({ domain: { spam_score: 30 } });
+    await run(db);
+    expect(domainState(db)).toBe('rejected');
+    const policy = P.normalizePolicyRow(null);
+    db._tables.seo_link_floor_waivers.push({ id: uid(), domain_id: d.id, path_id: p.id, decision_inputs_hash: P.floorInputsHash({ path: p, domain: d, policy, score: 75 }), overridden_floors: [{ floor: 'spam_score', value: 30, threshold: 10 }], approved_by: 'adam', approved_at: new Date(NOW.getTime() + 1000), invalidated_at: null });
+    const sel = await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER });
+    expect(sel).toEqual([{ id: d.id, domain: 'example.org', why: 'stale' }]);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r.parked).toBe(WAVES_LOCATIONS.length);
+    expect(rows(db).every((x) => x.level === 'OWNER_FREE' && x.floor_waiver_id)).toBe(true);
+    expect(domainState(db)).toBe('qualified');
+  });
+  test('domainIds forces selection whatever the state', async () => {
+    const { db, d } = scenario({ domain: { agent_state: 'watching' } });
+    expect(await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+    expect(await bridge.selectDomains(db, { domainIds: [d.id], limit: 10, policyUpdatedAt: EARLIER })).toEqual([{ id: d.id, domain: 'example.org', why: 'forced' }]);
+  });
+});
+
+describe('a failed domain transaction', () => {
+  test('reports nothing it did not commit and rings no bell', async () => {
+    const { db } = scenario();
+    db._failUpdate = 'seo_link_acquisition_paths'; // the authority_last_decided stamp, after the parks
+    const notify = jest.fn();
+    const r = await run(db, { notify });
+    expect(r.errors).toEqual([{ domain: 'example.org', error: 'injected failure on seo_link_acquisition_paths' }]);
+    expect(r).toMatchObject({ decided: 0, placementsCreated: 0, parked: 0, rowsWritten: 0 });
+    expect(notify).not.toHaveBeenCalled();
+  });
+});
+
 describe('selection', () => {
-  test('limit caps and dedupes across the two sources; domainIds narrows', async () => {
+  test('a bridged owner-routed domain that stays qualified does not starve the next one (limit 1, two nights)', async () => {
+    const { db } = scenario();
+    const d2 = domainRow({ domain: 'two.example', updated_at: NOW });
+    const p2 = pathRow(d2, { submission_url: 'https://two.example/add' });
+    d2.best_path_id = p2.id;
+    db._tables.seo_link_domains.push(d2);
+    db._tables.seo_link_acquisition_paths.push(p2);
+    const r1 = await run(db, { limit: 1 });
+    expect(r1).toMatchObject({ selected: 1, placementsCreated: WAVES_LOCATIONS.length });
+    const r2 = await run(db, { limit: 1, now: new Date(NOW.getTime() + 60000) });
+    expect(r2).toMatchObject({ selected: 1, placementsCreated: WAVES_LOCATIONS.length }); // the SECOND domain
+    expect(new Set(placements(db).map((x) => x.target_domain))).toEqual(new Set(['example.org', 'two.example']));
+    const r3 = await run(db, { limit: 1, now: new Date(NOW.getTime() + 120000) });
+    expect(r3.selected).toBe(0); // both current: nothing to do
+  });
+  test('limit caps and dedupes across the sources; domainIds narrows', async () => {
     const { db, d } = scenario();
     const d2 = domainRow({ domain: 'two.example', updated_at: NOW });
     const p2 = pathRow(d2);
@@ -364,7 +483,7 @@ describe('selection', () => {
     db._tables.seo_link_domains.push(d2);
     db._tables.seo_link_acquisition_paths.push(p2);
     expect((await bridge.selectDomains(db, { domainIds: null, limit: 1, policyUpdatedAt: EARLIER })).map((x) => x.id)).toEqual([d.id]);
-    expect((await bridge.selectDomains(db, { domainIds: [d2.id], limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.id)).toEqual([d2.id]);
+    expect((await bridge.selectDomains(db, { domainIds: [d2.id], limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['forced']);
     const r = await run(db, { limit: 1 });
     expect(r.selected).toBe(1);
   });

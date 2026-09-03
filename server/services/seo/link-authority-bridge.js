@@ -36,8 +36,8 @@ const { isEnabled } = require('../../config/feature-gates');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { WAVES_LOCATIONS } = require('../../config/locations');
-const { lockProspectDomain, findPlacementRow, targetPageOf } = require('./prospect-domain-lock');
-const { OUTREACH_ACQUISITION_TYPES, LEVEL_SEVERITY } = require('./link-registry');
+const { claimProspectDomain, findPlacementRow, targetPageOf } = require('./prospect-domain-lock');
+const { OUTREACH_ACQUISITION_TYPES, LEVEL_SEVERITY, settleRetiredPlacements } = require('./link-registry');
 const { SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
 const P = require('./link-authority-policy');
 
@@ -69,50 +69,76 @@ const defaultExclusive = (key, fn) => require('../../utils/cron-lock').runExclus
 const defaultNotify = (title, body, opts) => require('../notification-service').notifyAdmin('system', title, body, opts);
 
 // ---------------------------------------------------------------------------
-// Selection
+// Selection — resolved in JS over a few whereIn reads (hundreds of rows at
+// most) so the rule reads plainly and can never starve: a bridged domain that
+// stays `qualified` (owner-routed policy) is only re-selected when something it
+// depends on moved, so the batch always advances to the next unbridged one.
 // ---------------------------------------------------------------------------
 async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
-  // (a) freshly qualified
-  let qa = db('seo_link_domains').where({ agent_state: 'qualified' }).whereNotNull('best_path_id');
-  if (domainIds) qa = qa.whereIn('id', domainIds);
-  const fresh = await qa.orderBy('updated_at', 'asc').limit(limit).select('id', 'domain');
-  const picked = new Map(fresh.map((d) => [d.id, { id: d.id, domain: d.domain, why: 'qualified' }]));
-  if (picked.size >= limit) return [...picked.values()].slice(0, limit);
-
-  // (b) stale open rows — small tables, resolved in JS so the rule reads plainly
+  const forced = new Set(domainIds || []);
+  // candidates: qualified, or owning an open unsatisfied row, or carrying an active waiver, or explicitly requested
+  const qualified = await db('seo_link_domains').where({ agent_state: 'qualified' }).whereNotNull('best_path_id').orderBy('updated_at', 'asc').select('id');
   const open = await db(AUTH).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'decided_at');
-  if (!open.length) return [...picked.values()];
-  const oldest = new Map();
-  for (const r of open) oldest.set(r.prospect_id, Math.min(oldest.get(r.prospect_id) ?? Infinity, ts(r.decided_at)));
-  const prospects = await db('seo_link_prospects').whereIn('id', [...oldest.keys()]).whereNotNull('domain_id').select('id', 'domain_id', 'path_id');
-  const domIds = [...new Set(prospects.map((p) => p.domain_id))].filter((id) => !domainIds || domainIds.includes(id));
-  if (!domIds.length) return [...picked.values()];
-  const domains = await db('seo_link_domains').whereIn('id', domIds).whereNotNull('best_path_id').select('id', 'domain', 'best_path_id', 'updated_at');
-  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(prospects.map((p) => p.path_id).filter(Boolean))]).select('id', 'updated_at');
+  const openProspects = open.length ? await db('seo_link_prospects').whereIn('id', [...new Set(open.map((r) => r.prospect_id))]).whereNotNull('domain_id').select('id', 'domain_id', 'path_id') : [];
+  const waivers = await db('seo_link_floor_waivers').whereNull('invalidated_at').select('domain_id', 'path_id', 'approved_at');
+  const candidateIds = [...new Set([...qualified.map((d) => d.id), ...openProspects.map((p) => p.domain_id), ...waivers.map((w) => w.domain_id), ...forced])]
+    .filter((id) => !forced.size || forced.has(id));
+  if (!candidateIds.length) return [];
+  const domains = await db('seo_link_domains').whereIn('id', candidateIds).whereNotNull('best_path_id').select('id', 'domain', 'agent_state', 'best_path_id', 'updated_at');
+  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at');
   const pathAt = new Map(paths.map((p) => [p.id, ts(p.updated_at)]));
-  const byId = new Map(domains.map((d) => [d.id, d]));
-  for (const p of prospects) {
-    const d = byId.get(p.domain_id);
-    if (!d || picked.has(d.id)) continue;
-    const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), pathAt.get(p.path_id) || 0);
-    const stale = oldest.get(p.id) < cutoff || p.path_id !== d.best_path_id;
-    if (stale) picked.set(d.id, { id: d.id, domain: d.domain, why: 'stale' });
-    if (picked.size >= limit) break;
+  const oldestByProspect = new Map();
+  for (const r of open) oldestByProspect.set(r.prospect_id, Math.min(oldestByProspect.get(r.prospect_id) ?? Infinity, ts(r.decided_at)));
+  const byDomain = new Map();
+  for (const p of openProspects) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
+  const waiverAt = new Map();
+  for (const w of waivers) waiverAt.set(`${w.domain_id}|${w.path_id}`, Math.max(waiverAt.get(`${w.domain_id}|${w.path_id}`) || 0, ts(w.approved_at)));
+
+  const picked = [];
+  const rank = { forced: 0, unbridged: 1, stale: 2 };
+  for (const d of domains) {
+    const rows = byDomain.get(d.id) || [];
+    const onBest = rows.filter((p) => p.path_id === d.best_path_id);
+    const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), pathAt.get(d.best_path_id) || 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
+    let why = null;
+    if (forced.has(d.id)) why = 'forced';
+    else if (d.agent_state === 'qualified' && !onBest.length) why = 'unbridged';
+    else if (rows.some((p) => p.path_id !== d.best_path_id || oldestByProspect.get(p.id) < cutoff)) why = 'stale';
+    else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !rows.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
+    if (why) picked.push({ id: d.id, domain: d.domain, why, at: ts(d.updated_at) });
   }
-  return [...picked.values()].slice(0, limit);
+  picked.sort((a, b) => rank[a.why] - rank[b.why] || a.at - b.at);
+  return picked.slice(0, limit).map(({ id, domain, why }) => ({ id, domain, why }));
 }
 
+// A row is AUTHORIZED when it is satisfied, AUTO_*, or OWNER_* with a valid
+// (approved, not invalidated) approval attached — PR 2b writes those; the
+// bridge honours them so an approved placement is never re-parked.
+async function annotateApprovals(trx, rows) {
+  const ids = [...new Set(rows.filter((r) => r.approval_id).map((r) => r.approval_id))];
+  const approvals = ids.length ? await trx('seo_link_approvals').whereIn('id', ids).select('id', 'decision', 'invalidated_at') : [];
+  const valid = new Set(approvals.filter((a) => a.decision === 'approved' && !a.invalidated_at).map((a) => a.id));
+  for (const r of rows) r.approved = Boolean(r.approval_id && valid.has(r.approval_id));
+  return rows;
+}
+const authorized = (r) => Boolean(r.satisfied_at) || isAuto(r.level) || (isOwner(r.level) && r.approved === true);
+
+const freshCounters = () => ({ placementsCreated: 0, rowsWritten: 0, redecided: 0, ended: 0, parked: 0, released: 0, invalidatedApprovals: 0, invalidatedWaivers: 0, aggregateChanges: 0, skippedLeased: 0, parkedDomains: [] });
+
 // ---------------------------------------------------------------------------
-// One domain, one transaction
+// One domain, one transaction. Counters are LOCAL to the transaction and
+// merged by the caller only after it commits — a rollback reports nothing.
 // ---------------------------------------------------------------------------
-async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }) {
+async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
+  const out = freshCounters();
   const domain = await trx('seo_link_domains').where({ id: domainId }).forUpdate().first();
-  if (!domain || !domain.best_path_id) return { skipped: 'no best path' };
-  await lockProspectDomain(trx, domain.domain);
+  if (!domain || !domain.best_path_id) return { skipped: 'no best path', out };
+  // the shared board guard: the per-domain lock + "one conversation per inbox" —
+  // an outreach-lane placement is never opened beside an active outreach row
+  const { inFlight } = await claimProspectDomain(trx, domain.domain);
   const path = await trx('seo_link_acquisition_paths').where({ id: domain.best_path_id }).first();
-  if (!path || path.superseded_by) return { skipped: 'best path superseded' };
+  if (!path || path.superseded_by) return { skipped: 'best path superseded', out };
   const ctx = { path, domain, policy, score: domain.score };
-  const staleAfter = Math.max(ts(policyUpdatedAt), ts(domain.updated_at), ts(path.updated_at));
 
   // §6.3 1b — the latest waiver, honoured only for the exact floors the owner looked at
   let waiver = null;
@@ -124,18 +150,33 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
       out.invalidatedWaivers += 1;
     }
   }
+  const staleAfter = Math.max(ts(policyUpdatedAt), ts(domain.updated_at), ts(path.updated_at), waiver ? ts(waiverRow.approved_at) : 0);
 
   const decision = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: false, waiver });
   const outreachPath = OUTREACH_ACQUISITION_TYPES.includes(path.acquisition_type);
 
   // placements: one per GBP location for a signup lane, one unscoped row otherwise
   const locations = SIGNUP_LINK_TYPES.includes(path.link_type) ? WAVES_LOCATIONS.map((l) => l.id) : ['-'];
-  const placements = [];
+  let placements = [];
   for (const location of locations) {
     let row = await findPlacementRow(trx, domain.domain, HOMEPAGE, { location, columns: ['*'] });
+    if (!row && location === '-' && inFlight) {
+      // an outreach conversation already exists for this inbox (a manual or
+      // strategy-agent row on another page): ADOPT it as the placement rather
+      // than open a second one. A row already bound to a different live path
+      // is that path's placement — nothing is created this run.
+      const existing = await trx('seo_link_prospects').where({ id: inFlight.id }).first();
+      if (!existing || (existing.path_id && existing.path_id !== path.id)) return { skipped: `outreach conversation in flight on another path (${inFlight.status})`, out };
+      if (!existing.path_id) {
+        const adopt = { domain_id: domain.id, path_id: path.id, updated_at: now, ...(existing.link_type ? {} : { link_type: path.link_type }) };
+        await trx('seo_link_prospects').where({ id: existing.id }).update(adopt);
+        Object.assign(existing, adopt);
+      }
+      row = existing;
+    }
     if (!row) {
       const [created] = await trx('seo_link_prospects').insert({
-        target_domain: domain.domain, target_page: HOMEPAGE, location_key: location,
+        target_domain: domain.domain, target_page: HOMEPAGE, target_url: path.submission_url || null, location_key: location,
         domain_id: domain.id, path_id: path.id, link_type: path.link_type,
         source: domain.source, source_detail: OWNER, owner: OWNER, status: PARKABLE,
         created_at: now, updated_at: now,
@@ -146,10 +187,36 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
     placements.push(row);
   }
 
-  // account_wide fee: every sibling shares one payment group anchored on the first placement
-  if (path.payment_required && path.fee_scope === 'account_wide' && placements.length) {
-    const groupId = (placements.find((p) => p.payment_group_id) || {}).payment_group_id || placements[0].id;
+  // Supersession goes through the ONE placement mover (link-registry
+  // settleRetiredPlacements: waits for an unleased row, follows the chain,
+  // syncs lane/URL, clears a stale draft + classification). A placement still
+  // leased on its old path, or on a live path that is not the domain's best,
+  // is left alone this run.
+  const behind = placements.filter((p) => p.path_id !== path.id);
+  if (behind.length) {
+    await settleRetiredPlacements(trx, { prospectIds: behind.map((p) => p.id), now });
+    const moved = await trx('seo_link_prospects').whereIn('id', behind.map((p) => p.id)).select('*');
+    const byId = new Map(moved.map((p) => [p.id, p]));
+    placements = placements.map((p) => byId.get(p.id) || p);
     for (const p of placements) {
+      if (p.path_id === path.id && behind.some((b) => b.id === p.id)) {
+        // the rows were decided on the old path: the unsatisfied instances end, fresh generations are decided below
+        out.ended += await trx(AUTH).where({ prospect_id: p.id }).whereNull('ended_at').whereNull('satisfied_at').update({ ended_at: now, end_outcome: 'superseded', updated_at: now });
+      }
+    }
+    const stuck = placements.filter((p) => p.path_id !== path.id);
+    out.skippedLeased += stuck.length;
+    placements = placements.filter((p) => p.path_id === path.id);
+  }
+
+  // payment group (§3.3 / bridge): the purchase contract keys every reservation,
+  // duplicate guard and renewal by it — account_wide siblings share the first
+  // placement's id; a per_location fee is its own group (re-investigation from
+  // account_wide to per_location splits the group; the reverse re-joins it)
+  if (path.payment_required && placements.length) {
+    const anchor = path.fee_scope === 'account_wide' ? ((placements.find((p) => p.payment_group_id) || {}).payment_group_id || placements[0].id) : null;
+    for (const p of placements) {
+      const groupId = anchor || p.id;
       if (p.payment_group_id === groupId) continue;
       await trx('seo_link_prospects').where({ id: p.id }).update({ payment_group_id: groupId, updated_at: now });
       p.payment_group_id = groupId;
@@ -158,17 +225,10 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
 
   const summaries = [];
   for (const placement of placements) {
-    // supersession: the placement follows the domain's best path; its unsatisfied instances end
-    if (placement.path_id !== path.id || placement.domain_id !== domain.id) {
-      await trx('seo_link_prospects').where({ id: placement.id }).update({ path_id: path.id, domain_id: domain.id, updated_at: now });
-      const ended = await trx(AUTH).where({ prospect_id: placement.id }).whereNull('ended_at').whereNull('satisfied_at').update({ ended_at: now, end_outcome: 'superseded', updated_at: now });
-      out.ended += ended;
-      placement.path_id = path.id;
-    }
     // ALL rows, ended ones included: the full UNIQUE (prospect, dimension,
     // instance_key) keeps history, so a replacement instance takes the next
     // generation (`${kind}:${n+1}`, §3.3b) — never the ended row's key.
-    const history = await trx(AUTH).where({ prospect_id: placement.id }).select('*');
+    const history = await annotateApprovals(trx, await trx(AUTH).where({ prospect_id: placement.id }).select('*'));
     const open = history.filter((r) => !r.ended_at);
     const key = (r) => `${r.dimension}|${r.instance_kind}`;
     const nextGeneration = (inst) => 1 + history.filter((r) => key(r) === key(inst)).reduce((m, r) => Math.max(m, Number(String(r.instance_key).split(':').pop()) || 0), 0);
@@ -199,6 +259,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
       if (existing.approval_id && inputsMoved) {
         await trx('seo_link_approvals').where({ id: existing.approval_id }).whereNull('invalidated_at').update({ invalidated_at: now, invalidated_reason: `bridge: ${existing.level} → ${inst.level}, inputs re-decided`, updated_at: now });
         patch.approval_id = null;
+        existing.approved = false;
         out.invalidatedApprovals += 1;
       }
       await trx(AUTH).where({ id: existing.id }).update(patch);
@@ -222,7 +283,8 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
     // park / release — only the bridge's own statuses move
     const noDraft = !placement.outreach_status || placement.outreach_status === 'none';
     const gates = (r) => {
-      if (r.satisfied_at || !isOwner(r.level)) return false;
+      if (authorized(r)) return false;
+      if (!isOwner(r.level)) return false;
       // an owner-gated send with no draft yet: the draft lease (mode=draft) must run first; the card binds the draft
       if (r.dimension === 'communication' && noDraft && (r.level === 'OWNER_OUTREACH' || r.level === 'OWNER_LEGAL')) return false;
       // payment on an outreach path is DEFERRED until the publisher exposes a checkout (ready_for_payment, §3.3b)
@@ -235,7 +297,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
       Object.assign(patch, { status: PARKED, parked_from_status: PARKABLE });
       status = PARKED;
       out.parked += 1;
-      out.parkedDomains.add(domain.domain);
+      if (!out.parkedDomains.includes(domain.domain)) out.parkedDomains.push(domain.domain);
     } else if (status === PARKED && !ownerGated && placement.parked_from_status === PARKABLE) {
       Object.assign(patch, { status: PARKABLE, parked_from_status: null });
       status = PARKABLE;
@@ -249,12 +311,14 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
   const pathLevel = mostSevere(summaries.map((s) => s.authority).filter(Boolean));
   if (pathLevel && pathLevel !== path.authority_last_decided) await trx('seo_link_acquisition_paths').where({ id: path.id }).update({ authority_last_decided: pathLevel });
 
-  // §3.1 aggregate over ALL the domain's placements, not only the ones bridged now
-  if (BRIDGE_STATES.includes(domain.agent_state)) {
+  // §3.1 aggregate over ALL the domain's placements, not only the ones bridged
+  // now. `rejected` is left only on the owner's explicit "Acquire anyway" (a
+  // valid waiver) — the bridge cannot tell its own rejection from the owner's.
+  if (BRIDGE_STATES.includes(domain.agent_state) || (domain.agent_state === 'rejected' && waiver)) {
     const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status');
     const seen = new Map(summaries.map((s) => [s.id, s]));
     const others = all.filter((p) => !seen.has(p.id));
-    const otherRows = others.length ? await trx(AUTH).whereIn('prospect_id', others.map((p) => p.id)).whereNull('ended_at').select('*') : [];
+    const otherRows = others.length ? await annotateApprovals(trx, await trx(AUTH).whereIn('prospect_id', others.map((p) => p.id)).whereNull('ended_at').select('*')) : [];
     for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id) });
     const next = aggregateState([...seen.values()]);
     if (next !== domain.agent_state) {
@@ -262,7 +326,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
       if (moved) out.aggregateChanges += 1;
     }
   }
-  return { decided: true };
+  return { decided: true, out };
 }
 
 // §3.1 — ready_to_acquire while ANY authorized placement is pending; acquired
@@ -270,10 +334,11 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
 // qualified while the owner (or a deferred owner decision) holds it; back to
 // investigating when EVERY placement is INVALID; rejected ONLY when every
 // placement is DENY (a single DENY beside a pending sibling never rejects).
+// "authorized" = satisfied, AUTO_*, or OWNER_* with a valid approval.
 function aggregateState(placements) {
   const rows = (p) => p.rows || [];
-  const authorizedPending = (p) => p.status === PARKABLE && rows(p).length > 0 && rows(p).every((r) => r.satisfied_at || isAuto(r.level));
-  const ownerPending = (p) => p.status === PARKABLE && rows(p).some((r) => !r.satisfied_at && isOwner(r.level));
+  const authorizedPending = (p) => p.status === PARKABLE && rows(p).length > 0 && rows(p).every(authorized);
+  const ownerPending = (p) => p.status === PARKABLE && rows(p).some((r) => !authorized(r) && isOwner(r.level));
   const every = (level) => placements.length > 0 && placements.every((p) => rows(p).length > 0 && rows(p).every((r) => r.level === level));
   if (placements.some(authorizedPending)) return 'ready_to_acquire';
   if (placements.some((p) => ['live', 'indexed'].includes(p.status))) return 'acquired';
@@ -291,8 +356,9 @@ function aggregateState(placements) {
  * runAuthorityBridge(db, { limit, dryRun, domainIds, now, exclusive, notify })
  *   → { dryRun, gated, selected, decided, placementsCreated, rowsWritten, redecided,
  *       ended, parked, released, invalidatedApprovals, invalidatedWaivers,
- *       aggregateChanges, errors, skipped? }
+ *       aggregateChanges, skippedLeased, errors, skipped? }
  * - gated / dryRun: selection only; zero writes, no bell.
+ * - domainIds: force-select those domains (a waiver click, an admin retry) whatever their state.
  * - skipped: 'lease_held' when another run holds the session lock.
  */
 async function runAuthorityBridge(db, {
@@ -304,17 +370,19 @@ async function runAuthorityBridge(db, {
   limit = Math.max(1, Math.min(Math.floor(Number(limit) || 0) || DEFAULT_LIMIT, RUN_LIMIT_MAX));
   const { policy, updated_at: policyUpdatedAt } = await P.loadPolicy(db);
   const targets = await selectDomains(db, { domainIds, limit, policyUpdatedAt });
-  const out = {
-    dryRun, gated, selected: targets.length, decided: 0, placementsCreated: 0, rowsWritten: 0, redecided: 0, ended: 0,
-    parked: 0, released: 0, invalidatedApprovals: 0, invalidatedWaivers: 0, aggregateChanges: 0, errors: [],
-  };
+  const out = { dryRun, gated, selected: targets.length, decided: 0, ...freshCounters(), errors: [] };
+  delete out.parkedDomains;
   if (gated || dryRun || !targets.length) return out;
 
-  const parkedDomains = new Set();
+  const parkedDomains = [];
   const ran = await exclusive(LOCK_KEY, async () => {
     for (const t of targets) {
       try {
-        const r = await db.transaction((trx) => bridgeDomain(trx, { domainId: t.id, policy, policyUpdatedAt, now, out: Object.assign(out, { parkedDomains }) }));
+        const r = await db.transaction((trx) => bridgeDomain(trx, { domainId: t.id, policy, policyUpdatedAt, now }));
+        // merge only what COMMITTED
+        for (const [k, v] of Object.entries(r.out)) {
+          if (k === 'parkedDomains') { for (const d of v) if (!parkedDomains.includes(d)) parkedDomains.push(d); } else out[k] += v;
+        }
         if (r.decided) out.decided += 1;
         else if (r.skipped) out.errors.push({ domain: t.domain, skipped: r.skipped });
       } catch (err) {
@@ -324,20 +392,18 @@ async function runAuthorityBridge(db, {
     }
     return true;
   });
-  delete out.parkedDomains;
   if (ran && ran.skipped) { out.skipped = ran.reason || 'lease_held'; return out; }
 
   // ONE bell per run that parked something (never per card); keyed by ET day so a re-run refreshes it
   if (out.parked > 0) {
-    const domains = [...parkedDomains];
     try {
-      await notify('Link placements await your decision', `${out.parked} placement${out.parked === 1 ? '' : 's'} parked awaiting your approval: ${domains.slice(0, 8).join(', ')}${domains.length > 8 ? ` +${domains.length - 8} more` : ''}`, {
+      await notify('Link placements await your decision', `${out.parked} placement${out.parked === 1 ? '' : 's'} parked awaiting your approval: ${parkedDomains.slice(0, 8).join(', ')}${parkedDomains.length > 8 ? ` +${parkedDomains.length - 8} more` : ''}`, {
         link: '/admin/seo', bell: true, dedupeKey: `link-authority:${etDateString(now)}`, refreshOnDedupe: true,
-        metadata: { lane: 'link_authority', parked: out.parked, domains },
+        metadata: { lane: 'link_authority', parked: out.parked, domains: parkedDomains },
       });
     } catch (err) { logger.error(`[link-authority] bell failed: ${err.message}`); }
   }
   return out;
 }
 
-module.exports = { runAuthorityBridge, selectDomains, aggregateState, LOCK_KEY, HOMEPAGE, BRIDGE_STATES, RUN_LIMIT_MAX, DEFAULT_LIMIT };
+module.exports = { runAuthorityBridge, selectDomains, aggregateState, annotateApprovals, LOCK_KEY, HOMEPAGE, BRIDGE_STATES, RUN_LIMIT_MAX, DEFAULT_LIMIT };
