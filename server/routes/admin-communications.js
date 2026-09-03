@@ -220,7 +220,7 @@ router.post('/sms', async (req, res, next) => {
     const activations = contractActivations;
     contractActivations = null;
     try {
-      await require('./admin-contracts').restorePreparedShareLinks(activations);
+      await require('./admin-contracts').restorePreparedShareLinks(activations, req, { reason: 'Send was not attempted, blocked, or failed' });
     } catch (restoreErr) {
       logger.warn(`[communications] prepared contract link restore failed (the row keeps its activated link until it expires): ${restoreErr.message}`);
     }
@@ -259,6 +259,9 @@ router.post('/sms', async (req, res, next) => {
       // Composer Insert Link: a pending inline review_requests row whose link
       // rides in this body — marked delivered after a real send (below).
       reviewRequestId,
+      // Composer Insert Link: the contract a freshly inserted (unwritten)
+      // signing link belongs to — activated before the provider call.
+      contractId,
     } = req.body;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
@@ -481,7 +484,10 @@ router.post('/sms', async (req, res, next) => {
     // restores/releases or records/marks them.
     try {
       const { bearerLinkSendCheck, claimCardRequestSends } = require('../services/composer-customer-links');
-      const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), { trustedCustomerId: trustedCustomerId || null });
+      const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), {
+        trustedCustomerId: trustedCustomerId || null,
+        contractId: contractId && UUID_RE.test(String(contractId)) ? String(contractId) : null,
+      });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
       if (bearerCheck.contracts) {
@@ -715,7 +721,7 @@ router.post('/sms', async (req, res, next) => {
         const { isRealProviderSend } = require('../services/sms-auto-send');
         const contracts = require('./admin-contracts');
         if (isRealProviderSend(result)) await contracts.recordPreparedShareLinkSends(activations, req, result);
-        else await contracts.restorePreparedShareLinks(activations);
+        else await contracts.restorePreparedShareLinks(activations, req, { reason: 'Send was suppressed (no provider delivery)' });
       } catch (bookErr) {
         logger.warn(`[communications] contract link send bookkeeping failed: ${bookErr.message}`);
       }
@@ -1866,7 +1872,7 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // would insert a link the send then refuses (pre-push Codex P1).
       prep_guide: (ids, primaryId) => builders.buildPrepGuideLink([primaryId]),
       service_report: (ids) => builders.buildServiceReportLink(ids),
-      contract: (ids, primaryId) => builders.buildContractSigningLink([primaryId], req),
+      contract: (ids, primaryId) => builders.buildContractSigningLink([primaryId]),
       // A payer statement covers the bill-to's whole book and goes to the
       // PAYER's AP phone — which is normally no customer's phone at all, so
       // this kind never resolves a customer: the builder resolves the payer

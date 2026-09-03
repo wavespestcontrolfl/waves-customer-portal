@@ -61,7 +61,11 @@ jest.mock('../routes/reports-public', () => ({
     return Boolean(mode) && mode !== 'auto_send';
   },
 }));
-jest.mock('../routes/admin-contracts', () => ({ createShareLink: jest.fn() }));
+// The writer's predicate is real (pure); nothing in the builder writes.
+jest.mock('../routes/admin-contracts', () => ({
+  createShareLink: jest.fn(),
+  deliveredLiveShareLink: jest.requireActual('../routes/admin-contracts').deliveredLiveShareLink,
+}));
 // The public prep page's own resolver (token → source; expiry enforced there).
 jest.mock('../routes/prep-public', () => ({ resolvePrepSource: jest.fn() }));
 jest.mock('../services/payer-statement-settle', () => ({
@@ -951,55 +955,42 @@ describe('buildServiceReportLink', () => {
 });
 
 describe('buildContractSigningLink', () => {
-  const req = { technicianId: 'admin-1', ip: '127.0.0.1', get: () => 'jest' };
+  const MINTED = /^https:\/\/portal\.wavespestcontrol\.com\/contract\/[A-Za-z0-9_-]{43}$/;
   beforeEach(() => { createShareLink.mockReset(); });
 
-  test('no contract awaiting signature → reason, no mint', async () => {
+  test('no contract awaiting signature → reason, nothing minted', async () => {
     mockBuilders = { customer_contracts: chainBuilder({ firstRow: null }) };
-    const r = await buildContractSigningLink(['c1'], req);
+    const r = await buildContractSigningLink(['c1']);
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/No contract awaiting signature/);
-    expect(createShareLink).not.toHaveBeenCalled();
   });
 
-  test('PREPARES through the share-link writer — an insert is not a delivery, so the link is immediate-only and carries no window (GH Codex #3844 r3 P1)', async () => {
-    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', contract_type: 'autopay_authorization' } }) };
-    createShareLink.mockResolvedValue({ signingUrl: 'https://portal.wavespestcontrol.com/contract/tokX', expiresAt: null, contract: { id: 'k1' } });
-    const r = await buildContractSigningLink(['c1'], req);
-    expect(createShareLink).toHaveBeenCalledWith('k1', req, { prepare: true });
-    expect(r.url).toBe('https://portal.wavespestcontrol.com/contract/tokX');
-    expect(r.line).toBe('Please review and sign your Auto Pay Authorization here: https://portal.wavespestcontrol.com/contract/tokX\n\n');
+  test('mints the token IN MEMORY and writes nothing — the /sms send activates it (GH Codex #3844 r3 P1 + pre-push P0)', async () => {
+    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef', share_token_expires_at: new Date(Date.now() - 1000) } }) };
+    const r = await buildContractSigningLink(['c1']);
+    expect(r.url).toMatch(MINTED);
+    expect(r.line).toBe(`Please review and sign your Auto Pay Authorization here: ${r.url}\n\n`);
     expect(r.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true });
     expect(r.immediateOnly).toBe(true);
     expect(r.expiresAt).toBeUndefined();
-    // The delivered-live refusal is the writer's, under its row lock — the
-    // builder never pre-reads the link columns (a read outside the lock is
-    // the race r3 flagged).
-    expect(mockBuilders.customer_contracts.first).toHaveBeenCalledWith('id', 'title', 'contract_type', 'requires_signature_snapshot');
+    expect(createShareLink).not.toHaveBeenCalled();
+    expect(mockBuilders.customer_contracts.update).not.toHaveBeenCalled();
+    // Two inserts, two different tokens — nothing shared, nothing rotated.
+    expect((await buildContractSigningLink(['c1'])).url).not.toBe(r.url);
   });
 
-  test('the writer refusing a still-live delivered link (pre-push Codex P0) becomes the reason, unchanged', async () => {
-    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', contract_type: 'autopay_authorization' } }) };
-    createShareLink.mockResolvedValue({ error: { status: 409, message: 'A signing link for Auto Pay Authorization was already sent and is still live — the customer can use it, or resend it from the Contracts page' } });
-    const r = await buildContractSigningLink(['c1'], req);
+  test('a delivered link whose window is still open refuses (courtesy — the send re-judges it under the row lock)', async () => {
+    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef', share_token_expires_at: new Date(Date.now() + 86400e3) } }) };
+    const r = await buildContractSigningLink(['c1']);
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/already sent and is still live/);
   });
 
   test('a review-only document request (no signature) does not ask for one', async () => {
     mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k2', title: 'Service Guide', contract_type: 'document_template', requires_signature_snapshot: false } }) };
-    createShareLink.mockResolvedValue({ signingUrl: 'https://portal.wavespestcontrol.com/contract/tokY', expiresAt: null, contract: { id: 'k2' } });
-    const r = await buildContractSigningLink(['c1'], req);
-    expect(r.line).toBe('Please review your Service Guide here: https://portal.wavespestcontrol.com/contract/tokY\n\n');
+    const r = await buildContractSigningLink(['c1']);
+    expect(r.line).toBe(`Please review your Service Guide here: ${r.url}\n\n`);
     expect(r.contract.requiresSignature).toBe(false);
-  });
-
-  test('a share-link refusal (status drift) becomes the reason', async () => {
-    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Doc', contract_type: 'document_template' } }) };
-    createShareLink.mockResolvedValue({ error: { status: 409, message: 'Contract status changed. Refresh and try again.' } });
-    const r = await buildContractSigningLink(['c1'], req);
-    expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/status changed/);
   });
 });
 
@@ -1130,15 +1121,47 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     expect(await bearerLinkSendCheck('Hi there, see you Tuesday.', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
   });
 
-  test('a live contract link owned by the recipient passes and rides back for activation; the lookup is by token HASH', async () => {
+  test('a live contract link owned by the recipient passes and rides back as delivered; the lookup is by token HASH', async () => {
     const contracts = wire();
-    expect(await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, contracts: [{ id: 'k1', tokenHash: hashContractToken(TOKEN) }] });
+    expect(await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, contracts: [{ id: 'k1', tokenHash: hashContractToken(TOKEN), delivered: true }] });
     expect(contracts.where).toHaveBeenCalledWith({ share_token_hash: hashContractToken(TOKEN) });
   });
 
-  test('a PREPARED link (hash, no window yet — the composer insert) is live: the send activates it', async () => {
-    wire({ contract: { ...live, status: 'draft', share_token_expires_at: null } });
-    expect(await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, contracts: [{ id: 'k1', tokenHash: hashContractToken(TOKEN) }] });
+  describe('the composer\'s own unwritten insert (no stored hash — GH Codex #3844 r3 P1 + pre-push P0)', () => {
+    const MINTED = 'A'.repeat(43);
+    const MINTED_BODY = `Please sign: portal.wavespestcontrol.com/contract/${MINTED}`;
+    function wireUnwritten(contract = { id: 'k9', customer_id: 'c1', status: 'draft' }) {
+      const contracts = wire().customer_contracts || mockBuilders.customer_contracts;
+      // First lookup = by hash (nothing stored); second = by the composer's contractId.
+      contracts.first = jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(contract);
+      return contracts;
+    }
+
+    test('the composer names the contract, the token is a minted one, the owner matches → rides back for activation', async () => {
+      const contracts = wireUnwritten();
+      expect(await bearerLinkSendCheck(MINTED_BODY, '9415550100', { trustedCustomerId: 'c1', contractId: 'k9' })).toEqual({ ok: true, contracts: [{ id: 'k9', tokenHash: hashContractToken(MINTED), delivered: false }] });
+      expect(contracts.where).toHaveBeenCalledWith({ id: 'k9' });
+      expect(contracts.first).toHaveBeenCalledWith('id', 'customer_id', 'status');
+    });
+
+    test('no contractId (a pasted or reloaded link) refuses — nothing to activate', async () => {
+      wireUnwritten();
+      expect((await bearerLinkSendCheck(MINTED_BODY, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/expired or no longer live/);
+    });
+
+    test('a token that is not a composer mint refuses (the client cannot choose the bearer)', async () => {
+      wireUnwritten();
+      expect((await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: 'c1', contractId: 'k9' })).error).toMatch(/expired or no longer live/);
+    });
+
+    test.each([
+      ['a terminal contract', { id: 'k9', customer_id: 'c1', status: 'signed' }, '9415550100', /expired or no longer live/],
+      ['an unknown contract', null, '9415550100', /expired or no longer live/],
+      ['a contract whose customer is not the trusted recipient', { id: 'k9', customer_id: 'c2', status: 'draft' }, '9415550100', /search dropdown/],
+    ])('%s refuses', async (_label, contract, phone, msg) => {
+      wireUnwritten(contract);
+      expect((await bearerLinkSendCheck(MINTED_BODY, phone, { trustedCustomerId: 'c1', contractId: 'k9' })).error).toMatch(msg);
+    });
   });
 
   describe('prep guide links (the public page\'s predicates, re-run at the send — GH Codex #3844 r3 P2)', () => {

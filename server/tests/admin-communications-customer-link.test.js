@@ -433,7 +433,7 @@ describe('POST /admin/communications/customer-link', () => {
       const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'contract' });
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(builders.buildContractSigningLink).toHaveBeenCalledWith([CUSTOMER_UUID], expect.anything());
+      expect(builders.buildContractSigningLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
       expect(body.customerId).toBe(CUSTOMER_UUID);
       expect(body.expiresAt).toBe('2026-10-03T00:00:00.000Z');
       expect(body.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true });

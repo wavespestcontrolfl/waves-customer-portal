@@ -636,12 +636,33 @@ describe('admin communications SMS route', () => {
           const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
           expect(res.status).toBe(200);
           const { activatePreparedShareLinks, recordPreparedShareLinkSends, restorePreparedShareLinks } = contracts();
-          expect(activatePreparedShareLinks).toHaveBeenCalledWith([{ id: 'k1', tokenHash: TOKEN_HASH }], expect.anything());
+          expect(activatePreparedShareLinks).toHaveBeenCalledWith([{ id: 'k1', tokenHash: TOKEN_HASH, delivered: true }], expect.anything());
           expect(activatePreparedShareLinks.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
           expect(recordPreparedShareLinkSends).toHaveBeenCalledWith(
             [expect.objectContaining({ id: 'k1', tokenHash: TOKEN_HASH })], expect.anything(), expect.objectContaining({ providerMessageId: 'SM7' }),
           );
           expect(restorePreparedShareLinks).not.toHaveBeenCalled();
+        });
+      });
+
+      test('an unwritten composer insert: the body\'s minted token + the composer\'s contractId reach activation as delivered:false', async () => {
+        const MINTED = 'B'.repeat(43);
+        const CONTRACT_UUID = 'aaaa1111-0000-4000-8000-000000000001';
+        sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM7', provider: 'twilio' });
+        // Every db(table) call is a fresh builder — count contract lookups
+        // across them: by hash → nothing stored; by id → the composer's contract.
+        let contractLookups = 0;
+        db.mockImplementation((table) => {
+          const first = jest.fn();
+          if (table === 'customer_contracts') first.mockImplementation(async () => (contractLookups++ === 0 ? null : { id: CONTRACT_UUID, customer_id: 'cust-A', status: 'draft' }));
+          else if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+          return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', contractId: CONTRACT_UUID, body: `Please sign: portal.wavespestcontrol.com/contract/${MINTED}` });
+          expect(res.status).toBe(200);
+          expect(contracts().activatePreparedShareLinks).toHaveBeenCalledWith([{ id: CONTRACT_UUID, tokenHash: hashContractToken(MINTED), delivered: false }], expect.anything());
+          expect(contracts().activatePreparedShareLinks.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
         });
       });
 
@@ -665,7 +686,7 @@ describe('admin communications SMS route', () => {
         await withServer(async (baseUrl) => {
           const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
           expect(res.status).toBe(status);
-          expect(contracts().restorePreparedShareLinks).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })]);
+          expect(contracts().restorePreparedShareLinks).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })], expect.anything(), expect.objectContaining({ reason: expect.any(String) }));
           expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
         });
       });
@@ -686,7 +707,7 @@ describe('admin communications SMS route', () => {
         await withServer(async (baseUrl) => {
           const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
           expect(res.status).toBe(500);
-          expect(contracts().restorePreparedShareLinks).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })]);
+          expect(contracts().restorePreparedShareLinks).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })], expect.anything(), expect.anything());
           expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
         });
       });

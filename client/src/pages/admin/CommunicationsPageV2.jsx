@@ -838,7 +838,7 @@ function SmsTab() {
   const [libraryError, setLibraryError] = useState(null);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
-  // kind: { url, recipientKey, customerId, requestId? }. Same bearer-link
+  // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
   // strip contract as insertedResched/insertedReservice above.
   const [insertingCustomerLink, setInsertingCustomerLink] = useState(null);
   const [insertedCustomerLinks, setInsertedCustomerLinks] = useState({});
@@ -1304,6 +1304,9 @@ function SmsTab() {
             // The send that just left IS the review ask — the server marks
             // the inline review_requests row delivered (see /sms route).
             reviewRequestId: insertedCustomerLinks.review_request?.requestId || undefined,
+            // A freshly inserted contract signing link is unwritten until
+            // this send activates it — the server needs the contract it names.
+            contractId: insertedCustomerLinks.contract?.contractId || undefined,
           }),
         });
         setSendResult({ ok: true, text: "Message sent." });
@@ -1852,6 +1855,7 @@ function SmsTab() {
           recipientKey: requestRecipientKey,
           customerId: linkCustomerId,
           requestId: d.requestId || null,
+          contractId: d.contract?.id || null,
           // Expiring / immediate-only bearer links refuse scheduled and
           // draft sends (see the send boundary) — the server says which.
           expiresAt: d.expiresAt || null,

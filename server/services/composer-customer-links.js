@@ -699,8 +699,12 @@ async function immediateOnlyLinkSendCheck(body) {
  * card link to another phone, after rotation, or after expiry.
  *   contract  — /contract/<token>: the token's hash must match a live,
  *               unexpired, non-terminal customer_contracts row (a rotated
- *               or expired link matches nothing → refuse); a PREPARED row
- *               (hash, no window) is live — the send activates it.
+ *               or expired link matches nothing → refuse) — OR be the
+ *               composer's own unwritten insert: the caller names the
+ *               contract (`contractId`), the token is one the insert
+ *               minted (32 random bytes, base64url) and the contract's
+ *               customer owns the recipient; the send then activates it
+ *               under the row lock (activatePreparedShareLinks).
  *   prep      — /prep/<token>: the public page's own predicates at the send
  *               (GH Codex #3844 r3 P2) — the token still resolves
  *               (unexpired) and its guide still has an active version.
@@ -724,13 +728,16 @@ async function immediateOnlyLinkSendCheck(body) {
  * out; `cards` rides back with every live visit-lane link so the caller
  * can CLAIM the card request's one-text-ever send before dispatch
  * (claimCardRequestSends) — a row already texted (sent_at) refuses here —
- * `contracts` with every verified signing link ({ id, tokenHash }) so the
- * caller can ACTIVATE a prepared one before dispatch
+ * `contracts` with every verified signing link ({ id, tokenHash, delivered })
+ * so the caller can ACTIVATE an unwritten one before dispatch
  * (activatePreparedShareLinks), and `statements` with every verified
  * statement id so a real send can stamp finalized → sent
  * (markStatementsSent).
  */
-async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
+// The composer's own mint (contracts.js mintContractToken): 32 random bytes, base64url.
+const UNWRITTEN_CONTRACT_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+
+async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, contractId = null } = {}) {
   const runs = decodedRuns(body);
   const host = new URL(publicPortalUrl()).host.toLowerCase();
   const refuse = (error) => ({ ok: false, error });
@@ -757,13 +764,30 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
     const row = await db('customer_contracts')
       .where({ share_token_hash: tokenHash })
       .first('id', 'customer_id', 'status', 'share_token_expires_at');
-    const dead = !row
-      || ['signed', 'cancelled', 'voided', 'expired'].includes(String(row.status || '').toLowerCase())
-      || (row.share_token_expires_at && new Date(row.share_token_expires_at).getTime() <= Date.now());
-    if (dead) return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
-    const bad = await owned(row.customer_id, 'contract signing link');
+    const terminal = (status) => ['signed', 'cancelled', 'voided', 'expired'].includes(String(status || '').toLowerCase());
+    if (row) {
+      const dead = terminal(row.status)
+        || (row.share_token_expires_at && new Date(row.share_token_expires_at).getTime() <= Date.now());
+      if (dead) return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
+      const bad = await owned(row.customer_id, 'contract signing link');
+      if (bad) return bad;
+      if (!contracts.some((c) => c.tokenHash === tokenHash)) contracts.push({ id: row.id, tokenHash, delivered: true });
+      continue;
+    }
+    // No stored link: the composer's own unwritten insert, or a dead one.
+    // The composer names the contract and the token must be one the insert
+    // minted; the row's customer must own the recipient. Delivered-live and
+    // status are judged under the row lock at activation.
+    if (!contractId || !UNWRITTEN_CONTRACT_TOKEN_RE.test(token)) {
+      return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
+    }
+    const contract = await db('customer_contracts').where({ id: contractId }).first('id', 'customer_id', 'status');
+    if (!contract || terminal(contract.status)) {
+      return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
+    }
+    const bad = await owned(contract.customer_id, 'contract signing link');
     if (bad) return bad;
-    if (!contracts.some((c) => c.tokenHash === tokenHash)) contracts.push({ id: row.id, tokenHash });
+    if (!contracts.some((c) => c.tokenHash === tokenHash)) contracts.push({ id: contract.id, tokenHash, delivered: false });
   }
 
   // Prep guide pages: the page shows the customer's name and address and
@@ -1124,41 +1148,49 @@ const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
  * Contract signing link — the phone-owning customer's newest contract
  * still awaiting a signature (the route passes that ONE row, never account
  * siblings — a signable bearer follows the document delivery's own
- * recipient rule), PREPARED through the share-link route's ONE writer
- * (createShareLink, prepare mode). An insert is not a delivery: only the
- * token's hash lands — status, shared_at and the expiry window stay as
- * they are until the /sms send activates the link (bearerLinkSendCheck →
- * activatePreparedShareLinks), windowed from the send — so an abandoned
- * insert is simply replaced by the next one, while a link the customer may
- * still hold (delivered, window open) is REFUSED under the row lock rather
- * than rotated (pre-push Codex P0 + GH r3 P1); re-sending a live link stays
- * the Contracts page's deliberate action. The recipient-phone trust the
- * document delivery enforces (SMS_RECIPIENT_UNTRUSTED) already holds here:
- * /customer-link only resolves a customer whose phone is the recipient.
+ * recipient rule). The insert mints the token IN MEMORY and writes nothing:
+ * a bearer nobody can use exists only once the /sms send ACTIVATES it
+ * (bearerLinkSendCheck → activatePreparedShareLinks, the composer naming
+ * the contract), which writes the hash with status sent and a window
+ * opened from the send — the document delivery's prepare → activate →
+ * send shape, spread across the insert and the send (GH Codex #3844 r3 P1
+ * + pre-push P0: nothing is publicly live before delivery, an abandoned
+ * insert leaves nothing behind). A link the customer may still hold
+ * (delivered, window open) refuses here as a courtesy and again under the
+ * row lock at the send — never rotated (pre-push Codex P0); re-sending a
+ * live link stays the Contracts page's deliberate action. The recipient-
+ * phone trust the document delivery enforces (SMS_RECIPIENT_UNTRUSTED)
+ * already holds: /customer-link only resolves a customer whose phone is
+ * the recipient, and the send re-checks ownership.
  */
-async function buildContractSigningLink(customerIds, req) {
+async function buildContractSigningLink(customerIds) {
   const row = await db('customer_contracts')
     .whereIn('customer_id', customerIds)
     .where((qb) => qb
       .whereIn('status', CONTRACT_LINKABLE_STATUSES)
       .orWhere({ status: 'expired', contract_type: 'document_template' }))
     .orderBy('created_at', 'desc')
-    .first('id', 'title', 'contract_type', 'requires_signature_snapshot');
+    .first('id', 'title', 'contract_type', 'requires_signature_snapshot', 'share_token_hash', 'share_token_expires_at');
   if (!row) return { url: null, line: '', reason: 'No contract awaiting signature on this account' };
-  const { createShareLink } = require('../routes/admin-contracts');
-  const result = await createShareLink(row.id, req, { prepare: true });
-  if (result?.error) return { url: null, line: '', reason: result.error.message };
   const title = String(row.title || '').trim() || 'agreement';
+  if (require('../routes/admin-contracts').deliveredLiveShareLink(row)) {
+    return {
+      url: null,
+      line: '',
+      reason: `A signing link for ${title} was already sent and is still live — the customer can use it, or resend it from the Contracts page`,
+    };
+  }
+  const { mintContractToken, publicContractUrl, documentRequiresSignature } = require('./contracts');
+  const url = publicContractUrl(mintContractToken());
   // A document request whose template needs no signature is review-only —
   // the text must not ask for one (pre-push Codex P1). contracts.js's own
   // predicate: the creation-time snapshot, defaulting to signature required.
-  const { documentRequiresSignature } = require('./contracts');
   const needsSignature = documentRequiresSignature(row);
   return {
-    url: result.signingUrl,
-    line: `Please review${needsSignature ? ' and sign' : ''} your ${title} here: ${result.signingUrl}\n\n`,
-    // Immediate sends only — /sms is the one path that activates a prepared
-    // link (immediateOnlyLinkSendCheck is the server fence).
+    url,
+    line: `Please review${needsSignature ? ' and sign' : ''} your ${title} here: ${url}\n\n`,
+    // Immediate sends only — /sms is the one path that activates the link
+    // (immediateOnlyLinkSendCheck is the server fence).
     immediateOnly: true,
     contract: { id: row.id, title, requiresSignature: needsSignature },
   };
