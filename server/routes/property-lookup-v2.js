@@ -4182,21 +4182,28 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     if (!TREE_SHRUB_TIERS.has(tsTier)) throw treeShrubInputError('Tree & Shrub program must be light, standard, or enhanced.');
     const tsAccess = String(o.treeShrubAccess || 'easy').trim().toLowerCase();
     if (!TREE_SHRUB_ACCESS.has(tsAccess)) throw treeShrubInputError('Tree & Shrub access must be easy, moderate, or difficult.');
-    // Palms: the same resolution the property block uses below (a stored
-    // inventory count, else the vision estimate when its trust verdict
-    // allows it); a present-but-invalid count is rejected under the
-    // public-quote / intent-schema contract (whole number 1–200), never
-    // clamped into a confident price.
-    const palmRaw = measurementValue(
-      p.palmCount,
-      p.palmInventory?.palmCount,
-      p.palmCountTrusted === false ? undefined : p.estimatedPalmCount,
-    );
+    // Palms: the same resolution the property block uses below — the
+    // operator's count, else a stored inventory count, else the vision
+    // estimate when its trust verdict allows it. Only the OPERATOR count is
+    // validated (whole number 0–200 — the public-quote / intent-schema
+    // 1–200 contract, with a zero reading as "no palms" exactly like a
+    // cleared field); the fallback legs are lookup sentinels, never
+    // contracts — the lookup stores estimatedPalmCount: 0 when no palms
+    // were found, so a non-positive fallback is simply ABSENT (pre-push r3
+    // P0), the same way the palmInventory block below reads it.
     let tsPalmCount;
-    if (palmRaw !== undefined) {
-      const n = Number(palmRaw);
-      if (!(Number.isInteger(n) && n > 0 && n <= 200)) throw treeShrubInputError('Palm count must be a whole number between 1 and 200.');
-      tsPalmCount = n;
+    const typedPalmRaw = measurementValue(p.palmCount);
+    if (typedPalmRaw !== undefined) {
+      const n = Number(typedPalmRaw);
+      if (!(Number.isInteger(n) && n >= 0 && n <= 200)) throw treeShrubInputError('Palm count must be a whole number between 1 and 200.');
+      tsPalmCount = n > 0 ? n : undefined;
+    }
+    if (tsPalmCount === undefined) {
+      const fallbackPalm = positiveIntegerValue(
+        p.palmInventory?.palmCount,
+        p.palmCountTrusted === false ? undefined : p.estimatedPalmCount,
+      );
+      if (Number.isInteger(fallbackPalm) && fallbackPalm > 0 && fallbackPalm <= 200) tsPalmCount = fallbackPalm;
     }
     services.treeShrub = {
       tier: tsTier,

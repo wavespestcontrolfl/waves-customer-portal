@@ -218,8 +218,28 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
     });
   });
 
-  test('a present-but-invalid palm count is refused under the 1–200 contract', () => {
-    for (const palmCount of [0, 201, 'many', 3.5]) {
+  test('lookup palm sentinels are ABSENT, never rejected: estimatedPalmCount 0, an empty inventory, a cleared operator field', () => {
+    for (const extra of [
+      { estimatedPalmCount: 0 },
+      { estimatedPalmCount: 0, palmInventory: { palmCount: 0 } },
+      { palmCount: 0, estimatedPalmCount: 0 },
+      { palmCount: '', estimatedPalmCount: 0 },
+      { palmInventory: {}, estimatedPalmCount: null },
+    ]) {
+      const input = translateV2CallToV1Input(baseProfile(extra), ['TREE_SHRUB'], {});
+      expect(input.services.treeShrub).not.toHaveProperty('palmCount');
+    }
+    // A zero inventory does not fall through to a positive estimate (same
+    // first-present rule the palmInventory block uses).
+    expect(translateV2CallToV1Input(baseProfile({ palmInventory: { palmCount: 0 }, estimatedPalmCount: 9 }), ['TREE_SHRUB'], {})
+      .services.treeShrub).not.toHaveProperty('palmCount');
+    // A garbage vision leg is absent, not a 400.
+    expect(translateV2CallToV1Input(baseProfile({ estimatedPalmCount: 'lots' }), ['TREE_SHRUB'], {})
+      .services.treeShrub).not.toHaveProperty('palmCount');
+  });
+
+  test('a present-but-invalid OPERATOR palm count is refused under the 1–200 contract', () => {
+    for (const palmCount of [-1, 201, 'many', 3.5]) {
       let caught;
       try { translateV2CallToV1Input(baseProfile({ palmCount }), ['TREE_SHRUB'], {}); } catch (err) { caught = err; }
       expect(caught?.statusCode).toBe(400);
