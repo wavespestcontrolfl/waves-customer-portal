@@ -28,8 +28,11 @@ const FAILURE_CLASS = Object.freeze([
   'infrastructure', 'provider', 'tool', 'timeout', 'bad_input', 'budget',
   'reasoning', 'instruction', 'incomplete', 'regression', 'incorrect',
 ]);
-// The model's fault — what an eval could have caught.
-const QUALITY_FAILURE_CLASSES = Object.freeze(new Set(['reasoning', 'instruction', 'incomplete', 'regression', 'incorrect']));
+// The model's fault — what an eval could have caught. A frozen array, not a
+// Set: Object.freeze() leaves a Set's entries mutable, and this vocabulary
+// decides process-wide what becomes an eval candidate.
+const QUALITY_FAILURE_CLASSES = Object.freeze(['reasoning', 'instruction', 'incomplete', 'regression', 'incorrect']);
+const isQualityFailure = (failureClass) => QUALITY_FAILURE_CLASSES.includes(failureClass);
 
 const SIDE_EFFECT_CLASS = Object.freeze(['read_only', 'internal_write', 'draft_for_human', 'customer_visible', 'money', 'irreversible_external']);
 const RISK_TIER = Object.freeze({
@@ -89,7 +92,10 @@ const EVAL_FAMILY = Object.freeze([
  * are the strings services/llm/call.js and the validators actually produce
  * (`no_key`, `openai_429`, `anthropic_529`, `all_providers_failed`,
  * `timeout_budget_exhausted`, `openai_incomplete`, `empty_json`, `empty_text`,
- * `error`, validator rejection messages such as `banned:...`).
+ * `error`, validator rejection messages such as `banned:...`) plus the
+ * per-lane validator codes: `extraction_schema_invalid` (call extraction),
+ * `research_schema_invalid` (call research), `missing_is_service_claim`
+ * (footprint claim), `unmappable_screen` (job screen).
  *
  * ctx.pastBudget — the chain had already used its time budget when the code
  *   was produced (turns `openai_incomplete` into a timeout instead of an
@@ -114,6 +120,11 @@ function classifyFailure(errorCode, ctx = {}) {
   if (code === 'bad_request' || /_(400|413)$/.test(code)) return 'bad_input';
   if (code === 'empty_json' || code === 'empty_text' || code === 'unparseable' || code === 'truncated') return 'incomplete';
   if (code.startsWith('banned:') || code === 'safety_gate' || code === 'validator_rejected') return 'instruction';
+  // Lane validators: the model answered, but not in the shape it was told to
+  // (`*_schema_invalid`, `unmappable_*`) or with a required field missing
+  // (`missing_*`). The model's fault — eval candidates, not plumbing.
+  if (/_schema_invalid$/.test(code) || code.startsWith('unmappable_')) return 'instruction';
+  if (code.startsWith('missing_')) return 'incomplete';
   // Generic `error` (abort, socket hang-up, fetch failed) and anything unknown.
   return 'infrastructure';
 }
@@ -126,6 +137,7 @@ module.exports = {
   DISPOSITION,
   FAILURE_CLASS,
   QUALITY_FAILURE_CLASSES,
+  isQualityFailure,
   SIDE_EFFECT_CLASS,
   riskTierFor,
   PRIORITY,

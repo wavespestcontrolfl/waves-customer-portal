@@ -33,6 +33,9 @@ describe('agent-control taxonomy', () => {
     expect(Object.isFrozen(tax.MATURITY)).toBe(true);
     expect([...tax.QUALITY_FAILURE_CLASSES].sort()).toEqual(['incomplete', 'incorrect', 'instruction', 'reasoning', 'regression']);
     expect(Object.isFrozen(tax.QUALITY_FAILURE_CLASSES)).toBe(true);
+    expect(() => tax.QUALITY_FAILURE_CLASSES.push('provider')).toThrow();
+    expect(tax.isQualityFailure('incorrect')).toBe(true);
+    expect(tax.isQualityFailure('provider')).toBe(false);
     for (const cls of tax.QUALITY_FAILURE_CLASSES) expect(tax.FAILURE_CLASS).toContain(cls);
   });
 
@@ -74,6 +77,10 @@ describe('agent-control taxonomy', () => {
     ['banned:reentry_claim', {}, 'instruction'],
     ['safety_gate', {}, 'instruction'],
     ['validator_rejected', {}, 'instruction'],
+    ['extraction_schema_invalid', {}, 'instruction'],
+    ['research_schema_invalid', {}, 'instruction'],
+    ['unmappable_screen', {}, 'instruction'],
+    ['missing_is_service_claim', {}, 'incomplete'],
     ['tool_timeout', {}, 'tool'],
     ['openai_500', { tool: true }, 'tool'],
     ['judge_failed', {}, 'incorrect'],
@@ -101,10 +108,11 @@ describe('agent-control lane policies', () => {
 
   const MANAGED_AGENT_LANES = ['agent_bi', 'agent_lead', 'agent_content', 'agent_meta', 'agent_backlink', 'agent_assistant'];
   // Lanes that must never substitute a provider: the answer IS the
-  // measurement (mention probes), the exam leg is frozen (sealed eval), or the
-  // model is bake-off pinned (call research) / a judge whose scores are only
-  // comparable on one model (shadow judge).
-  const MEASUREMENT_LANES = ['mentions_prober', 'sealed_eval', 'shadow_judge', 'call_research'];
+  // measurement (mention probes), the exam leg is frozen (sealed eval), or a
+  // judge whose scores are only comparable on one model (shadow judge). Call
+  // research is NOT one: its miner deliberately dispatches with a
+  // cross-provider fallback (call-research-miner.js), so it is `offline`.
+  const MEASUREMENT_LANES = ['mentions_prober', 'sealed_eval', 'shadow_judge'];
 
   it('every switchboard lane has a runtime entry and vice versa (drift guard)', () => {
     const laneIds = sb.LANES.map((l) => l.id).sort();

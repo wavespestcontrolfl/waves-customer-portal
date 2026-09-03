@@ -76,14 +76,14 @@ const LANE_RUNTIME = {
   // ── Calls ──
   call_extraction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0', ...CALL_PIPELINE },
   call_extraction_v1: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', ...CALL_PIPELINE },
-  call_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'measurement', eval_family: 'structured_extraction', expected_cadence: 'daily', ...LONG_BATCH },
+  call_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_cadence: 'daily', ...LONG_BATCH },
   transcription: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   transcript_label: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   contact_pass: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   call_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   call_self_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_cadence: 'daily', ...LONG_BATCH },
   lead_synopsis: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
-  csr_coach: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'hourly' },
+  csr_coach: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'hourly' },
   contact_dictation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'transcription_contact' },
   address_recovery: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
   tech_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'interactive', eval_family: 'transcription_contact' },
@@ -155,7 +155,7 @@ const LANE_RUNTIME = {
   codex_remediation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', ...LONG_BATCH },
   footprint_claim: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_cadence: 'daily' },
   seo_intent: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  seo_advisor: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'weekly', ...LONG_BATCH },
+  seo_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'weekly', ...LONG_BATCH },
   prospect_score: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   signup_classifier: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_cadence: 'weekly' },
   outreach_drafter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', expected_cadence: 'daily', maturity: 'M2' },
@@ -167,7 +167,7 @@ const LANE_RUNTIME = {
   image_gen: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, expected_duration_ms: 180_000 },
   video_gen: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'video', fallback_class: 'offline', eval_family: null, ...LONG_BATCH },
   events: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_cadence: 'daily', maturity: 'M3', ...LONG_BATCH },
-  ads_advisor: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'daily' },
+  ads_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'daily' },
 
   // ── Intelligence Bar & knowledge ──
   ib_admin: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
@@ -187,7 +187,7 @@ const LANE_RUNTIME = {
   portal_assistant: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
 
   // ── Managed agents (sessions) ──
-  agent_bi: { side_effect_class: 'read_only', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', expected_cadence: 'weekly', ...AGENT_SESSION },
+  agent_bi: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', expected_cadence: 'weekly', ...AGENT_SESSION },
   agent_lead: { side_effect_class: 'customer_visible', ledger: 'session', fallback_class: 'interactive', eval_family: 'long_running_agent', ...AGENT_SESSION },
   agent_content: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', ...AGENT_SESSION },
   agent_meta: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', ...AGENT_SESSION },
@@ -196,7 +196,7 @@ const LANE_RUNTIME = {
 
   // ── Back office ──
   expense_categorize: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  tax_advisor: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'weekly', ...LONG_BATCH },
+  tax_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'weekly', ...LONG_BATCH },
   inventory_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', expected_duration_ms: 180_000 },
   job_screen: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
 };
