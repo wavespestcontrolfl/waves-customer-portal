@@ -125,6 +125,9 @@ function classifyFailure(errorCode, ctx = {}) {
   const code = String(errorCode || '').toLowerCase();
   if (ctx.tool === true || code.startsWith('tool_')) return 'tool';
   if (code.includes('(response truncated at max_tokens')) return 'incomplete';
+  // The validate hook THREW (llm/call.js records `validator_error:<msg>`):
+  // broken validation plumbing, not a rejected answer — whatever ctx says.
+  if (code.startsWith('validator_error:')) return 'infrastructure';
   if (ctx.validator === true) return /^(empty_|no_|missing_)|_empty$|_missing$/.test(code) ? 'incomplete' : 'instruction';
   if (code === 'judge_failed') return 'incorrect';
   if (code === 'eval_regression') return 'regression';

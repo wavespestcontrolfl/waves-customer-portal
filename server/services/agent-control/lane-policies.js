@@ -68,7 +68,9 @@ const LANE_RUNTIME = {
   contact_correction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3' },
   sms_pathology: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_cadence: 'daily', ...LONG_BATCH },
   sms_verifier: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check' },
-  shadow_judge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'measurement', eval_family: 'compliance_check', expected_cadence: 'daily', maturity: 'M0', ...LONG_BATCH },
+  // offline, not measurement: the nightly judge goes through createDeepMessage,
+  // which deliberately falls back to the OpenAI leg and records who judged.
+  shadow_judge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_cadence: 'daily', maturity: 'M0', ...LONG_BATCH },
   voice_profile: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'daily', ...LONG_BATCH },
   sealed_eval: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'measurement', eval_family: 'routine_copy', expected_cadence: 'daily', ...LONG_BATCH },
   quarantine_arbiter: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'transcription_contact' },
@@ -164,7 +166,9 @@ const LANE_RUNTIME = {
   seo_intent: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   seo_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'weekly', ...LONG_BATCH },
   prospect_score: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
-  signup_classifier: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_cadence: 'weekly' },
+  // event, not weekly: a healthy weekly tick over an empty board (or only
+  // known directories, handled heuristically) makes no model call.
+  signup_classifier: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   outreach_drafter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', expected_cadence: 'daily', maturity: 'M2' },
   form_filler: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: null, ...LONG_BATCH },
   signup_worker: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: null, ...LONG_BATCH },

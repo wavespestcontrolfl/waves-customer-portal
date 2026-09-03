@@ -66,6 +66,11 @@ describe('agent-control context', () => {
         expect(ctx.current().spanId).toBe(outer.spanId);
         ctx.withStep('child', () => expect(ctx.current().parentSpanId).toBe(outer.spanId));
       });
+      // An explicit trace that is NOT the ambient one is another trace too.
+      ctx.runInRun({ runId: 'other', traceId: 'b'.repeat(32) }, () => {
+        const c = ctx.current();
+        expect([c.traceId, c.stepId, c.spanId, c.parentSpanId]).toEqual(['b'.repeat(32), null, null, null]);
+      });
     }));
   });
 

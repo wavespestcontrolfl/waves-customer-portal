@@ -96,6 +96,9 @@ describe('agent-control taxonomy', () => {
     ['empty_output', {}, 'incomplete'],
     // A recorder that knows the code came from a lane validator needs no vocabulary.
     ['some_lane_specific_rule', { validator: true }, 'instruction'],
+    // The validator itself threw: broken plumbing, not a rejected answer.
+    ['validator_error:Cannot read properties of undefined', { validator: true }, 'infrastructure'],
+    ['validator_error:boom', {}, 'infrastructure'],
     ['summary_missing', { validator: true }, 'incomplete'],
     ['no_findings', { validator: true }, 'incomplete'],
     ['tool_timeout', {}, 'tool'],
@@ -129,8 +132,10 @@ describe('agent-control lane policies', () => {
   // judge whose scores are only comparable on one model (shadow judge). Call
   // research is NOT one: its miner deliberately dispatches with a
   // cross-provider fallback (call-research-miner.js), so it is `offline`.
-  // The SMS route canaries measure whether a route answers — same rule.
-  const MEASUREMENT_LANES = ['mentions_prober', 'sealed_eval', 'shadow_judge', 'sms_canary_default', 'sms_canary_save_sale'];
+  // The SMS route canaries measure whether a route answers — same rule. The
+  // shadow judge is NOT one: it judges through createDeepMessage, which falls
+  // back to the OpenAI leg by design and records who judged.
+  const MEASUREMENT_LANES = ['mentions_prober', 'sealed_eval', 'sms_canary_default', 'sms_canary_save_sale'];
 
   it('every switchboard lane has a runtime entry and vice versa (drift guard)', () => {
     const laneIds = sb.LANES.map((l) => l.id).sort();
