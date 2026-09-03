@@ -27,7 +27,7 @@ const {
 // 2026-09-03: flea_tick's seeded single-visit key was re-pointed at the
 // two-visit package (the only flea offer) once the row gained the package's
 // follow-up policy — the live catalog carries the remapped value.
-const { REMAP: FLEA_REMAP } = require('../models/migrations/20260903000050_flea_public_lane_two_visit_package');
+const { REMAP: FLEA_REMAP } = require('../models/migrations/20260903000060_flea_public_lane_two_visit_package');
 
 const { catalogLinkForProfile } = _internals;
 // id-only view used throughout this suite — the link {id, name, service_key}
@@ -109,7 +109,7 @@ const KNOWN_UNMAPPED_ENGINE_KEYS = [
   // cockroach_control's fixed two-treatment 14-day-follow-up lane). Label
   // resolution keeps status-quo behavior. (flea_package left this list on
   // 2026-09-03: flea_tick now carries the package's follow-up policy and
-  // maps it — 20260903000050.)
+  // maps it — 20260903000060.)
   'pest_initial_roach',
 ];
 

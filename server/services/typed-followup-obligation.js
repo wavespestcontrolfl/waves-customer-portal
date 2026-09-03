@@ -51,7 +51,7 @@ const logger = require('./logger');
 const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 };
 
 // Two-treatment package keys (20260712300000 cutover; flea_tick joined via
-// 20260903000050 when the Flea Elimination Package became the only flea
+// 20260903000060 when the Flea Elimination Package became the only flea
 // offer): the ALERT follow-up policy means visit 1 owes an included second
 // visit — and ONLY visit 1; an included follow-up completing must not mint
 // a third (Codex r3 on #3078-era rounds). Trapping programs deliberately

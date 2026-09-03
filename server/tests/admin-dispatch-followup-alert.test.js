@@ -76,7 +76,7 @@ describe('typedFollowupVerdict — the shared override chain', () => {
     expect(included.reason).toBe('included_followup_visit');
   });
 
-  test('flea package (flea_tick, ALERT since 20260903000050): visit 1 owes the included follow-up, visit 2 owes nothing', () => {
+  test('flea package (flea_tick, ALERT since 20260903000060): visit 1 owes the included follow-up, visit 2 owes nothing', () => {
     const fleaProfile = { serviceKey: 'flea_tick', findingsType: 'flea', followupPolicy: 'alert', defaultFollowupDays: 14 };
     const first = typedFollowupVerdict({ scheduledService: VISIT, profile: fleaProfile, findingsType: 'flea', values: {} });
     expect(first).toMatchObject({ required: true, days: 14, suggestedDate: '2026-08-13', alertType: 'follow_up_needed' });

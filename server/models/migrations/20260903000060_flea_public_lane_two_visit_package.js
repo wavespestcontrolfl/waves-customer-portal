@@ -61,8 +61,12 @@
  */
 const FLEA_CONFIG_KEY = 'onetime_flea';
 const SINGLE_OFFER_KEY = 'flea_knockdown_single';
-const MIGRATION_TAG = 'migration:20260903000050';
-const STATE_KEY = 'migration.20260903000050.state';
+// Stamp 20260903000060, not 000050: main already carries a 000050 migration
+// (backfill_sole_property_anchor) whose system_settings state row is its
+// rollback ownership record — sharing the stamp would share the state key,
+// and up() below would overwrite that record while down() would delete it.
+const MIGRATION_TAG = 'migration:20260903000060';
+const STATE_KEY = 'migration.20260903000060.state';
 const UP_REASON = 'Remove the single-visit flea knockdown offer — flea is sold only as the two-visit package (owner ruling 2026-09-03)';
 
 const SERVICE_KEY = 'flea_tick';
@@ -170,7 +174,7 @@ exports.up = async function up(knex) {
     if (profile && (!profile.followup_policy || profile.followup_policy === 'none')) {
       const openJobs = await openLegacyFleaJobs(knex);
       if (openJobs > 0) {
-        console.warn(`[migration 20260903000050] ${openJobs} open flea_tick job(s) were sold as single visits: their closeout will park a follow_up_needed card — dismiss it; nothing books or bills without a staff tap.`);
+        console.warn(`[migration 20260903000060] ${openJobs} open flea_tick job(s) were sold as single visits: their closeout will park a follow_up_needed card — dismiss it; nothing books or bills without a staff tap.`);
       }
       const count = await knex('service_completion_profiles')
         .where({ service_key: SERVICE_KEY })
@@ -225,7 +229,7 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   // Irreversible by design (see header): nothing is restored. The state row
   // is cleared so a deliberate re-seed migration starts from a clean record.
-  console.warn('[migration 20260903000050] rollback is a no-op by design: the flea two-visit cutover (pricing offer, catalog key, completion profile) is irreversible — re-seed the single-visit offer with a new migration if the product returns.');
+  console.warn('[migration 20260903000060] rollback is a no-op by design: the flea two-visit cutover (pricing offer, catalog key, completion profile) is irreversible — re-seed the single-visit offer with a new migration if the product returns.');
   if (await knex.schema.hasTable('system_settings')) {
     await knex('system_settings').where({ key: STATE_KEY }).del();
   }
