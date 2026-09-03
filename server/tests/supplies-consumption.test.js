@@ -284,7 +284,7 @@ describe('recap consumption hook — retry window (source contract)', () => {
   test('the window is 15 minutes and the skip is keyed on the record creation time, not priorCompleted alone', () => {
     expect(src).toMatch(/const RECAP_RETRY_WINDOW_MS = 15 \* 60 \* 1000;/);
     expect(hook).toMatch(/let consumeNow = result\.priorCompleted !== true;/);
-    expect(hook).toMatch(/if \(!consumeNow && result\.recordId\)/);
+    expect(hook).toMatch(/if \(!consumeNow && result\.recordId && result\.created === false\)/); // a recap that CREATED the record is a first recap on an old completion, not a retry
     expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('created_at'\)/);
     expect(hook).toMatch(/Date\.now\(\) - createdMs < RECAP_RETRY_WINDOW_MS\) consumeNow = true;/);
     expect(hook).toMatch(/if \(consumeNow\) \{/);

@@ -14100,13 +14100,16 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
     // P2). One exception (PR 2 pre-push P1): submitRecap commits the
     // completed status BEFORE this call, so a process death in between
     // makes the client's retry read priorCompleted=true with no kit movement
-    // written. A retry is a record completed MINUTES ago — so a
-    // priorCompleted recap whose service record was created inside
-    // RECAP_RETRY_WINDOW_MS still consumes; the at-most-once movement index
-    // makes a genuine double-consume impossible either way. A recap edit of a
-    // visit completed hours or years ago keeps consuming nothing.
+    // written. The retry's signature: the visit is priorCompleted AND this
+    // recap did NOT create the service record (the completing attempt did —
+    // `result.created === false`) AND that record is minutes old
+    // (RECAP_RETRY_WINDOW_MS). A first recap added to a historical completed
+    // visit creates its record (created === true) and consumes nothing; a
+    // recap edit of a visit completed hours or years ago finds an old record
+    // and consumes nothing; the at-most-once movement index makes a genuine
+    // double-consume impossible either way.
     let consumeNow = result.priorCompleted !== true;
-    if (!consumeNow && result.recordId) {
+    if (!consumeNow && result.recordId && result.created === false) {
       try {
         const rec = await db('service_records').where({ id: result.recordId }).first('created_at');
         const createdMs = rec?.created_at ? new Date(rec.created_at).getTime() : NaN;

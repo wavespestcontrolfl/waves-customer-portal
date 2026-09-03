@@ -373,10 +373,13 @@ async function verifyBillToAccount(page, { evidence, upload }) {
 // not 912345); every approved ship-to token must appear whole.
 async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload }) {
   const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  // Both readings must be VISIBLE (pre-push P0): a single hidden responsive
+  // or stale node carrying the approved values is not what the checkout shows.
   const account = await readExactlyOne(page, SELECTORS.checkoutAccount);
   if (account.count > 1) await refuse('account_ambiguous', `${account.count} billing-account readings at checkout — cannot tell which the order bills`);
   const accountText = normalizeText(account.text);
   if (!accountText) await refuse('account_unverified', 'could not read the billing account shown at checkout');
+  if (!account.visible) await refuse('account_hidden', 'the billing-account element at checkout is not visible — not what the order bills');
   const wantDigits = String(credentials.accountNumber).replace(/\D/g, '');
   const accountRuns = digitRuns(accountText);
   if (!wantDigits || accountRuns.length !== 1 || accountRuns[0] !== wantDigits) { evidence.checkoutAccount = accountText.slice(0, 60); await refuse('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`); }
@@ -384,6 +387,7 @@ async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidenc
   if (shipTo.count > 1) await refuse('ship_to_ambiguous', `${shipTo.count} ship-to readings at checkout — cannot tell which the order ships to`);
   const shipToText = normalizeText(shipTo.text);
   if (!shipToText) await refuse('ship_to_unverified', 'could not read the ship-to address shown at checkout');
+  if (!shipTo.visible) await refuse('ship_to_hidden', 'the ship-to element at checkout is not visible — not where the order ships');
   const missing = shipToTokens.filter((t) => !hasToken(shipToText, t));
   if (missing.length) { evidence.checkoutShipTo = shipToText.slice(0, 120); await refuse('ship_to_mismatch', `checkout ships to "${shipToText.slice(0, 80)}" — approved ship-to token(s) not found: ${missing.join(', ')}`); }
   evidence.accountVerified = true;
