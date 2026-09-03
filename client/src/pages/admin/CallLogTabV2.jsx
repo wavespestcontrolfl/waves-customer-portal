@@ -38,6 +38,7 @@ import CallTranscriptSync, {
   parseTranscriptSegments,
   segmentsMatchTranscript,
 } from "../../components/admin/CallTranscriptSync";
+import CallIntelligencePanel from "../../components/admin/CallIntelligencePanel";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
 
@@ -58,6 +59,51 @@ const PROCESS_RESULT_CLASS = {
   failed: "text-alert-fg",
 };
 const ADMIN_BRIDGE_PHONE_KEYS = new Set(["9415993489"]);
+
+// The server grounds commitment evidence with call-commitments.js
+// normalizeForMatch (lower-case; every run of non-alphanumerics is one
+// space). Mirror it here with a map from each normalized character back to
+// its offset in the original text, so a quote the server accepted always
+// finds its words in the transcript — a missing apostrophe or comma used to
+// leave the Jump action pointing at nothing.
+function normalizeWithOffsets(text) {
+  const src = String(text);
+  let norm = "";
+  const offsets = [];
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i].toLowerCase();
+    if (ch.length === 1 && /[a-z0-9]/.test(ch)) {
+      norm += ch;
+      offsets.push(i);
+    } else if (norm.length && norm[norm.length - 1] !== " ") {
+      norm += " ";
+      offsets.push(i);
+    }
+  }
+  return { norm, offsets };
+}
+
+// Wrap the first normalized occurrence of `quote` in a <mark> so the
+// evidence jump lands on the words. Plain text when there is no match.
+export function renderTranscriptWithHighlight(text, quote, id) {
+  if (!quote || !text) return text;
+  const q = normalizeWithOffsets(quote).norm.trim();
+  if (!q) return text;
+  const { norm, offsets } = normalizeWithOffsets(text);
+  const at = norm.indexOf(q);
+  if (at < 0) return text;
+  const start = offsets[at];
+  const end = offsets[at + q.length - 1] + 1;
+  return (
+    <>
+      {text.slice(0, start)}
+      <mark id={`call-transcript-mark-${id}`} className="not-italic bg-zinc-200 text-ink-primary rounded-xs px-0.5">
+        {text.slice(start, end)}
+      </mark>
+      {text.slice(end)}
+    </>
+  );
+}
 
 function phoneKey(value) {
   const digits = String(value || "").replace(/\D/g, "");
@@ -375,6 +421,17 @@ export default function CallLogTabV2() {
     }
     return map;
   }, [calls, transcriptSyncEnabled]);
+  // Evidence "Jump": the intelligence panel hands a verbatim quote to the
+  // transcript, which opens and marks it so the office can check a promise
+  // against the words in seconds instead of replaying the audio.
+  const [transcriptHighlights, setTranscriptHighlights] = useState(() => new Map());
+  const jumpToQuote = (id, quote) => {
+    setTranscriptHighlights((prev) => new Map(prev).set(id, quote));
+    setExpandedTranscripts((prev) => new Set(prev).add(id));
+    setTimeout(() => {
+      document.getElementById(`call-transcript-mark-${id}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 0);
+  };
 
   const loadCalls = (search = "") => {
     const q = search
@@ -1517,12 +1574,18 @@ export default function CallLogTabV2() {
                               </div>
                             ) : (
                               <div className="px-2 pb-2 text-14 md:text-12 text-ink-secondary italic leading-relaxed">
-                                "{open ? shown : preview}"
+                                "{renderTranscriptWithHighlight(open ? shown : preview, open ? transcriptHighlights.get(c.id) : null, c.id)}"
                               </div>
                             )}{" "}
                           </div>
                         );
                       })()}
+                    <CallIntelligencePanel
+                      callId={c.id}
+                      onJumpToQuote={c.transcription ? (quote) => jumpToQuote(c.id, quote) : null}
+                      onCallChanged={() => loadCalls(callLogSearch.trim())}
+                      refreshKey={[c.processing_status, c.processing_generation, c.updated_at].map((v) => v ?? "").join("|")}
+                    />
                   </div>
                 );
               })}

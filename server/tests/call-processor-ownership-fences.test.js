@@ -93,6 +93,19 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(body.slice(unlinkAt - 300, unlinkAt)).toContain("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')");
   });
 
+  test('commitments are recorded after finalization, fenced on the pass generation, from the V2 extraction + transcript only (no V1, no disposition)', () => {
+    const zeroTriageAt = body.indexOf('await applyZeroTriageLayers({');
+    const commitmentsAt = body.indexOf("require('./call-commitments').recordCallCommitments({");
+    expect(zeroTriageAt).toBeGreaterThan(-1);
+    expect(commitmentsAt).toBeGreaterThan(zeroTriageAt);
+    const callSite = body.slice(commitmentsAt, commitmentsAt + 700);
+    expect(callSite).not.toContain('disposition');
+    expect(callSite).not.toContain('v1:');
+    expect(callSite).toContain('transcript: transcription');
+    expect(callSite).toContain('procGeneration,');
+    expect(callSite).not.toContain('procToken');
+  });
+
   test('an explicit operator unlink stops the pass from finding or minting a customer, not only from writing the link back', () => {
     expect(body).toContain("const explicitUnlink = !!customerLinkOverride && !customerLinkOverride.customer_id;");
     // The one branch that finds-or-creates a customer from the caller's

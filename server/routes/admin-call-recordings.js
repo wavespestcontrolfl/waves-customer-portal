@@ -18,6 +18,20 @@ function maskSid(sid) {
   return value.length <= 8 ? `${value.slice(0, 2)}…` : `${value.slice(0, 2)}…${value.slice(-6)}`;
 }
 
+// GATE_CALL_COMMITMENTS off means NOTHING is written to call_commitments —
+// including by a person. Fail closed on the mutations; reads stay open so
+// rows recorded while the gate was on remain visible.
+function requireCommitmentsEnabled(req, res, next) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('callCommitments')) {
+    return res.status(409).json({
+      error: 'Call commitments are off (GATE_CALL_COMMITMENTS); nothing is written while the gate is off.',
+      code: 'COMMITMENTS_DISABLED',
+    });
+  }
+  return next();
+}
+
 function rejectQueryString(req, res, next) {
   if (req.originalUrl.includes('?')) {
     return res.status(400).json({
@@ -190,8 +204,79 @@ router.post('/synopsis/:callSid', async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// OPERATOR CORRECTIONS — customer relink, recording adoption (admin-only)
+// CALL INTELLIGENCE — the review-ready view, commitments, corrections
 // ═══════════════════════════════════════════════════════════════════
+
+// GET /calls/:id/intelligence — one normalized object: outcome, intent,
+// appointment, prices, objections, evidence-linked commitments with their
+// fulfillment, later outcomes, honest processing state, and which values a
+// person overrode. Read-only apart from the fulfillment refresh (open AI
+// rows are marked fulfilled when a later record proves it).
+router.get('/calls/:id/intelligence', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
+    const { loadCallIntelligence } = require('../services/call-intelligence');
+    const intelligence = await loadCallIntelligence(db, req.params.id);
+    if (!intelligence) return res.status(404).json({ error: 'Call not found' });
+    // Billing is admin-only everywhere else (the technician-safe customer
+    // payload strips invoices, payments and revenue): the outcomes block
+    // carries invoice totals and paid revenue, so a technician gets it
+    // without them (Codex r11 P1).
+    if (req.techRole !== 'admin' && intelligence.outcomes) {
+      intelligence.outcomes = { ...intelligence.outcomes, invoices: [], revenue_cents: null, billing_hidden: true };
+    }
+    const { isEnabled } = require('../config/feature-gates');
+    // The panel hides its write controls when the gate is off, instead of
+    // offering buttons that can only 409.
+    // The panel renders the admin-only corrections (customer relink,
+    // recording adoption) only for admins; staff see them read-only.
+    res.json({ intelligence, features: { commitments: isEnabled('callCommitments'), admin: req.techRole === 'admin' } });
+  } catch (err) { next(err); }
+});
+
+// POST /calls/:id/commitments — the office records a promise the AI missed.
+// Staff-wide (router-level requireTechOrAdmin), like tagging a disposition.
+router.post('/calls/:id/commitments', requireCommitmentsEnabled, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
+    const call = await db('call_log').where({ id: req.params.id }).first('id');
+    if (!call) return res.status(404).json({ error: 'Call not found' });
+    const { addHumanCommitment } = require('../services/call-commitments');
+    const row = await addHumanCommitment(db, call.id, {
+      party: req.body?.party,
+      kind: req.body?.kind,
+      description: req.body?.description,
+      due_at: req.body?.due_at ?? null,
+      channel: req.body?.channel ?? null,
+      reviewedBy: req.technicianId || null,
+    });
+    res.status(201).json({ commitment: row });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+// PATCH /commitments/:id — confirm / dismiss / fulfill / reopen / edit. A
+// human verdict is recorded on the row and survives every reprocess.
+// Staff-wide: settling a promise is the office's daily work.
+router.patch('/commitments/:id', requireCommitmentsEnabled, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Commitment id must be a UUID' });
+    const { applyHumanUpdate } = require('../services/call-commitments');
+    const row = await applyHumanUpdate(db, req.params.id, {
+      action: req.body?.action,
+      description: req.body?.description,
+      due_at: req.body?.due_at,
+      note: req.body?.note,
+      reviewedBy: req.technicianId || null,
+    });
+    res.json({ commitment: row });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
 
 // PUT /calls/:id/customer — repoint (or unlink) the call's customer. The
 // override is stamped in metadata so a reprocess keeps the human's link
