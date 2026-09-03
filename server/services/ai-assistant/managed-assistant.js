@@ -323,7 +323,9 @@ class ManagedAssistant {
       }
 
       // ── Session complete ──
-      if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') {
+      // stop_reason arrives as a string or as { type } — read both (Codex r9).
+      const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
+      if (event === 'done' || event === 'session_complete' || stopReason === 'end_turn') {
         sessionEnded = true;
         break;
       }

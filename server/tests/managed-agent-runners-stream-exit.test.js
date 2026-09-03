@@ -69,6 +69,12 @@ describe.each(RUNNERS)('%s — the session recorder sees how the stream ended', 
     expect(recorded()).toMatchObject({ laneId, sessionId: 'sess-1', failure: null });
   });
 
+  it('an idle carrying an object-valued end_turn stop reason is the terminal (Codex r9)', async () => {
+    global.fetch = fetchFor([text('all done'), { event: 'session.status_idle', data: { stop_reason: { type: 'end_turn' } } }, text('never read')]);
+    await expect(run(load(path))).resolves.toMatchObject({ sessionId: 'sess-1' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
   it('a session.error event is the same failed run as an error event (session_error_event)', async () => {
     global.fetch = fetchFor([text('partial'), { event: 'session.error', data: { type: 'overloaded_error' } }, text('never read')]);
     await run(load(path));

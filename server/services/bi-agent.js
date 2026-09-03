@@ -131,7 +131,9 @@ const BIAgent = {
           });
         }
 
-        if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') { sessionEnded = true; break; }
+        // stop_reason arrives as a string or as { type } — read both (Codex r9).
+        const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
+        if (event === 'done' || event === 'session_complete' || stopReason === 'end_turn') { sessionEnded = true; break; }
         if (event === 'error' || event === 'session.error') { logger.error(`[bi-agent] Error: ${JSON.stringify(data)}`); failure = 'session_error_event'; break; }
       }
       // The stream closed (or was left) before the session said it ended:
