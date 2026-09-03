@@ -61,9 +61,14 @@ describe('frozen enum literals == services/seo/link-registry.js', () => {
   test.each([
     ['LINK_SOURCES'], ['AGENT_STATES'], ['DISCOVERY_PRIORITIES'], ['ACQUISITION_TYPES'], ['EXPECTED_REL'], ['EXPECTED_INDEXABILITY'],
     ['EXPECTED_PERSISTENCE'], ['RENEWAL_PERIODS'], ['PATH_LINK_TYPES'], ['ATTEMPT_PROVIDERS'], ['ATTEMPT_ACTIONS'], ['ATTEMPT_OUTCOMES'],
-    ['AUTHORITY_DIMENSIONS'], ['AUTHORITY_LEVELS'],
+    ['AUTHORITY_DIMENSIONS'],
   ])('%s', (name) => {
     expect(literal(name)).toEqual([...R[name]]);
+  });
+  test('AUTHORITY_LEVELS: the step-1 literal is a prefix of the service enum (step 4a appended OWNER_INPUT_REQUIRED and swapped the CHECK)', () => {
+    const step1 = literal('AUTHORITY_LEVELS');
+    expect([...R.AUTHORITY_LEVELS].slice(0, step1.length)).toEqual(step1);
+    // the latest CHECK owner pins the FULL enum: backlink-authority-policy-step4a-migration.test.js
   });
   test('the migration requires no service enum (literals are frozen at migration time)', () => {
     expect(src).not.toMatch(/require\(['"][^'"]*link-registry['"]\)/);
