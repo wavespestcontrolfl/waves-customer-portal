@@ -90,7 +90,6 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { startOfETMonth } = require('../../utils/datetime-et');
-const { getVendorLoginCredentials } = require('../vendor-credentials');
 const { auditVendorOrder } = require('../audit-log');
 const { parsePackSize, convertToOz } = require('../product-costing');
 const { normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
@@ -109,8 +108,11 @@ const ADAPTER_BY_CODE = { 1: 'siteone', 25: 'stickermule' };
 const ADAPTER_BY_NAME = { siteone: 'siteone', 'sticker mule': 'stickermule' };
 const VENDOR_GATE = { siteone: 'GATE_AUTO_ORDER_SITEONE', stickermule: 'GATE_AUTO_ORDER_STICKERMULE' };
 
+// vendors.code → adapter key is registry knowledge; the SiteOne module itself
+// ships in PR 3 — until then a SiteOne vendor has no adapter here and stays
+// bell-and-click (canAutoOrder is false for it).
 function loadAdapters() {
-  return { siteone: require('./adapters/siteone'), stickermule: require('./adapters/stickermule') };
+  return { stickermule: require('./adapters/stickermule') };
 }
 
 function adapterKeyFor(vendor) {
@@ -153,7 +155,7 @@ async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
   const row = vendor || (vendorId ? await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code', 'active') : null);
   if (!row || row.active === false) return false;
   const key = adapterKeyFor(row);
-  return !!key && gateEnvValue(VENDOR_GATE[key]);
+  return !!key && !!loadAdapters()[key] && gateEnvValue(VENDOR_GATE[key]);
 }
 
 // Pack-size count for count-based stock: "100", "100 each", "50 ct", "1 pc".
@@ -336,9 +338,9 @@ async function reserveUnderCaps(conn, ledgerId, cents, { now = new Date(), env =
   });
 }
 
-// Open auto requests with no claim — or whose only claim is a SiteOne DRY
+// Open auto requests with no claim — or whose only claim is an adapter DRY
 // RUN park (needs_review, error 'dry_run:…'): nothing was submitted, and the
-// bell says "unset SITEONE_BOT_DRY_RUN to order for real", so the request
+// bell says "turn dry run off to order for real", so the request
 // stays eligible and insertClaim re-arms that row (Codex r4 P1).
 const DRY_RUN_RECLAIMABLE_SQL = "(vendor_orders.status = 'needs_review' AND vendor_orders.error LIKE 'dry_run:%')";
 async function findDispatchable(conn = db) {
@@ -424,7 +426,7 @@ function parkBellText({ reason, status, product, vendor, request, amountCents, m
   if (reason === 'dry_run') {
     return {
       title: `Auto-order dry run: ${product.name} (${vendor.name})`,
-      body: `SiteOne dry run filled the cart for ${request.requested_quantity} ${request.unit || ''} — total ${dollars(amountCents)}. Nothing was submitted; unset SITEONE_BOT_DRY_RUN to order for real.`,
+      body: `${vendor.name} dry run filled the cart for ${request.requested_quantity} ${request.unit || ''} — total ${dollars(amountCents)}. Nothing was submitted; turn the adapter's dry run off to order for real.`,
     };
   }
   const title = `Auto-order ${status === 'failed' ? 'failed' : 'needs review'}: ${product.name} (${vendor.name})`;
@@ -759,19 +761,6 @@ function parkIfUnpriced(conn, { ctx, pricing, order, vendor, product }) {
   return null;
 }
 
-// SiteOne's place() needs the vendor login and the cap reservation hook
-// (cart total = screen; checkout total = the binding reservation). A lookup
-// that THROWS (DB hiccup) is run-level: nothing was sent, so the claim is
-// released for tomorrow's tick instead of burning the request's one-shot
-// claim as 'failed' (pre-push P1). A lookup that RETURNS null/incomplete is
-// configuration and parks inside place().
-async function siteonePlaceArgs(conn, { base, vendor, ledger, releaseClaim, now, env }) {
-  let credentials;
-  try { credentials = await getVendorLoginCredentials(conn, vendor.id); }
-  catch (e) { await releaseClaim(); const err = new Error(`vendor credential lookup failed: ${e.message}`); err.runLevel = true; throw err; }
-  return { ...base, credentials, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { now, env }) };
-}
-
 // Detector: the vendor's read-back total should equal the reserved one. If it
 // came out higher and breaks a cap, the order exists but parks for the owner
 // (cancel with the vendor / revoke); the request is ordered. Returns the park
@@ -805,7 +794,10 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
       quoteCents = binding.quoteCents;
     }
     const base = { vendorSku, quantity, quoteCents };
-    const placeArgs = adapterKey === 'siteone' ? await siteonePlaceArgs(conn, { base, vendor, ledger, releaseClaim, now, env }) : base;
+    // An adapter with no static quote reads the vendor's total at the point of
+    // sale and runs the cap reservation through beforeSubmit right before it
+    // submits (the binding total is the vendor's, never a local estimate).
+    const placeArgs = adapter.quotesAtPlace ? { ...base, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { now, env }) } : base;
     const stopHeartbeat = startClaimHeartbeat(conn, ledger.id);
     try {
       placed = await adapter.place(placeArgs);

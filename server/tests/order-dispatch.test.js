@@ -26,7 +26,6 @@
  *     reported, and re-rung by the next run
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/vendor-credentials', () => ({ getVendorLoginCredentials: jest.fn(async () => ({ email: 'a@b.c', password: 'x', accountNumber: '123' })) }));
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/procurement/auto-reorder', () => ({ vendorPricingFor: jest.fn(async () => mockState.pricing) }));
 
@@ -266,15 +265,14 @@ test('request closed mid-flight: ledger still placed, request untouched, one rec
   expect(notify.mock.calls[0][1]).toMatch(/cancelled request/);
 });
 
-test('SiteOne: no static quote, the cap check runs through beforeSubmit and a dry run parks', async () => {
+test('an adapter with no static quote (quotesAtPlace) gets the cap check as beforeSubmit and a dry run parks', async () => {
   mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
   mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
   mockState.product = talstar;
   mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
-  const place = jest.fn(async ({ beforeSubmit, vendorSku, quantity, credentials }) => {
+  const place = jest.fn(async ({ beforeSubmit, vendorSku, quantity }) => {
     expect(vendorSku).toBe('S1-77');
     expect(quantity).toBe(2); // 256 fl oz of a 1 gal jug = 2 packages
-    expect(credentials.password).toBe('x');
     expect(await beforeSubmit(9900)).toEqual({ ok: true });
     expect((await beforeSubmit(999900)).reason).toBe('over_per_order_cap');
     return { dryRun: true, amountCents: 9900, externalOrderNumber: null, evidence: {} };
@@ -363,9 +361,13 @@ test('master gate off: the run still re-rings pending bells and recovers stale p
   expect(mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status).row).toMatchObject({ status: 'needs_review' });
 });
 
-test('canAutoOrder mirrors gates + adapter map + vendor active', async () => {
+test('canAutoOrder mirrors gates + adapter map + loaded module + vendor active', async () => {
   expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(true);
   expect(await dispatch.canAutoOrder({ vendor: { id: 'g', name: 'Gemplers', code: 24 } })).toBe(false);
+  // A vendor the registry KNOWS but whose adapter module is not shipped here
+  // (SiteOne, PR 3) must stay bell-and-click even with its gate set — a
+  // silent sweep + a no_adapter dispatch skip would be an unworked request.
+  expect(await dispatch.canAutoOrder({ vendor: { id: 's1', name: 'SiteOne', code: 1, active: true } })).toBe(false);
   expect(await dispatch.canAutoOrder({ vendor: { ...stickerMule, active: false } })).toBe(false);
   mockState.vendor = { ...stickerMule, active: false };
   expect(await dispatch.canAutoOrder({ vendorId: 'vend-sm' })).toBe(false);
@@ -497,9 +499,8 @@ test('an adapter without a vendor-confirmed pre-submit total never auto-places: 
   expect(ledger.placed_at).toBeUndefined();
 });
 
-test('the real Sticker Mule adapter is history-total + count quantity; the real SiteOne adapter is vendor-total + package quantity', () => {
+test('the real Sticker Mule adapter is history-total + count quantity', () => {
   expect(require('../services/procurement/adapters/stickermule')).toMatchObject({ preSubmitTotal: 'history', packagedQuantity: false });
-  expect(require('../services/procurement/adapters/siteone')).toMatchObject({ preSubmitTotal: 'vendor', packagedQuantity: true });
 });
 
 test('a bell that fails to send is persisted with the park, reported, and re-rung by the next run (r1 P1)', async () => {
@@ -530,21 +531,6 @@ test('the run goes red while a bell is undelivered', async () => {
   mockState.pendingBells = [{ id: 'ledger-9', evidence: { bell: { title: 'Auto-order needs review: x', body: 'y' } }, request_id: 'req-9', product_name: 'x', vendor_name: 'v' }];
   mockState.request = { ...baseRequest(), status: 'ordered' };
   await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
-});
-
-test('a credential lookup that THROWS is run-level: claim released, nothing parked failed, batch aborts (pre-push P1)', async () => {
-  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
-  getVendorLoginCredentials.mockRejectedValueOnce(new Error('connection reset'));
-  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
-  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
-  mockState.product = talstar;
-  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
-  const place = jest.fn();
-  await expect(run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, place })).rejects.toMatchObject({ runLevel: true, message: expect.stringMatching(/credential lookup failed/) });
-  expect(place).not.toHaveBeenCalled();
-  expect(mockState.deletes).toContain('vendor_orders'); // claim released
-  expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status)).toHaveLength(0); // never parked
-  expect(notify).not.toHaveBeenCalled();
 });
 
 test('a bell notifyAdmin swallowed (null return) is NOT delivered: bellPending, no bellAt stamp, re-rung next run (r2 P1)', async () => {
