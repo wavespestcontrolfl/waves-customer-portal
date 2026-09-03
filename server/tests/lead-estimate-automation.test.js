@@ -517,11 +517,17 @@ describe('keyed leads (C2): the draft prices the canonical product, never a labe
     expect(draft.automation).toMatchObject({ status: 'generated', generated: true });
     expect(draft.estimateData.services).toEqual({ mosquito: { tier: 'seasonal9' } });
   });
-  test('flea_tick drafts the single-visit knockdown, not the two-visit package', () => {
+  test('flea_tick drafts the two-visit package — the only flea offer (owner ruling 2026-09-03)', () => {
     const readiness = { ...readinessFor('Flea Control Service'), serviceKey: 'flea_tick', serviceKeyInstant: true };
     const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Flea Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
-    expect(draft.estimateData.services).toEqual({ flea: { offerKey: 'flea_knockdown_single' } });
-    expect(draft.estimateData.engineResult.lineItems.map((l) => l.service)).toContain('flea_knockdown_single');
+    expect(draft.estimateData.services).toEqual({ flea: {} });
+    // The draft carries the legacy-mapped line shape (visits, no warranty
+    // metadata) — the package identity + visit count are what the copy
+    // pack and the catalog linker key off.
+    const services = draft.estimateData.engineResult.lineItems.map((l) => l.service);
+    expect(services).toContain('flea_package');
+    expect(services).not.toContain('flea_knockdown_single');
+    expect(draft.estimateData.engineResult.lineItems.find((l) => l.service === 'flea_package').visits).toBe(2);
   });
   test('a selectable key with no instant request is quote-on-request — no automated draft', () => {
     const readiness = { ...readinessFor('WDO Inspection Service'), serviceKey: 'wdo_inspection', serviceKeyInstant: false };

@@ -134,10 +134,11 @@ describe('instant-quote set stays in step with the public quote engine', () => {
       expect({ key, priced: priced.length > 0 }).toEqual({ key, priced: true });
     }
   });
-  test('flea_tick prices the SINGLE-visit knockdown, not the two-visit package', () => {
+  test('flea_tick prices the two-visit package — flea is sold only that way (owner ruling 2026-09-03)', () => {
     const estimate = generateEstimate({ ...BASE, services: quoteServicesForKey('flea_tick') });
-    expect(estimate.lineItems.map((l) => l.service)).toContain('flea_knockdown_single');
-    expect(estimate.lineItems.map((l) => l.service)).not.toContain('flea_package');
+    const flea = estimate.lineItems.find((l) => l.service === 'flea_package');
+    expect(flea).toMatchObject({ visits: 2, warrantyType: 'conditional_retreat' });
+    expect(estimate.lineItems.map((l) => l.service)).not.toContain('flea_knockdown_single');
   });
 });
 

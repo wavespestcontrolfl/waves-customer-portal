@@ -65,10 +65,10 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
   tree_shrub_6week: { treeShrub: { tier: 'enhanced' } },
   rodent_bait_quarterly: { rodentBait: {} },
   rodent_trapping: { rodentTrapping: {} },
-  // Catalog flea_tick is the SINGLE-visit treatment (engine key
-  // flea_knockdown_single); the engine's default flea offer is the two-visit
-  // package, so the offer is pinned here (pre-push codex P0).
-  flea_tick: { flea: { offerKey: 'flea_knockdown_single' } },
+  // Catalog flea_tick prices the two-visit Flea Elimination Package (engine
+  // key flea_package) — the engine's only flea offer since the owner ruling
+  // 2026-09-03 ("flea should be two visits"; migration 20260903000050).
+  flea_tick: { flea: {} },
   // Station RENTAL, not purchase (owner ruling 2026-08-29): the website shows
   // the monthly rental number; no $600+ installation charge. Instant only
   // while GATE_TERMITE_STATION_RENTAL is on (see instantForRow) — with the

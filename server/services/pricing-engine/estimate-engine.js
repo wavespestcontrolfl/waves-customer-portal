@@ -1511,6 +1511,8 @@ function generateEstimate(input) {
       services: {
         ...(property.services || {}),
         flea: {
+          // Passed through so priceFlea can route a retired single-visit
+          // request to review (it never changes the priced offer).
           offerKey: fleaOptions.offerKey ?? fleaOptions.fleaOfferKey ?? services.fleaOfferKey ?? input.fleaOfferKey,
           fleaExterior: fleaOptions.fleaExterior ?? services.fleaExterior ?? input.fleaExterior,
           fleaComplexity: fleaOptions.fleaComplexity ?? services.fleaComplexity ?? input.fleaComplexity,
@@ -1518,7 +1520,6 @@ function generateEstimate(input) {
         },
         fleaExterior: fleaOptions.fleaExterior ?? services.fleaExterior ?? input.fleaExterior,
       },
-      fleaOfferKey: fleaOptions.offerKey ?? fleaOptions.fleaOfferKey ?? services.fleaOfferKey ?? input.fleaOfferKey,
       fleaComplexity: fleaOptions.fleaComplexity ?? services.fleaComplexity ?? input.fleaComplexity,
       fleaExteriorSourceSuspected: fleaOptions.exteriorSourceSuspected ?? services.fleaExteriorSourceSuspected ?? input.fleaExteriorSourceSuspected,
       fleaExteriorAreaSqFt: fleaOptions.fleaExteriorAreaSqFt ?? services.fleaExteriorAreaSqFt ?? input.fleaExteriorAreaSqFt,

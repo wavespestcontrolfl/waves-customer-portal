@@ -115,11 +115,10 @@ const SERVICE_OPTION_SCHEMAS = {
   flea: {
     type: 'object',
     properties: {
-      // priceFlea's canonical offer keys. Absent → the pricer's standard
-      // two-visit elimination package (the default PRODUCT, not an
-      // underquote), so offerKey stays optional; the composer sets
-      // knockdown only when the caller explicitly wants a single visit.
-      offerKey: { enum: ['flea_knockdown_single', 'flea_elimination_two_visit'] },
+      // priceFlea's only offer: the two-visit elimination package (owner
+      // ruling 2026-09-03 — the single-visit knockdown is retired, so the
+      // composer cannot ask for one). Absent → the same package.
+      offerKey: { enum: ['flea_elimination_two_visit'] },
       // fleaComplexity is the key the engine reads off services.flea
       // (estimate-engine's flea block); normalizeFleaComplexity silently
       // defaults anything else to 'light' (cheapest) — same

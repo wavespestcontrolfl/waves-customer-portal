@@ -1814,17 +1814,10 @@ const SPECIALTY = {
     },
   },
   flea: {
+    // Flea is sold ONLY as the two-visit Elimination Package (owner rulings
+    // 2026-09-03: "flea should be two visits"; the public flea_tick lane
+    // follows). The single-visit knockdown offer is gone from the config.
     offers: [
-      {
-        offerKey: 'flea_knockdown_single',
-        displayName: 'Flea Knockdown Visit',
-        billingCadence: 'one_time',
-        visitCount: 1,
-        warrantyType: 'none',
-        baseInitial: r(225),
-        floorInitial: r(185),
-        exteriorAddOnMode: 'initial_only',
-      },
       {
         offerKey: 'flea_elimination_two_visit',
         displayName: 'Flea Elimination Package',
