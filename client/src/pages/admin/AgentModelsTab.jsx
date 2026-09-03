@@ -153,12 +153,14 @@ export default function AgentModelsTab() {
       }
     }
     for (const l of data.lanes) {
-      const env = l.primary.pinEnv;
-      const next = env && draft[env];
-      if (!next || next === l.primary.model || byEnv.has(env)) continue;
-      const sharing = data.lanes.filter((x) => x.primary.pinEnv === env || x.fallback?.pinEnv === env);
-      const label = sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : l.name;
-      byEnv.set(env, { env, from: l.primary.model, to: next, label, lanes: sharing.length, restart: sharing.some((x) => x.applies !== "live") });
+      for (const leg of [l.primary, l.fallback]) {
+        const env = leg?.pinEnv;
+        const next = env && draft[env];
+        if (!next || next === leg.model || byEnv.has(env)) continue;
+        const sharing = data.lanes.filter((x) => x.primary.pinEnv === env || x.fallback?.pinEnv === env);
+        const label = sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.fallback ? " · fallback" : ""}`;
+        byEnv.set(env, { env, from: leg.model, to: next, label, lanes: sharing.length, restart: sharing.some((x) => x.applies !== "live") });
+      }
     }
     return [...byEnv.values()];
   }, [data, draft]);
@@ -365,7 +367,12 @@ export default function AgentModelsTab() {
                     </TR>
                     {lanes.map((l) => {
                       const changed = laneChanged(l);
-                      const pinEnv = l.primary.pinEnv;
+                      // A picker per leg that has its own env pin — the photo lanes
+                      // carry theirs on the Gemini fallback leg, not the primary.
+                      const pinLegs = [
+                        { leg: l.primary, which: "primary" },
+                        { leg: l.fallback, which: "fallback" },
+                      ].filter((p) => p.leg?.pinEnv);
                       return (
                         <TR key={l.id} className={cn(changed && "bg-zinc-50")}>
                           <TD>
@@ -391,24 +398,35 @@ export default function AgentModelsTab() {
                             {l.applies === "live" ? <Badge tone="strong">Next request</Badge> : <Badge>Restart</Badge>}
                           </TD>
                           <TD>
-                            {pinEnv && !l.lock ? (
-                              <Select
-                                size="sm"
-                                aria-label={`Pin ${l.name}`}
-                                value={draft[pinEnv] || ""}
-                                onChange={(e) => setDraftValue(pinEnv, e.target.value)}
-                                className="w-52"
-                              >
-                                <option value="">{l.primary.pinned ? `Pinned: ${modelLabel(catalog, l.primary.model)}` : `Follow ${l.primary.selector || "default"}`}</option>
-                                {optionsFor(l.primary.accepts)
-                                  .filter(([id]) => id !== l.primary.model)
-                                  .map(([id, m]) => (
-                                    <option key={id} value={id} disabled={m.status === "unavailable"}>
-                                      {m.label}
-                                      {m.status === "unavailable" ? " · no adapter" : ""}
-                                    </option>
-                                  ))}
-                              </Select>
+                            {pinLegs.length > 0 && !l.lock ? (
+                              <div className="flex flex-col gap-1">
+                                {pinLegs.map(({ leg, which }) => (
+                                  <label key={leg.pinEnv} className="flex flex-col gap-0.5">
+                                    {pinLegs.length > 1 && (
+                                      <span className="text-11 uppercase tracking-label text-ink-tertiary">{which}</span>
+                                    )}
+                                    <Select
+                                      size="sm"
+                                      aria-label={`Pin ${l.name}${which === "fallback" ? " fallback" : ""}`}
+                                      value={draft[leg.pinEnv] || ""}
+                                      onChange={(e) => setDraftValue(leg.pinEnv, e.target.value)}
+                                      className="w-52"
+                                    >
+                                      <option value="">
+                                        {leg.pinned ? `Pinned: ${modelLabel(catalog, leg.model)}` : `Follow ${leg.selector || "default"}`}
+                                      </option>
+                                      {optionsFor(leg.accepts)
+                                        .filter(([id]) => id !== leg.model)
+                                        .map(([id, m]) => (
+                                          <option key={id} value={id} disabled={m.status === "unavailable"}>
+                                            {m.label}
+                                            {m.status === "unavailable" ? " · no adapter" : ""}
+                                          </option>
+                                        ))}
+                                    </Select>
+                                  </label>
+                                ))}
+                              </div>
                             ) : (
                               <span className="text-12 text-ink-tertiary">
                                 {l.lock ? l.lock.detail || "not switchable here" : l.primary.selector ? `follows ${l.primary.selector}` : "—"}
