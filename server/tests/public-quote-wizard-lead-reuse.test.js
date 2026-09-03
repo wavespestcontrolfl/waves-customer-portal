@@ -57,6 +57,19 @@ describe('findPriorOpenWizardLeadId', () => {
     expect(calls.whereNot).toEqual([['id', 'lead-self']]);
   });
 
+  test('the token path only looks BACK: candidates must be created before the current row (no mutual-duplicate cycle between concurrent lookup-minted rows)', async () => {
+    const { dbh, calls } = chainMock({ id: 'lead-prior' });
+    const createdAt = new Date('2026-09-03T12:00:00Z');
+    await expect(_internals.findPriorOpenWizardLeadId(dbh, { ...SAME, excludeLeadId: 'lead-self', beforeCreatedAt: createdAt })).resolves.toBe('lead-prior');
+    expect(calls.where).toContainEqual(['created_at', '<', createdAt]);
+  });
+
+  test('without a current row (the tokenless insert path) no created_at ceiling is applied', async () => {
+    const { dbh, calls } = chainMock(null);
+    await _internals.findPriorOpenWizardLeadId(dbh, SAME);
+    expect(calls.where.filter((a) => a[0] === 'created_at' && a[1] === '<')).toEqual([]);
+  });
+
   test('no matching open lead → null (the row inserts as a normal new lead)', async () => {
     const { dbh } = chainMock(undefined);
     await expect(_internals.findPriorOpenWizardLeadId(dbh, SAME)).resolves.toBeNull();
@@ -88,7 +101,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
   });
 
   test('the token path re-derives duplicate state against what THIS stage typed, and attribution is skipped for duplicates', () => {
-    expect(src).toMatch(/returning\(\['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data'\]\)/);
+    expect(src).toMatch(/returning\(\['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at'\]\)/);
     expect(src).toMatch(/if \(!duplicateOfLeadId\) await db\('ad_service_attribution'\)\.insert\(/);
     // The replace path carries the marker forward...
     expect(src).toMatch(/'duplicate_of_lead_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'duplicate_of_lead_id'/);
@@ -99,7 +112,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // documented lookup→calculate flow is where a repeat is first fully typed.
     const block = src.slice(src.indexOf("if (lead && lead.lead_type === 'quote_wizard' && (lead.status === 'new' || lead.status === 'duplicate')) {"), src.indexOf('if (lead && !lead.lead_source_id && sourceMeta.leadSourceId)'));
     expect(block.length).toBeGreaterThan(200);
-    expect(block).toMatch(/duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead\.id \}\)/);
+    expect(block).toMatch(/duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead\.id, beforeCreatedAt: lead\.created_at \}\)/);
     expect(block).toMatch(/if \(duplicateOfLeadId !== stored\)/);
     expect(block).toMatch(/await db\('leads'\)\.where\(\{ id: lead\.id \}\)\.update\(/);
     expect(block).toMatch(/\? \{ status: 'duplicate', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) \|\| \?::jsonb"/);

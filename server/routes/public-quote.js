@@ -25,7 +25,7 @@ function duplicateOfFromExtracted(extractedData) {
 
 // `excludeLeadId` is the caller's OWN row (the token path re-checks a row the
 // property-lookup stage already minted) — a row is never its own prior.
-async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKey, excludeLeadId = null } = {}, now = Date.now()) {
+async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKey, excludeLeadId = null, beforeCreatedAt = null } = {}, now = Date.now()) {
   const emailLc = String(email || '').trim().toLowerCase();
   const phoneDigits = String(phone || '').replace(/\D/g, '').slice(-10);
   const addressLc = String(address || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -51,7 +51,14 @@ async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKe
       OPEN_ESTIMATE_STATUSES,
     )
     .where('created_at', '>', new Date(now - WIZARD_LEAD_REUSE_DAYS * 24 * 60 * 60 * 1000))
-    .modify((qb) => { if (excludeLeadId) qb.whereNot('id', excludeLeadId); })
+    // The token path only looks BACK: two lookup-minted rows for the same
+    // inquiry reaching /calculate together must not each pick the other and
+    // both close as 'duplicate' (codex #3834 r8 P1) — the newer row is the
+    // duplicate, the older stays the open original.
+    .modify((qb) => {
+      if (excludeLeadId) qb.whereNot('id', excludeLeadId);
+      if (beforeCreatedAt) qb.where('created_at', '<', beforeCreatedAt);
+    })
     .orderBy('created_at', 'desc')
     .first('id');
   return prior ? prior.id : null;
@@ -1753,7 +1760,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .whereNull('deleted_at')
         .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
         .update(updateFields)
-        .returning(['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data']);
+        .returning(['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at']);
       lead = rows[0];
       if (lead && lead.lead_type === 'quote_wizard' && (lead.status === 'new' || lead.status === 'duplicate')) {
         // The normal wizard flow mints a 'new' row at the property-lookup
@@ -1766,7 +1773,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // the label moves, lands, or clears on this row only; nothing on the
         // original is written.
         const stored = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
-        duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead.id });
+        duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
         if (duplicateOfLeadId !== stored) {
           await db('leads').where({ id: lead.id }).update(duplicateOfLeadId
             ? { status: 'duplicate', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }

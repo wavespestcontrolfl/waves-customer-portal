@@ -340,6 +340,9 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig6', expect.anything());
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup6', expect.objectContaining({ customerId: 'customer-1' }));
     expect(database._updates).toEqual([{ id: 'lead-dup6', patch: expect.objectContaining({ estimate_id: 'estimate-2g' }), conditional: false }]);
+    // The duplicate row has no ad_service_attribution row of its own, so the
+    // ORIGINAL's funnel row is the one advanced to booked (codex r8 P1).
+    expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-orig6', 'won', database);
   });
 
   test('an indirectly resolved original that belongs to a DIFFERENT customer is never converted', async () => {
@@ -410,6 +413,8 @@ describe('lead-estimate link service', () => {
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2c', customerId: 'customer-1', database });
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup2', expect.anything());
     expect(database._updates).toEqual([{ id: 'lead-dup2', patch: expect.objectContaining({ estimate_id: 'estimate-2c' }), conditional: false }]);
+    // No original ⇒ no surviving attribution row to advance.
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
 
   test('standalone estimate: rescues a single unlinked lead by contact and stamps the link', async () => {

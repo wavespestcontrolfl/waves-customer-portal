@@ -619,6 +619,11 @@ async function markLinkedLeadEstimateAccepted({
   const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id || null;
   if (dataLeadId) {
     const named = await database('leads').where({ id: dataLeadId }).first();
+    // A named row that no longer exists is still "accounted for": never
+    // fall through to the contact sweep on a wizard estimate.
+    if (!named) return;
+    // followDuplicateLink returns the original when the marker resolves and
+    // the named row itself otherwise, so `lead` is always a row here.
     const lead = await followDuplicateLink(database, named);
     // An INDIRECTLY resolved original (via a duplicate marker) is validated
     // like the send/view path validates the named lead: its contact must
@@ -629,8 +634,8 @@ async function markLinkedLeadEstimateAccepted({
     // original after the repeat was filed — converting it here would credit
     // the win to that estimate and leave the accepted one unlinked, codex
     // #3834 r4 P1). A named lead that is itself open converts as before.
-    const indirect = lead && named && lead.id !== named.id;
-    const eligible = lead && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at
+    const indirect = lead.id !== named.id;
+    const eligible = !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at
       && (!indirect || (
         leadMatchesEstimateContact(lead, estimate)
         && (!lead.customer_id || !customerId || lead.customer_id === customerId)
@@ -648,9 +653,18 @@ async function markLinkedLeadEstimateAccepted({
     // merge. A named row closed by any OTHER status stays closed, and an
     // original that is ALREADY won (the office closed the inquiry before
     // this acceptance) means the deal is credited once — a second won row
-    // would double-count it in the raw lead KPIs (codex #3834 r6 P1).
-    const originalAlreadyWon = indirect && lead.status === 'won';
-    if (named && named.status === 'duplicate' && !named.deleted_at && !originalAlreadyWon) await convert(named);
+    // would double-count it in the raw lead KPIs (codex #3834 r6 P1). When
+    // the hop did not resolve, `lead` IS the named duplicate row, so the
+    // 'won' check is the original's check exactly when there is one.
+    if (named.status === 'duplicate' && !named.deleted_at && lead.status !== 'won') {
+      await convert(named);
+      // The duplicate row never got an ad_service_attribution row (/calculate
+      // skips it for repeats), so markConverted's funnel bridge on the named
+      // id touched nothing. The one surviving attribution is the original's:
+      // advance THAT funnel row to booked (monotonic, funnel table only — the
+      // original's lead row stays untouched, codex #3834 r8 P1).
+      if (indirect) await bridgeLeadFunnelStage(lead.id, 'won', database);
+    }
     return;
   }
 
