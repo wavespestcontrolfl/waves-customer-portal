@@ -1,7 +1,7 @@
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-03T05:43:01.163Z. Constants source: **constants.js (in-code defaults)**.
-Scenarios: 1199 · independent-vs-engine matches: 1156 · mismatches: 0 · expected a price but the engine returned none: 0 · engine-only observations: 43 (1156 + 0 + 0 + 43 = 1199).
+Generated 2026-09-03T10:47:45.150Z. Constants source: **constants.js (in-code defaults)**.
+Scenarios: 1247 · independent-vs-engine matches: 1204 · mismatches: 0 · expected a price but the engine returned none: 0 · engine-only observations: 43 (1204 + 0 + 0 + 43 = 1247).
 
 ## Findings raised by this run
 
@@ -43,17 +43,17 @@ Recorded span = check-in → check-out, which often includes driving to the next
 | mosquito seasonal9 (8,000 sf lot) | gold | $77.00 | $589.05 | $589.05 | 30 | 40.3% | 67.4% | — | — | — | — |
 | mosquito seasonal9 (8,000 sf lot) | platinum | $77.00 | $554.40 | $554.40 | 30 | 36.5% | 57.5% | — | — | — | — |
 | rodent_bait (2,000 sf) | bronze | $89.00 | $356.00 | $455.00 | 25 | 37.2% | 59.3% | — | — | — | — |
-| rodent_bait (2,000 sf) | silver | $89.00 | $320.40 | $419.40 | 25 | 30.2% | 43.4% | — | — | — | — |
-| rodent_bait (2,000 sf) | gold | $89.00 | $302.60 | $401.60 | 25 | 26.1% | 35.4% | — | — | — | — |
-| rodent_bait (2,000 sf) | platinum | $89.00 | $284.80 | $383.80 | 25 | 21.5% | 27.4% | — | — | — | — |
+| rodent_bait (2,000 sf) | silver | $89.00 | $320.40 | $320.40 | 25 | 30.2% | 43.4% | — | — | — | — |
+| rodent_bait (2,000 sf) | gold | $89.00 | $302.60 | $302.60 | 25 | 26.1% | 35.4% | — | — | — | — |
+| rodent_bait (2,000 sf) | platinum | $89.00 | $284.80 | $284.80 | 25 | 21.5% | 27.4% | — | — | — | — |
 | tree_shrub 6x (1,440 sf beds, 6 trees) | bronze | $95.83 | $574.98 | $574.98 | 42 | 45.0% | 81.8% | — | — | — | — |
 | tree_shrub 6x (1,440 sf beds, 6 trees) | silver | $95.83 | $517.48 | $517.48 | 42 | 38.9% | 63.7% | — | — | — | — |
 | tree_shrub 6x (1,440 sf beds, 6 trees) | gold | $95.83 | $488.73 | $488.73 | 42 | 35.3% | 54.6% | — | — | — | — |
 | tree_shrub 6x (1,440 sf beds, 6 trees) | platinum | $95.83 | $459.98 | $459.98 | 42 | 31.3% | 45.5% | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | bronze | $72.00 | $288.00 | $288.00 | 75 | -65.0% | -39.4% | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | silver | $72.00 | $259.20 | $259.20 | 75 | -83.3% | -45.5% | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | gold | $72.00 | $244.80 | $244.80 | 75 | -94.1% | -48.5% | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | platinum | $72.00 | $230.40 | $230.40 | 75 | -106.2% | -51.5% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | bronze | $72.00 | $288.00 | $898.00 | 75 | -65.0% | -39.4% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | silver | $72.00 | $259.20 | $869.20 | 75 | -83.3% | -45.5% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | gold | $72.00 | $244.80 | $854.80 | 75 | -94.1% | -48.5% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | platinum | $72.00 | $230.40 | $840.40 | 75 | -106.2% | -51.5% | — | — | — | — |
 
 ## Markup vs margin sites
 
@@ -65,38 +65,38 @@ Recorded span = check-in → check-out, which often includes driving to the next
 
 ## Engine-only observations (no independent formula, recorded for the report)
 
-- [pest_control] invalid: blank homeSqFt: {}
-- [pest_control] invalid: zero homeSqFt: {}
-- [pest_control] invalid: negative homeSqFt: {}
-- [pest_control] invalid: decimal homeSqFt: {}
-- [pest_control] invalid: huge homeSqFt 1e9: {}
-- [pest_control] invalid: negative stories: {}
-- [pest_control] invalid: decimal stories: {}
-- [pest_control] invalid: unknown frequency semiannual: {}
-- [pest_control] invalid: unknown propertyType Condo: {}
-- [lawn_care] invalid: blank lawnSqFt (falls to lot-derived turf): {}
-- [lawn_care] invalid: zero lawnSqFt: {}
-- [lawn_care] invalid: negative lawnSqFt: {}
-- [lawn_care] invalid: decimal lawnSqFt: {}
-- [lawn_care] invalid: huge lawnSqFt 1e7: {}
-- [lawn_care] invalid: legacy lawnFreq 4 (retired basic): {}
-- [lawn_care] invalid: unknown grass paspalum: {}
-- [mosquito] invalid: zero lot: {}
-- [mosquito] invalid: negative lot: {}
-- [mosquito] invalid: missing lot: {}
-- [mosquito] invalid: lot smaller than footprint: {}
-- [rodent_bait] invalid: zero homeSqFt: {}
-- [rodent_bait] invalid: negative homeSqFt: {}
-- [rodent_bait] invalid: missing homeSqFt: {}
+- [pest_control] invalid: blank homeSqFt: {"engineError":null,"review":true,"warnings":["invalid_or_zero_pest_footprint"],"footprintUsed":2000,"footprintSource":"invalid_or_zero_footprint_fallback","frequency":"quarterly"}
+- [pest_control] invalid: zero homeSqFt: {"engineError":null,"review":true,"warnings":["invalid_or_zero_pest_footprint"],"footprintUsed":2000,"footprintSource":"invalid_or_zero_footprint_fallback","frequency":"quarterly"}
+- [pest_control] invalid: negative homeSqFt: {"engineError":null,"review":true,"warnings":["invalid_or_zero_pest_footprint"],"footprintUsed":2000,"footprintSource":"invalid_or_zero_footprint_fallback","frequency":"quarterly"}
+- [pest_control] invalid: decimal homeSqFt: {"engineError":null,"review":false,"warnings":[],"footprintUsed":2001,"footprintSource":"footprint","frequency":"quarterly"}
+- [pest_control] invalid: huge homeSqFt 1e9: {"engineError":null,"review":false,"warnings":[],"footprintUsed":1000000000,"footprintSource":"footprint","frequency":"quarterly"}
+- [pest_control] invalid: negative stories: {"engineError":null,"review":false,"warnings":[],"footprintUsed":2000,"footprintSource":"footprint","frequency":"quarterly"}
+- [pest_control] invalid: decimal stories: {"engineError":null,"review":false,"warnings":[],"footprintUsed":741,"footprintSource":"footprint","frequency":"quarterly"}
+- [pest_control] invalid: unknown frequency semiannual: {"engineError":null,"review":false,"warnings":["invalid_pest_frequency_defaulted_to_quarterly"],"footprintUsed":2000,"footprintSource":"footprint","frequency":"quarterly"}
+- [pest_control] invalid: unknown propertyType Condo: {"engineError":null,"review":false,"warnings":["invalid_property_type_defaulted_to_single_family"],"footprintUsed":2000,"footprintSource":"footprint","frequency":"quarterly"}
+- [lawn_care] invalid: blank lawnSqFt (falls to lot-derived turf): {"engineError":null,"lawnSqFtUsed":4044,"tier":"enhanced","review":true,"reasons":["low_confidence_turf_requires_field_verification"],"customQuote":false,"basis":"TABLE_INTERPOLATION"}
+- [lawn_care] invalid: zero lawnSqFt: {"engineError":null,"lawnSqFtUsed":0,"tier":"enhanced","review":false,"reasons":[],"customQuote":false,"basis":"TABLE_INTERPOLATION"}
+- [lawn_care] invalid: negative lawnSqFt: {"engineError":null,"lawnSqFtUsed":4044,"tier":"enhanced","review":true,"reasons":["low_confidence_turf_requires_field_verification"],"customQuote":false,"basis":"TABLE_INTERPOLATION"}
+- [lawn_care] invalid: decimal lawnSqFt: {"engineError":null,"lawnSqFtUsed":4500.5,"tier":"enhanced","review":false,"reasons":[],"customQuote":false,"basis":"TABLE_INTERPOLATION"}
+- [lawn_care] invalid: huge lawnSqFt 1e7: {"engineError":null,"lawnSqFtUsed":10000000,"tier":"enhanced","review":false,"reasons":[],"customQuote":true,"basis":"EXTRAPOLATED_ABOVE_TABLE_MAX"}
+- [lawn_care] invalid: legacy lawnFreq 4 (retired basic): {"engineError":null,"lawnSqFtUsed":4500,"tier":"enhanced","review":false,"reasons":[],"customQuote":false,"basis":"TABLE_INTERPOLATION"}
+- [lawn_care] invalid: unknown grass paspalum: {"engineError":null,"lawnSqFtUsed":4500,"tier":"enhanced","review":true,"reasons":["unknown_grass_type_priced_st_augustine"],"customQuote":false,"basis":"TABLE_INTERPOLATION"}
+- [mosquito] invalid: zero lot: {"engineError":null,"category":"SMALL","review":true,"reasons":["missing_mosquito_treatable_area"]}
+- [mosquito] invalid: negative lot: {"engineError":null,"category":"SMALL","review":true,"reasons":["missing_mosquito_treatable_area"]}
+- [mosquito] invalid: missing lot: {"engineError":null,"category":"ACRE","review":true,"reasons":["missing_mosquito_treatable_area","acre_or_larger_property"]}
+- [mosquito] invalid: lot smaller than footprint: {"engineError":null,"category":"SMALL","review":true,"reasons":["missing_mosquito_treatable_area"]}
+- [rodent_bait] invalid: zero homeSqFt: {"footprintUsed":2500,"stations":5}
+- [rodent_bait] invalid: negative homeSqFt: {"footprintUsed":2500,"stations":5}
+- [rodent_bait] invalid: missing homeSqFt: {"footprintUsed":2500,"stations":5}
 - [one_time_pest] stand-alone vs paired with recurring pest (same visit): {"standalone":246,"paired":212,"pairedAfterDiscount":212}
 - [tree_shrub] palm count contribution (30 palms): property-level vs service-line: {"monthlyNoPalms":53.08,"monthlyPropertyPalms":53.08,"monthlyServiceLinePalms":95.17,"propertyPalmSource":"property","serviceLinePalmSource":"service_line"}
 - [tree_shrub] no bed area and no lot: fallback: {"bedArea":2000,"bedAreaSource":"fallback","treeCount":0,"treeCountSource":"default_zero","review":true,"reasons":["missing_bed_area_fallback"]}
 - [tree_shrub] explicit treeCount 0 vs absent with heavy density: {"explicitZero":{"monthly":45.25,"treeCount":0,"source":"explicit","review":false},"absent":{"monthly":58.75,"treeCount":10,"source":"density_estimate"}}
-- [specialty] foam drill points=25: {}
-- [specialty] palm {"treatmentType":"nutrition","palmCount":0}: {}
-- [specialty] palm {"treatmentType":"nutrition","palmCount":-2}: {}
-- [specialty] palm {"treatmentType":"nutrition","palmCount":2.5}: {}
-- [specialty] palm {"treatmentType":"combo","palmCount":3}: {}
+- [specialty] foam drill points=25: {"refusedOverMaxPoints":true}
+- [specialty] palm {"treatmentType":"nutrition","palmCount":0}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"Palm count is required for palm injection pricing.","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"nutrition","palmCount":-2}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"Palm count is required for palm injection pricing.","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"nutrition","palmCount":2.5}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"Palm count is required for palm injection pricing.","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"combo","palmCount":3}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"palmSize is required for this palm treatment","palmSizeUsed":null}
 - [waveguard_discounts] Platinum + 25% manual discount (stacked, uncapped by design): {"platinumAnnual":1883.2,"withManual":1412.4,"manualDiscount":{"amount":470.8,"capReason":null},"marginWarnings":[{"service":"lawn_care","type":"waveguard_discount_below_margin_floor","margin":0.133,"marginFloor":0.35,"finalAnnual":460.8,"annualCost":399.31,"message":"lawn_care WaveGuard discount drops collected margin to 13.3% (below the 35% review floor) — price stands as discounted"},{"service":"pest_control","type":"manual_discount_below_margin_floor","margin":0.237,"marginFloor":0.35,"finalAnnual":239.77,"annualCost":183,"manualDiscountShare":118.63,"message":"pest_control manual discount
 - [waveguard_discounts] Platinum + FIXED $99,999 manual discount (zeroes the estimate?): {"year1Total":0,"manualDiscount":{"amount":1883.2,"value":99999}}
 - [commercial] commercial pest office 5,000 sf: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_pest","annual":715.83,"price":null,"perApp":178.96,"visits":4,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}

@@ -10,6 +10,15 @@
  * Runs on in-code constants (no DB). Values that are DB-authoritative in prod
  * (pest floor = $79 in pricing_config vs $89 in constants.js at audit time) are
  * asserted through the constants object, never as literals.
+ *
+ * Two suites, deliberately distinct (codex r2 P1 on PR #3792):
+ *   - formula parity (below): the independent calculator vs the engine, both
+ *     reading the live constants — proves the engine implements the documented
+ *     formula, NOT that today's prices are unchanged.
+ *   - FROZEN GOLDEN PRICES (last block): reviewed literals captured from the
+ *     in-code constants on 2026-09-03. A change to any constant, bracket or
+ *     discount fails these on purpose; update the literal only with the price
+ *     change that justifies it (pricing-config skill).
  */
 const path = require('path');
 
@@ -354,5 +363,32 @@ describe('pricing audit — input integrity (documents current behavior for the 
     const li = line(generateEstimate({ ...BASE, homeSqFt: undefined, services: { rodentBait: {} } }), 'rodent_bait');
     expect(li.footprintUsed).toBe(2500);
     expect(li.requiresManualReview).toBeFalsy();
+  });
+});
+
+describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 2026-09-03)", () => {
+  // Literals, not formulas: these pin today's list prices independently of the
+  // constants object so an accidental constant edit cannot move both sides.
+  const FROZEN = [
+    ["pest quarterly 1,000 sf", { ...BASE, homeSqFt: 1000, services: { pest: { frequency: "quarterly" } } }, "pest_control", { perApp: 100, annual: 400, monthly: 33.33, visitsPerYear: 4, initialFee: 99 }],
+    ["pest quarterly 2,000 sf", { ...BASE, services: { pest: { frequency: "quarterly" } } }, "pest_control", { perApp: 112, annual: 448, monthly: 37.33, visitsPerYear: 4, initialFee: 99 }],
+    ["pest quarterly 3,500 sf", { ...BASE, homeSqFt: 3500, services: { pest: { frequency: "quarterly" } } }, "pest_control", { perApp: 120, annual: 480, monthly: 40, visitsPerYear: 4 }],
+    ["pest quarterly 5,000 sf", { ...BASE, homeSqFt: 5000, services: { pest: { frequency: "quarterly" } } }, "pest_control", { perApp: 126, annual: 504, monthly: 42, visitsPerYear: 4 }],
+    ["pest bimonthly 2,000 sf", { ...BASE, services: { pest: { frequency: "bimonthly" } } }, "pest_control", { perApp: 98.56, annual: 591.36, monthly: 49.28, visitsPerYear: 6 }],
+    ["pest monthly 2,000 sf", { ...BASE, services: { pest: { frequency: "monthly" } } }, "pest_control", { perApp: 87.36, annual: 1048.32, monthly: 87.36, visitsPerYear: 12 }],
+    ["lawn St. Augustine standard 4,250 sf", { ...BASE, lawnSqFt: 4250, services: { lawn: { track: "st_augustine", tier: "standard" } } }, "lawn_care", { perApp: 76, annual: 456, monthly: 38 }],
+    ["lawn St. Augustine standard 8,000 sf", { ...BASE, lawnSqFt: 8000, services: { lawn: { track: "st_augustine", tier: "standard" } } }, "lawn_care", { perApp: 94, annual: 564, monthly: 47 }],
+    ["lawn St. Augustine premium 4,500 sf", { ...BASE, services: { lawn: { track: "st_augustine", tier: "premium" } } }, "lawn_care", { perApp: 64, annual: 768, monthly: 64 }],
+    ["lawn zoysia standard 4,500 sf", { ...BASE, services: { lawn: { track: "zoysia", tier: "standard" } } }, "lawn_care", { perApp: 84, annual: 504, monthly: 42 }],
+    ["mosquito seasonal9 8,000 sf lot", { ...BASE, lawnSqFt: undefined, services: { mosquito: { tier: "seasonal9" } } }, "mosquito", { perVisit: 77, annual: 693, monthly: 57.75 }],
+    ["mosquito monthly12 15,000 sf lot", { ...BASE, lotSqFt: 15000, lawnSqFt: undefined, services: { mosquito: { tier: "monthly12" } } }, "mosquito", { perVisit: 72, annual: 864, monthly: 72 }],
+    ["rodent bait 2,000 sf", { ...BASE, services: { rodentBait: {} } }, "rodent_bait", { perVisit: 89, annual: 356, monthly: 29.67, visitsPerYear: 4 }],
+    ["termite bait (Trelona) 2,000 sf monitoring", { ...BASE, services: { termite: { system: "trelona" } } }, "termite_bait", { perApp: 72, annual: 288, monthly: 24, visitsPerYear: 4 }],
+    ["one-time pest 2,000 sf", { ...BASE, services: { oneTimePest: {} } }, "one_time_pest", { basePrice: 112 }],
+  ];
+  test.each(FROZEN)("%s prices exactly as frozen", (_name, input, service, expected) => {
+    const li = line(generateEstimate(input), service);
+    expect(li).toBeDefined();
+    for (const [k, v] of Object.entries(expected)) expect(li[k]).toBe(v);
   });
 });

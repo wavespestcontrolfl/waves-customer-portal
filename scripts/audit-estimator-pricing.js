@@ -472,7 +472,9 @@ function record(section, name, input, expected, actual, opts = {}) {
   // line where a price was expected) and is counted, listed and raised as a
   // finding — never silently dropped from the totals (codex P1 on PR #3792).
   const status = expected === null || expected === undefined ? 'engine_only' : (actual === null || actual === undefined ? 'NO_PRICE' : (Math.abs(diff) <= tol ? 'match' : 'MISMATCH'));
-  const row = { section, name, input, expected, actual, diff, status, ...opts.extra };
+  // Scenario metadata stays under row.extra — the Markdown renderer prints
+  // s.extra, so spreading it onto the row hid every observation (codex r2 P2).
+  const row = { section, name, input, expected, actual, diff, status, extra: opts.extra || null };
   scenarios.push(row);
   if (status === 'MISMATCH') findings.push({ severity: 'P1', section, name, detail: `independent ${expected} vs engine ${actual} (diff ${diff})` });
   if (status === 'NO_PRICE') findings.push({ severity: 'P1', section, name, detail: `independent ${expected} but the engine returned no price for this line` });
@@ -596,7 +598,34 @@ function runMosquitoMatrix() {
       record(section, `lot ${lot} ${program}`, { lotSqFt: lot, program }, exp.perVisit, li ? li.perVisit : null, { extra: { treatableExpected: exp.treatable, treatableActual: li ? (li.mosquitoTreatableSqFt ?? li.treatableSqFt) : null, category: li ? li.lotCategory : null, annualExpected: exp.annual, annualActual: li ? li.annual : null } });
     }
   }
-  void edges;
+  // Category boundaries are defined on TREATABLE area (lot − footprint −
+  // hardscape), so construct the lot that lands treatable at edge−1 / edge /
+  // edge+1 instead of sampling lot sizes (codex r2 P2). Hardscape is a
+  // rounded function of the lot, so a target can be unreachable by ±1 sf; that
+  // is recorded as an engine-only observation rather than skipped.
+  const lotForTreatable = (target) => {
+    const fp = footprintOf(2000, 1);
+    for (let lot = target + fp; lot <= target + fp + 20000; lot += 1) {
+      const t = Math.max(0, lot - fp - hardscapeOf(lot, 'single_family', {}));
+      if (t === target) return lot;
+      if (t > target) return null;
+    }
+    return null;
+  };
+  for (const edge of edges.filter((e) => e < 43560)) {
+    for (const delta of [-1, 0, 1]) {
+      const target = edge + delta;
+      const lot = lotForTreatable(target);
+      if (lot === null) { record(section, `treatable ${target} unreachable by any integer lot (hardscape rounding)`, { treatableTarget: target }, null, null, { extra: { note: 'boundary cannot be hit exactly; neighbours cover it' } }); continue; }
+      for (const program of ['seasonal9', 'monthly12']) {
+        const exp = expectMosquito({ homeSqFt: 2000, lotSqFt: lot, program });
+        const r = runEngine({ ...BASE, lotSqFt: lot, lawnSqFt: undefined, services: { mosquito: { tier: program } } });
+        const li = line(r.result, 'mosquito');
+        record(section, `treatable ${target} (lot ${lot}) ${program}`, { lotSqFt: lot, treatableTarget: target, program }, exp.perVisit, li ? li.perVisit : null, { extra: { treatableExpected: exp.treatable, treatableActual: li ? (li.mosquitoTreatableSqFt ?? li.treatableSqFt) : null, categoryExpected: exp.category, categoryActual: li ? li.lotCategory : null } });
+        flagIf(exp.treatable !== target, 'P2', section, `treatable ${target} (lot ${lot})`, `independent treatable ${exp.treatable} missed the target`);
+      }
+    }
+  }
   for (const features of [{ trees: 'heavy' }, { nearWater: true }, { pool: true }, { irrigation: true }, { trees: 'heavy', complexity: 'complex', nearWater: true, pool: true, irrigation: true }]) {
     const exp = expectMosquito({ homeSqFt: 2000, lotSqFt: 8000, features, program: 'seasonal9' });
     const r = runEngine({ ...BASE, lawnSqFt: undefined, features, services: { mosquito: { tier: 'seasonal9' } } });
@@ -800,9 +829,12 @@ function runAnnualEconomics() {
     { service: 'pest_control quarterly (2,000 sf)', revenuePerVisit: pestQ.perApp, visits: 4, modeledMinutes: 25, observed: RECORDED_VISIT_SPAN_MINUTES.pest_control_quarterly, materialPerVisit: pestMaterial, callbackRate: OBSERVED_PEST_CALLBACK_RATE, callbackMinutes: RECORDED_VISIT_SPAN_MINUTES.pest_re_service.median, setupFee: constants.PEST.initialFee },
     { service: 'lawn_care 9x st_augustine (4,500 sf)', revenuePerVisit: lawn9.perApp, visits: 9, modeledMinutes: lawnCostModeled.modeledMinutes, driveMinutes: lawnCostModeled.driveMinutes, observed: RECORDED_VISIT_SPAN_MINUTES.lawn_care_9x, materialPerVisit: lawnCostModeled.materialPerVisit, callbackReservePerVisit: 2 },
     { service: 'mosquito seasonal9 (8,000 sf lot)', revenuePerVisit: mosq.perVisit, visits: 9, modeledMinutes: 30, observed: null, materialPerVisit: mosq.materialPerVisit },
-    { service: 'rodent_bait (2,000 sf)', revenuePerVisit: rod.perVisit, visits: 4, modeledMinutes: rod.stations * 5, observed: null, materialPerVisit: rod.stations * 1.5, extraAnnual: rod.stations * 7.5, setupFee: rod.setupFee },
+    // Rodent bait setup is waived by any other qualifying service, and a
+    // stand-alone rodent program is Bronze — so Silver+ rows (which imply
+    // another qualifier) carry no setup fee (codex r2 P2).
+    { service: 'rodent_bait (2,000 sf)', revenuePerVisit: rod.perVisit, visits: 4, modeledMinutes: rod.stations * 5, observed: null, materialPerVisit: rod.stations * 1.5, extraAnnual: rod.stations * 7.5, setupFee: rod.setupFee, setupStandaloneOnly: true },
     { service: 'tree_shrub 6x (1,440 sf beds, 6 trees)', revenuePerVisit: ts.perApp, visits: 6, modeledMinutes: ts.onSiteMin + 10, driveMinutes: 0, observed: null, materialPerVisit: round2(ts.materialCost / 6) },
-    { service: 'termite_bait monitoring (2,000 sf)', revenuePerVisit: term.perApp, visits: 4, modeledMinutes: term.stations * 5, observed: null, materialPerVisit: term.stations * 1.5, extraAnnual: term.stations * 7.5, setupFee: term.installPrice, setupIsInstall: true },
+    { service: 'termite_bait monitoring (2,000 sf)', revenuePerVisit: term.perApp, visits: 4, modeledMinutes: term.stations * 5, observed: null, materialPerVisit: term.stations * 1.5, extraAnnual: term.stations * 7.5, setupFee: term.installPrice /* billed installation — first-year revenue includes it (codex r2 P2) */ },
   ];
   for (const row of rows) {
     for (const tier of ['bronze', 'silver', 'gold', 'platinum']) {
@@ -810,8 +842,9 @@ function runAnnualEconomics() {
       const modeled = unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.modeledMinutes, driveMinutes: row.driveMinutes ?? constants.GLOBAL.DRIVE_TIME, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount });
       const observed = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.median, driveMinutes: 0 /* recorded span already contains drive — never re-added (MON-004) */, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount }) : null;
       const observedP75 = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.p75, driveMinutes: 0 /* recorded span already contains drive — never re-added (MON-004) */, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount }) : null;
-      const firstYearRevenue = round2(modeled.revenueAnnual + (row.setupFee && !row.setupIsInstall ? row.setupFee : 0));
-      out.push({ service: row.service, tier, discount, perVisitList: row.revenuePerVisit, visits: row.visits, renewalRevenue: modeled.revenueAnnual, firstYearRevenue, setupFee: row.setupFee || 0, modeledMinutes: row.modeledMinutes, observedMinutes: row.observed ? row.observed.median : null, observedN: row.observed ? row.observed.n : null, modeled, observed, observedP75 });
+      const setupThisYear = row.setupFee && !(row.setupStandaloneOnly && tier !== 'bronze') ? row.setupFee : 0;
+      const firstYearRevenue = round2(modeled.revenueAnnual + setupThisYear);
+      out.push({ service: row.service, tier, discount, perVisitList: row.revenuePerVisit, visits: row.visits, renewalRevenue: modeled.revenueAnnual, firstYearRevenue, setupFee: setupThisYear, modeledMinutes: row.modeledMinutes, observedMinutes: row.observed ? row.observed.median : null, observedN: row.observed ? row.observed.n : null, modeled, observed, observedP75 });
     }
   }
   return { section, rows: out };
@@ -915,6 +948,12 @@ function markupVsMarginAudit() {
 
 async function main() {
   const dbInfo = await maybeSyncFromDb();
+  if (WANT_DB && !dbInfo.synced) {
+    // An explicitly requested overlay that did not happen must never look like
+    // a passing constants-only run (codex r2 P1): fail nonzero.
+    console.error(`--db requested but the pricing_config overlay did not run: ${dbInfo.reason || 'sync returned false'}`);
+    process.exit(3);
+  }
   runPestMatrix();
   runLawnMatrix();
   runMosquitoMatrix();

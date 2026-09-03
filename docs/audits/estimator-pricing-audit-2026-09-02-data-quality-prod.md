@@ -158,6 +158,8 @@ _(0 rows)_
 
 ## Live estimates whose stored WaveGuard tier differs from the engine tier
 
+_Round 2 (Codex P2): `differs_from_engine` now uses `IS DISTINCT FROM`, so a NULL stored tier beside a non-null engine tier counts. The table below is from the 2026-09-03T05:43Z run under the old `<>` predicate (NULL-tier rows could not register a difference) and was not re-queried; treat the NULL row's 0 as unmeasured until the next run._
+
 | waveguard_tier | n | differs_from_engine |
 |---|---|---|
 | NULL | 236 | 0 |

@@ -206,7 +206,9 @@ const CHECKS = [
     key: 'estimates_tier_vs_engine',
     title: 'Live estimates whose stored WaveGuard tier differs from the engine tier',
     sql: `select waveguard_tier, count(*) as n,
-                 count(*) filter (where lower(waveguard_tier) <> lower(coalesce(estimate_data->'result'->'recurring'->>'waveGuardTier', estimate_data->'engineResult'->'waveGuard'->>'tier', waveguard_tier))) as differs_from_engine
+                 -- IS DISTINCT FROM so a NULL stored tier beside a non-null engine tier counts (codex r2 P2); rows with no engine tier in the snapshot are not comparable
+                 count(*) filter (where coalesce(estimate_data->'result'->'recurring'->>'waveGuardTier', estimate_data->'engineResult'->'waveGuard'->>'tier') is not null
+                                    and lower(waveguard_tier) is distinct from lower(coalesce(estimate_data->'result'->'recurring'->>'waveGuardTier', estimate_data->'engineResult'->'waveGuard'->>'tier'))) as differs_from_engine
           from estimates where archived_at is null and status in ('sent','viewed','accepted','draft') group by 1 order by 2 desc`,
   },
   {
