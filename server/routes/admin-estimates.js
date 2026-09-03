@@ -2379,8 +2379,25 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   const sentCount = await db('estimates')
     .where({ id: estimate.id, status: 'sending' })
     .whereNull('price_locked_at')
+    // A clarify hold stamped after the pre-handoff check (a reply lands on
+    // the 'sending' row by design) must not finalize the whole-building
+    // quote as 'sent' — the delivered link would render it (codex r3 P1 on
+    // #3804); the row parks as send_failed instead, like the pre-handoff
+    // verdict, and the operator re-drafts and re-sends.
+    .whereRaw(REPRICE_PENDING_ABSENT_SQL)
     .update(updatePayload);
   if (!sentCount) {
+    const heldNow = await db('estimates').where({ id: estimate.id }).first('status', 'price_locked_at', 'estimate_data');
+    if (heldNow && String(heldNow.status) === 'sending' && !heldNow.price_locked_at && siblingRepricePending(heldNow)) {
+      await db('estimates')
+        .where({ id: estimate.id, status: 'sending' })
+        .update({ status: 'send_failed', last_send_error: 'reprice_pending', scheduled_at: null, updated_at: db.fn.now() });
+      logger.warn(`[admin-estimates] estimate ${estimate.id} was held for a re-price while its send was in flight — parked as send_failed, not published.`);
+      await releaseGroupSiblingClaims(claimedGroupSiblings);
+      const held = new Error("This estimate was held for a re-price (the customer's clarify answer replaces its dollars or address) while the send was in flight. The message went out, but the link will not render until it is re-drafted and re-sent.");
+      held.statusCode = 409;
+      throw held;
+    }
     logger.warn(`[admin-estimates] estimate ${estimate.id} left the 'sending' claim during send (likely accepted/declined concurrently); preserving its current state.`);
     // The channels DID deliver — a customer accepting mid-flight is exactly
     // the outcome the learning loop must not lose, so the first-send event
@@ -3629,8 +3646,12 @@ router.put('/:id/proposal', async (req, res, next) => {
           // A UNIT hold is lifted only once the row's address carries the
           // answered unit (the proposal save never edits the address column;
           // the operator corrects it first) — codex r1 P1 on #3804.
+          // The proposal's EDITABLE address (proposal.propertyAddress) is
+          // what the operator corrects — the base column is immutable here
+          // and the residential revision refuses commercial rows (codex r3
+          // P1 on #3804).
           const { unitHoldSatisfied } = require('../utils/estimate-claim-sql');
-          if (await unitHoldSatisfied(trx, nextEngine.callLogId || null, locked.address)) {
+          if (await unitHoldSatisfied(trx, nextEngine.callLogId || null, normalized?.propertyAddress || locked.address)) {
             delete nextEngine.reprice_pending_at;
             delete nextEngine.reprice_attempt;
           }

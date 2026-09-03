@@ -405,7 +405,12 @@ function splitUnitFirstLine(value) {
   const segments = cleanString(value).split(',').map((s) => s.trim()).filter(Boolean);
   if (!segments.length) return null;
   if (segments.length >= 2 && UNIT_FIRST_SEGMENT_RE.test(segments[0])) {
-    return { unit: normalizeUnitLine(segments[0]), rest: segments.slice(1).join(', ') };
+    // EVERY consecutive leading unit segment ("Bldg 9, Apt 204, 123 Main
+    // St") folds into one unit, mirroring the street-first multi-segment
+    // peel (codex r3 P2 on #3804).
+    let consumed = 1;
+    while (consumed < segments.length - 1 && UNIT_FIRST_SEGMENT_RE.test(segments[consumed])) consumed += 1;
+    return { unit: normalizeUnitLine(segments.slice(0, consumed).join(' ')), rest: segments.slice(consumed).join(', ') };
   }
   const inline = segments[0].match(UNIT_FIRST_INLINE_RE);
   if (inline) {

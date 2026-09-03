@@ -791,7 +791,7 @@ describe('review fixes', () => {
     expect(idxPriv.addressFromContext(unitFirstStale)).toBe('Apt 204, 5 Other Rd, Venice, FL 34285');
     expect(idxPriv.addressFromContext({ ...unitFirstStale, lead: { address: '#9, 5 Other Rd, Venice, FL 34285' } })).toBe('Apt 204, 5 Other Rd, Venice, FL 34285');
     // The shared helper reads the unit in either position.
-    const { unitAnywhereOnLine, splitUnitFirstLine } = require('../utils/address-normalizer');
+    const { unitAnywhereOnLine, splitUnitFirstLine, dwellingUnitOnLine, structuralUnitPart } = require('../utils/address-normalizer');
     expect(unitAnywhereOnLine('Apt 204, 5 Other Rd, Venice, FL 34285')).toBe('Apt 204');
     expect(unitAnywhereOnLine('5 Other Rd Apt 204, Venice, FL 34285')).toBe('Apt 204');
     expect(unitAnywhereOnLine('5 Other Rd, Venice, FL 34285')).toBe('');
@@ -808,7 +808,6 @@ describe('review fixes', () => {
     expect(idxPriv.addressFromContext(structuralOnly)).toBe('Bldg 9 Apt 204, 5 Other Rd, Venice, FL 34285');
     const structuralTrailing = { extraction: null, lead: { address: '5 Other Rd Bldg 9, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
     expect(idxPriv.addressFromContext(structuralTrailing)).toBe('5 Other Rd Bldg 9 Apt 204, Venice, FL 34285');
-    const { dwellingUnitOnLine, structuralUnitPart } = require('../utils/address-normalizer');
     expect(dwellingUnitOnLine('Bldg 9, 5 Other Rd')).toBe('');
     expect(dwellingUnitOnLine('Bldg 9 Apt 204, 5 Other Rd')).toBe('Apt 204');
     expect(dwellingUnitOnLine('5 Other Rd #204')).toBe('Unit 204');
@@ -822,6 +821,13 @@ describe('review fixes', () => {
     // Longer designator spellings win over their prefixes in the comma-free form (codex r2 P2 on #3804).
     expect(splitUnitFirstLine('Floor 2 123 Main St, Sarasota')).toEqual({ unit: 'Floor 2', rest: '123 Main St, Sarasota' });
     expect(splitUnitFirstLine('Building 9 Apt 204 123 Main St')).toEqual({ unit: 'Building 9 Apt 204', rest: '123 Main St' });
+    // Every consecutive leading unit segment folds into one unit (codex r3 P2 on #3804).
+    expect(splitUnitFirstLine('Bldg 9, Apt 204, 123 Main St, Sarasota')).toEqual({ unit: 'Bldg 9 Apt 204', rest: '123 Main St, Sarasota' });
+    expect(dwellingUnitOnLine('Bldg 9, Apt 204, 123 Main St')).toBe('Apt 204');
+    const segmentedSame = { extraction: null, lead: { address: 'Bldg 9, Apt 204, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(segmentedSame)).toBe('Bldg 9, Apt 204, 5 Other Rd, Venice, FL 34285');
+    const segmentedStale = { extraction: null, lead: { address: 'Bldg 9, Apt 9, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(segmentedStale)).toBe('Bldg 9 Apt 204, 5 Other Rd, Venice, FL 34285');
     const inlineSame = { extraction: null, lead: { address: 'Apt 204 at 123 Main St, Sarasota, FL 34232' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
     expect(idxPriv.addressFromContext(inlineSame)).toBe('Apt 204 at 123 Main St, Sarasota, FL 34232');
     const inlineStale = { extraction: null, lead: { address: 'Unit 9 123 Main St, Sarasota, FL 34232' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };

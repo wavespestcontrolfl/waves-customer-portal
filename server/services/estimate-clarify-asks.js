@@ -159,7 +159,11 @@ function sameBuilding(addressLine, unitAskBuilding) {
 // line names the building's city.
 function sameBuildingForWrite(addressLine, unitAskBuilding) {
   if (!sameBuilding(addressLine, unitAskBuilding)) return false;
-  const line = String(addressLine || '');
+  // Locality is parsed from the PEELED line too — on "Apt 204, 1048 Example
+  // Lakes Cir, Sarasota" the unpeeled parse reads the street as the city
+  // (codex r3 P2 on #3804).
+  const { splitUnitFirstLine } = require('../utils/address-normalizer');
+  const line = splitUnitFirstLine(String(addressLine || ''))?.rest || String(addressLine || '');
   const b = unitAskBuilding || {};
   const askedZip = String(b.postal_code || '').trim().slice(0, 5);
   const askedCity = String(b.city || '').trim();

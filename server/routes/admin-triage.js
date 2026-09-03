@@ -210,6 +210,16 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
         updated_at: new Date(),
       });
     if (updated === 0) return { outcome: 'conflict' };
+    if (item.reason_code === 'missing_unit_number' && nextStatus === 'dismissed' && item.call_log_id) {
+      // The human verdict outranks the SMS answer: dismissing the unit card
+      // (the whole building IS the service address, or the texted reply was
+      // wrong) retires the call-level unit-answer fence the clarify
+      // write-back stamped, so creators stop adopting the rejected unit and
+      // the operator's building-level correction can lift a hold (codex r3
+      // P1 on #3804). Atomic with the dismissal, under the call lock.
+      const { clearCallUnitAnswer } = require('../utils/estimate-claim-sql');
+      await clearCallUnitAnswer(trx, item.call_log_id);
+    }
     if (nextStatus === 'resolved' && emailReviewCard) {
       // A force-reprocess can leave BOTH an email_invalid and an
       // email_unverified card on the call (the partial unique index is

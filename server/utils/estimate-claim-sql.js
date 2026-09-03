@@ -186,6 +186,21 @@ async function stampCallUnitAnswer(dbc, callLogId, { unit, building = null, askD
   return Number(changed) > 0;
 }
 
+// The human verdict retires the fence: staff dismissing the
+// missing_unit_number card (the whole building IS the service address, or
+// the texted reply was wrong) removes the stamp, so creators stop adopting
+// the rejected unit and the operator's building-level correction can lift
+// a hold (codex r3 P1 on #3804). Same atomic one-key delete shape as the
+// stamp.
+async function clearCallUnitAnswer(dbc, callLogId) {
+  if (!callLogId) return false;
+  const changed = await dbc('call_log')
+    .where({ id: callLogId })
+    .whereRaw("COALESCE(metadata->>?, '') <> ''", [CALL_UNIT_ANSWER_KEY])
+    .update({ metadata: dbc.raw("COALESCE(metadata, '{}'::jsonb) - ?", [CALL_UNIT_ANSWER_KEY]) });
+  return Number(changed) > 0;
+}
+
 async function callUnitAnswer(dbc, callLogId) {
   if (!callLogId) return null;
   const row = await dbc('call_log').where({ id: callLogId }).first('metadata');
@@ -256,6 +271,7 @@ module.exports = {
   callPassStillOwned,
   callSideBlockForEstimateData,
   stampCallUnitAnswer,
+  clearCallUnitAnswer,
   callUnitAnswer,
   unitAnswerFenceReason,
   callUnitAnswerFence,

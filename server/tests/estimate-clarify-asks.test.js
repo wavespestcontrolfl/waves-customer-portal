@@ -1757,6 +1757,14 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('retired');
     });
 
+    test('a unit-first lead line with a city but no ZIP ("Apt 204, 1048 …, Sarasota") is evidence at the building — locality parsed after the peel (codex r3 P2 on #3804)', async () => {
+      const lead = { id: 'lead-1', status: 'new', address: 'Apt 204, 1048 Example Lakes Cir, Sarasota', first_name: 'Anna' };
+      const cust = { id: 'cust-1', first_name: 'Anna', address_line1: '9 Home St', address_line2: null };
+      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, { id: 'call-1', customer_id: 'cust-1' }, lead, cust];
+      mockState.selectQueue = [[]];
+      expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('retired');
+    });
+
     test('SEVERAL units on file at the building (a property manager) do not answer WHICH one — the ask stands', async () => {
       const lead = { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Pat' };
       const cust = { id: 'cust-1', first_name: 'Pat', address_line1: '9 Home St', address_line2: null };

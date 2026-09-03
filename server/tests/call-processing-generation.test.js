@@ -516,6 +516,21 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     expect(JSON.parse(payload.metadata.params[1])).toEqual(expect.objectContaining({ unit: 'Apt 204', building: FENCE.building, ask_draft_id: 'draft-1' }));
     expect(await stampCallUnitAnswer(dbc, 'call-1', { unit: '' })).toBe(false);
   });
+
+  test('the human verdict retires the fence: clearCallUnitAnswer is an atomic one-key delete, wired to the missing_unit_number dismissal', async () => {
+    const { clearCallUnitAnswer } = require('../utils/estimate-claim-sql');
+    const dbc = dbcFor({ unit_answer: FENCE });
+    dbc.updates = [];
+    const chain = (table) => { const b = dbc(table); b.whereRaw = () => b; return b; };
+    chain.raw = dbc.raw;
+    expect(await clearCallUnitAnswer(chain, 'call-1')).toBe(true);
+    expect(dbc.updates[0].payload.metadata.__raw).toMatch(/COALESCE\(metadata, '\{\}'::jsonb\) - \?/);
+    expect(dbc.updates[0].payload.metadata.params[0]).toBe('unit_answer');
+    expect(await clearCallUnitAnswer(chain, null)).toBe(false);
+    const triage = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-triage.js'), 'utf8');
+    expect(triage).toContain("item.reason_code === 'missing_unit_number' && nextStatus === 'dismissed'");
+    expect(triage).toContain('clearCallUnitAnswer(trx, item.call_log_id)');
+  });
 });
 
 describe('generation fence + call-lock wiring (source pins)', () => {
@@ -586,15 +601,19 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // address carries the answered unit (codex r1 P1 on #3804).
     const route = src('../routes/admin-estimates.js');
     expect(route).toContain('delete nextEngine.reprice_pending_at;');
-    expect(route).toContain('unitHoldSatisfied(trx, nextEngine.callLogId || null, locked.address)');
     expect(persistence).toContain('unitHoldSatisfied(trx, lockedEngine.callLogId || null, revisedAddress)');
     // Grouped siblings honor the hold at preflight, at the claim, and at publication — and a hold that
     // zero-rows the publication is a FAILURE (released), never read as a concurrent acceptance.
     expect(route).toContain('if (siblingRepricePending(sibling)) {');
-    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(2);
     const heldThrowAt = route.indexOf("throw new Error('sibling is held for a re-price");
     expect(heldThrowAt).toBeGreaterThan(-1);
     expect(route.indexOf('published = true;', heldThrowAt)).toBeGreaterThan(heldThrowAt);
+    // The ANCHOR's final publication honors the hold too: three predicates (claim, sibling publish,
+    // anchor finalize) and the held anchor parks as send_failed (codex r3 P1 on #3804).
+    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(3);
+    expect(route).toContain("update({ status: 'send_failed', last_send_error: 'reprice_pending', scheduled_at: null, updated_at: db.fn.now() })");
+    // The proposal save judges the EDITABLE proposal address.
+    expect(route).toContain("unitHoldSatisfied(trx, nextEngine.callLogId || null, normalized?.propertyAddress || locked.address)");
     // The rows one clarify hold marked never block an adopted-answer replacement (both creators).
     for (const rel of ['../services/estimator-engine/draft-builder.js', '../services/estimator-engine/commercial-proposal.js']) {
       expect(src(rel)).toContain("context?.supersedeReason === 'unit_answer_adopted' && context?.supersedeAttempt");
