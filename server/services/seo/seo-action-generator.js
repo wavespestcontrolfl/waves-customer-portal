@@ -5,8 +5,19 @@ const crypto = require('crypto');
 const { normalizeUrl, extractDomain, urlLookupVariants } = require('../../utils/normalize-url');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const { dispatchWithFallback } = require('../llm/call');
+
+// Structured-output contract for a title/meta draft (llm/call.js jsonSchema).
+const DRAFT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['title', 'meta_description', 'reasoning'],
+  properties: {
+    title: { type: 'string', description: '50-60 characters' },
+    meta_description: { type: 'string', description: '140-155 characters' },
+    reasoning: { type: 'string' },
+  },
+};
 
 const DIAGNOSIS_ACTION_MAP = {
   indexation_problem: { action: 'submit_indexnow', tier: 'auto', effort: 1 },
@@ -218,8 +229,8 @@ class SeoActionGenerator {
   }
 
   async generateAIDrafts(actionIds) {
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      return { error: 'Anthropic API not configured', drafts_generated: 0 };
+    if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
+      return { error: 'No LLM provider configured', drafts_generated: 0 };
     }
 
     let query = db('seo_actions')
@@ -234,7 +245,6 @@ class SeoActionGenerator {
     }
 
     const actions = await query;
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     let generated = 0;
 
     for (const action of actions) {
@@ -254,13 +264,14 @@ class SeoActionGenerator {
 
         const queryList = topQueries.map((q) => `"${q.query}" (${q.impressions} impr, ${q.clicks} clicks)`).join('\n');
 
-        const response = await anthropic.messages.create({
-          model: MODELS.FLAGSHIP,
-          max_tokens: 1000,
+        // FLAGSHIP first, Sol on a miss; a two-leg miss throws into the
+        // per-action catch below and the action keeps no draft.
+        const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+          maxTokens: 1000,
+          jsonMode: true,
+          jsonSchema: DRAFT_SCHEMA,
           system: `You are an SEO specialist for Waves Pest Control, a local pest control company in Southwest Florida (Manatee/Sarasota/Charlotte counties). Write optimized title tags (50-60 chars) and meta descriptions (140-155 chars) that improve CTR for local service queries. Include the target city and service. Use action-oriented language. Never mention prices.`,
-          messages: [{
-            role: 'user',
-            content: `Rewrite the title and meta description for this page:
+          text: `Rewrite the title and meta description for this page:
 
 URL: ${action.url}
 Current title: ${detail.current_title || 'none'}
@@ -270,24 +281,13 @@ Service: ${action.service || 'pest control'}
 Current position: ${detail.gsc_position || 'unknown'}
 
 Top ranking queries:
-${queryList || 'No query data available'}
-
-Return JSON: { "title": "...", "meta_description": "...", "reasoning": "..." }`,
-          }],
+${queryList || 'No query data available'}`,
         });
-
-        const text = response.content[0]?.text || '';
-        let draft;
-        try {
-          const jsonMatch = text.match(/\{[\s\S]*\}/);
-          draft = jsonMatch ? JSON.parse(jsonMatch[0]) : { title: text, meta_description: '', reasoning: '' };
-        } catch {
-          draft = { title: text.substring(0, 60), meta_description: '', reasoning: 'Failed to parse JSON response' };
-        }
+        if (!res.ok || !res.json) throw new Error(`draft dispatch failed: ${res.reason}`);
 
         await db('seo_actions').where('id', action.id).update({
-          ai_draft: JSON.stringify(draft),
-          ai_model: MODELS.FLAGSHIP,
+          ai_draft: JSON.stringify(res.json),
+          ai_model: res.model,
         });
         generated++;
       } catch (err) {

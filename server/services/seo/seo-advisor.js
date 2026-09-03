@@ -19,10 +19,12 @@ const SearchConsole = require('./search-console-v2');
 const MODELS = require('../../config/models');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { publicPortalUrl } = require('../../utils/portal-url');
-const { parseLooseJson } = require('../../utils/llm-json');
+const { dispatchWithFallback } = require('../llm/call');
 
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+// The SDK path ran on its 10-minute default request timeout; keep that as the
+// shared two-leg ceiling.
+const ADVISOR_TIMEOUT_MS = 10 * 60 * 1000;
+
 
 let TwilioService;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
@@ -107,21 +109,23 @@ class SEOAdvisor {
       gbpByLocation,
     };
 
-    // If no Anthropic, return data-only
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
+    // With no provider key at all, return data-only
+    if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
       const fallback = this.generateFallbackReport(analysisData);
       await this.storeReport(fallback);
       return fallback;
     }
 
     try {
-      const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-      const response = await anthropic.messages.create({
-        model: MODELS.FLAGSHIP,
+      // FLAGSHIP first, Sol on a miss. timeoutMs keeps the SDK's old 10-minute
+      // ceiling as the shared budget across both legs — an 8000-token weekly
+      // report needs more than the dispatcher's 2-minute-per-leg default.
+      const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
         // 8000: the weekly schema has 8 array sections and a verbose week can
         // exceed 4000, truncating the JSON mid-structure (the "Grade: ?" alerts).
-        max_tokens: 8000,
+        maxTokens: 8000,
+        jsonMode: true,
+        timeoutMs: ADVISOR_TIMEOUT_MS,
         system: `You are an SEO analyst specializing in local service businesses (pest control, lawn care) in Southwest Florida. You review Google Search Console, Google Business Profile, and web performance data weekly and provide specific, actionable SEO recommendations.
 
 BUSINESS CONTEXT:
@@ -164,9 +168,7 @@ Return JSON: {
   "mobile_insights": [{"finding": "", "action": ""}]
 }`,
 
-        messages: [{
-          role: 'user',
-          content: `Weekly SEO review for ${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}:
+        text: `Weekly SEO review for ${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}:
 
 SITEWIDE PERFORMANCE (last 28 days):
 ${JSON.stringify(analysisData.sitewide, null, 2)}
@@ -198,16 +200,14 @@ ${JSON.stringify(analysisData.indexingIssues, null, 2)}
 GBP PERFORMANCE BY LOCATION (last 28 days):
 ${JSON.stringify(analysisData.gbpByLocation, null, 2)}
 
-Analyze and provide specific, prioritized recommendations.`
-        }]
+Analyze and provide specific, prioritized recommendations.`,
       });
 
-      const rawText = response.content[0].text;
-      let report = parseLooseJson(rawText);
-      if (!report) {
-        logger.warn(`[seo-advisor] weekly report JSON parse failed (len=${String(rawText).length}); head: ${String(rawText).slice(0, 300)}`);
-        report = { raw: rawText, parse_error: true, grade: '?', overall_assessment: 'Report generated but could not parse.' };
-      }
+      // An unparseable answer is a rejected leg inside the dispatcher (the
+      // next provider gets a turn); a two-leg miss lands in the catch below
+      // and stores the deterministic fallback report.
+      if (!res.ok || !res.json) throw new Error(`report dispatch failed: ${res.reason}`);
+      const report = res.json;
 
       report.date = etDateString();
       await this.storeReport(report);

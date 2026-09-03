@@ -1,6 +1,30 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { dispatchWithFallback } = require('../llm/call');
+
+// Structured-output contract (llm/call.js jsonSchema). The confidence floor
+// and the type map below still decide which signals are recorded.
+const SIGNALS_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['signals'],
+  properties: {
+    signals: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['type', 'confidence', 'evidence'],
+        properties: {
+          type: { type: 'string', enum: ['frustration', 'treatment_ineffective', 'price_complaint', 'competitor_interest', 'cancellation_intent'] },
+          confidence: { type: 'number', description: '0.0-1.0' },
+          evidence: { type: 'string', description: 'brief quote' },
+        },
+      },
+    },
+  },
+};
 
 const SIGNAL_TYPES = {
   PAYMENT_FAILED: { weight: -15, severity: 'warning' },
@@ -70,10 +94,7 @@ async function analyzeSentimentBatch(customerId) {
 
     if (smsText.length === 0 && notesText.length === 0) return signals;
 
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic();
-
-    const prompt = `Analyze the following customer communications for a pest control company. Return ONLY valid JSON, no other text.
+    const prompt = `Analyze the following customer communications for a pest control company.
 
 SMS messages from customer (most recent first):
 ${smsText.map((t, i) => `${i + 1}. "${t}"`).join('\n')}
@@ -88,23 +109,18 @@ Detect these sentiment signals and rate confidence 0.0-1.0:
 - competitor_interest: customer mentions other pest control companies
 - cancellation_intent: customer hints at or explicitly mentions cancelling/stopping service
 
-Return JSON format:
-{"signals": [{"type": "frustration", "confidence": 0.8, "evidence": "brief quote"}, ...]}
-Only include signals you detect. Empty array if none found.`;
+For each signal give its type, a confidence, and a brief quote as evidence. Only include signals you detect. Empty array if none found.`;
 
-    const response = await client.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 500,
-      messages: [{ role: 'user', content: prompt }],
+    // FLAGSHIP first, Sol on a miss. A two-leg miss throws into the catch
+    // below, which returns the deterministic signals exactly as before.
+    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      text: prompt,
+      jsonMode: true,
+      jsonSchema: SIGNALS_SCHEMA,
+      maxTokens: 500,
     });
-
-    const responseText = response.content[0]?.text || '{}';
-    // Extract JSON from response (handle possible markdown wrapping)
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return signals;
-
-    const parsed = JSON.parse(jsonMatch[0]);
-    const aiSignals = parsed.signals || [];
+    if (!res.ok || !res.json) throw new Error(res.reason || 'no_json');
+    const aiSignals = res.json.signals || [];
 
     // Map AI types to existing signal types (only confidence >= 0.6)
     const typeMap = {
