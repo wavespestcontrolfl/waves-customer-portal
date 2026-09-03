@@ -19,7 +19,7 @@ function seedDb() {
       { id: 'p-m2', customer_id: 'c-multi', active: true },
     ],
     scheduled_services: [
-      { id: 'v-open', customer_id: 'c-sole', status: 'pending', property_id: null, service_address_line1: null },
+      { id: 'v-open', customer_id: 'c-sole', status: 'pending', property_id: null, service_address_line1: null, visit_id: null },
       { id: 'v-confirmed', customer_id: 'c-sole', status: 'confirmed', property_id: null, service_address_line1: null },
       { id: 'v-nullstatus', customer_id: 'c-sole', status: null, property_id: null, service_address_line1: null },
       { id: 'v-stamped', customer_id: 'c-sole', status: 'pending', property_id: null, service_address_line1: '9 Elsewhere Rd' },
@@ -176,9 +176,10 @@ describe('20260903000050 backfill sole-property anchor', () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
     visit(db, 'v-confirmed').property_id = 'p-admin'; // admin re-pointed it since
+    visit(db, 'v-nullstatus').visit_id = 'vis-1'; // grouped since — the visit keys on the property
     await migration.down(fakeKnex(db));
     expect(visit(db, 'v-open').property_id).toBeNull();
-    expect(visit(db, 'v-nullstatus').property_id).toBeNull();
+    expect(visit(db, 'v-nullstatus').property_id).toBe('p-sole');
     expect(visit(db, 'v-confirmed').property_id).toBe('p-admin');
     expect(db.system_settings.find((r) => r.key === STATE_KEY)).toBeUndefined();
   });

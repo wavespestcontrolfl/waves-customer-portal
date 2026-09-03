@@ -1175,7 +1175,10 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   // the fallback ONCE on a copy of the parent and let copyIfPresent carry it —
   // the parent row itself is not rewritten here. Same rule as the admin
   // extension writers (customer-properties.anchorSoleProperty).
-  const anchoredParent = { ...parent };
+  // The copy carries the estimate identity the children will carry
+  // (opts.sourceEstimateId wins in buildRecurringFollowUpRows) so an
+  // estimate-backed series is left to the estimate linkage.
+  const anchoredParent = { ...parent, ...(opts.sourceEstimateId ? { source_estimate_id: opts.sourceEstimateId } : {}) };
   await require('./customer-properties').anchorSoleProperty(anchoredParent, columns, conn);
   const builtRows = buildRecurringFollowUpRows(anchoredParent, {
     ...opts,

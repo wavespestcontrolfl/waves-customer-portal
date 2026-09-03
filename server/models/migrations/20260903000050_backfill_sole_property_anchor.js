@@ -29,8 +29,10 @@
  *
  * Ownership is recorded in a system_settings state row so down() clears
  * exactly what up() wrote, value-guarded per row (a link an admin changed
- * since is left as the admin left it). Idempotent: a second up() with the
- * state row present is a no-op.
+ * since is left as the admin left it), and never on a row that has since
+ * joined a visit (GH codex #3837 r1 P1: the visit's stop tuple carries
+ * that property — clearing it would strand the member). Idempotent: a
+ * second up() with the state row present is a no-op.
  */
 
 const STATE_KEY = 'migration.20260903000050.state';
@@ -120,11 +122,13 @@ exports.down = async function down(knex) {
   const state = await loadState(knex);
   if (!state) return; // nothing owned → restore nothing
 
-  // Clear ONLY where the visit still carries the property we wrote.
-  for (const [visitId, propertyId] of Object.entries(state.linked || {})) {
-    await knex('scheduled_services')
-      .where({ id: visitId, property_id: propertyId })
-      .update({ property_id: null });
+  // Clear ONLY where the row still carries the property we wrote AND has
+  // not joined a visit since (its membership keys on that property).
+  const hasVisitCol = await knex.schema.hasColumn('scheduled_services', 'visit_id');
+  for (const [rowId, propertyId] of Object.entries(state.linked || {})) {
+    const q = knex('scheduled_services').where({ id: rowId, property_id: propertyId });
+    if (hasVisitCol) q.whereNull('visit_id');
+    await q.update({ property_id: null });
   }
 
   if (await knex.schema.hasTable('system_settings')) {

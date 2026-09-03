@@ -9,7 +9,7 @@ const path = require('path');
 jest.mock('../models/db', () => ({}), { virtual: false });
 const { anchorSoleProperty } = require('../services/customer-properties');
 
-const COLS = { property_id: true, service_address_line1: true };
+const COLS = { property_id: true, service_address_line1: true, source_estimate_id: true };
 
 function fakeConn(propertiesByCustomer) {
   return (table) => {
@@ -47,6 +47,12 @@ describe('anchorSoleProperty', () => {
     expect(row.property_id).toBeNull();
   });
 
+  test('an estimate-backed row is left to the estimate linkage (a new address must not anchor to the old property)', async () => {
+    const row = { customer_id: 'c-sole', property_id: null, source_estimate_id: 'est-1' };
+    await anchorSoleProperty(row, COLS, conn);
+    expect(row.property_id).toBeNull();
+  });
+
   test('two active properties → null (office places it)', async () => {
     const row = { customer_id: 'c-multi', property_id: null };
     await anchorSoleProperty(row, COLS, conn);
@@ -79,11 +85,16 @@ describe('every spawned-row writer anchors the sole property', () => {
     expect(j).toBeGreaterThan(i);
   });
 
-  test('every admin-schedule stamp copy on a spawned row is followed by the anchor', () => {
+  test('every admin-schedule spawned-row writer copies the parent stamp AND anchors', () => {
     const src = read('routes/admin-schedule.js');
-    const copies = src.match(/copyStampedServiceAddressFields\((\w+), parent, cols\);\n\s*await anchorSoleProperty\(\1, cols, (trx|conn)\);/g) || [];
-    const allCopies = src.match(/copyStampedServiceAddressFields\(\w+, parent, cols\);/g) || [];
-    expect(allCopies.length).toBeGreaterThan(0);
-    expect(copies.length).toBe(allCopies.length);
+    const anchored = src.match(/copyStampedServiceAddressFields\((\w+), (\w+), cols\);\n\s*await anchorSoleProperty\(\1, cols, (trx|conn)\);/g) || [];
+    const allCopies = src.match(/copyStampedServiceAddressFields\(\w+, \w+, cols\);/g) || [];
+    // Five extension/spawn writers + the direct admin-create child and
+    // booster loops (GH codex #3837 r1 P1).
+    expect(allCopies.length).toBe(7);
+    expect(anchored.length).toBe(allCopies.length);
+    // The direct-create loops spawn from the freshly inserted parent `svc`.
+    expect(src).toContain('copyStampedServiceAddressFields(childData, svc, cols);\n        await anchorSoleProperty(childData, cols, trx);');
+    expect(src).toContain('copyStampedServiceAddressFields(boosterData, svc, cols);\n          await anchorSoleProperty(boosterData, cols, trx);');
   });
 });

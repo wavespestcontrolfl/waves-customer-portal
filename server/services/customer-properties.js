@@ -540,12 +540,19 @@ async function soleActivePropertyId(customerId, conn = db) {
  * COALESCE, which for a sole-property customer IS that property, while a
  * stamped row may name an address the customer never registered; the
  * 20260903000050 backfill applies the same rule to existing rows.
+ * Estimate-backed rows (source_estimate_id) are NOT anchored here (GH
+ * codex #3837 r1 P1): an accepted estimate for a NEW address seeds its
+ * children before the post-commit estimate linkage creates that property,
+ * and the linker only stamps rows still NULL — anchoring them to the old
+ * sole property would dispatch the series to the wrong house. The
+ * linkage owns those rows.
  * Cols-guarded like the stamp copy; best-effort (null on error).
  */
 async function anchorSoleProperty(target, cols, conn = db) {
   if (!target || !cols || !cols.property_id) return;
   if (target.property_id != null || !target.customer_id) return;
   if (cols.service_address_line1 && target.service_address_line1) return;
+  if (cols.source_estimate_id && target.source_estimate_id) return;
   target.property_id = await soleActivePropertyId(target.customer_id, conn);
 }
 
