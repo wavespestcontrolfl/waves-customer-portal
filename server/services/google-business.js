@@ -39,10 +39,10 @@ function isSystemicDbFailure(err) {
   const code = String((err && err.code) || '');
   // Node socket codes ride in err.code too (ECONNRESET / ECONNREFUSED /
   // ETIMEDOUT / EPIPE, plus the DNS and route failures ENOTFOUND /
-  // ENETUNREACH / EAI_* — codex r7 P1) and Knex's pool timeout is a
+  // ENETUNREACH and the whole libuv EAI_* resolver family — codex r7/r8 P1) and Knex's pool timeout is a
   // KnexTimeoutError — classify those before any SQLSTATE test, or they
   // read as row errors.
-  if (/^E(CONNRESET|CONNREFUSED|TIMEDOUT|PIPE|HOSTUNREACH|NETUNREACH|NETDOWN|NOTFOUND|AI_AGAIN|AI_NONAME|AI_FAIL)$/i.test(code)) return true;
+  if (/^E(CONNRESET|CONNREFUSED|TIMEDOUT|PIPE|HOSTUNREACH|NETUNREACH|NETDOWN|NOTFOUND|AI_[A-Z]+)$/i.test(code)) return true;
   if (String((err && err.name) || '') === 'KnexTimeoutError') return true;
   // 57014 (query_canceled) is what statement_timeout raises under database
   // overload — every row would wait the full timeout under the location

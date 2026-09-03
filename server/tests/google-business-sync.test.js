@@ -580,6 +580,8 @@ describe('Google Business review sync', () => {
       Object.assign(new Error('getaddrinfo ENOTFOUND postgres.railway.internal'), { code: 'ENOTFOUND' }),
       Object.assign(new Error('connect ENETUNREACH 10.0.0.5:5432'), { code: 'ENETUNREACH' }),
       new Error('getaddrinfo EAI_AGAIN postgres.railway.internal'),
+      Object.assign(new Error('resolver failure'), { code: 'EAI_NODATA' }),
+      Object.assign(new Error('resolver failure'), { code: 'EAI_ADDRFAMILY' }),
     ]) {
       const tagged = await run(dead);
       expect(tagged.systemicError).toBe(dead);
