@@ -826,8 +826,21 @@ const witnessAt = (row, after) => {
 // sweep both consume this; there is no second implementation. Never
 // association-strength matches.
 //
-// probes: [{ key, callId, twilioCallSid, after }] — one per card, with its
-// own boundary. Returns Map key → the EARLIEST qualifying direct proof.
+// A lead "minted by this call" is one carrying the call's SID AND created
+// at or after the call started: lead-attribution re-stamps a REUSED lead's
+// twilio_call_sid with each newer call, so the SID alone is not filing-
+// time provenance — a lead older than the call is a reused one, and its
+// estimate is association-strength at most. A probe without callStartedAt
+// mints nothing (fails closed).
+const mintedByCall = (lead, probe) => {
+  const started = probe.callStartedAt ? new Date(probe.callStartedAt) : null;
+  const created = lead.created_at ? new Date(lead.created_at) : null;
+  return Boolean(started && created && !Number.isNaN(started.getTime()) && !Number.isNaN(created.getTime()) && created >= started);
+};
+
+// probes: [{ key, callId, twilioCallSid, callStartedAt, after }] — one per
+// card, with its own boundary. Returns Map key → the EARLIEST qualifying
+// direct proof.
 async function directEstimatesSentAfter(conn, probes) {
   const out = new Map();
   if (!probes.length) return out;
@@ -860,12 +873,14 @@ async function directEstimatesSentAfter(conn, probes) {
     .select(cols);
   for (const r of stamped) consider(r.stamped_call_id, r, "estimate_stamped_with_this_call");
 
-  const callBySid = new Map(probes.filter((p) => p.twilioCallSid).map((p) => [p.twilioCallSid, String(p.callId)]));
-  if (!callBySid.size) return out;
-  const leads = await conn("leads")
-    .whereIn("twilio_call_sid", [...callBySid.keys()])
-    .select("id", "estimate_id", "twilio_call_sid");
+  const probeBySid = new Map(probes.filter((p) => p.twilioCallSid).map((p) => [p.twilioCallSid, p]));
+  if (!probeBySid.size) return out;
+  const leads = (await conn("leads")
+    .whereIn("twilio_call_sid", [...probeBySid.keys()])
+    .select("id", "estimate_id", "twilio_call_sid", "created_at"))
+    .filter((l) => mintedByCall(l, probeBySid.get(l.twilio_call_sid)));
   if (!leads.length) return out;
+  const callBySid = new Map([...probeBySid].map(([sid, p]) => [sid, String(p.callId)]));
   const estimateIds = leads.map((l) => l.estimate_id).filter(Boolean);
   const leadIds = leads.map((l) => String(l.id));
   const linked = await handedOffWithin(conn("estimates")
@@ -907,20 +922,27 @@ async function resolveFulfillment(conn, commitment, call) {
     case "send_estimate": {
       // Direct: the shared primitive above (estimator stamp; lead FK or
       // public-quote mirror on a lead this call minted).
-      const direct = (await directEstimatesSentAfter(conn, [{ key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, after }])).get("call");
+      const probe = { key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at, after };
+      const direct = (await directEstimatesSentAfter(conn, [probe])).get("call");
       if (direct) return direct;
-      // A lead reached only through the lead_id / relay_lead_id stamp that
-      // does NOT carry this call's SID is a REUSED earlier call's lead: an
-      // estimate later sent on it is not necessarily this call's, so it is
-      // a hint, never direct proof (Codex #3738 r13 P1). Same guard as
-      // buildCallOutcomes: no lead key, no lead lookup. No local catch: a
-      // failed lead lookup reaches refreshFulfillment's failed accounting
-      // (r13 P2) instead of reading as "no leads".
-      const stampedLeads = leadIds.length ? await conn("leads").whereIn("id", leadIds).select("id", "estimate_id", "twilio_call_sid") : [];
-      const mintedHere = (lead) => Boolean(lead.twilio_call_sid) && lead.twilio_call_sid === call.twilio_call_sid;
+      // A REUSED earlier call's lead — reached through the lead_id /
+      // relay_lead_id stamp, or carrying this call's SID only because
+      // attribution re-stamped a lead older than the call — is a hint,
+      // never direct proof (Codex #3738 r13 P1): an estimate later sent on
+      // it is not necessarily this call's. Same guard as buildCallOutcomes:
+      // no lead key, no lead lookup. No local catch: a failed lead lookup
+      // reaches refreshFulfillment's failed accounting (r13 P2) instead of
+      // reading as "no leads".
+      const stampedLeads = (leadIds.length || call.twilio_call_sid) ? await conn("leads")
+        .where(function scope() {
+          if (leadIds.length) this.orWhereIn("id", leadIds);
+          if (call.twilio_call_sid) this.orWhere("twilio_call_sid", call.twilio_call_sid);
+        })
+        .select("id", "estimate_id", "twilio_call_sid", "created_at") : [];
+      const mintedHere = (lead) => Boolean(lead.twilio_call_sid) && lead.twilio_call_sid === call.twilio_call_sid && mintedByCall(lead, probe);
       const mintedIds = new Set(stampedLeads.filter(mintedHere).map((l) => String(l.id)));
       const reused = stampedLeads.filter((l) => !mintedHere(l));
-      const reusedLeadIds = leadIds.filter((id) => !mintedIds.has(id));
+      const reusedLeadIds = [...new Set([...leadIds.filter((id) => !mintedIds.has(id)), ...reused.map((l) => String(l.id))])];
       const reusedEstimateIds = reused.map((l) => l.estimate_id).filter(Boolean);
       if (reusedEstimateIds.length || reusedLeadIds.length) {
         const onReused = await handedOffWithin(conn("estimates")

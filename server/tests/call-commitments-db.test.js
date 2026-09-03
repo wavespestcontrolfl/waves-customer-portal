@@ -391,6 +391,13 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       await db('estimates').where({ id: est.id }).update({ estimate_data: handedOff(30, { estimatorEngine: { callLogId: call.id } }) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, reusing)).toMatchObject({ record_id: est.id, strength: 'direct', basis: 'estimate_stamped_with_this_call' });
       await db('estimates').where({ id: est.id }).update({ estimate_data: handedOff() });
+      // A lead OLDER than the call that carries its SID only because
+      // attribution re-stamped it on reuse is a reused lead: association,
+      // not direct (Codex #3811 r9 P1). Created at/after the call: minted.
+      await db('leads').where({ id: lead.id }).update({ created_at: new Date(call.created_at.getTime() - 24 * 60 * 60 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ record_id: est.id, strength: 'association', basis: 'estimate_sent_on_a_lead_reused_from_an_earlier_call' });
+      await db('leads').where({ id: lead.id }).update({ created_at: new Date(call.created_at.getTime() + 30 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ record_id: est.id, strength: 'direct' });
       // The same-customer association path: an estimate created before the
       // call but sent after it is a hint like any other (r14).
       await db('leads').where({ id: lead.id }).update({ estimate_id: null });
@@ -508,8 +515,8 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     try {
       const after = new Date(call.created_at.getTime() + 90 * 1000);
       const out = await cc.directEstimatesSentAfter(db, [
-        { key: 'a', callId: call.id, twilioCallSid: SID, after },
-        { key: 'b', callId: call2.id, twilioCallSid: sid2, after },
+        { key: 'a', callId: call.id, twilioCallSid: SID, callStartedAt: call.created_at, after },
+        { key: 'b', callId: call2.id, twilioCallSid: sid2, callStartedAt: call.created_at, after },
       ]);
       expect(out.get('a')).toMatchObject({ record_id: est.id, strength: 'direct' });
       expect(out.get('b')).toMatchObject({ record_id: est.id, strength: 'direct' });

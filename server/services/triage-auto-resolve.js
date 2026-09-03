@@ -765,6 +765,7 @@ async function loadEstimateEvidence(conn, items, flag) {
       key: item.id,
       callId: item.call_log_id,
       twilioCallSid: item.call_twilio_call_sid,
+      callStartedAt: item.call_created_at,
       after: cardBoundary(item),
     })));
     for (const item of quoteItems) {
@@ -1039,7 +1040,23 @@ async function sweep({ now = new Date() } = {}) {
   let callsSynced = 0;
   const itemCallById = new Map(applied.map((d) => [d.item.id, d.item.call_log_id]));
   await db.transaction(async (trx) => {
-    // Per-call ADVISORY locks first (sorted), then the row pre-locks — the
+    // Lock ORDER: customer rows FIRST, then the per-call advisory locks,
+    // then the row pre-locks — the same order property-role staging and
+    // the Customer 360 save use (customer row, then lockTriageCall), so the
+    // sweep can never sit on a call lock waiting for a customer row a
+    // staging worker holds while it waits for our call lock. The customer
+    // rows are held because the contact arm's phone-slot check and the
+    // address/surname guards read them and contact saves take no triage
+    // lock — a removal committing in the gap blocks behind us instead of
+    // the card closing on a number no longer on file. The call→customer
+    // link can move in the gap; a fresh row naming a customer we do not
+    // hold is dropped (fails closed to the next sweep) rather than locked
+    // out of order.
+    const lockedCustomers = new Set(applied.map((d) => d.item.call_customer_id).filter(Boolean).map(String));
+    if (lockedCustomers.size) {
+      await trx('customers').whereIn('id', [...lockedCustomers].sort()).orderBy('id', 'asc').forUpdate().select('id');
+    }
+    // Per-call ADVISORY locks next (sorted), then the row pre-locks — the
     // shared lockTriageCall contract with admin-triage's transitionCore and
     // verdict writers. Ordering our own row locks was not enough: the admin
     // verdict's bulk UPDATE acquires siblings in planner order, so only a
@@ -1063,26 +1080,8 @@ async function sweep({ now = new Date() } = {}) {
     // and booking provenance (rows held FOR UPDATE until commit, so
     // scheduling writers serialize behind us) are reloaded inside the
     // transaction.
-    // The joined CUSTOMER rows are held too: the contact arm's phone-slot
-    // check and the address/surname guards read them, and contact saves
-    // never take the triage advisory lock — a removal committing between
-    // the read and the write would otherwise close caller_not_authorized
-    // on a number no longer on file. Held FOR UPDATE, the removal blocks
-    // behind us and re-arms the card on its own path. The call→customer
-    // link itself can move in the gap, so lock, re-read, and repeat until
-    // the fresh rows name no unlocked customer; a row still naming one
-    // after the bounded passes is dropped (fails closed to the next sweep).
-    const lockedCustomers = new Set();
-    let freshRows = [];
-    for (let pass = 0; pass < 4; pass += 1) {
-      freshRows = await loadCandidateItems(trx, applied.map((d) => d.item.id));
-      const unlocked = [...new Set(freshRows.map((r) => r.call_customer_id).filter(Boolean).map(String))]
-        .filter((id) => !lockedCustomers.has(id)).sort();
-      if (!unlocked.length) break;
-      await trx('customers').whereIn('id', unlocked).orderBy('id', 'asc').forUpdate().select('id');
-      for (const id of unlocked) lockedCustomers.add(id);
-    }
-    freshRows = freshRows.filter((r) => !r.call_customer_id || lockedCustomers.has(String(r.call_customer_id)));
+    const freshRows = (await loadCandidateItems(trx, applied.map((d) => d.item.id)))
+      .filter((r) => !r.call_customer_id || lockedCustomers.has(String(r.call_customer_id)));
     const freshById = new Map(freshRows.map((r) => [r.id, r]));
     const freshBookedCallIds = await loadBookedCallIds(trx, allCallIds, { lock: true });
     const freshEvidence = await loadEvidence(trx, freshRows, { lock: true });
