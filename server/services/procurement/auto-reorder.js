@@ -163,6 +163,14 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
         const stillLow = !!fresh && fresh.auto_reorder_enabled === true && fresh.active !== false
           && freshOnHand != null && freshThreshold != null && freshOnHand <= freshThreshold;
         if (!stillLow) return { stale: true };
+        // The live-request check again, UNDER the lock (pre-push P1): every
+        // creation path (staff, forecast, Intelligence Bar, the dispatcher's
+        // claim) locks this row first, so a request that committed between
+        // the scan and this lock is visible here — the partial unique index
+        // only spans auto rows, so without this read two live requests would
+        // survive.
+        const live = await trx('product_restock_requests').where({ product_id: p.id }).whereIn('status', ['open', 'ordered']).first('id', 'source');
+        if (live) return { conflict: true, reason: live.source === SOURCE ? 'concurrent_auto_request' : 'concurrent_staff_request' };
         // The request is derived from the LOCKED configuration, not the scan
         // snapshot: a reorder-quantity or vendor edit between the two must
         // not send the office to the old vendor for the old count (Codex r4
@@ -208,7 +216,7 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
       });
       if (outcome.stale) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: 'no_longer_low' }); continue; }
       if (outcome.unconfigured) { result.unconfigured.push({ productId: p.id, name: p.name, reason: outcome.unconfigured }); continue; }
-      if (outcome.conflict) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: 'concurrent_auto_request' }); continue; }
+      if (outcome.conflict) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: outcome.reason || 'concurrent_auto_request' }); continue; }
       const { request } = outcome;
       result.created.push({ productId: p.id, name: p.name, requestId: request.id, requestedQuantity: outcome.reorderQty, vendor: outcome.vendorName });
 
