@@ -253,7 +253,7 @@ async function listOwnerQueue(db) {
     // a LEASED card cannot be the primary: its click is the lease 409 and every unleased sibling would defer to it
     if (p.claimed_at || !path || path.id !== d.best_path_id) return false;
     const ctx = { path, domain: d, policy, score: d.score };
-    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && whyNotApprovable(r, path) === null && whyNotHere(p, r) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null, heldDomain.has(d.id)).reason);
+    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && r.path_id === path.id && whyNotApprovable(r, path) === null && whyNotHere(p, r) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null, heldDomain.has(d.id)).reason);
   };
   const groupPrimary = new Map();
   const byId = [...cardsFor].sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -269,7 +269,7 @@ async function listOwnerQueue(db) {
     const path = pathById.get(p.path_id) || null;
     const lead = path ? rows.find((r) => r.prospect_id === p.id && r.dimension === 'payment' && !r.satisfied_at) : null;
     const attachable = (s) => s.payment_group_id === groupId && s.path_id === path.id && !s.claimed_at
-      && rows.some((r) => r.prospect_id === s.id && r.dimension === 'payment' && r.instance_key === lead.instance_key && r.level === lead.level && r.decision_inputs_hash === lead.decision_inputs_hash && Number(r.path_revision) === Number(lead.path_revision) && !r.satisfied_at && !r.approved);
+      && rows.some((r) => r.prospect_id === s.id && r.dimension === 'payment' && r.path_id === path.id && r.instance_key === lead.instance_key && r.level === lead.level && r.decision_inputs_hash === lead.decision_inputs_hash && Number(r.path_revision) === Number(lead.path_revision) && !r.satisfied_at && !r.approved);
     coveredByGroup.set(groupId, lead ? cardsFor.filter((s) => s.id === p.id || attachable(s)).length : 1);
   }
 
@@ -281,7 +281,11 @@ async function listOwnerQueue(db) {
     const ctx = onBestPath ? { path, domain: d, policy, score: d.score } : null;
     const mine = rows.filter((r) => r.prospect_id === p.id).map((r) => {
       // the lease is the click's first refusal — a leased card never shows a button that can only 409
-      let whyNot = onBestPath ? (whyNotApprovable(r, path) || whyNotHere(p, r) || (p.claimed_at ? 'leased to a worker — refresh after it reports' : null)) : 'placement is not on the domain\'s current best path — the nightly bridge rotates it';
+      // a row decided on a PRIOR path (the placement moved to the best path, its instances not yet rotated) is judged
+      // against nothing here — the click's explicit row-path check refuses it, so the card never offers it
+      let whyNot = !onBestPath ? 'placement is not on the domain\'s current best path — the nightly bridge rotates it'
+        : r.path_id !== path.id ? 'the step was decided on a prior path — the nightly bridge rotates it'
+          : (whyNotApprovable(r, path) || whyNotHere(p, r) || (p.claimed_at ? 'leased to a worker — refresh after it reports' : null));
       // the same freshness test the click applies — a stale stamp never shows a button that can only 409, and an
       // APPROVED row whose inputs moved since (price, policy, revision) is shown as awaiting the bridge's re-decision
       // rather than as live spending authority (the bridge invalidates it on its next pass)
@@ -544,9 +548,12 @@ async function acquireAnyway(db, { domainId, actor, note = null, now = new Date(
   // failure reports an unavailable summary — never a failed click that invites a retry (which would only write an
   // audited replacement waiver).
   try {
-    const ids = (await db('seo_link_prospects').where({ domain_id: result.domainId }).select('id')).map((p) => p.id);
-    const open = ids.length ? await loadApprovals(db, await db(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at')) : [];
-    const awaiting = open.filter((r) => typeof r.level === 'string' && r.level.startsWith('OWNER_') && !r.approved).length;
+    const mine = await db('seo_link_prospects').where({ domain_id: result.domainId }).select('id', 'status', 'parked_from_status', 'claimed_at');
+    const byId = new Map(mine.map((p) => [p.id, p]));
+    const open = mine.length ? await loadApprovals(db, await db(AUTH).whereIn('prospect_id', mine.map((p) => p.id)).whereNull('ended_at').whereNull('satisfied_at')) : [];
+    // only what is a CARD now — a deferred outreach step (no draft yet, no checkout yet) stays open without a card and
+    // must not be reported as awaiting in the queue
+    const awaiting = open.filter((r) => isOwner(r.level) && !r.approved && byId.has(r.prospect_id) && !byId.get(r.prospect_id).claimed_at && whyNotHere(byId.get(r.prospect_id), r) === null).length;
     const state = (await db('seo_link_domains').where({ id: result.domainId }).first('agent_state'))?.agent_state || null;
     return { ...result, bridge: ran, awaiting, agent_state: state, summary_unavailable: false };
   } catch (err) {

@@ -676,6 +676,19 @@ describe('decideDomain (Reject / Watch)', () => {
     expect(card.why_not).toMatch(/nightly bridge re-decides/);
   });
 
+  test('a row decided on a PRIOR path (placement moved, instances not yet rotated) is never offered — the click refuses it too', async () => {
+    const { db } = await parked();
+    const row = openRows(db)[0];
+    const prior = uid();
+    db._tables.seo_link_acquisition_paths.push({ ...storedPath(db), id: prior, superseded_by: storedPath(db).id });
+    row.path_id = prior; // the placement itself sits on the best path
+    const card = (await Q.listOwnerQueue(db)).cards.find((c) => c.placement.id === row.prospect_id);
+    expect(card.path.on_best_path).toBe(true);
+    expect(card.rows.find((x) => x.id === row.id)).toMatchObject({ approvable: false, why_not: expect.stringMatching(/decided on a prior path/) });
+    await expect(Q.approveRow(db, { authorityId: row.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409 });
+    expect(approvals(db)).toHaveLength(0);
+  });
+
 describe('acquireAnyway', () => {
   test('DENY: the failing floors are waived at their values, the bridge lifts the rejection and parks cards without a bell', async () => {
     const s = scenario({ domain: { spam_score: 30, score: 40 } });
@@ -709,6 +722,17 @@ describe('acquireAnyway', () => {
     expect(r2.replaced).toBe(1);
     expect(waivers(s.db).filter((w) => !w.invalidated_at)).toHaveLength(1);
     expect(waivers(s.db)[0].invalidated_reason).toMatch(/replaced/);
+  });
+
+  test('Acquire anyway on an outreach path counts only what is a card now — deferred steps (no draft, no checkout yet) are not "awaiting"', async () => {
+    const s = scenario({ make: outreachPath, domain: { spam_score: 30, score: 40 } });
+    await nightly(s.db);
+    expect(domainState(s.db)).toBe('rejected');
+    const r = await Q.acquireAnyway(s.db, { domainId: s.d.id, actor: ACTOR, now: NOW, bridge: inline });
+    expect(r.bridge.parked).toBe(0); // the send waits for a draft, the post-send step for the send — nothing parks
+    expect(openRows(s.db).some((x) => /^OWNER_/.test(x.level))).toBe(true);
+    expect(r.awaiting).toBe(0);
+    expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
   });
 
   test('INVALID is never waivable; passing floors leave nothing to waive; no path refuses', async () => {
