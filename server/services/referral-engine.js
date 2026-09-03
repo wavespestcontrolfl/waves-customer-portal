@@ -318,19 +318,32 @@ async function resolvePromoter(customerId, { conn = null, settings = null, datab
       : enrollPromoter(customerId));
   } catch (err) {
     if (err?.code !== '23505') throw err;
-    const profile = await dbx('customers')
-      .where({ id: customerId })
-      .first('id', 'phone', 'account_id');
-    const promoter = profile?.phone && profile?.account_id
-      ? await dbx('referral_promoters as rp')
-        .join('customers as c', 'rp.customer_id', 'c.id')
-        .where('rp.customer_phone', profile.phone)
-        .where('c.account_id', profile.account_id)
-        .first('rp.*')
-      : null;
+    const promoter = await findHouseholdPromoter(customerId, dbx);
     if (!promoter) throw err;
     return { promoter, alreadyEnrolled: true, household: true };
   }
+}
+
+/**
+ * Read-only household resolution: the promoter another profile on the SAME
+ * account enrolled with this customer's phone. What resolvePromoter hands
+ * a sibling on 23505 — and what read paths that never enroll (the portal's
+ * /stats card) show, so every portal surface agrees on the sibling's
+ * promoter. null when the customer has no phone or account, or no
+ * same-account promoter shares the phone (a cross-account collision is
+ * never resolved here).
+ */
+async function findHouseholdPromoter(customerId, dbx = db) {
+  const profile = await dbx('customers')
+    .where({ id: customerId })
+    .first('id', 'phone', 'account_id');
+  if (!profile?.phone || !profile?.account_id) return null;
+  const promoter = await dbx('referral_promoters as rp')
+    .join('customers as c', 'rp.customer_id', 'c.id')
+    .where('rp.customer_phone', profile.phone)
+    .where('c.account_id', profile.account_id)
+    .first('rp.*');
+  return promoter || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,6 +1427,7 @@ async function getProgramAnalytics(startDate, endDate) {
 module.exports = {
   enrollPromoter,
   resolvePromoter,
+  findHouseholdPromoter,
   submitReferral,
   convertReferral,
   updateReferralStatus,

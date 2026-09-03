@@ -140,7 +140,12 @@ router.get('/', async (req, res, next) => {
 // =========================================================================
 router.get('/stats', async (req, res, next) => {
   try {
-    const promoter = await db('referral_promoters').where({ customer_id: req.customerId }).first();
+    // Own row first; a multi-property sibling sharing the household phone
+    // shows the household promoter GET / resolves for it (same account-
+    // scoped rule, read-only — the stats card never enrolls), so the two
+    // portal surfaces agree.
+    const promoter = await db('referral_promoters').where({ customer_id: req.customerId }).first()
+      || await engine.findHouseholdPromoter(req.customerId);
 
     if (!promoter) {
       return res.json({

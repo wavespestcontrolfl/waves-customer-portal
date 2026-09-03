@@ -254,3 +254,30 @@ describe('resolvePromoter — enroll-or-resolve the household promoter (the one 
     expect(state.phoneFallbacks).toHaveLength(1);
   });
 });
+
+describe('findHouseholdPromoter — the read-only household resolution read paths share', () => {
+  const house = { id: 'promo-house', customer_id: 'cust-1', customer_phone: '+15555550100', referral_code: 'WAVES-HOUSE01' };
+  const sibling = { id: 'cust-2', account_id: 'acct-1', phone: '+15555550100', email: 'y@example.com', first_name: 'Sam', last_name: 'Placeholder', referral_code: null };
+
+  test('a same-account promoter on the sibling phone resolves, read-only (no lock, no write)', async () => {
+    const state = freshState({ customer: sibling, promoter: house, promoterAccountId: 'acct-1' });
+    const out = await engine.findHouseholdPromoter('cust-2', makeTrx(state));
+    expect(out.id).toBe('promo-house');
+    expect(state.phoneFallbacks).toEqual([{ phone: '+15555550100', account: 'acct-1', locked: false }]);
+    expect(state.inserts).toHaveLength(0);
+    expect(state.updates).toHaveLength(0);
+  });
+
+  test('a different account on the same phone resolves nothing (never a foreign code)', async () => {
+    const state = freshState({ customer: sibling, promoter: house, promoterAccountId: 'acct-other' });
+    expect(await engine.findHouseholdPromoter('cust-2', makeTrx(state))).toBeNull();
+  });
+
+  test('no phone or no account on the profile → null without the join', async () => {
+    for (const customer of [{ ...sibling, phone: null }, { ...sibling, account_id: null }]) {
+      const state = freshState({ customer, promoter: house, promoterAccountId: 'acct-1' });
+      expect(await engine.findHouseholdPromoter('cust-2', makeTrx(state))).toBeNull();
+      expect(state.phoneFallbacks).toHaveLength(0);
+    }
+  });
+});

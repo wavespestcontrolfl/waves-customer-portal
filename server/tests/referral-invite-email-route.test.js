@@ -12,6 +12,7 @@ jest.mock('../models/db', () => jest.fn());
 
 jest.mock('../services/referral-engine', () => ({
   resolvePromoter: jest.fn(async () => ({ promoter: { id: 'promoter-1', first_name: 'Taylor', customer_email: 'taylor@waves.test' } })),
+  findHouseholdPromoter: jest.fn(async () => null),
   submitReferral: jest.fn(),
   getSettings: jest.fn(async () => ({ referee_discount_cents: 2500 })),
   getPromoterReferralLink: jest.fn(() => 'https://portal.wavespestcontrol.com/r/WAVES-J4KM'),
@@ -267,5 +268,36 @@ describe('POST /api/referrals/invite-email — atomic dedupe', () => {
     const res = await post('/api/referrals/invite-email', { email: 'taylor.new@waves.test' });
     expect(res.status).toBe(400);
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /stats — a multi-property sibling sees the household promoter GET / resolves for it', () => {
+  test('own row missing → the account-scoped household promoter fills the card (read-only, never enrolls)', async () => {
+    installDb({ firstResults: { referral_promoters: null } });
+    referralEngine.findHouseholdPromoter.mockResolvedValueOnce({ id: 'promo-h', referral_code: 'WAVES-HOUSE01', total_referrals_sent: 2, total_earned_cents: 2500 });
+    const res = await fetch(`${base}/api/referrals/stats`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.enrolled).toBe(true);
+    expect(body.referralCode).toBe('WAVES-HOUSE01');
+    expect(body.totalReferrals).toBe(2);
+    expect(referralEngine.findHouseholdPromoter).toHaveBeenCalledWith('cust-1');
+    expect(recordedInserts).toHaveLength(0);
+  });
+
+  test('no own row and no household promoter → enrolled:false, nothing written', async () => {
+    installDb({ firstResults: { referral_promoters: null } });
+    const res = await fetch(`${base}/api/referrals/stats`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).enrolled).toBe(false);
+    expect(recordedInserts).toHaveLength(0);
+  });
+
+  test('an own row wins — the household read never runs', async () => {
+    installDb({ firstResults: { referral_promoters: { id: 'promo-own', referral_code: 'WAVES-OWN00001' } } });
+    referralEngine.findHouseholdPromoter.mockClear();
+    const body = await (await fetch(`${base}/api/referrals/stats`)).json();
+    expect(body.referralCode).toBe('WAVES-OWN00001');
+    expect(referralEngine.findHouseholdPromoter).not.toHaveBeenCalled();
   });
 });
