@@ -1787,7 +1787,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   const category = residentialUnitLookup ? 'RESIDENTIAL' : wholePropertyCategory;
   const commercialProfile = category === 'COMMERCIAL';
   const commercialSubtype = commercialProfile ? wholePropertySubtype : null;
-  if (residentialUnitLookup && rc) {
+  if (residentialUnitLookup) {
     // Everything the record and the imagery say about SIZE and GROUNDS is
     // the building's / the parcel's, not the unit's — carrying any of it
     // into a one-unit quote is the whole-complex overquote the unit-scope
@@ -1810,8 +1810,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     //    profile synthesizes its neutral defaults with _observed=false.
     // unitCount stays as whole-parcel context; the HIGH flag below owns
     // the confirm-before-pricing posture.
-    const isVerified = (field) => rc._fieldEvidence?.[field]?.sourceType === 'verified';
-    rc = {
+    // A RECORDLESS verdict (vision's multifamily read alone) still drops
+    // the parcel-wide analysis (pre-push codex P1 r13).
+    const isVerified = (field) => rc?._fieldEvidence?.[field]?.sourceType === 'verified';
+    if (rc) rc = {
       ...rc,
       // What a person saved on this address, for the flag only.
       _unitVerifiedSaved: {

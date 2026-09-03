@@ -1381,6 +1381,15 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
       null, null, null, null, unit,
     );
     expect(visionOnly.isCommercial).toBe(false);
+    // No record at all — vision's read is the only source; its parcel-wide
+    // areas still go.
+    const recordless = buildEnrichedProfile(
+      null, { propertyUse: 'COMMERCIAL', commercialUseType: 'MULTIFAMILY_COMMON_AREA', estimatedTurfSf: 180000, hasPool: 'YES' },
+      null, null, null, null, unit,
+    );
+    expect(recordless.isCommercial).toBe(false);
+    expect(recordless.estimatedTurfSf).toBe(0);
+    expect(recordless.pool).not.toBe('YES');
     const mixed = buildEnrichedProfile(
       rentalComplexRecord(), { propertyUse: 'MIXED', commercialUseType: 'MULTIFAMILY_COMMON_AREA' },
       null, null, null, null, unit,
