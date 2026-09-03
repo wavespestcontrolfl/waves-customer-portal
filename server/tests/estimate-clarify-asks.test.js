@@ -23,6 +23,7 @@ jest.mock('../models/db', () => {
       orderByRaw() { return builder; },
       whereRaw(sql, params) { mockState.raws.push({ sql: String(sql), params }); return builder; },
       forUpdate() { return builder; },
+      modify(fn) { fn(builder); return builder; },
       first: async () => {
         mockState.firsts.push(table);
         const v = mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft;
@@ -1066,6 +1067,10 @@ describe('bedroom_count ask (unit-band lane)', () => {
     await clearEstimateRepricePending('est-1');
     const upd = mockState.updates.find((u) => u.table === 'estimates');
     expect(upd.payload.estimate_data.__raw).toMatch(/- 'reprice_pending_at' - 'reprice_attempt'\)/);
+    // Scoped to the attempt the revision observed: a newer reply's marker is not this revision's to lift.
+    mockState.raws = [];
+    await clearEstimateRepricePending('est-1', undefined, { attempt: 'att-seen' });
+    expect(mockState.raws.some((r) => /reprice_attempt', ''\) = \?/.test(r.sql) && Array.isArray(r.params) && r.params[0] === 'att-seen')).toBe(true);
   });
 
   test('the linked ESTIMATE carries reprice_pending_at from the locked phase; a failed re-draft lifts it (bell stands)', async () => {
@@ -1810,6 +1815,47 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
 });
 
 
+describe('parkClarifyAsk — a delivered, partially answered ask is re-bound, never shadowed by a fresh unsent row', () => {
+  const SENT = (flags = {}) => ({
+    id: 'sent-1', customer_id: 'cust-1', status: 'approved', sent_at: '2026-09-03T12:00:00Z',
+    flags: JSON.stringify({ missing: ['bedroom_count'], answer_recorded: ['unit_number'], bedroom_estimate_id: 'est-1', estimate_id: 'est-1', ...flags }),
+  });
+  const estRow = (supersedes) => ({ estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1', ...(supersedes ? { supersedesEstimateId: supersedes } : {}) } }) });
+  const park = () => parkClarifyAsk({ missing: ['bedroom_count'], phone: '+17735550142', estimateId: 'est-new', source: 'estimator_engine_red', channelProvenance: 'voice' });
+
+  test('the replacement draft (which superseded the bedroom item\'s draft) re-binds the delivered ask: no new row, bedroom_estimate_id re-pointed', async () => {
+    mockState.firstQueue = [SENT(), estRow('est-1')];
+    const out = await park();
+    expect(out).toEqual(expect.objectContaining({ parked: false, skipped: 'rebound_to_delivered_ask', draftId: 'sent-1', covers: ['bedroom_count'] }));
+    expect(mockState.inserts).toHaveLength(0);
+    const upd = mockState.updates.find((u) => u.table === 'message_drafts');
+    expect(JSON.parse(upd.payload.flags)).toEqual(expect.objectContaining({ bedroom_estimate_id: 'est-new', estimate_id: 'est-new', answer_recorded: ['unit_number'] }));
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a bedroom item bound to a draft this estimate did NOT supersede keeps its target — a fresh ask is parked as before', async () => {
+    mockState.firstQueue = [SENT({ bedroom_estimate_id: 'est-other-call' }), estRow('est-1')];
+    const out = await park();
+    expect(out.parked).toBe(true);
+    expect(mockState.inserts).toHaveLength(1);
+    expect(mockState.updates.find((u) => u.table === 'message_drafts')).toBeUndefined();
+  });
+
+  test('no prior bedroom target: the delivered ask is bound to the new draft without reading it', async () => {
+    mockState.firstQueue = [SENT({ bedroom_estimate_id: undefined })];
+    const out = await park();
+    expect(out.skipped).toBe('rebound_to_delivered_ask');
+    expect(mockState.firsts.filter((t) => t === 'estimates')).toHaveLength(0);
+    expect(JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags).bedroom_estimate_id).toBe('est-new');
+  });
+
+  test('a CONSUMED ask (every item answered) still gets the fresh ask — the contact is responsive and the question is new', async () => {
+    mockState.firstQueue = [SENT({ missing: [], answered_at: '2026-09-03T12:30:00Z' })];
+    const out = await park();
+    expect(out.parked).toBe(true);
+  });
+});
+
 describe('unit re-draft (GATE_CLARIFY_UNIT_WRITEBACK — PR C2: fence + every-live-draft guard + supersede)', () => {
   const BUILDING = { street_line_1: '1048 Example Lakes Cir', city: 'Sarasota', postal_code: '34232' };
   const gateOn = () => mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks' || key === 'clarifyUnitWriteback');
@@ -1920,6 +1966,16 @@ describe('unit re-draft (GATE_CLARIFY_UNIT_WRITEBACK — PR C2: fence + every-li
     await reply({ drafts: [{ id: 'est-sending', status: 'sending' }] });
     expect(guardUpdates()).toHaveLength(1);
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateIds: ['est-sending'] }));
+  });
+
+  test('the guarded/superseded set is limited to drafts AT the asked building: a same-call draft for another property is neither guarded nor retired; an addressless row is kept', async () => {
+    await reply({ drafts: [
+      { id: 'est-here', status: 'draft', address: '1048 Example Lakes Circle, Sarasota, FL 34232' },
+      { id: 'est-elsewhere', status: 'scheduled', address: '5 Other Rd, Venice, FL 34285' },
+      { id: 'est-noaddr', status: 'draft', address: null },
+    ] });
+    expect(guardUpdates()).toHaveLength(2);
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateIds: ['est-here', 'est-noaddr'] }));
   });
 
   test('a guarded row the supersede could NOT retire (already sending / revised) stays held after the replacement lands: unscheduled, recorded on the ask, ONE bell naming it', async () => {

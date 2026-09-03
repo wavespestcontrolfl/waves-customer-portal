@@ -579,8 +579,13 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     expect(source.indexOf('archiveSupersededDraftInTx(trx, target')).toBeGreaterThan(source.indexOf("category: 'COMMERCIAL'"));
   });
 
-  test('the reply handler stamps the fence under the same call-row lock the creators hold, and the engine adopts it', () => {
+  test('the reply handler stamps the fence under the same call-row lock the creators hold, and the engine adopts it — dry runs included', () => {
     const clarify = src('../services/estimate-clarify-asks.js');
+    // estimator-replay must price what the live path drafts (codex r2 P2 on #3796).
+    expect(src('../services/estimator-engine/index.js')).toContain('if (context && !context.error && !unitLineOverride) {');
+    // The admin revision lifts only the marker it observed on the row it wrote.
+    const route = src('../routes/admin-estimates.js');
+    expect(route).toContain("clearEstimateRepricePending(estimate.id, undefined, { attempt: observedEngine.reprice_attempt || '' })");
     const lockAt = clarify.indexOf("unitCallLinkage(trx, flags.unit_call_log_id, { lock: true })");
     const stampAt = clarify.indexOf('stampCallUnitAnswer(trx, flags.unit_call_log_id');
     expect(lockAt).toBeGreaterThan(-1);

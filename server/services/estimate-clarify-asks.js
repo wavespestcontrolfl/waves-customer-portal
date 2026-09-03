@@ -306,15 +306,19 @@ async function unitTargets(trx, flags) {
   };
 }
 
-// EVERY live unsent engine draft for the call, newest first, taken FOR
-// UPDATE: the reply guards all of them (historical composer races can
-// leave several rows carrying one callLogId, and guarding only the newest
-// leaves the rest sendable with the building-level address — codex r5 P1
-// on #3785). Same predicate the engine's own existing-draft lookups use.
-// Locked BEFORE the reply's customer/lead/call rows: the invalidation
-// finalizer's order is estimates → leads → call_log, and the creators'
-// is estimates (supersede target) → call_log (codex r4 P1 on #3785).
-async function unsentDraftsForCall(trx, callLogId) {
+// EVERY live unsent engine draft for the call AT THE ASKED BUILDING,
+// newest first, taken FOR UPDATE: the reply guards all of them (historical
+// composer races can leave several rows carrying one callLogId, and
+// guarding only the newest leaves the rest sendable with the building-level
+// address — codex r5 P1 on #3785). A same-call draft for ANOTHER property
+// is outside this answer (the fence treats it the same way) and is neither
+// guarded nor retired (codex r2 P1 on #3796); an addressless row is kept —
+// it cannot be a different property's quote. Same predicate the engine's
+// own existing-draft lookups use. Locked BEFORE the reply's
+// customer/lead/call rows: the invalidation finalizer's order is estimates
+// → leads → call_log, and the creators' is estimates (supersede target) →
+// call_log (codex r4 P1 on #3785).
+async function unsentDraftsForCall(trx, callLogId, building) {
   if (!callLogId) return [];
   const rows = await trx('estimates')
     .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(callLogId)])
@@ -331,15 +335,18 @@ async function unsentDraftsForCall(trx, callLogId) {
     .whereNull('archived_at')
     .orderBy('created_at', 'desc')
     .forUpdate()
-    .select('id', 'status', 'created_at');
-  return Array.isArray(rows) ? rows : [];
+    .select('id', 'status', 'created_at', 'address');
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    const line = String(row.address || '').trim();
+    return !line || sameBuilding(line, building);
+  });
 }
 
 // Guard (re-price marker + this reply's attempt token) every live unsent
 // draft for the call that is not guarded yet. Returns the FULL live set,
 // newest first — the first is the supersede primary.
 async function guardLiveDraftsForCall(trx, callLogId, redraft) {
-  const rows = await unsentDraftsForCall(trx, callLogId);
+  const rows = await unsentDraftsForCall(trx, callLogId, redraft.building);
   const at = new Date().toISOString();
   const ids = [];
   for (const row of rows) {
@@ -627,6 +634,32 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
   return { changed: changed > 0, merged };
 }
 
+// See parkClarifyAsk's partial-answer branch. Returns true when the
+// delivered ask now serves this request.
+async function rebindDeliveredAsk(trx, existing, sentFlags, { askable, estimateId }) {
+  const patch = {};
+  if (askable.includes('bedroom_count') && estimateId) {
+    const prior = sentFlags.bedroom_estimate_id ? String(sentFlags.bedroom_estimate_id) : null;
+    if (prior && prior !== String(estimateId)) {
+      // Only a draft this request's estimate SUPERSEDED may be re-pointed.
+      const row = await trx('estimates').where({ id: String(estimateId) }).first('estimate_data');
+      let eng = null;
+      try {
+        const data = typeof row?.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row?.estimate_data || null);
+        eng = data?.estimatorEngine || null;
+      } catch { eng = null; }
+      const supersedes = new Set([eng?.supersedesEstimateId, ...(Array.isArray(eng?.supersedesEstimateIds) ? eng.supersedesEstimateIds : [])].filter(Boolean).map(String));
+      if (!supersedes.has(prior)) return false;
+    }
+    patch.bedroom_estimate_id = String(estimateId);
+    patch.estimate_id = String(estimateId);
+  }
+  if (Object.keys(patch).length) {
+    await trx('message_drafts').where({ id: existing.id }).update({ flags: JSON.stringify({ ...sentFlags, ...patch }) });
+  }
+  return true;
+}
+
 /**
  * Park one clarifying-question draft. Fail-soft by contract: callers sit on
  * quote dead-end paths that must never break because calibration/outreach
@@ -757,6 +790,20 @@ async function parkClarifyAsk({
       const partiallyAnswered = recordedItems.length > 0;
       const consumed = !!sentFlags.answered_at;
       const asksOnlyRemaining = remaining.length > 0 && askable.every((item) => remaining.includes(item));
+      if (partiallyAnswered && asksOnlyRemaining && !consumed && askable.includes('bedroom_count')) {
+        // The delivered ask ALREADY asks the bedroom count this request
+        // needs and is still routable — a fresh unsent row would shadow it
+        // in the reply lookup while rejecting the bare answers ("2") only
+        // a DELIVERED one-question ask accepts, losing the customer's next
+        // text (codex r2 P1 on #3796). Re-bind the delivered row's bedroom
+        // target to this request instead (the unit re-draft's replacement
+        // asking for the count its predecessor lacked); a bedroom item
+        // bound to a draft this request did NOT replace keeps its target
+        // and the fresh ask below is parked as before. Other items keep
+        // the fresh re-ask — their replies need no delivered row.
+        const rebound = await rebindDeliveredAsk(trx, existing, sentFlags, { askable, estimateId });
+        if (rebound) return { parked: false, skipped: 'rebound_to_delivered_ask', draftId: existing.id, covers: remaining };
+      }
       if (!((partiallyAnswered && asksOnlyRemaining) || consumed)) {
         return {
           parked: false,
@@ -842,12 +889,20 @@ function repricePendingActive(engineData) {
 /**
  * Explicit operator price correction (admin PUT /:id ran the full server
  * re-price): the stale-price block is lifted. Atomic JSONB path delete —
- * no other key is touched.
+ * no other key is touched. `attempt` scopes the clear to the marker the
+ * revision OBSERVED (the token on the row it wrote): a reply that stamped
+ * a newer attempt between the revision's commit and this call — one the
+ * revision never priced in — must keep its guard, or its detached supersede
+ * and unschedule both fail the token predicate and a scheduled
+ * whole-building draft goes out (codex r2 P1 on #3796).
  */
-async function clearEstimateRepricePending(estimateId, database = db) {
+async function clearEstimateRepricePending(estimateId, database = db, { attempt } = {}) {
   const changed = await database('estimates')
     .where({ id: estimateId })
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') <> ''")
+    .modify((q) => {
+      if (attempt !== undefined && attempt !== null) q.whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_attempt', '') = ?", [String(attempt)]);
+    })
     .update({
       estimate_data: database.raw("jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) - 'reprice_pending_at' - 'reprice_attempt')"),
       updated_at: new Date(),
@@ -1288,7 +1343,7 @@ async function handleClarifyReply({ phone, body }) {
             // runs under the call-row lock inside applyUnitWriteback. Quote
             // signals: the item's own, or recovered from the call row for a
             // legacy ask.
-            if (freshFlags.unit_call_log_id && (targets.quotePromised || targets.quoteRequested)) {
+            if (freshFlags.unit_call_log_id && freshFlags.unit_ask_building?.street_line_1 && (targets.quotePromised || targets.quoteRequested)) {
               unitRedraft = {
                 callLogId: String(freshFlags.unit_call_log_id),
                 quotePromised: targets.quotePromised === true,

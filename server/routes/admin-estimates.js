@@ -799,9 +799,21 @@ router.put('/:id', async (req, res, next) => {
     if (!dryRun) {
       logger.info(`[estimates] Revised estimate ${estimate.id} in place (status ${estimate.status})`);
       // An operator revision IS the explicit price correction a pending
-      // bedroom re-price waits for — lift the stale-price send guard.
-      await require('../services/estimate-clarify-asks').clearEstimateRepricePending(estimate.id)
-        .catch((err) => logger.warn(`[estimates] reprice guard clear failed for ${estimate.id}: ${err.message}`));
+      // re-price waits for — lift the stale-price send guard, but ONLY the
+      // marker the revision observed (the attempt token on the row it
+      // wrote): a clarify reply that stamped a NEWER attempt after the
+      // revision committed was never priced in and keeps its guard (codex
+      // r2 P1 on #3796). No marker on the written row = nothing to lift.
+      let observedEngine = null;
+      try {
+        const written = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
+        observedEngine = written?.estimatorEngine || null;
+      } catch { observedEngine = null; }
+      if (observedEngine?.reprice_pending_at) {
+        await require('../services/estimate-clarify-asks')
+          .clearEstimateRepricePending(estimate.id, undefined, { attempt: observedEngine.reprice_attempt || '' })
+          .catch((err) => logger.warn(`[estimates] reprice guard clear failed for ${estimate.id}: ${err.message}`));
+      }
       notifyPricingFallbackAfterCommit(estimate, pricingFallbackReason);
     }
     res.json({

@@ -1310,7 +1310,10 @@ async function maybeDraftEstimateForCall({
     // building, and must not be blocked by the fence it never saw. Only
     // when this run's own address is the asked building (or it has none):
     // a reprocess that heard a different property keeps its own address.
-    if (context && !context.error && !unitLineOverride && !dryRun) {
+    // Dry runs (estimator-replay) adopt it too — the read has no side
+    // effects, and a replay that priced the whole building while the live
+    // path drafts the apartment would misreport production (codex r2 P2).
+    if (context && !context.error && !unitLineOverride) {
       try {
         const { callUnitAnswer } = require('../../utils/estimate-claim-sql');
         const fence = await callUnitAnswer(db, callLogId);
