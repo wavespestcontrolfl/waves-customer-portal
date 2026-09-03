@@ -158,11 +158,11 @@ function expectedCadenceForRequest(request) {
 // still say two, or the instant quote advertises a package the obligation
 // does not deliver (pre-push codex P1; codex #3842 r1 P1).
 const COCKROACH_PACKAGE_VISITS = 2;
-// Live-count half of the gate, exported because the admin pricing-config
-// save resyncs the mutable constants at any time: the /calculate handler
-// re-runs it synchronously before generateEstimate so a resync that lands
-// during its awaited lookups cannot render a count the obligation does not
-// deliver (codex #3842 r2 P1).
+// Live-count half of the gate. The admin pricing-config save resyncs the
+// mutable constants at any time, so /calculate re-reads the row through
+// publicSelectableService (and therefore this predicate) immediately before
+// generateEstimate — a resync that lands during its awaited lookups cannot
+// render a count the obligation does not deliver (codex #3842 r2 P1).
 function cockroachPackageDisplayCurrent() {
   return Number(pricingConstants.PEST?.pestInitialRoach?.display?.regular_standalone?.treatments) === COCKROACH_PACKAGE_VISITS;
 }

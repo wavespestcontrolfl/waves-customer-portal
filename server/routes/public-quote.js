@@ -2,7 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { cockroachPackageDisplayCurrent, publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
+const { publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
 const logger = require('../services/logger');
 const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
@@ -969,9 +969,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const keyedInstant = !!(keyedService && keyedService.instant && quoteServicesForKey(requestedServiceKey));
     // Keyed but not instant: no engine services — the request flows through
     // the standard manual-quote lifecycle on a synthetic quote-required estimate.
-    // `let`: the standalone cockroach package demotes to quote-on-request
-    // right before generateEstimate when the live display count moved
-    // during the awaited lookups (see the re-check there).
+    // `let`: a keyed instant request demotes to quote-on-request right
+    // before generateEstimate when the catalog row or the live display
+    // config moved during the awaited lookups (see the re-check there).
     let keyedQuoteOnRequest = !!(keyedService && !keyedInstant);
     let services = keyedInstant ? mergeKeyedRequestOptions(quoteServicesForKey(requestedServiceKey), bodyServices)
       : (keyedQuoteOnRequest ? {} : dropKeyedOnlyServices(bodyServices));
@@ -1530,17 +1530,24 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         return res.status(503).json({ error: 'Account lookup is temporarily unavailable — please retry in a moment.' });
       }
     }
-    // Standalone cockroach package: publicSelectableService passed the live
-    // display-count gate before the property / account lookups above
-    // yielded; an admin pricing-config save in that window resyncs the
-    // mutable constants, and generateEstimate would render "Includes 3
-    // treatment visits" for a package the obligation stops after visit 2.
-    // Re-check synchronously — nothing yields between here and the engine —
-    // and demote to the quote-on-request lifecycle (codex #3842 r2 P1).
-    if (engineInput.services?.pestInitialRoach && !cockroachPackageDisplayCurrent()) {
-      keyedQuoteOnRequest = true;
-      services = {};
-      engineInput.services = {};
+    // Keyed instant: publicSelectableService passed the catalog-row gate
+    // (visits / cadence / selectability, and for the cockroach package the
+    // live display count) before the property / account lookups above
+    // yielded. An admin catalog edit or pricing-config save in that window
+    // would still price the product the row no longer describes — for the
+    // cockroach package, "Includes 3 treatment visits" for an obligation
+    // that stops after visit 2. Re-read the row through the SAME gate
+    // immediately before the engine (nothing yields between the answer and
+    // generateEstimate) and demote to the quote-on-request lifecycle; a
+    // catalog read failure fails closed the same way (codex #3842 r2 P1 +
+    // pre-push P1).
+    if (keyedInstant && !keyedQuoteOnRequest) {
+      const fresh = await publicSelectableService(requestedServiceKey);
+      if (!fresh?.instant) {
+        keyedQuoteOnRequest = true;
+        services = {};
+        engineInput.services = {};
+      }
     }
     const estimate = keyedQuoteOnRequest ? quoteOnRequestEstimate(keyedService, engineInput) : generateEstimate(engineInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter((line) =>
