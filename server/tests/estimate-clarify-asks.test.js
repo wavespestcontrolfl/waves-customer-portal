@@ -678,6 +678,16 @@ describe('clarifyPreDispatchCheck', () => {
     expect(await clarifyPreDispatchCheck(PARAMS)()).toEqual({ ok: true });
   });
 
+  test('a unit-number card closed while validators ran aborts the send; an open one lets it through', async () => {
+    const unitParams = { ...PARAMS, dispatchedMissing: ['unit_number'] };
+    mockState.firstQueue = [claimedRow({ missing: ['unit_number'], unit_call_log_id: 'call-1' }), null];
+    const verdict = await clarifyPreDispatchCheck(unitParams)();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toMatch(/card was closed/);
+    mockState.firstQueue = [claimedRow({ missing: ['unit_number'], unit_call_log_id: 'call-1' }), { id: 'card-1' }];
+    expect(await clarifyPreDispatchCheck(unitParams)()).toEqual({ ok: true });
+  });
+
   test('an answer recorded while validators ran aborts the send', async () => {
     mockState.firstQueue = [claimedRow({ missing: [], answered_at: '2026-07-19T00:00:00Z' })];
     const verdict = await clarifyPreDispatchCheck(PARAMS)();

@@ -1304,6 +1304,20 @@ function clarifyPreDispatchCheck({ draftId, sourceRef, dispatchedMissing }) {
         if (changed) {
           return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'customer answered part of this while the send was validating' };
         }
+        // The unit card closes under the CALL-scoped triage lock, not this
+        // phone-scoped one, so re-read it at the last await before the
+        // provider handoff: a card staff resolved/dismissed while the
+        // validators ran must not let the obsolete question out (codex
+        // post-trim P2).
+        if (missing.includes('unit_number') && flags.unit_call_log_id) {
+          const cardOpen = await trx('triage_items')
+            .where({ call_log_id: String(flags.unit_call_log_id), reason_code: 'missing_unit_number' })
+            .whereIn('status', ['open', 'in_progress'])
+            .first('id');
+          if (!cardOpen) {
+            return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'the unit-number card was closed while the send was validating' };
+          }
+        }
         return { ok: true };
       });
     } catch (err) {

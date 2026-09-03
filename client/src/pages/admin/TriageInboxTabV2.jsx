@@ -171,6 +171,13 @@ export function ConfirmEvidence({ payload }) {
         p.unit_ask_building.postal_code,
       ].filter(Boolean).join(", "),
     },
+    // The customer answered the approval-gated unit text: the reply lands
+    // HERE only (no CRM write), so the reviewer must see it beside the ask
+    // to give the card its human verdict.
+    p.customer_reply_unit && {
+      label: "Customer replied",
+      value: `${p.customer_reply_unit} (by text${p.customer_reply_at ? ` ${new Date(p.customer_reply_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET` : ""}) — confirm and enter it on the record`,
+    },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },
