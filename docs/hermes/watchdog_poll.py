@@ -137,6 +137,12 @@ def poll():
     # that is a failed poll (advances the streak), never a script crash.
     if not isinstance(snap, dict) or not isinstance(snap.get("database"), dict):
         return "down", None, "malformed snapshot (not an object)"
+    # The contract the diff relies on: a verdict word and a list of string
+    # reason keys. Anything else is an incomplete response, not a recovery.
+    reasons = snap.get("reasons")
+    if snap.get("verdict") not in ("healthy", "attention") or not isinstance(reasons, list) \
+            or not all(isinstance(r, str) for r in reasons):
+        return "down", None, "malformed snapshot (missing verdict/reasons)"
     if not snap["database"].get("ok", False):
         return "down", snap, "database degraded"
     return "ok", snap, "ok"
