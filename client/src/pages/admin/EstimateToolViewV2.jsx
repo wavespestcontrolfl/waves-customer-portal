@@ -6015,6 +6015,11 @@ export default function EstimateToolViewV2({
                       palmProduct: "Tree-Age G-4",
                       palmLicensedApplicator: false,
                       treeCount: "",
+                      // Billable per-property T&S choices — a 9x / difficult
+                      // pick must not ride into the next property's quote
+                      // (pre-push r8 P1).
+                      tsTier: "standard",
+                      tsAccess: "easy",
                       measuredTurfSf: "",
                       // Structure-specific measurements must clear with the
                       // property — leaving them meant house B could be quoted

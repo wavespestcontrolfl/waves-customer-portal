@@ -106,6 +106,26 @@ describe("tree & shrub program and access selects", () => {
     expect(program.value).toBe("enhanced");
     expect(access.value).toBe("moderate");
 
+    // Clear All resets both billable choices to the mandated defaults so a
+    // 9x / moderate pick never rides into the next property's quote.
+    const clearAll = Array.from(container.querySelectorAll("button")).find((b) =>
+      /^\s*Clear All\s*$/i.test(b.textContent || ""),
+    );
+    expect(clearAll).toBeTruthy();
+    fireEvent.click(clearAll);
+    await waitFor(() => {
+      const p = findSelectWithOption(container, "enhanced");
+      const a = findSelectWithOption(container, "difficult");
+      expect(p).toBeTruthy();
+      expect(a).toBeTruthy();
+      expect(p.value).toBe("standard");
+      expect(a.value).toBe("easy");
+    });
+    program = findSelectWithOption(container, "enhanced");
+    access = findSelectWithOption(container, "difficult");
+    fireEvent.change(program, { target: { value: "enhanced" } });
+    fireEvent.change(access, { target: { value: "moderate" } });
+
     // Commercial estimates price through the commercial ornamental pricer
     // (fixed cadence, no access term) — the controls must not render there.
     const commercial = findSelectWithOption(container, "YES");
