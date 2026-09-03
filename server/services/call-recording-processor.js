@@ -14046,8 +14046,21 @@ const CallRecordingProcessor = {
               //     to prevent, so it gets no link.
               const recipientIsSavedCustomerPhone = smsLast10(customer?.phone).length === 10
                 && smsLast10(customer.phone) === smsLast10(smsRecipient);
+              const estimateLinkGateOn = require('../config/feature-gates').gateEnvValue('GATE_CALL_CONFIRMATION_ESTIMATE_LINK');
+              // EXPLICIT prerequisite (GH codex #3814 r2 P1): a call-booked
+              // visit carries no source_estimate_id, so the accept contract
+              // can reach it only through the customer-wide adoption
+              // fallback behind GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE.
+              // With that gate off the accept page could not honor the
+              // link, so the link gate is inert — say so once per booking
+              // rather than withhold silently.
+              const estimateLinkPrereqOn = !estimateLinkGateOn
+                || require('../config/feature-gates').isEnabled('estimateExistingApptCustomerWide');
+              if (estimateLinkGateOn && !estimateLinkPrereqOn) {
+                logger.warn(`[call-proc] GATE_CALL_CONFIRMATION_ESTIMATE_LINK is on but GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE is off — the accept page could not adopt visit ${scheduledServiceId}, so no estimate link is sent`);
+              }
               if (smsBody && !redirectImpliedToAni && recipientIsSavedCustomerPhone
-                && require('../config/feature-gates').gateEnvValue('GATE_CALL_CONFIRMATION_ESTIMATE_LINK')) {
+                && estimateLinkGateOn && estimateLinkPrereqOn) {
                 try {
                   const { findLatestOpenEstimate } = require('./composer-customer-links');
                   const { estimate: openEstimate } = await findLatestOpenEstimate([customerId]);

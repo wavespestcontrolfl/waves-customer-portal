@@ -841,7 +841,11 @@ const gates = {
   // The link lets them accept, pick the plan, and add the card before the
   // visit instead of on the doorstep. Customer-facing copy → dark until
   // the owner approves the wording; `false`/unset is the kill, read at
-  // call time through gateEnvValue (GH codex #3814 r1 P1).
+  // call time through gateEnvValue (GH codex #3814 r1 P1). PREREQUISITE:
+  // GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE — the link is sent only when
+  // the accept page would adopt the call-booked visit, which an unlinked
+  // row reaches through that customer-wide fallback alone; with it off the
+  // link gate is inert (warns per booking).
   callConfirmationEstimateLink: gateEnvValue('GATE_CALL_CONFIRMATION_ESTIMATE_LINK'),
 
   // Backlink Agent — Playwright browser automation for profile signups
