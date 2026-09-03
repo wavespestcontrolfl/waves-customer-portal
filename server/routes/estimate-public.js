@@ -8,7 +8,7 @@ const { createDefaultCustomerRows } = require('../services/customer-default-rows
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
 // shared with the admin routes so every whole-blob write applies the same
 // rule (dependency-free module: partial test mocks can't blank a guard).
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL, callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -16144,12 +16144,22 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     }
 
     // Step 2 — cap already burned (or the auto claim lost a race and burned
-    // the dedupe window): try the plain 24h notify-only claim.
+    // the dedupe window): try the plain 24h notify-only claim. The hold
+    // predicate rides this claim too (codex r10 P0 on #3804): a hold that
+    // landed after the eligibility read zero-rows the auto claim above and
+    // must not fall through to a 201 that pages the office — the row is off
+    // the surface, so the answer is the same generic 404 as an unknown
+    // token (no enumeration). A zero row is re-read to tell the two apart.
     const claimed = await db('estimates')
       .where({ id: estimate.id })
       .where(DEDUPE_OPEN)
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .update({ extension_requested_at: db.fn.now() });
     if (!claimed) {
+      const fresh = await db('estimates').where({ id: estimate.id }).first('id', 'estimate_data');
+      if (!fresh || estimateOffCustomerSurface(fresh)) {
+        return res.status(404).json({ error: 'Estimate not found' });
+      }
       return res.json({ success: true, alreadyRequested: true });
     }
 
@@ -18196,20 +18206,11 @@ function estimateLinkageInvalidated(estimate = {}) {
   return !!(eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at));
 }
 
-// THE "off the customer surface" verdict every public predicate shares —
-// a linkage marker OR a clarify re-price hold (estimate-clarify-asks:
-// the row's dollars or address are known stale; a link that slipped out
-// while the hold landed — a reply on a 'sending' row, by design — renders
-// nothing until the operator's correction lifts it). One predicate, one
-// call site per surface (view, SSR, accept-active, ask, extension
-// eligibility, the pinned document render): a surface that checked the
-// linkage markers but not the hold was how the extension request kept
-// auto-granting a held row (codex r7 P0 on #3804) — a predicate added
-// later inherits both by calling this, never the pieces.
-function estimateOffCustomerSurface(estimate = {}) {
-  if (estimateLinkageInvalidated(estimate)) return true;
-  return require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine);
-}
+// The "off the customer surface" verdict (linkage marker OR clarify
+// re-price hold) is estimate-claim-sql.estimateOffCustomerSurface — shared
+// with the services that judge a locked row (the add-service request), so
+// the route's pre-read and the service's locked read can never disagree.
+// Every public predicate below calls it, never the pieces.
 
 function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;

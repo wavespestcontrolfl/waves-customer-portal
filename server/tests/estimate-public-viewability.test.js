@@ -21,6 +21,17 @@ describe('estimateOffCustomerSurface (the one verdict every public predicate sha
     expect(estimateOffCustomerSurface({ estimate_data: null })).toBe(false);
     expect(estimateOffCustomerSurface({})).toBe(false);
   });
+  it('is the util verdict (estimate-claim-sql), shared with the add-service request that judges a LOCKED row (codex r10 P0)', () => {
+    const { estimateOffCustomerSurface: util } = require('../utils/estimate-claim-sql');
+    expect(estimateOffCustomerSurface).toBe(util);
+    const { isEstimateAddServiceRequestable } = require('../services/estimate-add-service-request');
+    expect(isEstimateAddServiceRequestable({ status: 'sending', expires_at: FUTURE, estimate_data: held })).toBe(false);
+    expect(isEstimateAddServiceRequestable({ status: 'accepted', estimate_data: held })).toBe(false);
+    expect(isEstimateAddServiceRequestable({ status: 'sent', expires_at: FUTURE, estimate_data: invalidated })).toBe(false);
+    expect(isEstimateAddServiceRequestable({ status: 'sent', expires_at: FUTURE, estimate_data: JSON.stringify({ estimatorEngine: {} }) })).toBe(true);
+    expect(isEstimateAddServiceRequestable({ status: 'accepted' })).toBe(true);
+  });
+
   it('is the ONLY hold read on the public predicates — a surface that reads the linkage markers alone is the r7 regression shape', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
     const predicates = ['function isEstimateAskAnswerable', 'function isEstimateAcceptActive', 'function isEstimateCustomerViewable', 'function isEstimateExtensionRequestEligible'];

@@ -272,7 +272,27 @@ async function unitHoldSatisfied(dbc, callLogId, address) {
   return unitAnswerFenceReason(fence, { address }) === null;
 }
 
+// THE "off the customer surface" verdict every public predicate shares — a
+// linkage marker (full or pending) OR a clarify re-price hold. One predicate,
+// one call site per surface (view, SSR, accept-active, ask, extension
+// eligibility, the pinned document render, the add-service request): a
+// surface that checked the linkage markers but not the hold was how the
+// extension request kept auto-granting a held row (codex r7 P0 on #3804),
+// and a service-side predicate that checked neither was how a bundle
+// inquiry kept running on a held row (codex r10 P0). Lives here, not in the
+// route, so services judge a LOCKED row with the same verdict the route
+// judges its pre-read with. The clarify module is required lazily — this
+// file stays dependency-free at load (see the header).
+function estimateOffCustomerSurface(estimate = {}) {
+  let data = estimate?.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  const eng = data && typeof data === 'object' ? data.estimatorEngine : null;
+  if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+  return require('../services/estimate-clarify-asks').repricePendingActive(eng);
+}
+
 module.exports = {
+  estimateOffCustomerSurface,
   ESTIMATE_DELIVERY_CLAIM_TTL_MS,
   CALL_EXTRACTION_RETRY_WINDOW_MS,
   DELIVERY_CLAIM_NOT_LIVE_SQL,

@@ -568,9 +568,13 @@ row as not accept-active / not answerable at the pre-read, and the five
 mutations predicate their whole-blob writes on the marker's absence, so
 none of them can overwrite the hold off the row; `/extension-request`
 treats a held row as ineligible (the generic 404), and the auto-grant
-claim, the guarded expiry write, and the sibling revive all carry the
-marker predicate — a hold that lands after the eligibility read never
-burns the grant or texts a link the renderer refuses. A
+claim, the notify-only claim, the guarded expiry write, and the sibling
+revive all carry the marker predicate — a hold that lands after the
+eligibility read never burns the grant, texts a link the renderer
+refuses, or pages the office with a 201 (the zero-row claim re-reads and
+answers the generic 404); `/bundle-inquiry` judges the locked row with
+the same verdict (409 "no longer active", the route's existing shape for
+an inactive row). A
 group's held siblings are skipped at preflight, claim and publication;
 a held ANCHOR parks as `send_failed`. No enumeration signal: the hold
 is unobservable from outside beyond the accept/decline 409, which a held
