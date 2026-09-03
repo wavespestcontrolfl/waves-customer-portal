@@ -19,6 +19,7 @@ jest.mock('../models/db', () => {
   const b = {
     where(c) { if (typeof c === 'object') Object.entries(c).forEach(([k, v]) => conds.push((r) => r[k] === v)); return b; },
     whereNull(k) { conds.push((r) => r[k] == null); return b; },
+    whereNotNull(k) { conds.push((r) => r[k] != null); return b; },
     whereRaw(sql, binds = []) {
       const meta = (r) => r.metadata || {};
       if (sql.includes("'kind'")) conds.push((r) => meta(r).kind === binds[0]);
@@ -58,6 +59,13 @@ beforeEach(() => {
     customers: [{ id: 'c1', termite_stations_rented: false }],
     termite_stations: [{ id: 't1', customer_id: 'c1', program: 'termite', owned_by: 'waves', is_active: true }],
     notifications: [{ id: 'n-dated', recipient_type: 'admin', read_at: null, metadata: { kind: 'termite_station_retrieval', customerId: 'c1', retrieveAfter: '2027-02-28', dedupeKey: 'termite_station_retrieval:c1:req-0' } }],
+    // Request chronology: req-0 < req-a < req-1 < req-b.
+    service_requests: [
+      { id: 'req-0', created_at: '2026-08-01T00:00:00Z' },
+      { id: 'req-a', created_at: '2026-08-10T00:00:00Z' },
+      { id: 'req-1', created_at: '2026-08-20T00:00:00Z' },
+      { id: 'req-b', created_at: '2026-08-30T00:00:00Z' },
+    ],
   };
 });
 
@@ -102,6 +110,9 @@ test('a prior episode\'s SAME-DATE unread task is retired before the fresh one i
   expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/supersedes an earlier station-retrieval task/);
   expect(mockNotifyAdmin.mock.calls[0][3].dedupeKey).toBe('termite_station_retrieval:c1:req-1');
+  // A same-key re-raise with a corrected date rewrites the standing row
+  // (notifyAdmin refreshOnDedupe) instead of silently keeping the old one.
+  expect(mockNotifyAdmin.mock.calls[0][3].refreshOnDedupe).toBe(true);
   expect(out).toEqual(expect.objectContaining({ raised: true }));
 });
 
@@ -112,16 +123,40 @@ test('a retry of the SAME request leaves its own unread row alone (it dedupes ag
   expect(mockNotifyAdmin.mock.calls[0][2]).not.toMatch(/supersedes/);
 });
 
-test('a retry of an OLDER request whose row was already retired never retires the newer request\'s open task (GH r2 P1)', async () => {
-  // A raised, B raised (retired A), then A's lost-task repair retries: A
-  // dedupes against its own READ row and inserts nothing — B must stay
-  // the one open instruction.
+test('a retry of an OLDER request never retires a NEWER request\'s open task — it yields (GH r2 + r3 P1s)', async () => {
+  // A raised, B raised (retired A), then A's lost-task repair retries: B
+  // must stay the one open instruction, A inserts nothing.
   mockTables.notifications = [datedRow('req-a'), datedRow('req-b')];
   mockTables.notifications[0].read_at = new Date('2026-01-02');
-  await raiseTermiteRetrievalTask('c1', 'req-a', { retrieveAfter: '2027-02-28' });
+  const out = await raiseTermiteRetrievalTask('c1', 'req-a', { retrieveAfter: '2027-02-28' });
   expect(mockTables.notifications[1].read_at).toBeNull();
-  expect(mockNotifyAdmin.mock.calls[0][2]).not.toMatch(/supersedes/);
-  expect(mockLog.filter((l) => l === 'update:notifications')).toEqual([]);
+  expect(mockTables.notifications[0].read_at).not.toBeNull();
+  expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  expect(out).toEqual(expect.objectContaining({ raised: true, deduped: true, supersededByNewer: 'req-b' }));
+  // ...and when A's first insert never landed at all (no own row), the same.
+  mockTables.notifications = [datedRow('req-b')];
+  await raiseTermiteRetrievalTask('c1', 'req-a', { retrieveAfter: '2027-03-31' });
+  expect(mockTables.notifications[0].read_at).toBeNull();
+  expect(mockNotifyAdmin).not.toHaveBeenCalled();
+});
+
+test('the NEWEST request\'s raise retires older open rows and REOPENS its own read row (a reverted correction)', async () => {
+  // req-1 was acted on (read); an older no-request row is still open.
+  mockTables.notifications = [datedRow('req-1'), datedRow('n-portal', { dedupeKey: 'termite_station_retrieval:c1:no-request' })];
+  mockTables.notifications[0].read_at = new Date('2026-01-02');
+  await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
+  expect(mockTables.notifications[1].read_at).not.toBeNull();
+  expect(mockTables.notifications[0].read_at).toBeNull();
+  expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/supersedes an earlier station-retrieval task/);
+});
+
+test('legacy rows without a stamped requestId are dated by the request id inside their key', async () => {
+  // req-b's row (newer) carries no metadata.requestId, only its key.
+  mockTables.notifications = [datedRow('req-b')];
+  const out = await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
+  expect(out).toEqual(expect.objectContaining({ supersededByNewer: 'req-b' }));
+  expect(mockNotifyAdmin.mock.calls[0]).toBeUndefined();
 });
 
 test('rows already READ are never touched, and another customer\'s rows are out of scope', async () => {
