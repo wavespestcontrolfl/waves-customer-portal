@@ -423,6 +423,20 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       } finally {
         await db('estimates').where({ id: lateAnchor.id }).del();
       }
+      // The hint is the estimate handed off EARLIEST after the call: a
+      // sibling row carrying a stale pre-call handoff plus a later post-call
+      // acceptance is admitted, but its qualifying witness (the acceptance)
+      // is later than est's own handoff, so it must not sort ahead of est
+      // (codex r15 P2).
+      const [stale] = await db('estimates').insert({
+        status: 'accepted', customer_id: cust.id, sent_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000),
+        accepted_at: new Date(Date.now() - 5 * 1000), estimate_data: handedOff(3 * 24 * 60 * 60),
+      }).returning('id');
+      try {
+        expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
+      } finally {
+        await db('estimates').where({ id: stale.id }).del();
+      }
     } finally {
       await db('leads').where({ id: lead.id }).del();
       await db('estimates').where({ id: est.id }).del();

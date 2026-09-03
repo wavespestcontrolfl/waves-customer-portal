@@ -809,7 +809,17 @@ const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWi
     .orWhereRaw(within(ANCHOR_HANDOFF_SQL), bind)
     .orWhereRaw(within("accepted_at"), bind);
 });
-const HANDOFF_ORDER_SQL = `LEAST(COALESCE(${OWN_HANDOFF_SQL}, 'infinity'::timestamptz), COALESCE(${ANCHOR_HANDOFF_SQL}, 'infinity'::timestamptz), COALESCE(accepted_at, 'infinity'::timestamptz)) asc`;
+// Ordering by the QUALIFYING witness, not the earliest one on the row: a
+// row admitted for a post-call handoff may also carry a pre-call handoff
+// or acceptance, and sorting by that stale stamp would put it ahead of an
+// estimate actually handed off earlier after the call (codex r15 P2).
+// LEAST ignores NULLs, and every row here passed handedOffWithin on the
+// same window, so at least one CASE is non-null.
+const handoffOrder = (conn, after, until = null) => {
+  const inWindow = (expr) => `CASE WHEN ${expr} > ?${until ? ` AND ${expr} <= ?` : ''} THEN ${expr} END`;
+  const bind = until ? [after, until] : [after];
+  return conn.raw(`LEAST(${inWindow(OWN_HANDOFF_SQL)}, ${inWindow(ANCHOR_HANDOFF_SQL)}, ${inWindow('accepted_at')}) asc`, [...bind, ...bind, ...bind]);
+};
 const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${OWN_HANDOFF_SQL} as handed_off_at`), conn.raw(`${ANCHOR_HANDOFF_SQL} as anchor_handed_off_at`)];
 // The EARLIEST post-boundary witness time on a fetched row, or null.
 const witnessAt = (row, after) => {
@@ -968,7 +978,7 @@ async function resolveFulfillment(conn, commitment, call) {
             if (reusedEstimateIds.length) this.orWhereIn("id", reusedEstimateIds);
             if (reusedLeadIds.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${reusedLeadIds.map(() => "?").join(", ")})`, reusedLeadIds);
           }), after)
-          .orderByRaw(HANDOFF_ORDER_SQL)
+          .orderByRaw(handoffOrder(conn, after))
           .first(...HANDOFF_COLS(conn));
         if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
       }
@@ -988,7 +998,7 @@ async function resolveFulfillment(conn, commitment, call) {
       } else {
         return null;
       }
-      const est = await estQ.orderByRaw(HANDOFF_ORDER_SQL).first(...HANDOFF_COLS(conn));
+      const est = await estQ.orderByRaw(handoffOrder(conn, after, until)).first(...HANDOFF_COLS(conn));
       return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: witnessAt(est, after), strength: "association", basis: customerId ? `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` : `estimate_sent_to_caller_phone_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "send_appointment_confirmation": {
