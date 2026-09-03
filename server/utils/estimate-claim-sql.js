@@ -227,13 +227,17 @@ async function callUnitAnswer(dbc, callLogId) {
 // draft carrying the rejected unit must not insert (pre-push codex P1 on
 // #3804, r8). 'unit_answer_retracted' exits as quietly as
 // 'unit_answer_pending'; the next reprocess composes without it.
+function adoptedAnswerRetracted(fence, adopted) {
+  if (!adopted || !adopted.unit) return false;
+  if (!fence || !fence.unit) return true;
+  const { unitLineValueKey } = require('./address-normalizer');
+  if (unitLineValueKey(String(fence.unit)) !== unitLineValueKey(String(adopted.unit))) return true;
+  return Boolean(adopted.at) && String(fence.at || '') !== String(adopted.at);
+}
+
 function unitAnswerFenceReason(fence, { address = null, adopted = null } = {}) {
   const { unitLineValueKey, dwellingUnitOnLine, splitUnitFirstLine } = require('./address-normalizer');
-  if (adopted && adopted.unit) {
-    if (!fence || !fence.unit) return 'unit_answer_retracted';
-    if (unitLineValueKey(String(fence.unit)) !== unitLineValueKey(String(adopted.unit))) return 'unit_answer_retracted';
-    if (adopted.at && String(fence.at || '') !== String(adopted.at)) return 'unit_answer_retracted';
-  }
+  if (adoptedAnswerRetracted(fence, adopted)) return 'unit_answer_retracted';
   if (!fence || !fence.unit) return null;
   const fencedKey = unitLineValueKey(String(fence.unit));
   const line = String(address || '').trim();
