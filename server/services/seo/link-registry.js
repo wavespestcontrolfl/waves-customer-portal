@@ -86,6 +86,31 @@ const AUTHORITY_LEVELS = Object.freeze([
   'OWNER_MEMBERSHIP', 'OWNER_LEGAL', 'OWNER_HUMAN_STEP', 'DENY', 'INVALID',
   'OWNER_INPUT_REQUIRED',
 ]);
+// §6.3 — most restrictive first. The placement's `authority` column is the
+// most severe level across its OPEN rows (display only; claims read the rows).
+const LEVEL_SEVERITY = Object.freeze([
+  'INVALID', 'DENY', 'OWNER_INPUT_REQUIRED', 'OWNER_MANUAL_PAYMENT', 'OWNER_HUMAN_STEP', 'OWNER_LEGAL',
+  'OWNER_MEMBERSHIP', 'OWNER_PAYMENT', 'OWNER_ACCOUNT', 'OWNER_OUTREACH', 'OWNER_FREE',
+  'AUTO_PAID_WITHIN_POLICY', 'AUTO_OUTREACH', 'AUTO_ACCOUNT', 'AUTO_FREE',
+]);
+// §3.3b instance kinds persisted explicitly ('-' initial, 'terms' accept_terms,
+// 'followup'); a renewal's kind is its renewal_period_key (YYYY or YYYY-MM).
+const INSTANCE_KINDS = Object.freeze(['-', 'terms', 'followup']);
+const RENEWAL_KIND_RE = /^[0-9]{4}(-[0-9]{2})?$/;
+const SATISFIED_REASONS = Object.freeze(['sent', 'placed', 'charged', 'manual_charged', 'no_payment_required', 'human_step_done', 'group_purchase']);
+const END_OUTCOMES = Object.freeze(['failed', 'skipped', 'not_sent', 'voided', 'superseded', 'terms_changed', 'lost', 'human_step_done', 'path_failed_after_charge']);
+// §3.6b approvals
+const APPROVAL_DECISIONS = Object.freeze(['approved', 'rejected', 'watch']);
+const APPROVAL_ACTIONS = Object.freeze(['acquire', 'accept_terms', 'purchase', 'renewal', 'outreach_send', 'outreach_followup']);
+const ACTIONS_BY_DIMENSION = Object.freeze({
+  execution: Object.freeze(['acquire', 'accept_terms']),
+  payment: Object.freeze(['purchase', 'renewal']),
+  communication: Object.freeze(['outreach_send', 'outreach_followup']),
+});
+// the OWNER_* levels an approval row can grant — never OVERRIDE (a waiver is
+// its own table), MANUAL_PAYMENT (paid outside the system) or INPUT_REQUIRED
+// (a price entry is an input, not an approval)
+const APPROVABLE_LEVELS = Object.freeze(['OWNER_FREE', 'OWNER_ACCOUNT', 'OWNER_OUTREACH', 'OWNER_PAYMENT', 'OWNER_MEMBERSHIP', 'OWNER_LEGAL', 'OWNER_HUMAN_STEP']);
 
 // §4 step 1 — hosts that are references to opportunities or our own, never a
 // target. Dropped by intake (not parked). Subdomains match too.
@@ -556,9 +581,11 @@ module.exports = {
   LINK_SOURCES, AGENT_STATES, DISCOVERY_PRIORITIES, ACQUISITION_TYPES, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES,
   EXPECTED_REL, EXPECTED_INDEXABILITY, EXPECTED_PERSISTENCE, RENEWAL_PERIODS, PATH_LINK_TYPES, CURRENCIES, FEE_SCOPES,
   ATTEMPT_PROVIDERS, ATTEMPT_ACTIONS, ATTEMPT_OUTCOMES, AUTHORITY_DIMENSIONS, AUTHORITY_LEVELS,
+  LEVEL_SEVERITY, INSTANCE_KINDS, RENEWAL_KIND_RE, SATISFIED_REASONS, END_OUTCOMES,
+  APPROVAL_DECISIONS, APPROVAL_ACTIONS, ACTIONS_BY_DIMENSION, APPROVABLE_LEVELS,
   INTAKE_ITEM_STATES, INTAKE_DROP_REASONS, normalizeRawUrl, intakeItemKey,
   NEVER_TARGET_HOSTS, isNeverTargetHost,
-  mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, isStandingConfidence, normalizeSubmissionUrl, pathKey,
+  mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, isStandingConfidence, normalizeSubmissionUrl, pathKey, movePatch,
   acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,
   settleRetiredPlacements,
 };
