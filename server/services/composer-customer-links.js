@@ -357,8 +357,13 @@ async function buildAutopaySetupLink(customerId) {
     if (!body) return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS.template_inactive };
     // validateTemplateBody does not require {secure_link} for this key — an
     // edit that drops it renders fine and would text setup copy with no
-    // link (GH Codex #3812 r4 P2). The minted URL must be in the body.
-    if (!String(body).includes(result.secureUrl)) return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS.template_missing_link };
+    // link (GH Codex #3812 r4 P2). The minted URL must be in the body —
+    // compared scheme-stripped, because getTemplate strips https:// from
+    // owned portal hosts before returning (r5 P1).
+    const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
+    if (!String(body).includes(stripPortalUrlScheme(result.secureUrl))) {
+      return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS.template_missing_link };
+    }
     return {
       url: result.secureUrl,
       line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
@@ -377,6 +382,20 @@ async function buildAutopaySetupLink(customerId) {
 // Case-insensitive: the React route is not case-sensitive, so /Secure/<tok>
 // still opens the page and must still be judged (GH Codex #3812 r4 P1).
 const SECURE_PATH_RE = /\/secure\/([A-Za-z0-9_-]{16,})/gi;
+
+// Percent-escapes decode before detection: React Router decodes the
+// pathname, so "/secur%65/<token>" still opens the page and must still be
+// judged (GH Codex #3812 r5 P1). Malformed escapes are left as typed.
+function decodeLinkText(body) {
+  return String(body || '').replace(/(?:%[0-9A-Fa-f]{2})+/g, (seq) => {
+    try { return decodeURIComponent(seq); } catch { return seq; }
+  });
+}
+
+// Cheap presence probe for callers that refuse on presence alone (drafts).
+function bodyMayCarrySecureLink(body) {
+  return /\/secure\//i.test(decodeLinkText(body));
+}
 // A canonical link: the portal host (exact, port included), optionally
 // schemed, NOT preceded by a hostname/URL character — so
 // "https://evil.example/portal.wavespestcontrol.com/secure/<token>" (path
@@ -412,7 +431,7 @@ function canonicalSecureLinkRe() {
  * gates — they are neither judged nor reclassified here.
  */
 async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
-  const text = String(body || '');
+  const text = decodeLinkText(body);
   const anySecure = [...text.matchAll(SECURE_PATH_RE)];
   if (!anySecure.length) return { present: false };
   const refuse = (error) => ({ present: true, ok: false, error });
@@ -464,4 +483,5 @@ module.exports = {
   AUTOPAY_SKIP_REASONS,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
+  bodyMayCarrySecureLink,
 };

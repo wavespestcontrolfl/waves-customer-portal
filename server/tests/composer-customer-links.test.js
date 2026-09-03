@@ -27,6 +27,12 @@ jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: je
 // pricing-authority send gate the estimate builder consults) stays off.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'autopayCustomerSms') }));
 jest.mock('../services/appointment-card-request', () => ({ renderTemplate: jest.fn() }));
+// getTemplate strips https:// from owned portal hosts before returning —
+// the mocked render mirrors that, and the comparison helper is the real
+// contract the builder must use.
+jest.mock('../routes/admin-sms-templates', () => ({
+  stripPortalUrlScheme: (b) => String(b).replace(/https?:\/\/(portal\.wavespestcontrol\.com)/g, '$1'),
+}));
 jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
   checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
@@ -278,7 +284,7 @@ describe('buildAutopaySetupLink', () => {
     };
     renderTemplate.mockReset().mockImplementation(async (vars, key) => (
       key === 'autopay_setup_link'
-        ? `Hi ${vars.first_name}! Set up Auto Pay here: ${vars.secure_link}\nNothing is charged today. Reply STOP to opt out.`
+        ? `Hi ${vars.first_name}! Set up Auto Pay here: ${vars.secure_link.replace(/^https:\/\//, '')}\nNothing is charged today. Reply STOP to opt out.`
         : null
     ));
   });
@@ -324,7 +330,9 @@ describe('buildAutopaySetupLink', () => {
     // newline-delimited lines carrying the tracked URL on a recipient
     // change — the whole message must go with it), inserted as-is.
     expect(renderTemplate).toHaveBeenCalledWith({ first_name: 'Pat', secure_link: r.url }, 'autopay_setup_link');
-    expect(r.line).toBe('Hi Pat! Set up Auto Pay here: https://portal.wavespestcontrol.com/secure/tok123 Nothing is charged today. Reply STOP to opt out.\n\n');
+    // Scheme-stripped in the rendered body (getTemplate's owned-host rule) —
+    // the minted-URL presence check compares the same way.
+    expect(r.line).toBe('Hi Pat! Set up Auto Pay here: portal.wavespestcontrol.com/secure/tok123 Nothing is charged today. Reply STOP to opt out.\n\n');
     expect(r.standalone).toBe(true);
   });
 
@@ -462,6 +470,13 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
     // Same body with a second, canonical link: the foreign one still refuses.
     const r2 = await autopayLinkSendCheck('https://evil.example/portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY ' + BODY, '9415550184');
     expect(r2.ok).toBe(false);
+  });
+
+  test('a percent-encoded /secur%65/ path is still detected and judged', async () => {
+    wire({ row: { ...live, expires_at: new Date(Date.now() - 1000) } });
+    const r = await autopayLinkSendCheck('Set it up here: portal.wavespestcontrol.com/secur%65/abcDEF123_-xyz789QWERTY', '9415550184');
+    expect(r.present).toBe(true);
+    expect(r.ok).toBe(false);
   });
 
   test('a differently-cased /Secure/ path is still detected and judged', async () => {

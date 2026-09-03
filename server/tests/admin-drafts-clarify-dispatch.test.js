@@ -43,7 +43,10 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => mockGates[gate] !== false),
 }));
 const mockPreDispatchCheck = jest.fn(async () => ({ ok: true }));
-jest.mock('../services/composer-customer-links', () => ({ autopayLinkSendCheck: jest.fn(async () => ({ present: false })) }));
+jest.mock('../services/composer-customer-links', () => ({
+  autopayLinkSendCheck: jest.fn(async () => ({ present: false })),
+  bodyMayCarrySecureLink: (b) => /\/secure\//i.test(String(b || '')),
+}));
 jest.mock('../services/estimate-clarify-asks', () => ({
   claimClarifyDispatch: jest.fn(),
   clarifyPreDispatchCheck: jest.fn(() => mockPreDispatchCheck),

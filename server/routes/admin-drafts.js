@@ -134,8 +134,8 @@ const AUTOPAY_LINK_IN_DRAFT = 'Auto Pay setup links cannot go out through draft 
 // Presence only (customer-kind /secure links or a look-alike host): the
 // composer-links seam does the lookups; a draft never sends one at all.
 async function draftCarriesAutopayLink(body) {
-  if (!/\/secure\//i.test(String(body || ''))) return false;
-  const { autopayLinkSendCheck } = require('../services/composer-customer-links');
+  const { bodyMayCarrySecureLink, autopayLinkSendCheck } = require('../services/composer-customer-links');
+  if (!bodyMayCarrySecureLink(body)) return false;
   return (await autopayLinkSendCheck(body, null)).present;
 }
 
