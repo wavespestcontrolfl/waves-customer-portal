@@ -17,6 +17,7 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const worker = require('./link-prospect-worker');
 const { fetchPageText } = require('./contact-finder');
+const { callAnthropic } = require('../llm/call');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -70,16 +71,12 @@ function buildFollowUpPrompt(prospect, profile, loc) {
   ].join('\n');
 }
 
+// through the shared Anthropic caller (services/llm/call.js): thinking-safe text read, loose-JSON parse, provider
+// error normalization — the injected client keeps the drafter's per-site config and the test seam
 async function draftFollowUp(prospect, { profile, anthropic }) {
   const loc = pickLocation(prospect, profile);
-  const resp = await anthropic.messages.create({
-    model: DRAFT_MODEL,
-    max_tokens: 800,
-    system: FOLLOW_UP_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: buildFollowUpPrompt(prospect, profile, loc) }],
-  });
-  const text = (resp && resp.content ? resp.content : []).map((b) => b.text || '').join('');
-  return parseDraft(text);
+  const r = await callAnthropic({ model: DRAFT_MODEL, maxTokens: 800, system: FOLLOW_UP_SYSTEM_PROMPT, text: buildFollowUpPrompt(prospect, profile, loc), jsonMode: false, anthropicClient: anthropic });
+  return r.ok ? parseDraft(r.text) : null;
 }
 
 /**

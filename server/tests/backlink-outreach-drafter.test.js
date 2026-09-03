@@ -86,9 +86,10 @@ describe('run', () => {
   test('a due follow-up is drafted in the pitch\'s thread and reported on the follow-up lane (subject Re:, no recipient, the lease token)', async () => {
     const sent = prospect({ id: 'p2', outreach_to_email: 'michael@directinspections.com', outreach_subject: 'Add Waves to your vendor resources?', outreach_body: 'Hi Michael, …', outreach_status: 'sent', follow_up_status: 'due', lease_token: '2026-07-02T00:00:00.000Z' });
     claims([], [sent]);
+    // through the shared caller (llm/call.js): the system prompt travels as a cached text block, the prompt as content blocks
     const a = { messages: { create: jest.fn(async ({ system, messages }) => {
-      expect(system).toMatch(/follow-up/i);
-      expect(messages[0].content).toMatch(/Add Waves to your vendor resources\?/);
+      expect(JSON.stringify(system)).toMatch(/follow-up/i);
+      expect(JSON.stringify(messages[0].content)).toMatch(/Add Waves to your vendor resources\?/);
       return { content: [{ type: 'text', text: '{"subject":"Re: Add Waves to your vendor resources?","body":"Hi Michael, a quick nudge.\\n— The Waves Pest Control Team","recipient":"evil@attacker.com"}' }] };
     }) } };
     const r = await drafter.run({ anthropic: a, fetchPageFn: noFetch });
