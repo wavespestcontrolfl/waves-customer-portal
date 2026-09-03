@@ -11201,6 +11201,58 @@ const CallRecordingProcessor = {
           }
         }
 
+        // Ask-the-customer loop for a COMPLETED call (GATE_ESTIMATE_CLARIFY_ASKS):
+        // the caller gave a building that validated as a real premise but
+        // no apartment/unit (bridge missing_unit_number), or no street
+        // address at all. The Triage Inbox card already asks the office
+        // to collect it; this parks ONE approval-gated clarifying text in
+        // the drafts queue so the question can go out on the owner's
+        // click instead of waiting for a callback (owner request
+        // 2026-09-03 after a tenant's roach-treatment lead at a 358-unit
+        // complex sat on a bare street address). Never sends: the draft
+        // row is the terminal artifact; the send runs through the full
+        // consent pipeline at approval. Same eligibility posture as the
+        // dropped-call text: inbound, not spam/voicemail, no
+        // do-not-contact, the inbound ANI only (implied consent is
+        // personal to it — a dictated callback number never receives it).
+        // Fail-soft — a clarify hiccup never breaks the call.
+        if (leadId && !extracted.is_spam && !extracted.is_voicemail && !isOutboundCall(call)
+          && v2Result?.extraction?.consent?.do_not_contact_request !== true) {
+          try {
+            const clarifyAni = firstExternalPhone(call.from_phone);
+            const hasStreet = !!String(extracted.address_line1 || '').trim()
+              || !!String(v2Result?.extraction?.property?.service_address?.street_line_1 || '').trim();
+            const unitOwed = bridgeNeedsConfirmation.includes('missing_unit_number');
+            const clarifyMissing = unitOwed ? ['unit_number'] : (!hasStreet ? ['street_address'] : []);
+            if (clarifyAni && clarifyMissing.length) {
+              const { parkClarifyAsk } = require('./estimate-clarify-asks');
+              const n = v2AddressValidation?.normalized || {};
+              const unitAskBuilding = unitOwed ? {
+                street_line_1: n.street_line_1 || extracted.address_line1 || null,
+                city: n.city || extracted.city || null,
+                postal_code: n.postal_code || extracted.zip || null,
+              } : null;
+              const parked = await parkClarifyAsk({
+                missing: clarifyMissing,
+                phone: clarifyAni,
+                firstName: extracted.first_name || null,
+                customerId: customerId || null,
+                leadId,
+                callLogId: call.id,
+                source: unitOwed ? 'call_missing_unit_number' : 'call_missing_service_address',
+                channelProvenance: 'voice',
+                unitAskBuilding,
+                contextSummary: unitOwed
+                  ? `Caller gave ${unitAskBuilding.street_line_1 || 'the building'} but no apartment/unit number (call ${maskSid(callSid)}). Clarifying text drafted — approve to send; the Triage Inbox card keeps its verdict.`
+                  : `Caller gave no service address (call ${maskSid(callSid)}). Clarifying text drafted — approve to send.`,
+              });
+              logger.info(`[call-proc] clarify ask for ${maskSid(callSid)}: ${parked.parked ? `parked ${parked.draftId}` : parked.skipped}`);
+            }
+          } catch (clarifyErr) {
+            logger.warn(`[call-proc] clarify ask failed (non-blocking): ${clarifyErr.message}`);
+          }
+        }
+
       } catch (leadErr) {
         // Required-linkage failures must reach the outer extraction_failed
         // guard — swallowing them finalized the call with its only

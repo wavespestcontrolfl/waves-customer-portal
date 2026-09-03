@@ -38,7 +38,12 @@ const RECENT_SENT_WINDOW_MS = 7 * 86400000;
 // resumed SMS-thread composer reads it from the thread (intent
 // unit_bedroom_count), so approval-time staleness treats it as still
 // missing until the reply handler records it.
-const ASKABLE_MISSING = new Set(['street_address', 'specific_service', 'bedroom_count']);
+// 'unit_number' (call pipeline lane): the caller gave a building that
+// validated as a real premise but no apartment/unit. The Triage Inbox card
+// (missing_unit_number) stays human-verdict-only per AGENTS.md — this ask
+// only collects the answer onto the lead/customer and stamps it on the
+// card; it never resolves the card.
+const ASKABLE_MISSING = new Set(['street_address', 'specific_service', 'bedroom_count', 'unit_number']);
 
 function clarifyAsksEnabled() {
   return isEnabled('estimateClarifyAsks');
@@ -52,18 +57,35 @@ function firstNameGreeting(firstName) {
 // Deterministic, neighborly, compliant: company name in full, one concrete
 // question, no service claims. The owner can revise any of it before send.
 const BEDROOM_ASK = 'how many bedrooms is the unit (studio, 1, 2, 3, or 4+)? That sets the price for your apartment or condo.';
+// The building rides in from the missing_unit_number card's own payload
+// (unit_ask_building), so the question names the address the caller gave.
+function unitAsk(unitAskBuilding) {
+  const street = String(unitAskBuilding?.street_line_1 || '').trim();
+  return `what's the apartment or unit number${street ? ` at ${street}` : ''}?`;
+}
 
-function composeClarifyBody({ missing, firstName }) {
+function composeClarifyBody({ missing, firstName, unitAskBuilding = null }) {
   const greeting = firstNameGreeting(firstName);
   const wantsAddress = missing.includes('street_address');
   const wantsService = missing.includes('specific_service');
   const wantsBedrooms = missing.includes('bedroom_count');
+  const wantsUnit = missing.includes('unit_number');
+  if (wantsUnit && missing.length === 1) {
+    return `${greeting}it's Waves Pest Control — one quick thing to finish your quote: ${unitAsk(unitAskBuilding)}`;
+  }
+  if (wantsUnit) {
+    // Unit alongside another gap: the base ask plus one trailing question
+    // (same shape as bedrooms below; a unit ask never rides with a
+    // street-address ask — the building is what makes it a unit ask).
+    const base = composeClarifyBody({ missing: missing.filter((m) => m !== 'unit_number'), firstName, unitAskBuilding });
+    return `${base} Also, ${unitAsk(unitAskBuilding)}`;
+  }
   if (wantsBedrooms && !wantsAddress && !wantsService) {
     return `${greeting}it's Waves Pest Control — one quick question to finish your quote: ${BEDROOM_ASK}`;
   }
   if (wantsBedrooms) {
     // Bedrooms alongside another gap: the base ask plus one trailing question.
-    const base = composeClarifyBody({ missing: missing.filter((m) => m !== 'bedroom_count'), firstName });
+    const base = composeClarifyBody({ missing: missing.filter((m) => m !== 'bedroom_count'), firstName, unitAskBuilding });
     return `${base} Also, ${BEDROOM_ASK}`;
   }
   if (wantsAddress && wantsService) {
@@ -104,16 +126,19 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
   } catch { existingFlags = {}; }
   const existingMissing = Array.isArray(existingFlags.missing) ? existingFlags.missing : [];
   const merged = [...new Set([...existingMissing, ...askable])];
+  const unitAskBuilding = linkage.unitAskBuilding || existingFlags.unit_ask_building || null;
   const changed = await trx('message_drafts')
     .where({ id: existing.id, status: 'pending' })
     .update({
       customer_id: linkage.customerId || null,
-      draft_response: composeClarifyBody({ missing: merged, firstName }),
+      draft_response: composeClarifyBody({ missing: merged, firstName, unitAskBuilding }),
       flags: JSON.stringify({
         ...existingFlags,
         missing: merged,
         lead_id: linkage.leadId || null,
         estimate_id: linkage.estimateId || null,
+        ...(linkage.callLogId ? { call_log_id: String(linkage.callLogId) } : {}),
+        ...(unitAskBuilding ? { unit_ask_building: unitAskBuilding } : {}),
         // The bedroom item binds to ITS unit draft, independent of the
         // generic linkage a later merged ask may re-point.
         ...(askable.includes('bedroom_count') && linkage.estimateId ? { bedroom_estimate_id: String(linkage.estimateId) } : {}),
@@ -147,6 +172,11 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
  *                    messaging validator's fail-closed path owns the
  *                    verdict.
  *   contextSummary — operator-facing "why this draft exists" line
+ *   callLogId      — the call whose missing_unit_number card this ask
+ *                    serves (a unit reply is stamped onto that card)
+ *   unitAskBuilding — { street_line_1, city, postal_code } the unit belongs
+ *                    to (the card's own payload) — names the building in
+ *                    the question
  */
 async function parkClarifyAsk({
   missing = [],
@@ -158,6 +188,8 @@ async function parkClarifyAsk({
   source = 'unknown',
   channelProvenance = null,
   contextSummary = null,
+  callLogId = null,
+  unitAskBuilding = null,
 }) {
   try {
     if (!clarifyAsksEnabled()) return { parked: false, skipped: 'gate_off' };
@@ -175,7 +207,7 @@ async function parkClarifyAsk({
     if (!digits) return { parked: false, skipped: 'no_usable_phone' };
 
     const sourceRef = `clarify:${digits}`;
-    const linkage = { customerId, leadId, estimateId, source, channelProvenance };
+    const linkage = { customerId, leadId, estimateId, source, channelProvenance, callLogId, unitAskBuilding };
     // The whole dedupe→merge→insert sequence holds the clarify lock, so
     // producers for one phone serialize completely — no lost merges, no
     // 23505 recovery dance (the unique index remains as the DB backstop;
@@ -263,7 +295,7 @@ async function parkClarifyAsk({
     const [draft] = await trx('message_drafts')
       .insert({
         customer_id: customerId || null,
-        draft_response: composeClarifyBody({ missing: askable, firstName }),
+        draft_response: composeClarifyBody({ missing: askable, firstName, unitAskBuilding }),
         intent: 'estimate_clarify',
         status: 'pending',
         source_ref: sourceRef,
@@ -275,6 +307,8 @@ async function parkClarifyAsk({
           toPhone: `+1${digits}`,
           lead_id: leadId || null,
           estimate_id: estimateId || null,
+          ...(callLogId ? { call_log_id: String(callLogId) } : {}),
+          ...(unitAskBuilding ? { unit_ask_building: unitAskBuilding } : {}),
           // Item-specific target for the bedroom re-price (see mergePendingClarify).
           ...(askable.includes('bedroom_count') && estimateId ? { bedroom_estimate_id: String(estimateId) } : {}),
           source,
@@ -517,6 +551,25 @@ function extractAddressReply(body) {
   return best;
 }
 
+// A unit reply: "Apt 204", "unit 12B", "#7", "Apt. 204, thanks". A BARE
+// token ("204", "12B") is the natural answer to the one-question ask and
+// is accepted only when the unit was the only thing asked AND the question
+// was actually delivered (same rule as the bedroom ask). Returns the
+// canonical unit line ("Apt 204" / "Apt 12B") or null.
+const UNIT_REPLY_RE = /\b(?:apt|apartment|unit)\.?\s*#?\s*([a-z]?\d{1,5}[a-z]?|[a-z]\d{0,4}|\d{1,4}-[a-z0-9]{1,3})\b/i;
+const UNIT_HASH_REPLY_RE = /#\s*([a-z]?\d{1,5}[a-z]?|[a-z]\d{0,4})\b/i;
+const BARE_UNIT_REPLY_RE = /^\s*(?:it'?s\s+|its\s+|number\s+)?([a-z]?\d{1,5}[a-z]?|\d{1,4}-[a-z0-9]{1,3})\s*[.!]?\s*$/i;
+function extractUnitReply(body, { bareOk = false } = {}) {
+  const text = String(body || '').trim();
+  if (!text) return null;
+  const { normalizeUnitLine } = require('../utils/address-normalizer');
+  const designated = text.match(UNIT_REPLY_RE) || text.match(UNIT_HASH_REPLY_RE);
+  if (designated) return normalizeUnitLine(`apt ${designated[1]}`) || null;
+  if (!bareOk) return null;
+  const bare = text.match(BARE_UNIT_REPLY_RE);
+  return bare ? normalizeUnitLine(`apt ${bare[1]}`) || null : null;
+}
+
 /**
  * Inbound reply routing for engine/email-originated asks (the intake state
  * machine routes its own replies). A text from a phone with a
@@ -601,6 +654,11 @@ async function handleClarifyReply({ phone, body }) {
         }
       }
     }
+    let unitLine = null;
+    if (missing.includes('unit_number')) {
+      unitLine = extractUnitReply(text, { bareOk: missing.length === 1 && !!awaiting.sent_at });
+      if (unitLine) candidates.push('unit_number');
+    }
     let bedroomCount = null;
     if (missing.includes('bedroom_count')) {
       // The one-question ask offers "studio, 1, 2, 3 or more" — a bare
@@ -679,6 +737,39 @@ async function handleClarifyReply({ phone, body }) {
         await trx('leads').where({ id: freshFlags.lead_id }).whereNull('deleted_at')
           .update({ service_interest: serviceText });
       }
+      if (recorded.includes('unit_number')) {
+        const { splitStreetLineUnit } = require('../utils/address-normalizer');
+        // leads.address is ONE free-text line: append the unit to the street
+        // the caller gave, only when that line carries no unit yet.
+        if (freshFlags.lead_id) {
+          const leadRow = await trx('leads').where({ id: freshFlags.lead_id }).whereNull('deleted_at').first();
+          const leadAddress = String(leadRow?.address || '').trim();
+          if (leadAddress && !splitStreetLineUnit(leadAddress).unit) {
+            await trx('leads').where({ id: freshFlags.lead_id }).whereNull('deleted_at')
+              .update({ address: `${leadAddress} ${unitLine}` });
+          }
+        }
+        // Fill-only, like the street: an existing unit line is never
+        // clobbered by an SMS-captured one.
+        if (fresh.customer_id) {
+          await trx('customers').where({ id: fresh.customer_id })
+            .where((q) => q.whereNull('address_line2').orWhere('address_line2', ''))
+            .update({ address_line2: unitLine });
+        }
+        // The Triage Inbox card keeps its human verdict (AGENTS.md: no
+        // auto-resolution for missing_unit_number) — the reply is stamped
+        // on it so the reviewer sees the answer beside the ask.
+        if (freshFlags.call_log_id) {
+          await trx('triage_items')
+            .where({ call_log_id: String(freshFlags.call_log_id), reason_code: 'missing_unit_number' })
+            .whereIn('status', ['open', 'in_progress'])
+            .update({
+              payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('customer_reply_unit', ?::text, 'customer_reply_at', ?::text)", [unitLine, new Date().toISOString()]),
+              updated_at: new Date(),
+            });
+        }
+        freshFlags.unit_number_answer = unitLine;
+      }
       // bedroom_count has no row of its own: the resumed SMS-thread draft
       // reads the answer from the thread. The flag keeps the audit.
       if (recorded.includes('bedroom_count')) freshFlags.bedroom_count_answer = bedroomCount;
@@ -718,7 +809,7 @@ async function handleClarifyReply({ phone, body }) {
         const applied = await trx('message_drafts')
           .where({ id: fresh.id, status: 'pending' })
           .update(remaining.length
-            ? { draft_response: composeClarifyBody({ missing: remaining, firstName: null }), flags: answeredFlags }
+            ? { draft_response: composeClarifyBody({ missing: remaining, firstName: null, unitAskBuilding: freshFlags.unit_ask_building || null }), flags: answeredFlags }
             : { status: 'rejected', flags: answeredFlags });
         if (!applied) {
           // The UNLOCKED admin claim flipped pending→approved after our
@@ -930,7 +1021,7 @@ async function recordClarifyAnswer({ phone, items = [] }) {
         const applied = await trx('message_drafts')
           .where({ id: awaiting.id, status: 'pending' })
           .update(remaining.length
-            ? { draft_response: composeClarifyBody({ missing: remaining, firstName: null }), flags: answeredFlags }
+            ? { draft_response: composeClarifyBody({ missing: remaining, firstName: null, unitAskBuilding: flags.unit_ask_building || null }), flags: answeredFlags }
             : { status: 'rejected', flags: answeredFlags });
         if (!applied) {
           // The UNLOCKED admin claim won the race after our read — fall
@@ -1060,8 +1151,14 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
         .some((value) => value && /\d/.test(String(value)));
       const { hasConcreteServiceInterest } = require('./lead-estimate-automation');
       const hasServiceNow = hasConcreteServiceInterest(lead?.service_interest);
+      // A unit is "on file" when the customer's line 2 holds one, or the
+      // lead's/estimate's single address line carries a unit designator.
+      const { splitStreetLineUnit } = require('../utils/address-normalizer');
+      const hasUnitNow = !!String(customer?.address_line2 || '').trim()
+        || [lead?.address, estimate?.address].some((value) => value && splitStreetLineUnit(String(value)).unit);
       const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
         || (item === 'specific_service' && !hasServiceNow)
+        || (item === 'unit_number' && !hasUnitNow)
         // No row carries a bedroom count — only the reply handler can
         // retire it (it drops the item from `missing` when answered).
         || item === 'bedroom_count');
@@ -1078,6 +1175,7 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
         const rewritten = composeClarifyBody({
           missing: stillMissing,
           firstName: lead?.first_name || customer?.first_name || null,
+          unitAskBuilding: flags.unit_ask_building || null,
         });
         const { copy_stale: _resolved, ...restFlags } = flags;
         const rewrittenFlags = { ...restFlags, missing: stillMissing };
@@ -1257,7 +1355,7 @@ async function reopenClarifyAfterFailedSend({ draftId, dispatchedMissing = null,
           // again.
           ...(missingChanged
             ? {
-              draft_response: composeClarifyBody({ missing, firstName: null }),
+              draft_response: composeClarifyBody({ missing, firstName: null, unitAskBuilding: flags.unit_ask_building || null }),
               flags: JSON.stringify({ ...restFlags, missing }),
             }
             : {}),
@@ -1286,5 +1384,5 @@ module.exports = {
   reopenClarifyAfterFailedSend,
   repricePendingActive,
   clearEstimateRepricePending,
-  _private: { composeClarifyBody, extractAddressReply, extractBedroomReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
+  _private: { composeClarifyBody, extractAddressReply, extractBedroomReply, extractUnitReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
 };
