@@ -178,8 +178,10 @@ const MODEL_CATALOG = {
   'claude-opus-5': { label: 'Claude Opus 5', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 5, out: 25 }, status: 'current' },
   'claude-opus-4-8': { label: 'Claude Opus 4.8', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 5, out: 25 }, status: 'legacy' },
   'claude-sonnet-5': { label: 'Claude Sonnet 5', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 2, out: 10 }, status: 'current' },
-  'claude-fable-5-1': { label: 'Claude Fable 5.1', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 10, out: 50 }, status: 'current' },
-  'claude-fable-5': { label: 'Claude Fable 5', provider: 'anthropic', caps: ['text', 'vision'], rate: null, status: 'legacy' },
+  // Fable's thinking blocks + refusal semantics are handled only by
+  // services/llm/deep.js, so only DEEP / EXTREME selectors may take it.
+  'claude-fable-5-1': { label: 'Claude Fable 5.1', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 10, out: 50 }, status: 'current', requires: 'deep' },
+  'claude-fable-5': { label: 'Claude Fable 5', provider: 'anthropic', caps: ['text', 'vision'], rate: null, status: 'legacy', requires: 'deep' },
   'claude-haiku-4-5-20251001': { label: 'Claude Haiku 4.5', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 1, out: 5 }, status: 'current' },
   'gpt-5.6-sol': { label: 'GPT-5.6 Sol', provider: 'openai', caps: ['text', 'vision'], rate: { in: 4, out: 20 }, status: 'current' },
   'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], rate: { in: 2, out: 12 }, status: 'current' },

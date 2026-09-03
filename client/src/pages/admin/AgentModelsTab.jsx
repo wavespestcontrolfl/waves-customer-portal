@@ -42,6 +42,7 @@ const FILTERS = [
   { key: "pinned", label: "Env-pinned" },
   { key: "fanout", label: "Multi-model" },
   { key: "locked", label: "Locked" },
+  { key: "nobackup", label: "No backup" },
 ];
 
 // Draft value meaning "delete this env var in Railway" — a pinned leg then
@@ -124,8 +125,14 @@ function DisclosureButton({ open, onClick, label }) {
 // Options a picker offers for a leg/selector: catalog models the provider and
 // modality can run, plus the live-search entry.
 function ModelOptions({ catalog, accepts, exclude }) {
+  // requires:'deep' (Fable) is offered only where every call site goes
+  // through llm/deep.js — the DEEP / EXTREME selectors and pins on their lanes.
   const options = Object.entries(catalog).filter(
-    ([id, m]) => id !== exclude && accepts.providers.includes(m.provider) && (m.caps.length === 0 || m.caps.includes(accepts.cap)),
+    ([id, m]) =>
+      id !== exclude &&
+      accepts.providers.includes(m.provider) &&
+      (m.caps.length === 0 || m.caps.includes(accepts.cap)) &&
+      (!m.requires || (m.requires === "deep" && accepts.deep)),
   );
   return (
     <>
@@ -150,7 +157,9 @@ export default function AgentModelsTab() {
   const [draft, setDraft] = useState({});
   const [review, setReview] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [openSelectors, setOpenSelectors] = useState({});
+  const [openModels, setOpenModels] = useState({});
+  // Lanes-table filter by model id (set by a Models-in-use row's lane count).
+  const [laneModel, setLaneModel] = useState(null);
   const [openLanes, setOpenLanes] = useState({});
   // Models found through live search, merged into the catalog for labels.
   const [discovered, setDiscovered] = useState({});
@@ -248,7 +257,65 @@ export default function AgentModelsTab() {
     return [...byEnv.values()];
   }, [data, draft, selectorByKey]);
 
+  // One row per model actually running: the selectors resolving to it and
+  // how many lanes run it as primary / fallback (pins and literals included).
+  const modelsInUse = useMemo(() => {
+    if (!data) return [];
+    const rows = new Map();
+    const row = (id) => {
+      if (!rows.has(id)) rows.set(id, { id, selectors: [], primaryLanes: 0, fallbackLanes: 0 });
+      return rows.get(id);
+    };
+    for (const s of data.selectors) row(s.current).selectors.push(s);
+    for (const l of data.lanes) {
+      const r = row(l.primary.model);
+      r.primaryLanes += 1;
+      // What catches this model's lanes if its provider is down: the set of
+      // fallback models across its primary lanes, plus how many have none.
+      r.backups = r.backups || new Map();
+      if (l.fallback?.model) {
+        r.backups.set(l.fallback.model, (r.backups.get(l.fallback.model) || 0) + 1);
+        row(l.fallback.model).fallbackLanes += 1;
+      } else {
+        r.noBackup = (r.noBackup || 0) + 1;
+      }
+    }
+    const providerOrder = { anthropic: 0, openai: 1, gemini: 2 };
+    return [...rows.values()].sort(
+      (a, b) =>
+        (providerOrder[catalog[a.id]?.provider] ?? 9) - (providerOrder[catalog[b.id]?.provider] ?? 9) ||
+        b.primaryLanes - a.primaryLanes ||
+        a.id.localeCompare(b.id),
+    );
+  }, [data, catalog]);
+
+  // What a whole-model switch may offer: the provider is shared (one id, one
+  // provider); the modality is the union its selectors need; Fable only when
+  // every selector is on the deep path. Locked selectors are left out.
+  const modelAccepts = (m) => {
+    const open = m.selectors.filter((s) => !s.lock);
+    if (!open.length) return null;
+    const caps = new Set(open.map((s) => s.accepts.cap));
+    return {
+      providers: [catalog[m.id]?.provider],
+      cap: caps.has("vision") ? "vision" : [...caps][0],
+      deep: open.every((s) => s.accepts.deep),
+      envs: open.map((s) => s.env),
+    };
+  };
+
   const destLabel = (c) => (c.destinations || [c.to]).map((id) => modelLabel(catalog, id)).join(" / ");
+
+  // Inbound-content lanes that a change lands on Gemini. The Gemini adapter
+  // (llm/call.js) folds the system prompt into the user turn, so customer or
+  // third-party text on it has no instruction boundary — say so before copy.
+  const geminiInboundLanes = useMemo(() => {
+    if (!data) return [];
+    return data.lanes
+      .filter((l) => l.inbound && laneChanged(l))
+      .filter((l) => [effectiveLeg(l, l.primary), effectiveLeg(l, l.fallback)].some((id) => id && catalog[id]?.provider === "gemini" && ![l.primary.model, l.fallback?.model].includes(id)))
+      .map((l) => l.name);
+  }, [data, laneChanged, effectiveLeg, catalog]);
   // Unpins are deletions: Railway has no "unset" syntax, so the line is an
   // instruction rather than an assignment.
   const envBlock = changes.map((c) => (c.unpin ? `# delete ${c.env}  (unpin → ${destLabel(c)})` : `${c.env}=${c.to}`)).join("\n");
@@ -264,22 +331,24 @@ export default function AgentModelsTab() {
     });
   };
 
-  // A picker change: FIND opens the search for that env, anything else drafts.
-  const onPick = (env, accepts, currentLabel) => (e) => {
+  // A picker change: FIND opens the search for the env(s), anything else
+  // drafts. A Models-in-use row drafts every selector on that model at once.
+  const onPick = (envs, accepts, currentLabel) => (e) => {
     const v = e.target.value;
+    const list = Array.isArray(envs) ? envs : [envs];
     if (v === FIND) {
-      setFind({ env, accepts, currentLabel });
+      setFind({ envs: list, accepts, currentLabel });
       return;
     }
-    setDraftValue(env, v);
+    list.forEach((env) => setDraftValue(env, v));
   };
 
-  const onFound = (env, model) => {
+  const onFound = (envs, model) => {
     setDiscovered((prev) => ({
       ...prev,
       [model.id]: { label: model.label || model.id, provider: model.provider, caps: [], rate: null, status: "current", discovered: true },
     }));
-    setDraftValue(env, model.id);
+    envs.forEach((env) => setDraftValue(env, model.id));
     setFind(null);
   };
 
@@ -296,13 +365,15 @@ export default function AgentModelsTab() {
   const visibleLanes = useMemo(() => {
     if (!data) return [];
     return data.lanes.filter((l) => {
+      if (laneModel && l.primary.model !== laneModel && l.fallback?.model !== laneModel) return false;
       if (filter === "changed") return laneChanged(l);
       if (filter === "pinned") return l.primary.pinned || (l.fallback && l.fallback.pinned);
       if (filter === "fanout") return l.fanout;
       if (filter === "locked") return !!l.lock;
+      if (filter === "nobackup") return !l.fallback;
       return true;
     });
-  }, [data, filter, laneChanged]);
+  }, [data, filter, laneChanged, laneModel]);
 
   if (loading && !data) {
     return (
@@ -327,9 +398,11 @@ export default function AgentModelsTab() {
     <div className="flex flex-col gap-4 pb-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="m-0 max-w-[70ch] text-13 text-ink-secondary">
-          <span className="font-medium text-zinc-900 u-nums">{data.lanes.length}</span> AI lanes over{" "}
-          <span className="font-medium text-zinc-900 u-nums">{data.selectors.length}</span> registry selectors ·{" "}
-          <span className="u-nums">{overriddenCount}</span> overridden by env today. Every selector is read once at boot, so a
+          <span className="font-medium text-zinc-900 u-nums">{data.lanes.length}</span> AI lanes on{" "}
+          <span className="font-medium text-zinc-900 u-nums">{modelsInUse.length}</span> models through{" "}
+          <span className="u-nums">{data.selectors.length}</span> registry selectors ·{" "}
+          <span className="u-nums">{overriddenCount}</span> overridden by env today ·{" "}
+          <span className="u-nums">{data.lanes.filter((l) => !l.fallback).length}</span> lanes have no backup model. Every selector is read once at boot, so a
           switch is a Railway env change plus the restart Railway performs on save. Nothing here sends anything to a customer.
         </p>
         <Button size="sm" variant="secondary" onClick={load} disabled={loading} className="gap-2">
@@ -338,114 +411,181 @@ export default function AgentModelsTab() {
         </Button>
       </div>
 
-      {/* Registry selectors — the knobs that actually exist */}
-      <section aria-labelledby="models-selectors-heading" className="flex flex-col gap-2">
+      {/* Models in use — one row per model actually running */}
+      <section aria-labelledby="models-in-use-heading" className="flex flex-col gap-2">
         <div>
-          <h2 id="models-selectors-heading" className="m-0 text-14 font-medium text-zinc-900">
-            Registry selectors
+          <h2 id="models-in-use-heading" className="m-0 text-14 font-medium text-zinc-900">
+            Models in use
           </h2>
           <p className="m-0 text-12 text-ink-secondary">
-            Change a selector and every lane that follows it moves. The picker only offers models the selector's provider and
-            modality can actually run; "Find a model…" searches the providers live for anything newer.
+            Every model something runs on right now. "Change to" moves every selector on that model at once; expand a row to
+            move one selector on its own. "Find a model…" searches the providers live for anything newer.
           </p>
         </div>
         <Card className="overflow-hidden">
           <Table className="min-w-[880px]">
             <THead>
               <TR>
-                <TH>Selector</TH>
-                <TH>Env var</TH>
-                <TH>Runs on now</TH>
-                <TH>Source</TH>
-                <TH>Lanes</TH>
+                <TH>Model</TH>
+                <TH>Selectors</TH>
+                <TH align="right">Lanes</TH>
+                <TH>Backup if this provider is down</TH>
                 <TH>Change to</TH>
               </TR>
             </THead>
             <TBody>
-              {data.selectors.map((s) => {
-                const next = draft[s.env];
-                const changed = next && next !== s.current;
-                const primaryLanes = data.lanes.filter((l) => l.primary.selector === s.key && !l.primary.pinned);
-                const fallbackLanes = data.lanes.filter((l) => l.fallback?.selector === s.key && !l.fallback.pinned);
-                const total = primaryLanes.length + fallbackLanes.length;
-                const open = !!openSelectors[s.key];
+              {modelsInUse.map((m) => {
+                const info = catalog[m.id];
+                const accepts = modelAccepts(m);
+                const open = !!openModels[m.id];
+                const envs = accepts?.envs || [];
+                const drafts = envs.map((env) => draft[env]).filter(Boolean);
+                const allSame = drafts.length === envs.length && drafts.every((v) => v === drafts[0]);
+                const rowValue = allSame && drafts[0] && drafts[0] !== m.id ? drafts[0] : "";
+                const mixed = drafts.length > 0 && !allSame;
+                const lockedOnly = m.selectors.length > 0 && m.selectors.every((s) => s.lock);
+                const total = m.primaryLanes + m.fallbackLanes;
                 return (
-                  <React.Fragment key={s.key}>
-                    <TR className={cn(changed && "bg-zinc-50")}>
+                  <React.Fragment key={m.id}>
+                    <TR className={cn((rowValue || mixed) && "bg-zinc-50")}>
                       <TD>
-                        <div className="flex flex-col">
-                          <span className="font-medium text-zinc-900">{s.key}</span>
-                          <span className="text-11 text-ink-tertiary">{s.description}</span>
+                        <div className="flex items-start gap-1">
+                          <DisclosureButton open={open} onClick={() => toggle(setOpenModels, m.id)} label={`${open ? "Hide" : "Show"} selectors for ${modelLabel(catalog, m.id)}`} />
+                          <div className="flex flex-col gap-0.5 pt-1.5">
+                            <ModelChip catalog={catalog} id={m.id} />
+                            <span className="text-11 text-ink-tertiary u-nums">
+                              {m.id}
+                              {info?.status === "legacy" ? " · legacy" : ""}
+                              {fmtRate(info?.rate) ? ` · ${fmtRate(info.rate)}` : ""}
+                            </span>
+                          </div>
                         </div>
                       </TD>
-                      <TD className="u-nums text-12 text-ink-secondary">{s.env}</TD>
                       <TD>
-                        <div className="flex flex-col gap-0.5">
-                          <ModelChip catalog={catalog} id={changed ? next : s.current} />
-                          {changed && <span className="text-11 text-ink-secondary">was {modelLabel(catalog, s.current)}</span>}
-                        </div>
-                      </TD>
-                      <TD>
-                        {s.overridden ? (
-                          <Badge tone="strong" className="whitespace-nowrap">
-                            env override
-                          </Badge>
+                        {m.selectors.length ? (
+                          <span className="flex flex-wrap gap-1">
+                            {m.selectors.map((s) => (
+                              <Badge key={s.key} tone={s.overridden ? "strong" : "neutral"} title={s.overridden ? `${s.env} set in Railway` : `${s.env} · code default`}>
+                                {s.key}
+                              </Badge>
+                            ))}
+                          </span>
                         ) : (
-                          <Badge className="whitespace-nowrap">code default</Badge>
+                          <span className="text-12 text-ink-tertiary">lane pins / code defaults only</span>
                         )}
                       </TD>
-                      <TD>
+                      <TD align="right">
                         {total > 0 ? (
                           <button
                             type="button"
-                            onClick={() => toggle(setOpenSelectors, s.key)}
-                            aria-expanded={open}
-                            className="inline-flex items-center gap-1 rounded-sm px-1 text-13 text-zinc-900 underline-offset-2 hover:underline u-focus-ring"
+                            onClick={() => {
+                              setLaneModel(laneModel === m.id ? null : m.id);
+                              document.getElementById("models-lanes-heading")?.scrollIntoView({ block: "start" });
+                            }}
+                            aria-pressed={laneModel === m.id}
+                            className={cn("inline-flex items-baseline gap-1 rounded-sm px-1 text-13 text-zinc-900 underline-offset-2 hover:underline u-focus-ring", laneModel === m.id && "bg-zinc-900 text-white hover:no-underline")}
+                            title="Show these lanes below"
                           >
-                            <span className="u-nums">{total}</span>
-                            <span className="text-12 text-ink-secondary">
-                              {primaryLanes.length} primary{fallbackLanes.length ? ` · ${fallbackLanes.length} fallback` : ""}
-                            </span>
-                            {open ? <ChevronUp size={13} strokeWidth={2} aria-hidden /> : <ChevronDown size={13} strokeWidth={2} aria-hidden />}
+                            <span className="u-nums">{m.primaryLanes}</span>
+                            {m.fallbackLanes > 0 && <span className={cn("text-11", laneModel === m.id ? "text-zinc-300" : "text-ink-tertiary")}>+{m.fallbackLanes} fallback</span>}
                           </button>
                         ) : (
-                          <span className="text-12 text-ink-tertiary">none</span>
+                          <span className="text-12 text-ink-tertiary">0</span>
                         )}
                       </TD>
                       <TD>
-                        {s.lock ? (
-                          <span className="text-12 text-ink-secondary">{s.lock.label}</span>
+                        {m.primaryLanes === 0 ? (
+                          <span className="text-12 text-ink-tertiary">—</span>
                         ) : (
-                          <Select
-                            size="sm"
-                            aria-label={`Change ${s.key}`}
-                            value={next || ""}
-                            onChange={onPick(s.env, s.accepts, modelLabel(catalog, s.current))}
-                            className="w-56"
-                          >
-                            <option value="">Keep {modelLabel(catalog, s.current)}</option>
-                            <ModelOptions catalog={catalog} accepts={s.accepts} exclude={s.current} />
-                          </Select>
+                          <div className="flex flex-col gap-0.5 text-12">
+                            {[...(m.backups || new Map()).entries()]
+                              .sort((a, b) => b[1] - a[1])
+                              .map(([id, n]) => {
+                                const sameProvider = catalog[id]?.provider === catalog[m.id]?.provider;
+                                return (
+                                  <span key={id} className="text-zinc-900">
+                                    {modelLabel(catalog, id)} <span className="text-ink-tertiary u-nums">· {n}</span>
+                                    {sameProvider && (
+                                      <span className="ml-1 text-11 text-alert-fg" title="Same provider — an outage takes both legs down">same provider</span>
+                                    )}
+                                  </span>
+                                );
+                              })}
+                            {m.noBackup > 0 && (
+                              <span className="text-alert-fg">
+                                none <span className="u-nums">· {m.noBackup}</span> lane{m.noBackup === 1 ? "" : "s"}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </TD>
+                      <TD>
+                        {lockedOnly ? (
+                          <span className="text-12 text-ink-secondary">{m.selectors[0].lock.label}</span>
+                        ) : accepts ? (
+                          <div className="flex flex-col gap-0.5">
+                            <Select
+                              size="sm"
+                              aria-label={`Change every selector on ${modelLabel(catalog, m.id)}`}
+                              value={rowValue}
+                              onChange={onPick(envs, accepts, modelLabel(catalog, m.id))}
+                              className="w-56"
+                            >
+                              <option value="">{mixed ? "Mixed — see selectors" : `Keep ${modelLabel(catalog, m.id)}`}</option>
+                              <ModelOptions catalog={catalog} accepts={accepts} exclude={m.id} />
+                            </Select>
+                            {rowValue && <span className="text-11 text-ink-secondary">{envs.length} selector{envs.length === 1 ? "" : "s"} move</span>}
+                          </div>
+                        ) : (
+                          <span className="text-12 text-ink-tertiary">pinned by lane — change it on the lane</span>
                         )}
                       </TD>
                     </TR>
                     {open && (
                       <TR className="bg-zinc-50 hover:bg-zinc-50">
-                        <TD colSpan={6} className="py-2 pl-6">
-                          <div className="flex flex-col gap-1 text-12">
-                            {primaryLanes.length > 0 && (
-                              <div>
-                                <span className="text-11 uppercase tracking-label text-ink-tertiary">Primary · </span>
-                                <span className="text-zinc-900">{primaryLanes.map((l) => l.name).join(" · ")}</span>
-                              </div>
-                            )}
-                            {fallbackLanes.length > 0 && (
-                              <div>
-                                <span className="text-11 uppercase tracking-label text-ink-tertiary">Fallback · </span>
-                                <span className="text-zinc-900">{fallbackLanes.map((l) => l.name).join(" · ")}</span>
-                              </div>
-                            )}
-                          </div>
+                        <TD colSpan={5} className="py-2 pl-11">
+                          {m.selectors.length === 0 ? (
+                            <span className="text-12 text-ink-secondary">No registry selector resolves here; the lanes below reach it through their own env pin or a code default.</span>
+                          ) : (
+                            <ul className="m-0 flex list-none flex-col gap-2 p-0">
+                              {m.selectors.map((s) => {
+                                const next = draft[s.env];
+                                const changed = next && next !== s.current;
+                                return (
+                                  <li key={s.key} className="grid grid-cols-[minmax(160px,1fr)_minmax(200px,1fr)_auto_minmax(220px,auto)] items-center gap-3 text-12">
+                                    <span className="flex flex-col">
+                                      <span className="font-medium text-zinc-900">{s.key}</span>
+                                      <span className="text-11 text-ink-tertiary">{s.description}</span>
+                                    </span>
+                                    <span className="u-nums text-ink-secondary">
+                                      {s.env}
+                                      <span className="ml-2">
+                                        {s.overridden ? <Badge tone="strong">env override</Badge> : <Badge>code default</Badge>}
+                                      </span>
+                                    </span>
+                                    <span className="u-nums text-ink-secondary">{s.laneCount} primary</span>
+                                    {s.lock ? (
+                                      <span className="text-ink-secondary">{s.lock.label}</span>
+                                    ) : (
+                                      <span className="flex flex-col gap-0.5">
+                                        <Select
+                                          size="sm"
+                                          aria-label={`Change ${s.key}`}
+                                          value={next || ""}
+                                          onChange={onPick(s.env, s.accepts, modelLabel(catalog, s.current))}
+                                          className="w-56"
+                                        >
+                                          <option value="">Keep {modelLabel(catalog, s.current)}</option>
+                                          <ModelOptions catalog={catalog} accepts={s.accepts} exclude={s.current} />
+                                        </Select>
+                                        {changed && <span className="text-11 text-ink-secondary">→ {modelLabel(catalog, next)}</span>}
+                                      </span>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          )}
                         </TD>
                       </TR>
                     )}
@@ -469,7 +609,12 @@ export default function AgentModelsTab() {
               env pin can move without touching its selector. Expand a lane for its file and how it reaches the model.
             </p>
           </div>
-          <div className="flex flex-wrap gap-1" role="group" aria-label="Lane filter">
+          <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Lane filter">
+            {laneModel && (
+              <Button size="sm" variant="primary" onClick={() => setLaneModel(null)} aria-label={`Clear model filter ${modelLabel(catalog, laneModel)}`}>
+                {modelLabel(catalog, laneModel)} ×
+              </Button>
+            )}
             {FILTERS.map((f) => (
               <Button
                 key={f.key}
@@ -526,6 +671,7 @@ export default function AgentModelsTab() {
                                 <span className="flex flex-wrap items-center gap-1.5 pt-1.5 text-13 text-zinc-900">
                                   {l.name}
                                   {l.fanout && <Badge>fan-out</Badge>}
+                                  {l.inbound && <Badge title="Prompt carries customer or third-party content">inbound</Badge>}
                                   {l.lock && <Badge>{l.lock.label}</Badge>}
                                 </span>
                               </div>
@@ -682,6 +828,13 @@ export default function AgentModelsTab() {
               );
             })}
           </ul>
+          {geminiInboundLanes.length > 0 && (
+            <div className="text-12 text-alert-fg" role="alert">
+              Moves inbound customer content onto Gemini: {geminiInboundLanes.join(", ")}. The Gemini adapter has no
+              system-instruction boundary yet (llm/call.js folds it into the user turn), so this widens the prompt-injection
+              surface until that is fixed.
+            </div>
+          )}
           <pre className="m-0 overflow-x-auto rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-zinc-900 u-nums">
             {envBlock}
           </pre>
@@ -701,7 +854,7 @@ export default function AgentModelsTab() {
         </DialogFooter>
       </Dialog>
 
-      {find && <FindModelDialog target={find} onClose={() => setFind(null)} onPick={(model) => onFound(find.env, model)} />}
+      {find && <FindModelDialog target={find} onClose={() => setFind(null)} onPick={(model) => onFound(find.envs, model)} />}
     </div>
   );
 }
@@ -712,6 +865,7 @@ export default function AgentModelsTab() {
 function FindModelDialog({ target, onClose, onPick }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState(null);
+  const [newest, setNewest] = useState(null);
   const [unavailable, setUnavailable] = useState([]);
   const [capUnverified, setCapUnverified] = useState(false);
   const [searching, setSearching] = useState(false);
@@ -721,20 +875,21 @@ function FindModelDialog({ target, onClose, onPick }) {
 
   useEffect(() => {
     const query = q.trim();
-    if (query.length < 2) {
-      setResults(null);
-      return undefined;
-    }
+    // Empty box → the newest ids per provider (a release whose id doesn't
+    // carry its name still shows by date); two+ characters → a search.
+    const browse = query.length < 2;
+    if (browse) setResults(null);
     const id = ++requestRef.current;
     const timer = setTimeout(async () => {
       setSearching(true);
       setProblem(null);
       try {
         const out = await adminFetch(
-          `/admin/agents/models/search?q=${encodeURIComponent(query)}&providers=${encodeURIComponent(target.accepts.providers.join(","))}&cap=${encodeURIComponent(target.accepts.cap)}`,
+          `/admin/agents/models/search?q=${encodeURIComponent(browse ? "" : query)}&providers=${encodeURIComponent(target.accepts.providers.join(","))}&cap=${encodeURIComponent(target.accepts.cap)}`,
         );
         if (id !== requestRef.current) return;
-        setResults(out.results || []);
+        if (browse) setNewest(out.newest || []);
+        else setResults(out.results || []);
         setUnavailable(out.unavailable || []);
         setCapUnverified(!!out.capUnverified);
       } catch (e) {
@@ -742,9 +897,11 @@ function FindModelDialog({ target, onClose, onPick }) {
       } finally {
         if (id === requestRef.current) setSearching(false);
       }
-    }, 300);
+    }, browse ? 0 : 300);
     return () => clearTimeout(timer);
   }, [q, target]);
+
+  const deepBlocked = (m) => m.requiresDeep && !target.accepts.deep;
 
   const choose = async (model) => {
     setProbing(model.id);
@@ -770,7 +927,7 @@ function FindModelDialog({ target, onClose, onPick }) {
         <DialogTitle>Find a model</DialogTitle>
         <p className="m-0 mt-1 text-12 text-ink-secondary">
           Searches {target.accepts.providers.map((p) => PROVIDER_LABEL[p] || p).join(" and ")} live, so a model released today
-          is here. Replaces {target.currentLabel} for {target.env}.
+          is here. Replaces {target.currentLabel} for {target.envs.join(", ")}.
         </p>
       </DialogHeader>
       <DialogBody className="flex flex-col gap-3">
@@ -797,31 +954,33 @@ function FindModelDialog({ target, onClose, onPick }) {
             does — a text-only model here breaks the photo lanes after restart.
           </div>
         )}
-        {searching && !results ? (
-          <div className="text-13 text-ink-secondary" role="status">
-            Searching…
-          </div>
-        ) : results && results.length === 0 ? (
-          <div className="text-13 text-ink-secondary">No model matches "{q.trim()}".</div>
-        ) : results ? (
-          <ul className="m-0 flex list-none flex-col divide-y divide-zinc-200 border-hairline border-zinc-200 p-0">
-            {results.map((m) => (
-              <li key={`${m.provider}:${m.id}`} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
-                <span className="flex flex-col">
-                  <span className="text-13 text-zinc-900">{m.label}</span>
-                  <span className="text-11 text-ink-tertiary u-nums">
-                    {m.id} · {PROVIDER_LABEL[m.provider] || m.provider}
-                    {m.createdAt ? ` · ${m.createdAt.slice(0, 10)}` : ""}
-                  </span>
+        {q.trim().length >= 2 ? (
+          searching && !results ? (
+            <div className="text-13 text-ink-secondary" role="status">
+              Searching…
+            </div>
+          ) : results && results.length === 0 ? (
+            <div className="text-13 text-ink-secondary">No model matches "{q.trim()}".</div>
+          ) : results ? (
+            <ResultList items={results} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
+          ) : null
+        ) : newest && newest.length > 0 ? (
+          <div className="flex flex-col gap-3">
+            {newest.map((group) => (
+              <div key={group.provider} className="flex flex-col gap-1">
+                <span className="text-11 uppercase tracking-label text-ink-secondary">
+                  Newest listed by {PROVIDER_LABEL[group.provider] || group.provider}
                 </span>
-                <Button size="sm" variant="secondary" onClick={() => choose(m)} disabled={!!probing}>
-                  {probing === m.id ? "Checking…" : "Use"}
-                </Button>
-              </li>
+                <ResultList items={group.items} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
+              </div>
             ))}
-          </ul>
+          </div>
+        ) : searching ? (
+          <div className="text-13 text-ink-secondary" role="status">
+            Loading the newest models…
+          </div>
         ) : (
-          <div className="text-12 text-ink-tertiary">Type at least two characters.</div>
+          <div className="text-12 text-ink-tertiary">Type a name or id, or pick from the newest below once they load.</div>
         )}
       </DialogBody>
       <DialogFooter>
@@ -830,5 +989,32 @@ function FindModelDialog({ target, onClose, onPick }) {
         </Button>
       </DialogFooter>
     </Dialog>
+  );
+}
+
+function ResultList({ items, probing, onChoose, deepBlocked }) {
+  return (
+    <ul className="m-0 flex list-none flex-col divide-y divide-zinc-200 border-hairline border-zinc-200 p-0">
+      {items.map((m) => {
+        const blocked = deepBlocked(m);
+        return (
+          <li key={`${m.provider}:${m.id}`} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+            <span className="flex flex-col">
+              <span className="text-13 text-zinc-900">{m.label}</span>
+              <span className="text-11 text-ink-tertiary u-nums">
+                {m.id} · {PROVIDER_LABEL[m.provider] || m.provider}
+                {m.createdAt ? ` · ${m.createdAt.slice(0, 10)}` : ""}
+              </span>
+              {blocked && (
+                <span className="text-11 text-ink-secondary">Only DEEP / EXTREME selectors can run this model (llm/deep.js path).</span>
+              )}
+            </span>
+            <Button size="sm" variant="secondary" onClick={() => onChoose(m)} disabled={!!probing || blocked}>
+              {probing === m.id ? "Checking…" : "Use"}
+            </Button>
+          </li>
+        );
+      })}
+    </ul>
   );
 }

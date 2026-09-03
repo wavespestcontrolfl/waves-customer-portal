@@ -20,6 +20,7 @@ const logger = require('./logger');
 const LIST_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8000;
 const MAX_RESULTS = 25;
+const NEWEST_PER_PROVIDER = 10;
 
 const PROVIDERS = ['anthropic', 'openai', 'gemini'];
 
@@ -40,9 +41,11 @@ const ADAPTERS = {
     retrieveUrl: (id) => `https://api.openai.com/v1/models/${encodeURIComponent(id)}`,
     headers: () => ({ Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }),
     items: (body) => (body.data || [])
-      // Fine-tunes (ft:…), org snapshots and non-chat families are noise for a
-      // text/vision picker; the search still matches anything left.
-      .filter((m) => !/^ft:|^(dall-e|tts|whisper|text-embedding|omni-moderation|davinci|babbage)/.test(m.id))
+      // Fine-tunes (ft:…), audio / realtime / image / embedding / moderation
+      // families are noise for a text-or-vision picker; the search still
+      // matches anything left (the prod list's newest entries were
+      // gpt-live-transcribe and gpt-realtime-2.1 before this filter).
+      .filter((m) => !/^ft:|^(dall-e|tts|whisper|text-embedding|omni-moderation|davinci|babbage|gpt-image|sora)|transcribe|realtime|-audio|-tts/.test(m.id))
       .map((m) => ({ id: m.id, label: m.id, createdAt: m.created ? new Date(m.created * 1000).toISOString() : null })),
   },
   gemini: {
@@ -52,8 +55,10 @@ const ADAPTERS = {
     listUrl: () => 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',
     retrieveUrl: (id) => `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(id)}`,
     headers: () => ({ 'x-goog-api-key': geminiKey() }),
+    // Only the gemini-* generation family: the list also carries gemma,
+    // deep-research and other previews no lane can use.
     items: (body) => (body.models || [])
-      .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent') && /^models\/gemini-/.test(m.name || ''))
       .map((m) => ({ id: String(m.name || '').replace(/^models\//, ''), label: m.displayName || m.name, createdAt: null })),
   },
 };
@@ -131,12 +136,43 @@ async function search(query, { providers = PROVIDERS, cap = 'text', fetchImpl = 
   const lists = await Promise.all(wanted.map((p) => listProvider(p, { fetchImpl })));
   const unavailable = lists.filter((l) => !l.available).map((l) => ({ provider: l.provider, reason: l.reason }));
   const capUnverified = cap === 'vision';
-  if (!q.length) return { query: query || '', cap, capUnverified, results: [], unavailable };
+  // Empty query → the newest ids per provider. OpenAI lists ids without
+  // display names, so a release whose id doesn't carry its marketing name
+  // ("Astra" shipping as gpt-5.7) is still findable by recency.
+  if (!q.length) {
+    const newest = lists.filter((l) => l.available).map((l) => ({
+      provider: l.provider,
+      items: [...l.items].sort(byRecency).slice(0, NEWEST_PER_PROVIDER).map((m) => ({ provider: l.provider, ...m, requiresDeep: requiresDeep(m.id) })),
+    }));
+    return { query: query || '', cap, capUnverified, results: [], newest, unavailable };
+  }
   const results = lists
-    .flatMap((l) => l.items.filter((m) => matches(m, q)).map((m) => ({ provider: l.provider, ...m })))
-    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0) || a.id.localeCompare(b.id))
+    .flatMap((l) => l.items.filter((m) => matches(m, q)).map((m) => ({ provider: l.provider, ...m, requiresDeep: requiresDeep(m.id) })))
+    .sort(byRecency)
     .slice(0, MAX_RESULTS);
   return { query, cap, capUnverified, results, unavailable };
+}
+
+// Newest first. Gemini's list carries no dates, so fall back to the version
+// number in the id (gemini-3.8-flash > gemini-3.5-flash > gemini-2.5-pro).
+function versionOf(id) {
+  const m = /(\d+(?:\.\d+)?)/.exec(String(id || '').replace(/^gpt-|^claude-|^gemini-/, ''));
+  return m ? parseFloat(m[1]) : 0;
+}
+function byRecency(a, b) {
+  const da = new Date(a.createdAt || 0).getTime();
+  const dbb = new Date(b.createdAt || 0).getTime();
+  if (da !== dbb) return dbb - da;
+  const va = versionOf(a.id);
+  const vb = versionOf(b.id);
+  if (va !== vb) return vb - va;
+  return a.id.localeCompare(b.id);
+}
+
+// Fable / Mythos need services/llm/deep.js (thinking blocks, refusal
+// fallback); only DEEP / EXTREME selectors reach the model through it.
+function requiresDeep(id) {
+  return /^claude-(fable|mythos)/.test(String(id || ''));
 }
 
 /**
@@ -161,4 +197,4 @@ function clearCache() {
   cache.clear();
 }
 
-module.exports = { search, probe, listProvider, clearCache, normalize, matches, tokens, PROVIDERS, SEARCHABLE_CAPS, LIST_TTL_MS };
+module.exports = { search, probe, listProvider, clearCache, normalize, matches, tokens, requiresDeep, PROVIDERS, SEARCHABLE_CAPS, LIST_TTL_MS };

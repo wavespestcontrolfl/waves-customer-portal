@@ -97,4 +97,20 @@ describe('model-switchboard', () => {
     // Muse has no adapter: present in the catalog only as an unavailable option.
     expect(sb.MODEL_CATALOG['muse-spark-1.3'].status).toBe('unavailable');
   });
+
+  it('only DEEP-path selectors may take Fable, and inbound-content lanes are flagged', () => {
+    const { selectors, lanes } = sb.getSwitchboard();
+    const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
+    expect(deepSafe).toEqual(['DEEP', 'EXTREME']);
+    for (const id of Object.keys(sb.MODEL_CATALOG).filter((k) => /fable|mythos/.test(k))) {
+      expect(sb.MODEL_CATALOG[id].requires).toBe('deep');
+    }
+    // A pin on a DEEP lane inherits the deep-safe accepts; a FLAGSHIP pin does not.
+    expect(lanes.find((l) => l.id === 'fact_check_gate').primary.accepts.deep).toBe(true);
+    expect(lanes.find((l) => l.id === 'ib_admin').primary.accepts.deep).toBeUndefined();
+    for (const id of ['sms_draft', 'call_extraction', 'pest_id', 'ask_waves']) {
+      expect(lanes.find((l) => l.id === id).inbound).toBe(true);
+    }
+    expect(lanes.find((l) => l.id === 'tax_advisor').inbound).toBe(false);
+  });
 });

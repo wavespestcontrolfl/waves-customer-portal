@@ -49,6 +49,8 @@ const OPENAI = jsonResponse(200, {
     { id: 'gpt-5.7-astra', created: 1788480000 },
     { id: 'ft:gpt-5-mini:waves:abc', created: 1780000000 },
     { id: 'whisper-1', created: 1700000000 },
+    { id: 'gpt-live-transcribe', created: 1790000000 },
+    { id: 'gpt-realtime-2.1', created: 1789000000 },
     { id: 'gpt-5.6-sol', created: 1770000000 },
   ],
 });
@@ -56,6 +58,8 @@ const GEMINI = jsonResponse(200, {
   models: [
     { name: 'models/gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', supportedGenerationMethods: ['generateContent'] },
     { name: 'models/embedding-001', displayName: 'Embedding 001', supportedGenerationMethods: ['embedContent'] },
+    { name: 'models/deep-research-pro-preview-12-2025', displayName: 'Deep Research', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemma-4-31b-it', displayName: 'Gemma 4', supportedGenerationMethods: ['generateContent'] },
   ],
 });
 
@@ -81,10 +85,10 @@ describe('search', () => {
     expect(astra.results.map((r) => r.id)).toEqual(['gpt-5.7-astra']);
 
     const gpt = await discovery.search('gpt', { fetchImpl });
-    expect(gpt.results.map((r) => r.id)).toEqual(['gpt-5.7-astra', 'gpt-5.6-sol']); // ft:* and whisper filtered
+    expect(gpt.results.map((r) => r.id)).toEqual(['gpt-5.7-astra', 'gpt-5.6-sol']); // ft:*, whisper, transcribe, realtime filtered
 
     const gem = await discovery.search('flash', { providers: ['gemini'], fetchImpl });
-    expect(gem.results.map((r) => r.id)).toEqual(['gemini-3.8-flash']); // embedding-only model excluded
+    expect(gem.results.map((r) => r.id)).toEqual(['gemini-3.8-flash']); // embedding-only, gemma, deep-research excluded
   });
 
   it('caches each provider list and reports providers without a key or with a failing call', async () => {
@@ -127,11 +131,25 @@ describe('search', () => {
     expect(embed.unavailable).toEqual([{ provider: 'all', reason: 'cap_not_searchable' }]);
   });
 
-  it('returns no results for an empty query but still reports availability', async () => {
+  it('empty query lists the newest ids per provider (dates first, version numbers where undated)', async () => {
     const fetchImpl = fakeFetch([['api.anthropic.com', ANTHROPIC], ['api.openai.com', OPENAI], ['generativelanguage', GEMINI]]);
     const out = await discovery.search('', { fetchImpl });
     expect(out.results).toEqual([]);
     expect(out.unavailable).toEqual([]);
+    const byProvider = Object.fromEntries(out.newest.map((n) => [n.provider, n.items.map((i) => i.id)]));
+    expect(byProvider.anthropic).toEqual(['claude-fable-5-1', 'claude-opus-5', 'claude-fable-5']);
+    expect(byProvider.openai).toEqual(['gpt-5.7-astra', 'gpt-5.6-sol']); // the release shows by recency even without a name match
+    expect(byProvider.gemini).toEqual(['gemini-3.8-flash']);
+    const anthropic = out.newest.find((n) => n.provider === 'anthropic').items;
+    expect(anthropic[0].requiresDeep).toBe(true);
+    expect(anthropic[1].requiresDeep).toBe(false);
+  });
+
+  it('flags Fable / Mythos ids as requiring the DEEP path', () => {
+    expect(discovery.requiresDeep('claude-fable-5-1')).toBe(true);
+    expect(discovery.requiresDeep('claude-mythos-5-1')).toBe(true);
+    expect(discovery.requiresDeep('claude-opus-5')).toBe(false);
+    expect(discovery.requiresDeep('gpt-5.7-astra')).toBe(false);
   });
 });
 

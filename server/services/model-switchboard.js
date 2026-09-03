@@ -40,12 +40,15 @@ function catalogEntry(id) {
 // ── Registry selectors ────────────────────────────────────────────────
 // The env-overridable consts in config/models.js. `env` is the var the
 // composer writes (first of the aliases the registry reads). `accepts`
-// is what the picker may offer: the provider the call sites' SDK speaks and
-// the modality the lanes need. `lock` removes the picker entirely.
+// is what the picker may offer: the provider the call sites' SDK speaks, the
+// modality the lanes need, and `deep: true` where every call site reaches the
+// model through services/llm/deep.js (the only path that handles Fable's
+// thinking blocks + refusals — catalog entries with requires:'deep'). `lock`
+// removes the picker entirely.
 const SELECTORS = [
   { key: 'FLAGSHIP', env: 'MODEL_FLAGSHIP', description: 'Best general reasoning', accepts: { providers: ['anthropic'], cap: 'text' } },
-  { key: 'DEEP', env: 'MODEL_DEEP', description: 'Verifiers, judges, gates (via llm/deep.js)', accepts: { providers: ['anthropic'], cap: 'text' } },
-  { key: 'EXTREME', env: 'MODEL_EXTREME', description: 'Explicit deep-audit opt-in; never automatic', accepts: { providers: ['anthropic'], cap: 'text' } },
+  { key: 'DEEP', env: 'MODEL_DEEP', description: 'Verifiers, judges, gates (via llm/deep.js)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
+  { key: 'EXTREME', env: 'MODEL_EXTREME', description: 'Explicit deep-audit opt-in; never automatic', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'WORKHORSE', env: 'MODEL_WORKHORSE', description: 'Drafting and content', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'FAST', env: 'MODEL_FAST', description: 'Claude leg of the fast lanes', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VOICE', env: 'MODEL_VOICE', description: 'Spoken voice relay + Ask Waves fallback', accepts: { providers: ['anthropic'], cap: 'text' } },
@@ -133,6 +136,11 @@ const LOCK = {
 };
 
 const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by six photo lanes';
+// `inbound: true` = the lane's prompt carries customer or third-party content
+// (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
+// adapter (llm/call.js) folds the system prompt into the user turn, so moving
+// an inbound lane onto Gemini widens the prompt-injection surface — the tab
+// warns on that specific move.
 const L = (id, name, file, policy, primary, fallback = null, extra = {}) => ({ id, name, file, policy, primary, fallback, ...extra });
 
 // The audited call-site map (server/, 2026-09-02). Grouped by the kind of
@@ -140,19 +148,19 @@ const L = (id, name, file, policy, primary, fallback = null, extra = {}) => ({ i
 // riding a heavier model than its job needs is visible at a glance.
 const LANES = [
   // ── Fast text ──
-  L('lead_triage', 'Lead triage classification', 'lead-triage.js', 'fastText', R('leadClassify'), T('FAST')),
-  L('churn_classify', 'Churn-reason classification', 'churn-classifier.js', 'fastText', R('churnClassify'), T('FAST')),
-  L('email_classify', 'Inbound email classification', 'email/email-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
-  L('sms_intent', 'SMS service-intent classification', 'sms-service-intent.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
-  L('call_sentiment', 'Call sentiment', 'call-sentiment.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
-  L('parse_when', 'Scheduling "when" parse', 'scheduling/parse-when.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
+  L('lead_triage', 'Lead triage classification', 'lead-triage.js', 'fastText', R('leadClassify'), T('FAST'), { inbound: true }),
+  L('churn_classify', 'Churn-reason classification', 'churn-classifier.js', 'fastText', R('churnClassify'), T('FAST'), { inbound: true }),
+  L('email_classify', 'Inbound email classification', 'email/email-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('sms_intent', 'SMS service-intent classification', 'sms-service-intent.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('call_sentiment', 'Call sentiment', 'call-sentiment.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('parse_when', 'Scheduling "when" parse', 'scheduling/parse-when.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('social_judge', 'Social compliance judge', 'social-compliance-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
-  L('job_screen', 'Job application screening', 'job-application-screen.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
+  L('job_screen', 'Job application screening', 'job-application-screen.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('footprint_claim', 'Service-footprint claim classifier', 'content/footprint-claim-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
-  L('estimator_sms_signal', 'Estimator SMS thread quote signal', 'estimator-engine/sms-thread.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
-  L('sms_pathology', 'SMS pathology clustering', 'sms-pathology-ledger.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { note: 'summary pass rides DEEP' }),
-  L('contact_correction', 'SMS contact-correction extraction', 'contact-correction.js', 'fastText', T('FAST')),
-  L('bounce_rescue', 'Email bounce address decode', 'email-bounce-rescue.js', 'fastText', T('FAST')),
+  L('estimator_sms_signal', 'Estimator SMS thread quote signal', 'estimator-engine/sms-thread.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('sms_pathology', 'SMS pathology clustering', 'sms-pathology-ledger.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'summary pass rides DEEP' }),
+  L('contact_correction', 'SMS contact-correction extraction', 'contact-correction.js', 'fastText', T('FAST'), null, { inbound: true }),
+  L('bounce_rescue', 'Email bounce address decode', 'email-bounce-rescue.js', 'fastText', T('FAST'), null, { inbound: true }),
   L('seo_intent', 'SEO query-intent classification', 'seo/seo-diagnosis-tools.js', 'fastText', T('FAST')),
   L('prospect_score', 'Backlink prospect scoring', 'seo/prospect-scorer.js', 'fastText', T('FAST')),
   L('signup_classifier', 'Backlink signup classifier', 'seo/signup-classifier.js', 'fastText', E('MODEL_SIGNUP_CLASSIFIER', T('FAST'))),
@@ -161,10 +169,10 @@ const LANES = [
   L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', T('FLAGSHIP'), null, { note: 'routine categories on the flagship tier' }),
 
   // ── Multimodal ──
-  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, note: `Claude + Gemini in parallel, Gemini retries on GEMINI_VISION_FALLBACK · ${SHARED_GEMINI_PIN}` }),
-  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, note: `Claude + Gemini in parallel, Gemini retries on GEMINI_VISION_FALLBACK · ${SHARED_GEMINI_PIN}` }),
+  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
   L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, note: SHARED_GEMINI_PIN }),
   L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, note: 'three legs today: Claude + OPENAI_VISION_MODEL (gpt-5-mini) + Gemini · owner ruling 2026-09-02: one Gemini model — not yet coded' }),
   L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), D('GEMINI_PROPERTY_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, note: 'consensus of Claude + OPENAI_PROPERTY_MODEL (gpt-5-mini) + Gemini' }),
@@ -177,25 +185,25 @@ const LANES = [
   L('lawn_challenge', 'Lawn diagnostic · adversarial challenge', 'lawn-diagnostic-prompt.js', 'multimodal', T('LAWN_CHALLENGE')),
   L('hero_alt', 'Hero image alt-text', 'content/hero-alt-vision.js', 'multimodal', T('VISION')),
   L('wdo_project_brief', 'WDO project brief (photo + text)', 'routes/admin-projects.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'text-only briefs ride contentDraft' }),
-  L('invoice_pdf', 'Vendor invoice PDF processing', 'email/invoice-processor.js', 'multimodal', T('FLAGSHIP')),
-  L('contact_dictation', 'Contact dictation decoder', 'contact-dictation.js', 'multimodal', D('GEMINI_CONTACT_DECODER_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } })),
-  L('address_recovery', 'Address street recovery', 'address-validation/recovery.js', 'multimodal', D('GEMINI_RECOVERY_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } })),
+  L('invoice_pdf', 'Vendor invoice PDF processing', 'email/invoice-processor.js', 'multimodal', T('FLAGSHIP'), null, { inbound: true }),
+  L('contact_dictation', 'Contact dictation decoder', 'contact-dictation.js', 'multimodal', D('GEMINI_CONTACT_DECODER_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true }),
+  L('address_recovery', 'Address street recovery', 'address-validation/recovery.js', 'multimodal', D('GEMINI_RECOVERY_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true }),
 
   // ── Customer voice ──
-  L('sms_draft', 'SMS auto-reply draft (routine)', 'sms-shadow-drafter.js', 'voice', R('smsDraftDefault'), P('highStakes', 'fallback')),
-  L('sms_save_sale', 'SMS draft · save-the-sale', 'sms-shadow-drafter.js', 'voice', R('smsDraftSaveSale'), P('highStakes', 'fallback')),
-  L('sms_tone', 'SMS tone rewrite', 'routes/admin-communications.js', 'voice', R('smsToneRewrite'), P('customerCopy', 'fallback')),
-  L('sms_suggest', 'SMS draft suggestion (comms panel)', 'routes/admin-communications.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
-  L('response_drafter', 'SMS reply drafter (auto / high-stakes split)', 'response-drafter.js', 'voice', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'routine intents ride customerCopy' }),
-  L('estimate_followup', 'Estimate-conversion follow-up SMS', 'estimate-conversion-agent.js, sms-shadow-drafter.js', 'voice', R('smsDraftDefault'), P('highStakes', 'fallback'), { note: 'delegates to the SMS drafter' }),
+  L('sms_draft', 'SMS auto-reply draft (routine)', 'sms-shadow-drafter.js', 'voice', R('smsDraftDefault'), P('highStakes', 'fallback'), { inbound: true }),
+  L('sms_save_sale', 'SMS draft · save-the-sale', 'sms-shadow-drafter.js', 'voice', R('smsDraftSaveSale'), P('highStakes', 'fallback'), { inbound: true }),
+  L('sms_tone', 'SMS tone rewrite', 'routes/admin-communications.js', 'voice', R('smsToneRewrite'), P('customerCopy', 'fallback'), { inbound: true }),
+  L('sms_suggest', 'SMS draft suggestion (comms panel)', 'routes/admin-communications.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
+  L('response_drafter', 'SMS reply drafter (auto / high-stakes split)', 'response-drafter.js', 'voice', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true, note: 'routine intents ride customerCopy' }),
+  L('estimate_followup', 'Estimate-conversion follow-up SMS', 'estimate-conversion-agent.js, sms-shadow-drafter.js', 'voice', R('smsDraftDefault'), P('highStakes', 'fallback'), { inbound: true, note: 'delegates to the SMS drafter' }),
   L('completion_recap', 'Completion recap (customer-facing)', 'completion-recap.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('lawn_visit_narratives', 'Lawn + visit-summary narratives', 'service-report/lawn-report-narrative.js, service-report/visit-summary-narrative.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('social_copy', 'Social post copy', 'social-media.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('tech_caption_copy', 'Tech social caption · copy', 'tech-social-caption.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('review_ask', 'Review-ask drafting', 'review-ask-drafter.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
-  L('review_reply', 'GBP review replies', 'review-reply/drafter.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
+  L('review_reply', 'GBP review replies', 'review-reply/drafter.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
   L('review_gate_text', 'Review gate · customer review text', 'routes/review-gate.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
-  L('email_reply', 'Email reply drafting', 'email/email-actions.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
+  L('email_reply', 'Email reply drafting', 'email/email-actions.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
   L('invoice_summary', 'Invoice AI summary', 'invoice-ai-summary.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('blog_draft', 'Blog post drafts', 'content/blog-writer.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
@@ -212,11 +220,11 @@ const LANES = [
   L('lawn_diag_writer', 'Lawn diagnostic · customer narrative', 'lawn-diagnostic-prompt.js', 'report', D('LAWN_WRITER_MODEL', 'gpt-5.5', { accepts: { providers: ['openai'], cap: 'text' } }), T('FLAGSHIP')),
 
   // ── Balanced Q&A ──
-  L('estimate_assistant', 'Estimate assistant Q&A', 'estimate-assistant.js', 'qa', R('estimateAssistant'), E('ESTIMATE_ASSISTANT_MODEL', T('WORKHORSE'), { live: true })),
+  L('estimate_assistant', 'Estimate assistant Q&A', 'estimate-assistant.js', 'qa', R('estimateAssistant'), E('ESTIMATE_ASSISTANT_MODEL', T('WORKHORSE'), { live: true }), { inbound: true }),
   L('knowledge_qa', 'Knowledge-base Q&A', 'knowledge-bridge.js', 'qa', R('knowledgeAnswer'), T('FLAGSHIP')),
-  L('ask_waves', 'Ask Waves (public chat)', 'ask-waves-intake.js', 'qa', R('askWaves'), E('ASK_WAVES_MODEL', T('VOICE'), { live: true })),
+  L('ask_waves', 'Ask Waves (public chat)', 'ask-waves-intake.js', 'qa', R('askWaves'), E('ASK_WAVES_MODEL', T('VOICE'), { live: true }), { inbound: true }),
   L('wiki_qa', 'Wiki Q&A', 'knowledge/wiki-qa.js', 'qa', T('FLAGSHIP')),
-  L('wdo_history', 'WDO history lookup', 'property-lookup/wdo-history-lookup.js', 'qa', T('WORKHORSE')),
+  L('wdo_history', 'WDO history lookup', 'property-lookup/wdo-history-lookup.js', 'qa', T('WORKHORSE'), null, { inbound: true }),
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
   L('seo_advisor', 'SEO weekly advisor + action drafts', 'seo/seo-advisor.js, seo/seo-action-generator.js', 'qa', T('FLAGSHIP')),
   L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', T('FLAGSHIP')),
@@ -227,28 +235,28 @@ const LANES = [
   L('ib_tech', 'Intelligence Bar · tech context', 'routes/admin-intelligence-bar.js', 'reason', E('INTELLIGENCE_BAR_TECH_MODEL', T('FLAGSHIP'), { live: true }), null, { note: 'read-only tools, low max_tokens' }),
   L('ib_tools', 'IB email / SMS / procurement tools', 'intelligence-bar/email-tools.js, intelligence-bar/comms-tools.js, intelligence-bar/procurement-tools.js', 'reason', T('FLAGSHIP')),
   L('commercial_proposal', 'Commercial proposal brief', 'estimator-engine/commercial-proposal.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback')),
-  L('signal_detector', 'Customer signal detector', 'customer-intelligence/signal-detector.js', 'reason', T('FLAGSHIP')),
+  L('signal_detector', 'Customer signal detector', 'customer-intelligence/signal-detector.js', 'reason', T('FLAGSHIP'), null, { inbound: true }),
   L('retention_drafts', 'Retention drafts (owner-approved)', 'customer-intelligence/retention-engine.js', 'reason', T('FLAGSHIP')),
   L('tax_advisor', 'Tax advisor weekly report', 'tax-advisor.js', 'reason', T('FLAGSHIP')),
   L('csr_coach', 'CSR call coaching', 'csr/csr-coach.js', 'reason', T('FLAGSHIP')),
   L('inventory_research', 'Inventory vendor mapping + price research', 'routes/admin-inventory.js', 'reason', T('FLAGSHIP'), null, { note: 'Anthropic web_search tool' }),
-  L('lead_synopsis', 'Lead synopsis from call', 'call-recording-processor.js', 'reason', T('FLAGSHIP')),
+  L('lead_synopsis', 'Lead synopsis from call', 'call-recording-processor.js', 'reason', T('FLAGSHIP'), null, { inbound: true }),
   L('codex_remediation', 'Content finding auto-fix', 'content/codex-remediation.js', 'reason', T('FLAGSHIP')),
   L('portal_assistant', 'Customer portal assistant', 'ai-assistant/assistant.js', 'reason', T('FLAGSHIP')),
   L('signup_worker', 'Backlink signup worker', 'backlink-agent/signup-worker.js', 'reason', T('FLAGSHIP')),
   L('form_filler', 'Backlink browser form filler (vision)', 'seo/browser-form-filler.js', 'reason', E('MODEL_SIGNUP_FILLER', T('FLAGSHIP'))),
 
   // ── Deep audit ──
-  L('sms_verifier', 'SMS draft fact-check verifier', 'sms-draft-verifier.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),
-  L('shadow_judge', 'SMS shadow judge', 'sms-shadow-judge.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),
+  L('sms_verifier', 'SMS draft fact-check verifier', 'sms-draft-verifier.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
+  L('shadow_judge', 'SMS shadow judge', 'sms-shadow-judge.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('intent_composer', 'Estimator intent composer', 'estimator-engine/intent-composer.js', 'deep', E('ESTIMATOR_ENGINE_MODEL', T('DEEP'), { live: true }), P('deepAnalysis', 'fallback')),
   L('fact_check_gate', 'Blog fact-check gate', 'content/fact-check-gate.js', 'deep', E('MODEL_FACTCHECK', P('deepAnalysis', 'primary')), P('deepAnalysis', 'fallback')),
   L('compliance_gate', 'Content compliance gate', 'content/compliance-gate.js', 'deep', E('MODEL_COMPLIANCE', P('deepAnalysis', 'primary')), P('deepAnalysis', 'fallback'), { note: 'GATE_COMPLIANCE ships dark' }),
   L('blog_optimize', 'Blog optimization pass', 'content/blog-writer.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
   L('kb_audit', 'Knowledge-base nightly audit', 'knowledge-base.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),
   L('wiki_compiler', 'Wiki compiler + agronomic wiki', 'knowledge/wiki-compiler.js, agronomic-wiki.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),
-  L('quarantine_arbiter', 'Contact quarantine arbiter', 'contact-quarantine-arbiter.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),
-  L('call_self_audit', 'Call self-audit', 'call-self-audit.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),
+  L('quarantine_arbiter', 'Contact quarantine arbiter', 'contact-quarantine-arbiter.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
+  L('call_self_audit', 'Call self-audit', 'call-self-audit.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('wdo_appt_brief', 'WDO appointment brief', 'appointment-tagger.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
   L('voice_profile', 'Voice-profile distiller (weekly)', 'voice-profile-distiller.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),
   L('extreme_tier', 'Explicit deep audit (EXTREME tier)', 'config/models.js', 'deep', T('EXTREME'), null, { note: 'no automatic lane — deliberate opt-in only' }),
@@ -262,11 +270,11 @@ const LANES = [
   L('agent_assistant', 'Customer assistant (managed)', 'ai-assistant/managed-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: LOCK.agents('Anthropic Managed Agents') }),
 
   // ── Specialized / locked ──
-  L('call_extraction', 'Call extraction V2', 'call-recording-processor.js', 'locked', D('CALL_EXTRACTION_MODEL', 'gpt-5.6-sol'), T('CALL_EXTRACTION_ANTHROPIC'), { lock: LOCK.benchmark('25-call bake-off 2026-07-18 · run a new bake-off to move it'), note: 'provider via CALL_EXTRACTION_PROVIDER' }),
-  L('call_research', 'Call-research corpus miner', 'call-research-miner.js', 'locked', D('CALL_RESEARCH_MODEL', 'gpt-5.6-sol'), T('CALL_RESEARCH_ANTHROPIC'), { lock: LOCK.benchmark('7-arm bake-off 2026-07-18') }),
-  L('transcription', 'Call transcription (primary + long-call verifier)', 'call-recording-processor.js', 'locked', D('OPENAI_TRANSCRIPTION_MODEL', 'gpt-4o-transcribe-diarize'), D('GEMINI_TRANSCRIPTION_MODEL', 'gemini-3.5-flash'), { lock: LOCK.provider('audio pipeline with its own validation') }),
+  L('call_extraction', 'Call extraction V2', 'call-recording-processor.js', 'locked', D('CALL_EXTRACTION_MODEL', 'gpt-5.6-sol'), T('CALL_EXTRACTION_ANTHROPIC'), { inbound: true, lock: LOCK.benchmark('25-call bake-off 2026-07-18 · run a new bake-off to move it'), note: 'provider via CALL_EXTRACTION_PROVIDER' }),
+  L('call_research', 'Call-research corpus miner', 'call-research-miner.js', 'locked', D('CALL_RESEARCH_MODEL', 'gpt-5.6-sol'), T('CALL_RESEARCH_ANTHROPIC'), { inbound: true, lock: LOCK.benchmark('7-arm bake-off 2026-07-18') }),
+  L('transcription', 'Call transcription (primary + long-call verifier)', 'call-recording-processor.js', 'locked', D('OPENAI_TRANSCRIPTION_MODEL', 'gpt-4o-transcribe-diarize'), D('GEMINI_TRANSCRIPTION_MODEL', 'gemini-3.5-flash'), { inbound: true, lock: LOCK.provider('audio pipeline with its own validation') }),
   L('transcript_label', 'Transcript speaker relabeling', 'call-recording-processor.js', 'locked', D('OPENAI_TRANSCRIPT_LABEL_MODEL', 'gpt-5-mini'), null, { lock: LOCK.provider('audio pipeline') }),
-  L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
+  L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
   L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', T('GEMINI_IMAGE_BEST'), T('GEMINI_IMAGE_STABLE'), { lock: LOCK.provider('gpt-image chain first, then Gemini') }),
@@ -369,6 +377,7 @@ function getSwitchboard() {
       applies: primary.live ? 'live' : 'restart',
       lock: lane.lock || null,
       fanout: !!lane.fanout,
+      inbound: !!lane.inbound,
       note: lane.note || null,
     };
   });
