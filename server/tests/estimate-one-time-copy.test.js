@@ -444,6 +444,26 @@ describe('server-rendered page', () => {
     expect(html).not.toContain('Waves AI sized this cleanout to your infestation');
   });
 
+  test('an engine-backed estimate (no result.oneTime rows) keeps its sold-scope flags on the SSR page', () => {
+    const est = {
+      id: 'estimate-engine-ssr',
+      status: 'sent',
+      customerName: 'Test Customer',
+      address: '1 Main St, Bradenton, FL 34203',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 300,
+      quoteRequired: false,
+    };
+    const html = renderPage('engine-token', est, {
+      engineResult: { lineItems: [
+        { service: 'wasp', name: 'Wasp Nest Treatment', price: 300, pricingBreakdown: { subtotal: 300, removal: 75 } },
+      ] },
+    });
+    expect(html).toContain('Nest treatment and physical removal');
+    expect(html).not.toContain('physical nest removal is available as an add-on');
+  });
+
   test('a regulated WDO surface renders no row copy at all, even for a roach row beside it', () => {
     const est = {
       id: 'estimate-wdo-ssr',

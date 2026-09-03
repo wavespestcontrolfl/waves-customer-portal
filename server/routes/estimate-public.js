@@ -16804,6 +16804,19 @@ function oneTimeItemsForRender(estResult, estData) {
     reason: row.reason || null,
     customQuoteReason: row.customQuoteReason || null,
     ...(row.kind === 'included' ? { serviceSpecificDiscountApplied: true } : {}),
+    // Sold-scope metadata the one-time copy pack reads (codex #3823 pre-push
+    // P1): without it an engine-backed estimate's SSR page under-describes
+    // purchased scope (exterior flea, wasp removal, guarantees).
+    offerKey: row.offerKey || null,
+    visits: row.visits || null,
+    warrantyType: row.warrantyType || null,
+    exteriorStatus: row.exteriorStatus || null,
+    warrantyEligible: row.warrantyEligible === true,
+    nestRemovalSelected: row.nestRemovalSelected === true,
+    chemistryType: row.chemistryType || null,
+    warrantyTier: row.warrantyTier || null,
+    debrisRemovalIncluded: row.debrisRemovalIncluded === true,
+    creditableWithinDays: row.creditableWithinDays || null,
   }));
 }
 

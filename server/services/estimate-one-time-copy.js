@@ -182,7 +182,11 @@ function resolveOneTimeServiceCopy(item = {}) {
   if (key === 'bed_bug' && item.warrantyEligible !== true) {
     assurance = null;
   }
-  if (key === 'wasp' && item.nestRemovalSelected !== true) {
+  // Raw pricer rows carry the removal price under pricingBreakdown/removal;
+  // normalized rows carry the derived flag — accept either.
+  const nestRemovalSelected = item.nestRemovalSelected === true
+    || Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal;
+  if (key === 'wasp' && !nestRemovalSelected) {
     lines = lines.map((line) => (line === entry.removalBullet ? entry.noRemovalBullet : line));
     outcome = entry.outcomeNoRemoval || outcome;
   }
