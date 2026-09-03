@@ -159,14 +159,38 @@ test('legacy rows without a stamped requestId are dated by the request id inside
   expect(mockNotifyAdmin.mock.calls[0]).toBeUndefined();
 });
 
-test('rows already READ are never touched, and another customer\'s rows are out of scope', async () => {
+test('rows already READ are never retired (the note still names them), and another customer\'s rows are out of scope', async () => {
   mockTables.notifications = [
     datedRow('req-0', { }), datedRow('req-x', { customerId: 'c2' }),
   ];
   mockTables.notifications[0].read_at = new Date('2026-01-01');
   await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
+  expect(mockTables.notifications[0].read_at).not.toBeNull();
   expect(mockTables.notifications[1].read_at).toBeNull();
-  expect(mockNotifyAdmin.mock.calls[0][2]).not.toMatch(/supersedes/);
+  expect(mockLog.filter((l) => l === 'update:notifications')).toEqual([]);
+  expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/supersedes an earlier station-retrieval task/);
+});
+
+test('the supersession note is stable across a routine retry of the same event — an acted-on task is never reopened by content drift (GH r4 P1)', async () => {
+  mockTables.notifications = [datedRow('req-0')];
+  await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
+  const first = mockNotifyAdmin.mock.calls[0][2];
+  expect(first).toMatch(/supersedes/);
+  // Staff acted on req-1's task; req-0 is history (read). A retry of req-1
+  // renders the identical body: refreshOnDedupe sees no change.
+  mockTables.notifications.push({ ...datedRow('req-1'), read_at: new Date('2026-02-01') });
+  await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
+  expect(mockNotifyAdmin.mock.calls[1][2]).toBe(first);
+  expect(mockTables.notifications[1].read_at).not.toBeNull();
+});
+
+test('a READ task of a NEWER request still makes the older request\'s repair yield (GH r4 P1)', async () => {
+  // Staff scheduled req-b's retrieval (read); req-a's original insert never
+  // landed and its repair fires now — it must not restore the older date.
+  mockTables.notifications = [{ ...datedRow('req-b'), read_at: new Date('2026-02-01') }];
+  const out = await raiseTermiteRetrievalTask('c1', 'req-a', { retrieveAfter: '2027-01-31' });
+  expect(out).toEqual(expect.objectContaining({ supersededByNewer: 'req-b' }));
+  expect(mockNotifyAdmin).not.toHaveBeenCalled();
 });
 
 test('a FAILED retire on a DATED raise throws too', async () => {
