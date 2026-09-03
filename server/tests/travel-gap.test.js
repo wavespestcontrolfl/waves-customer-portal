@@ -144,6 +144,12 @@ describe('travelGapConflicts — route neighbours only', () => {
     // A hold sitting inside the gap is still a conflict on its own.
     const nearHold = { ...hold, id: 'near-hold', startMin: 625, endMin: 670 }; // 5 free min
     expect(travelGapConflicts(candidate, [nearHold]).map((c) => c.stop.id)).toEqual(['near-hold']);
+    // A hold BEHIND a committed neighbour can never become adjacent — it is
+    // not measured even when far away (r4 P2).
+    const farHold = { ...hold, id: 'far-hold', startMin: 540, endMin: 600, ...FAR_SOUTH };
+    expect(travelGapConflicts(candidate, [farHold, adjacent])).toEqual([]);
+    // Without the committed stop in front of it, the same hold is adjacent and measured.
+    expect(travelGapConflicts(candidate, [farHold]).map((c) => c.stop.id)).toEqual(['far-hold']);
     // Explicit flag wins over the column heuristic; a committed row with
     // reservation_expires_at cleared is a plain neighbour.
     expect(travelGapConflicts(candidate, [{ ...hold, hold: false }, farEarlier]).map((c) => c.stop.id)).toEqual([]);

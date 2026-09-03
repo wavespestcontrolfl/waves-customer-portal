@@ -125,8 +125,8 @@ function isHoldStop(stop) {
  * The stops a candidate fails against, in the order given: every overlapping
  * stop (reason 'overlap'), plus — of the non-overlapping stops — ONLY the
  * immediate COMMITTED route neighbours (latest-ending before, earliest-
- * starting after) and every live hold, when they sit closer than the
- * required gap (reason 'travel_gap'). See isHoldStop.
+ * starting after) and any live hold that could become one, when they sit
+ * closer than the required gap (reason 'travel_gap'). See isHoldStop.
  * Gate-agnostic like travelGapViolation; malformed stops are skipped.
  * Returns [{ stop, reason }].
  */
@@ -154,8 +154,15 @@ function travelGapConflicts(candidate, stops) {
       after.push(stop);
     }
   }
+  // A hold counts only where it COULD become the immediate neighbour: on a
+  // side with no committed stop, or sitting between the committed neighbour
+  // and the candidate. A hold behind a committed stop is never adjacent,
+  // expired or graduated (GH codex #3803 r4 P2).
+  const liveNeighbourHolds = holds.filter((hold) => (hold.endMin <= candidate.startMin
+    ? !before.length || hold.endMin > before[0].endMin
+    : !after.length || hold.startMin < after[0].startMin));
   const neighbours = [];
-  for (const stop of [...before, ...after, ...holds]) {
+  for (const stop of [...before, ...after, ...liveNeighbourHolds]) {
     if (travelGapViolation(candidate, stop)) neighbours.push({ stop, reason: 'travel_gap' });
   }
   return overlaps.concat(neighbours);

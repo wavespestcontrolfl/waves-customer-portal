@@ -149,3 +149,14 @@ test('gate on without an estimate: buffer-only pin, still mirrored; a failed ran
   result = await engine.getAvailableSlots('Palmetto', 'est-1');
   expect(startsOf(result)).toContain('09:00');
 });
+
+test('findGaps applies the accept predicate BEFORE its four-slot cap (r4 P2)', () => {
+  // Six one-hour holes on the day (blocks every other hour); rejecting the
+  // first four must still surface the fifth and sixth.
+  const occupied = [9, 11, 13, 15].map((h) => ({ start: h * 60, end: h * 60 + 60 }));
+  const all = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0);
+  expect(all).toHaveLength(4); // capped
+  const rejectEarly = (g) => g.start >= 14 * 60;
+  const late = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, rejectEarly);
+  expect(late.map((g) => g.start / 60)).toEqual([14, 16]);
+});

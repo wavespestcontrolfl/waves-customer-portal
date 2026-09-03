@@ -249,15 +249,15 @@ class AvailabilityEngine {
       // Sort occupied by start time
       occupied.sort((a, b) => a.start - b.start);
 
-      // Find gaps
-      const gaps = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer);
-      // Travel-gap mirror (see above): drop what the commit probe would 409.
-      const slots = travelMirror
-        ? gaps.filter((g) => !violatesTravelGap(
+      // Find gaps. Travel-gap mirror (see above): drop what the commit probe
+      // would 409 — BEFORE findGaps' four-slot cap, so a dense day's later
+      // valid gap is not hidden behind four rejected ones (r4 P2).
+      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, travelMirror
+        ? (g) => !violatesTravelGap(
           { startMin: g.start, endMin: g.end, ...travelMirror.pin },
           travelMirror.byDate.get(dateStr) || [],
-        ))
-        : gaps;
+        )
+        : null);
 
       if (slots.length > 0) {
         days.push({
@@ -280,8 +280,10 @@ class AvailabilityEngine {
     return { zone: zone.zone_name, days };
   }
 
-  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer) {
+  // accept(slot) → false drops a candidate before the four-per-day cap.
+  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null) {
     const slots = [];
+    const offer = (slot) => { if (!accept || accept(slot)) slots.push(slot); };
     let cursor = dayStart;
 
     // Round minutes-since-midnight UP to the next clean hour. Customer-
@@ -296,7 +298,7 @@ class AvailabilityEngine {
       const gapEnd = block.start - buffer;
 
       if (gapEnd - gapStart >= slotDuration) {
-        slots.push({ start: gapStart, end: gapStart + slotDuration });
+        offer({ start: gapStart, end: gapStart + slotDuration });
       }
       cursor = Math.max(cursor, block.end);
     }
@@ -304,7 +306,7 @@ class AvailabilityEngine {
     // Gap after the last occupied block — same clean-hour rule.
     const finalStart = roundUpToHour(cursor + buffer);
     if (dayEnd - finalStart >= slotDuration) {
-      slots.push({ start: finalStart, end: finalStart + slotDuration });
+      offer({ start: finalStart, end: finalStart + slotDuration });
     }
 
     return slots.slice(0, 4); // max 4 slots per day

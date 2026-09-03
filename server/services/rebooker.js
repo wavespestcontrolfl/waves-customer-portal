@@ -1363,8 +1363,12 @@ class SmartRebooker {
           windowEnd: occupancyGateEnd,
           excludeServiceIds: [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))],
           excludeStatuses: ['cancelled', 'completed'],
-          // Travel gap (GATE_SLOT_TRAVEL_GAP): the moving row's own pin.
-          travel: await resolveStopCoords(trx, serviceId),
+          // Travel gap (GATE_SLOT_TRAVEL_GAP): the moving row's own pin —
+          // CUSTOMER-FACING movers only (options.travelGap: public reschedule
+          // page, SMS reply). Auto-dispatch generates its candidates under
+          // its own route policy; admin and tech (rain-out) moves are
+          // advisory; all stay overlap-only (GH codex #3803 r4 P1).
+          ...(options.travelGap === true ? { travel: await resolveStopCoords(trx, serviceId) } : {}),
         });
         if (occupancyClash.length) {
           if (!overlapAdvisory) {
@@ -1886,7 +1890,9 @@ class SmartRebooker {
         .map((s) => s.id);
       // Travel gap (GATE_SLOT_TRAVEL_GAP): one pin for the whole sweep —
       // siblings of a series share the anchor's property.
-      const seriesTravel = await resolveStopCoords(trx, serviceId);
+      // Customer-facing series moves only (see reschedule()); undefined →
+      // the legacy overlap probe, no coordinate read.
+      const seriesTravel = options.travelGap === true ? await resolveStopCoords(trx, serviceId) : undefined;
 
       // Same-series same-DATE collisions are hard-blocked regardless of
       // tech/time (auto-dispatch candidate-slots does the same): a plan must
@@ -2819,7 +2825,6 @@ class SmartRebooker {
     const movable = swept.filter((row, idx) => RESCHEDULABLE_STATUSES.has(row.status)
       || (idx === 0 && LIVE_OVERRIDE_STATUSES.has(row.status)));
     const sweptIds = movable.map((row) => String(row.id));
-    const seriesTravel = await resolveStopCoords(db, serviceId);
     const dates = [];
     let conflictCount = 0;
     for (let i = 0; i < swept.length; i++) {
@@ -2840,7 +2845,6 @@ class SmartRebooker {
         windowEnd: occupancyProbeEnd(row.window_start, row.window_end, row.estimated_duration_minutes),
         excludeServiceIds: sweptIds,
         excludeStatuses: TERMINAL,
-        travel: seriesTravel,
       });
       if (clash.length) conflictCount += 1;
     }
