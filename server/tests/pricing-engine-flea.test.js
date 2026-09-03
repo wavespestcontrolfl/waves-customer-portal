@@ -55,11 +55,20 @@ describe('flea treatment pricing', () => {
   test('an admin edit of the surviving offer can move prices but never the package contract', () => {
     const constants = require('../services/pricing-engine/constants');
     const saved = constants.SPECIALTY.flea.offers;
-    constants.SPECIALTY.flea.offers = [{ offerKey: 'flea_elimination_two_visit', visitCount: 1, warrantyType: 'none', baseInitial: 240, baseFollowUp: 130 }];
+    constants.SPECIALTY.flea.offers = [{
+      offerKey: 'flea_elimination_two_visit', visitCount: 1, warrantyType: 'none', guaranteeWindowDaysAfterFollowUp: 0,
+      maxIncludedRetreats: 0, exteriorAddOnMode: 'initial_only', baseInitial: 240, baseFollowUp: 130,
+    }];
     try {
       const result = priceFlea({ services: { flea: true }, footprintSqFt: 2000, lotSqFt: 7500 });
-      expect(result).toMatchObject({ visits: 2, warrantyType: 'conditional_retreat', initial: 240, followUp: 130, total: 370 });
+      expect(result).toMatchObject({
+        visits: 2, warrantyType: 'conditional_retreat', guaranteeWindowDaysAfterFollowUp: 30, maxIncludedRetreats: 1,
+        initial: 240, followUp: 130, total: 370,
+      });
       expect(result.display.name).toBe('Flea Elimination Package — 2 visits');
+      // Exterior add-on mode is part of the contract too: priced on BOTH visits.
+      const exterior = priceFlea({ services: { flea: { fleaExterior: true } }, footprintSqFt: 2000, lotSqFt: 7500, fleaExteriorAreaSqFt: 4000, fleaExteriorAreaSource: 'CONFIRMED_SQ_FT' });
+      expect(exterior.adjustments.exteriorArea.followUp).toBeGreaterThan(0);
     } finally {
       constants.SPECIALTY.flea.offers = saved;
     }

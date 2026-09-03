@@ -7500,12 +7500,14 @@ function fleaOfferConfig(cfg) {
     // back into a one-visit sale (GH codex #3845 r1 P1).
     visitCount: defaults.visitCount,
     warrantyType: defaults.warrantyType,
+    guaranteeWindowDaysAfterFollowUp: defaults.guaranteeWindowDaysAfterFollowUp,
+    maxIncludedRetreats: defaults.maxIncludedRetreats,
+    exteriorAddOnMode: defaults.exteriorAddOnMode,
     baseInitial: configured.baseInitial ?? configured.base_initial ?? defaults.baseInitial,
     floorInitial: configured.floorInitial ?? configured.floor_initial ?? defaults.floorInitial,
     baseFollowUp: configured.baseFollowUp ?? configured.base_follow_up ?? defaults.baseFollowUp,
     floorFollowUp: configured.floorFollowUp ?? configured.floor_follow_up ?? defaults.floorFollowUp,
     packageFloor: configured.packageFloor ?? configured.package_floor ?? defaults.packageFloor,
-    exteriorAddOnMode: configured.exteriorAddOnMode || configured.exterior_add_on_mode || defaults.exteriorAddOnMode,
   };
 }
 
