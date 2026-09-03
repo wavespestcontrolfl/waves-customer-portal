@@ -253,7 +253,9 @@ function decisionInputs(dimension, ctx = {}) {
   if (!fields) throw new Error(`unknown authority dimension '${dimension}'`);
   // ctx.attestation = the immutable seo_link_currency_attestations row backing path.currency_attestation_id (null until it exists)
   const path = { ...(ctx.path || {}), currency_attestation_hash: ctx.attestation && ctx.attestation.hash ? ctx.attestation.hash : null };
-  return { dimension, ...Object.fromEntries(fields.map((f) => [f, path[f] === undefined ? null : path[f]])), floors: floorInputs(ctx) };
+  // ctx.instanceKey = the §3.3b action instance (`${kind}:${generation}`) the hash binds to — every generation gets its own
+  // snapshot (§3.6b), so a generation-2 approval can never be mistaken for generation 1's
+  return { dimension, instance_key: ctx.instanceKey || null, ...Object.fromEntries(fields.map((f) => [f, path[f] === undefined ? null : path[f]])), floors: floorInputs(ctx) };
 }
 const decisionInputsHash = (dimension, ctx) => sha256(decisionInputs(dimension, ctx));
 

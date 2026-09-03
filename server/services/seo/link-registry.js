@@ -98,7 +98,7 @@ const LEVEL_SEVERITY = Object.freeze([
 const INSTANCE_KINDS = Object.freeze(['-', 'terms', 'followup']);
 const RENEWAL_KIND_RE = /^[0-9]{4}(-[0-9]{2})?$/;
 const SATISFIED_REASONS = Object.freeze(['sent', 'placed', 'charged', 'manual_charged', 'no_payment_required', 'human_step_done', 'group_purchase']);
-const END_OUTCOMES = Object.freeze(['failed', 'skipped', 'not_sent', 'voided', 'superseded', 'terms_changed', 'lost', 'human_step_done', 'path_failed_after_charge', 'path_failed_after_free']);
+const END_OUTCOMES = Object.freeze(['failed', 'skipped', 'not_sent', 'voided', 'superseded', 'terms_changed', 'lost', 'human_step_done', 'path_failed_after_charge', 'path_failed_after_free', 'free_checkout_failed', 'captcha']);
 // §3.6b approvals
 const APPROVAL_DECISIONS = Object.freeze(['approved', 'rejected', 'watch']);
 const APPROVAL_ACTIONS = Object.freeze(['acquire', 'accept_terms', 'purchase', 'renewal', 'outreach_send', 'outreach_followup']);
