@@ -21,27 +21,64 @@ vi.mock("./AgentShadowDraftsPage", () => ({
 vi.mock("./DataHygienePage", () => ({
   default: () => <div>Hygiene workspace</div>,
 }));
+vi.mock("./AgentModelsTab", () => ({
+  default: () => <div>Models workspace</div>,
+}));
 vi.mock("../../lib/adminUsage", () => ({
   trackAdminPageView: vi.fn(),
 }));
+vi.mock("../../utils/admin-fetch", () => ({ adminFetch: vi.fn() }));
 
 import AgentsHubPage from "./AgentsHubPage";
 import { trackAdminPageView } from "../../lib/adminUsage";
+import { adminFetch } from "../../utils/admin-fetch";
+import { useLocation } from "react-router-dom";
+
+const HUB = { features: { queue: false }, areas: [{ key: "sms", label: "SMS & messaging" }, { key: "calls", label: "Calls" }] };
 
 afterEach(cleanup);
 beforeEach(() => {
   trackAdminPageView.mockClear();
+  adminFetch.mockReset();
+  adminFetch.mockImplementation(async (path) => {
+    if (path === "/admin/agents/control/hub") return HUB;
+    throw new Error(`unexpected fetch ${path}`);
+  });
 });
+
+function LocationSpy() {
+  return <output data-testid="search">{useLocation().search}</output>;
+}
 
 function renderHub(entry = "/admin/agents") {
   render(
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
-        <Route path="/admin/agents" element={<AgentsHubPage />} />
+        <Route path="/admin/agents" element={<><AgentsHubPage /><LocationSpy /></>} />
       </Routes>
     </MemoryRouter>,
   );
 }
+
+describe("AgentsHubPage area strip", () => {
+  it("shows the product-area strip on the Models tab only and writes ?area= without touching ?tab=", async () => {
+    renderHub("/admin/agents?tab=models");
+    expect(screen.getByText("Models workspace")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "SMS & messaging" }));
+    expect(screen.getByTestId("search")).toHaveTextContent("?tab=models&area=sms");
+    fireEvent.click(screen.getByRole("button", { name: "All areas" }));
+    expect(screen.getByTestId("search")).toHaveTextContent("?tab=models");
+    // The beacon reports the tab alone, never the area (the lib dedupes re-asserts).
+    expect(trackAdminPageView).toHaveBeenCalledWith(expect.objectContaining({ search: "?tab=models" }));
+    expect(trackAdminPageView).not.toHaveBeenCalledWith(expect.objectContaining({ search: expect.stringContaining("area") }));
+  });
+
+  it("keeps the strip off the Overview and labels the activity tab Runs", async () => {
+    renderHub("/admin/agents?tab=overview");
+    expect(await screen.findByRole("button", { name: "Runs" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "SMS & messaging" })).toBeNull();
+  });
+});
 
 describe("AgentsHubPage usage reporting", () => {
   it("reports the rendered fallback for an invalid ?tab=, never the raw value", () => {

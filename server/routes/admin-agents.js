@@ -1037,15 +1037,22 @@ router.post('/models/probe', async (req, res, next) => {
 });
 
 // ── Ops queue (GATE_ADMIN_OPS_QUEUE) — read-only, admin-only (router-level
-// requireAdmin). Availability is a separate probe so the hub can decide
-// whether to render the tab without paying for the full read.
+// requireAdmin).
 function opsQueueGateOn() {
   const { gateEnvValue } = require('../config/feature-gates');
   return gateEnvValue('GATE_ADMIN_OPS_QUEUE') === true;
 }
 
-router.get('/queue/availability', (_req, res) => {
-  res.json({ available: opsQueueGateOn() });
+// Hub probe: one read that tells the Agents hub which gated surfaces exist
+// (so a dark gate renders nothing new) and the product areas its area strip
+// filters by. Feature flags land as their server layers ship — ledger, runs,
+// cost and verification are the agent-control phases; queue is the existing
+// ops-queue gate. Cheap by design: no ledger read, no DB.
+router.get('/control/hub', (_req, res) => {
+  res.json({
+    features: { queue: opsQueueGateOn(), ledger: false, runs: false, cost: false, verification: false },
+    areas: modelSwitchboard.AREAS,
+  });
 });
 
 router.get('/queue', async (_req, res, next) => {
