@@ -1,0 +1,128 @@
+// @vitest-environment jsdom
+import "fake-indexeddb/auto";
+import { IDBFactory } from "fake-indexeddb";
+import { beforeEach, describe, expect, it } from "vitest";
+
+import {
+  deleteCompletionResumeBody,
+  PRUNE_GRACE_MS,
+  getCompletionResumeBody,
+  pruneCompletionResumeBodies,
+  putCompletionResumeBody,
+} from "./completion-resume-store";
+import {
+  clearCompletionResumeOwed,
+  completionResumeOwed,
+  persistCompletionResumeOwed,
+  restoreCompletionResumeBody,
+} from "../pages/admin/SchedulePage.jsx";
+
+// A committed completion body the way handleSubmit builds it: the original
+// idempotency key, station capturedAt stamps, and base64 photos — the parts
+// a rebuilt body cannot reproduce and the server's resume hash binds.
+const photo = (n) => ({
+  data: `data:image/jpeg;base64,${"A".repeat(2000)}${n}`,
+  name: `service-photo-${n}.jpg`,
+  photoType: "after",
+  sortOrder: n,
+  capturedAt: "2026-09-03T02:00:00.000Z",
+});
+const committedBody = () => ({
+  idempotencyKey: "complete_svc-1_7c1c0f7e",
+  notes: "Treated exterior perimeter.",
+  stationReferences: [{ id: "st-1", capturedAt: "2026-09-03T02:00:01.000Z" }],
+  completionPhotos: [photo(1), photo(2)],
+});
+
+beforeEach(() => {
+  // Fresh database AND fresh marker per test.
+  globalThis.indexedDB = new IDBFactory();
+  localStorage.clear();
+});
+
+describe("completion resume store (IndexedDB)", () => {
+  it("round-trips a photo-bearing body byte-for-byte", async () => {
+    const body = committedBody();
+    expect(await putCompletionResumeBody("svc-1", body)).toBe(true);
+    const restored = await getCompletionResumeBody("svc-1");
+    expect(restored).toEqual(body);
+    expect(restored.completionPhotos[1].data).toBe(body.completionPhotos[1].data);
+  });
+
+  it("is keyed per service and deletes only its own row", async () => {
+    await putCompletionResumeBody("svc-1", committedBody());
+    await putCompletionResumeBody("svc-2", { ...committedBody(), idempotencyKey: "complete_svc-2_x" });
+    expect(await deleteCompletionResumeBody("svc-1")).toBe(true);
+    expect(await getCompletionResumeBody("svc-1")).toBeNull();
+    expect((await getCompletionResumeBody("svc-2")).idempotencyKey).toBe("complete_svc-2_x");
+  });
+
+  it("resolves null / false instead of throwing when IndexedDB is unavailable", async () => {
+    globalThis.indexedDB = undefined;
+    expect(await putCompletionResumeBody("svc-1", committedBody())).toBe(false);
+    expect(await getCompletionResumeBody("svc-1")).toBeNull();
+    expect(await deleteCompletionResumeBody("svc-1")).toBe(false);
+  });
+
+  it("rejects nothing-bodies without touching storage", async () => {
+    expect(await putCompletionResumeBody("svc-1", null)).toBe(false);
+    expect(await putCompletionResumeBody("", committedBody())).toBe(false);
+    expect(await getCompletionResumeBody("svc-1")).toBeNull();
+  });
+});
+
+describe("persistCompletionResumeOwed / restore / clear (marker + body)", () => {
+  // clear's body delete is fire-and-forget; settle it before asserting.
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it("stores the exact body, then sets the durable marker", async () => {
+    const body = committedBody();
+    const pending = persistCompletionResumeOwed("svc-1", body);
+    // The marker must never be visible ahead of the body it promises: a
+    // reload between the two would land on the mismatch path.
+    expect(completionResumeOwed("svc-1")).toBe(false);
+    await pending;
+    expect(completionResumeOwed("svc-1")).toBe(true);
+    expect(await restoreCompletionResumeBody("svc-1")).toEqual(body);
+  });
+
+  it("still sets the marker when the body cannot be stored (today's behavior)", async () => {
+    globalThis.indexedDB = undefined;
+    await persistCompletionResumeOwed("svc-1", committedBody());
+    expect(completionResumeOwed("svc-1")).toBe(true);
+    expect(await restoreCompletionResumeBody("svc-1")).toBeNull();
+  });
+
+  it("restores nothing when the marker is absent, even if a body row exists", async () => {
+    await putCompletionResumeBody("svc-1", committedBody());
+    expect(completionResumeOwed("svc-1")).toBe(false);
+    expect(await restoreCompletionResumeBody("svc-1")).toBeNull();
+  });
+
+  it("prune deletes aged bodies whose marker is gone and keeps owed ones", async () => {
+    const past = Date.now() - PRUNE_GRACE_MS - 1000;
+    await putCompletionResumeBody("svc-owed", committedBody(), past);
+    localStorage.setItem("waves_completion_resume_owed_svc-owed", "1");
+    await putCompletionResumeBody("svc-orphan", committedBody(), past);
+    expect(await pruneCompletionResumeBodies(completionResumeOwed)).toBe(1);
+    expect(await getCompletionResumeBody("svc-orphan")).toBeNull();
+    expect(await getCompletionResumeBody("svc-owed")).not.toBeNull();
+    expect(await pruneCompletionResumeBodies(() => false)).toBe(1);
+  });
+
+  it("prune leaves a freshly written body alone — its marker may still be in flight in another tab", async () => {
+    await putCompletionResumeBody("svc-fresh", committedBody());
+    expect(await pruneCompletionResumeBodies(() => false)).toBe(0);
+    expect(await getCompletionResumeBody("svc-fresh")).not.toBeNull();
+    // Past the grace window the same un-owed row is an orphan.
+    expect(await pruneCompletionResumeBodies(() => false, Date.now() + PRUNE_GRACE_MS + 1)).toBe(1);
+  });
+
+  it("clear removes both the marker and the body", async () => {
+    await persistCompletionResumeOwed("svc-1", committedBody());
+    clearCompletionResumeOwed("svc-1");
+    await settle();
+    expect(completionResumeOwed("svc-1")).toBe(false);
+    expect(await getCompletionResumeBody("svc-1")).toBeNull();
+  });
+});
