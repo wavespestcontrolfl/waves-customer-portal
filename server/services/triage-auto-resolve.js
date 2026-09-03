@@ -1435,16 +1435,19 @@ async function loadEvidence(conn, items) {
 async function sweep({ now = new Date() } = {}) {
   const items = await loadCandidateItems(db);
 
-  // Booking provenance (live source-linked rows only — the canonical
-  // lookup's predicates: no cancelled/rescheduled rows, no follow-up
-  // children) feeds the confirmed-unbooked address guard.
+  // Booking provenance (LIVE source-linked rows only — the evidence
+  // loader's positive allowlist, so a skipped / no-show row that once
+  // answered the confirmed ask does not keep reporting the call as booked
+  // and let address_moot close its card with no live appointment behind it
+  // (codex r26 P1); no follow-up children) feeds the confirmed-unbooked
+  // address guard.
   const loadBookedCallIds = async (conn, callIds) => {
     const set = new Set();
     if (!callIds.length) return set;
     const booked = await conn('scheduled_services')
       .whereIn('source_call_log_id', callIds)
       .whereNull('parent_service_id')
-      .whereNotIn('status', ['cancelled', 'rescheduled'])
+      .whereIn('status', [...LIVE_BOOKING_STATUSES])
       .orderBy('id', 'asc')
       .select('source_call_log_id');
     for (const b of booked) set.add(b.source_call_log_id);

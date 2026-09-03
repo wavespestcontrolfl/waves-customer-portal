@@ -2577,6 +2577,25 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
           if (!updated) {
             logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
+            // The customer SAW and accepted THIS delivery's scope: merge the
+            // stamp UNDER the terminal row's sendSnapshot (its bundle is
+            // kept, never status / price lock), exactly as the superseded
+            // anchor path does — the accept witness alone cannot close a
+            // quote_promised card without it (codex r26 P1). Real
+            // deliveries only; fail-soft.
+            if (stampChannels.length && snapshot.sendSnapshot.scope) {
+              try {
+                await db('estimates').where({ id: sibling.id }).update({
+                  estimate_data: db.raw(
+                    "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{sendSnapshot}', COALESCE(estimate_data -> 'sendSnapshot', '{}'::jsonb) || ?::jsonb, true)",
+                    [JSON.stringify({ scope: snapshot.sendSnapshot.scope })],
+                  ),
+                  updated_at: db.fn.now(),
+                });
+              } catch (scopeErr) {
+                logger.warn(`[admin-estimates] sibling ${sibling.id} delivered-scope merge failed (state stands): ${scopeErr.message}`);
+              }
+            }
             // The customer still SAW this sibling's quote — the public flow
             // deliberately exposes and accepts siblings mid-'sending', and
             // acceptance sets price_locked_at which zero-rows the guarded

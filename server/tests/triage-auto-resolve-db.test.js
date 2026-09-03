@@ -294,6 +294,43 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     expect(await statusOf(morningMiss)).toBe('open');
   });
 
+  // address card on a call that CONFIRMED a slot: booked only by a LIVE
+  // source-linked row (codex r26 P1 — a skipped one is not the appointment).
+  async function seedConfirmedAddressCall(sid, { bookingStatus }) {
+    const { customerId, propertyId } = await seedCustomer(sid.slice(-2));
+    const callAt = new Date(Date.now() - 65 * 60000);
+    const [call] = await db('call_log').insert({
+      twilio_call_sid: sid, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
+      status: 'completed', duration_seconds: 120, processing_status: 'processed',
+      customer_id: customerId, review_status: 'open', created_at: callAt,
+      ai_extraction_enriched: JSON.stringify({ service_request: { primary_service_category: 'pest_control' }, scheduling: { status: 'confirmed' } }),
+    }).returning('id');
+    ids.calls.push(call.id);
+    const cardAt = new Date(Date.now() - 60 * 60000);
+    const [card] = await db('triage_items').insert({
+      call_log_id: call.id, category: 'address_review', severity: 'blocking', reason_code: 'address_unverified',
+      status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
+      payload: JSON.stringify({ flag: 'address_unverified', scheduling_status: 'confirmed' }),
+    }).returning('id');
+    const [visit] = await db('scheduled_services').insert({
+      customer_id: customerId, property_id: propertyId, source_call_log_id: call.id, service_type: 'Quarterly Pest Control', status: bookingStatus,
+      scheduled_date: new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10),
+      created_at: new Date(Date.now() - 10 * 60000),
+    }).returning('id');
+    ids.visits.push(visit.id);
+    return { callId: call.id, cardId: card.id };
+  }
+
+  test('a confirmed call counts as booked only by a LIVE source-linked appointment — a skipped one keeps the address card (codex r26 P1)', async () => {
+    const live = await seedConfirmedAddressCall(SID.replace(/e2$/, 'a1'), { bookingStatus: 'confirmed' });
+    const skippedBooking = await seedConfirmedAddressCall(SID.replace(/e2$/, 'a2'), { bookingStatus: 'skipped' });
+    const result = await sweep.runTriageAutoResolve({ now: new Date() });
+    expect(result.skipped).toBe(false);
+    const statusOf = async (c) => (await db('triage_items').where({ id: c.cardId }).first('status')).status;
+    expect(await statusOf(live)).toBe('resolved');
+    expect(await statusOf(skippedBooking)).toBe('open');
+  });
+
   test('booking after the card on the requested day resolves it as auto; a pre-card, skipped, or off-day booking leaves it open', async () => {
     const fresh = await seedCall(SID, { cardAgeMin: 60, bookingAgeMin: 10 });
     const stale = await seedCall(SID.replace(/e2$/, 'e3'), { cardAgeMin: 10, bookingAgeMin: 60 });
