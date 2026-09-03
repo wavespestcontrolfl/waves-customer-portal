@@ -384,7 +384,8 @@ describe('Google Business review sync', () => {
     // Independent side effects: the failed suppression mark must not skip the attribution-moment thank-you.
     expect(enrollReviewThankYou).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', source: 'google_review' }));
     expect(result.synced).toBe(1);
-    expect(result.errors).toEqual([]);
+    // Surfaced, but not as a storage failure.
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_side_effect', error: expect.stringContaining('suppression write failed') })]);
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(degraded).not.toHaveBeenCalled();
     expect(db.__state.rows.google_reviews).toEqual(expect.arrayContaining([

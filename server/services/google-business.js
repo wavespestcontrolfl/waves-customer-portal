@@ -1463,6 +1463,14 @@ class GoogleBusinessService {
                 const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked, locRestored);
                 if (result.inserted) totalNew++;
                 totalSynced++;
+                // Stored, but a post-write side effect (suppression mark,
+                // thank-you enrollment, reinstatement clear) failed: the
+                // row is synced, so no reconcile skip and no degraded
+                // alert — but it joins result.errors so the run is not
+                // reported clean (pre-push audit r3).
+                if (result.sideEffectError) {
+                  errors.push({ location: loc.name, error: `post-write side effect failed for ${normalized.gbp_review_name || normalized.google_review_id || '?'}: ${result.sideEffectError}`, source: 'gbp_side_effect' });
+                }
               } catch (rowErr) {
                 rowFailures.push({ review: normalized.gbp_review_name || normalized.google_review_id || '?', error: rowErr.message });
                 logger.error(`[gbp] review upsert failed for ${loc.name} (${normalized.gbp_review_name || normalized.google_review_id || '?'}): ${rowErr.message}`);
