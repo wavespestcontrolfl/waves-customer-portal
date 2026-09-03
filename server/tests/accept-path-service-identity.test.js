@@ -252,6 +252,58 @@ describe('resolveEstimateSlotProfile carries the RAW engine key', () => {
   });
 });
 
+describe('catalogLinkForProfile — verified catalog key on the line', () => {
+  // A keyed public quote freezes the VERIFIED catalog key on the line
+  // (cockroach_control → engine pest_initial_roach, whose engine key is
+  // deliberately unaliased). Exact-key resolution runs first and never
+  // falls through to containment on a miss (codex #3842 r3 P1).
+  const makeKeyConn = (rowsByKey, onContainment) => {
+    const builder = () => ({
+      where: (w) => ({ limit: () => ({ select: async () => rowsByKey(w) }) }),
+      whereRaw: (_sql, b) => { onContainment(b); return { andWhere: () => ({ limit: () => ({ select: async () => [] }) }) }; },
+    });
+    builder.transaction = async (cb) => cb(builder);
+    return builder;
+  };
+  const profile = (extra = {}) => ({
+    serviceMode: 'one_time',
+    services: [{ service: 'pest_control', engineKey: 'pest_initial_roach', label: 'Cockroach Treatment Service', ...extra }],
+  });
+  test('resolves by the exact key ahead of engine-key containment', async () => {
+    let containment = 0;
+    const link = await catalogLinkForProfile(
+      // No is_active filter: a row archived after the quote still names the promised product.
+      makeKeyConn((w) => (w.service_key === 'cockroach_control' && w.is_active === undefined ? [{ id: 'svc-roach', name: 'Cockroach Treatment', service_key: 'cockroach_control' }] : []), () => { containment += 1; }),
+      profile({ catalogServiceKey: 'cockroach_control' }),
+    );
+    expect(link).toEqual({ id: 'svc-roach', name: 'Cockroach Treatment', service_key: 'cockroach_control' });
+    expect(containment).toBe(0);
+  });
+  test('a missing or ambiguous key stamps nothing and does NOT fall through to containment', async () => {
+    let containment = 0;
+    expect(await catalogLinkForProfile(makeKeyConn(() => [], () => { containment += 1; }), profile({ catalogServiceKey: 'cockroach_control' }))).toBeNull();
+    expect(await catalogLinkForProfile(makeKeyConn(() => [{ id: 'a' }, { id: 'b' }], () => { containment += 1; }), profile({ catalogServiceKey: 'cockroach_control' }))).toBeNull();
+    expect(containment).toBe(0);
+  });
+  test('without a catalog key the unaliased engine key still goes to containment (status quo)', async () => {
+    let bindings = null;
+    await catalogLinkForProfile(makeKeyConn(() => [], (b) => { bindings = b; }), profile());
+    expect(bindings).toEqual([JSON.stringify(['pest_initial_roach'])]);
+  });
+  test('the one-time profile carries the frozen key off the breakdown line', () => {
+    const { oneTimeProfileServices } = require('../services/estimate-slot-availability')._internals;
+    const rows = oneTimeProfileServices({}, { result: { oneTime: { items: [{ service: 'pest_initial_roach', label: 'Cockroach Treatment Service', price: 250, catalogServiceKey: 'cockroach_control' }] } } });
+    expect(rows[0]).toMatchObject({ engineKey: 'pest_initial_roach', catalogServiceKey: 'cockroach_control' });
+    // The engine's own `serviceKey` family token (flea → 'flea', catalog row
+    // flea_tick via engine_keys) is NOT a catalog key: it stays on the
+    // containment path, never an exact lookup for a row that does not exist
+    // (codex r5 P1 — regression guard).
+    const flea = oneTimeProfileServices({}, { result: { oneTime: { items: [{ service: 'flea_knockdown_single', label: 'Flea Treatment', price: 199, serviceKey: 'flea' }] } } });
+    expect(flea[0].catalogServiceKey).toBeNull();
+    expect(flea[0].engineKey).toBe('flea_knockdown_single');
+  });
+});
+
 describe('catalogServiceIdForProfile', () => {
   // The helper runs its read inside conn.transaction(...) — a SAVEPOINT when
   // the caller already holds a transaction — so the fake connection must model

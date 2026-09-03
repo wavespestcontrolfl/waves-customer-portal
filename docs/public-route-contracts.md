@@ -459,8 +459,22 @@ set by two keys: `oneTimeMosquito` (menu `mosquito_one_time`; priced by
 treatable lot area; station / dunk add-ons are staff-scoped and never
 site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
 (turf-priced on the forwarded track; a lot-only lookup routes it to manual
-review like the lawn programs). Both are additive — no existing key or
-response field changed. **Menu `flea_tick` changed product on 2026-09-03**
+review like the lawn programs). Catalog `cockroach_control` → `pestInitialRoach`
+(owner ruling 2026-09-03: the two-treatment package priced as one
+regular_standalone knockdown on the home footprint; species / severity /
+price override stay staff-scoped, the site prices the native scale; the
+included second visit is booked at completion at no charge). It prices
+instantly but never mints a self-book slot (`bookingUrl` null, like bed
+bug): the self-book funnel collapses it to the generic pest visit with no
+catalog `service_id`, which the included second visit's scheduling needs —
+the owner books the first visit. Instant eligibility also requires the live
+`regular_standalone.treatments` display count to still read 2 — read from the persisted `pricing_config`
+row itself (never process-local engine constants), on the menu build, on
+the first eligibility read, and again immediately before the engine. The engine input freezes `packageTreatments: 2` and
+`catalogServiceKey: cockroach_control` on the request, so the stored draft
+regenerates the two-visit promise on every send / view and the accepted
+visit resolves `service_id` by that exact key. All three are
+additive — no existing key or response field changed. **Menu `flea_tick` changed product on 2026-09-03**
 (owner ruling "flea is two visits"; PR #3845): the keyed request now
 expands to the two-visit Flea Elimination Package (`flea_package`, 2
 visits, conditional retreat guarantee) — previously the single-visit

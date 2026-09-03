@@ -1426,6 +1426,7 @@ function generateEstimate(input) {
         ...pestInitialRoachOptions,
         roachType: standaloneRoachMeta.roachType,
         standalone: true,
+        buildingSizeMeasured: input.buildingSizeMeasured,
         source: pestInitialRoachOptions.source || 'standalone_native_cockroach_treatment',
       });
       if (result) lineItems.push(result);
