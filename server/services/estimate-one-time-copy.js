@@ -219,6 +219,13 @@ function resolveOneTimeServiceCopy(item = {}) {
   if (key === 'dethatching' && item.debrisRemovalIncluded !== true) {
     lines = lines.filter((line) => line !== entry.debrisBullet);
   }
+  // Unit-band one-time pest (GATE_UNIT_BAND_PRICING) is interior-only —
+  // the row's includedScope says so and its scopeNote already lists the
+  // exclusions, so the exterior-perimeter bullet is swapped for the
+  // interior-unit bullet (codex #3823 r6 P1).
+  if (key === 'one_time_pest' && /^interior_/.test(String(item.includedScope || ''))) {
+    lines = lines.map((line) => (line === entry.exteriorBullet ? entry.interiorUnitBullet : line));
+  }
   // Exclusion: vent screening is a priced option — the bullet rides only a
   // row that says it was included (codex #3823 r5 P1).
   if (key === 'rodent_exclusion' && item.includesScreening !== true) {

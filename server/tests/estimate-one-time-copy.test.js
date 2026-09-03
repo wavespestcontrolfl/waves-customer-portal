@@ -153,6 +153,22 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(removed.outcome).toMatch(/^The nest gone/);
   });
 
+  test('one-time pest: a unit-band (interior-only) row swaps the exterior-perimeter bullet for the interior-unit bullet', () => {
+    const whole = resolveOneTimeServiceCopy({ service: 'one_time_pest', label: 'One-Time Pest Control' });
+    expect(whole.includes[0]).toMatch(/^Full exterior perimeter/);
+    const unit = resolveOneTimeServiceCopy({ service: 'one_time_pest', label: 'One-Time Pest Control', includedScope: 'interior_unit_general_pest' });
+    expect(unit.includes[0]).toMatch(/^Interior of your unit treated/);
+    expect(unit.includes.join(' ')).not.toMatch(/exterior perimeter/i);
+  });
+
+  test('AI provenance copy describes only inputs the pricer actually uses (wasp: no species; trapping: the flat standard plan)', () => {
+    expect(ONE_TIME_SERVICE_COPY.wasp.aiBody).not.toMatch(/species/i);
+    expect(ONE_TIME_SERVICE_COPY.wasp.hero.sub).not.toMatch(/species/i);
+    expect(ONE_TIME_SERVICE_COPY.rodent_trapping.aiBody).not.toMatch(/not a flat fee|sized to/i);
+    expect(ONE_TIME_SERVICE_COPY.rodent_trapping.aiBody).toMatch(/standard plan/i);
+    expect(ONE_TIME_SERVICE_COPY.one_time_pest.hero.sub).not.toMatch(/priced from your actual property/i);
+  });
+
   test('trenching: the colony-transfer claim only rides non-repellent chemistry', () => {
     const fipronil = resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching', chemistryType: 'non_repellent' });
     expect(fipronil.outcome).toMatch(/carry it back to the colony/);
@@ -212,8 +228,9 @@ describe('resolveOneTimeServiceCopy', () => {
         { service: 'dethatching', name: 'Lawn Dethatching', price: 300, debrisRemovalIncluded: false, cleanupLevel: 'none' },
         { service: 'rodent_inspection', name: 'Rodent Inspection', price: 149, creditableWithinDays: 14 },
         { service: 'exclusion_v2', name: 'Full Rodent Exclusion', price: 895, includesScreening: true },
+        { service: 'one_time_pest', name: 'One-Time Pest Control', price: 189, includedScope: 'interior_unit_general_pest', scopeExclusions: ['interior only'], scopeNote: 'Interior of your unit only' },
       ],
-      total: { oneTime: 1975, monthly: 0, annual: 0 },
+      total: { oneTime: 2164, monthly: 0, annual: 0 },
     });
     // Specialty rows land in specItems, lawn one-time rows in items — both projections carry the flags.
     const items = [...(shaped?.oneTime?.specItems || []), ...(shaped?.oneTime?.items || [])];
@@ -223,6 +240,7 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(byService.dethatching.debrisRemovalIncluded).toBe(false);
     expect(byService.rodent_inspection.creditableWithinDays).toBe(14);
     expect(byService.exclusion_v2.includesScreening).toBe(true);
+    expect(byService.one_time_pest.includedScope).toBe('interior_unit_general_pest');
   });
 
   test('bed bug: the treatment-method bullet leads and follows the priced method', () => {
@@ -422,6 +440,8 @@ describe('server-rendered page', () => {
     expect(html).toContain('Two targeted visits');
     // Bullets ride a native <details> dropdown, collapsed by default.
     expect(html).toContain('<details class="onetime-includes-wrap"><summary>See everything included (7)</summary>');
+    // A closed <details> prints nothing — the page opens every inclusion list on beforeprint (codex r6).
+    expect(html).toContain("window.addEventListener('beforeprint', () => { document.querySelectorAll('details.onetime-includes-wrap')");
     expect(html).toContain('Gel bait placed where German roaches actually live');
     expect(html).toContain('ULV fogging with a non-repellent plus an insect growth regulator (IGR)');
     expect(html).toContain('Visit 2 about 10–14 days later');

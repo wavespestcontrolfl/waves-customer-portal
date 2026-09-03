@@ -6737,6 +6737,9 @@ ${shellQuestionsBar()}
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const roundMoney = (n) => Math.round(Number(n || 0) * 100) / 100;
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
+  // A closed <details> prints nothing — open every one-time inclusion list
+  // before the browser captures the page (React RowInclusions does the same).
+  window.addEventListener('beforeprint', () => { document.querySelectorAll('details.onetime-includes-wrap').forEach((d) => { d.open = true; }); });
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
   // Subtle click pulse on any button — fires once per click, self-removes after animation
   document.addEventListener('click', (ev) => {
@@ -16818,6 +16821,7 @@ function oneTimeItemsForRender(estResult, estData) {
     debrisRemovalIncluded: row.debrisRemovalIncluded === true,
     creditableWithinDays: row.creditableWithinDays || null,
     includesScreening: row.includesScreening === true,
+    includedScope: row.includedScope || null,
   }));
 }
 
@@ -17270,6 +17274,7 @@ function normalizeOneTimeBreakdown(estData) {
         debrisRemovalIncluded: item.debrisRemovalIncluded === true,
         creditableWithinDays: Number(item.creditableWithinDays) > 0 ? Number(item.creditableWithinDays) : null,
         includesScreening: item.includesScreening === true || /\+screening\b/.test(String(item.detail || item.det || '')),
+        includedScope: item.includedScope || null,
       });
     }
   };

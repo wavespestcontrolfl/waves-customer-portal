@@ -55,8 +55,10 @@
     "hero": {
       "eyebrow": "Your one-time pest control visit",
       "h1": "Hello {first}, your one-time pest control quote is ready!",
-      "sub": "One thorough visit, priced from your actual property — approve online and pick a day that works. Licensed & insured, 30-day callback included."
-    }
+      "sub": "One thorough visit, no plan required — approve online and pick a day that works. Licensed & insured, 30-day callback included."
+    },
+    "exteriorBullet": "Full exterior perimeter, entry points, eaves, and harborage zones treated",
+    "interiorUnitBullet": "Interior of your unit treated — kitchen and bath plumbing lines, entry points, and harborage zones (building exterior and common areas are not included)"
   },
   "flea": {
     "outcome": "Fleas out of the house and the yard, with the egg cycle broken so they don’t come back.",
@@ -108,7 +110,7 @@
     "assurance": "30-day callback — if activity returns within a month, so do we, free",
     "terms": "Pay on service day. No recurring schedule.",
     "aiTitle": "Waves AI priced this by the nest, not a flat fee",
-    "aiBody": "Wasp and hornet work is quoted by the nest — species, where it is, and how established it is — never a one-size fee.",
+    "aiBody": "Wasp and hornet work is quoted by the nest — where it is, how high and how hard to reach, how aggressive the colony is, and whether you add removal — never a one-size fee.",
     "askChips": [
       "How do you remove the nest?",
       "What precautions should I follow for pets and children?",
@@ -118,7 +120,7 @@
     "hero": {
       "eyebrow": "Your wasp & hornet service",
       "h1": "Hello {first}, your wasp & hornet quote is ready!",
-      "sub": "Nest treatment priced by species and location, physical removal when you add it — approve online and pick a day. Licensed & insured, 30-day callback included."
+      "sub": "Nest treatment priced by where the nest is and how hard it is to reach, physical removal when you add it — approve online and pick a day. Licensed & insured, 30-day callback included."
     },
     "outcomeNoRemoval": "The nest knocked out and the yard yours again — usually the same day.",
     "removalBullet": "Nest treatment and physical removal",
@@ -198,8 +200,8 @@
     ],
     "assurance": null,
     "terms": "Pay on service day. No contract.",
-    "aiTitle": "Waves AI sized this trapping plan to the job",
-    "aiBody": "Trapping is sized to where the activity is and how long the active window usually runs — not a flat fee.",
+    "aiTitle": "Waves AI priced this as our standard trapping plan",
+    "aiBody": "Rodent trapping is one standard plan — interior trap lines set, checked, and cleared for the same active job at one price, with a surcharge only when you need an emergency start.",
     "askChips": [
       "How often are traps checked?",
       "Trapping vs exclusion?",
