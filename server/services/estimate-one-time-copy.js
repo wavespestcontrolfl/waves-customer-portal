@@ -64,6 +64,7 @@ const SERVICE_KEY_TO_COPY = {
   foam_drill: 'termite_foam',
   trenching: 'termite_trenching',
   termite_trenching: 'termite_trenching',
+  termite_bait_installation: 'termite_bait',
   one_time_pest: 'one_time_pest',
   pest_initial_cleanout: 'one_time_pest',
   initial_pest_cleanout: 'one_time_pest',
@@ -190,6 +191,16 @@ function resolveOneTimeServiceCopy(item = {}) {
   if (key === 'termite_trenching' && String(item.chemistryType || '') !== 'non_repellent') {
     outcome = entry.outcomeRepellent || outcome;
   }
+  // Trenching: the warranty-period inspection bullet rides a sold warranty
+  // tier only (repellent products default to 'none') — codex #3823 r3 P1.
+  if (key === 'termite_trenching' && (!item.warrantyTier || String(item.warrantyTier) === 'none')) {
+    lines = lines.filter((line) => line !== entry.warrantyBullet);
+  }
+  // Dethatching: debris hauling is priced separately (cleanupLevel) — the
+  // bullet rides only when the row says it is included (codex #3823 r3 P1).
+  if (key === 'dethatching' && item.debrisRemovalIncluded !== true) {
+    lines = lines.filter((line) => line !== entry.debrisBullet);
+  }
   return {
     key,
     outcome: fillVisits(outcome, visits),
@@ -243,8 +254,25 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
   };
 }
 
+// Row copies for a breakdown, aligned by index: ONE copy per logical job
+// (the V2 exclusion pricer expands one quote into several rows all stamped
+// rodent_exclusion — the first row carries the pack, the component rows
+// stay bare), and included (service-credit) rows never carry copy. Both
+// render paths use this so they cannot diverge (codex #3823 r3 P2s).
+function resolveOneTimeRowCopies(rows = []) {
+  const seen = new Set();
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    if (!row || row.serviceSpecificDiscountApplied === true || row.kind === 'included') return null;
+    const copy = resolveOneTimeServiceCopy(row);
+    if (!copy || seen.has(copy.key)) return null;
+    seen.add(copy.key);
+    return copy;
+  });
+}
+
 module.exports = {
   ONE_TIME_SERVICE_COPY: PACK,
+  resolveOneTimeRowCopies,
   oneTimeCopyKeyFor,
   resolveOneTimeServiceCopy,
   oneTimeOnlyIntelligenceCopy,

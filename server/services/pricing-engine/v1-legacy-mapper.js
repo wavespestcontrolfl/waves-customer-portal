@@ -1113,6 +1113,13 @@ function mapV1ToLegacyShape(v1Result) {
         prepChecklistRequired: !!li.prepChecklistRequired,
         petSourceAttestationRequired: !!li.petSourceAttestationRequired,
         exteriorStatus: li.exteriorStatus,
+        // Sold-scope flags the customer estimate's one-time copy pack keys
+        // off (codex #3823 r3 P1): bed-bug warranty, purchased wasp nest
+        // removal, dethatching debris removal.
+        ...(li.warrantyEligible !== undefined ? { warrantyEligible: li.warrantyEligible === true } : {}),
+        ...(li.pricingBreakdown?.removal !== undefined || li.removal !== undefined
+          ? { nestRemovalSelected: Number(li.pricingBreakdown?.removal) > 0 || !!li.removal } : {}),
+        ...(li.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: li.debrisRemovalIncluded === true } : {}),
         fleaExteriorZones: li.fleaExteriorZones || [],
         addOns: li.addOns || [],
         serviceSpecificDiscountApplied: !!li.serviceSpecificDiscountApplied,
@@ -1316,6 +1323,9 @@ function mapV1ToLegacyShape(v1Result) {
           requiresCustomQuote: !!s.requiresCustomQuote,
           customQuoteReason: s.customQuoteReason,
           fleaExteriorZones: s.fleaExteriorZones,
+          ...(s.warrantyEligible !== undefined ? { warrantyEligible: s.warrantyEligible === true } : {}),
+          ...(s.nestRemovalSelected !== undefined ? { nestRemovalSelected: s.nestRemovalSelected === true } : {}),
+          ...(s.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: s.debrisRemovalIncluded === true } : {}),
           source: s.source,
           pricingModel: s.pricingModel,
           legacyPricingModel: s.legacyPricingModel,

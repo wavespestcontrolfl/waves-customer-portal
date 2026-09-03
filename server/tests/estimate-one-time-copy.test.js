@@ -10,9 +10,11 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 const {
   oneTimeCopyKeyFor,
   resolveOneTimeServiceCopy,
+  resolveOneTimeRowCopies,
   oneTimeOnlyIntelligenceCopy,
   ONE_TIME_SERVICE_COPY,
 } = require('../services/estimate-one-time-copy');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   attachPublicPricingContract,
   buildWaveGuardIntelligencePayload,
@@ -53,6 +55,7 @@ describe('oneTimeCopyKeyFor', () => {
     expect(oneTimeCopyKeyFor({ service: 'rodent_sanitation', label: 'Rodent Sanitation' })).toBe('rodent_sanitation');
     expect(oneTimeCopyKeyFor({ service: 'rodent_bait_setup', label: 'Rodent Bait Station Setup' })).toBe('rodent_bait_setup');
     expect(oneTimeCopyKeyFor({ service: 'termite_bait', label: 'Termite Bait Station Installation' })).toBe('termite_bait');
+    expect(oneTimeCopyKeyFor({ service: 'termite_bait_installation', label: 'Sentricon Installation' })).toBe('termite_bait');
     expect(oneTimeCopyKeyFor({ service: 'pre_slab_termiticide', label: 'Pre-Slab Termite Treatment' })).toBe('pre_slab_termiticide');
     expect(oneTimeCopyKeyFor({ service: 'bora_care', label: 'Bora-Care Wood Treatment' })).toBe('bora_care');
     expect(oneTimeCopyKeyFor({ service: 'plugging', label: 'Lawn Plugging Service' })).toBe('plugging');
@@ -143,6 +146,45 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(pyrethroid.outcome).toBe('A continuous liquid barrier around your foundation — a treated zone termites will not cross.');
     // Unknown chemistry fails closed to the barrier wording.
     expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching' }).outcome).toBe(pyrethroid.outcome);
+    // The warranty-period inspection bullet rides a sold warranty tier only.
+    expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching', chemistryType: 'non_repellent', warrantyTier: 'one_year_retreat' }).includes).toContain('Annual inspection during the warranty period');
+    expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching', chemistryType: 'repellent_pyrethroid', warrantyTier: 'none' }).includes).not.toContain('Annual inspection during the warranty period');
+    expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching' }).includes).not.toContain('Annual inspection during the warranty period');
+  });
+
+  test('dethatching: debris hauling is a bullet only when the row includes it', () => {
+    expect(resolveOneTimeServiceCopy({ service: 'dethatching', label: 'Lawn Dethatching', debrisRemovalIncluded: true }).includes).toContain('Removal and disposal of thatch debris');
+    expect(resolveOneTimeServiceCopy({ service: 'dethatching', label: 'Lawn Dethatching', debrisRemovalIncluded: false }).includes).not.toContain('Removal and disposal of thatch debris');
+    expect(resolveOneTimeServiceCopy({ service: 'dethatching', label: 'Lawn Dethatching' }).includes).not.toContain('Removal and disposal of thatch debris');
+    expect(ONE_TIME_SERVICE_COPY.dethatching.hero.sub).not.toMatch(/debris/);
+  });
+
+  test('resolveOneTimeRowCopies: one copy per logical job, included rows bare', () => {
+    const rows = [
+      { service: 'rodent_exclusion', label: 'Exclusion — wire mesh', amount: 400 },
+      { service: 'rodent_exclusion', label: 'Exclusion — job minimum', amount: 150 },
+      { service: 'rodent_exclusion', label: 'Inspection fee', amount: 0, serviceSpecificDiscountApplied: true },
+      { service: 'wasp', label: 'Wasp Nest Treatment', amount: 150, nestRemovalSelected: true },
+    ];
+    const copies = resolveOneTimeRowCopies(rows);
+    expect(copies.map((c) => (c ? c.key : null))).toEqual(['rodent_exclusion', null, null, 'wasp']);
+  });
+
+  test('legacy mapper carries the sold-scope flags the pack reads (bed bug warranty, wasp removal, dethatching debris)', () => {
+    const shaped = mapV1ToLegacyShape({
+      lineItems: [
+        { service: 'bed_bug', name: 'Bed Bug Heat Treatment — 2 room(s)', price: 1450, warrantyEligible: true },
+        { service: 'wasp', name: 'Wasp Nest Treatment', price: 225, pricingBreakdown: { subtotal: 225, removal: 75 } },
+        { service: 'dethatching', name: 'Lawn Dethatching', price: 300, debrisRemovalIncluded: false, cleanupLevel: 'none' },
+      ],
+      total: { oneTime: 1975, monthly: 0, annual: 0 },
+    });
+    // Specialty rows land in specItems, lawn one-time rows in items — both projections carry the flags.
+    const items = [...(shaped?.oneTime?.specItems || []), ...(shaped?.oneTime?.items || [])];
+    const byService = Object.fromEntries(items.map((it) => [it.service, it]));
+    expect(byService.bed_bug.warrantyEligible).toBe(true);
+    expect(byService.wasp.nestRemovalSelected).toBe(true);
+    expect(byService.dethatching.debrisRemovalIncluded).toBe(false);
   });
 
   test('bed bug: the treatment-method bullet leads and follows the priced method', () => {

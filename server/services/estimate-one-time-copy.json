@@ -43,8 +43,8 @@
     ],
     "assurance": "30-day callback — if they're back within a month, so are we, free",
     "terms": "Pay on service day. No recurring schedule, no tier discount.",
-    "aiTitle": "Waves AI priced this visit from your property",
-    "aiBody": "We reviewed your home, lot, and pest-risk factors before pricing this one-time visit — the same inputs a recurring plan would use.",
+    "aiTitle": "Waves AI priced this as one visit, no plan",
+    "aiBody": "This is a single visit priced for your property — the same treatment scope as a plan visit, without the plan.",
     "askChips": [
       "What does the visit include?",
       "Can you treat inside?",
@@ -259,7 +259,8 @@
       "h1": "Hello {first}, your termite trenching quote is ready!",
       "sub": "A continuous liquid barrier priced from your measured foundation — our team reviews it and confirms scheduling with you. Licensed & insured."
     },
-    "outcomeRepellent": "A continuous liquid barrier around your foundation — a treated zone termites will not cross."
+    "outcomeRepellent": "A continuous liquid barrier around your foundation — a treated zone termites will not cross.",
+    "warrantyBullet": "Annual inspection during the warranty period"
   },
   "one_time_mosquito": {
     "outcome": "One barrier treatment where mosquitoes actually rest — for a party, a bad stretch, or to try us out.",
@@ -273,7 +274,7 @@
     "hero": {
       "eyebrow": "Your one-time mosquito treatment",
       "h1": "Hello {first}, your mosquito treatment quote is ready!",
-      "sub": "One barrier treatment priced from your lot — approve online and pick a day. Licensed & insured, 30-day callback included."
+      "sub": "One barrier treatment priced from the measured treatment area — approve online and pick a day. Licensed & insured, 30-day callback included."
     }
   },
   "one_time_lawn": {
@@ -427,8 +428,9 @@
     "hero": {
       "eyebrow": "Your lawn dethatching",
       "h1": "Hello {first}, your lawn dethatching quote is ready!",
-      "sub": "A power dethatching pass across the measured turf with the debris hauled off — approve online and pick a day. Licensed & insured."
-    }
+      "sub": "A power dethatching pass across the measured turf — approve online and pick a day. Licensed & insured."
+    },
+    "debrisBullet": "Removal and disposal of thatch debris"
   },
   "top_dressing": {
     "outcome": "A thin layer of compost or sand that levels the turf, adds organic matter, and breaks down thatch over time.",

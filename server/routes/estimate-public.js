@@ -36,7 +36,7 @@ function acceptBookingGateToken(estimate) {
   return token ? `&accept_token=${encodeURIComponent(token)}` : '';
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
-const { resolveOneTimeServiceCopy, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
+const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -5651,14 +5651,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Row copy is suppressed on a regulated certificate surface (WDO) — the
   // page stays narrative-free, not just the WDO row (codex pre-push P0).
   const oneTimeRowCopyAllowed = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
-  const realOneTimeRows = billableOneTimeItems.map((it) => {
+  // One copy per logical job, included (service-credit) rows skipped — the
+  // same helper the React contract uses (codex #3823 r3 P2s).
+  const oneTimeRowCopies = oneTimeRowCopyAllowed ? resolveOneTimeRowCopies(billableOneTimeItems) : [];
+  const realOneTimeRows = billableOneTimeItems.map((it, rowIndex) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
     const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
     // What the visit involves — same outcome + bullet + terms shape the
     // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
-    const rowCopy = oneTimeRowCopyAllowed ? resolveOneTimeServiceCopy(it) : null;
+    const rowCopy = oneTimeRowCopies[rowIndex] || null;
     const rowCopyHtml = rowCopy
       ? `<div class="onetime-outcome">${escapeHtml(rowCopy.outcome)}</div><details class="onetime-includes-wrap"><summary>See everything included (${rowCopy.includes.length})</summary><ul class="onetime-includes">${rowCopy.includes.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></details>${rowCopy.terms ? `<div class="onetime-terms">${escapeHtml(rowCopy.terms)}</div>` : ''}`
       : '';
@@ -17247,8 +17250,10 @@ function normalizeOneTimeBreakdown(estData) {
         // trenching chemistry (repellent barriers get no colony-transfer
         // claim) and whether wasp nest removal was actually priced.
         chemistryType: item.chemistryType || null,
+        warrantyTier: item.warrantyTier || null,
+        nestRemovalSelected: item.nestRemovalSelected === true || Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal,
         warrantyEligible: item.warrantyEligible === true,
-        nestRemovalSelected: Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal,
+        debrisRemovalIncluded: item.debrisRemovalIncluded === true,
       });
     }
   };
@@ -22617,9 +22622,12 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
       ...basePayload,
       oneTimeBreakdown: {
         ...basePayload.oneTimeBreakdown,
-        items: basePayload.oneTimeBreakdown.items.map((row) => (
-          rowCopyAllowed ? attachOneTimeRowCopy(normalizeBreakdownItemLabel(row)) : normalizeBreakdownItemLabel(row)
-        )),
+        items: (() => {
+          const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel);
+          if (!rowCopyAllowed) return labeled;
+          const copies = resolveOneTimeRowCopies(labeled);
+          return labeled.map((row, i) => (copies[i] ? { ...row, copy: copies[i] } : row));
+        })(),
       },
     }
     : basePayload;
@@ -22740,15 +22748,6 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
 // A breakdown row whose only label is the raw engine service key (e.g. "bora_care")
 // is not customer-facing; map it to the friendly category label for the client
 // payload. Mirrors the raw-key guard in buildOneTimeInvoiceServiceLabel.
-// Resolved service copy (estimate-one-time-copy.js) rides the row so the
-// React OneTimeBreakdownCard renders the same outcome/bullets/terms the
-// server-rendered page does. Rows with no pack entry are returned as-is.
-function attachOneTimeRowCopy(item = {}) {
-  if (!item || typeof item !== 'object') return item;
-  const copy = resolveOneTimeServiceCopy(item);
-  return copy ? { ...item, copy } : item;
-}
-
 function normalizeBreakdownItemLabel(item = {}) {
   if (!item || typeof item !== 'object') return item;
   const label = String(item.label || '').trim();
