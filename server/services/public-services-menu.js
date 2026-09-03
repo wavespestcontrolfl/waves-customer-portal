@@ -80,7 +80,7 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
 // needs inputs the website does not collect or returns a manual line:
 //   palm_injection (palm count) · bed_bug_treatment (method) ·
 //   dethatching / termite_trenching / termite_slab_pretreat (quote-required
-//   lines) · pest_general_semiannual · lawn_care_quarterly · mosquito_one_time ·
+//   lines) · lawn_care_quarterly · mosquito_one_time ·
 //   lawn_care_one_time (manually scoped: fert / weed / insect — the keyed
 //   request carries no treatment type) · rodent_sanitation_light/standard/heavy
 //   (one engine key covers three rows, so acceptance could stamp no service_id).
@@ -89,6 +89,8 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
 //   depth options move the price ~4× and the site does not collect them) ·
 //   rodent_exclusion_only (per-entry-point pricing; with no counts the
 //   engine returns the floor) — all pre-push / GH codex findings.
+//   pest_general_semiannual and german_roach_initial are no longer selectable
+//   at all (owner rulings 2026-09-03, migration 20260903000020).
 // The contract test runs every instant key through the engine and requires
 // a positive, non-manual line.
 const PUBLIC_INSTANT_QUOTE_KEYS = new Set(Object.keys(PUBLIC_QUOTE_REQUESTS));
