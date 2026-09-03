@@ -52,7 +52,10 @@ const CADENCE_CASE_SQL = `(case lower(trim(frequency)) ${CADENCE_LABELS.map((l) 
 // "Has an engine key" = at least one NON-EMPTY STRING member: the runtime lookup
 // is string containment (engine_keys @> '["foam_drill"]'), so [null], [{}] or
 // [""] can never resolve a line and count as unmapped (codex r9 P2).
-const HAS_ENGINE_KEY_SQL = "coalesce(jsonb_typeof(engine_keys) = 'array' and exists (select 1 from jsonb_array_elements(engine_keys) ek where jsonb_typeof(ek) = 'string' and btrim(ek #>> '{}') <> ''), false)";
+// Non-arrays are normalised to [] INSIDE the expansion: Postgres does not
+// promise short-circuit evaluation of the boolean AND, so a scalar / object
+// value could still abort the whole query (codex r13 P2).
+const HAS_ENGINE_KEY_SQL = "coalesce(jsonb_typeof(engine_keys) = 'array' and exists (select 1 from jsonb_array_elements(case when jsonb_typeof(engine_keys) = 'array' then engine_keys else '[]'::jsonb end) ek where jsonb_typeof(ek) = 'string' and btrim(ek #>> '{}') <> ''), false)";
 // Mirror of cadenceCatalogKeyForProfile in server/services/slot-reservation.js:
 // recurring pest / lawn / mosquito / tree-shrub visits resolve their catalog row
 // by service_key (category x visits/yr), bypassing engine-key containment, so
