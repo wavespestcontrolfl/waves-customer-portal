@@ -883,6 +883,8 @@ describe('buildServiceReportLink', () => {
     };
     const r = await buildServiceReportLink(['c1', 'c2']);
     expect(mockBuilders.service_records.whereNotNull).toHaveBeenCalledWith('report_view_token');
+    // Only v1 records: the React page's /:token/data 404s for legacy templates.
+    expect(mockBuilders.service_records.where).toHaveBeenCalledWith({ status: 'completed', report_template_version: 'service_report_v1' });
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/report/${'c'.repeat(32)}`);
     expect(shortenOrPassthrough).toHaveBeenCalledWith(r.url, expect.objectContaining({
       kind: 'service_report', entityType: 'service_records', entityId: 'r-ok', customerId: 'c2', codePrefix: 'report',

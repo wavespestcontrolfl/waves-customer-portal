@@ -760,7 +760,10 @@ async function buildServiceReportLink(customerIds) {
   for (let offset = 0; ; offset += PAGE) {
     const rows = await db('service_records')
       .whereIn('customer_id', customerIds)
-      .where({ status: 'completed' })
+      // The React report page reads /:token/data, which answers only for
+      // service_report_v1 records — a legacy-template row with a token
+      // would insert a link that 404s (pre-push Codex P1).
+      .where({ status: 'completed', report_template_version: 'service_report_v1' })
       .whereNotNull('report_view_token')
       .orderBy([{ column: 'service_date', order: 'desc' }, { column: 'created_at', order: 'desc' }])
       .offset(offset)
