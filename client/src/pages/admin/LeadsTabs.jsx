@@ -215,6 +215,16 @@ function parseLeadExtractedData(raw) {
   }
 }
 
+// Declared "when do you want this handled?" from the marketing-site quote
+// forms (extracted_data.timeline, server/services/lead-timeline.js). The
+// urgency badge already reflects it; this is the customer's own wording.
+const TIMELINE_LABELS = {
+  now: "Today / ASAP",
+  this_week: "This week",
+  this_month: "This month",
+  browsing: "Just pricing it out",
+};
+
 // preferred_date_time is an ET wall-clock string with NO timezone
 // ("2026-04-20T14:00" — the call extraction stores Eastern local time).
 // Don't route it through new Date(): a non-Eastern browser would reinterpret
@@ -1981,14 +1991,27 @@ export function LeadsSection() {
                                           ex.quote_promised &&
                                             "Quote promised to caller",
                                         ].filter(Boolean);
+                                        const timelineLabel =
+                                          TIMELINE_LABELS[ex.timeline];
                                         if (
                                           !ex.pain_points &&
                                           !ex.preferred_date_time &&
+                                          !timelineLabel &&
                                           quoteFlags.length === 0
                                         )
                                           return null;
                                         return (
                                           <>
+                                            {timelineLabel && (
+                                              <div>
+                                                Wants service:{" "}
+                                                <span
+                                                  style={{ color: C.text }}
+                                                >
+                                                  {timelineLabel}
+                                                </span>
+                                              </div>
+                                            )}
                                             {ex.pain_points && (
                                               <div>
                                                 Concerns:{" "}
