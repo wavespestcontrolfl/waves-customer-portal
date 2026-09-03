@@ -959,16 +959,28 @@ describe('buildContractSigningLink', () => {
     expect(createShareLink).not.toHaveBeenCalled();
   });
 
-  test('mints through the share-link writer and flags rotation when a link already existed', async () => {
-    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', status: 'sent', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef' } }) };
+  test('mints through the share-link writer when the contract has no live link (none, or the last one expired)', async () => {
+    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', status: 'sent', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef', share_token_expires_at: new Date(Date.now() - 1000) } }) };
     const expiresAt = new Date('2026-10-03T00:00:00Z');
     createShareLink.mockResolvedValue({ signingUrl: 'https://portal.wavespestcontrol.com/contract/tokX', expiresAt, contract: { id: 'k1' } });
     const r = await buildContractSigningLink(['c1'], req);
     expect(createShareLink).toHaveBeenCalledWith('k1', req);
     expect(r.url).toBe('https://portal.wavespestcontrol.com/contract/tokX');
     expect(r.line).toBe('Please review and sign your Auto Pay Authorization here: https://portal.wavespestcontrol.com/contract/tokX\n\n');
-    expect(r.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', rotated: true, requiresSignature: true });
+    expect(r.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true });
     expect(r.expiresAt).toBe(expiresAt);
+  });
+
+  test('an insert is not a delivery: a contract whose signing link is still LIVE refuses instead of rotating it (pre-push Codex P0)', async () => {
+    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', status: 'sent', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef', share_token_expires_at: new Date(Date.now() + 86400e3) } }) };
+    const r = await buildContractSigningLink(['c1'], req);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/already sent and is still live/);
+    expect(createShareLink).not.toHaveBeenCalled();
+    // No expiry on file = live too (fail closed on the in-flight link).
+    mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Doc', status: 'sent', contract_type: 'document_template', share_token_hash: 'deadbeef', share_token_expires_at: null } }) };
+    expect((await buildContractSigningLink(['c1'], req)).reason).toMatch(/still live/);
+    expect(createShareLink).not.toHaveBeenCalled();
   });
 
   test('a review-only document request (no signature) does not ask for one', async () => {

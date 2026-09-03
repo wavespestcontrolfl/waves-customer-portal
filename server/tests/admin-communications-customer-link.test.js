@@ -426,7 +426,7 @@ describe('POST /admin/communications/customer-link', () => {
     builders.buildContractSigningLink.mockResolvedValue({
       url: 'https://portal.wavespestcontrol.com/contract/tokX',
       line: 'Please review and sign your Auto Pay Authorization here: https://portal.wavespestcontrol.com/contract/tokX\n\n',
-      contract: { id: 'k1', title: 'Auto Pay Authorization', rotated: false },
+      contract: { id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true },
       expiresAt: '2026-10-03T00:00:00.000Z',
     });
     await withServer(async (baseUrl) => {
@@ -436,7 +436,7 @@ describe('POST /admin/communications/customer-link', () => {
       expect(builders.buildContractSigningLink).toHaveBeenCalledWith([CUSTOMER_UUID], expect.anything());
       expect(body.customerId).toBe(CUSTOMER_UUID);
       expect(body.expiresAt).toBe('2026-10-03T00:00:00.000Z');
-      expect(body.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', rotated: false });
+      expect(body.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true });
     });
   });
 

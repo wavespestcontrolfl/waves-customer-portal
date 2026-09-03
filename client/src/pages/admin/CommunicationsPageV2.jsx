@@ -1751,7 +1751,7 @@ function SmsTab() {
       `Prep guide link added${d.prep?.label ? ` — ${d.prep.label}` : ""}${d.prep?.scheduledDate ? ` on ${d.prep.scheduledDate}` : ""}.`,
     service_report: (d) => `Service report link added${d.report?.serviceDate ? ` — visit on ${d.report.serviceDate}` : ""}.`,
     contract: (d) =>
-      `Contract signing link added${d.contract?.title ? ` — ${d.contract.title}` : ""}.${d.contract?.rotated ? " The previously sent signing link no longer works." : ""}`,
+      `Contract signing link added${d.contract?.title ? ` — ${d.contract.title}` : ""}.`,
     statement: (d) =>
       d.statement
         ? `Statement pay link added — ${d.statement.number}, $${Number(d.statement.total).toFixed(2)} for ${d.statement.payerName}.`

@@ -1101,11 +1101,15 @@ const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
  * still awaiting a signature (the route passes that ONE row, never account
  * siblings — a signable bearer follows the document delivery's own
  * recipient rule), minted through the share-link route's ONE writer
- * (createShareLink). The raw token is never stored, so this necessarily
- * ROTATES any previously sent link; `contract.rotated` says whether one
- * existed so the composer can say so. The recipient-phone trust the
- * document delivery enforces (SMS_RECIPIENT_UNTRUSTED) already holds here:
- * /customer-link only resolves a customer whose phone is the recipient.
+ * (createShareLink). The raw token is never stored, so a mint ROTATES the
+ * live link — and an insert is not a delivery (the operator may abandon
+ * or remove it), so a contract whose signing link is still live is
+ * REFUSED here rather than rotated (pre-push Codex P0: an in-flight
+ * tokenized link keeps working); re-sending a live link stays the
+ * Contracts page's deliberate action. Mints only when no link exists or
+ * the last one expired. The recipient-phone trust the document delivery
+ * enforces (SMS_RECIPIENT_UNTRUSTED) already holds here: /customer-link
+ * only resolves a customer whose phone is the recipient.
  */
 async function buildContractSigningLink(customerIds, req) {
   const row = await db('customer_contracts')
@@ -1114,8 +1118,17 @@ async function buildContractSigningLink(customerIds, req) {
       .whereIn('status', CONTRACT_LINKABLE_STATUSES)
       .orWhere({ status: 'expired', contract_type: 'document_template' }))
     .orderBy('created_at', 'desc')
-    .first('id', 'title', 'status', 'contract_type', 'share_token_hash', 'requires_signature_snapshot');
+    .first('id', 'title', 'status', 'contract_type', 'share_token_hash', 'share_token_expires_at', 'requires_signature_snapshot');
   if (!row) return { url: null, line: '', reason: 'No contract awaiting signature on this account' };
+  const liveLink = !!row.share_token_hash
+    && (!row.share_token_expires_at || new Date(row.share_token_expires_at).getTime() > Date.now());
+  if (liveLink) {
+    return {
+      url: null,
+      line: '',
+      reason: `A signing link for ${String(row.title || '').trim() || 'this contract'} was already sent and is still live — the customer can use it, or resend it from the Contracts page`,
+    };
+  }
   const { createShareLink } = require('../routes/admin-contracts');
   const result = await createShareLink(row.id, req);
   if (result?.error) return { url: null, line: '', reason: result.error.message };
@@ -1128,7 +1141,7 @@ async function buildContractSigningLink(customerIds, req) {
   return {
     url: result.signingUrl,
     line: `Please review${needsSignature ? ' and sign' : ''} your ${title} here: ${result.signingUrl}\n\n`,
-    contract: { id: row.id, title, rotated: !!row.share_token_hash, requiresSignature: needsSignature },
+    contract: { id: row.id, title, requiresSignature: needsSignature },
     expiresAt: result.expiresAt || null,
   };
 }
