@@ -12,7 +12,7 @@ const { computeMrrBreakdown } = require('../mrr-breakdown');
 const { pendingPrepayIds } = require('../mrr-snapshot');
 const logger = require('../logger');
 const { whereLiveCustomer, CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../customer-stages');
-const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime, validCalendarDate } = require('../../utils/datetime-et');
 
 // Internal/test customers excluded from sales-funnel analytics. Names are
 // matched lowercase against both estimates.customer_name (denormalized
@@ -889,13 +889,19 @@ async function getServiceMix(input) {
 // Report engagement — the read path for the service-report telemetry that
 // completion + the public report page already write (service_report_events,
 // service_report_deliveries.sent_at, service_records.report_viewed_at).
-// Cohort = records whose report was FIRST sent inside the window. Both send
-// sources are server-owned: the delivery queue's sent_at (email) and the
+// Cohort = service_report_v1 records whose report was FIRST sent inside the
+// window. Every send source is server-owned: the per-recipient email ledger
+// (email_messages, keyed service_report_ready:<record>:<role> — the earliest
+// recipient success, so a partial multi-recipient send still counts from its
+// first delivery), the delivery queue's terminal sent_at, and the
 // completion-SMS stamp the dispatch route / deferred sender write into
 // service_records.structured_notes. The sms_sent/mms_sent EVENT rows are
 // deliberately not used — the public token endpoint accepts those names, so
-// a token holder could forge a send. Opens are the first-view stamp;
-// in-report actions are distinct records with the (customer-written) event.
+// a token holder could forge a send. Non-v1 completions text a generic
+// portal link and stamp the same SMS status, so the cohort is filtered to
+// report_template_version = service_report_v1. Opens are the first-view
+// stamp; in-report actions are distinct records with the (customer-written)
+// event.
 const REPORT_ACTION_EVENTS = [
   'pdf_downloaded',
   'photo_opened',
@@ -907,18 +913,13 @@ const REPORT_ACTION_EVENTS = [
   'followup_requested',
   'report_question_asked',
 ];
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-// Shape AND calendar validity: Date.UTC normalizes 2026-02-31 to Mar 3, so a
-// shape-only check would run the query for a different day than echoed.
-function isRealEtDate(value) {
-  return ISO_DATE_RE.test(value) && etDateString(parseETDateTime(`${value}T12:00`)) === value;
-}
 
 async function getReportEngagement(input = {}) {
   const now = new Date();
-  const from = input.date_from || etDateString(addETDays(now, -30));
+  // Inclusive lower bound: 29 days back + today = exactly 30 ET calendar days.
+  const from = input.date_from || etDateString(addETDays(now, -29));
   const to = input.date_to || etDateString(now);
-  if (!isRealEtDate(from) || !isRealEtDate(to)) {
+  if (!validCalendarDate(from) || !validCalendarDate(to)) {
     return { error: 'date_from and date_to must be real YYYY-MM-DD dates' };
   }
   // ET wall-clock day bounds as real Dates — the send timestamps are
@@ -943,6 +944,13 @@ async function getReportEngagement(input = {}) {
         FROM service_report_deliveries
         WHERE status = 'sent' AND sent_at IS NOT NULL
         UNION ALL
+        SELECT split_part(idempotency_key, ':', 2)::uuid AS service_record_id, sent_at
+        FROM email_messages
+        WHERE idempotency_key LIKE 'service_report_ready:%'
+          AND split_part(idempotency_key, ':', 2) ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          AND status IN ('sent', 'delivered', 'opened', 'clicked')
+          AND sent_at IS NOT NULL
+        UNION ALL
         SELECT id AS service_record_id,
                COALESCE(structured_notes->>'completionSmsDeferredDeliveredAt',
                         structured_notes->>'sentSmsAt')::timestamptz AS sent_at
@@ -960,7 +968,8 @@ async function getReportEngagement(input = {}) {
              srec.report_viewed_at
       FROM sends snd
       JOIN service_records srec ON srec.id = snd.service_record_id
-      WHERE snd.first_sent_at >= ? AND snd.first_sent_at < ?
+      WHERE srec.report_template_version = 'service_report_v1'
+        AND snd.first_sent_at >= ? AND snd.first_sent_at < ?
     ),
     acts AS (
       SELECT sre.service_record_id,
@@ -1002,13 +1011,13 @@ async function getReportEngagement(input = {}) {
 
   return {
     period: { from, to },
-    cohort: 'service reports first sent to the customer (report email via the delivery queue, or the completion SMS/MMS per the server-stamped send status) in the period',
+    cohort: 'service_report_v1 records first sent to the customer (report email per the email ledger / delivery queue, or the completion SMS/MMS per the server-stamped send status) in the period',
     total: totalRow ? shape(totalRow) : shape({ sent: 0, opened: 0 }),
     by_service_line: byLine.map((r) => ({ service_line: r.service_line, ...shape(r) })),
     notes: [
-      'opened = the customer first viewed the report page at or after the first send (staff/static views never stamp; a view that predates every send is not counted)',
+      'opened = the report link was first viewed at or after the first send. Staff previews with a staff JWT and portal static views never stamp, but a staff download through the plain customer PDF link does (that link cannot carry the staff JWT), so a small share of opens can be internal QA. A view that predates every send is not counted.',
       'median_minutes_to_open is over those post-send first opens',
-      'action counts are distinct reports with at least one such event at or after the first send',
+      'action counts are distinct reports with at least one such event at or after the first send (pdf_downloaded shares the staff-download caveat above)',
       "service_line 'unknown' = records completed before the line was stamped on the record",
     ],
   };

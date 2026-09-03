@@ -67,9 +67,18 @@ describe('get_report_engagement', () => {
     // so an event row is not proof of a send (pre-push Codex P1).
     expect(sql).not.toMatch(/'sms_sent'|'mms_sent'/);
     expect(sql).toMatch(/FROM service_report_deliveries\s+WHERE status = 'sent' AND sent_at IS NOT NULL/);
+    // Earliest per-recipient email success, so a partial multi-recipient
+    // send counts from its first delivery, not the queue's later retry.
+    expect(sql).toMatch(/FROM email_messages\s+WHERE idempotency_key LIKE 'service_report_ready:%'/);
+    expect(sql).toMatch(/status IN \('sent', 'delivered', 'opened', 'clicked'\)/);
     expect(sql).toMatch(/structured_notes->>'completionSmsStatus' = 'sent'/);
     expect(sql).toMatch(/completionSmsDeferredDeliveredAt/);
     expect(sql).toMatch(/sentSmsAt/);
+  });
+
+  test('only service_report_v1 records join the cohort — generic completion texts stamp the same SMS status', async () => {
+    await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
+    expect(rawCalls[0].sql).toMatch(/WHERE srec\.report_template_version = 'service_report_v1'\s+AND snd\.first_sent_at >= \?/);
   });
 
   test('defaults to the last 30 ET days ending today', async () => {
@@ -77,10 +86,10 @@ describe('get_report_engagement', () => {
     expect(res.period.to).toBe(etDateString(new Date()));
     const fromMs = rawCalls[0].bindings[0].getTime();
     const toMs = rawCalls[0].bindings[1].getTime();
-    // 31 ET days inclusive (30 days ago through today) → 31 × 24h ± DST hour.
+    // Exactly 30 ET calendar days (29 days ago through today) → 30 × 24h ± DST hour.
     const days = (toMs - fromMs) / 86400000;
-    expect(days).toBeGreaterThanOrEqual(30.9);
-    expect(days).toBeLessThanOrEqual(31.1);
+    expect(days).toBeGreaterThanOrEqual(29.9);
+    expect(days).toBeLessThanOrEqual(30.1);
   });
 
   test('splits the ROLLUP total from the per-line rows and parses Postgres strings', async () => {
