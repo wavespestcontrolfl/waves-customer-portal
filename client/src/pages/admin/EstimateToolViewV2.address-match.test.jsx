@@ -104,7 +104,7 @@ describe("address match is a suggestion, never a silent link", () => {
     expect(atAddress).toHaveLength(1);
     expect(atAddress[0][0]).toBe("/api/admin/customers/at-address");
     expect(atAddress[0][1].method).toBe("POST");
-    expect(JSON.parse(atAddress[0][1].body)).toEqual({ address: ADDRESS });
+    expect(JSON.parse(atAddress[0][1].body)).toEqual({ address: ADDRESS, phone: null, email: null });
     expect(screen.queryByText("Pat Other")).not.toBeInTheDocument();
     // No chip, no linked-customer spend request: customerId is still empty.
     expect(screen.queryByText(/Existing customer:/)).not.toBeInTheDocument();
@@ -170,6 +170,18 @@ describe("address match is a suggestion, never a silent link", () => {
     // A re-lookup with nobody linked offers the suggestion again.
     await lookUp();
     expect(screen.getByText("Jane Doe")).toBeInTheDocument();
+  });
+
+  it("a server-tagged contact match is labelled on its row", async () => {
+    customersAtStreet = [{ ...HUSBAND, contactMatch: "phone" }, WIFE];
+    renderTool();
+    await lookUp();
+
+    const rows = screen.getAllByRole("button", { name: "Link" }).map((b) => b.closest("div.flex").textContent);
+    expect(rows[0]).toContain("John Doe");
+    expect(rows[0]).toContain("phone matches");
+    expect(rows[1]).toContain("Jane Doe");
+    expect(rows[1]).not.toContain("matches");
   });
 
   it("hides the suggestion once the address is edited, so a stale Link cannot fire", async () => {

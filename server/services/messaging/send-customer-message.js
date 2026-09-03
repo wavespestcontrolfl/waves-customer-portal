@@ -441,6 +441,8 @@ async function sendCustomerMessage(input) {
       nextAllowedAt: retryAt ? retryAt.toISOString() : undefined,
       providerErrorCode: providerOutcome.providerErrorCode,
       providerHttpStatus: providerOutcome.providerHttpStatus,
+      // true = the provider layer already raised twilio_failure for this event.
+      providerAlerted: providerOutcome.providerAlerted === true,
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,

@@ -14,6 +14,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 const { aiTriageLead } = require('../services/lead-triage');
+const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
@@ -206,8 +207,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       lastName,
       serviceInterest: submittedServiceInterest,
       serviceKey,
+      timeline,
       leadSource,
     } = intake;
+    // The visitor's declared timeline sets urgency directly; null when the
+    // form didn't ask (older cached pages) so the AI triage may still guess.
+    const declaredUrgency = urgencyForTimeline(timeline);
     // A keyed lead only when the key names a product a NEW customer may
     // choose; anything else stays a prose-only lead (service_key NULL). On a
     // keyed lead the display label is the catalog name — identity wins over
@@ -486,6 +491,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     const webhookStageBase = {
       stage: 'lead_webhook_received',
       service_interest: serviceInterest || null,
+      ...(timeline ? { timeline } : {}),
       automation: {
         leadEstimateAutomation: estimateAutomationReadiness,
         draftEstimateAutomation: null,
@@ -516,6 +522,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       service_interest: serviceInterest || null,
       service_key: leadServiceKey,
       customer_id: customer.id,
+      ...(declaredUrgency ? { urgency: declaredUrgency } : {}),
       // The visitor just submitted from a browser carrying this unit id — a
       // call-pipeline lead attaching to a web submission gains the join too.
       ...(anonId ? { anon_id: anonId } : {}),
@@ -948,6 +955,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           lead_type: 'form_submission',
           service_interest: serviceInterest || null,
           service_key: leadServiceKey,
+          ...(declaredUrgency ? { urgency: declaredUrgency } : {}),
           extracted_data: JSON.stringify(webhookStage),
           first_contact_at: new Date(),
           first_contact_channel: 'form',
@@ -1077,18 +1085,21 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             if (triageServiceInterestUpdate) {
               updates.service_interest = triageServiceInterestUpdate;
             }
-            if (triageResult.urgency) updates.urgency = triageResult.urgency;
+            // The customer's declared timeline is the authority on urgency —
+            // the triage's prose guess only fills in when the form didn't ask.
+            if (triageResult.urgency && !declaredUrgency) updates.urgency = triageResult.urgency;
             if (triageResult.extractedData) {
               // On an attached call-pipeline lead, MERGE — a wholesale replace
               // here would clobber the voicemail provenance and the text-back
               // one-shot stamp the attach just preserved. The replace branch
-              // still carries forward additional_properties captured at intake
-              // (jsonb_strip_nulls drops the key when the row had none) so the
-              // triage snapshot can't erase the extra-property ask.
+              // still carries forward additional_properties and the declared
+              // timeline captured at intake (jsonb_strip_nulls drops a key the
+              // row never had) so the triage snapshot — whose schema has neither
+              // — can't erase the extra-property ask or the "Wants service" line.
               updates.extracted_data = attachedCallLead
                 ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
                 : db.raw(
-                  "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties')) || ?::jsonb",
+                  "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline')) || ?::jsonb",
                   [JSON.stringify(triageResult.extractedData)]
                 );
             }
@@ -1581,6 +1592,9 @@ function buildLeadWebhookIntake(body = {}) {
   const lastName = capitalizeName(normalizedName.last_name || '');
   const serviceInterest = normalizeLeadServiceInterest(body);
   const serviceKey = normalizeLeadServiceKey(body);
+  // Declared "when do you want this handled?" — exact key only (a substring
+  // sweep would catch address/attribution fields, same trap as `message`).
+  const timeline = normalizeTimeline(body.timeline ?? body['Timeline']);
   const leadSource = determineLeadSource(
     attribution.pageUrl,
     attribution.landingUrl,
@@ -1610,6 +1624,7 @@ function buildLeadWebhookIntake(body = {}) {
     lastName,
     serviceInterest,
     serviceKey,
+    timeline,
     leadSource,
     // Free-prose message body — the readiness gate's commercial-signal scan
     // reads it (a residential form whose own words describe a commercial

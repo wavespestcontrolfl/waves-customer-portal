@@ -78,6 +78,7 @@ describe('stageLifecycleStamps', () => {
   test('lateral archive moves preserve churn history (past_customer → dormant/lost)', () => {
     const toDormant = stageLifecycleStamps('past_customer', 'dormant', { churned_at: '2026-03-01' }, { today: TODAY });
     expect(toDormant).not.toHaveProperty('churned_at');
+    expect(toDormant).not.toHaveProperty('churn_episode_id');
     expect(toDormant).not.toHaveProperty('churn_reason');
     const toLost = stageLifecycleStamps('past_customer', 'lost', { churned_at: '2026-03-01' }, { today: TODAY });
     expect(toLost).not.toHaveProperty('churned_at');
@@ -104,6 +105,8 @@ describe('stageLifecycleStamps', () => {
     const s = stageLifecycleStamps('churned', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
     expect(s.churned_at).toBeNull();
     expect(s.churn_reason).toBeNull();
+    // The churn EPISODE (cancellation-processor mints it) ends here too.
+    expect(s.churn_episode_id).toBeNull();
   });
 
   test('clears a stale churned_at even when the old stage was not churned', () => {

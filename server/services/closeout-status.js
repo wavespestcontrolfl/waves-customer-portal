@@ -108,6 +108,10 @@ const INVOICE_DELIVERED_STATUSES = new Set(['sent', 'viewed', 'overdue', 'paid',
 // 'prepaid' = settled from account credit / prepayment; invoice.js refuses to
 // send one, so no delivery is owed (pre-push codex r4).
 const INVOICE_SETTLED_STATUSES = new Set(['paid', 'prepaid']);
+// Paid-receipt enqueue grace (owner ruling 2026-09-03, #3776 follow-up):
+// a paid invoice with no receipt job younger than this reads as
+// pending_enqueue, not as an operator gap.
+const RECEIPT_ENQUEUE_GRACE_MS = 5 * 60 * 1000;
 // Report delivery queue statuses (service_report_deliveries.status).
 const DELIVERY_TERMINAL_OK = new Set(['sent']);
 const DELIVERY_TERMINAL_SKIPPED = new Set(['skipped', 'cancelled', 'canceled']);
@@ -914,8 +918,19 @@ function deriveCloseoutFacts(inputs) {
     const sentAt = isoOrNull(inv.sent_at);
     const smsSentAt = isoOrNull(inv.sms_sent_at);
     const receiptSentAt = isoOrNull(inv.receipt_sent_at);
-    const evidence = { invoiceId: inv.id, status, sentAt, smsSentAt, receiptSentAt, ...(live ? {} : { source: 'sibling_first_application' }) };
-    if (status === 'prepaid') invoiceDelivery = fact('done', 'prepaid', evidence);
+    // email_sent_at is stamped by invoice-email.js on provider acceptance,
+    // BEFORE the dispatch-side markDeliverySent (which can fail after the
+    // send) — durable delivery evidence for a payer invoice (#3776 r4 P2).
+    const emailSentAt = isoOrNull(inv.email_sent_at);
+    const paidAt = isoOrNull(inv.paid_at);
+    const evidence = { invoiceId: inv.id, status, sentAt, smsSentAt, emailSentAt, receiptSentAt, paidAt, ...(live ? {} : { source: 'sibling_first_application' }) };
+    // A child invoice accrued to a NET payer's monthly statement is never
+    // sent (or receipted) individually — admin-invoices refuses the
+    // individual send for rows with payer_statement_id; the statement owns
+    // delivery in EVERY status, prepaid and paid-after-settlement included
+    // (#3776 r2 P2), so this outranks the status branches below.
+    if (inv.payer_statement_id) invoiceDelivery = fact('not_required', 'statement_accrued', { ruleSource: 'payer_statement', ...evidence, payerStatementId: inv.payer_statement_id });
+    else if (status === 'prepaid') invoiceDelivery = fact('done', 'prepaid', evidence);
     else if (INVOICE_SETTLED_STATUSES.has(status)) {
       // Paid ≠ receipted: receipt_sent_at is stamped only on confirmed
       // delivery; the queue row says where an unstamped receipt stands.
@@ -935,9 +950,15 @@ function deriveCloseoutFacts(inputs) {
       }
       else if (jobStatus === 'failed') invoiceDelivery = fact('failed', 'receipt_delivery_exhausted', { ...evidence, receiptJobId: job.id, attempts: toNumber(job.attempts), lastError: scrubErrorText(job.last_error) });
       else if (jobStatus) invoiceDelivery = fact('pending', `receipt_${jobStatus}`, { ...evidence, receiptJobId: job.id, nextAttemptAt: isoOrNull(job.next_attempt_at) });
+      // The Stripe success handler stamps paid_at before it enqueues the
+      // receipt job (several awaited side effects later) — a read inside
+      // that window is not an operator gap (#3776 r1 P2). Older, no
+      // paid_at to age against, or a FUTURE paid_at (clock skew / bad data
+      // must not suppress a real gap) is a genuinely never-enqueued receipt.
+      else if (paidAt && (() => { const age = now.getTime() - new Date(paidAt).getTime(); return age >= 0 && age < RECEIPT_ENQUEUE_GRACE_MS; })()) invoiceDelivery = fact('pending', 'paid_receipt_pending_enqueue', evidence);
       else invoiceDelivery = fact('pending', 'paid_receipt_not_sent', evidence);
     }
-    else if (inv.payer_id) invoiceDelivery = fact(sentAt ? 'done' : 'pending', sentAt ? 'payer_invoice_sent' : 'payer_invoice_unsent', evidence);
+    else if (inv.payer_id) invoiceDelivery = fact((sentAt || emailSentAt) ? 'done' : 'pending', (sentAt || emailSentAt) ? 'payer_invoice_sent' : 'payer_invoice_unsent', evidence);
     else if (sentAt || smsSentAt || INVOICE_DELIVERED_STATUSES.has(status)) invoiceDelivery = fact('done', 'invoice_delivered', evidence);
     else if (smsStatus === 'deferred') invoiceDelivery = fact('pending', 'deferred_send_window', { ...evidence, completionSmsStatus: smsStatus });
     else if (smsStatus === 'failed') invoiceDelivery = fact('failed', 'completion_sms_failed', { ...evidence, completionSmsStatus: smsStatus });

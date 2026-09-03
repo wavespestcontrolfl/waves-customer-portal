@@ -7555,6 +7555,11 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+    // Set by WHICHEVER lane files the missing_unit_number card (enforce
+    // advisory loop or the shadow bridge) — the completed-call clarify ask
+    // below reads it, so the ask does not depend on the routing mode
+    // (codex r1 P1 on #3775).
+    let clarifyUnitOwed = false;
     // In-run email-review signal: set the moment either bridge branch decides
     // the extracted email needs read-back, BEFORE any card insert — so a
     // failed triage insert cannot release the first-touch email hold below.
@@ -7862,6 +7867,7 @@ const CallRecordingProcessor = {
           // identity signals the shadow bridge used to surface. onConflict dedups
           // against the blocked-branch inserts below.
           for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
+            if (flag === 'missing_unit_number') clarifyUnitOwed = true;
             await db('triage_items')
               .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory', addressValidation }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
@@ -8187,6 +8193,7 @@ const CallRecordingProcessor = {
               // of truth for the address, and the bridge only files this ask
               // when AV's building corroborates it.
               if (flag === 'missing_unit_number') {
+                clarifyUnitOwed = true;
                 await db('triage_items')
                   .insert(buildTriageItem({
                     callLogId: call.id,
@@ -11462,6 +11469,97 @@ const CallRecordingProcessor = {
             logger.info(`[call-proc] Dropped call mid-intake for ${maskSid(callSid)} — review card opened (sms: ${smsOutcome.sent ? 'sent' : smsOutcome.skipped || 'skipped'})`);
           } catch (dropErr) {
             logger.warn(`[call-proc] dropped-call card/text failed (non-blocking): ${dropErr.message}`);
+          }
+        }
+
+        // Ask-the-customer loop for a COMPLETED call (GATE_ESTIMATE_CLARIFY_ASKS):
+        // the caller gave a building that validated as a real premise but
+        // no apartment/unit (bridge missing_unit_number), or no street
+        // address at all. The Triage Inbox card already asks the office
+        // to collect it; this parks ONE approval-gated clarifying text in
+        // the drafts queue so the question can go out on the owner's
+        // click instead of waiting for a callback (owner request
+        // 2026-09-03 after a tenant's roach-treatment lead at a 358-unit
+        // complex sat on a bare street address). Never sends: the draft
+        // row is the terminal artifact; the send runs through the full
+        // consent pipeline at approval. Same eligibility posture as the
+        // dropped-call text: inbound, not spam/voicemail, no
+        // do-not-contact, the inbound ANI only (implied consent is
+        // personal to it — a dictated callback number never receives it).
+        // A DROPPED call stays on its own one-shot text above — parking a
+        // second address question for the same run would let the owner
+        // send the same ask twice (codex r1 P1). The street judgment reads
+        // the CANONICAL extraction only: in shadow mode a V2-only street
+        // is deliberately not adopted, so the persisted lead is
+        // addressless and the ask must fire (codex r1 P1).
+        // Fail-soft — a clarify hiccup never breaks the call.
+        // Both DNC shapes gate it — the V2 consent object AND the legacy
+        // flat extractor field (V2 off / unavailable / schema-failed still
+        // sets the flat one) (codex r5 P1).
+        if (leadId && !droppedMidIntake && !extracted.is_spam && !extracted.is_voicemail && !isOutboundCall(call)
+          && v2Result?.extraction?.consent?.do_not_contact_request !== true
+          && extracted.do_not_contact_request !== true) {
+          try {
+            const clarifyAni = firstExternalPhone(call.from_phone);
+            const hasStreet = !!String(extracted.address_line1 || '').trim();
+            // The ACTIVE missing_unit_number card is the source of truth for
+            // the unit ask (codex post-trim r2 P1 ×2): on a reprocess the
+            // card insert above no-ops against the open card, so (a) the
+            // building the customer is asked about must be the one on that
+            // surviving card, not this run's validation, and (b) a card
+            // that already carries the customer's texted reply is answered
+            // — parkClarifyAsk lets a consumed ask fall through to a fresh
+            // one, so the dedupe has to happen here.
+            let unitCard = null;
+            if (clarifyUnitOwed) {
+              const row = await db('triage_items')
+                .where({ call_log_id: call.id, reason_code: 'missing_unit_number' })
+                .whereIn('status', ['open', 'in_progress'])
+                .first('payload');
+              let payload = row?.payload;
+              if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
+              unitCard = row ? { answered: !!payload?.customer_reply_unit, building: payload?.unit_ask_building || null } : null;
+            }
+            const unitOwed = !!unitCard && !unitCard.answered;
+            // The street ask is a NEW-prospect ask (same posture as the
+            // dropped-call text): an existing customer's saved address
+            // would retire it at approval, and the second-property case
+            // belongs to the office callback.
+            const streetOwed = !clarifyUnitOwed && !hasStreet && (!customerId || createdCustomerFromCall === true);
+            const clarifyMissing = unitOwed ? ['unit_number'] : (streetOwed ? ['street_address'] : []);
+            if (clarifyUnitOwed && !unitOwed) {
+              logger.info(`[call-proc] clarify unit ask skipped for ${maskSid(callSid)}: ${unitCard ? 'customer already replied on the card' : 'no active card'}`);
+            }
+            if (clarifyAni && clarifyMissing.length) {
+              // A durable draft must not outlive a lost claim: a peer may
+              // have reprocessed the call as spam/DNC meanwhile (codex r1
+              // P2 — same fence as the dropped-call text).
+              if (!(await stillOwnsClaim())) return abandonToPeer('the completed-call clarify draft');
+              const { parkClarifyAsk } = require('./estimate-clarify-asks');
+              const n = v2AddressValidation?.normalized || {};
+              const unitAskBuilding = unitOwed ? (unitCard.building?.street_line_1 ? unitCard.building : {
+                street_line_1: n.street_line_1 || extracted.address_line1 || null,
+                city: n.city || extracted.city || null,
+                postal_code: n.postal_code || extracted.zip || null,
+              }) : null;
+              const parked = await parkClarifyAsk({
+                missing: clarifyMissing,
+                phone: clarifyAni,
+                firstName: extracted.first_name || null,
+                customerId: customerId || null,
+                leadId,
+                callLogId: call.id,
+                source: unitOwed ? 'call_missing_unit_number' : 'call_missing_service_address',
+                channelProvenance: 'voice',
+                unitAskBuilding,
+                contextSummary: unitOwed
+                  ? `Caller gave ${unitAskBuilding.street_line_1 || 'the building'} but no apartment/unit number (call ${maskSid(callSid)}). Clarifying text drafted — approve to send; the Triage Inbox card keeps its verdict.`
+                  : `Caller gave no service address (call ${maskSid(callSid)}). Clarifying text drafted — approve to send.`,
+              });
+              logger.info(`[call-proc] clarify ask for ${maskSid(callSid)}: ${parked.parked ? `parked ${parked.draftId}` : parked.skipped}`);
+            }
+          } catch (clarifyErr) {
+            logger.warn(`[call-proc] clarify ask failed (non-blocking): ${clarifyErr.message}`);
           }
         }
 

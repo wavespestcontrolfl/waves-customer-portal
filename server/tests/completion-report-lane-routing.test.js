@@ -1,4 +1,8 @@
-const { completionUsesReportLane, reportV1InvoiceBodyCarriesPayLink } = require('../routes/admin-dispatch')._test;
+const {
+  completionUsesReportLane,
+  reportV1InvoiceBodyCarriesPayLink,
+  completionSmsWithheldForMissingReportToken,
+} = require('../routes/admin-dispatch')._test;
 const smsTemplates = require('../routes/admin-sms-templates');
 const { serviceReportV1SmsType } = require('../services/service-report/delivery');
 
@@ -134,5 +138,39 @@ describe('completionUsesReportLane', () => {
           .toBe(reportLaneEnabled && !usePaidCompletionTemplate);
       }
     }
+  });
+});
+
+// The completion handler itself is not unit-drivable (it is a multi-thousand
+// line route with live DB/Stripe/Twilio side effects), so the withhold
+// decision is pinned as the pure predicate the route calls ahead of the SMS
+// lane. The defect: ensureReportToken threw, reportUrl stayed the portal HOME,
+// and the report-v1 template still texted "your report is ready" around it.
+describe('completionSmsWithheldForMissingReportToken', () => {
+  test('report-v1 visit with no token → withheld (no "report ready" text without a report link)', () => {
+    expect(completionSmsWithheldForMissingReportToken({
+      serviceReportV1Delivery: true, typedDeliveryMode: 'auto_send', reportToken: null,
+    })).toBe(true);
+    expect(completionSmsWithheldForMissingReportToken({
+      serviceReportV1Delivery: true, typedDeliveryMode: null, reportToken: '',
+    })).toBe(true);
+  });
+
+  test('report-v1 visit with a minted token → sends as before', () => {
+    expect(completionSmsWithheldForMissingReportToken({
+      serviceReportV1Delivery: true, typedDeliveryMode: 'auto_send', reportToken: 'a'.repeat(32),
+    })).toBe(false);
+  });
+
+  test('legacy (non-report-v1) visit is never withheld — its portal-home link is the visit detail', () => {
+    expect(completionSmsWithheldForMissingReportToken({
+      serviceReportV1Delivery: false, typedDeliveryMode: 'auto_send', reportToken: null,
+    })).toBe(false);
+  });
+
+  test("delivery_mode 'disabled' never mints and never texts — not a withhold", () => {
+    expect(completionSmsWithheldForMissingReportToken({
+      serviceReportV1Delivery: true, typedDeliveryMode: 'disabled', reportToken: null,
+    })).toBe(false);
   });
 });

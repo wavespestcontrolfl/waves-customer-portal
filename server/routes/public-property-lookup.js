@@ -12,6 +12,7 @@ const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { verifyTurnstileToken } = require('../utils/turnstile');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
+const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
 const { isEnabled } = require('../config/feature-gates');
 
 // Aggressive rate limit — each lookup spends real AI + Google Maps dollars.
@@ -288,10 +289,16 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     const anonId = sanitizeAnonUnitId(attr?.anon_id);
     const sourceMeta = await resolveLeadSource(attr);
     const serviceInterest = normalizeServiceInterest(req.body || {});
+    // Declared "when do you want this handled?" (quote-form tile). Persisted
+    // verbatim in extracted_data and mapped onto leads.urgency; null when the
+    // form didn't ask, so nothing is guessed.
+    const timeline = normalizeTimeline(req.body?.timeline);
+    const declaredUrgency = urgencyForTimeline(timeline);
 
     const startedStage = {
       stage: 'property_lookup_started',
       service_interest: serviceInterest || null,
+      ...(timeline ? { timeline } : {}),
       utm: attr?.utm || null,
       clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
       referrer: attr?.referrer || null,
@@ -330,6 +337,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             city: normalizedAddress.city || zipToCity(normalizedAddress.zip) || null,
             zip: normalizedAddress.zip || null,
             ...(serviceInterest ? { service_interest: serviceInterest } : {}),
+            ...(declaredUrgency ? { urgency: declaredUrgency } : {}),
             ...(anonId ? { anon_id: anonId } : {}),
             // A lead the office parked as 'unresponsive' just responded — the
             // admin UI buckets that status as closed, so reopen it or the
@@ -374,6 +382,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         fbp,
         anon_id: anonId,
         service_interest: serviceInterest || null,
+        ...(declaredUrgency ? { urgency: declaredUrgency } : {}),
         extracted_data: JSON.stringify(startedStage),
       }).returning(['id']);
     }
@@ -398,6 +407,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         avm: result.avm || null,
         ai_sources: result.aiAnalysis?._sources || null,
         service_interest: serviceInterest || null,
+        ...(timeline ? { timeline } : {}),
         utm: attr?.utm || null,
         clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
         referrer: attr?.referrer || null,

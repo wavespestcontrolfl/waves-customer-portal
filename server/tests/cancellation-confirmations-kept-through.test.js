@@ -13,20 +13,28 @@ const mockEmail = jest.fn().mockResolvedValue({ ok: true });
 jest.mock('../services/account-membership-email', () => ({ sendCancellationReceived: (...a) => mockEmail(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // Send-once probe (messaging_audit_log): default = no prior accepted send.
+// The probe's raw predicates are recorded so a test can assert whether the
+// term clause was (not) added.
 let mockPriorSmsRow = null;
-jest.mock('../models/db', () => jest.fn(() => ({
-  where() { return this; },
-  whereNotNull() { return this; },
-  whereRaw() { return this; },
-  first: async () => mockPriorSmsRow,
-})));
+let mockProbeSql = [];
+jest.mock('../models/db', () => jest.fn(() => {
+  const b = {
+    where(c) { if (typeof c === 'function') c.call(b); return b; },
+    whereNotNull() { return b; },
+    whereRaw(sql, bindings) { mockProbeSql.push([sql, bindings]); return b; },
+    orWhereRaw(sql, bindings) { mockProbeSql.push([sql, bindings]); return b; },
+    first: async () => mockPriorSmsRow,
+  };
+  return b;
+}));
 
 const { sendCancellationConfirmations } = require('../services/cancellation-confirmations');
 
 const customer = { id: 'cust-1', first_name: 'Pat', phone: '+15550000000' };
 const request = { id: 'req-1', created_at: new Date('2026-08-31T14:00:00Z') };
 
-beforeEach(() => { mockSend.mockClear(); mockRender.mockClear(); mockEmail.mockClear(); mockPriorSmsRow = null; });
+beforeEach(() => { mockSend.mockClear(); mockRender.mockClear(); mockEmail.mockClear(); mockPriorSmsRow = null; mockProbeSql = []; });
+const termClause = () => mockProbeSql.find(([sql]) => sql.includes('prepay_term_id'));
 
 test('keptThrough whole-account: end-of-term template, email told the date and that visits stay', async () => {
   const out = await sendCancellationConfirmations({
@@ -78,4 +86,45 @@ test('a retry whose SMS already accepted for this request+template skips the res
   expect(mockSend).not.toHaveBeenCalled();
   // The email leg still runs (its own class-keyed idempotency dedupes it).
   expect(mockEmail).toHaveBeenCalled();
+});
+
+const EP = '2026-09-01T12:00:00.000Z';
+
+test('end-of-term with a prepaid term + episode: send-once probes (term, episode) too; the audit row and the email carry both', async () => {
+  await sendCancellationConfirmations({
+    customer, request, result: { scope: [] }, processed: true,
+    effectiveAt: '2027-02-28T12:00:00-05:00', keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: EP,
+  });
+  expect(termClause()).toEqual([expect.stringContaining("churn_episode"), ['term-1', EP]]);
+  expect(mockSend.mock.calls[0][0].metadata).toEqual(expect.objectContaining({ prepay_term_id: 'term-1', churn_episode: EP, service_request_id: 'req-1' }));
+  expect(mockEmail).toHaveBeenCalledWith(expect.objectContaining({ keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: EP }));
+});
+
+test('a prior end-of-term send for the SAME (term, episode) under an earlier request skips the resend', async () => {
+  // A repeat end-of-coverage commit after the admin latch's 24h echo window
+  // opens a NEW request; the audit log still shows the term already told.
+  mockPriorSmsRow = { id: 'audit-term' };
+  const out = await sendCancellationConfirmations({
+    customer, request: { id: 'req-2', created_at: request.created_at }, result: { scope: [] }, processed: true,
+    effectiveAt: '2027-02-28T12:00:00-05:00', keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: EP,
+  });
+  expect(out.smsSent).toBe(true);
+  expect(mockSend).not.toHaveBeenCalled();
+  expect(mockEmail).toHaveBeenCalledWith(expect.objectContaining({ prepayTermId: 'term-1', termEpisodeKey: EP }));
+});
+
+test('the term clause is only added for the end-of-term class with an episode — immediate, by-hand and unanchored stay request-keyed', async () => {
+  await sendCancellationConfirmations({ customer, request, result: { scope: [] }, processed: true, prepayTermId: 'term-1', termEpisodeKey: EP });
+  expect(termClause()).toBeUndefined();
+  mockProbeSql = [];
+  await sendCancellationConfirmations({ customer, request, result: null, processed: false, keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: EP });
+  expect(termClause()).toBeUndefined();
+  mockProbeSql = [];
+  // A term without an episode (unanchored churn) — request-keyed.
+  await sendCancellationConfirmations({ customer, request, result: { scope: [] }, processed: true, keptThrough: true, prepayTermId: 'term-1' });
+  expect(termClause()).toBeUndefined();
+  mockProbeSql = [];
+  // keptThrough without a term (no prepaid term resolved) — request-keyed.
+  await sendCancellationConfirmations({ customer, request, result: { scope: [] }, processed: true, keptThrough: true });
+  expect(termClause()).toBeUndefined();
 });
