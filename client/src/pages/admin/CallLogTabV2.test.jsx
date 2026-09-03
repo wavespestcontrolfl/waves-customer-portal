@@ -18,6 +18,8 @@ describe("CallLogTabV2 standalone navigation", () => {
       ok: true,
       json: async () => String(url).includes("route-calibration")
         ? {}
+        : String(url).includes("/admin/call-recordings/stats")
+        ? { processing: 1, stalledClaims: 0, failed: 2, retrying: 1, reviewOpen: 3, parkedRecordings: 0, oldestUnfinishedMinutes: 12, p50PassMs7d: 41000 }
         : {
             calls: [{
               id: "call-1",
@@ -177,5 +179,30 @@ describe("renderTranscriptWithHighlight", () => {
     const { container } = render(<p>{renderTranscriptWithHighlight("Agent: fixture line.", "not here", "c1")}</p>);
     expect(container.querySelector("mark")).toBeNull();
     expect(container.textContent).toBe("Agent: fixture line.");
+  });
+});
+
+describe("pipeline health line", () => {
+  beforeEach(() => {
+    localStorage.setItem("waves_admin_token", "t");
+    vi.stubGlobal("fetch", vi.fn(async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => String(url).includes("/admin/call-recordings/stats")
+        ? { processing: 1, stalledClaims: 0, failed: 2, retrying: 1, reviewOpen: 3, parkedRecordings: 0, oldestUnfinishedMinutes: 12, p50PassMs7d: 41000 }
+        : String(url).includes("route-calibration") ? {} : { calls: [] },
+    })));
+  });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  it("renders the processing pipeline's live state from the stats endpoint", async () => {
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    const line = await screen.findByTestId("pipeline-health");
+    expect(line.textContent).toContain("1 processing");
+    expect(line.textContent).toContain("2 failed (1 retrying)");
+    expect(line.textContent).toContain("3 in review");
+    expect(line.textContent).toContain("oldest unfinished 12 min");
+    expect(line.textContent).toContain("0 stale claims");
+    expect(line.textContent).toContain("p50 pass 41 s (7d)");
   });
 });

@@ -335,6 +335,14 @@ export default function CallLogTabV2() {
   const navigate = useNavigate();
   const [calls, setCalls] = useState([]);
   const [routeCalibration, setRouteCalibration] = useState(null);
+  // The processing pipeline's live state (GET /admin/call-recordings/stats):
+  // what is running, what is stuck, what failed and will retry, what waits on
+  // the office — readable here instead of a SQL console.
+  const [pipeline, setPipeline] = useState(null);
+  // Play-from-evidence: the intelligence panel names a moment (a quote's
+  // diarized start_ms); the call's audio seeks there and plays through the
+  // player's shared seekTo(seconds) handle (same handle the synced-transcript
+  // work uses), so there is one seek path, not a parallel one.
   const [loading, setLoading] = useState(true);
   const [callTo, setCallTo] = useState("");
   const [callToSearch, setCallToSearch] = useState("");
@@ -492,8 +500,9 @@ export default function CallLogTabV2() {
     return Promise.allSettled([
       adminFetch(`/ai/admin/calls${q}`),
       adminFetch("/ai/admin/calls/route-calibration?days=30"),
+      adminFetch("/admin/call-recordings/stats"),
     ])
-      .then(([callsResult, calibrationResult]) => {
+      .then(([callsResult, calibrationResult, statsResult]) => {
         if (seq !== loadSeqRef.current) return; // superseded
         if (callsResult.status !== "fulfilled") throw callsResult.reason;
         const d = callsResult.value;
@@ -502,6 +511,9 @@ export default function CallLogTabV2() {
         pinnedFetchRef.current = null;
         if (calibrationResult.status === "fulfilled") {
           setRouteCalibration(calibrationResult.value);
+        }
+        if (statsResult.status === "fulfilled" && statsResult.value && typeof statsResult.value === "object") {
+          setPipeline(statsResult.value);
         }
         setLoading(false);
       })
@@ -1076,6 +1088,34 @@ export default function CallLogTabV2() {
           </CardBody>{" "}
         </Card>
       )}
+      {pipeline && (
+        <Card>
+          <CardBody>
+            <div className="flex items-center gap-3 flex-wrap text-13 md:text-12 text-ink-secondary" data-testid="pipeline-health">
+              <span className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary">Pipeline</span>
+              <span><span className="font-mono u-nums text-ink-primary">{Number(pipeline.processing) || 0}</span> processing</span>
+              {/* Named for what the counter measures — claims whose heartbeat
+                  went quiet — not the watchdog's wider "stalled" (which also
+                  counts old NULL/pending rows); Codex #3733 P2. */}
+              <span className={Number(pipeline.stalledClaims) > 0 ? "text-amber-700" : ""}><span className="font-mono u-nums">{Number(pipeline.stalledClaims) || 0}</span> stale claims</span>
+              <span className={Number(pipeline.failed) > 0 ? "text-amber-700" : ""}><span className="font-mono u-nums">{Number(pipeline.failed) || 0}</span> failed ({Number(pipeline.retrying) || 0} retrying)</span>
+              <span><span className="font-mono u-nums text-ink-primary">{Number(pipeline.reviewOpen) || 0}</span> in review</span>
+              <span><span className="font-mono u-nums text-ink-primary">{Number(pipeline.parkedRecordings) || 0}</span> parked recordings</span>
+              {/* Mirrors the stall watchdog's eligibility: the metric counts
+                  a row still carrying audio AND a PAN-quarantined call whose
+                  masked transcript is still processable but has no audio (the
+                  r18 change). "with audio" would overclaim the quarantined
+                  case, so the label just says "unfinished" (Codex #3733 P2). */}
+              {pipeline.oldestUnfinishedMinutes != null && (
+                <span className={Number(pipeline.oldestUnfinishedMinutes) > 30 ? "text-amber-700" : ""}>oldest unfinished <span className="font-mono u-nums">{Math.round(Number(pipeline.oldestUnfinishedMinutes))}</span> min</span>
+              )}
+              {pipeline.p50PassMs7d != null && (
+                <span>p50 pass <span className="font-mono u-nums">{Math.round(Number(pipeline.p50PassMs7d) / 1000)}</span> s (7d)</span>
+              )}
+            </div>
+          </CardBody>
+        </Card>
+      )}
       {routeCalibration && (
         <Card>
           <CardBody>
@@ -1641,6 +1681,7 @@ export default function CallLogTabV2() {
                       callId={c.id}
                       defaultOpen={focusCallId === c.id}
                       onJumpToQuote={c.transcription ? (quote) => jumpToQuote(c.id, quote) : null}
+                      onPlayAt={c.recording_available ? (ms) => playerRefs.current.get(c.id)?.seekTo(ms / 1000) : null}
                       onCallChanged={() => loadCalls(callLogSearch.trim())}
                       refreshKey={[c.processing_status, c.processing_generation, c.updated_at].map((v) => v ?? "").join("|")}
                     />
