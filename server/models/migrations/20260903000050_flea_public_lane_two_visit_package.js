@@ -21,13 +21,16 @@
  *    the package's second visit instead of nothing. 20260825000011 refused
  *    to alias flea_package onto this row precisely because it had no
  *    follow-up policy; this is what makes the alias below honest.
- *    GRANDFATHERING: a flea_tick appointment already on the books was sold
- *    under the single-visit contract and must keep it, so the flip is
- *    DEFERRED while any open (non-terminal) flea_tick scheduled service
- *    exists — the profile stays 'none', the deferral is recorded in the
- *    migration state, and a later run of up() (or a follow-up migration)
- *    applies it once those jobs have closed. Prod 2026-09-03 carries 0
- *    open flea_tick jobs, so prod flips on deploy.
+ *    CUTOVER IS DETERMINISTIC (a deferred flip has no consumer once knex
+ *    marks the migration done): the policy flips now. A flea_tick
+ *    appointment already on the books under the single-visit contract keeps
+ *    everything that contract carries — the ALERT policy only PARKS a
+ *    dismissible follow_up_needed card at closeout; the $0 included follow-up
+ *    child is booked solely by a staff tap on that card
+ *    (POST /:serviceId/schedule-followup), never automatically, and billing
+ *    is untouched (followup_included stays false). The count of such open
+ *    jobs is recorded in the migration state and logged so the office knows
+ *    which cards to dismiss. Prod 2026-09-03 carries 0 open flea_tick jobs.
  *
  * 3. services.flea_tick — engine_keys ['flea_knockdown_single'] (stamped by
  *    20260825000011, an engine key nothing prices any more) → ['flea_package']
@@ -68,7 +71,8 @@ const FOLLOWUP_DAYS = 14;
 const CLOSED_JOB_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 
 // Open flea_tick appointments sold before this cutover (single-visit
-// contract). While any exist the follow-up policy must not flip.
+// contract) — recorded + logged so their closeout cards are known to be
+// dismissible (see header).
 async function openLegacyFleaJobs(knex) {
   if (!(await knex.schema.hasTable('scheduled_services'))) return 0;
   const row = await knex('scheduled_services as ss')
@@ -144,7 +148,7 @@ exports.up = async function up(knex) {
     }
   }
 
-  const state = { profile: null, profileDeferred: null, stamped: [] };
+  const state = { profile: null, stamped: [] };
 
   if (await knex.schema.hasTable('service_completion_profiles')) {
     // Profiles are keyed by service_key (no surrogate id).
@@ -154,16 +158,17 @@ exports.up = async function up(knex) {
     if (profile && (!profile.followup_policy || profile.followup_policy === 'none')) {
       const openJobs = await openLegacyFleaJobs(knex);
       if (openJobs > 0) {
-        // Fail closed for the appointments already sold as single visits:
-        // keep their contract, record why, flip later (see header).
-        state.profileDeferred = { openLegacyJobs: openJobs, checkedAt: new Date().toISOString() };
-        console.warn(`[migration 20260903000050] flea_tick follow-up policy NOT flipped: ${openJobs} open flea_tick job(s) still carry the single-visit contract; re-run once they close.`);
-      } else {
-        await knex('service_completion_profiles')
-          .where({ service_key: SERVICE_KEY })
-          .update({ followup_policy: FOLLOWUP_POLICY, default_followup_days: FOLLOWUP_DAYS, updated_at: knex.fn.now() });
-        state.profile = { service_key: SERVICE_KEY, followup_policy: profile.followup_policy || null, default_followup_days: profile.default_followup_days ?? null };
+        console.warn(`[migration 20260903000050] ${openJobs} open flea_tick job(s) were sold as single visits: their closeout will park a follow_up_needed card — dismiss it; nothing books or bills without a staff tap.`);
       }
+      await knex('service_completion_profiles')
+        .where({ service_key: SERVICE_KEY })
+        .update({ followup_policy: FOLLOWUP_POLICY, default_followup_days: FOLLOWUP_DAYS, updated_at: knex.fn.now() });
+      state.profile = {
+        service_key: SERVICE_KEY,
+        followup_policy: profile.followup_policy || null,
+        default_followup_days: profile.default_followup_days ?? null,
+        openLegacyJobsAtCutover: openJobs,
+      };
     }
   }
 
@@ -200,7 +205,6 @@ exports.up = async function up(knex) {
   const prior = await loadState(knex);
   await saveState(knex, {
     profile: state.profile || prior?.profile || null,
-    profileDeferred: state.profile ? null : (state.profileDeferred || prior?.profileDeferred || null),
     stamped: [...new Map([...(prior?.stamped || []), ...state.stamped].filter((r) => r && r.id).map((r) => [r.id, r])).values()],
   });
 };
