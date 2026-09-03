@@ -91,9 +91,17 @@ function treeShrubPalmProvenanceForReplay(estData = {}) {
     : (estData?.result?.results?.tsMeta || null);
   const hasMappedTs = !!tsMeta || (Array.isArray(result?.results?.ts) && result.results.ts.length > 0);
   if (!tsLine && !hasMappedTs) return null;
-  // The MAPPED stamp wins over a stale raw agent-draft line (see the knob
-  // signal above for why).
-  const source = (tsMeta && tsMeta.palmCountSource) || (tsLine && tsLine.palmCountSource) || null;
+  // The MAPPED envelope is authoritative and EXCLUSIVE whenever it exists
+  // (see the knob signal above for why): a revision replaces result but
+  // leaves an agent draft's original raw engineResult in place, so a raw
+  // line marked service_line can be older than mapped columns that priced
+  // no service-line palms — falling through to it would re-promote the
+  // count on replay (pre-push r5 P0). A mapped envelope with no palm stamp
+  // (pre-v4.7 tsMeta, or ts rows alone) is a legacy line; the raw line is
+  // consulted only when there is no mapped result at all.
+  const source = hasMappedTs
+    ? ((tsMeta && tsMeta.palmCountSource) || null)
+    : ((tsLine && tsLine.palmCountSource) || null);
   return source === 'service_line' ? 'service_line' : 'legacy';
 }
 

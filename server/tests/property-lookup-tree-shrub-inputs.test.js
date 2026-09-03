@@ -178,6 +178,22 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
       expect(treeShrubPalmProvenanceForReplay(stored({ eb: 1200, et: 3 }))).toBe('legacy');
       // Raw agent-draft line without a mapped envelope.
       expect(treeShrubPalmProvenanceForReplay({ engineResult: { lineItems: [{ service: 'tree_shrub', palmCountSource: 'service_line' }] } })).toBe('service_line');
+      // The mapped envelope is EXCLUSIVE: a stale raw draft line marked
+      // service_line never outranks a mapped result that priced none (a
+      // revision replaces result but keeps the draft's engineResult).
+      expect(treeShrubPalmProvenanceForReplay({
+        ...stored({ eb: 1200, et: 3 }),
+        engineResult: { lineItems: [{ service: 'tree_shrub', palmCountSource: 'service_line' }] },
+      })).toBe('legacy');
+      expect(treeShrubPalmProvenanceForReplay({
+        ...stored({ eb: 1200, et: 3, palmCountSource: 'property' }),
+        engineResult: { lineItems: [{ service: 'tree_shrub', palmCountSource: 'service_line' }] },
+      })).toBe('legacy');
+      // Mapped ts rows with no tsMeta at all are a legacy line too.
+      expect(treeShrubPalmProvenanceForReplay({
+        result: { results: { ts: [{ tier: 'standard', selected: true }] } },
+        engineResult: { lineItems: [{ service: 'tree_shrub', palmCountSource: 'service_line' }] },
+      })).toBe('legacy');
       // No T&S sold at all → the translator output stands.
       expect(treeShrubPalmProvenanceForReplay({ result: { results: { pestTiers: [] } } })).toBeNull();
       expect(treeShrubPalmProvenanceForReplay({})).toBeNull();
