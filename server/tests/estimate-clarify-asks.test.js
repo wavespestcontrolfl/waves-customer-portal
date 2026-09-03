@@ -1915,6 +1915,15 @@ describe('unit hold (GATE_CLARIFY_UNIT_WRITEBACK — PR C2a: call-row fence + ev
     expect(stamps().find((f) => f.unit_hold).unit_hold.estimate_ids).toEqual(['est-sending']);
   });
 
+  test('a lead line with only a STRUCTURAL component ("Bldg 9, 1048 …") still lacks the apartment: the dwelling unit is added, the building part kept', async () => {
+    await reply({ leadRow: { id: 'lead-1', address: 'Bldg 9, 1048 Example Lakes Cir, Sarasota, FL 34232' } });
+    const lead = mockState.updates.find((u) => u.table === 'leads');
+    expect(lead).toBeDefined();
+    expect(lead.payload.address).toMatch(/Apt 204/);
+    expect(lead.payload.address).toMatch(/Bldg 9/);
+    expect(stamps().at(-1).unit_writeback.lead).toBe('unit_added');
+  });
+
   test('write-back with a unit-first CRM line ("Apt 9, 1048 …") never adds a second unit to the lead or the customer', async () => {
     await reply({
       leadRow: { id: 'lead-1', address: 'Apt 9, 1048 Example Lakes Cir, Sarasota, FL 34232' },

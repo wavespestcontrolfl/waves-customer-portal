@@ -420,6 +420,38 @@ function unitAnywhereOnLine(value) {
   return splitUnitFirstLine(value)?.unit || splitStreetLineUnit(value).unit || '';
 }
 
+// A unit line split into its designator/value pairs, normalized:
+// "Bldg 9 Apt 204" → [{ designator: 'bldg', value: '9' }, { designator:
+// 'apt', value: '204' }]; "#204" → [{ designator: 'unit', value: '204' }].
+function unitDesignatorPairs(unitLine) {
+  const tokens = String(normalizeUnitLine(unitLine) || '').split(' ').filter(Boolean);
+  const pairs = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const key = tokens[i].replace(/\./g, '').toLowerCase();
+    if (UNIT_DESIGNATORS.has(key) && i + 1 < tokens.length) { pairs.push({ designator: key, value: tokens[i + 1] }); i += 1; }
+  }
+  return pairs;
+}
+const DWELLING_DESIGNATORS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite']);
+// The DWELLING (subpremise) part of the unit a line carries, or '' — a
+// structural component alone ("Bldg 9", "Floor 2") is a resolved
+// building, not the apartment the customer was asked for; it is
+// preserved beside the dwelling unit, never mistaken for it (pre-push
+// codex P1 on #3804).
+function dwellingUnitOnLine(value) {
+  const unit = unitAnywhereOnLine(value);
+  if (!unit) return '';
+  const pair = unitDesignatorPairs(unit).find((p) => DWELLING_DESIGNATORS.has(p.designator));
+  return pair ? normalizeUnitLine(`${pair.designator} ${pair.value}`) : '';
+}
+// The structural (non-dwelling) part of a unit line, kept when the
+// dwelling unit is replaced: "Bldg 9 Apt 9" → "Bldg 9"; "Apt 9" → ''.
+function structuralUnitPart(unitLine) {
+  return unitDesignatorPairs(unitLine)
+    .filter((p) => !DWELLING_DESIGNATORS.has(p.designator))
+    .map((p) => normalizeUnitLine(`${p.designator} ${p.value}`)).join(' ');
+}
+
 // splitStreetLineUnit plus the PLACE tail — every comma segment after the
 // street and its unit segments, joined back with ', ' ("100 Main St, Apt 4,
 // Sarasota, FL 34236" → tail "Sarasota, FL 34236"; '' when there is none).
@@ -675,6 +707,8 @@ module.exports = {
   splitStreetLineUnitParts,
   splitUnitFirstLine,
   unitAnywhereOnLine,
+  dwellingUnitOnLine,
+  structuralUnitPart,
   splitStreetAndCity,
   titleCaseWords,
   normalizeState,

@@ -332,27 +332,35 @@ function draftAmountLabel({ monthly, oneTime }) {
 // A unit the customer supplied AFTER the call (clarify write-back): the
 // re-run composes the address WITH it, since the original extraction and
 // the lead line may still describe the whole building. A line already
-// carrying the SAME unit (any spelling — the write-back formats it as its
-// own comma segment, "street, Apt 204, city") is left alone; a DIFFERENT
-// unit is the stale or misheard one the customer's answer corrects, so it
-// is replaced — never kept beside the answer.
+// carrying the SAME dwelling unit (any spelling, either position — the
+// write-back formats it as its own comma segment, "street, Apt 204,
+// city") is left alone; a DIFFERENT dwelling unit is the stale or
+// misheard one the customer's answer corrects, so it is replaced — never
+// kept beside the answer. A STRUCTURAL component ("Bldg 9", "Floor 2") is
+// a resolved building, not the apartment: it is preserved and the
+// dwelling unit is added beside it (pre-push codex P1 on #3804).
 function withUnitOverride(line, context) {
   const unit = String(context?.unitLineOverride || '').trim();
   if (!unit || !line) return line;
-  const { splitStreetLineUnitParts, unitLineValueKey, splitUnitFirstLine } = require('../../utils/address-normalizer');
+  const {
+    splitStreetLineUnitParts, unitLineValueKey, splitUnitFirstLine, dwellingUnitOnLine, structuralUnitPart,
+  } = require('../../utils/address-normalizer');
+  const rebuiltUnit = (existingUnit) => [structuralUnitPart(existingUnit), unit].filter(Boolean).join(' ');
   // The supported UNIT-FIRST form ("Apt 204, 123 Main St, …"): the splitter
   // would read the leading unit as the street and the override would be
   // doubled in front of it (codex r3 P2 on #3796). Same-unit = untouched;
   // a different one is replaced in place, the form kept.
   const unitFirst = splitUnitFirstLine(String(line));
   if (unitFirst) {
-    if (unitLineValueKey(unitFirst.unit) === unitLineValueKey(unit)) return line;
-    return `${unit}, ${unitFirst.rest}`;
+    const dwelling = dwellingUnitOnLine(String(line));
+    if (dwelling && unitLineValueKey(dwelling) === unitLineValueKey(unit)) return line;
+    return `${rebuiltUnit(unitFirst.unit)}, ${unitFirst.rest}`;
   }
   const parsed = splitStreetLineUnitParts(String(line));
   if (parsed.unit) {
-    if (unitLineValueKey(parsed.unit) === unitLineValueKey(unit)) return line;
-    return [`${parsed.street} ${unit}`, parsed.tail].filter(Boolean).join(', ');
+    const dwelling = dwellingUnitOnLine(String(line));
+    if (dwelling && unitLineValueKey(dwelling) === unitLineValueKey(unit)) return line;
+    return [`${parsed.street} ${rebuiltUnit(parsed.unit)}`, parsed.tail].filter(Boolean).join(', ');
   }
   const parts = String(line).split(',');
   parts[0] = `${parts[0].trim()} ${unit}`;

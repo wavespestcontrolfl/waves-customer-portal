@@ -487,6 +487,9 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     expect(unitAnswerFenceReason(FENCE, { address: 'Bldg 9, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
     expect(unitAnswerFenceReason(FENCE, { address: 'Floor 2, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
     expect(unitAnswerFenceReason(FENCE, { address: 'Bldg 9 Apt 9, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    // A structural component beside the answered dwelling unit is the answer; alone it is not.
+    expect(unitAnswerFenceReason(FENCE, { address: 'Bldg 9 Apt 204, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Bldg 9 Apt 204, Sarasota, FL 34232' })).toBeNull();
   });
 
   test('no address at all did not see the answer — blocked; a fence with no building blocks any unitless or differing draft', () => {

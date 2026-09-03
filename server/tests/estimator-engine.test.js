@@ -801,8 +801,19 @@ describe('review fixes', () => {
     expect(splitUnitFirstLine('Bldg 9 Apt 204, 123 Main St, Sarasota, FL 34232')).toEqual({ unit: 'Bldg 9 Apt 204', rest: '123 Main St, Sarasota, FL 34232' });
     expect(unitAnywhereOnLine('Bldg 9 Apt 204, 123 Main St, Sarasota, FL 34232')).toBe('Bldg 9 Apt 204');
     expect(unitAnywhereOnLine('Floor 2, 123 Main St')).toBe('Floor 2');
+    // A STRUCTURAL component is preserved beside the answered dwelling unit (pre-push codex P1 on #3804).
     const multiStale = { extraction: null, lead: { address: 'Bldg 9 Apt 9, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
-    expect(idxPriv.addressFromContext(multiStale)).toBe('Apt 204, 5 Other Rd, Venice, FL 34285');
+    expect(idxPriv.addressFromContext(multiStale)).toBe('Bldg 9 Apt 204, 5 Other Rd, Venice, FL 34285');
+    const structuralOnly = { extraction: null, lead: { address: 'Bldg 9, 5 Other Rd, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(structuralOnly)).toBe('Bldg 9 Apt 204, 5 Other Rd, Venice, FL 34285');
+    const structuralTrailing = { extraction: null, lead: { address: '5 Other Rd Bldg 9, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(structuralTrailing)).toBe('5 Other Rd Bldg 9 Apt 204, Venice, FL 34285');
+    const { dwellingUnitOnLine, structuralUnitPart } = require('../utils/address-normalizer');
+    expect(dwellingUnitOnLine('Bldg 9, 5 Other Rd')).toBe('');
+    expect(dwellingUnitOnLine('Bldg 9 Apt 204, 5 Other Rd')).toBe('Apt 204');
+    expect(dwellingUnitOnLine('5 Other Rd #204')).toBe('Unit 204');
+    expect(structuralUnitPart('Bldg 9 Apt 9')).toBe('Bldg 9');
+    expect(structuralUnitPart('Apt 9')).toBe('');
     // The comma-free unit-first forms the canonical matcher supports (codex r1 P2 on #3804).
     expect(splitUnitFirstLine('Apt 204 at 123 Main St, Sarasota, FL 34232')).toEqual({ unit: 'Apt 204', rest: '123 Main St, Sarasota, FL 34232' });
     expect(splitUnitFirstLine('Unit 204 123 Main St')).toEqual({ unit: 'Unit 204', rest: '123 Main St' });

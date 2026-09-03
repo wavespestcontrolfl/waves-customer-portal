@@ -300,7 +300,7 @@ async function unitTargets(trx, flags) {
 // P1 on #3785).
 async function unsentDraftsForCall(trx, callLogId, building, unitLine) {
   if (!callLogId) return [];
-  const { unitAnywhereOnLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const { dwellingUnitOnLine, unitLineValueKey } = require('../utils/address-normalizer');
   const answered = unitLineValueKey(String(unitLine || ''));
   const rows = await trx('estimates')
     .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(callLogId)])
@@ -320,7 +320,7 @@ async function unsentDraftsForCall(trx, callLogId, building, unitLine) {
     const line = String(row.address || '').trim();
     if (!line) return true;
     if (!sameBuilding(line, building)) return false;
-    const lineUnit = unitAnywhereOnLine(line);
+    const lineUnit = dwellingUnitOnLine(line);
     if (lineUnit && answered && unitLineValueKey(lineUnit) === answered) row.alreadyCorrect = true;
     return true;
   });
@@ -351,10 +351,12 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
   const building = flags.unit_ask_building || null;
   const out = { lead: 'skipped', customer: 'skipped', at: new Date().toISOString() };
   if (!building?.street_line_1) return { ...out, reason: 'no_building' };
-  // Unit detection reads the unit in EITHER supported position — a record
-  // stored unit-first ("Apt 9, 1048 Example Lakes Cir, …") must never be
-  // given a second unit (codex r6 P1 on #3796).
-  const { unitAnywhereOnLine, normalizeLeadAddress } = require('../utils/address-normalizer');
+  // Unit detection reads the DWELLING unit in EITHER supported position —
+  // a record stored unit-first ("Apt 9, 1048 Example Lakes Cir, …") must
+  // never be given a second unit (codex r6 P1 on #3796), while a structural
+  // component alone ("Bldg 9, …") still lacks the apartment (pre-push
+  // codex P1 on #3804).
+  const { dwellingUnitOnLine, normalizeLeadAddress } = require('../utils/address-normalizer');
   const { leadId, customerId } = targets;
   // Lock order: CUSTOMER row first, then the lead — the Customer 360
   // address edit takes customer → leads (customer-address-fanout), and the
@@ -414,12 +416,12 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
       const formatted = normalizeLeadAddress({ line1: building.street_line_1, line2: unitLine, city: building.city, state: 'FL', zip: building.postal_code });
       await trx('leads').where({ id: leadId }).whereNull('deleted_at').update({ address: formatted.fullAddress });
       out.lead = 'filled';
-    } else if (leadRow && !unitAnywhereOnLine(leadAddress) && sameBuildingForWrite(leadAddress, building)) {
+    } else if (leadRow && !dwellingUnitOnLine(leadAddress) && sameBuildingForWrite(leadAddress, building)) {
       const formatted = normalizeLeadAddress({ raw: leadAddress, line2: unitLine });
       await trx('leads').where({ id: leadId }).whereNull('deleted_at').update({ address: formatted.fullAddress || `${leadAddress}, ${unitLine}` });
       out.lead = 'unit_added';
     } else if (leadRow) {
-      out.lead = unitAnywhereOnLine(leadAddress) ? 'already_has_unit' : 'different_building';
+      out.lead = dwellingUnitOnLine(leadAddress) ? 'already_has_unit' : 'different_building';
     }
   }
   if (customerId && customerRow) {
@@ -435,7 +437,7 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
       const props = await trx('customer_properties')
         .where({ customer_id: customerId, active: true })
         .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip');
-      const propUnit = (p) => String(p.address_line2 || '').trim() || unitAnywhereOnLine(String(p.address_line1 || '')) || '';
+      const propUnit = (p) => String(p.address_line2 || '').trim() || dwellingUnitOnLine(String(p.address_line1 || '')) || '';
       const atBuilding = (props || []).filter((p) => sameBuildingForWrite(customerAddressLine(p), building));
       const unitAlreadyOnFile = atBuilding.some((p) => propUnit(p) && unitLineValueKey(propUnit(p)) === wanted);
       // The building + replied unit as its OWN property row on the account,
@@ -484,7 +486,7 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
         // Ignoring that last shape would overwrite Apt 9 with Apt 204 on
         // both the mirror and the primary (codex r1 P0 on #3788).
         const primaryAtBuilding = atBuilding.find((p) => p.is_primary);
-        const ownUnit = String(customerRow.address_line2 || '').trim() || unitAnywhereOnLine(ownAddress)
+        const ownUnit = String(customerRow.address_line2 || '').trim() || dwellingUnitOnLine(ownAddress)
           || (primaryAtBuilding ? propUnit(primaryAtBuilding) : '') || '';
         if (!ownUnit) {
           // A supported shape: unitless primary at the building PLUS an
@@ -542,7 +544,7 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
 async function unitOnFileAtBuilding(trx, flags) {
   const building = flags.unit_ask_building || null;
   if (!building?.street_line_1) return false;
-  const { unitAnywhereOnLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const { dwellingUnitOnLine, unitLineValueKey } = require('../utils/address-normalizer');
   const { leadId, customerId, linkage } = await unitTargets(trx, flags);
   const units = new Set();
   const add = (unit) => { const key = unitLineValueKey(String(unit || '')); if (key) units.add(key); };
@@ -553,7 +555,7 @@ async function unitOnFileAtBuilding(trx, flags) {
     // entered there answers it regardless of a property manager's other
     // units on the account (codex r1 P2 on #3788) — unless an operator
     // has detached that lead from the call since (same rule as the write).
-    if (leadRow && leadStillLinked(leadRow, linkage) && line && unitAnywhereOnLine(line) && sameBuildingForWrite(line, building)) return true;
+    if (leadRow && leadStillLinked(leadRow, linkage) && line && dwellingUnitOnLine(line) && sameBuildingForWrite(line, building)) return true;
   }
   if (customerId) {
     const customerRow = await trx('customers').where({ id: customerId }).whereNull('deleted_at').first();
@@ -561,14 +563,14 @@ async function unitOnFileAtBuilding(trx, flags) {
     // no city/ZIP is not evidence that THIS building's unit is on file
     // (codex r2 P1 on #3788).
     if (customerRow && sameBuildingForWrite(customerAddressLine(customerRow), building)) {
-      const own = String(customerRow.address_line2 || '').trim() || unitAnywhereOnLine(String(customerRow.address_line1 || ''));
+      const own = String(customerRow.address_line2 || '').trim() || dwellingUnitOnLine(String(customerRow.address_line1 || ''));
       if (own) add(own);
     }
     const props = await trx('customer_properties')
       .where({ customer_id: customerId, active: true })
       .select('address_line1', 'address_line2', 'city', 'zip');
     for (const p of props || []) {
-      const unit = String(p.address_line2 || '').trim() || unitAnywhereOnLine(String(p.address_line1 || ''));
+      const unit = String(p.address_line2 || '').trim() || dwellingUnitOnLine(String(p.address_line1 || ''));
       if (unit && sameBuildingForWrite(customerAddressLine(p), building)) add(unit);
     }
   }

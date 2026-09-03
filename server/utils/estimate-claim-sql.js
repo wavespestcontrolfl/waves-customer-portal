@@ -207,7 +207,7 @@ async function callUnitAnswer(dbc, callLogId) {
 // with no building applies to every unitless or differing draft.
 function unitAnswerFenceReason(fence, { address = null } = {}) {
   if (!fence || !fence.unit) return null;
-  const { unitLineValueKey, unitAnywhereOnLine, splitUnitFirstLine } = require('./address-normalizer');
+  const { unitLineValueKey, dwellingUnitOnLine, splitUnitFirstLine } = require('./address-normalizer');
   const fencedKey = unitLineValueKey(String(fence.unit));
   const line = String(address || '').trim();
   if (!line) return 'unit_answer_pending';
@@ -219,9 +219,10 @@ function unitAnswerFenceReason(fence, { address = null } = {}) {
     // Main St, …") is not another building (codex r5 P1 on #3796).
     if (!sameStreetAddress(splitUnitFirstLine(line)?.rest || line, buildingLine)) return null;
   }
-  // The unit in EITHER supported position — the composer may return the
-  // unit-first form the override deliberately preserves (codex r4 P2).
-  const lineUnit = unitAnywhereOnLine(line);
+  // The DWELLING unit in either supported position — the composer may
+  // return the unit-first form the override deliberately preserves (codex
+  // r4 P2); a structural component alone ("Bldg 9") is no answer.
+  const lineUnit = dwellingUnitOnLine(line);
   if (lineUnit && unitLineValueKey(lineUnit) === fencedKey) return null;
   return 'unit_answer_pending';
 }
