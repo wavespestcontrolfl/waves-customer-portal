@@ -10,7 +10,7 @@ vi.mock("./SchedulePage", () => ({
   completionResumeOwed: (id) => id === "svc-resume",
 }));
 
-import { completedVisitOwesCompletion } from "./DispatchPageV2";
+import { CLOSEOUT_OWED_LABEL, completedVisitOwesCompletion, stopStatusBadge } from "./DispatchPageV2";
 
 describe("completedVisitOwesCompletion", () => {
   it("opens completion for a completed visit with NO service record (status-only completion)", () => {
@@ -29,5 +29,20 @@ describe("completedVisitOwesCompletion", () => {
   it("never applies to non-completed statuses", () => {
     expect(completedVisitOwesCompletion({ id: "svc-1", status: "cancelled", has_service_record: false })).toBe(false);
     expect(completedVisitOwesCompletion({ id: "svc-1", status: "on_site", has_service_record: false })).toBe(false);
+  });
+});
+
+describe("stopStatusBadge", () => {
+  it("reads 'Closeout owed' in the alert tone when a completed visit still owes its closeout", () => {
+    expect(stopStatusBadge({ id: "svc-resume", status: "completed", has_service_record: true }))
+      .toEqual({ tone: "alert", label: CLOSEOUT_OWED_LABEL });
+    expect(stopStatusBadge({ id: "svc-1", status: "completed", has_service_record: false }))
+      .toEqual({ tone: "alert", label: CLOSEOUT_OWED_LABEL });
+  });
+  it("keeps the plain status badge for a finished completion and for every other status", () => {
+    expect(stopStatusBadge({ id: "svc-1", status: "completed", has_service_record: true }))
+      .toEqual({ tone: "strong", label: "Completed" });
+    expect(stopStatusBadge({ id: "svc-resume", status: "on_site" }))
+      .toEqual({ tone: "neutral", label: "On Site" });
   });
 });

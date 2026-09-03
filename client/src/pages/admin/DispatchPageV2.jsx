@@ -119,6 +119,20 @@ export function completedVisitOwesCompletion(service) {
   return service?.has_service_record === false || completionResumeOwed(service?.id);
 }
 
+// The stop card's status badge: a completed visit that still owes its
+// closeout (resume marker or status-only completion) reads "Closeout owed"
+// in the alert tone instead of a plain "Completed" — the tech's only cue
+// after a reload that the visit still needs a tap (the marker never
+// auto-opens the panel). Same predicate the tap-to-open path uses, so the
+// badge and the reopen decision cannot disagree.
+export function stopStatusBadge(service) {
+  if (completedVisitOwesCompletion(service)) {
+    return { tone: "alert", label: CLOSEOUT_OWED_LABEL };
+  }
+  const status = String(service?.status || "").toLowerCase();
+  return { tone: statusTone(status), label: statusLabel(status) };
+}
+
 function shouldOpenMobileCompletion(service) {
   const status = String(service?.status || "").toLowerCase();
   return (
@@ -289,6 +303,8 @@ function groupMultiServiceStops(services) {
 }
 
 // Status → Badge tone. completed/skipped = strong/alert; in-flight = neutral; pending = neutral.
+export const CLOSEOUT_OWED_LABEL = "Closeout owed";
+
 function statusTone(status) {
   if (status === "completed") return "strong";
   if (status === "skipped") return "alert";
@@ -504,8 +520,8 @@ function ServiceCardV2({
             {service.windowDisplay || ""}
           </span>{" "}
         </div>{" "}
-        <Badge dot tone={statusTone(status)}>
-          {statusLabel(status)}
+        <Badge dot tone={stopStatusBadge(service).tone}>
+          {stopStatusBadge(service).label}
         </Badge>{" "}
       </div>
       {/* Customer name + badges */}
@@ -2226,6 +2242,7 @@ export default function DispatchPageV2({
           date={date}
           refreshKey={scheduleRefreshKey}
           technicians={technicians}
+          owesCompletion={completedVisitOwesCompletion}
           onRefresh={() => setScheduleRefreshKey((key) => key + 1)}
           onEdit={(svc) => {
             if (shouldOpenMobileCompletion(svc)) {
@@ -2560,6 +2577,7 @@ export default function DispatchPageV2({
               date={date}
               services={services}
               technicians={technicians}
+              owesCompletion={completedVisitOwesCompletion}
               onEdit={(svc) => setEditingService(svc)}
               onProtocol={(svc) => setProtocolService(svc)}
               onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
@@ -2587,6 +2605,7 @@ export default function DispatchPageV2({
               services={services}
               rainChance={typeof safeData.rainChance === "number" ? safeData.rainChance : null}
               technicians={technicians}
+              owesCompletion={completedVisitOwesCompletion}
               onRefresh={() => fetchSchedule(date)}
               onEdit={(svc) => {
                 if (shouldOpenMobileCompletion(svc)) {
