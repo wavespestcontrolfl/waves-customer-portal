@@ -483,9 +483,14 @@ async function sendAuthority(trx, { placement, path, policy, mode, draft, review
   const actionHash = M.draftHash(draft);
   if (row.approval_id) {
     const a = await trx('seo_link_approvals').where({ id: row.approval_id }).first();
-    if (a && a.decision === 'approved' && !a.invalidated_at && !a.consumed_at && a.action === 'outreach_send' && a.action_hash === actionHash) return { ok: true, rowId: row.id, approvalId: a.id, level: row.level };
-    // an approval for another text (the draft was edited after it) is spent by that edit — the click below replaces it
-    if (a && !a.invalidated_at && !a.consumed_at) await trx('seo_link_approvals').where({ id: a.id }).update({ invalidated_at: now, invalidated_reason: 'draft changed after the approval', updated_at: now });
+    const live = a && a.decision === 'approved' && !a.invalidated_at && !a.consumed_at && a.action === 'outreach_send';
+    // a live approval is reused only for THIS text AND THIS recipient review (§13 binds the match the owner looked
+    // at): a contact added since (clear → ambiguous / customer) or a resolved match makes it another decision
+    const snap = a && typeof a.terms_snapshot === 'string' ? JSON.parse(a.terms_snapshot) : (a && a.terms_snapshot) || {};
+    const sameReview = snap.recipient_review && snap.recipient_review.lookup_hash === review.lookup_hash;
+    if (live && a.action_hash === actionHash && sameReview) return { ok: true, rowId: row.id, approvalId: a.id, level: row.level };
+    // spent by the edit (another text) or by the changed match — the click below replaces it
+    if (live) await trx('seo_link_approvals').where({ id: a.id }).update({ invalidated_at: now, invalidated_reason: a.action_hash === actionHash ? 'recipient review changed after the approval' : 'draft changed after the approval', updated_at: now });
   }
   const snapshot = { ...P.decisionInputs('communication', ctx), draft_hash: actionHash, recipient_review: { recipient: review.recipient, match_kind: review.kind, matched_ids: review.matched, lookup_hash: review.lookup_hash } };
   const [approval] = await trx('seo_link_approvals').insert({

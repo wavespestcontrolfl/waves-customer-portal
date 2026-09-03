@@ -182,12 +182,25 @@ describe('sendOutreach under the contract', () => {
   test('a live approval bound to THIS draft is reused; one bound to an earlier text is spent by the edit and replaced', async () => {
     const s = scenario();
     await nightly(s.db);
-    const prior = { id: uid(), prospect_id: s.row.id, path_id: s.p.id, path_revision: 1, decision_inputs_hash: commRow(s.db).decision_inputs_hash, money_action: false, decision: 'approved', authority: 'OWNER_OUTREACH', terms_snapshot: {}, dimension: 'communication', action: 'outreach_send', instance_key: '-:1', action_hash: M.draftHash(s.row), approved_by: 'Adam', approved_at: EARLIER, invalidated_at: null, consumed_at: null };
+    const clearHash = (await M.recipientReview(s.db, s.row.outreach_to_email)).lookup_hash;
+    const prior = { id: uid(), prospect_id: s.row.id, path_id: s.p.id, path_revision: 1, decision_inputs_hash: commRow(s.db).decision_inputs_hash, money_action: false, decision: 'approved', authority: 'OWNER_OUTREACH', terms_snapshot: { recipient_review: { lookup_hash: clearHash } }, dimension: 'communication', action: 'outreach_send', instance_key: '-:1', action_hash: M.draftHash(s.row), approved_by: 'Adam', approved_at: EARLIER, invalidated_at: null, consumed_at: null };
     approvals(s.db).push(prior);
     commRow(s.db).approval_id = prior.id;
     const r = await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' });
     expect(r).toMatchObject({ ok: true, authority: { approval_id: prior.id } });
     expect(approvals(s.db)).toHaveLength(1);
+    // the same text, but the recipient review changed since (a customer's domain appeared): the old approval is spent
+    const u = scenario({ contacts: { customers: [{ id: 'c9', email: 'ads@example.org' }] } });
+    await nightly(u.db);
+    const old = { ...prior, id: uid(), prospect_id: u.row.id, path_id: u.p.id, decision_inputs_hash: commRow(u.db).decision_inputs_hash, action_hash: M.draftHash(u.row), terms_snapshot: { recipient_review: { lookup_hash: clearHash } }, invalidated_at: null, consumed_at: null };
+    approvals(u.db).push(old);
+    commRow(u.db).approval_id = old.id;
+    const refused = await Outreach.sendOutreach({ prospectId: u.row.id, approvedBy: 'Adam' });
+    expect(refused.code).toBe('recipient_review_required');
+    const r3 = await Outreach.sendOutreach({ prospectId: u.row.id, approvedBy: 'Adam', reviewedLookupHash: refused.review.lookup_hash });
+    expect(r3.ok).toBe(true);
+    expect(approvals(u.db).find((a) => a.id === old.id)).toMatchObject({ invalidated_reason: 'recipient review changed after the approval' });
+    expect(approvals(u.db)).toHaveLength(2);
     // edited after the approval: the old approval is spent, the click writes a fresh one for the new text
     const t = scenario();
     await nightly(t.db);
