@@ -552,7 +552,10 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   if (BANNED_RE.test(body)) return reject('banned_phrase', body.match(BANNED_RE)[0]);
   if (DISPUTE_RE.test(body)) return reject('dispute_words', body.match(DISPUTE_RE)[0]);
   if (STOCK_PHRASE_RE.test(body)) return reject('stock_phrase', body.match(STOCK_PHRASE_RE)[0]);
-  for (const phrase of body.match(new RegExp(DATE_CLAIM_RE.source, 'gi')) || []) {
+  // The greeting line is judged by the greeting rule below, not here: a
+  // reviewer named April, June or August is a name, not a date claim.
+  const afterGreeting = body.replace(/^[^\n]*,/, '');
+  for (const phrase of afterGreeting.match(new RegExp(DATE_CLAIM_RE.source, 'gi')) || []) {
     if (!hasPhrase(grounding.review.text.toLowerCase(), phrase.toLowerCase())) return reject('date_claim', phrase);
   }
 
@@ -905,11 +908,12 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
   return lines.join('\n');
 }
 
-// Rejection codes whose span is a person or a contact detail (a name, a phone
-// number, an email, an address, a link — and the opening, which starts with
-// the greeting name): the retry prompt sees the words, the row and the audit
-// log keep the code only.
-const REDACTED_SPAN_CODES = new Set(['email', 'url', 'phone', 'address', 'forbidden_name', 'unlisted_name', 'repetitive_opening']);
+// Rejection codes whose span is a phrase class (a banned or stock phrase, an
+// unsourced claim, a stray number or city, a word count) and may be stored on
+// the row and the audit log. Every other span — a name, a phone number, an
+// email, an address, a link, the opening (which starts with the greeting
+// name), a date phrase — reaches the retry prompt only.
+const STORED_SPAN_CODES = new Set(['too_long', 'banned_phrase', 'dispute_words', 'stock_phrase', 'private_channel', 'unlisted_digits', 'unlisted_city', 'unlisted_service_claim', 'negated_review_claim', 'unlisted_relationship_claim', 'unlisted_credential_claim', 'unlisted_experience_claim']);
 
 const FEEDBACK_FOR = {
   too_long: 'too many words',
@@ -1006,10 +1010,10 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
       return { ok: true, text: normalized, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reviewOnly: step.reviewOnly };
     }
     rejections.push(verdict.code);
-    // Stored for diagnosis: attempt, code and the words that tripped it —
-    // never the whole rejected draft, and no name or contact-shaped span.
-    // The retry prompt is built from verdict.span directly.
-    rejectionDetails.push({ attempt: attempts, code: verdict.code, span: REDACTED_SPAN_CODES.has(verdict.code) ? null : verdict.span, promptSpan: verdict.span });
+    // Stored for diagnosis: attempt, code and — for phrase-class codes only —
+    // the words that tripped it. Never the whole rejected draft. The retry
+    // prompt is built from verdict.span directly.
+    rejectionDetails.push({ attempt: attempts, code: verdict.code, span: STORED_SPAN_CODES.has(verdict.code) ? verdict.span : null, promptSpan: verdict.span });
     // Code only in the log: a span can be a phone number, an address or a
     // name. The words live in rejectionDetails, stored on the review row.
     logger.info(`[review-reply-drafter] attempt ${attempts} rejected (${verdict.code}) review=${grounding.reviewId} mode=${mode}`);
@@ -1038,9 +1042,9 @@ const stored = (details) => details.map(({ attempt, code, span }) => ({ attempt,
 function safeCopyReply(grounding, mode, recentReplies = []) {
   const r = grounding.review;
   if (mode === 'low_rating' || !(Number(r.rating) >= 4)) return null;
-  // A first name the verifier itself cannot pass ("April" reads as a date,
-  // "O'Neil" / "Mary-Jane" as an unsourced proper noun) falls back to the
-  // generic greeting rather than to no reply at all.
+  // A first name the verifier itself cannot pass ("O'Neil" / "Mary-Jane"
+  // read as an unsourced proper noun) falls back to the generic greeting
+  // rather than to no reply at all.
   const greetings = r.firstName ? [`Hi ${r.firstName},`, 'Hello there,'] : ['Hello there,'];
   const noun = r.hasText ? 'the review' : (Number(r.rating) === 5 ? 'the five stars' : 'the rating');
   // No technician name: a 4-star review can name a tech in a complaint, and

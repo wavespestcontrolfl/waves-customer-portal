@@ -697,6 +697,17 @@ describe('draftReviewReply — fallback ladder', () => {
     mockDispatch.mockResolvedValue({ ok: true, text: CLEAN });
     const r2 = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [good('Hi Dana, glad Marcus got out quickly and the ants are staying out of your kitchen. Thanks.')] });
     expect(r2.rejectionDetails.every((d) => d.code === 'repetitive_opening' && d.span === null)).toBe(true);
+    // A reviewer named for a month is greeted by name, not flagged as a date claim (GitHub r4 P1);
+    // and a date_claim span elsewhere is never stored (allowlist of phrase-class codes only).
+    const gm = grounding({ firstName: 'April', text: 'Marcus came out fast and the ants are gone.', mentionedTechNames: ['Marcus'] });
+    gm.allow.names = ['April', 'Marcus'];
+    expect(Drafter.verifyReplyText(good('Hi April, glad Marcus got out fast and the ants are gone from your place.'), gm)).toBeNull();
+    const dated = Drafter.verifyReplyDetailed(good('Hi April, glad Marcus got out fast on Monday and the ants are gone.'), gm);
+    expect(dated).toMatchObject({ code: 'date_claim', span: 'Monday' });
+    mockDispatch.mockReset();
+    mockDispatch.mockResolvedValue({ ok: true, text: good('Hi April, glad Marcus got out fast on Monday and the ants are gone.') });
+    const r3 = await Drafter.draftReviewReply({ grounding: { ...gm, review: { ...gm.review, rating: 3 } }, recentReplies: [] });
+    expect(r3.rejectionDetails.every((d) => d.code === 'date_claim' && d.span === null)).toBe(true);
   });
   test('safe copy never names a technician, and its variants dodge the non-repetition rule', () => {
     const g = grounding({ mentionedTechNames: [], topics: [] });
@@ -719,8 +730,12 @@ describe('draftReviewReply — fallback ladder', () => {
     const noText = grounding({ firstName: '', text: '', mentionedTechNames: [], topics: [], account: null });
     expect(Drafter.safeCopyReply(noText, 'no_text', [])).toBe(good('Hello there,\n\nThanks for the five stars. Glad to be your pest and lawn team.'));
     expect(Drafter.safeCopyReply(grounding({ rating: 2 }), 'low_rating', [])).toBeNull();
+    // A month name is a greeting, not a date claim (GitHub r4): April is greeted by name.
+    const april = grounding({ firstName: 'April', mentionedTechNames: [], topics: [] });
+    april.allow.names = ['April'];
+    expect(Drafter.safeCopyReply(april, 'service_quality', [])).toBe(good('Hi April,\n\nThanks for the review. Glad to be your pest and lawn team.'));
     // A first name the verifier cannot pass falls back to the generic greeting (GitHub r2).
-    for (const firstName of ['April', "O'Neil", 'Mary-Jane', 'McDonald']) {
+    for (const firstName of ["O'Neil", 'Mary-Jane', 'McDonald']) {
       const gn = grounding({ firstName, mentionedTechNames: [], topics: [] });
       gn.allow.names = [firstName];
       expect(Drafter.safeCopyReply(gn, 'service_quality', [])).toBe(good('Hello there,\n\nThanks for the review. Glad to be your pest and lawn team.'));
