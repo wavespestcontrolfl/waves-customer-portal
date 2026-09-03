@@ -1,7 +1,7 @@
 // Locks the LLM call-trace contract (agent-control S2a): redacted bodies are
 // kept ONLY when GATE_LLM_CALL_TRACES is on AND the lane's runtime policy
-// opts in, every body passes through the PII redactor and is capped, an
-// inbound lane skips a low-confidence redaction entirely, and nothing is
+// opts in, every body passes through the PII redactor and is capped, a
+// low-confidence redaction is never persisted on ANY lane, and nothing is
 // written when the call row itself was not (null id). Fire-and-forget:
 // never throws into the adapter.
 
@@ -92,14 +92,18 @@ describe('recordTrace', () => {
     expect(mockRedact).not.toHaveBeenCalled();
   });
 
-  it('drops an INBOUND lane trace when redaction confidence is low, keeps a plain lane with the confidence stamped', async () => {
+  it('drops a low-confidence redaction on EVERY lane — inbound or not — and keeps medium with the confidence stamped', async () => {
     mockConfidence = 'low';
     const { recordTrace } = load();
     recordTrace(Promise.resolve(1), { prompt: 'customer text', laneId: 'traced_inbound' });
-    recordTrace(Promise.resolve(2), { prompt: 'internal text', laneId: 'traced_plain' });
+    recordTrace(Promise.resolve(2), { prompt: 'internal text with a name', laneId: 'traced_plain' });
     await flush();
-    expect(traceRows()).toHaveLength(1);
-    expect(traceRows()[0]).toMatchObject({ call_id: 2, lane_id: 'traced_plain', redaction_confidence: 'low' });
+    expect(traceRows()).toHaveLength(0);
+    expect(mockDb).not.toHaveBeenCalled();
+    mockConfidence = 'medium';
+    recordTrace(Promise.resolve(3), { prompt: 'internal text', laneId: 'traced_plain' });
+    await flush();
+    expect(traceRows()).toEqual([expect.objectContaining({ call_id: 3, lane_id: 'traced_plain', redaction_confidence: 'medium' })]);
   });
 
   it('records the WORST confidence across the three bodies', async () => {

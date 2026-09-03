@@ -514,8 +514,10 @@ function failureCode(failure) {
 /**
  * Keep the redacted bodies of one call, fire-and-forget. Only when
  * GATE_LLM_CALL_TRACES is on AND the lane's runtime policy opts in
- * (`trace: true`); inbound lanes (customer / third-party content in the
- * prompt) skip the write when the redactor is not confident. Bodies are
+ * (`trace: true`). A LOW-confidence redaction is never persisted, on any
+ * lane: the redactor reports low exactly when its name / address heuristics
+ * may be blind, and a report or draft lane carries customer names as
+ * readily as an inbound one — "redacted" has to mean it. Bodies are
  * redacted in full and THEN capped, so a cap can never split a phone number
  * into an unredacted half. Nothing is written when the call row itself was
  * not (null id).
@@ -529,7 +531,6 @@ function recordTrace(callIdPromise, { system = null, prompt = null, response = n
     const runId = ctx.runId || null;
     void Promise.resolve(callIdPromise).then((callId) => {
       if (callId === null || callId === undefined) return null;
-      const inbound = !!require('./model-switchboard').LANES.find((l) => l.id === lane)?.inbound;
       const { redact } = require('./content/pii-redactor');
       const RANK = { high: 0, medium: 1, low: 2 };
       let worst = 'high';
@@ -544,7 +545,10 @@ function recordTrace(callIdPromise, { system = null, prompt = null, response = n
         prompt_redacted: clean(prompt),
         response_redacted: clean(response),
       };
-      if (inbound && worst === 'low') return null;
+      if (worst === 'low') {
+        logger.debug(`[llm-dispatch-metrics] trace for call ${callId} (${lane}) skipped: low redaction confidence`);
+        return null;
+      }
       return require('../models/db')('llm_call_traces').insert({
         call_id: callId,
         lane_id: lane,
