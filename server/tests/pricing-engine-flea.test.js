@@ -52,6 +52,19 @@ describe('flea treatment pricing', () => {
     expect(priceFlea({ services: { flea: true }, footprintSqFt: 2000, lotSqFt: 7500 }).requiresManualReview).toBe(false);
   });
 
+  test('an admin edit of the surviving offer can move prices but never the package contract', () => {
+    const constants = require('../services/pricing-engine/constants');
+    const saved = constants.SPECIALTY.flea.offers;
+    constants.SPECIALTY.flea.offers = [{ offerKey: 'flea_elimination_two_visit', visitCount: 1, warrantyType: 'none', baseInitial: 240, baseFollowUp: 130 }];
+    try {
+      const result = priceFlea({ services: { flea: true }, footprintSqFt: 2000, lotSqFt: 7500 });
+      expect(result).toMatchObject({ visits: 2, warrantyType: 'conditional_retreat', initial: 240, followUp: 130, total: 370 });
+      expect(result.display.name).toBe('Flea Elimination Package — 2 visits');
+    } finally {
+      constants.SPECIALTY.flea.offers = saved;
+    }
+  });
+
   test.each([
     [0, 0],
     [2500, 125],

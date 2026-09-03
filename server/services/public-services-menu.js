@@ -154,6 +154,7 @@ function requestMatchesCatalogRow(serviceKey, row) {
 // the track's bracket table). Everything else is fixed by the canonical
 // request.
 const LAWN_TRACKS = new Set(['st_augustine', 'bahia', 'bermuda', 'zoysia']);
+const FLEA_COMPLEXITIES = new Set(['light', 'moderate', 'heavy']);
 function mergeKeyedRequestOptions(request, bodyServices) {
   if (!request) return null;
   const out = JSON.parse(JSON.stringify(request));
@@ -162,6 +163,10 @@ function mergeKeyedRequestOptions(request, bodyServices) {
     if (out.lawn) out.lawn.track = track;
     if (out.lawnPestControl) out.lawnPestControl.track = track;
   }
+  // Flea infestation complexity (light / moderate / heavy) when the site
+  // collected it; absent, the package prices at the base (light) rate.
+  const fleaComplexity = String(bodyServices?.flea?.fleaComplexity || '').toLowerCase();
+  if (out.flea && FLEA_COMPLEXITIES.has(fleaComplexity)) out.flea.fleaComplexity = fleaComplexity;
   return out;
 }
 function termiteRentalGateOn() {

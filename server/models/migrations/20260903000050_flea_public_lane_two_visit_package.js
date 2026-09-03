@@ -109,7 +109,10 @@ async function saveState(knex, state) {
 
 exports.up = async function up(knex) {
   if (await knex.schema.hasTable('pricing_config')) {
-    const row = await knex('pricing_config').where({ config_key: FLEA_CONFIG_KEY }).first();
+    // Row lock across the read-modify-write: the admin pricing writer
+    // serializes on FOR UPDATE, so an admin save racing this migration can
+    // never be overwritten with a stale snapshot (GH codex #3845 r1 P1).
+    const row = await knex('pricing_config').where({ config_key: FLEA_CONFIG_KEY }).forUpdate().first();
     const data = parseData(row?.data);
     if (row && Array.isArray(data.offers) && data.offers.some((o) => offerKeyOf(o) === SINGLE_OFFER_KEY)) {
       const offers = data.offers.filter((o) => offerKeyOf(o) !== SINGLE_OFFER_KEY);

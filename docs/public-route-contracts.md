@@ -460,7 +460,18 @@ treatable lot area; station / dunk add-ons are staff-scoped and never
 site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
 (turf-priced on the forwarded track; a lot-only lookup routes it to manual
 review like the lawn programs). Both are additive — no existing key or
-response field changed. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
+response field changed. **Menu `flea_tick` changed product on 2026-09-03**
+(owner ruling "flea is two visits"; PR #3845): the keyed request now
+expands to the two-visit Flea Elimination Package (`flea_package`, 2
+visits, conditional retreat guarantee) — previously the single-visit
+knockdown. The retired `services.flea.offerKey = flea_knockdown_single`
+is still accepted on the direct-`services` shape, but the engine prices
+the package and routes the line to manual review
+(`flea_single_visit_offer_retired`), so a stale caller gets a review
+response, never an instant two-visit price it did not ask for. A
+site-collected `services.flea.fleaComplexity` (`light` / `moderate` /
+`heavy`) is forwarded on both shapes; absent, the package prices at the
+base (light) rate. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
 `treeShrub`) park as `lot_size_requires_verification` when the lookup
 flagged the lot verify-first; the response is then a manual quote, never a
 price built from the synthetic sqft×4 fallback. `oneTimeMosquito` goes one

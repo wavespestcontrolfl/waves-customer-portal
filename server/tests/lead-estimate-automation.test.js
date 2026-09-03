@@ -527,7 +527,9 @@ describe('keyed leads (C2): the draft prices the canonical product, never a labe
     const services = draft.estimateData.engineResult.lineItems.map((l) => l.service);
     expect(services).toContain('flea_package');
     expect(services).not.toContain('flea_knockdown_single');
-    expect(draft.estimateData.engineResult.lineItems.find((l) => l.service === 'flea_package').visits).toBe(2);
+    const compact = draft.estimateData.engineResult.lineItems.find((l) => l.service === 'flea_package');
+    // The compact projection keeps the sold-scope flags the copy pack reads.
+    expect(compact).toMatchObject({ visits: 2, warrantyType: 'conditional_retreat', guaranteeWindowDaysAfterFollowUp: 30, maxIncludedRetreats: 1, exteriorStatus: 'not_included' });
   });
   test('a selectable key with no instant request is quote-on-request — no automated draft', () => {
     const readiness = { ...readinessFor('WDO Inspection Service'), serviceKey: 'wdo_inspection', serviceKeyInstant: false };

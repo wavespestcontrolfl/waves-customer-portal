@@ -7493,8 +7493,13 @@ function fleaOfferConfig(cfg) {
     ...configured,
     service: configured.service || configured.serviceKey || configured.service_key || defaults.service,
     displayName: configured.displayName || configured.display_name || defaults.displayName,
-    visitCount: Number(configured.visitCount ?? configured.visit_count ?? defaults.visitCount) || defaults.visitCount,
-    warrantyType: configured.warrantyType || configured.warranty_type || defaults.warrantyType,
+    // Package-DEFINING fields are pinned, not configurable: the public
+    // menu, the flea_tick completion profile, and the customer copy all
+    // promise two visits with the conditional retreat guarantee, so an
+    // admin edit of the row can move the prices but never turn the package
+    // back into a one-visit sale (GH codex #3845 r1 P1).
+    visitCount: defaults.visitCount,
+    warrantyType: defaults.warrantyType,
     baseInitial: configured.baseInitial ?? configured.base_initial ?? defaults.baseInitial,
     floorInitial: configured.floorInitial ?? configured.floor_initial ?? defaults.floorInitial,
     baseFollowUp: configured.baseFollowUp ?? configured.base_follow_up ?? defaults.baseFollowUp,
@@ -7646,11 +7651,11 @@ function priceFlea(property = {}) {
     },
     modifiers: { urgencyMultiplier, recurringCustomerMultiplier, rushPremium },
     display: {
-      name: offer.visitCount > 1 ? 'Flea Elimination Package — 2 visits' : 'Flea Knockdown Visit',
-      detail: offer.visitCount > 1 ? `$${initial} initial + $${followUp} follow-up` : '1 visit, no retreat warranty',
+      name: 'Flea Elimination Package — 2 visits',
+      detail: `$${initial} initial + $${followUp} follow-up`,
       exteriorDetail,
     },
-    detail: offer.visitCount > 1 ? `$${initial} initial + $${followUp} follow-up` : '1 visit, no retreat warranty',
+    detail: `$${initial} initial + $${followUp} follow-up`,
     exteriorDetail,
     scope: 'Exterior flea treatment is applied to eligible targeted outdoor areas where flea activity is likely, such as shaded pet resting areas, under decks, kennels, foundation edges, mulch beds, and other approved areas. Final treatment area is subject to technician confirmation and product label directions.',
     requiresCustomQuote: !!exterior.requiresCustomQuote,

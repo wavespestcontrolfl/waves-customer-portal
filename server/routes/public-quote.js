@@ -1345,7 +1345,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // one visit fails closed instead of silently instant-quoting two.
       const FLEA_OFFERS = ['flea_knockdown_single', 'flea_elimination_two_visit'];
       const fleaOffer = FLEA_OFFERS.includes(String(services.flea.offerKey || '').toLowerCase()) ? String(services.flea.offerKey).toLowerCase() : null;
-      engineInput.services.flea = fleaOffer ? { offerKey: fleaOffer } : {};
+      const fleaComplexity = ['light', 'moderate', 'heavy'].includes(String(services.flea.fleaComplexity || '').toLowerCase())
+        ? String(services.flea.fleaComplexity).toLowerCase() : null;
+      engineInput.services.flea = {
+        ...(fleaOffer ? { offerKey: fleaOffer } : {}),
+        ...(fleaComplexity ? { fleaComplexity } : {}),
+      };
     }
     if (services.stinging) {
       engineInput.services.stinging = {
@@ -2115,6 +2120,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // the mirrored estimate can render per-application pricing.
             perVisit: item.perVisit ?? null,
             visits: item.visits ?? null,
+            // Sold-scope flags the estimate's one-time copy pack reads
+            // (flea retreat terms + yard scope) — dropped here, the public
+            // flea quote could never show its exact guarantee (GH codex
+            // #3845 r1 P2).
+            warrantyType: item.warrantyType ?? null,
+            guaranteeWindowDaysAfterFollowUp: item.guaranteeWindowDaysAfterFollowUp ?? null,
+            maxIncludedRetreats: item.maxIncludedRetreats ?? null,
+            exteriorStatus: item.exteriorStatus ?? null,
             // Palm-injection lines carry cadence ONLY as appsPerYear (the
             // palm pricer emits no visits/frequency) — dropping it here
             // left the mirrored draft cadence-less, so a palm-only handoff
