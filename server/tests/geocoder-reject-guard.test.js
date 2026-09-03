@@ -17,6 +17,11 @@ describe('isInServiceAreaBox', () => {
   test('Bradenton is in, Fort Worth / Ontario / a half-set pair are out', () => {
     expect(isInServiceAreaBox(27.4989, -82.5748)).toBe(true);
     expect(isInServiceAreaBox('27.4989', '-82.5748')).toBe(true);
+    // Served south-Hillsborough cities (SOUTH_HILLSBOROUGH_CITIES) sit north
+    // of the Manatee county line and must stay inside the box.
+    expect(isInServiceAreaBox(27.886, -82.326)).toBe(true); // Riverview
+    expect(isInServiceAreaBox(27.853, -82.383)).toBe(true); // Gibsonton
+    expect(isInServiceAreaBox(27.771, -82.407)).toBe(true); // Apollo Beach
     expect(isInServiceAreaBox(32.7555, -97.3308)).toBe(false);
     expect(isInServiceAreaBox(43.65, -79.38)).toBe(false);
     expect(isInServiceAreaBox(27.4989, null)).toBe(false);
@@ -81,6 +86,22 @@ describe('geocodeAddressWithStatus with a rejected result', () => {
 
     const second = await geocodeAddressWithStatus('100 Main St, Fort Worth, TX 76102');
     expect(second).toEqual({ location: null, permanent: true });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a venue caller opts out of the guard and shares the memo with the guarded path', async () => {
+    // A Tampa point of interest: outside the customer box and not street-level.
+    const venue = {
+      types: ['establishment', 'point_of_interest'],
+      geometry: { location: { lat: 27.9506, lng: -82.4572 }, location_type: 'GEOMETRIC_CENTER' },
+    };
+    global.fetch = jest.fn(async () => ({ json: async () => ({ status: 'OK', results: [venue] }) }));
+
+    const asVenue = await geocodeAddressWithStatus('Curtis Hixon Park, Tampa, FL', { serviceAddress: false });
+    expect(asVenue).toEqual({ location: { lat: 27.9506, lng: -82.4572 }, permanent: false });
+
+    const asCustomer = await geocodeAddressWithStatus('Curtis Hixon Park, Tampa, FL');
+    expect(asCustomer).toEqual({ location: null, permanent: true });
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 

@@ -15,7 +15,7 @@ const GOOGLE_KEY = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY
 // address by widening until something matches, and those wide answers are
 // exactly the shape that has put false coordinates on customer rows:
 //   "4696"                          -> postal_code, Raetihi NEW ZEALAND
-//   "8124 Bessemer Ave, ..., 34608" -> partial_match, a ZIP centroid
+//   a street that is not in its ZIP -> partial_match, a ZIP centroid
 //   a city named "Venice", no state -> the wrong Venice, in Ontario
 //   a snowbird's mailing address    -> a real rooftop in Fort Worth, Texas
 // A ZIP or city centroid is worse than no coordinate at all, because route
@@ -42,7 +42,10 @@ function rejectGeocodeResult(result) {
   return null;
 }
 
-// In-process memo (speeds up batch runs; process restart clears)
+// In-process memo of Google's first result per address string (speeds up
+// batch runs; process restart clears). Stores the RAW result, so the
+// service-address guard below can be applied or skipped per caller without
+// a second API call for the same string; null means ZERO_RESULTS.
 const memo = new Map();
 
 function buildAddress(c) {
@@ -50,23 +53,23 @@ function buildAddress(c) {
 }
 
 /**
- * Geocode a free-form address string, reporting whether a failure is
- * permanent. Returns { location: {lat,lng}|null, permanent: boolean } —
- * `permanent` is true only for answers that will never change without an
- * address edit (empty address, ZERO_RESULTS); quota / config / network
- * failures are transient and safe to retry.
+ * Fetch Google's first result for an address. Returns
+ * { result: object|null, permanent: boolean } — `permanent` is true only for
+ * answers that will never change without an address edit (empty address,
+ * ZERO_RESULTS); quota / config / network failures are transient and safe
+ * to retry. Not exported: every caller goes through the guard decision in
+ * geocodeAddressWithStatus.
  */
-async function geocodeAddressWithStatus(address) {
-  if (!address) return { location: null, permanent: true };
+async function fetchGeocodeResult(address) {
+  if (!address) return { result: null, permanent: true };
   if (memo.has(address)) {
     const cached = memo.get(address);
-    // memo stores null only for permanent verdicts — ZERO_RESULTS and a
-    // rejected result — so a cached null is permanent.
-    return { location: cached, permanent: cached === null };
+    // memo stores null only for ZERO_RESULTS, so a cached null is permanent.
+    return { result: cached, permanent: cached === null };
   }
   if (!GOOGLE_KEY) {
     logger.warn('[geocoder] GOOGLE_API_KEY not set');
-    return { location: null, permanent: false };
+    return { result: null, permanent: false };
   }
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_KEY}`;
@@ -76,22 +79,9 @@ async function geocodeAddressWithStatus(address) {
     const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
     const data = await resp.json();
     if (data.status === 'OK' && data.results && data.results.length > 0) {
-      const rejected = rejectGeocodeResult(data.results[0]);
-      if (rejected) {
-        // Permanent like ZERO_RESULTS: the same address string will keep
-        // producing the same unusable answer, so memoize it and let the
-        // sweep exclude the row instead of spending a call per pass. Only
-        // an address edit can change the verdict, and the sweep's
-        // pruneStaleExclusions already re-admits a row when that happens.
-        // Reason only — the address is customer PII and does not belong in logs.
-        logger.warn(`[geocoder] rejected geocode: ${rejected}`);
-        memo.set(address, null);
-        return { location: null, permanent: true };
-      }
-      const { lat, lng } = data.results[0].geometry.location;
-      const result = { lat, lng };
+      const result = data.results[0];
       memo.set(address, result);
-      return { location: result, permanent: false };
+      return { result, permanent: false };
     }
     logger.warn(`[geocoder] Geocoding failed: ${data.status}`);
     // Only memoize ZERO_RESULTS — Google saying "this address truly
@@ -103,20 +93,55 @@ async function geocodeAddressWithStatus(address) {
     // address as null in-process until restart.
     if (data.status === 'ZERO_RESULTS') {
       memo.set(address, null);
-      return { location: null, permanent: true };
+      return { result: null, permanent: true };
     }
-    return { location: null, permanent: false };
+    return { result: null, permanent: false };
   } catch (err) {
     logger.error(`[geocoder] Geocoding error: ${err.message}`);
+    return { result: null, permanent: false };
+  }
+}
+
+/**
+ * Geocode a free-form address string and say whether a null answer is
+ * permanent. Returns { location: {lat,lng}|null, permanent: boolean }.
+ *
+ * By default the result must pass rejectGeocodeResult — the caller wants a
+ * SERVICE address (a customer's front door for routing), and a coarse,
+ * partial, or out-of-area answer is worse than none. A rejection is
+ * permanent like ZERO_RESULTS: the same string keeps producing the same
+ * unusable answer, so the backstop sweep excludes the row instead of
+ * spending a call per pass, and an address edit re-admits it through the
+ * sweep's pruneStaleExclusions.
+ *
+ * Pass { serviceAddress: false } for places that are NOT customer
+ * addresses — a newsletter event venue in Tampa, say — where a
+ * point-of-interest hit outside the customer footprint is the right answer
+ * and must not be thrown away.
+ */
+async function geocodeAddressWithStatus(address, { serviceAddress = true } = {}) {
+  const { result, permanent } = await fetchGeocodeResult(address);
+  if (!result) return { location: null, permanent };
+  if (serviceAddress) {
+    const rejected = rejectGeocodeResult(result);
+    if (rejected) {
+      // Reason only — the address is customer PII and does not belong in logs.
+      logger.warn(`[geocoder] rejected geocode: ${rejected}`);
+      return { location: null, permanent: true };
+    }
+  }
+  const location = result.geometry && result.geometry.location;
+  if (!location || !Number.isFinite(Number(location.lat)) || !Number.isFinite(Number(location.lng))) {
     return { location: null, permanent: false };
   }
+  return { location: { lat: location.lat, lng: location.lng }, permanent: false };
 }
 
 /**
  * Geocode a free-form address string. Returns { lat, lng } or null.
  */
-async function geocodeAddress(address) {
-  const { location } = await geocodeAddressWithStatus(address);
+async function geocodeAddress(address, options) {
+  const { location } = await geocodeAddressWithStatus(address, options);
   return location;
 }
 
