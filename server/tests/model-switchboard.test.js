@@ -252,6 +252,9 @@ describe('model-switchboard', () => {
 
   it('only DEEP-path selectors may take Fable, and inbound-content lanes are flagged', () => {
     const { selectors, lanes } = sb.getSwitchboard();
+    // FLAGSHIP feeds image payloads (satellite, property lookup v2): the
+    // picker must require vision, so a text-only find cannot be drafted.
+    expect(selectors.find((s) => s.key === 'FLAGSHIP').accepts.cap).toBe('vision');
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
     expect(deepSafe).toEqual(['DEEP', 'EXTREME']);
     for (const id of Object.keys(sb.MODEL_CATALOG).filter((k) => /fable|mythos/.test(k))) {
@@ -260,7 +263,9 @@ describe('model-switchboard', () => {
     // A pin on a DEEP lane inherits the deep-safe accepts; a FLAGSHIP pin does not.
     expect(lanes.find((l) => l.id === 'fact_check_gate').primary.accepts.deep).toBe(true);
     expect(lanes.find((l) => l.id === 'ib_admin').primary.accepts.deep).toBeUndefined();
-    for (const id of ['sms_draft', 'call_extraction', 'pest_id', 'ask_waves']) {
+    // intent_composer: the prompt carries the transcript, SMS thread and
+    // customer profile, so a pinned ESTIMATOR_ENGINE_MODEL needs per-lane review.
+    for (const id of ['sms_draft', 'call_extraction', 'pest_id', 'ask_waves', 'intent_composer']) {
       expect(lanes.find((l) => l.id === id).inbound).toBe(true);
     }
     expect(lanes.find((l) => l.id === 'tax_advisor').inbound).toBe(false);
