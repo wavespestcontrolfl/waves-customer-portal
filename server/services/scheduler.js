@@ -1642,6 +1642,19 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Link path investigator sweep failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // NIGHTLY 3:35AM — Link authority bridge (Manager v2 step 4, plan §6.3):
+  // every qualified domain with a best path + every stale authority row →
+  // placements, §6.3 decisions, awaiting_owner parks, one bell per run.
+  // Gated by GATE_LINK_AUTHORITY inside the service (dark ⇒ selection-only
+  // no-op); its own session lock ('link-authority-bridge') skips overlaps.
+  // Decides only — never leases, sends, or spends.
+  cron.schedule('35 3 * * *', async () => {
+    try {
+      const r = await require('./seo/link-authority-bridge').runAuthorityBridge(db);
+      if (!r.gated && r.selected) logger.info(`[link-authority] bridge: ${r.skipped ? `SKIPPED (${r.skipped}) ` : ''}selected ${r.selected} decided ${r.decided} placements ${r.placementsCreated} rows ${r.rowsWritten} redecided ${r.redecided} ended ${r.ended} parked ${r.parked} released ${r.released} approvals_invalidated ${r.invalidatedApprovals} aggregate ${r.aggregateChanges} errors ${r.errors.length}`);
+    } catch (err) { logger.error(`Link authority bridge failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY SUNDAY 4:10AM — Registry feeders, after the 3:30 backlink scan (§4):
   // existing-profile baseline (idempotent) → competitor-gap ingestion → enrich
   // (DataForSEO, gated by GATE_SEO_INTELLIGENCE inside the service). Services
