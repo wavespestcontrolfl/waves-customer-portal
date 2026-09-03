@@ -46,6 +46,16 @@
  *    reverse of the package (interior + follow-up; yard as the add-on);
  *    rewritten to match.
  *
+ * ROLLBACK IS FORWARD-ONLY FOR THE CATALOG IDENTITY AND THE PROFILE: once a
+ * two-visit flea estimate has been issued, its stored `flea_package` line
+ * must keep an owner (catalogLinkForProfile) and its follow-up contract
+ * (the profile) or an in-flight link would accept into an unlinked,
+ * follow-up-less visit (GH codex #3845 r3 P0). down() therefore restores
+ * ONLY the pricing offer (so a reverted engine prices consistently) and
+ * clears the migration state; engine_keys and the profile stay as up()
+ * left them. The single-visit key names nothing after this cutover, so
+ * there is nothing to give back to.
+ *
  * Prod 2026-09-03 (read-only): 0 estimates ever carried the single key; no
  * row claims flea_package.
  */
@@ -230,33 +240,8 @@ exports.down = async function down(knex) {
     }
   }
 
-  const state = await loadState(knex);
-  if (!state) return;
-
-  if (state.profile && await knex.schema.hasTable('service_completion_profiles')) {
-    // Value-guarded: an admin edit since up() survives the rollback.
-    await knex('service_completion_profiles')
-      .where({ service_key: SERVICE_KEY, followup_policy: FOLLOWUP_POLICY, default_followup_days: FOLLOWUP_DAYS })
-      .update({
-        followup_policy: state.profile.followup_policy || 'none',
-        default_followup_days: state.profile.default_followup_days,
-        updated_at: knex.fn.now(),
-      });
-  }
-
-  if (await knex.schema.hasTable('services') && await knex.schema.hasColumn('services', 'engine_keys')) {
-    for (const rec of (Array.isArray(state.stamped) ? state.stamped : [])) {
-      if (!rec || !rec.id || !Array.isArray(rec.before) || !Array.isArray(rec.after)) continue;
-      await knex('services')
-        .where({ id: rec.id, service_key: SERVICE_KEY })
-        .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(rec.after)])
-        .update({
-          engine_keys: JSON.stringify(rec.before),
-          ...(rec.description ? { description: OLD_DESCRIPTION } : {}),
-          updated_at: knex.fn.now(),
-        });
-    }
-  }
+  // Catalog identity + completion profile are forward-only (see header):
+  // issued flea_package estimates keep their owner and follow-up contract.
   if (await knex.schema.hasTable('system_settings')) {
     await knex('system_settings').where({ key: STATE_KEY }).del();
   }

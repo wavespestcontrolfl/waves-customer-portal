@@ -7491,13 +7491,14 @@ function fleaOfferConfig(cfg) {
   return {
     ...defaults,
     ...configured,
-    service: configured.service || configured.serviceKey || configured.service_key || defaults.service,
     displayName: configured.displayName || configured.display_name || defaults.displayName,
     // Package-DEFINING fields are pinned, not configurable: the public
-    // menu, the flea_tick completion profile, and the customer copy all
-    // promise two visits with the conditional retreat guarantee, so an
-    // admin edit of the row can move the prices but never turn the package
-    // back into a one-visit sale (GH codex #3845 r1 P1).
+    // menu, the flea_tick completion profile (engine key flea_package), and
+    // the customer copy all promise two visits with the conditional retreat
+    // guarantee, so an admin edit of the row can move the prices but never
+    // turn the package back into a one-visit sale or re-name the line's
+    // service identity (GH codex #3845 r1 P1, r3 P1).
+    service: defaults.service,
     visitCount: defaults.visitCount,
     warrantyType: defaults.warrantyType,
     guaranteeWindowDaysAfterFollowUp: defaults.guaranteeWindowDaysAfterFollowUp,

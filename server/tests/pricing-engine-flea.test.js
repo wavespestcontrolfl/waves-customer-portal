@@ -56,13 +56,13 @@ describe('flea treatment pricing', () => {
     const constants = require('../services/pricing-engine/constants');
     const saved = constants.SPECIALTY.flea.offers;
     constants.SPECIALTY.flea.offers = [{
-      offerKey: 'flea_elimination_two_visit', visitCount: 1, warrantyType: 'none', guaranteeWindowDaysAfterFollowUp: 0,
+      offerKey: 'flea_elimination_two_visit', service: 'flea_custom', visitCount: 1, warrantyType: 'none', guaranteeWindowDaysAfterFollowUp: 0,
       maxIncludedRetreats: 0, exteriorAddOnMode: 'initial_only', baseInitial: 240, baseFollowUp: 130,
     }];
     try {
       const result = priceFlea({ services: { flea: true }, footprintSqFt: 2000, lotSqFt: 7500 });
       expect(result).toMatchObject({
-        visits: 2, warrantyType: 'conditional_retreat', guaranteeWindowDaysAfterFollowUp: 30, maxIncludedRetreats: 1,
+        service: 'flea_package', visits: 2, warrantyType: 'conditional_retreat', guaranteeWindowDaysAfterFollowUp: 30, maxIncludedRetreats: 1,
         initial: 240, followUp: 130, total: 370,
       });
       expect(result.display.name).toBe('Flea Elimination Package — 2 visits');
