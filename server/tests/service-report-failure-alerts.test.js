@@ -274,8 +274,15 @@ describe('/complete accepted-send catch finalizes invoice delivery like the succ
     expect(dispatchSource).toMatch(/await finalizeCompletionSmsInvoiceDelivery\(\{ smsType: snap\.type, payLinkCarried: snap\.payLinkCarried === true \}\);/);
   });
 
-  test('the accepted snapshot records whether the pay link rode the text — the catch cannot see the try-scoped flag', () => {
-    expect(dispatchSource).toMatch(/reviewCarried: !bundledReviewUrl \|\| sentSmsBody\.includes\(bundledReviewUrl\),\n\s*payLinkCarried: allowCompletionInvoiceLink,\n\s*\} : null;/);
+  test('the accepted snapshot (pay link included) is captured BEFORE the provider call — an audit-insert throw inside the send still finalizes', () => {
+    const snapshotAt = dispatchSource.search(/completionSmsAcceptedSnapshot = \{\n\s*body: sentSmsBody,\n\s*type: sentSmsType,\n\s*channel: sentSmsChannel,\n\s*reviewCarried: !bundledReviewUrl \|\| sentSmsBody\.includes\(bundledReviewUrl\),\n\s*payLinkCarried: allowCompletionInvoiceLink,\n\s*\};/);
+    const firstSendAt = dispatchSource.indexOf('let smsResult = await sendCustomerMessage(sendInput);');
+    expect(snapshotAt).toBeGreaterThan(0);
+    expect(firstSendAt).toBeGreaterThan(snapshotAt);
+    // The MMS→SMS fallback re-labels the channel before its own send.
+    expect(dispatchSource).toMatch(/completionSmsAcceptedSnapshot\.channel = 'sms';\n\s*smsResult = await sendCustomerMessage\(\{/);
+    // The snapshot is content only — acceptance is still gated on the provider.
+    expect(dispatchSource).toMatch(/const providerAccepted = completionSmsProviderAccepted \|\| e\.providerOutcome\?\.sent === true;/);
   });
 
   test('the finalizer is the ONLY markDeliverySent / receipt claim in the completion SMS lane', () => {

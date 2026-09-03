@@ -12507,8 +12507,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // merge, an event insert) must never be reported as "not delivered"
       // (GitHub Codex r3 P1).
       let completionSmsProviderAccepted = false;
-      // What the accepted text WAS, so the catch can stamp the honest 'sent'
-      // state (sentSmsBody is scoped inside the try).
+      // What the text IS — body, type, channel, whether the review link and
+      // the pay link ride it — captured BEFORE the provider call, so the
+      // catch can stamp the honest 'sent' state even when the throw comes
+      // from inside sendCustomerMessage (Twilio accepted, the audit insert
+      // failed: providerOutcome.sent === true arrives with nothing assigned
+      // after the await — pre-push Codex r6 P1). Never read unless the
+      // provider ACCEPTED (completionSmsProviderAccepted / providerOutcome).
       let completionSmsAcceptedSnapshot = null;
       // Invoice bookkeeping owed once the completion text has REACHED the
       // provider: the pay-link invoice leaves draft (markDeliverySent) and a
@@ -12883,6 +12888,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             identityTrustLevel: 'phone_matches_customer',
             metadata: smsMetadata,
           };
+          completionSmsAcceptedSnapshot = {
+            body: sentSmsBody,
+            type: sentSmsType,
+            channel: sentSmsChannel,
+            reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
+            payLinkCarried: allowCompletionInvoiceLink,
+          };
           let smsResult = await sendCustomerMessage(sendInput);
           if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
             logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
@@ -12890,6 +12902,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             delete fallbackMetadata.mediaUrls;
             delete fallbackMetadata.allowMediaUrls;
             fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
+            completionSmsAcceptedSnapshot.channel = 'sms';
             smsResult = await sendCustomerMessage({
               ...sendInput,
               metadata: fallbackMetadata,
@@ -12902,13 +12915,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
           completionSmsProviderAccepted = smsResult.sent === true;
-          completionSmsAcceptedSnapshot = completionSmsProviderAccepted ? {
-            body: sentSmsBody,
-            type: sentSmsType,
-            channel: sentSmsChannel,
-            reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
-            payLinkCarried: allowCompletionInvoiceLink,
-          } : null;
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
           // worker retries a 'blocked' status — so the held text is requeued
