@@ -198,13 +198,15 @@ describe('account and membership email sender', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('an end-of-coverage cancellation email keys on (prepaid TERM, churn episode) for both outcome classes; no term / no episode keeps the request key', async () => {
+  test('an end-of-coverage cancellation email keys on (prepaid TERM, churn episode) for the COMPLETED class only; the partial "received" note, no term, or no episode keeps the request key', async () => {
     // A repeat end_of_coverage commit on the same decided term after the
     // admin latch's 24h echo window opens a NEW request — the term key is
     // what stops the customer being told twice; the episode is what lets a
-    // won-back customer who churns again be told again.
+    // won-back customer who churns again be told again. The partial note
+    // stays per request (same rule as the SMS leg): a later request on the
+    // same term that also needs manual follow-up must still be acknowledged.
     const EP = '2026-09-01T12:00:00.000Z';
-    for (const [processed, cls] of [[true, 'completed'], [false, 'received']]) {
+    for (const [processed, key] of [[true, `account.cancellation_received:term:term-1:${EP}:completed`], [false, 'account.cancellation_received:req-1:received']]) {
       jest.clearAllMocks();
       setDbQueues({
         email_messages: [chain({ first: undefined })],
@@ -213,12 +215,10 @@ describe('account and membership email sender', () => {
       });
       await AccountMembershipEmail.sendCancellationReceived({
         customerId: 'cust-1',
-        request: { id: `req-${cls}`, category: 'cancellation', subject: 'Cancel plan', created_at: '2026-08-31' },
+        request: { id: 'req-1', category: 'cancellation', subject: 'Cancel plan', created_at: '2026-08-31' },
         processed, keptThrough: true, prepayTermId: 'term-1', termEpisodeKey: EP,
       });
-      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
-        idempotencyKey: `account.cancellation_received:term:term-1:${EP}:${cls}`,
-      }));
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: key }));
     }
     // keptThrough without a resolved term, a term without keptThrough
     // (immediate end-now cancel), and a term without an episode: request-keyed.

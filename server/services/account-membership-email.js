@@ -405,7 +405,11 @@ async function sendCancellationReceived({
   // upgrade applies to new requests only. Best-effort: an unreadable table
   // falls through to the class-keyed send.
   const outcomeClass = processed === true ? 'completed' : 'received';
-  const termKeyed = !!(keptThrough && prepayTermId && termEpisodeKey);
+  // Only the COMPLETED end-of-term class is once-per-(term, episode) — same
+  // rule as the SMS leg. A partial run's "closing out by hand" note stays
+  // request-keyed: a later request on the same term that also needs manual
+  // follow-up must still acknowledge the customer.
+  const termKeyed = !!(keptThrough && prepayTermId && termEpisodeKey && outcomeClass === 'completed');
   // Only a provider-ACCEPTED send counts — the library also persists
   // blocked/failed rows under a key, and honoring one of those would mark
   // the channel successful while no email reached the customer.
@@ -439,8 +443,8 @@ async function sendCancellationReceived({
     // most once per request. An end-of-coverage cancel keys on the (TERM,
     // churn episode) instead (a repeat commit on the same decided term
     // opens a new request; a won-back customer churning again is a new
-    // episode); the class suffix is kept so a partial send never blocks the
-    // completed end-of-term copy.
+    // episode) for its COMPLETED class only — the class suffix is kept so a
+    // partial send never blocks the completed end-of-term copy.
     idempotencyKey: idempotencyKey || (termKeyed
       ? `account.cancellation_received:term:${prepayTermId}:${termEpisodeKey}:${outcomeClass}`
       : `account.cancellation_received:${request.id}:${outcomeClass}`),
