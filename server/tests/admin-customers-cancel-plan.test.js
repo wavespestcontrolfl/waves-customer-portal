@@ -770,6 +770,36 @@ describe('POST /:id/cancel-plan', () => {
     expect(mockOpenCase).toHaveBeenCalledWith(expect.objectContaining({ snapshot: expect.objectContaining({ churnEpisodeId: 'ep-1' }) }));
   }));
 
+  test('a churn-episode stamp that fails to persist keeps THIS run request-keyed and records the failure — its repair resolves to the same identity', () => withServer(async (baseUrl) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+      status: 'active', renewal_decision: 'cancel',
+    }];
+    mockState.scheduled_services = [
+      { id: 'cv1', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
+      { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
+      { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-12-01' },
+      { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
+    ];
+    db.mockImplementation((table) => {
+      const b = builderFor(table);
+      if (table === 'service_requests') {
+        const update = b.update;
+        b.update = async (patch) => {
+          if (patch && typeof patch.metadata === 'string' && patch.metadata.includes('churnEpisodeId')) throw new Error('requests table down');
+          return update(patch);
+        };
+      }
+      return b;
+    });
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28', churnEpisodeId: 'ep-1', termiteRetrievalPending: { retrieveAfter: '2027-02-28' } });
+    const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+    expect(body.errors).toContain('churn_episode_stamp');
+    expect(mockRaiseTermite).toHaveBeenCalledWith('cust-1', body.requestId, { retrieveAfter: '2027-02-28' });
+    expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ prepayTermId: null, termEpisodeKey: null }));
+  }));
+
   test('a processor run that did not churn (no episode) keeps every side effect request-keyed', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
       id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',

@@ -714,12 +714,15 @@ const termEpisodeSendArgs = (episode) => ({
 });
 const termEpisodeRaiseArgs = (episode) => (episode ? { termId: episode.termId, episodeKey: episode.episodeKey } : {});
 // Durable retry state: the episode the processor churned this request
-// under. Written before the term-keyed side effects so a repair after a
-// lost response finds it; a lost stamp only means that repair falls back
-// to request-keyed dedupe (at-most-twice beats never telling anyone).
+// under. Written BEFORE the term-keyed side effects so a repair after a
+// lost response finds it. Returns whether the stamp stands; on a failed
+// write the caller keys this run's side effects on the REQUEST instead
+// (the identity its repair will also resolve to), so the pair can never
+// double-fire — a term key this run alone knew would let the repair send
+// again under the request key.
 async function stampRequestEpisode(requestRow, episodeId) {
   const meta = requestCancelPlanMeta(requestRow) || {};
-  if (String(meta.churnEpisodeId || '') === String(episodeId)) return;
+  if (String(meta.churnEpisodeId || '') === String(episodeId)) return true;
   const next = { ...meta, churnEpisodeId: String(episodeId) };
   try {
     await db('service_requests').where({ id: requestRow.id }).update({
@@ -727,8 +730,10 @@ async function stampRequestEpisode(requestRow, episodeId) {
       updated_at: new Date(),
     });
     requestRow.metadata = JSON.stringify({ cancel_plan: next });
+    return true;
   } catch (metaErr) {
     logger.warn(`[admin-cancellation] churn episode stamp failed for request ${requestRow.id}: ${metaErr.message}`);
+    return false;
   }
 }
 
@@ -1960,8 +1965,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // processor, which re-derives the pending task from live rows.
   // The episode the processor churned this request under — stamped on the
   // request BEFORE the term-keyed side effects, and carried on the case.
-  if (result && result.churnEpisodeId) await stampRequestEpisode(request, result.churnEpisodeId);
-  const termEpisode = termEpisodeOf(term, result && result.churnEpisodeId, prepayPlan.keepThrough || null);
+  // A stamp that did not persist is a follow-up failure like a lost case
+  // write (belled below): this run stays request-keyed and the office sees
+  // why a later repeat commit on the term could re-tell the customer.
+  const episodeStamped = !!(result && result.churnEpisodeId) && await stampRequestEpisode(request, result.churnEpisodeId);
+  if (result && result.churnEpisodeId && !episodeStamped) errors.push('churn_episode_stamp');
+  const termEpisode = episodeStamped ? termEpisodeOf(term, result.churnEpisodeId, prepayPlan.keepThrough || null) : null;
   if (result && result.termiteRetrievalPending) {
     if (processed && ['ends_at_term', 'ended_now', 'decision_already_recorded'].includes(termOutcome)) {
       try {
