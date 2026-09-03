@@ -281,13 +281,15 @@ describe('recap consumption hook — retry window (source contract)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
   const hook = src.slice(src.indexOf("router.post('/:serviceId/pest-recap'"), src.indexOf('recap supplies consumption failed'));
 
-  test('the window is 15 minutes and the skip is keyed on the record creation time, not priorCompleted alone', () => {
-    expect(src).toMatch(/const RECAP_RETRY_WINDOW_MS = 15 \* 60 \* 1000;/);
+  test('the retry signal is the durable completion_supplies_owed marker the recap transition wrote, read and cleared by the hook — never record age', () => {
+    const recapSrc = fs.readFileSync(path.join(__dirname, '../services/pest-recap.js'), 'utf8');
+    expect(recapSrc.match(/completion_supplies_owed: true/g)).toHaveLength(2); // update branch + insert branch, both gated on !recapPriorCompleted
+    expect(recapSrc).toMatch(/\.\.\.\(recapPriorCompleted \? \{\} : \{ field_flags: trx\.raw/);
     expect(hook).toMatch(/let consumeNow = result\.priorCompleted !== true;/);
-    expect(hook).toMatch(/if \(!consumeNow && result\.recordId && result\.created === false\)/); // a recap that CREATED the record is a first recap on an old completion, not a retry
-    expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('created_at'\)/);
-    expect(hook).toMatch(/Date\.now\(\) - createdMs < RECAP_RETRY_WINDOW_MS\) consumeNow = true;/);
+    expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('field_flags'\)/);
+    expect(hook).toMatch(/if \(flags\.completion_supplies_owed === true\) consumeNow = true;/);
+    expect(hook).toMatch(/- 'completion_supplies_owed'/); // cleared after the at-most-once consume
+    expect(hook).not.toMatch(/RECAP_RETRY_WINDOW_MS|created_at/);
     expect(hook).toMatch(/if \(consumeNow\) \{/);
-    expect(hook).not.toMatch(/if \(result\.priorCompleted !== true\) \{/);
   });
 });

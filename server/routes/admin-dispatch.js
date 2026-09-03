@@ -14047,11 +14047,6 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
 });
 
 // POST /:serviceId/pest-recap — commit the recap (complete, no bill).
-// A recap that reports priorCompleted within this window of the service
-// record's creation is a RETRY of the completing recap, not an edit of a
-// historical completion (see the consumption hook in the handler).
-const RECAP_RETRY_WINDOW_MS = 15 * 60 * 1000;
-
 router.post('/:serviceId/pest-recap', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
@@ -14097,24 +14092,23 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
     // consumes nothing, matching the original closeout (GH codex r3 P2). A
     // recap EDIT of a visit that was already completed (priorCompleted) is
     // not a new visit — no kit was left, nothing is consumed (GH codex r4
-    // P2). One exception (PR 2 pre-push P1): submitRecap commits the
-    // completed status BEFORE this call, so a process death in between
-    // makes the client's retry read priorCompleted=true with no kit movement
-    // written. The retry's signature: the visit is priorCompleted AND this
-    // recap did NOT create the service record (the completing attempt did —
-    // `result.created === false`) AND that record is minutes old
-    // (RECAP_RETRY_WINDOW_MS). A first recap added to a historical completed
-    // visit creates its record (created === true) and consumes nothing; a
-    // recap edit of a visit completed hours or years ago finds an old record
-    // and consumes nothing; the at-most-once movement index makes a genuine
-    // double-consume impossible either way.
+    // P2). One exception (PR 2 pre-push P1 / GH codex r3 P1): submitRecap
+    // commits the completed status BEFORE this call, so a process death in
+    // between makes the client's retry read priorCompleted=true with no kit
+    // movement written. The completing transition therefore stamps
+    // field_flags.completion_supplies_owed on the service record INSIDE its
+    // transaction (pest-recap.js); this hook consumes whenever that marker is
+    // set, and clears it afterwards. Durable evidence of the transition, not
+    // record age: a first recap added to a historical completion and any
+    // later edit carry no marker and consume nothing; the at-most-once
+    // movement index still makes a genuine double-consume impossible.
     let consumeNow = result.priorCompleted !== true;
-    if (!consumeNow && result.recordId && result.created === false) {
+    if (!consumeNow && result.recordId) {
       try {
-        const rec = await db('service_records').where({ id: result.recordId }).first('created_at');
-        const createdMs = rec?.created_at ? new Date(rec.created_at).getTime() : NaN;
-        if (Number.isFinite(createdMs) && Date.now() - createdMs < RECAP_RETRY_WINDOW_MS) consumeNow = true;
-      } catch (e) { logger.warn(`[dispatch] recap retry-window read failed: ${e.message}`); }
+        const rec = await db('service_records').where({ id: result.recordId }).first('field_flags');
+        const flags = typeof rec?.field_flags === 'string' ? JSON.parse(rec.field_flags) : (rec?.field_flags || {});
+        if (flags.completion_supplies_owed === true) consumeNow = true;
+      } catch (e) { logger.warn(`[dispatch] recap supplies-owed read failed: ${e.message}`); }
     }
     if (consumeNow) {
       try {
@@ -14138,6 +14132,10 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
           const JobCosting = require('../services/job-costing');
           void JobCosting.calculateJobCost(req.params.serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
         }
+        // The kit is settled (consumed, or skipped for a deterministic reason
+        // that a retry would repeat): clear the owed marker. A failed clear
+        // leaves it set — the next retry re-runs the at-most-once consume.
+        if (result.recordId) await db('service_records').where({ id: result.recordId }).update({ field_flags: db.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
       } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }
     }
     res.json(result);

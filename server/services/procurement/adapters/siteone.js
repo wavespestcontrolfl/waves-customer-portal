@@ -92,7 +92,9 @@ const SELECTORS = Object.freeze({
   checkoutAccount: '.checkout [data-test="account-number"], .checkout-billing .account-number, .checkout .billing-account .account-number, .payment-method.selected .account-number, [data-test="bill-to-account"] .account-number',
   checkoutShipTo: '.checkout [data-test="ship-to"], .checkout-shipping .shipping-address, .checkout .ship-to address, .checkout .delivery-address address, [data-test="shipping-address"]',
   placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
-  orderNumber: '.order-number, [data-test="order-number"], .confirmation-number, :has-text("Order #")',
+  // Confirmation-number element only — never a bare :has-text() that an
+  // ancestor (the body) would satisfy ahead of the real node (Codex r3 P1).
+  orderNumber: '[data-test="order-number"], .order-number, .confirmation-number, .order-confirmation-number, h1:has-text("Order #"), h2:has-text("Order #"), h3:has-text("Order #"), p:has-text("Order #"), strong:has-text("Order #")',
 });
 
 const NAV_TIMEOUT = 45000;
@@ -424,7 +426,9 @@ async function submitAndReadOrderNumber(page, { evidence, upload }) {
   }
   await shot(page, 'confirmation', evidence, upload);
   const numText = (await page.locator(SELECTORS.orderNumber).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ');
-  const m = numText.match(/([A-Z0-9-]{5,})\s*$/i);
+  // The number ADJACENT to the label wins; the trailing token is only the
+  // fallback for a bare-number element.
+  const m = numText.match(/order\s*(?:#|number|no\.?)?\s*:?\s*([A-Z0-9-]{5,})/i) || numText.match(/([A-Z0-9-]{5,})\s*$/i);
   if (!m) {
     const err = new Error('siteone: order submitted but no confirmation number was found');
     err.ambiguous = true; err.evidence = evidence;

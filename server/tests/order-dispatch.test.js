@@ -152,7 +152,7 @@ test('no eligible price → needs_review no_price, adapter never called, one bel
   expect(ledgerStatus()).toBe('needs_review');
   expect(requestStatus()).toBeUndefined();
   expect(notify).toHaveBeenCalledTimes(1);
-  expect(notify.mock.calls[0][3]).toMatchObject({ bell: true, dedupeKey: 'auto-order:ledger-1' });
+  expect(notify.mock.calls[0][3]).toMatchObject({ bell: true, dedupeKey: expect.stringMatching(/^auto-order:ledger-1:[a-z0-9]+$/) }); // versioned (r3 P1)
 });
 
 test('caps unconfigured → needs_review, no order', async () => {
@@ -519,7 +519,7 @@ test('a bell that fails to send is persisted with the park, reported, and re-run
   mockState.request = { ...baseRequest(), status: 'ordered' };
   const run2 = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } });
   expect(run2.bells).toEqual({ rung: ['ledger-1'], pending: [] });
-  expect(notify).toHaveBeenLastCalledWith('system', evidence.bell.title, evidence.bell.body, expect.objectContaining({ dedupeKey: 'auto-order:ledger-1' }));
+  expect(notify).toHaveBeenLastCalledWith('system', evidence.bell.title, evidence.bell.body, expect.objectContaining({ dedupeKey: `auto-order:ledger-1:${evidence.bell.v}` }));
   expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.evidence)).toBe(true);
 });
 

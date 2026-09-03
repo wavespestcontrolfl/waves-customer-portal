@@ -133,6 +133,12 @@ function meta(raw) {
   if (typeof raw !== 'string') return raw;
   try { return JSON.parse(raw) || {}; } catch { return {}; }
 }
+// Every bell carries a version (`v`): the dedupe key and the delivery stamp
+// are bound to it, so an obsolete in-flight delivery (a stale-park bell
+// re-ringing while the delayed vendor call replaces it) can neither refresh
+// the admin notification back to old copy nor acknowledge its replacement
+// (Codex r3 P1).
+const versioned = (bell) => ({ ...bell, v: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` });
 const dollars = (cents) => `$${(Number(cents || 0) / 100).toFixed(2)}`;
 const num = (v) => { const n = Number(v); return v == null || v === '' || !Number.isFinite(n) ? null : n; };
 
@@ -341,7 +347,7 @@ async function findDispatchable(conn = db) {
  * a failed send (bellAt stays null) is re-rung by reringPendingBells on the
  * next run. Returns true when the bell landed.
  */
-async function deliverBell(conn, { notify, ledgerId, requestId, productName, vendorName, title, body }) {
+async function deliverBell(conn, { notify, ledgerId, requestId, productName, vendorName, title, body, v = null }) {
   const notifyAdmin = notify || ((...args) => require('../notification-service').notifyAdmin(...args));
   // notifyAdmin swallows its own insert/dedupe failures and returns null
   // (notification-service.js) — a resolved promise is not a landed bell,
@@ -351,7 +357,7 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
     landed = await notifyAdmin('system', title, body, {
       bell: true,
       link: RESTOCK_TAB,
-      dedupeKey: `auto-order:${ledgerId}`,
+      dedupeKey: v ? `auto-order:${ledgerId}:${v}` : `auto-order:${ledgerId}`,
       refreshOnDedupe: true,
       metadata: { vendorOrderId: ledgerId, restockRequestId: requestId, productName, vendorName },
     });
@@ -364,7 +370,11 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
     return false;
   }
   try {
-    await conn('vendor_orders').where({ id: ledgerId }).update({
+    // Stamp ONLY the bell version that was delivered: if the row's bell was
+    // replaced meanwhile, the replacement stays pending for the re-ring.
+    const stamp = conn('vendor_orders').where({ id: ledgerId });
+    if (v) stamp.whereRaw("evidence->'bell'->>'v' = ?", [v]);
+    await stamp.update({
       evidence: conn.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ bellAt: new Date().toISOString() })]),
       updated_at: new Date(),
     });
@@ -390,7 +400,7 @@ async function reringPendingBells({ conn = db, notify = null } = {}) {
   for (const row of rows) {
     const bell = meta(row.evidence).bell;
     if (!bell?.title) continue;
-    const ok = await deliverBell(conn, { notify, ledgerId: row.id, requestId: row.request_id, productName: row.product_name || '?', vendorName: row.vendor_name || '?', title: bell.title, body: bell.body || '' });
+    const ok = await deliverBell(conn, { notify, ledgerId: row.id, requestId: row.request_id, productName: row.product_name || '?', vendorName: row.vendor_name || '?', title: bell.title, body: bell.body || '', v: bell.v || null });
     (ok ? rung : pending).push(row.id);
   }
   return { rung, pending };
@@ -398,7 +408,8 @@ async function reringPendingBells({ conn = db, notify = null } = {}) {
 
 // The bell a park rings — persisted with the outcome (evidence.bell) so a
 // failed send is re-rung, never lost. Post-submit reasons say do-NOT-re-order.
-function parkBell({ reason, status, product, vendor, request, amountCents, message, placed }) {
+function parkBell(args) { return versioned(parkBellText(args)); }
+function parkBellText({ reason, status, product, vendor, request, amountCents, message, placed }) {
   if (reason === 'dry_run') {
     return {
       title: `Auto-order dry run: ${product.name} (${vendor.name})`,
@@ -627,10 +638,10 @@ async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCe
   const parked = await trx('vendor_orders').where({ id: ledger.id }).first('evidence');
   const wasRevoked = !!meta(parked?.evidence).revokedAt;
   const after = wasRevoked ? 'the operator revoked it' : `it was parked and the request marked ${fresh?.status || 'missing'}`;
-  const bell = {
+  const bell = versioned({
     title: `Auto-order landed after ${wasRevoked ? 'revoke' : 'stale recovery'}: ${product.name}`,
     body: `${vendor.name} order ${placed.externalOrderNumber || '(number unknown)'} (${dollars(orderFacts.amount_cents ?? quoteCents)}) was confirmed after ${after}. The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke again.`,
-  };
+  });
   await trx('vendor_orders').where({ id: ledger.id }).update({
     ...orderFacts,
     evidence: conn.raw("(COALESCE(evidence, '{}'::jsonb) - 'revokedAt' - 'bellAt') || ?::jsonb", [JSON.stringify({ bell, latePlacementAt: new Date().toISOString(), latePlacementAfterRevoke: wasRevoked })]),
@@ -657,8 +668,12 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
   };
   // The office closed the request while the vendor call was in flight: an
   // order exists that the tab no longer expects — say so once.
-  const closedMidFlightBell = (freshStatus) => ({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. Reconcile by hand.` });
+  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. Reconcile by hand.` });
   const outcome = await conn.transaction(async (trx) => {
+    // LOCK ORDER: ledger row first, then the request — the same order the
+    // revoke script and every park use, so a late placement racing an
+    // operator revoke waits instead of deadlocking (Codex r3 P1).
+    await trx('vendor_orders').where({ id: ledger.id }).forUpdate().first('id');
     const fresh = await trx('product_restock_requests').where({ id: request.id }).forUpdate().first('status');
     const stillOpen = fresh?.status === 'open';
     const bell = stillOpen ? null : closedMidFlightBell(fresh?.status);
@@ -844,23 +859,32 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
   const bells = await reringPendingBells({ conn, notify });
   const recovered = await recoverStalePlacing({ conn, notify, now });
   const gated = !gateEnvValue(GATE);
-  const rows = gated ? [] : await findDispatchable(conn);
   const results = [];
   let runLevelError = null;
-  for (const row of rows) {
-    try {
-      results.push(await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env }));
-    } catch (err) {
-      // Run-level: the environment is broken for every remaining request —
-      // stop here (claims released), let job_health record it, retry tomorrow.
-      runLevelError = err;
-      logger.error(`[order-dispatch] run-level failure, batch aborted: ${err.message}`);
-      break;
+  // Rescan before releasing the lease (Codex r3 P2): a request another
+  // replica's sweep raised while a slow vendor order was in flight is
+  // picked up now, not tomorrow. Bounded; a pass that finds nothing new ends.
+  const seen = new Set();
+  let rows = [];
+  for (let pass = 0; pass < 3 && !runLevelError && !gated; pass += 1) {
+    rows = (await findDispatchable(conn)).filter((r) => !seen.has(r.id));
+    if (!rows.length) break;
+    for (const row of rows) {
+      seen.add(row.id);
+      try {
+        results.push(await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env }));
+      } catch (err) {
+        // Run-level: the environment is broken for every remaining request —
+        // stop here (claims released), let job_health record it, retry tomorrow.
+        runLevelError = err;
+        logger.error(`[order-dispatch] run-level failure, batch aborted: ${err.message}`);
+        break;
+      }
     }
   }
   const failed = results.filter((r) => r.status === 'failed');
   const bellsPending = [...bells.pending, ...recovered.bellPending, ...results.filter((r) => r.bellPending).map((r) => r.ledgerId)];
-  logger.info(`[order-dispatch] ${results.filter((r) => r.status === 'placed').length} placed, ${results.filter((r) => r.status === 'needs_review').length} parked, ${failed.length} failed, ${results.filter((r) => r.skipped).length} skipped of ${rows.length}; ${bells.rung.length} bells re-rung, ${bellsPending.length} pending`);
+  logger.info(`[order-dispatch] ${results.filter((r) => r.status === 'placed').length} placed, ${results.filter((r) => r.status === 'needs_review').length} parked, ${failed.length} failed, ${results.filter((r) => r.skipped).length} skipped of ${seen.size}; ${bells.rung.length} bells re-rung, ${bellsPending.length} pending`);
   if (runLevelError) throw runLevelError;
   const problems = [];
   if (failed.length) problems.push(`${failed.length} order(s) failed (${failed.map((f) => f.reason).join(', ')})`);
