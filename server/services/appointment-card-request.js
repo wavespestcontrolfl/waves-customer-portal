@@ -2177,6 +2177,17 @@ async function feeEligibleRequestForVisit(scheduledServiceId) {
   return { request };
 }
 
+// feeEligibleRequestForVisit exclusion → cancel-fee rule code (+ detail).
+function skipRule(skipReason) {
+  const reason = String(skipReason || '');
+  if (reason === 'not_completed' || reason === 'no_charge_target') return { code: 'not_secured' };
+  if (reason === 'no_agreed_fee' || reason === 'no_fee_consent') return { code: 'no_agreed_fee' };
+  if (reason === 'payer_billed') return { code: 'payer_billed' };
+  if (reason === 'card_hold_lane') return { code: 'fee_settled', detail: 'card hold already released' };
+  if (reason.startsWith('fee_')) return { code: 'fee_settled', detail: reason.slice(4).replace(/_/g, ' ') };
+  return { code: 'no_card' };
+}
+
 // Same window formula as the card-hold rail, with fee_agreed_at (the consent
 // moment) as the booking-age anchor: the free-cancel period a late securer
 // gets is exactly the time they've had the agreement. Missing/skewed
@@ -2757,7 +2768,7 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
   // Dark rail: no lookups, no fee-may-apply previews (Codex #3153 r11 P1)
   // — the disabled rail cannot charge, so the lane presents as absent.
   const { describeCancelFeeRule, freeCancelReason } = require('./estimate-card-holds');
-  if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
+  if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'rail_dark' }) };
   const { request, unresolved, reason: skipReason } = await feeEligibleRequestForVisit(scheduledServiceId);
   if (!request) {
     if (unresolved) {
@@ -2779,7 +2790,9 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
       const code = skipReason === 'charge_review' ? 'charge_in_flight' : 'unresolved';
       return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code, feeAmount, detail: String(skipReason || 'lookup failed').replace(/_/g, ' ') }) };
     }
-    return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
+    // A secured-but-exempt card must not read as "no card saved" (pre-push
+    // Codex P1): map each eligibility exclusion to its truthful rule.
+    return { secured: false, feeApplies: false, rule: describeCancelFeeRule(skipRule(skipReason)) };
   }
   const feeAmount = Number(request.no_show_fee_amount);
   const windowHours = Number(request.cancel_window_hours) > 0 ? Number(request.cancel_window_hours) : 24;

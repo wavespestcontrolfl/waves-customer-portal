@@ -1008,7 +1008,21 @@ describe('appointmentCardCancelPreview', () => {
     const res = await appointmentCardCancelPreview('svc-1');
     // Dark rail presents as ABSENT — no lookups, no fee-may-apply
     // previews (Codex #3153 r11).
-    expect(res).toEqual({ secured: false, feeApplies: false, rule: expect.objectContaining({ code: 'no_card', willCharge: false }) });
+    expect(res).toEqual({ secured: false, feeApplies: false, rule: expect.objectContaining({ code: 'rail_dark', willCharge: false }) });
+    expect(res.rule.text).not.toMatch(/card is saved/i);
+  });
+  test('secured but exempt → the exemption is named, never "no card saved"', async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'released' } });
+    let res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: false, feeApplies: false, rule: { code: 'fee_settled', willCharge: false } });
+    expect(res.rule.text).toMatch(/already settled \(released\)/);
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), no_show_fee_amount: null } });
+    res = await appointmentCardCancelPreview('svc-1');
+    expect(res.rule).toMatchObject({ code: 'no_agreed_fee', willCharge: false });
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'pending', stripe_payment_method_id: null } });
+    res = await appointmentCardCancelPreview('svc-1');
+    expect(res.rule).toMatchObject({ code: 'not_secured', willCharge: false });
+    expect(res.rule.text).not.toMatch(/^No card is saved/);
   });
   test('outside-window → no fee, and the rule names the visit start and the free-cancel reason', async () => {
     mockApptTime = new Date(Date.now() + 100 * HOUR);

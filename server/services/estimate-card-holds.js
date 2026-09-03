@@ -1316,6 +1316,17 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
       return rule(false, 'No card is saved for this visit, so nothing will be charged.');
     case 'rail_off':
       return rule(false, 'A card is saved, but fee collection is switched off, so nothing will be charged.');
+    case 'rail_dark':
+      // No lookup was made (dark rail short-circuits), so no claim about a card.
+      return rule(false, 'Late-cancel fee collection is switched off, so nothing will be charged.');
+    case 'not_secured':
+      return rule(false, 'A card was requested for this visit but never saved, so nothing will be charged.');
+    case 'no_agreed_fee':
+      return rule(false, 'A card is saved, but no late-cancel fee was agreed for this visit, so nothing will be charged.');
+    case 'payer_billed':
+      return rule(false, 'A card is saved, but a third-party payer is billed for this visit, so the homeowner\'s card will not be charged.');
+    case 'fee_settled':
+      return rule(false, `The fee for this visit was already settled${detail ? ` (${detail})` : ''}, so nothing more will be charged.`);
     case 'no_time':
       return rule(false, `A card is saved, but this visit has no scheduled time to measure the ${hours}-hour window from, so nothing will be charged.`);
     case 'past_start':
