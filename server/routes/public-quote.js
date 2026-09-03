@@ -1389,11 +1389,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
     }
     if (services.flea) {
-      // Offer key is a whitelisted engine identity (single-visit knockdown vs
-      // the two-visit package); anything else falls to the engine default.
+      // Offer key is a whitelisted engine identity; anything else falls to
+      // the engine default (the two-visit package). The retired single-visit
+      // key is still whitelisted ON PURPOSE: priceFlea prices the package
+      // and routes the line to review, so a cached form that still asks for
+      // one visit fails closed instead of silently instant-quoting two.
       const FLEA_OFFERS = ['flea_knockdown_single', 'flea_elimination_two_visit'];
       const fleaOffer = FLEA_OFFERS.includes(String(services.flea.offerKey || '').toLowerCase()) ? String(services.flea.offerKey).toLowerCase() : null;
-      engineInput.services.flea = fleaOffer ? { offerKey: fleaOffer } : {};
+      const fleaComplexity = ['light', 'moderate', 'heavy'].includes(String(services.flea.fleaComplexity || '').toLowerCase())
+        ? String(services.flea.fleaComplexity).toLowerCase() : null;
+      engineInput.services.flea = {
+        ...(fleaOffer ? { offerKey: fleaOffer } : {}),
+        ...(fleaComplexity ? { fleaComplexity } : {}),
+      };
     }
     if (services.stinging) {
       engineInput.services.stinging = {
@@ -2214,6 +2222,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // the mirrored estimate can render per-application pricing.
             perVisit: item.perVisit ?? null,
             visits: item.visits ?? null,
+            // Sold-scope flags the estimate's one-time copy pack reads
+            // (flea retreat terms + yard scope) — dropped here, the public
+            // flea quote could never show its exact guarantee (GH codex
+            // #3845 r1 P2).
+            warrantyType: item.warrantyType ?? null,
+            guaranteeWindowDaysAfterFollowUp: item.guaranteeWindowDaysAfterFollowUp ?? null,
+            maxIncludedRetreats: item.maxIncludedRetreats ?? null,
+            exteriorStatus: item.exteriorStatus ?? null,
             // Palm-injection lines carry cadence ONLY as appsPerYear (the
             // palm pricer emits no visits/frequency) — dropping it here
             // left the mirrored draft cadence-less, so a palm-only handoff
@@ -2787,6 +2803,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : quoteRequiredReason === 'lot_size_requires_verification'
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
+          // A stale single-visit flea request (retired offer key) prices the
+          // two-visit package but parks for review — say so, never the
+          // commercial fallback (GH codex #3845 r5 P2).
+          : quoteRequiredReason === 'flea_single_visit_offer_retired'
+          ? 'Flea control is now our two-visit Flea Elimination Package rather than a single treatment — the Waves team will confirm your package price shortly.'
           : lowConfidenceForcesSiteQuote && !manualQuoteLine
             ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
             : 'Commercial properties require a manual quote. The Waves team has been notified.',

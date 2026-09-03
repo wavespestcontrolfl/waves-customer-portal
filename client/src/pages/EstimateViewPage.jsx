@@ -61,6 +61,7 @@ import {
   glassDayLinesFor,
   glassEstimateCopyFor,
   glassOneTimeHeroOverlay,
+  glassPackWithOneTimeHero,
   glassServiceSlug,
   glassTierDisplay,
   setCommercialGlass,
@@ -6805,17 +6806,9 @@ function EstimateViewPageInner() {
   const oneTimeServiceCopy = estimate.isOneTimeOnly === true && pricing.oneTimeServiceCopy?.hero
     ? pricing.oneTimeServiceCopy
     : null;
-  // Review-gated quotes (cta.reviewBeforeBooking) keep the overlay's
-  // confirm-with-you subline — a pack subline may promise "approve online
-  // and pick a day" (codex pre-push P1); the service name still leads.
-  const glassPack = baseGlassPack && oneTimeServiceCopy
-    ? {
-      ...baseGlassPack,
-      eyebrow: oneTimeServiceCopy.hero.eyebrow,
-      heroH1: oneTimeServiceCopy.hero.h1,
-      heroSub: reviewBeforeBooking ? baseGlassPack.heroSub : oneTimeServiceCopy.hero.sub,
-    }
-    : baseGlassPack;
+  // Applied with or without the category glass pack — the server-rendered
+  // page applies the service hero unconditionally (codex #3823 deferred P2).
+  const glassPack = glassPackWithOneTimeHero(baseGlassPack, oneTimeServiceCopy, { reviewBeforeBooking });
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
@@ -6858,7 +6851,7 @@ function EstimateViewPageInner() {
     ? null
     : oneTimeServiceCopy?.aiTitle && estimate.intelligence
     ? { ...estimate.intelligence, title: oneTimeServiceCopy.aiTitle, body: oneTimeServiceCopy.aiBody }
-    : glassPack && estimate.intelligence
+    : glassPack?.aiTitle && estimate.intelligence
     ? { ...estimate.intelligence, title: fillGlassTokens(glassPack.aiTitle), body: glassPack.aiBody }
     : estimate.intelligence;
   const askChips = oneTimeServiceCopy?.askChips?.length

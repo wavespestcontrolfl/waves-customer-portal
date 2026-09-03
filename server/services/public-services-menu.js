@@ -65,10 +65,10 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
   tree_shrub_6week: { treeShrub: { tier: 'enhanced' } },
   rodent_bait_quarterly: { rodentBait: {} },
   rodent_trapping: { rodentTrapping: {} },
-  // Catalog flea_tick is the SINGLE-visit treatment (engine key
-  // flea_knockdown_single); the engine's default flea offer is the two-visit
-  // package, so the offer is pinned here (pre-push codex P0).
-  flea_tick: { flea: { offerKey: 'flea_knockdown_single' } },
+  // Catalog flea_tick prices the two-visit Flea Elimination Package (engine
+  // key flea_package) — the engine's only flea offer since the owner ruling
+  // 2026-09-03 ("flea should be two visits"; migration 20260903000060).
+  flea_tick: { flea: {} },
   // Station RENTAL, not purchase (owner ruling 2026-08-29): the website shows
   // the monthly rental number; no $600+ installation charge. Instant only
   // while GATE_TERMITE_STATION_RENTAL is on (see instantForRow) — with the
@@ -190,6 +190,7 @@ function requestMatchesCatalogRow(serviceKey, row) {
 // the track's bracket table). Everything else is fixed by the canonical
 // request.
 const LAWN_TRACKS = new Set(['st_augustine', 'bahia', 'bermuda', 'zoysia']);
+const FLEA_COMPLEXITIES = new Set(['light', 'moderate', 'heavy']);
 function mergeKeyedRequestOptions(request, bodyServices) {
   if (!request) return null;
   const out = JSON.parse(JSON.stringify(request));
@@ -198,6 +199,10 @@ function mergeKeyedRequestOptions(request, bodyServices) {
     if (out.lawn) out.lawn.track = track;
     if (out.lawnPestControl) out.lawnPestControl.track = track;
   }
+  // Flea infestation complexity (light / moderate / heavy) when the site
+  // collected it; absent, the package prices at the base (light) rate.
+  const fleaComplexity = String(bodyServices?.flea?.fleaComplexity || '').toLowerCase();
+  if (out.flea && FLEA_COMPLEXITIES.has(fleaComplexity)) out.flea.fleaComplexity = fleaComplexity;
   return out;
 }
 function termiteRentalGateOn() {

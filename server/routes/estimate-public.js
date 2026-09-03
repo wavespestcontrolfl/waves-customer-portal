@@ -16842,6 +16842,8 @@ function oneTimeItemsForRender(estResult, estData) {
     offerKey: row.offerKey || null,
     visits: row.visits || null,
     warrantyType: row.warrantyType || null,
+    guaranteeWindowDaysAfterFollowUp: Number(row.guaranteeWindowDaysAfterFollowUp) > 0 ? Number(row.guaranteeWindowDaysAfterFollowUp) : null,
+    maxIncludedRetreats: Number(row.maxIncludedRetreats) > 0 ? Number(row.maxIncludedRetreats) : null,
     exteriorStatus: row.exteriorStatus || null,
     warrantyEligible: row.warrantyEligible === true,
     nestRemovalSelected: row.nestRemovalSelected === true,

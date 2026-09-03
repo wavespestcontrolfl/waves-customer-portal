@@ -7470,12 +7470,6 @@ function fleaAdjustment(initial = 0, followUp = 0) {
   return { initial: Math.round(Number(initial) || 0), followUp: Math.round(Number(followUp) || 0) };
 }
 
-function normalizeFleaOfferKey(value) {
-  const raw = String(value || '').trim().toLowerCase();
-  if (['flea_knockdown_single', 'knockdown', 'single', 'one_visit'].includes(raw)) return 'flea_knockdown_single';
-  return 'flea_elimination_two_visit';
-}
-
 function normalizeFleaComplexity(value) {
   const raw = String(value || '').trim().toLowerCase();
   if (['moderate', 'heavy'].includes(raw)) return raw;
@@ -7492,51 +7486,52 @@ function fleaComplexityAdjustment(complexity, config = {}) {
   return fleaAdjustment(0, 0);
 }
 
-function fleaOfferConfig(cfg, offerKey) {
+// Flea is sold ONLY as the two-visit Elimination Package (owner ruling
+// 2026-09-03); a requested offer key is ignored — the single-visit knockdown
+// offer no longer exists in the config or the defaults.
+const FLEA_OFFER_KEY = 'flea_elimination_two_visit';
+const RETIRED_FLEA_SINGLE_KEYS = new Set(['flea_knockdown_single', 'knockdown', 'single', 'one_visit']);
+
+function fleaOfferConfig(cfg) {
   const configured = Array.isArray(cfg.offers)
-    ? cfg.offers.find(offer => offer?.offerKey === offerKey || offer?.offer_key === offerKey)
+    ? cfg.offers.find(offer => offer?.offerKey === FLEA_OFFER_KEY || offer?.offer_key === FLEA_OFFER_KEY)
     : null;
-  const defaults = offerKey === 'flea_knockdown_single'
-    ? {
-      service: 'flea_knockdown_single',
-      displayName: 'Flea Knockdown Visit',
-      visitCount: 1,
-      warrantyType: 'none',
-      baseInitial: 225,
-      floorInitial: 185,
-      baseFollowUp: 0,
-      floorFollowUp: 0,
-      packageFloor: 185,
-      exteriorAddOnMode: 'initial_only',
-    }
-    : {
-      service: 'flea_package',
-      displayName: 'Flea Elimination Package',
-      visitCount: 2,
-      warrantyType: 'conditional_retreat',
-      baseInitial: cfg.initial?.base ?? 225,
-      floorInitial: cfg.initial?.floor ?? 185,
-      baseFollowUp: cfg.followUp?.base ?? 125,
-      floorFollowUp: cfg.followUp?.floor ?? 95,
-      packageFloor: (cfg.initial?.floor ?? 185) + (cfg.followUp?.floor ?? 95),
-      guaranteeWindowDaysAfterFollowUp: 30,
-      maxIncludedRetreats: 1,
-      exteriorAddOnMode: 'two_visit',
-    };
+  const defaults = {
+    service: 'flea_package',
+    displayName: 'Flea Elimination Package',
+    visitCount: 2,
+    warrantyType: 'conditional_retreat',
+    baseInitial: cfg.initial?.base ?? 225,
+    floorInitial: cfg.initial?.floor ?? 185,
+    baseFollowUp: cfg.followUp?.base ?? 125,
+    floorFollowUp: cfg.followUp?.floor ?? 95,
+    packageFloor: (cfg.initial?.floor ?? 185) + (cfg.followUp?.floor ?? 95),
+    guaranteeWindowDaysAfterFollowUp: 30,
+    maxIncludedRetreats: 1,
+    exteriorAddOnMode: 'two_visit',
+  };
   if (!configured) return defaults;
   return {
     ...defaults,
     ...configured,
-    service: configured.service || configured.serviceKey || configured.service_key || defaults.service,
     displayName: configured.displayName || configured.display_name || defaults.displayName,
-    visitCount: Number(configured.visitCount ?? configured.visit_count ?? defaults.visitCount) || defaults.visitCount,
-    warrantyType: configured.warrantyType || configured.warranty_type || defaults.warrantyType,
+    // Package-DEFINING fields are pinned, not configurable: the public
+    // menu, the flea_tick completion profile (engine key flea_package), and
+    // the customer copy all promise two visits with the conditional retreat
+    // guarantee, so an admin edit of the row can move the prices but never
+    // turn the package back into a one-visit sale or re-name the line's
+    // service identity (GH codex #3845 r1 P1, r3 P1).
+    service: defaults.service,
+    visitCount: defaults.visitCount,
+    warrantyType: defaults.warrantyType,
+    guaranteeWindowDaysAfterFollowUp: defaults.guaranteeWindowDaysAfterFollowUp,
+    maxIncludedRetreats: defaults.maxIncludedRetreats,
+    exteriorAddOnMode: defaults.exteriorAddOnMode,
     baseInitial: configured.baseInitial ?? configured.base_initial ?? defaults.baseInitial,
     floorInitial: configured.floorInitial ?? configured.floor_initial ?? defaults.floorInitial,
     baseFollowUp: configured.baseFollowUp ?? configured.base_follow_up ?? defaults.baseFollowUp,
     floorFollowUp: configured.floorFollowUp ?? configured.floor_follow_up ?? defaults.floorFollowUp,
     packageFloor: configured.packageFloor ?? configured.package_floor ?? defaults.packageFloor,
-    exteriorAddOnMode: configured.exteriorAddOnMode || configured.exterior_add_on_mode || defaults.exteriorAddOnMode,
   };
 }
 
@@ -7544,14 +7539,16 @@ function priceFlea(property = {}) {
   const cfg = SPECIALTY.flea;
   const services = property.services || {};
   const fleaOptions = typeof services.flea === 'object' && services.flea !== null ? services.flea : {};
-  const offerKey = normalizeFleaOfferKey(
-    property.fleaOfferKey
-    ?? property.offerKey
-    ?? services.fleaOfferKey
-    ?? fleaOptions.offerKey
-    ?? fleaOptions.fleaOfferKey
-  );
-  const offer = fleaOfferConfig(cfg, offerKey);
+  const offerKey = FLEA_OFFER_KEY;
+  const offer = fleaOfferConfig(cfg);
+  // A caller that still asks for the retired single-visit knockdown is not
+  // silently repriced: the package prices, but the line routes to review so
+  // a person confirms the two-visit scope before it reaches a customer
+  // (pre-push codex P0). Absent/unknown keys are the ordinary default.
+  const requestedOfferKey = String(
+    property.fleaOfferKey ?? property.offerKey ?? services.fleaOfferKey ?? fleaOptions.offerKey ?? fleaOptions.fleaOfferKey ?? ''
+  ).trim().toLowerCase();
+  const singleVisitRequested = RETIRED_FLEA_SINGLE_KEYS.has(requestedOfferKey);
   const footprintResolution = resolvePestFootprint({
     ...property,
     homeSqFt: property.homeSqFt
@@ -7637,10 +7634,14 @@ function priceFlea(property = {}) {
   if (exterior.requiresCustomQuote) {
     manualReviewReasons.push('flea_exterior_area_custom_quote_required');
   }
+  if (singleVisitRequested) {
+    manualReviewReasons.push('flea_single_visit_offer_retired');
+  }
   const warnings = uniqueList([
     ...footprintResolution.warnings,
     ...(exteriorSelected ? (exterior.warnings || []) : []),
     ...(exteriorSourceSuspected && !exteriorSelected ? ['Exterior flea source suspected; guarantee scope is limited to treated interior areas.'] : []),
+    ...(singleVisitRequested ? ['A single-visit flea knockdown was requested; flea is sold only as the two-visit Elimination Package — confirm the scope before sending.'] : []),
   ]);
   const guaranteeScope = exteriorSelected && hasPricedExteriorFleaSpray
     ? 'interior_and_treated_exterior_zones'
@@ -7676,11 +7677,11 @@ function priceFlea(property = {}) {
     },
     modifiers: { urgencyMultiplier, recurringCustomerMultiplier, rushPremium },
     display: {
-      name: offer.visitCount > 1 ? 'Flea Elimination Package — 2 visits' : 'Flea Knockdown Visit',
-      detail: offer.visitCount > 1 ? `$${initial} initial + $${followUp} follow-up` : '1 visit, no retreat warranty',
+      name: 'Flea Elimination Package — 2 visits',
+      detail: `$${initial} initial + $${followUp} follow-up`,
       exteriorDetail,
     },
-    detail: offer.visitCount > 1 ? `$${initial} initial + $${followUp} follow-up` : '1 visit, no retreat warranty',
+    detail: `$${initial} initial + $${followUp} follow-up`,
     exteriorDetail,
     scope: 'Exterior flea treatment is applied to eligible targeted outdoor areas where flea activity is likely, such as shaded pet resting areas, under decks, kennels, foundation edges, mulch beds, and other approved areas. Final treatment area is subject to technician confirmation and product label directions.',
     requiresCustomQuote: !!exterior.requiresCustomQuote,
@@ -7689,7 +7690,7 @@ function priceFlea(property = {}) {
     reason: exterior.customQuoteReason || null,
     warning: warnings[0] || null,
     warnings,
-    requiresManualReview: footprintResolution.requiresManualReview || !!(exteriorSelected && (exterior.needsConfirmation || exterior.requiresCustomQuote)),
+    requiresManualReview: footprintResolution.requiresManualReview || singleVisitRequested || !!(exteriorSelected && (exterior.needsConfirmation || exterior.requiresCustomQuote)),
     manualReviewReasons: uniqueList(manualReviewReasons),
     areaSource: exterior.source,
     footprintUsed: footprint,
