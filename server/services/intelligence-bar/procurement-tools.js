@@ -1359,11 +1359,19 @@ async function updateRestockRequest(input) {
       return { success: true, request_id: request.id, product: product.name, status: 'cancelled' };
     }
 
-    // receive — recompute against the locked product row, never the preview
+    // receive — recompute against the locked product row, never the preview.
+    // When the operator gave no quantity, the default is re-derived HERE,
+    // under the request lock: an automatic order that went placing → placed
+    // between the preview and this transaction must receive what it actually
+    // bought, not the requested figure (pre-push P0).
     const fresh = await trx('products_catalog').where('id', request.product_id).forUpdate().first();
     if (!fresh) return { error: 'Product not found' };
+    const enteredQuantity = toNumber(input.quantity)
+      ?? await require('../procurement/order-dispatch').orderedQuantityFor(trx, request.id)
+      ?? toNumber(lockedRequest.requested_quantity);
+    if (!enteredQuantity || enteredQuantity <= 0) return { error: 'Receive quantity is required' };
     const inventoryUnit = fresh.inventory_unit || receivePlan.enteredUnit;
-    const received = describeInventoryConversion(receivePlan.enteredQuantity, receivePlan.enteredUnit, inventoryUnit);
+    const received = describeInventoryConversion(enteredQuantity, receivePlan.enteredUnit, inventoryUnit);
     if (!received.convertible || received.amount == null) {
       return { error: `Cannot convert receive unit ${receivePlan.enteredUnit} to inventory unit ${inventoryUnit}` };
     }
@@ -1404,7 +1412,7 @@ async function updateRestockRequest(input) {
         source: 'intelligence_bar_restock_receive',
         restockRequestId: request.id,
         note: input.note || null,
-        enteredQuantity: receivePlan.enteredQuantity,
+        enteredQuantity: enteredQuantity,
         enteredUnit: receivePlan.enteredUnit,
         conversionConfidence: received.confidence,
       },
