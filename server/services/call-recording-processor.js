@@ -14028,10 +14028,13 @@ const CallRecordingProcessor = {
               // preference or a withheld link never leaves a permanent
               // bearer short_codes row behind (GH codex #3814 r1 P2).
               // Three gates, all fail closed:
-              //  1. Recipient is the account's saved phone, never an
-              //     implied-consent redirect to the inbound ANI — a spouse,
-              //     tenant or service contact who called must not receive
-              //     the account holder's bearer estimate link (r1 P1).
+              //  1. Recipient IS the account's saved phone (customers.phone,
+              //     compared last-10) — never an implied-consent redirect to
+              //     the inbound ANI, and never the validation fallback that
+              //     fills a phone-less account's slot from the extracted or
+              //     caller number (pre-push codex P0): a spouse, tenant or
+              //     service contact who called must not receive the account
+              //     holder's bearer estimate link (r1 P1).
               //  2. The composer's resolver picks the newest OPEN estimate
               //     (viewability + pricing-authority gates).
               //  3. Tied to THIS booking (pre-push P1): accepting that
@@ -14041,7 +14044,9 @@ const CallRecordingProcessor = {
               //     other-property estimate would send the customer to the
               //     slot picker and mint the very duplicate this lane exists
               //     to prevent, so it gets no link.
-              if (smsBody && !redirectImpliedToAni
+              const recipientIsSavedCustomerPhone = smsLast10(customer?.phone).length === 10
+                && smsLast10(customer.phone) === smsLast10(smsRecipient);
+              if (smsBody && !redirectImpliedToAni && recipientIsSavedCustomerPhone
                 && require('../config/feature-gates').gateEnvValue('GATE_CALL_CONFIRMATION_ESTIMATE_LINK')) {
                 try {
                   const { findLatestOpenEstimate } = require('./composer-customer-links');

@@ -221,13 +221,14 @@ async function findLatestOpenEstimate(customerIds) {
 // Mint the customer-facing short link for an estimate findLatestOpenEstimate
 // resolved. createShortCode always inserts a fresh row, so a caller whose
 // send can retry (the call-booking confirmation) passes reuseExisting to
-// take the estimate's earliest existing short code instead of accumulating
-// bearer links across retries (pre-push codex P1); the composer insert
-// keeps its own per-insert code for click attribution.
+// take the earliest code THIS purpose already minted for the estimate
+// instead of accumulating bearer links across retries (pre-push codex P1);
+// never another workflow's code — click attribution stays with the send
+// that minted it. The composer insert keeps its own per-insert code.
 async function mintEstimateLink(estimate, { purpose = 'composer_insert', reuseExisting = false } = {}) {
   if (reuseExisting) {
     const { existingShortUrlFor } = require('./short-url');
-    const reused = await existingShortUrlFor({ kind: 'estimate', entityType: 'estimates', entityId: estimate.id });
+    const reused = await existingShortUrlFor({ kind: 'estimate', entityType: 'estimates', entityId: estimate.id, purpose });
     if (reused) {
       return {
         url: reused,

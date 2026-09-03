@@ -201,6 +201,10 @@ describe('buildLatestEstimateLink', () => {
     existingShortUrlFor.mockResolvedValueOnce('https://l.example/abc');
     const reused = await mintEstimateLink(estimate, { purpose: 'call_booking_confirmation', reuseExisting: true });
     expect(reused.url).toBe('https://l.example/abc');
+    // Scoped to THIS workflow's codes — never a composer/campaign link.
+    expect(existingShortUrlFor).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: 'estimate', entityId: 'e-ok', purpose: 'call_booking_confirmation' }),
+    );
     expect(shortenOrPassthrough).not.toHaveBeenCalled();
 
     existingShortUrlFor.mockResolvedValueOnce(null);

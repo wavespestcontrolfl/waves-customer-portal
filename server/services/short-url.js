@@ -220,11 +220,16 @@ async function createTrackedShortLink(longUrl, opts = {}) {
  * ONE row that every later message about the entity reuses, instead of a
  * new orphan per render.
  */
-async function existingShortUrlFor({ kind, entityType, entityId }) {
+// Optional `purpose` scopes the reuse to codes THIS workflow minted — a
+// retrying sender must never adopt another campaign's code and inherit its
+// click attribution (pre-push codex P1 on #3814).
+async function existingShortUrlFor({ kind, entityType, entityId, purpose = null }) {
   if (!kind || !entityType || !entityId) return null;
   try {
-    const row = await db('short_codes')
-      .where({ kind, entity_type: entityType, entity_id: String(entityId) })
+    const lookup = db('short_codes')
+      .where({ kind, entity_type: entityType, entity_id: String(entityId) });
+    if (purpose) lookup.where({ purpose });
+    const row = await lookup
       .orderBy('created_at', 'asc')
       .first('code');
     return row?.code ? `${baseUrl()}/l/${row.code}` : null;
