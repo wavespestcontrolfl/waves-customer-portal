@@ -14114,7 +14114,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
         // codex r4 P2).
         if (consumption?.consumed?.length) {
           const JobCosting = require('../services/job-costing');
-          JobCosting.calculateJobCost(req.params.serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
+          void JobCosting.calculateJobCost(req.params.serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
         }
       } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }
     }
