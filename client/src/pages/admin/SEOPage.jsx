@@ -3450,16 +3450,19 @@ function OwnerQueuePanel() {
     return `released ${b.released}, parked ${b.parked}, domain updates ${b.aggregateChanges}`;
   };
 
+  // what the payment field SHOWS: the owner's edit (even a cleared one), else the quote
+  const displayedAmount = (card, row) => (amounts[row.id] !== undefined ? amounts[row.id] : card.path && card.path.estimated_cost_cents != null ? (card.path.estimated_cost_cents / 100).toFixed(2) : "");
+
   const approve = async (card, row) => {
     setBusy(row.id);
     setError(null);
     setResult(null);
     const body = {};
-    const raw = amounts[row.id];
-    if (row.dimension === "payment" && raw !== undefined && raw !== "") {
-      // a money authorization: the decimal TOKEN becomes integer cents (never through a binary float —
-      // 10.075 * 100 rounds to 1007); more than two fractional digits is refused, not rounded
-      const cents = dollarsToCents(raw);
+    if (row.dimension === "payment") {
+      // a money authorization ALWAYS carries the amount the owner can see in the field — the server never
+      // defaults it for a click from this card. The decimal TOKEN becomes integer cents (never through a
+      // binary float — 10.075 * 100 rounds to 1007); a blank field or >2 decimals is refused, not defaulted.
+      const cents = dollarsToCents(displayedAmount(card, row));
       if (cents === null) {
         setError("Enter the amount in dollars with at most two decimals, greater than zero.");
         setBusy(null);
@@ -3627,7 +3630,7 @@ function OwnerQueuePanel() {
                                     type="number"
                                     min="0.01"
                                     step="0.01"
-                                    value={amounts[r.id] !== undefined ? amounts[r.id] : p && p.estimated_cost_cents != null ? (p.estimated_cost_cents / 100).toFixed(2) : ""}
+                                    value={displayedAmount(c, r)}
                                     disabled={rowBusy}
                                     onChange={(e) => setAmounts({ ...amounts, [r.id]: e.target.value })}
                                     style={{ ...inputStyle, width: 96 }}
