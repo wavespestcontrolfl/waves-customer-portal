@@ -164,7 +164,7 @@ describe('a qualified domain with a free signup-lane path', () => {
     expect(rs).toHaveLength(WAVES_LOCATIONS.length);
     for (const x of rs) {
       expect(x).toMatchObject({ dimension: 'execution', instance_kind: '-', instance_key: '-:1', level: 'OWNER_FREE', path_revision: 1, floor_waiver_id: null, decided_at: NOW });
-      expect(x.decision_inputs_hash).toBe(P.decisionInputsHash('execution', { path: p, domain: d, policy: P.normalizePolicyRow(null), score: 75 }));
+      expect(x.decision_inputs_hash).toBe(P.decisionInputsHash('execution', { path: p, domain: d, policy: P.normalizePolicyRow(null), score: 75, instanceKey: '-:1' }));
     }
     expect(db._tables.seo_link_acquisition_paths[0].authority_last_decided).toBe('OWNER_FREE');
     expect(domainState(db)).toBe('qualified'); // awaiting the owner
@@ -220,7 +220,8 @@ describe('outreach-lane paths', () => {
     expect(r).toMatchObject({ decided: 1, placementsCreated: 0, rowsWritten: 1, parked: 0 });
     expect(placements(db)).toHaveLength(1);
     expect(placements(db)[0]).toMatchObject({ id: manual.id, domain_id: d.id, path_id: p.id, link_type: 'resource', status: 'contacted', authority: 'OWNER_OUTREACH' });
-    expect(rows(db)[0]).toMatchObject({ prospect_id: manual.id, dimension: 'communication' });
+    // the pitch already went out: the initial communication instance is satisfied from that evidence, never re-sent
+    expect(rows(db)[0]).toMatchObject({ prospect_id: manual.id, dimension: 'communication', instance_key: '-:1', satisfied_at: NOW, satisfied_reason: 'sent' });
     expect(domainState(db)).toBe('acquiring');
     // bound to ANOTHER live path ⇒ that path's placement: nothing is created
     const other = outreachPath(d);
@@ -251,6 +252,12 @@ describe('outreach-lane paths', () => {
     expect(r).toMatchObject({ selected: 1, parked: 1 });
     expect(placements(db)[0].status).toBe('awaiting_owner');
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+  });
+  test('a fee the owner settles by hand at checkout (OWNER_MANUAL_PAYMENT — foreign currency) IS deferred on an outreach path: the conversation must open the checkout first', async () => {
+    const { db } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'foreign', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
+    const r = await run(db);
+    expect(rows(db).find((x) => x.dimension === 'payment').level).toBe('OWNER_MANUAL_PAYMENT');
+    expect([r.parked, placements(db)[0].status, domainState(db)]).toEqual([0, 'prospect', 'qualified']);
   });
   test('a price the owner must enter (OWNER_INPUT_REQUIRED) on an outreach path is NOT deferred: it parks at once', async () => {
     const { db } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: null, currency: 'unknown', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
@@ -428,7 +435,7 @@ describe('re-decision', () => {
     // the placement already sits on the best path (moved by the worker on release); its instance was decided on the old one
     const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: p.id, status: 'prospect', link_type: 'directory', updated_at: EARLIER };
     db._tables.seo_link_prospects.push(pl);
-    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: pl.id, path_id: old.id, dimension: 'execution', instance_kind: '-', instance_key: '-:1', level: 'OWNER_FREE', decision_inputs_hash: P.decisionInputsHash('execution', { path: p, domain: d, policy: P.normalizePolicyRow(null), score: 75 }), path_revision: 1, decided_at: NOW, ended_at: null, satisfied_at: null });
+    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: pl.id, path_id: old.id, dimension: 'execution', instance_kind: '-', instance_key: '-:1', level: 'OWNER_FREE', decision_inputs_hash: P.decisionInputsHash('execution', { path: p, domain: d, policy: P.normalizePolicyRow(null), score: 75, instanceKey: '-:1' }), path_revision: 1, decided_at: NOW, ended_at: null, satisfied_at: null });
     db._tables.seo_link_domains[0].agent_state = 'watching'; // not bridge-owned ⇒ the location check cannot select it: only the row rule can
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([{ id: d.id, domain: 'example.org', why: 'stale' }]);
     const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
@@ -551,6 +558,49 @@ describe('re-decision', () => {
     await run(db);
     expect(placements(db)[0].status).toBe('placed'); // the bridge never overwrote it
     expect(domainState(db)).toBe('acquiring'); // not ready_to_acquire from the stale snapshot
+  });
+  test('a re-rank moves ONLY the in-shape placements: a legacy unscoped row on the same old signup path stays put (never relabelled outreach)', async () => {
+    const { db, d, p } = scenario();
+    const other = pathRow(d, { submission_url: 'https://example.org/other' }); // live, no longer best
+    db._tables.seo_link_acquisition_paths.push(other);
+    const inShape = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: other.id, status: 'prospect', link_type: 'directory', updated_at: EARLIER };
+    const legacy = { id: uid(), target_domain: 'example.org', target_page: 'https://www.wavespestcontrol.com/pest-control/', location_key: '-', domain_id: d.id, path_id: other.id, status: 'prospect', link_type: 'directory', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(inShape, legacy);
+    await run(db);
+    expect(placements(db).find((x) => x.id === inShape.id).path_id).toBe(p.id);
+    expect(placements(db).find((x) => x.id === legacy.id)).toMatchObject({ path_id: other.id, link_type: 'directory' });
+  });
+  test('a zero-total proof on the SAME path rotates when the path is revised in place to charge (revision_payment moved); an unchanged path keeps it', async () => {
+    const { db, d, p } = scenario({ make: paidPath });
+    const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: p.id, status: 'prospect', link_type: 'directory', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(pl);
+    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: pl.id, path_id: p.id, dimension: 'payment', instance_kind: '-', instance_key: '-:1', level: 'AUTO_FREE', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: EARLIER, satisfied_reason: 'no_payment_required' });
+    db._tables.seo_link_domains[0].agent_state = 'watching';
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // same revision: the proof stands
+    Object.assign(db._tables.seo_link_acquisition_paths[0], { revision_payment: 2, updated_at: new Date(NOW.getTime() + 1000) });
+    expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r.ended).toBe(1);
+    expect(rows(db).filter((x) => x.prospect_id === pl.id && x.dimension === 'payment').map((x) => [x.instance_key, x.end_outcome || null]).sort()).toEqual([['-:1', 'superseded'], ['-:2', null]]);
+  });
+  test('a baseline placeholder path (imported existing backlink) is never bridged into new placements', async () => {
+    const { db, d } = scenario({ domain: { agent_state: 'acquired' }, path: { baseline: true, last_investigated_at: null } });
+    db._tables.seo_link_prospects.push({ id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: d.id, path_id: d.best_path_id, status: 'live', link_type: 'directory', updated_at: EARLIER });
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+    const r = await run(db, { domainIds: [d.id] });
+    expect(r.errors).toEqual([{ domain: 'example.org', skipped: 'baseline placeholder (not an executable path)' }]);
+    expect(placements(db)).toHaveLength(1);
+  });
+  test('a location REMOVED from WAVES_LOCATIONS still selects the domain once so its open authority is retired', async () => {
+    const { db } = scenario();
+    await run(db);
+    const gone = placements(db)[0];
+    Object.assign(gone, { location_key: 'retired-location' }); // as if WAVES_LOCATIONS swapped this location for another
+    expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['unbridged']); // the replacement location is missing
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r).toMatchObject({ ended: 1, placementsCreated: 1 }); // the retired row's authority ends; the new location is bridged
+    expect(rows(db).filter((x) => x.prospect_id === gone.id).map((x) => x.end_outcome)).toEqual(['superseded']);
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
   });
   test('a placement still LEASED on its old path is left alone this run (the registry mover waits for claimed_at IS NULL)', async () => {
     const { db, d, p } = scenario();

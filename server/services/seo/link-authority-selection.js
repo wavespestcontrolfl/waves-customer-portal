@@ -31,17 +31,21 @@ const termsChanged = (r, path) => r.instance_kind === 'terms' && (r.accepted_ter
 // accept_terms instance ends `terms_changed` when its hash moved (an equal hash
 // carries across); a satisfied ACQUISITION execution instance proves only the
 // path it ran on and ends `superseded` when the placement moved; a satisfied
-// payment proof carries EXCEPT a zero-total one (`no_payment_required`) onto
-// a path that charges — nothing was paid, so nothing covers the successor;
-// a satisfied communication instance is path-independent (the pitch went
-// out) and is carried. Null = keep. `path` needs id, legal_terms_hash,
-// payment_required.
+// payment proof carries EXCEPT a zero-total one (`no_payment_required`) when
+// the CURRENT path charges under payment inputs the proof did not see (another
+// path, or the same path revised in place — its revision_payment moved) —
+// nothing was paid, so nothing covers the fee; a satisfied communication
+// instance is path-independent (the pitch went out) and is carried. Null =
+// keep. `path` needs id, legal_terms_hash, payment_required, revision_payment.
 const rotationOutcome = (r, path) => {
   if (r.ended_at) return null;
   if (!r.satisfied_at) return r.path_id !== path.id ? 'superseded' : null;
   if (r.instance_kind === 'terms') return termsChanged(r, path) ? 'terms_changed' : null;
   if (r.dimension === 'execution') return r.path_id !== path.id ? 'superseded' : null;
-  if (r.dimension === 'payment' && r.satisfied_reason === 'no_payment_required') return r.path_id !== path.id && path.payment_required === true ? 'superseded' : null;
+  if (r.dimension === 'payment' && r.satisfied_reason === 'no_payment_required') {
+    const feeMoved = r.path_id !== path.id || Number(r.path_revision) !== Number(path.revision_payment ?? path.revision ?? 1);
+    return path.payment_required === true && feeMoved ? 'superseded' : null;
+  }
   return null;
 };
 
@@ -59,14 +63,14 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const forced = new Set(domainIds || []);
   // candidates: bridge-owned state, or owning an open row (satisfied or not), or carrying an active waiver, or explicitly requested
   const owned = await db('seo_link_domains').whereIn('agent_state', [...BRIDGE_STATES]).whereNotNull('best_path_id').orderBy('updated_at', 'asc').select('id');
-  const open = await db(AUTH).whereNull('ended_at').select('prospect_id', 'path_id', 'dimension', 'instance_kind', 'decided_at', 'satisfied_at', 'satisfied_reason', 'accepted_terms_hash');
+  const open = await db(AUTH).whereNull('ended_at').select('prospect_id', 'path_id', 'path_revision', 'dimension', 'instance_kind', 'decided_at', 'satisfied_at', 'satisfied_reason', 'accepted_terms_hash');
   const owners = open.length ? await db('seo_link_prospects').whereIn('id', [...new Set(open.map((r) => r.prospect_id))]).whereNotNull('domain_id').select('id', 'domain_id') : [];
   const waivers = await db('seo_link_floor_waivers').whereNull('invalidated_at').select('domain_id', 'path_id', 'approved_at');
   const candidateIds = [...new Set([...owned.map((d) => d.id), ...owners.map((p) => p.domain_id), ...waivers.map((w) => w.domain_id), ...forced])]
     .filter((id) => !forced.size || forced.has(id));
   if (!candidateIds.length) return [];
   const domains = await db('seo_link_domains').whereIn('id', candidateIds).whereNotNull('best_path_id').select('id', 'domain', 'agent_state', 'best_path_id', 'updated_at');
-  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at', 'link_type', 'legal_terms_hash', 'payment_required');
+  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at', 'link_type', 'legal_terms_hash', 'payment_required', 'revision_payment', 'revision', 'baseline');
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
   const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'updated_at');
@@ -81,10 +85,15 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const rank = { forced: 0, unbridged: 1, stale: 2 };
   for (const d of domains) {
     const best = pathById.get(d.best_path_id) || null;
+    // a baseline placeholder (an imported existing backlink, never investigated) is not an executable path: nothing to bridge
+    if (best && best.baseline === true && !forced.has(d.id)) continue;
     const expected = expectedLocations(best);
     // only placements INSIDE the lane's shape are bridged or a staleness source — an off-shape row (the other lane's
-    // keys after a re-rank) keeps its history and is never moved or re-decided (bridge: off-shape retirement)
-    const mine = (byDomain.get(d.id) || []).filter((p) => expected.includes(p.location_key));
+    // keys after a re-rank, or a location removed from WAVES_LOCATIONS) keeps its history and is never moved or
+    // re-decided; while it still carries an OPEN UNSATISFIED instance it is stale once, so the bridge can retire it
+    const all = byDomain.get(d.id) || [];
+    const mine = all.filter((p) => expected.includes(p.location_key));
+    const offShapeOpen = all.some((p) => !expected.includes(p.location_key) && (rowsByProspect.get(p.id) || []).some((r) => !r.satisfied_at));
     const onBest = mine.filter((p) => p.path_id === d.best_path_id);
     const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
     const staleRow = (r, p) => (best && rotationOutcome(r, best) !== null)
@@ -93,7 +102,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     let why = null;
     if (forced.has(d.id)) why = 'forced';
     else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';
-    else if (withRows.some((p) => p.path_id !== d.best_path_id || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
+    else if (offShapeOpen || withRows.some((p) => p.path_id !== d.best_path_id || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
     else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !withRows.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
     if (why) picked.push({ id: d.id, domain: d.domain, why, at: ts(d.updated_at) });
   }

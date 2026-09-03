@@ -87,10 +87,13 @@ const authorized = (r) => Boolean(r.satisfied_at) || isAuto(r.level) || (isOwner
 // (ready_for_payment, §3.3b): it neither parks the placement nor holds the
 // domain back from ready_to_acquire — the initial send claims on communication
 // authority alone (the claim predicate, plan §6.4, accepts nothing below
-// ready_to_acquire). ONLY the levels that intentionally wait for checkout
-// defer: a price the owner must enter (OWNER_INPUT_REQUIRED) or settle by hand
-// (OWNER_MANUAL_PAYMENT) parks immediately like any other owner decision.
-const DEFERRABLE_PAYMENT_LEVELS = Object.freeze(['OWNER_PAYMENT', 'AUTO_PAID_WITHIN_POLICY']);
+// ready_to_acquire). ONLY the levels that wait for a checkout defer — the
+// owner's own approval (OWNER_PAYMENT), the policy's (AUTO_PAID_WITHIN_POLICY)
+// and a fee the owner settles by hand at that checkout (OWNER_MANUAL_PAYMENT:
+// foreign currency / no merchant binding — the conversation must open the
+// checkout first). A price the owner must ENTER (OWNER_INPUT_REQUIRED) is an
+// input, not a checkout step: it parks immediately.
+const DEFERRABLE_PAYMENT_LEVELS = Object.freeze(['OWNER_PAYMENT', 'AUTO_PAID_WITHIN_POLICY', 'OWNER_MANUAL_PAYMENT']);
 const deferred = (r, outreach) => outreach === true && r.dimension === 'payment' && DEFERRABLE_PAYMENT_LEVELS.includes(r.level);
 
 const freshCounters = () => ({ placementsCreated: 0, rowsWritten: 0, redecided: 0, ended: 0, parked: 0, released: 0, invalidatedApprovals: 0, invalidatedWaivers: 0, aggregateChanges: 0, skippedLeased: 0, parkedDomains: [] });
@@ -108,6 +111,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   const { inFlight } = await claimProspectDomain(trx, domain.domain);
   const path = await trx('seo_link_acquisition_paths').where({ id: domain.best_path_id }).first();
   if (!path || path.superseded_by) return { skipped: 'best path superseded', out };
+  if (path.baseline === true) return { skipped: 'baseline placeholder (not an executable path)', out };
   const ctx = { path, domain, policy, score: domain.score };
 
   // §6.3 1b — the latest waiver, honoured only for the exact floors the owner looked at
@@ -184,9 +188,10 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     const behindPaths = await trx('seo_link_acquisition_paths').whereIn('id', [...new Set(behind.map((p) => p.path_id))]).select('id', 'superseded_by');
     const chained = new Set(behindPaths.filter((x) => x.superseded_by).map((x) => x.id));
     const viaChain = behind.filter((p) => chained.has(p.path_id));
-    const viaRerank = [...new Set(behind.filter((p) => !chained.has(p.path_id)).map((p) => p.path_id))];
+    const viaRerank = behind.filter((p) => !chained.has(p.path_id));
     if (viaChain.length) await settleRetiredPlacements(trx, { prospectIds: viaChain.map((p) => p.id), now });
-    if (viaRerank.length) await settleRetiredPlacements(trx, { pathIds: viaRerank, successor: path, now });
+    // exactly the in-shape rows: a sibling on the same old path outside this lane's shape stays put (retired below)
+    if (viaRerank.length) await settleRetiredPlacements(trx, { prospectIds: viaRerank.map((p) => p.id), successor: path, now });
     const moved = await trx('seo_link_prospects').whereIn('id', behind.map((p) => p.id)).select('*');
     const byId = new Map(moved.map((p) => [p.id, p]));
     placements = placements.map((p) => byId.get(p.id) || p);
@@ -246,14 +251,23 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
 
     for (const inst of decision.instances) {
       const existing = byKey.get(key(inst));
-      const hash = P.decisionInputsHash(inst.dimension, ctx);
+      // the hash binds to THIS instance (§3.6b): the open row's own key, or the next generation's for a fresh row
+      const instanceKey = existing ? existing.instance_key : `${inst.instance_kind}:${nextGeneration(inst)}`;
+      const hash = P.decisionInputsHash(inst.dimension, { ...ctx, instanceKey });
       const pathRevision = path[`revision_${inst.dimension}`] ?? path.revision ?? 1;
       const floorWaiverId = waiver ? waiver.id : null;
       if (!existing) {
+        // an adopted conversation whose initial email already went out (durable
+        // `outreach_sent_at` / `sent`) gets its FIRST communication instance
+        // satisfied from that evidence — the worker never re-sends a sent row,
+        // and the follow-up needs the initial send satisfied
+        const sentBefore = inst.dimension === 'communication' && inst.instance_kind === '-' && !history.some((r) => key(r) === key(inst))
+          && Boolean(placement.outreach_sent_at || placement.outreach_status === 'sent');
         const [row] = await trx(AUTH).insert({
-          prospect_id: placement.id, path_id: path.id, dimension: inst.dimension, instance_kind: inst.instance_kind, instance_key: `${inst.instance_kind}:${nextGeneration(inst)}`,
+          prospect_id: placement.id, path_id: path.id, dimension: inst.dimension, instance_kind: inst.instance_kind, instance_key: instanceKey,
           level: inst.level, reason: inst.reason, decision_inputs_hash: hash, path_revision: pathRevision,
           floor_waiver_id: floorWaiverId, decided_at: now, created_at: now, updated_at: now,
+          ...(sentBefore ? { satisfied_at: placement.outreach_sent_at || now, satisfied_reason: 'sent' } : {}),
         }).returning('*');
         open.push(row);
         history.push(row);

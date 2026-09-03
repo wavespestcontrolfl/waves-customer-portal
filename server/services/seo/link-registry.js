@@ -495,6 +495,14 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
     const rows = await q('seo_link_prospects').whereIn('path_id', pathIds).whereNull('claimed_at').select(...PLACEMENT_MOVE_COLUMNS);
     return moveRows(rows || [], successor);
   }
+  if (successor && successor.id && Array.isArray(prospectIds)) {
+    // exactly THESE unleased placements onto `successor` (the bridge's re-rank
+    // to a still-live best path: only the rows inside the new lane's shape
+    // follow; a sibling on the same old path stays put)
+    if (!prospectIds.length) return 0;
+    const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').forUpdate().select(...PLACEMENT_MOVE_COLUMNS);
+    return moveRows(rows || [], successor);
+  }
   if (!Array.isArray(prospectIds) || !prospectIds.length) return 0;
   // Lock order everywhere is prospect → path: the placement rows are locked
   // FIRST (callers that already hold them re-lock harmlessly), then the
