@@ -49,10 +49,10 @@ const events = () => mockWrites.filter((w) => w.table === 'customer_contract_eve
 
 beforeEach(() => { mockWrites.length = 0; mockRows = {}; });
 
-test('deliveredLiveShareLink: hashed, windowed, window open — anything less is nobody\'s link', () => {
+test('deliveredLiveShareLink: hashed with the window open, or hashed with no window at all (the public route serves a null expiry as live — a legacy link is never rotated); a closed window or no hash is nobody\'s link', () => {
   expect(deliveredLiveShareLink({ share_token_hash: 'h', share_token_expires_at: new Date(Date.now() + DAY) })).toBe(true);
   expect(deliveredLiveShareLink({ share_token_hash: 'h', share_token_expires_at: new Date(Date.now() - 1) })).toBe(false);
-  expect(deliveredLiveShareLink({ share_token_hash: 'h', share_token_expires_at: null })).toBe(false);
+  expect(deliveredLiveShareLink({ share_token_hash: 'h', share_token_expires_at: null })).toBe(true);
   expect(deliveredLiveShareLink({ share_token_hash: null, share_token_expires_at: new Date(Date.now() + DAY) })).toBe(false);
 });
 

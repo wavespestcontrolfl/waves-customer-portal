@@ -323,11 +323,16 @@ async function shareLinkExpiresAt(trx, contract) {
   return contractExpiresAt();
 }
 
-// A signing link the customer may hold: hashed, windowed, window still open.
+// A signing link the customer may hold: hashed, and either its window is
+// still open or it has none — the public route serves a null expiry as
+// live indefinitely (contracts-public isExpired), so a legacy hash with no
+// window is a customer's live link too and is never rotated by the
+// composer (pre-push Codex P0: in-flight tokenized links must keep
+// working). Only a hash whose window has closed is nobody's link.
 function deliveredLiveShareLink(contract) {
-  return !!contract?.share_token_hash
-    && !!contract.share_token_expires_at
-    && new Date(contract.share_token_expires_at).getTime() > Date.now();
+  if (!contract?.share_token_hash) return false;
+  if (!contract.share_token_expires_at) return true;
+  return new Date(contract.share_token_expires_at).getTime() > Date.now();
 }
 
 const SHARE_LINK_TERMINAL_STATUSES = ['signed', 'cancelled', 'voided'];
