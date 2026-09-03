@@ -844,10 +844,12 @@ describe('hashCompletionRequest — flagless backfill resumes reach the re-deriv
     expect(attemptsSource).toMatch(/backfill: backfill === true,\s*\n\s*timeOnSite: backfill === true \|\| isOperatorTimeOnSite\(timeOnSite\)/);
     // The resume claim is the ONLY core-segment comparison site; the
     // pending/failed/succeeded sites go through the strict matcher.
-    expect(attemptsSource).toMatch(/if \(!resumeHashMatches\(row\.request_hash, requestHash\)\) \{/);
+    // Every matcher call carries the prior-layout projection (#3745 r5 P0):
+    // rows stored before the photos-in-mode layout compare under theirs.
+    expect(attemptsSource).toMatch(/if \(!resumeHashMatches\(row\.request_hash, requestHash, priorLayoutRequestHash\)\) \{/);
     expect((attemptsSource.match(/resumeHashMatches\(/g) || []).length).toBe(2); // definition + the claimSideEffectsRun call
-    expect(attemptsSource).toMatch(/const hashMismatch = !requestHashMatches\(existing\.request_hash, requestHash\);/);
-    expect(attemptsSource).toMatch(/if \(!requestHashMatches\(priorSuccess\.request_hash, requestHash\)\) \{/);
+    expect(attemptsSource).toMatch(/const hashMismatch = !requestHashMatches\(existing\.request_hash, requestHash, priorLayoutRequestHash\);/);
+    expect(attemptsSource).toMatch(/if \(!requestHashMatches\(priorSuccess\.request_hash, requestHash, priorLayoutRequestHash\)\) \{/);
     // Telemetry stays hash-free everywhere — a retry's timings never 409.
     expect(hashCompletionRequest({ ...committedBody, completionTelemetry: { submitClickedAt: 1 } }))
       .toBe(hashCompletionRequest(committedBody));

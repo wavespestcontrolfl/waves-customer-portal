@@ -255,3 +255,36 @@ describe('service report failure alerts', () => {
     expect(sanitizeErrorText('x'.repeat(500)).length).toBeLessThanOrEqual(240);
   });
 });
+
+// GitHub Codex #3745 r5 P1: when Twilio ACCEPTED the completion text but a
+// post-send write threw, the catch stamps 'sent' — and must also run the
+// invoice-delivery bookkeeping the success path runs (pay-link invoice out
+// of draft, combined-receipt claim), or a delivered pay-link text leaves the
+// invoice in draft and the deferred receipt job texts a duplicate receipt.
+describe('/complete accepted-send catch finalizes invoice delivery like the success path (source contract)', () => {
+  const dispatchSource = require('fs').readFileSync(
+    require('path').join(__dirname, '../routes/admin-dispatch.js'),
+    'utf8',
+  );
+
+  test('one shared finalizer, called from BOTH the success branch and the accepted-error catch', () => {
+    expect(dispatchSource).toMatch(/const finalizeCompletionSmsInvoiceDelivery = async \(\{ smsType, payLinkCarried \}\) => \{/);
+    expect((dispatchSource.match(/await finalizeCompletionSmsInvoiceDelivery\(/g) || []).length).toBe(2);
+    expect(dispatchSource).toMatch(/await finalizeCompletionSmsInvoiceDelivery\(\{ smsType: sentSmsType, payLinkCarried: allowCompletionInvoiceLink \}\);/);
+    expect(dispatchSource).toMatch(/await finalizeCompletionSmsInvoiceDelivery\(\{ smsType: snap\.type, payLinkCarried: snap\.payLinkCarried === true \}\);/);
+  });
+
+  test('the accepted snapshot records whether the pay link rode the text — the catch cannot see the try-scoped flag', () => {
+    expect(dispatchSource).toMatch(/reviewCarried: !bundledReviewUrl \|\| sentSmsBody\.includes\(bundledReviewUrl\),\n\s*payLinkCarried: allowCompletionInvoiceLink,\n\s*\} : null;/);
+  });
+
+  test('the finalizer is the ONLY markDeliverySent / receipt claim in the completion SMS lane', () => {
+    const lane = dispatchSource.slice(
+      dispatchSource.indexOf('const finalizeCompletionSmsInvoiceDelivery'),
+      dispatchSource.indexOf('completionSmsAuditError: e.message'),
+    );
+    expect(lane.length).toBeGreaterThan(0);
+    expect((lane.match(/InvoiceService\.markDeliverySent\(/g) || []).length).toBe(1);
+    expect((lane.match(/whereNull\('receipt_sent_at'\)/g) || []).length).toBe(1);
+  });
+});

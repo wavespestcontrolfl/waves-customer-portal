@@ -68,10 +68,23 @@ function isOperatorTimeOnSite(value) {
 //    completion_resume_payload_mismatch. claimSideEffectsRun (the only
 //    committed-record claim) therefore matches on the CORE segment alone.
 //
-// Legacy rows: attempts stored before this round carry a single-segment
-// hash whose projection equals today's CORE exactly (the old exclusion
-// set). Both matchers treat a separator-free stored hash as core-only, so
-// in-flight attempts across the deploy keep matching.
+// Stored layouts, oldest first — every in-flight row across a deploy must
+// keep matching (GitHub Codex #3745 r5 P0):
+//  - layout 0 (single segment): the pre-round-10 exclusion set, which is
+//    exactly layout 1's CORE;
+//  - layout 1 (`<core>:<mode>`, no prefix): completionPhotos hashed in the
+//    CORE, the mode = { backfill, timeOnSite };
+//  - layout 2 (`v2:<core>:<mode>`): completionPhotos moved to the MODE
+//    segment (below). New rows store this.
+// The matchers compare a stored row under the layout it was written in, so
+// the route hashes the incoming body under BOTH layout 2 and layout 1
+// (priorLayoutCompletionRequestHash) and passes both.
+const HASH_LAYOUT_PREFIX = 'v2:';
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(sortObjectKeys(value))).digest('hex');
+}
+
 function completionRequestHashSegments(body) {
   // reportReconcileConfirmed controls only the PRE-claim reconciliation
   // prompt (GATE_REPORT_RECONCILE_PROMPT): a same-key retry that first
@@ -90,9 +103,7 @@ function completionRequestHashSegments(body) {
     idempotencyKey, timeOnSite, completionTelemetry, backfill,
     reportReconcileConfirmed, completionPhotos, ...stableBody
   } = body || {};
-  const core = crypto.createHash('sha256')
-    .update(JSON.stringify(sortObjectKeys(stableBody)))
-    .digest('hex');
+  const core = sha256(stableBody);
   // Normalized so an omitted flag and an explicit false (same intent) hash
   // identically, and undefined/null duration unify; a non-backfill body's
   // TIMER-string duration is noise and never enters the hash, while every
@@ -100,45 +111,86 @@ function completionRequestHashSegments(body) {
   // route's intake gate applies — binds in any mode (see above; codex P2
   // #3152 round 14). Operator strings are canonicalized via String() so
   // "45" and a later " 45 " still compare by content.
-  const mode = crypto.createHash('sha256')
-    .update(JSON.stringify(sortObjectKeys({
-      backfill: backfill === true,
-      timeOnSite: backfill === true || isOperatorTimeOnSite(timeOnSite)
-        ? (timeOnSite == null ? null : (typeof timeOnSite === 'number' ? timeOnSite : String(timeOnSite).trim()))
-        : null,
-      // Omitted and empty hash identically (the request default is []).
-      completionPhotos: Array.isArray(completionPhotos) && completionPhotos.length ? completionPhotos : null,
-    })))
-    .digest('hex');
-  return { core, mode };
+  const modeFields = {
+    backfill: backfill === true,
+    timeOnSite: backfill === true || isOperatorTimeOnSite(timeOnSite)
+      ? (timeOnSite == null ? null : (typeof timeOnSite === 'number' ? timeOnSite : String(timeOnSite).trim()))
+      : null,
+  };
+  const mode = sha256({
+    ...modeFields,
+    // Omitted and empty hash identically (the request default is []).
+    completionPhotos: Array.isArray(completionPhotos) && completionPhotos.length ? completionPhotos : null,
+  });
+  // Layout 1: the same body hashed the way rows written before this deploy
+  // were — photos in the core (present only when the request carried the
+  // key), mode without them.
+  const prior = {
+    core: sha256('completionPhotos' in (body || {}) ? { ...stableBody, completionPhotos } : stableBody),
+    mode: sha256(modeFields),
+  };
+  return { core, mode, prior };
 }
 
 function hashCompletionRequest(body) {
   const { core, mode } = completionRequestHashSegments(body);
-  return `${core}:${mode}`;
+  return `${HASH_LAYOUT_PREFIX}${core}:${mode}`;
+}
+
+// The incoming body under layout 1, for comparing against rows stored
+// before the photos-in-mode layout. Never stored.
+function priorLayoutCompletionRequestHash(body) {
+  const { prior } = completionRequestHashSegments(body);
+  return `${prior.core}:${prior.mode}`;
+}
+
+function parseStoredHash(hash) {
+  const value = String(hash || '');
+  if (value.startsWith(HASH_LAYOUT_PREFIX)) {
+    const [core, mode] = value.slice(HASH_LAYOUT_PREFIX.length).split(':');
+    return { layout: 2, core, mode: mode || null };
+  }
+  if (value.includes(':')) {
+    const [core, mode] = value.split(':');
+    return { layout: 1, core, mode };
+  }
+  return { layout: 0, core: value, mode: null };
 }
 
 function coreHashSegment(hash) {
-  return String(hash || '').split(':')[0];
+  return parseStoredHash(hash).core;
+}
+
+// Picks the incoming projection that matches the STORED row's layout. A
+// caller that hashed only under the current layout (no prior projection)
+// compares a layout-0/1 row against the current segments — the pre-r5
+// behavior — so nothing gets stricter for them.
+function comparableSegments(storedHash, incomingHash, priorLayoutIncomingHash) {
+  const stored = parseStoredHash(storedHash);
+  const incoming = stored.layout === 2 || !priorLayoutIncomingHash
+    ? parseStoredHash(incomingHash)
+    : parseStoredHash(priorLayoutIncomingHash);
+  return { stored, incoming };
 }
 
 // PRE-commit sites (pending / failed / succeeded-replay): the full
 // composite must match — a same-key retry may not flip the completion mode
 // or the typed duration. Null/absent on either side keeps the existing
 // tolerant behavior (legacy rows without a stored hash never 409 on it).
-function requestHashMatches(storedHash, incomingHash) {
+function requestHashMatches(storedHash, incomingHash, priorLayoutIncomingHash = null) {
   if (!storedHash || !incomingHash) return true;
-  if (!String(storedHash).includes(':')) {
-    return storedHash === coreHashSegment(incomingHash);
-  }
-  return storedHash === incomingHash;
+  const { stored, incoming } = comparableSegments(storedHash, incomingHash, priorLayoutIncomingHash);
+  if (stored.core !== incoming.core) return false;
+  // Layout 0 rows carry no mode segment: core-only, as before.
+  return stored.layout === 0 || stored.mode === incoming.mode;
 }
 
 // POST-commit resume (claimSideEffectsRun): the committed record's frozen
 // structured_notes own the mode fields — only the CORE payload must agree.
-function resumeHashMatches(storedHash, incomingHash) {
+function resumeHashMatches(storedHash, incomingHash, priorLayoutIncomingHash = null) {
   if (!storedHash || !incomingHash) return true;
-  return coreHashSegment(storedHash) === coreHashSegment(incomingHash);
+  const { stored, incoming } = comparableSegments(storedHash, incomingHash, priorLayoutIncomingHash);
+  return stored.core === incoming.core;
 }
 
 function sortObjectKeys(value) {
@@ -161,13 +213,13 @@ function sideEffectsRunningPayload() {
   };
 }
 
-async function claimSideEffectsRun(row, requestHash, knex = db) {
+async function claimSideEffectsRun(row, { requestHash, priorLayoutRequestHash = null }, knex = db) {
   if (!row?.service_record_id) return null;
   // Core-only match: the committed record exists (service_record_id), so
   // the frozen structured_notes are authoritative for backfill/timeOnSite
   // and the retry body legally disagrees on them (see the hash contract
   // above). Everything else in the payload must still match.
-  if (!resumeHashMatches(row.request_hash, requestHash)) {
+  if (!resumeHashMatches(row.request_hash, requestHash, priorLayoutRequestHash)) {
     return {
       action: 'conflict',
       status: 409,
@@ -280,7 +332,7 @@ async function insertPendingAttempt(knex, values) {
   return doInsert(knex);
 }
 
-async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }, knex = db) {
+async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash, priorLayoutRequestHash = null }, knex = db) {
   // Per-service terminal-state guard. The unique index on
   // (service_id, idempotency_key) plus the partial pending-only
   // index don't prevent a NEW attempt under a fresh key for an
@@ -302,7 +354,7 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
       // strict (mode fields included): the mismatch permit lives ONLY in
       // claimSideEffectsRun; a replay never re-runs anything, so strictness
       // costs nothing and keeps one rule for every non-resume site.
-      if (!requestHashMatches(priorSuccess.request_hash, requestHash)) {
+      if (!requestHashMatches(priorSuccess.request_hash, requestHash, priorLayoutRequestHash)) {
         return {
           action: 'conflict',
           status: 409,
@@ -334,7 +386,7 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     .orderBy('updated_at', 'desc')
     .first();
   if (resumable?.service_record_id) {
-    return claimSideEffectsRun(resumable, requestHash, knex);
+    return claimSideEffectsRun(resumable, { requestHash, priorLayoutRequestHash }, knex);
   }
 
   const completedRecord = await knex('service_records')
@@ -487,7 +539,7 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     // contract while passing the check (Codex P1, fix round 10). The
     // committed-resume states route through claimSideEffectsRun above,
     // which permits exactly that mode disagreement.
-    const hashMismatch = !requestHashMatches(existing.request_hash, requestHash);
+    const hashMismatch = !requestHashMatches(existing.request_hash, requestHash, priorLayoutRequestHash);
 
     if (existing.status === 'succeeded' && existing.response) {
       if (hashMismatch) {
@@ -504,7 +556,7 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     }
 
     if ((existing.status === 'side_effects_pending' || existing.status === 'side_effects_running') && existing.service_record_id) {
-      return claimSideEffectsRun(existing, requestHash, knex);
+      return claimSideEffectsRun(existing, { requestHash, priorLayoutRequestHash }, knex);
     }
 
     if (existing.status === 'pending') {
@@ -795,6 +847,7 @@ module.exports = {
   claimCompletionAttempt,
   completionStatusForService,
   hashCompletionRequest,
+  priorLayoutCompletionRequestHash,
   hasCommittedCompletionAttempt,
   // The single timer-vs-operator classification rule, shared with the
   // completion route's intake gate (liveTimeOnSitePlan) so the idempotency

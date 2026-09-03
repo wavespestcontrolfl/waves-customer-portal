@@ -5557,6 +5557,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             serviceId: svc.id,
             idempotencyKey,
             requestHash: CompletionAttempts.hashCompletionRequest(req.body),
+            // Rows claimed before the photos-in-mode hash layout compare
+            // under the layout they were stored in (completion-attempts.js).
+            priorLayoutRequestHash: CompletionAttempts.priorLayoutCompletionRequestHash(req.body),
           }, lockTrx);
         });
         break;
@@ -12507,6 +12510,37 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // What the accepted text WAS, so the catch can stamp the honest 'sent'
       // state (sentSmsBody is scoped inside the try).
       let completionSmsAcceptedSnapshot = null;
+      // Invoice bookkeeping owed once the completion text has REACHED the
+      // provider: the pay-link invoice leaves draft (markDeliverySent) and a
+      // combined receipt claims receipt_sent_at so the deferred receipt job
+      // skips its SMS leg. One helper for the clean success path AND the
+      // accepted-but-post-send-write-failed catch (GitHub Codex r5 P1) —
+      // both mean the customer has the text, so both owe the same
+      // idempotent finalization; skipping it left a delivered pay-link
+      // invoice in draft and re-armed a duplicate receipt.
+      const finalizeCompletionSmsInvoiceDelivery = async ({ smsType, payLinkCarried }) => {
+        if (payLinkCarried && invoice?.id && invoiceCreated && payUrl) {
+          try {
+            const InvoiceService = require('../services/invoice');
+            invoice = await InvoiceService.markDeliverySent(invoice.id, {
+              sms: true,
+              source: smsType || 'completion_sms_with_invoice',
+              payUrl,
+            });
+          } catch (statusErr) {
+            logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id}: ${statusErr.message}`);
+          }
+        }
+        if (smsType === 'service_complete_paid_receipt' && invoice?.id) {
+          // Confirmed-delivery claim: the deferred receipt job now skips
+          // its SMS leg (email leg unaffected). Stamped ONLY here — any
+          // earlier bail leaves receipt_sent_at null and the deferred
+          // job sends the classic receipt when it comes due.
+          await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
+            .update({ receipt_sent_at: db.fn.now(), updated_at: new Date() })
+            .catch((stampErr) => logger.warn(`[dispatch] combined-receipt claim failed for invoice ${invoice.id} — the deferred receipt may also text: ${stampErr.message}`));
+        }
+      };
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         // Use the recap STORED on the record (the server-generated effectiveCustomerRecap,
@@ -12873,6 +12907,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             type: sentSmsType,
             channel: sentSmsChannel,
             reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
+            payLinkCarried: allowCompletionInvoiceLink,
           } : null;
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
@@ -13092,33 +13127,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 }),
               }).catch((eventErr) => logger.warn(`[dispatch] service report MMS fallback event insert failed: ${eventErr.message}`));
             }
-            if (invoice?.id && invoiceCreated && payUrl && allowCompletionInvoiceLink) {
-              try {
-                const InvoiceService = require('../services/invoice');
-                invoice = await InvoiceService.markDeliverySent(invoice.id, {
-                  sms: true,
-                  source: sentSmsType || 'completion_sms_with_invoice',
-                  payUrl,
-                });
-              } catch (statusErr) {
-                logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id}: ${statusErr.message}`);
-              }
-            }
+            await finalizeCompletionSmsInvoiceDelivery({ smsType: sentSmsType, payLinkCarried: allowCompletionInvoiceLink });
             if (!bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl)) {
               await markBundledReviewDelivered();
             } else {
               await markBundledReviewFailed();
             }
             record.structured_notes = sentNotes;
-            if (sentSmsType === 'service_complete_paid_receipt' && invoice?.id) {
-              // Confirmed-delivery claim: the deferred receipt job now skips
-              // its SMS leg (email leg unaffected). Stamped ONLY here — any
-              // earlier bail leaves receipt_sent_at null and the deferred
-              // job sends the classic receipt when it comes due.
-              await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
-                .update({ receipt_sent_at: db.fn.now(), updated_at: new Date() })
-                .catch((stampErr) => logger.warn(`[dispatch] combined-receipt claim failed for invoice ${invoice.id} — the deferred receipt may also text: ${stampErr.message}`));
-            }
           }
         }
       } catch (e) {
@@ -13148,6 +13163,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           await mergeRecordNotesKeys(record.id, acceptedDelta)
             .catch((updateErr) => logger.error(`Completion SMS accepted-state update failed: ${updateErr.message}`));
           record.structured_notes = acceptedNotes;
+          // The text reached the provider: the invoice leaves draft and a
+          // combined receipt is claimed exactly as the success path does.
+          await finalizeCompletionSmsInvoiceDelivery({ smsType: snap.type, payLinkCarried: snap.payLinkCarried === true });
           if (snap.reviewCarried !== false) await markBundledReviewDelivered();
           else await markBundledReviewFailed();
           logger.warn(`[dispatch] Completion SMS for service_record ${record.id} was accepted by the provider (${e.providerOutcome?.providerMessageId || 'no message id'}) but a post-send write failed (${e.message}) — recorded as sent, no failure bell, do not re-send`);

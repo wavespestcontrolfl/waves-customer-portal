@@ -412,16 +412,49 @@ describe("committed-body persistence for resume-owed visits", () => {
     return map;
   }
 
-  it("strips completionPhotos and keeps every other field", () => {
+  it("strips completionPhotos only once the record owns them (photosDurable) and keeps every other field", () => {
     const body = { a: 1, completionPhotos: [{ data: "data:image/jpeg;base64,xxx" }], idempotencyKey: "k" };
-    expect(completionResumeBodyForStorage(body)).toEqual({ a: 1, idempotencyKey: "k" });
+    expect(completionResumeBodyForStorage(body, { photosDurable: true })).toEqual({ a: 1, idempotencyKey: "k" });
+    // Not yet durable (a side_effects_running 409): the photos are the only
+    // copy left, so the full body is what gets pinned.
+    expect(completionResumeBodyForStorage(body)).toEqual(body);
     expect(completionResumeBodyForStorage(null)).toBeNull();
+  });
+
+  it("a resume-owed 503 pins the photo-less body; a side-effects 409 keeps the photos", () => {
+    const map = stubStorage();
+    try {
+      persistCompletionResumeOwed("svc-p", { a: 1, completionPhotos: [{ data: "big" }] });
+      expect(JSON.parse(map.get(completionResumeOwedBodyKey("svc-p")))).toEqual({ a: 1, completionPhotos: [{ data: "big" }] });
+      persistCompletionResumeOwed("svc-p", { a: 1, completionPhotos: [{ data: "big" }] }, { photosDurable: true });
+      expect(JSON.parse(map.get(completionResumeOwedBodyKey("svc-p")))).toEqual({ a: 1 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("a photo-carrying pin that hits the quota falls back to the photo-less body", () => {
+    const map = new Map();
+    stubStorage({
+      setItem: (k, v) => {
+        if (k.endsWith(":body") && String(v).includes("completionPhotos")) throw new Error("QuotaExceededError");
+        map.set(k, String(v));
+      },
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+    });
+    try {
+      persistCompletionResumeOwed("svc-q", { a: 1, completionPhotos: [{ data: "big" }] });
+      expect(map.get("waves_completion_resume_owed_svc-q")).toBe("1");
+      expect(restoreCompletionResumeOwedBody("svc-q")).toEqual({ a: 1 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("persists marker + photo-less body together and restores the body only while the marker is set", () => {
     const map = stubStorage();
     try {
-      persistCompletionResumeOwed("svc-1", { a: 1, completionPhotos: [{ data: "big" }] });
+      persistCompletionResumeOwed("svc-1", { a: 1, completionPhotos: [{ data: "big" }] }, { photosDurable: true });
       expect(map.get("waves_completion_resume_owed_svc-1")).toBe("1");
       expect(JSON.parse(map.get(completionResumeOwedBodyKey("svc-1")))).toEqual({ a: 1 });
       expect(restoreCompletionResumeOwedBody("svc-1")).toEqual({ a: 1 });
@@ -439,7 +472,7 @@ describe("committed-body persistence for resume-owed visits", () => {
     // would read the original attempt as succeeded_other_key.
     const map = stubStorage();
     try {
-      persistCompletionResumeOwed("svc-k", { a: 1, idempotencyKey: "key-123", completionPhotos: [{ data: "x" }] });
+      persistCompletionResumeOwed("svc-k", { a: 1, idempotencyKey: "key-123", completionPhotos: [{ data: "x" }] }, { photosDurable: true });
       expect(restoreCompletionResumeOwedBody("svc-k")).toEqual({ a: 1, idempotencyKey: "key-123" });
       expect(map.size).toBe(2);
     } finally {

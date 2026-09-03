@@ -858,30 +858,49 @@ export function completionResumeOwed(serviceId) {
 // The committed body persists BESIDE the marker (codex P1 #3745 r4): a panel
 // reopened after a reload used to rebuild the request, and a rebuilt body
 // 409s completion_resume_payload_mismatch — after which the handler dropped
-// the marker with the report/completion text still unsent. Photos are
-// stripped before storage (completionPhotos can run to 1.5 MB × 5 data URLs,
-// past the localStorage quota); the server's resume hash no longer binds
-// them because the committed record already owns the uploads
-// (completion-attempts.js completionRequestHashSegments). Best-effort: a
-// quota failure leaves the marker alone, which is exactly today's behavior.
+// the marker with the report/completion text still unsent. The server's
+// resume hash does not bind completionPhotos (completion-attempts.js
+// completionRequestHashSegments), so the stored body may carry them or not:
+//  - photosDurable: the committed record already owns the uploads — every
+//    resume-owed 503 exits AFTER the post-commit photo upload — so the data
+//    URLs (up to 1.5 MB × 5) are stripped to stay under the localStorage
+//    quota;
+//  - otherwise (a 409 completion_side_effects_running: the original request
+//    may still be between commit and its photo upload) the photos are the
+//    only copy left, so the full body is stored and the photo-less body is
+//    the QUOTA fallback, not the default (GitHub Codex r5 P1). A resume
+//    that re-sends already-uploaded photos is a no-op — service-photos.js
+//    dedupes by image hash per record.
+// Best-effort: a storage failure leaves the marker alone, which is exactly
+// today's behavior.
 export function completionResumeOwedBodyKey(serviceId) {
   return `${completionResumeOwedKey(serviceId)}:body`;
 }
-export function completionResumeBodyForStorage(body) {
+export function completionResumeBodyForStorage(body, { photosDurable = false } = {}) {
   if (!body || typeof body !== "object") return null;
+  if (!photosDurable) return body;
   const { completionPhotos, ...rest } = body;
   return rest;
 }
-export function persistCompletionResumeOwed(serviceId, body) {
+export function persistCompletionResumeOwed(serviceId, body, { photosDurable = false } = {}) {
   try {
     localStorage.setItem(completionResumeOwedKey(serviceId), "1");
   } catch {
     return; // storage unavailable — the mounted panel's in-memory retry still works
   }
+  const stored = completionResumeBodyForStorage(body, { photosDurable });
+  if (!stored) return;
   try {
-    const stored = completionResumeBodyForStorage(body);
-    if (stored) localStorage.setItem(completionResumeOwedBodyKey(serviceId), JSON.stringify(stored));
-  } catch { /* quota — marker alone still reopens the panel */ }
+    localStorage.setItem(completionResumeOwedBodyKey(serviceId), JSON.stringify(stored));
+  } catch {
+    if (photosDurable) return; // quota — marker alone still reopens the panel
+    try {
+      localStorage.setItem(
+        completionResumeOwedBodyKey(serviceId),
+        JSON.stringify(completionResumeBodyForStorage(body, { photosDurable: true })),
+      );
+    } catch { /* quota even without photos — marker alone still reopens the panel */ }
+  }
 }
 export function restoreCompletionResumeOwedBody(serviceId) {
   if (!completionResumeOwed(serviceId)) return null;
@@ -14177,8 +14196,10 @@ export function CompletionPanel({
         // (now completed) visit even after a reload, and pin the committed
         // chain so the re-submit replays the SAME body through the server's
         // resume claim — a rebuilt body (fresh station capturedAt) would 409
-        // completion_resume_payload_mismatch instead of resuming.
-        persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current);
+        // completion_resume_payload_mismatch instead of resuming. Every code
+        // in COMPLETION_RESUME_OWED_CODES exits after the post-commit photo
+        // upload, so the record owns the photos and the pin can drop them.
+        persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current, { photosDurable: true });
         sideEffectsCommittedRef.current = true;
       } else if (e?.code === "completion_resume_payload_mismatch") {
         // A marker-resume rebuilt from the draft can differ from the

@@ -835,9 +835,73 @@ describe('request hash fits its column', () => {
       backfill: true,
       timeOnSite: 95,
     });
-    expect(hash).toMatch(/^[0-9a-f]{64}:[0-9a-f]{64}$/);
-    expect(hash.length).toBe(129);
+    expect(hash).toMatch(/^v2:[0-9a-f]{64}:[0-9a-f]{64}$/);
+    expect(hash.length).toBe(132);
     expect(hash.length).toBeLessThanOrEqual(REQUEST_HASH_COLUMN_WIDTH);
+  });
+});
+
+// GitHub Codex #3745 r5 P0: rows claimed before the photos-in-mode layout
+// carry `<core>:<mode>` with completionPhotos in the CORE (layout 1) — or
+// the older single segment (layout 0). Replaying the identical request must
+// keep matching across the deploy, so the matchers compare a stored row
+// under the layout it was written in, using the route's prior-layout
+// projection of the incoming body.
+describe('request hash layout compatibility', () => {
+  const { priorLayoutCompletionRequestHash } = require('../services/completion-attempts');
+  const crypto = require('crypto');
+  const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys) : (v && typeof v === 'object'
+    ? Object.keys(v).sort().reduce((a, k) => { a[k] = sortKeys(v[k]); return a; }, {}) : v));
+  const sha = (v) => crypto.createHash('sha256').update(JSON.stringify(sortKeys(v))).digest('hex');
+  // What the previous deploy stored for this body: photos in the core, the
+  // mode without them (computed independently of the module under test).
+  const photos = [{ data: 'data:image/jpeg;base64,AAA', caption: 'after' }];
+  const body = { notes: 'done', products: [{ id: 1 }], completionPhotos: photos, backfill: true, timeOnSite: 45, idempotencyKey: 'k' };
+  const layout1Stored = `${sha({ notes: 'done', products: [{ id: 1 }], completionPhotos: photos })}:${sha({ backfill: true, timeOnSite: 45 })}`;
+  const layout0Stored = sha({ notes: 'done', products: [{ id: 1 }], completionPhotos: photos });
+
+  test('the prior-layout projection reproduces what the previous deploy stored', () => {
+    expect(priorLayoutCompletionRequestHash(body)).toBe(layout1Stored);
+    expect(hashCompletionRequest(body)).not.toBe(layout1Stored);
+    expect(hashCompletionRequest(body)).toMatch(/^v2:/);
+  });
+
+  test('a layout-1 row (photos in the core) still matches the identical request pre- and post-commit', () => {
+    const incoming = hashCompletionRequest(body);
+    const prior = priorLayoutCompletionRequestHash(body);
+    expect(requestHashMatches(layout1Stored, incoming, prior)).toBe(true);
+    expect(resumeHashMatches(layout1Stored, incoming, prior)).toBe(true);
+    // Swapped photos or a flipped mode still 409 pre-commit under the stored layout.
+    const swapped = { ...body, completionPhotos: [{ data: 'data:image/jpeg;base64,BBB' }] };
+    expect(requestHashMatches(layout1Stored, hashCompletionRequest(swapped), priorLayoutCompletionRequestHash(swapped))).toBe(false);
+    const flipped = { ...body, backfill: false };
+    expect(requestHashMatches(layout1Stored, hashCompletionRequest(flipped), priorLayoutCompletionRequestHash(flipped))).toBe(false);
+    // Post-commit the mode has no vote, but the core (photos included under layout 1) does.
+    expect(resumeHashMatches(layout1Stored, hashCompletionRequest(flipped), priorLayoutCompletionRequestHash(flipped))).toBe(true);
+    expect(resumeHashMatches(layout1Stored, hashCompletionRequest(swapped), priorLayoutCompletionRequestHash(swapped))).toBe(false);
+  });
+
+  test('a layout-0 row (single segment) matches on the prior-layout core alone', () => {
+    expect(requestHashMatches(layout0Stored, hashCompletionRequest(body), priorLayoutCompletionRequestHash(body))).toBe(true);
+    expect(resumeHashMatches(layout0Stored, hashCompletionRequest(body), priorLayoutCompletionRequestHash(body))).toBe(true);
+    const flipped = { ...body, backfill: false };
+    expect(requestHashMatches(layout0Stored, hashCompletionRequest(flipped), priorLayoutCompletionRequestHash(flipped))).toBe(true);
+    expect(requestHashMatches(layout0Stored, hashCompletionRequest({ ...body, notes: 'other' }), priorLayoutCompletionRequestHash({ ...body, notes: 'other' }))).toBe(false);
+  });
+
+  test('a layout-2 row compares under the current layout: a photo-less post-commit replay resumes, a pre-commit one does not', () => {
+    const stored = hashCompletionRequest(body);
+    const photoless = { ...body, completionPhotos: [] };
+    expect(resumeHashMatches(stored, hashCompletionRequest(photoless), priorLayoutCompletionRequestHash(photoless))).toBe(true);
+    expect(requestHashMatches(stored, hashCompletionRequest(photoless), priorLayoutCompletionRequestHash(photoless))).toBe(false);
+    expect(requestHashMatches(stored, hashCompletionRequest(body), priorLayoutCompletionRequestHash(body))).toBe(true);
+  });
+
+  test('without a prior-layout projection an old row compares under the current segments (pre-r5 behavior)', () => {
+    const noPhotos = { notes: 'done', backfill: false };
+    const oldStored = `${coreHashSegment(hashCompletionRequest(noPhotos))}:${sha({ backfill: false, timeOnSite: null })}`;
+    expect(resumeHashMatches(oldStored, hashCompletionRequest(noPhotos))).toBe(true);
+    expect(requestHashMatches(coreHashSegment(hashCompletionRequest(noPhotos)), hashCompletionRequest(noPhotos))).toBe(true);
   });
 });
 
