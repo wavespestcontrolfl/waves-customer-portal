@@ -10,7 +10,8 @@
  * (FK first, then the (customer_id, service_date, service_type) soft-join
  * with ambiguity detection); this stamps the same resolution up front, ONLY
  * where the tuple is unique on both sides — exactly one unlinked record and
- * exactly one completed visit. Ambiguous tuples are left NULL on purpose
+ * exactly one completed visit, and the visit does not already own a linked
+ * record. Ambiguous tuples are left NULL on purpose
  * (stamping the wrong visit is worse than an owed badge). Idempotent; prod
  * has 4 such rows (read-only check 2026-09-03). No down: a healed backlink
  * is correct data, and the pre-heal state is not distinguishable afterwards.
@@ -26,6 +27,9 @@ exports.up = async function up(knex) {
       AND sr.service_date = ss.scheduled_date
       AND sr.service_type = ss.service_type
       AND ss.status = 'completed'
+      -- A visit that already owns a linked record is never healed onto a
+      -- second one (resolveServiceRecord returns the FK match first).
+      AND NOT EXISTS (SELECT 1 FROM service_records sr3 WHERE sr3.scheduled_service_id = ss.id)
       AND (SELECT count(*) FROM service_records sr2
             WHERE sr2.scheduled_service_id IS NULL
               AND sr2.customer_id = ss.customer_id
