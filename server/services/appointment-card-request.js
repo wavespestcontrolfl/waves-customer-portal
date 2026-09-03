@@ -2772,7 +2772,7 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
   // — the disabled rail cannot charge, so the lane presents as absent.
   const { describeCancelFeeRule, freeCancelReason } = require('./estimate-card-holds');
   if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'rail_dark' }) };
-  const { request, unresolved, reason: skipReason } = await feeEligibleRequestForVisit(scheduledServiceId);
+  const { request, unresolved, reason: skipReason, inFlight } = await feeEligibleRequestForVisit(scheduledServiceId);
   if (!request) {
     if (unresolved) {
       // Lane state unverifiable (Codex #3153 r9 P1): reporting "no fee"
@@ -2795,6 +2795,9 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
     }
     // A secured-but-exempt card must not read as "no card saved" (pre-push
     // Codex P1): map each eligibility exclusion to its truthful rule.
+    // A capture mid-completion ('completing') can finish with fee consent a
+    // moment from now — not "never saved" (pre-push P1): undetermined.
+    if (inFlight) return { secured: false, feeApplies: false, unresolved: true, rule: describeCancelFeeRule({ code: 'capture_in_flight' }) };
     return { secured: false, feeApplies: false, rule: describeCancelFeeRule(skipRule(skipReason)) };
   }
   const feeAmount = Number(request.no_show_fee_amount);

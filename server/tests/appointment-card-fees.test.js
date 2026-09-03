@@ -1023,6 +1023,10 @@ describe('appointmentCardCancelPreview', () => {
     res = await appointmentCardCancelPreview('svc-1');
     expect(res.rule).toMatchObject({ code: 'not_secured', willCharge: false });
     expect(res.rule.text).not.toMatch(/^No card is saved/);
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'completing' } });
+    res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: false, feeApplies: false, unresolved: true, rule: { code: 'capture_in_flight', willCharge: null } });
+    expect(res.rule.text).not.toMatch(/never saved/);
     mockTableHandlers = handlersWith({ hold: { id: 'h-parked' } });
     res = await appointmentCardCancelPreview('svc-1');
     expect(res.rule).toMatchObject({ code: 'card_hold_lane', willCharge: false });

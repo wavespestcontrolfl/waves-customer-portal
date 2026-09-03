@@ -1355,6 +1355,8 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
       return rule(true, `A card is saved and the visit starts ${fmtETWhen(start)}, within the ${hours}-hour late-cancel window. ${fee} will be charged — rule: cancellations within ${hours} hours of the visit.`);
     case 'sticky':
       return rule(true, `A card is saved. The customer rescheduled on ${fmtETWhen(sticky?.rescheduledAt)} while inside the ${hours}-hour window of the earlier slot (${fmtETWhen(sticky?.originalStart)}), so the window carried over to this visit. ${fee} will be charged — rule: a reschedule made inside the window doesn't reset it.`);
+    case 'capture_in_flight':
+      return rule(null, 'The customer is saving a card for this visit right now (secure link mid-completion), so fee terms may land in a moment. This cancel can\'t preview them — check the visit\'s billing after cancelling.');
     case 'charge_in_flight':
       return rule(null, 'A fee charge for this visit is already in progress or under billing review. This cancel starts no new charge — check the visit\'s billing before promising the customer either way.');
     case 'unresolved':
