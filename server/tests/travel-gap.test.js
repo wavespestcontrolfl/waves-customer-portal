@@ -136,6 +136,19 @@ describe('travelGapConflicts — route neighbours only', () => {
     expect(travelGapConflicts(candidate, [nearAfter, farAfter]).map((c) => c.stop.id)).toEqual(['far-after']);
   });
 
+  test('a live hold is measured but never shadows the committed neighbour behind it', () => {
+    // Far committed 9–10 stop, nearby hold 10:15–11:00 in front of it.
+    const hold = { startMin: 615, endMin: 660, ...PALMETTO, id: 'hold', customer_id: null, reservation_expires_at: '2099-01-01T00:00:00Z' };
+    const out = travelGapConflicts(candidate, [farEarlier, hold]).map((c) => [c.stop.id, c.reason]);
+    expect(out).toEqual([['far', 'travel_gap']]); // the hold itself has 15 free minutes → fine
+    // A hold sitting inside the gap is still a conflict on its own.
+    const nearHold = { ...hold, id: 'near-hold', startMin: 625, endMin: 670 }; // 5 free min
+    expect(travelGapConflicts(candidate, [nearHold]).map((c) => c.stop.id)).toEqual(['near-hold']);
+    // Explicit flag wins over the column heuristic; a committed row with
+    // reservation_expires_at cleared is a plain neighbour.
+    expect(travelGapConflicts(candidate, [{ ...hold, hold: false }, farEarlier]).map((c) => c.stop.id)).toEqual([]);
+  });
+
   test('every overlapping stop is a conflict regardless of position; malformed stops are skipped', () => {
     const overlapA = { startMin: 700, endMin: 720, id: 'a' };
     const overlapB = { startMin: 730, endMin: 800, id: 'b' };

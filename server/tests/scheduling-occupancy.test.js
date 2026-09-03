@@ -120,6 +120,20 @@ describe('findConflictingVisits — travel option (GATE_SLOT_TRAVEL_GAP)', () =>
     ]);
   });
 
+  test('gate on + travel → a live hold in front of a far committed stop does not shadow it', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const FAR_SOUTH = { lat: 27.20, lng: -82.545 }; // ~67 modeled minutes from Palmetto
+    const q = makeQuery([
+      { id: 'far', customer_id: 'c9', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60, ...FAR_SOUTH },
+      { id: 'hold', customer_id: null, reservation_expires_at: '2099-01-01T00:00:00Z', window_start: '10:15:00', window_end: '11:00:00', estimated_duration_minutes: 45, ...PALMETTO },
+    ]);
+    db.mockReturnValue(q);
+    const found = await findConflictingVisits({
+      db, date: '2099-01-05', windowStart: '11:15', windowEnd: '12:15', travel: PALMETTO,
+    });
+    expect(found.map((r) => [r.id, r.conflict_reason])).toEqual([['far', 'travel_gap']]);
+  });
+
   test('gate on + travel with null coords → buffer-only (drive term drops out)', async () => {
     process.env.GATE_SLOT_TRAVEL_GAP = 'true';
     const q = makeQuery(rowsOnDate);

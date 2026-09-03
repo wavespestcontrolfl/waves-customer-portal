@@ -906,8 +906,10 @@ class SmartRebooker {
           windowEnd: candidateEnd,
           excludeServiceIds: [String(serviceId)],
           excludeStatuses: ['cancelled', 'completed'],
-          // Travel gap: a day option must survive the commit's own probe.
-          travel: { lat: service.lat ?? null, lng: service.lng ?? null },
+          // Travel gap: a CUSTOMER-FACING day option (rain-out sheet) must
+          // survive the commit's own probe. Admin reschedule-options stay
+          // overlap-only — staff saves are advisory (GH codex #3803 r3 P2).
+          ...(opts.travelGap === true ? { travel: { lat: service.lat ?? null, lng: service.lng ?? null } } : {}),
         });
         if (clash.length) continue;
       } catch (err) {

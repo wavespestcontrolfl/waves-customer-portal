@@ -1389,7 +1389,11 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
       'scheduled_services.zone',
       'customers.city as customer_city',
       // Gate off → the legacy select, byte for byte (no coordinate raws).
-      ...(travelGapEnabled() ? guardedCoordSelects(db) : []),
+      // Gate on → guarded pin + the two columns that tell a live hold from a
+      // committed stop (a hold never shadows a committed neighbour).
+      ...(travelGapEnabled()
+        ? [...guardedCoordSelects(db), 'scheduled_services.customer_id', 'scheduled_services.reservation_expires_at']
+        : []),
     );
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
 
@@ -1422,6 +1426,7 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
       endMin: explicitEndMin ?? (startMin != null ? startMin + fallbackDuration : null),
       lat: row.lat ?? null,
       lng: row.lng ?? null,
+      hold: row.reservation_expires_at != null && row.customer_id == null,
     };
     const key = `${row.technician_id || 'unassigned'}|${date}`;
     if (!byTechDate.has(key)) byTechDate.set(key, []);

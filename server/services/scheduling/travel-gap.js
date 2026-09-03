@@ -109,10 +109,24 @@ function windowsOverlap(a, b) {
 }
 
 /**
+ * A live estimate hold (customer_id NULL + reservation_expires_at) occupies
+ * route time but may expire without graduating, so it is measured against
+ * the candidate like any stop yet never SHADOWS a committed neighbour — the
+ * committed stop behind it becomes the real neighbour the moment the hold
+ * lapses (GH codex #3803 r3 P1). Callers may set `hold` explicitly; rows
+ * carrying the occupancy columns are recognised as they are.
+ */
+function isHoldStop(stop) {
+  if (stop.hold != null) return stop.hold === true;
+  return stop.reservation_expires_at != null && stop.customer_id == null;
+}
+
+/**
  * The stops a candidate fails against, in the order given: every overlapping
  * stop (reason 'overlap'), plus — of the non-overlapping stops — ONLY the
- * immediate route neighbours (latest-ending before, earliest-starting after)
- * when they sit closer than the required gap (reason 'travel_gap').
+ * immediate COMMITTED route neighbours (latest-ending before, earliest-
+ * starting after) and every live hold, when they sit closer than the
+ * required gap (reason 'travel_gap'). See isHoldStop.
  * Gate-agnostic like travelGapViolation; malformed stops are skipped.
  * Returns [{ stop, reason }].
  */
@@ -120,6 +134,7 @@ function travelGapConflicts(candidate, stops) {
   if (!candidate || ![candidate.startMin, candidate.endMin].every(Number.isFinite)) return [];
   if (!Array.isArray(stops) || stops.length === 0) return [];
   const overlaps = [];
+  const holds = [];
   // Every stop tied at the boundary is a neighbour (two legacy rows ending
   // at the same minute: the farther one still sets the gap).
   let before = [];
@@ -128,6 +143,8 @@ function travelGapConflicts(candidate, stops) {
     if (!stop || ![stop.startMin, stop.endMin].every(Number.isFinite)) continue;
     if (windowsOverlap(candidate, stop)) {
       overlaps.push({ stop, reason: 'overlap' });
+    } else if (isHoldStop(stop)) {
+      holds.push(stop);
     } else if (stop.endMin <= candidate.startMin) {
       if (!before.length || stop.endMin > before[0].endMin) before = [stop];
       else if (stop.endMin === before[0].endMin) before.push(stop);
@@ -138,7 +155,7 @@ function travelGapConflicts(candidate, stops) {
     }
   }
   const neighbours = [];
-  for (const stop of [...before, ...after]) {
+  for (const stop of [...before, ...after, ...holds]) {
     if (travelGapViolation(candidate, stop)) neighbours.push({ stop, reason: 'travel_gap' });
   }
   return overlaps.concat(neighbours);
@@ -184,6 +201,7 @@ module.exports = {
   requiredGapMinutes,
   travelGapViolation,
   travelGapConflicts,
+  isHoldStop,
   violatesTravelGap,
   resolveStopCoords,
 };

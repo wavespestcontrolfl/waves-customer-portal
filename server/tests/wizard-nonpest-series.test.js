@@ -497,6 +497,9 @@ describe('booking route wiring (source contracts)', () => {
     // The pin helper must let a SQL NULL fall through to the booking pin —
     // Number(null) is 0 (GH codex #3803 r2 P1).
     expect(booking).toMatch(/function seededRowPin\([\s\S]{0,400}v != null && Number\.isFinite\(Number\(v\)\)/);
+    // The parent-extension guard is a commit surface too: the extended
+    // window must clear the travel gap with the same booking pin (r3 P1).
+    expect(booking).toMatch(/parentExtensionGuard\(\{[\s\S]{0,700}travel: \{\s*\n\s*lat: Number\.isFinite\(offerLat\)/);
   });
 
   test('activation takes rung-1 occupancy locks BEFORE the comms/row locks, from the pre-computed plan', () => {

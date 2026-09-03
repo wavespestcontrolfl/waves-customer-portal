@@ -446,7 +446,15 @@ async function findConflictingVisitsWithTravel({
     const durationMin = Number(row.estimated_duration_minutes) > 0
       ? Number(row.estimated_duration_minutes)
       : DEFAULT_DURATION_MINUTES;
-    stops.push({ startMin, endMin: explicitEnd != null ? explicitEnd : startMin + durationMin, lat: row.lat, lng: row.lng, row });
+    stops.push({
+      startMin,
+      endMin: explicitEnd != null ? explicitEnd : startMin + durationMin,
+      lat: row.lat,
+      lng: row.lng,
+      // A live hold never shadows a committed neighbour (travel-gap.js).
+      hold: row.reservation_expires_at != null && row.customer_id == null,
+      row,
+    });
   }
   const reasonByRow = new Map(travelGapConflicts(candidate, stops).map(({ stop, reason }) => [stop.row, reason]));
   // Query order (window_start asc), not conflict order.

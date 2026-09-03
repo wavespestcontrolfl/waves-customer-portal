@@ -3674,6 +3674,14 @@ async function createSelfBooking(payload = {}) {
               windowStart: slot_start,
               windowEnd: extendedEnd,
               excludeServiceIds: [seriesParentRow.id],
+              // Travel gap (GATE_SLOT_TRAVEL_GAP): the extended window must
+              // clear the same drive + buffer the offered one did — an
+              // extension can eat the gap without overlapping the next stop
+              // (GH codex #3803 r3 P1). Same booking pin as the commit probe.
+              travel: {
+                lat: Number.isFinite(offerLat) ? offerLat : null,
+                lng: Number.isFinite(offerLng) ? offerLng : null,
+              },
             });
             if (extensionClashes.length === 0) {
               await trx('scheduled_services')
