@@ -1209,6 +1209,11 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect((await bearerLinkSendCheck(PREP_BODY, '5551234567', { trustedCustomerId: 'c1' })).error).toMatch(/different customer/);
     });
 
+    test('a prep page with no customer owner refuses — nothing can bind it to a recipient (pre-push Codex P0)', async () => {
+      resolvePrepSource.mockResolvedValue({ templateKey: 'prep.flea', customerId: null });
+      expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no customer on file/);
+    });
+
     test('a non-canonical prep host refuses outright', async () => {
       expect((await bearerLinkSendCheck(`https://evil.example/?next=portal.wavespestcontrol.com/prep/${PREP}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
     });

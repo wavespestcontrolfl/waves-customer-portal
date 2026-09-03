@@ -824,10 +824,11 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, contract
     if (!source) return refuse('This prep guide link has expired — remove it and insert a fresh one.');
     const loaded = await require('./email-template-library').loadTemplateByKey(source.templateKey);
     if (!loaded?.activeVersion) return refuse('This prep guide has no active version in Email Templates — remove the prep link before sending.');
-    if (source.customerId) {
-      const bad = await owned(source.customerId, 'prep guide link');
-      if (bad) return bad;
-    }
+    // A page with no customer owner still shows a service address — nothing
+    // can bind it to a recipient, so it never rides an SMS (pre-push Codex P0).
+    if (!source.customerId) return refuse('This prep guide page has no customer on file — remove the prep link before sending.');
+    const bad = await owned(source.customerId, 'prep guide link');
+    if (bad) return bad;
   }
 
   for (const run of linkRuns(runs, /\/pay\/statement\//i)) {
