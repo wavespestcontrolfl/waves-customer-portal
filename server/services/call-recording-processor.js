@@ -1415,6 +1415,9 @@ async function shouldHoldLeadEmailEnrollment(callLogId, { procToken = null, call
             ...(heldEmails.length ? {
               email_as_heard: heldEmails[0],
               email_candidates: heldEmails,
+              // Filing-time snapshot of the address this card releases — the
+              // evidence sweep reads THIS, never the hold's mutable held_email.
+              email_release_target: String(heldEmails[0]).trim().toLowerCase(),
               confirmation_question: 'The email review-state lookup failed mid-run — read this address back with the customer before releasing.',
             } : {}),
           },
@@ -8327,7 +8330,10 @@ const CallRecordingProcessor = {
                 flag,
                 extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                 severity: 'advisory',
-                extraPayload: dictationEmailPayload,
+                // + the address the run adopted at filing time (the release
+                // target the evidence sweep may verify); null when the
+                // dictation demoted it — then only a human can settle it.
+                extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
               })),
           });
         }
@@ -8405,7 +8411,8 @@ const CallRecordingProcessor = {
               flag,
               extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
               severity: 'advisory',
-              extraPayload: dictationEmailPayload,
+              // Same filing-time release-target snapshot as the shadow branch.
+              extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
             })),
           });
         }
@@ -15089,6 +15096,9 @@ const CallRecordingProcessor = {
               if (!existingCandidates.some((c) => String(c?.value || '').trim().toLowerCase() === heldLc)) {
                 recoveryEmailEvidence.email_candidates = [{ value: extracted.email }, ...existingCandidates];
               }
+              // Filing-time snapshot of the release target for the evidence
+              // sweep (the hold's held_email is mutable — fanout retargets it).
+              recoveryEmailEvidence.email_release_target = heldLc;
             }
             // The WHOLE recovery — card insert, ledger retarget, claim
             // invalidation — rides ONE token-fenced transaction (Codex

@@ -274,18 +274,18 @@ function callerPhoneOnFile(item) {
   ].some((slot) => phoneDigits(slot) === ani);
 }
 
-// The address THIS call established for the caller: the V1 extraction's
-// adopted email plus the first-touch hold's held target for the call. Never
-// the card's email_candidates — those are alternative spellings awaiting
-// the read-back, and one of them may be another customer's real address.
-function capturedEmails(item, heldEmails = []) {
-  const out = new Set();
-  const v1 = parseMaybeJson(item.call_extraction_v1);
-  for (const v of [v1?.email, ...heldEmails]) {
-    const e = String(v || '').trim().toLowerCase();
-    if (e) out.add(e);
-  }
-  return [...out];
+// The address THIS card is about: the release target the processor
+// snapshotted onto the card at filing time (payload.email_release_target).
+// Never the card's email_candidates (alternative spellings awaiting the
+// read-back — one may be another customer's real address), never the hold's
+// held_email (mutable: fanout retargets it when the customer's email
+// changes), never the call's rolling extraction columns. A card filed
+// without a target (the dictation demoted every reading, or it predates
+// the snapshot) has no evidence and waits for a human.
+function capturedEmails(item) {
+  const payload = parseMaybeJson(item.payload);
+  const e = String(payload?.email_release_target || '').trim().toLowerCase();
+  return e ? [e] : [];
 }
 
 function ageDays(createdAt, now) {
@@ -644,23 +644,12 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
     }
   }
 
-  // email_unverified → the captured address ENGAGED (opened/clicked — a
+  // email_unverified → the card's release target ENGAGED (opened/clicked — a
   // delivery alone only proves some mailbox exists) with a message SENT
   // after the card (an older message opened later proves nothing about
   // this call's capture), and never bounced/complained.
   const emailItems = candidates.filter((i) => i.reason_code === 'email_unverified');
-  const heldByCall = new Map();
-  if (emailItems.length) {
-    const holdRows = await conn('first_touch_holds')
-      .whereIn('call_log_id', [...new Set(emailItems.map((i) => i.call_log_id))])
-      .select('call_log_id', 'held_email');
-    for (const r of holdRows) {
-      const list = heldByCall.get(String(r.call_log_id)) || [];
-      if (r.held_email) list.push(r.held_email);
-      heldByCall.set(String(r.call_log_id), list);
-    }
-  }
-  const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i, heldByCall.get(String(i.call_log_id)) || [])]));
+  const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i)]));
   const allEmails = [...new Set([...emailsByItem.values()].flat())];
   if (allEmails.length) {
     const rows = await conn('email_messages')

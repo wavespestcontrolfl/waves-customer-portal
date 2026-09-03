@@ -428,12 +428,15 @@ describe('evidence helpers', () => {
     expect(callerPhoneOnFile(item({ call_direction: 'inbound', call_from_phone: '+19415550100', customer_phone: '+19415550101' }))).toBe(false);
   });
 
-  test('capturedEmails is the V1 adopted email plus the held targets, lowercased — never the dictation candidates', () => {
-    const emails = capturedEmails(item({
-      call_extraction_v1: JSON.stringify({ email: 'Pat@Example.com', email_raw: 'pat@examplecom' }),
-      payload: { email_candidates: [{ value: 'pat@example.com' }, { value: 'PAT.S@example.com' }] },
-    }), ['Held@Example.com']);
-    expect(emails.sort()).toEqual(['held@example.com', 'pat@example.com']);
+  test('capturedEmails is the card\'s filing-time release target only — never the candidates or the call extraction', () => {
+    expect(capturedEmails(item({
+      call_extraction_v1: JSON.stringify({ email: 'Other@Example.com' }),
+      payload: { email_release_target: 'Pat@Example.com', email_candidates: [{ value: 'pat@example.com' }, { value: 'PAT.S@example.com' }] },
+    }))).toEqual(['pat@example.com']);
+    expect(capturedEmails(item({
+      call_extraction_v1: JSON.stringify({ email: 'Other@Example.com' }),
+      payload: { email_candidates: [{ value: 'pat@example.com' }] },
+    }))).toEqual([]);
   });
 
   test('requested service tokens ignore generic words; service types match on a specific token', () => {
