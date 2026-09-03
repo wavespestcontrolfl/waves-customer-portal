@@ -4196,9 +4196,11 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     if (typedPalmRaw !== undefined) {
       const n = Number(typedPalmRaw);
       if (!(Number.isInteger(n) && n >= 0 && n <= 200)) throw treeShrubInputError('Palm count must be a whole number between 1 and 200.');
+      // An operator zero is "no palms" and ends the resolution here — a
+      // positive vision estimate must never resurrect a count the operator
+      // rejected (pre-push r4 P0).
       tsPalmCount = n > 0 ? n : undefined;
-    }
-    if (tsPalmCount === undefined) {
+    } else {
       const fallbackPalm = positiveIntegerValue(
         p.palmInventory?.palmCount,
         p.palmCountTrusted === false ? undefined : p.estimatedPalmCount,

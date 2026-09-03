@@ -229,6 +229,15 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
       const input = translateV2CallToV1Input(baseProfile(extra), ['TREE_SHRUB'], {});
       expect(input.services.treeShrub).not.toHaveProperty('palmCount');
     }
+    // An operator ZERO ends the resolution: no inventory or vision leg may
+    // resurrect a count the operator rejected.
+    for (const extra of [
+      { palmCount: 0, estimatedPalmCount: 9 },
+      { palmCount: '0', palmInventory: { palmCount: 4 }, estimatedPalmCount: 9 },
+    ]) {
+      expect(translateV2CallToV1Input(baseProfile(extra), ['TREE_SHRUB'], {})
+        .services.treeShrub).not.toHaveProperty('palmCount');
+    }
     // A zero inventory does not fall through to a positive estimate (same
     // first-present rule the palmInventory block uses).
     expect(translateV2CallToV1Input(baseProfile({ palmInventory: { palmCount: 0 }, estimatedPalmCount: 9 }), ['TREE_SHRUB'], {})
