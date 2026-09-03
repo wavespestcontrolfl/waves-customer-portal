@@ -696,6 +696,14 @@ describe('draftReviewReply — fallback ladder', () => {
     const second = Drafter.safeCopyReply(g, 'service_quality', [first]);
     expect(second).not.toBe(first);
     expect(Drafter.verifyReplyText(second, g, { recentReplies: [first], mode: 'service_quality' })).toBeNull();
+    // No variant implies a relationship the account does not license.
+    const RELATIONSHIP_HINT = /\b(?:keep|continu|again|back|with us|ongoing|return|loyal|years?)\b/i;
+    const seen = new Set();
+    for (const gg of [g, grounding({ mentionedTechNames: [], topics: [], account: null }), grounding({ account: { relationship: 'first_visit', tenure: null, serviceCategories: [], city: null } })]) {
+      let prior = [];
+      for (let i = 0; i < 3; i++) { const v = Drafter.safeCopyReply(gg, 'service_quality', prior); expect(v).toBeTruthy(); expect(v).not.toMatch(RELATIONSHIP_HINT); seen.add(v); prior = [...prior, v]; }
+    }
+    expect(seen.size).toBeGreaterThanOrEqual(3);
     const noText = grounding({ firstName: '', text: '', mentionedTechNames: [], topics: [], account: null });
     expect(Drafter.safeCopyReply(noText, 'no_text', [])).toBe(good('Hello there,\n\nThanks for the five stars. Glad to be your pest and lawn team.'));
     expect(Drafter.safeCopyReply(grounding({ rating: 2 }), 'low_rating', [])).toBeNull();

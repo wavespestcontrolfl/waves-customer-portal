@@ -972,7 +972,9 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
     }
     rejections.push(verdict.code);
     rejectionDetails.push({ attempt: attempts, code: verdict.code, span: verdict.span, text: normalized.slice(0, 400) });
-    logger.info(`[review-reply-drafter] attempt ${attempts} rejected (${verdict.code}${verdict.span ? `: "${verdict.span}"` : ''}) review=${grounding.reviewId} mode=${mode}`);
+    // Code only in the log: a span can be a phone number, an address or a
+    // name. The words live in rejectionDetails, stored on the review row.
+    logger.info(`[review-reply-drafter] attempt ${attempts} rejected (${verdict.code}) review=${grounding.reviewId} mode=${mode}`);
   }
   // Last rung: deterministic safe copy built only from facts the verifier
   // already trusts, and verified like any other draft. A 4-5 star review
@@ -989,7 +991,8 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
 /**
  * Deterministic last-resort reply. Uses only the reviewer's first name, the
  * technician names the reviewer wrote, and the location sign-off — nothing
- * the verifier could call unsourced. Three phrasings so the non-repetition
+ * the verifier could call unsourced, and no wording that implies a past or
+ * future relationship (a first-visit reviewer gets none). Three phrasings so the non-repetition
  * rule does not reject the third use at one location. Returns the first
  * variant that passes verifyReplyDetailed, else null (the row parks).
  */
@@ -1009,8 +1012,8 @@ function safeCopyReply(grounding, mode, recentReplies = []) {
     ]
     : [
       `Thanks for ${noun}. Glad to be your pest and lawn team.`,
-      `We appreciate ${noun}. Glad you chose us, and we'll keep showing up.`,
-      `Much appreciated. Good to have you with us.`,
+      `We appreciate ${noun}. Glad you chose us.`,
+      `Much appreciated. Thanks for choosing us.`,
     ];
   for (const body of variants) {
     const text = `${greeting}\n\n${body}\n\n${signOffFor(grounding.locationName)}`;
