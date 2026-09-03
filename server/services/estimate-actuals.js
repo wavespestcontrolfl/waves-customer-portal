@@ -133,17 +133,29 @@ function extractTreeShrubEstimate(estimateData) {
   const mappedTier = normalizedEnum(mappedSelected?.tier);
   const optionAccess = normalizedEnum(requestOptions.treeShrubAccess);
 
-  // Mapped T&S evidence present ⇒ the mapped branch below is THE record; a
-  // revision that changed bed area or tree count must not be recorded off
-  // the stale raw line's measurements either (pre-push r7 P1). Raw-only
-  // fields (bedAreaSource, onSiteMin) read null there rather than stale.
+  // Raw vs mapped: server-authoritative admin saves store the FRESH raw
+  // engineResult next to the mapped result (resolveServerAuthoritativePricing
+  // writes both), so the raw line normally carries the exact bedAreaSource
+  // and onSiteMin the mapped envelope loses — keep them. It is stale only
+  // when a revision replaced the mapped result but left an agent draft's
+  // original engineResult behind; the tell is DISAGREEMENT with the mapped
+  // measurements (tsMeta eb / et), and then the mapped record wins with the
+  // raw-only fields null rather than wrong (GH #3801 P1 + pre-push r7 P1).
   const tsMeta = estimateData.result?.results?.tsMeta;
   const hasMappedTs = !!(tsMeta && typeof tsMeta === 'object');
+  const agreesWithMapped = (quote) => {
+    if (!hasMappedTs) return true;
+    const rawBed = positiveNumber(quote.bedAreaUsed ?? quote.bedArea);
+    const rawTrees = nonnegativeCount(quote.treeCount);
+    const mappedBed = positiveNumber(tsMeta.eb);
+    const mappedTrees = nonnegativeCount(tsMeta.et);
+    return (rawBed ?? null) === (mappedBed ?? null) && (rawTrees ?? null) === (mappedTrees ?? null);
+  };
 
-  const lineItems = hasMappedTs ? null : estimateData.engineResult?.lineItems;
+  const lineItems = estimateData.engineResult?.lineItems;
   if (Array.isArray(lineItems)) {
     const quote = lineItems.find((item) => item?.service === 'tree_shrub');
-    if (quote) {
+    if (quote && agreesWithMapped(quote)) {
       const bedAreaSource = normalizedEnum(quote.bedAreaSource);
       const extracted = {
         bedSqFt: positiveNumber(quote.bedAreaUsed ?? quote.bedArea),

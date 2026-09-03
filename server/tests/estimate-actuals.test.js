@@ -276,17 +276,20 @@ describe('extractTreeShrubEstimate', () => {
       result: { results: { tsMeta: { eb: 1500, et: 4, bedAreaIsEstimated: false }, ts: [{ tier: 'standard', selected: false }, { tier: 'enhanced', selected: true }] } },
       engineRequest: { profile: { homeSqFt: 2000 }, options: { treeShrubAccess: 'difficult' } },
     })).toEqual({
-      // The MAPPED record wins wholesale — raw-only fields read null rather
-      // than the stale line's values.
-      bedSqFt: 1500, bedAreaSource: null, bedAreaEstimated: false, treeCount: 4,
-      access: 'difficult', tier: 'enhanced', onSiteMin: null,
+      // The raw line AGREES with the mapped measurements (a fresh
+      // server-authoritative save stores both), so its exact bedAreaSource
+      // and onSiteMin are kept; tier/access come from the mapped record.
+      bedSqFt: 1500, bedAreaSource: 'explicit', bedAreaEstimated: false, treeCount: 4,
+      access: 'difficult', tier: 'enhanced', onSiteMin: 25,
     });
-    // A revision that changed the measurements records the mapped ones.
+    // A revision that changed the measurements left the draft's raw line
+    // behind: it DISAGREES with tsMeta, so the mapped record wins and the
+    // raw-only fields read null rather than wrong.
     expect(extractTreeShrubEstimate({
-      engineResult: { lineItems: [{ service: 'tree_shrub', bedArea: 1500, treeCount: 4, access: 'easy', tier: 'standard', onSiteMin: 25 }] },
+      engineResult: { lineItems: [{ service: 'tree_shrub', bedArea: 1500, bedAreaSource: 'explicit', treeCount: 4, access: 'easy', tier: 'standard', onSiteMin: 25 }] },
       result: { results: { tsMeta: { eb: 2600, et: 9, bedAreaIsEstimated: true }, ts: [{ tier: 'standard', selected: true }] } },
       engineRequest: { profile: {}, options: {} },
-    })).toMatchObject({ bedSqFt: 2600, treeCount: 9, bedAreaEstimated: true, access: 'easy', tier: 'standard' });
+    })).toEqual({ bedSqFt: 2600, bedAreaSource: null, bedAreaEstimated: true, treeCount: 9, access: 'easy', tier: 'standard', onSiteMin: null });
     // The v4.8 builder's replayed access is THE priced access on the mapped
     // path too.
     expect(extractTreeShrubEstimate({
