@@ -257,7 +257,35 @@ function heardAddressMatchesOnFile(item) {
   if (!readings.length) return false;
   // Every reading must key AND agree — one unkeyable representation (a bare
   // street, a fragment) is unverified evidence, not ignorable.
-  return readings.every((h) => addressKey(h.text) === onFile && localityMatches(item, h) && heardUnitMatches(item, h));
+  return readings.every((h) => readingMatchesOnFile(item, h));
+}
+
+// One heard reading against the on-file address: street key, locality, unit.
+function readingMatchesOnFile(item, reading) {
+  const onFile = addressKey(item.customer_address_line1);
+  return Boolean(onFile) && addressKey(reading.text) === onFile
+    && localityMatches(item, reading) && heardUnitMatches(item, reading);
+}
+
+// Did the CARD's filing-time ask (scheduling_window.requested_address —
+// never the call's rolling extraction) name no address at all, or exactly
+// the on-file one? Any other shape — a second property, a different
+// street, a locality/unit-only fragment, or no snapshot — is not an ask
+// the on-file address answers.
+function requestedAddressIsOnFile(item) {
+  const ask = parseMaybeJson(item.payload)?.scheduling_window?.requested_address;
+  if (!ask || typeof ask !== 'object') return false;
+  if (Number(ask.additional_properties) > 0) return false;
+  const readings = [
+    { text: ask.street_line_1, line2: ask.street_line_2, city: ask.city, zip: ask.postal_code },
+    { text: ask.raw_text, ...localityOfRaw(ask.raw_text) },
+  ].filter((r) => String(r.text || '').trim());
+  if (!readings.length) {
+    // No street named — but a unit / city / ZIP fragment alone is still an
+    // ask about SOME address that cannot be keyed.
+    return ![ask.street_line_2, ask.city, ask.postal_code].some((v) => String(v || '').trim());
+  }
+  return readings.every((r) => readingMatchesOnFile(item, r));
 }
 
 // The requested service categories the CARD snapshotted at filing time
@@ -775,9 +803,9 @@ function visitAtOnFileAddress(item, visit, places) {
 // every service category the card snapshotted at filing. Booking
 // provenance is PARENT rows only (follow-up children are not the booking
 // the call asked for). Direct = this call's own booking; association =
-// same customer, single ACTIVE property, the call named no other address,
-// scheduled inside the requested days, positively linked to the on-file
-// address. Direct bookings are held to the snapshot too: a reprocess that
+// same customer, single ACTIVE property, the card's filing-time ask named
+// no address or exactly the on-file one, scheduled inside the requested
+// days, positively linked to the on-file address. Direct bookings are held to the snapshot too: a reprocess that
 // re-classified the call and minted a different-service booking must not
 // close the original ask. A card with no snapshot (filed before it
 // existed — the historical backlog) gets NO booking evidence: without the
@@ -789,8 +817,7 @@ function bookingCoversRequest(item, mine, { multiProperty, places }) {
   const parents = mine.filter((v) => !v.parent_service_id && strictlyAfter(v.created_at, item.created_at));
   const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id));
   let pool = direct;
-  const askIsOnFile = !callSuppliedAddress(item.call_extraction, item.call_extraction_v1) || heardAddressMatchesOnFile(item);
-  if (!multiProperty && askIsOnFile) {
+  if (!multiProperty && requestedAddressIsOnFile(item)) {
     const window = requestedWindow(item);
     if (window) {
       pool = pool.concat(parents.filter((v) => {
@@ -1031,6 +1058,7 @@ module.exports = {
   requestedServiceTokens,
   serviceTypeMatches,
   requestedWindow,
+  requestedAddressIsOnFile,
   loadEvidence,
   EVIDENCE_CODES,
   LIVE_BOOKING_STATUSES,

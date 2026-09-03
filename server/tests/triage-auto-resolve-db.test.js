@@ -70,7 +70,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const [card] = await db('triage_items').insert({
       call_log_id: call.id, category: 'time_ambiguous', severity: 'blocking', reason_code: 'not_confirmed',
       status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
-      payload: JSON.stringify({ flag: 'not_confirmed', scheduling_window: { status: 'requested', requested_date_range_start: requestedDay, requested_service_categories: categories } }),
+      payload: JSON.stringify({ flag: 'not_confirmed', scheduling_window: { status: 'requested', requested_date_range_start: requestedDay, requested_service_categories: categories, requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 } } }),
     }).returning('id');
     const [visit] = await db('scheduled_services').insert({
       customer_id: customerId, property_id: propertyId, service_type: 'Quarterly Pest Control', status: bookingStatus,

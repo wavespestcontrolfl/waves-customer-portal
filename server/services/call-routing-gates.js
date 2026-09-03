@@ -343,6 +343,17 @@ function buildTriageItem({
         extraction?.service_request?.primary_service_category,
         ...(Array.isArray(extraction?.service_request?.secondary_categories) ? extraction.service_request.secondary_categories : []),
       ].filter((c) => typeof c === 'string' && c.trim()),
+      // Filing-time snapshot of WHERE the caller asked for service, for the
+      // same reason: the sweep's same-customer booking arm applies only
+      // when the ask named no address or exactly the on-file one.
+      requested_address: {
+        street_line_1: extraction?.property?.service_address?.street_line_1 ?? null,
+        street_line_2: extraction?.property?.service_address?.street_line_2 ?? null,
+        city: extraction?.property?.service_address?.city ?? null,
+        postal_code: extraction?.property?.service_address?.postal_code ?? null,
+        raw_text: extraction?.property?.service_address?.raw_text ?? null,
+        additional_properties: Array.isArray(extraction?.property?.additional_properties) ? extraction.property.additional_properties.length : 0,
+      },
     };
   }
 

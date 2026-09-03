@@ -339,6 +339,7 @@ const {
   requestedServiceTokens,
   serviceTypeMatches,
   requestedWindow,
+  requestedAddressIsOnFile,
   loadEvidence,
 } = require('../services/triage-auto-resolve');
 
@@ -485,6 +486,19 @@ describe('evidence helpers', () => {
     expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-05T01:00:00Z' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-04' });
     expect(requestedWindow(item({ payload: { scheduling_window: { requested_date_range_start: '2026-08-04', requested_date_range_end: '2026-08-06' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-06' });
     expect(requestedWindow(item({ payload: { scheduling_window: { status: 'requested' } } }))).toBeNull();
+  });
+
+  test('requestedAddressIsOnFile reads only the filing-time ask: none named, or exactly the on-file address', () => {
+    const onFile = { customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205', call_extraction: { property: { service_address: { street_line_1: '999 Other Rd' } } } };
+    const ask = (requested_address) => item({ ...onFile, payload: { scheduling_window: { requested_address } } });
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    expect(requestedAddressIsOnFile(ask(none))).toBe(true);
+    expect(requestedAddressIsOnFile(ask({ ...none, street_line_1: '77 Oak Street', city: 'Bradenton' }))).toBe(true);
+    expect(requestedAddressIsOnFile(ask({ ...none, street_line_1: '78 Oak St' }))).toBe(false);
+    expect(requestedAddressIsOnFile(ask({ ...none, additional_properties: 1 }))).toBe(false);
+    expect(requestedAddressIsOnFile(ask({ ...none, street_line_2: 'Unit 4' }))).toBe(false);
+    // No snapshot (a pre-snapshot card) → never on file, whatever the rolling extraction says.
+    expect(requestedAddressIsOnFile(item({ ...onFile, payload: { scheduling_window: {} } }))).toBe(false);
   });
 
   test('loadEvidence is an empty map with the evidence gate off — no DB access', async () => {

@@ -206,6 +206,7 @@ describe('triage surfacing', () => {
     const payload = JSON.parse(item.payload);
     expect(payload.scheduling_window).toEqual({
       requested_service_categories: ['pest_control', 'mosquito_control'],
+      requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 1 },
       status: 'requested',
       confirmed_start_at: null,
       requested_date_range_start: '2026-07-14',
