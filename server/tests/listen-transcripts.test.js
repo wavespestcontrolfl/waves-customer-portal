@@ -26,6 +26,17 @@ describe('transcript readers', () => {
     expect(joined).not.toContain('system-reminder');
   });
 
+  test('the --hours window applies per turn, not per file: older turns in a recently touched session are dropped, unstamped lines fail closed', () => {
+    const since = Date.parse('2026-09-03T04:03:00.000Z');
+    const claude = _internals.readClaudeTranscript(FIX('listen-claude-session.jsonl'), { sinceMs: since });
+    expect(claude).toHaveLength(1);
+    expect(claude[0].role).toBe('assistant');
+    const codex = _internals.readCodexTranscript(FIX('listen-codex-session.jsonl'), { sinceMs: Date.parse('2026-09-03T04:14:01.500Z') });
+    expect(codex.map((t) => t.role)).toEqual(['assistant']);
+    expect(_internals.inWindow({}, since)).toBe(false);
+    expect(_internals.inWindow({ timestamp: 'not a date' }, since)).toBe(false);
+  });
+
   test('codex: user + assistant + agent_message only, developer instructions skipped', () => {
     const turns = _internals.readCodexTranscript(FIX('listen-codex-session.jsonl'));
     expect(turns.map((t) => t.role)).toEqual(['user', 'assistant']);

@@ -108,6 +108,16 @@ function listRecentFiles(root, sinceMs) {
   return out.sort((a, b) => b.mtimeMs - a.mtimeMs).map((o) => o.file);
 }
 
+// The --hours window is a PRIVACY contract, not a scan hint: a long-running
+// or recently touched session must not carry turns older than the window to
+// the LLM. Every transcript line is stamped in both formats; a line with no
+// parseable stamp is treated as outside the window (fail closed).
+function inWindow(entry, sinceMs) {
+  if (!sinceMs) return true;
+  const t = Date.parse(entry.timestamp || '');
+  return Number.isFinite(t) && t >= sinceMs;
+}
+
 function textBlocks(content) {
   if (typeof content === 'string') return [content];
   if (!Array.isArray(content)) return [];
@@ -121,14 +131,14 @@ function textBlocks(content) {
 // Claude Code: one JSON object per line; conversation turns are
 // {type:'user'|'assistant', message:{role, content}}. Everything else
 // (mode, attachment, file-history-snapshot, …) is harness bookkeeping.
-function readClaudeTranscript(file) {
+function readClaudeTranscript(file, { sinceMs = 0 } = {}) {
   const turns = [];
   for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
     if (!line) continue;
     let o;
     try { o = JSON.parse(line); } catch (_) { continue; }
     if ((o.type !== 'user' && o.type !== 'assistant') || !o.message) continue;
-    if (o.isMeta) continue;
+    if (o.isMeta || !inWindow(o, sinceMs)) continue;
     const texts = textBlocks(o.message.content);
     // A user turn whose only content is tool_result yields nothing here.
     for (const t of texts) {
@@ -142,12 +152,13 @@ function readClaudeTranscript(file) {
 // Codex: {type:'response_item', payload:{type:'message', role, content:[{type:'input_text'|'output_text', text}]}}
 // plus {type:'event_msg', payload:{type:'agent_message', message}}. Developer /
 // system roles (base instructions) are skipped.
-function readCodexTranscript(file) {
+function readCodexTranscript(file, { sinceMs = 0 } = {}) {
   const turns = [];
   for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
     if (!line) continue;
     let o;
     try { o = JSON.parse(line); } catch (_) { continue; }
+    if (!inWindow(o, sinceMs)) continue;
     const p = o.payload || {};
     if (o.type === 'response_item' && p.type === 'message' && (p.role === 'user' || p.role === 'assistant')) {
       for (const t of textBlocks(p.content)) turns.push({ role: p.role, text: t });
@@ -161,8 +172,9 @@ function readCodexTranscript(file) {
 function collectTurns({ hours, now = Date.now() }) {
   const sinceMs = now - hours * 3600_000;
   const sources = [];
-  for (const f of listRecentFiles(CLAUDE_PROJECTS, sinceMs)) sources.push({ file: f, kind: 'claude', mtimeMs: fs.statSync(f).mtimeMs, turns: readClaudeTranscript(f) });
-  for (const f of listRecentFiles(CODEX_SESSIONS, sinceMs)) sources.push({ file: f, kind: 'codex', mtimeMs: fs.statSync(f).mtimeMs, turns: readCodexTranscript(f) });
+  // mtime is only the scan filter; the per-turn stamp is the window.
+  for (const f of listRecentFiles(CLAUDE_PROJECTS, sinceMs)) sources.push({ file: f, kind: 'claude', mtimeMs: fs.statSync(f).mtimeMs, turns: readClaudeTranscript(f, { sinceMs }) });
+  for (const f of listRecentFiles(CODEX_SESSIONS, sinceMs)) sources.push({ file: f, kind: 'codex', mtimeMs: fs.statSync(f).mtimeMs, turns: readCodexTranscript(f, { sinceMs }) });
   return sources.filter((s) => s.turns.length).sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
@@ -529,7 +541,7 @@ if (require.main === module) {
 
 module.exports = {
   _internals: {
-    textBlocks, readClaudeTranscript, readCodexTranscript, redactedChunks, extractIdeas,
+    textBlocks, inWindow, readClaudeTranscript, readCodexTranscript, redactedChunks, extractIdeas,
     targetingViolation, buildManifest, briefFor, ideaFromBrief, normalizeTitle, sourceAllowed, shapeIdea, containsSecret, SYSTEM_PROMPT,
   },
 };
