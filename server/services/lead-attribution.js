@@ -1,4 +1,4 @@
-const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
+const { scopeToProspects } = require('./lead-statuses');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -350,12 +350,10 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
     .modify((qb) => applyNameExclusion(qb, excludeCustomerNames))
     // Same population rule as the leads analytics overview: spam, cancelled
     // and auto-filed wizard 'duplicate' repeats are not prospects and must
-    // not dilute the source's conversion rate (codex #3834 r6). A repeat
-    // that later took a win keeps its ancestry marker, so it is excluded by
-    // the marker too — status alone would let it re-enter as a second
-    // prospect and conversion beside its original (pre-push P1 on r13).
-    .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
-    .whereRaw("COALESCE(extracted_data->>'duplicate_of_lead_id', '') = ''");
+    // not dilute the source's conversion rate (codex #3834 r6), and a repeat
+    // that took the win beside an already-won original is a second win, not
+    // a second prospect and conversion (scopeToProspects, lead-statuses.js).
+    .modify(scopeToProspects);
 
   const totalLeads = leads.length;
   const wonLeads = leads.filter(l => l.status === 'won');

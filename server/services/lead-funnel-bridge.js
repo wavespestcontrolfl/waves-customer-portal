@@ -39,6 +39,8 @@
  * Idempotent — re-firing any event converges.
  */
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
+const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 
 // Rank order mirrors lead-funnel.js REACHED / ad-attribution-sync ADVANCEABLE_STAGES.
 const FUNNEL_STAGE_RANK = {
@@ -154,9 +156,71 @@ async function bridgeLeadsFunnelStage(leadIds, leadStatus, database = null) {
   }
 }
 
+/**
+ * stampLeadFunnelRow(database, lead, { customerId?, serviceInterest?, funnelStage? })
+ * Create the ONE ad_service_attribution row a lead row's own intake would
+ * have stamped, rebuilt from what the row stored — its lead source's channel,
+ * its click ids, its service, its first-contact date — never from the
+ * current request's touch, which would credit acquisition to the wrong visit
+ * and corrupt first-touch ROI (codex #3834 r11 P2). Two callers:
+ *   • the quote wizard's repeat-run root repair (routes/public-quote.js): a
+ *     repeat skips its own row because the chain root carries the prospect,
+ *     and rebuilds the root's row when the root's own best-effort insert
+ *     never landed (codex #3834 r10 P2);
+ *   • a duplicate row taking a win whose root is not ours to book
+ *     (lead-estimate-link.js): the win would otherwise reach no funnel row at
+ *     all (codex #3834 r14 P2) — stamped straight at 'booked', the stage the
+ *     bridge would have set.
+ * `customerId` / `serviceInterest` fill in only what the row lacks — the row
+ * belongs to ITS customer (codex #3834 r13 P2). Paid means the channel is a
+ * paid one AND the row stored a click id (fbc included). A stored source with
+ * no channel gets no row, exactly as the row's own intake would have.
+ * Idempotent on the UNIQUE lead_id; returns the id of the row THIS call
+ * inserted, or null when one already existed / nothing applied / the write
+ * failed (best-effort, like the bridge).
+ */
+async function stampLeadFunnelRow(database, lead, { customerId = null, serviceInterest = null, funnelStage = 'lead' } = {}) {
+  const db = database || require('../models/db');
+  try {
+    if (!lead || !lead.id) return null;
+    // Lazy: call-attribution loads the db module at require time.
+    const { attributionForSourceType } = require('./ads/call-attribution');
+    const source = lead.lead_source_id ? await db('lead_sources').where({ id: lead.lead_source_id }).first('source_type') : null;
+    const channel = attributionForSourceType(source?.source_type);
+    if (!channel) return null;
+    const interest = lead.service_interest || serviceInterest || null;
+    const rows = await db('ad_service_attribution').insert({
+      customer_id: lead.customer_id || customerId || null,
+      lead_id: lead.id,
+      service_line: inferServiceLine(interest),
+      specific_service: inferSpecificService(interest),
+      service_bucket: inferServiceBucket(interest),
+      lead_date: etDateString(lead.created_at ? new Date(lead.created_at) : undefined),
+      lead_source: channel.leadSource,
+      lead_source_detail: null,
+      gclid: lead.gclid || null,
+      wbraid: lead.wbraid || null,
+      gbraid: lead.gbraid || null,
+      fbclid: lead.fbclid || null,
+      fbc: lead.fbc || null,
+      fbp: lead.fbp || null,
+      utm_campaign: null,
+      utm_term: null,
+      funnel_stage: funnelStage,
+      is_paid: !!channel.isPaid && !!(lead.gclid || lead.wbraid || lead.gbraid || lead.fbclid || lead.fbc),
+    }).onConflict('lead_id').ignore().returning('id');
+    const inserted = Array.isArray(rows) ? rows[0] : null;
+    return inserted ? (inserted.id ?? inserted) : null;
+  } catch (err) {
+    logger.warn(`[lead-funnel-bridge] funnel row stamp failed for lead ${lead && lead.id} (${funnelStage}): ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   bridgeLeadFunnelStage,
   bridgeLeadsFunnelStage,
+  stampLeadFunnelRow,
   // exported for unit tests
   FUNNEL_STAGE_RANK,
   LEAD_STATUS_TO_FUNNEL_STAGE,

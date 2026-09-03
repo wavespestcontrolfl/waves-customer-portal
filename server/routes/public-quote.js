@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { followDuplicateLink } = require('../services/lead-estimate-link');
+const { stampLeadFunnelRow } = require('../services/lead-funnel-bridge');
 // A wizard re-run of the same inquiry inside this window lands as a
 // 'duplicate' of the prior open lead instead of a second 'new' one.
 const WIZARD_LEAD_REUSE_DAYS = 30;
@@ -1832,6 +1833,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // run IS the duplicate row's id, and everything keyed on this flag
     // (attribution, bells) must see it on later stages (codex #3834 r3 P1).
     let duplicateOfLeadId = null;
+    // The identity THIS request typed, as observed on the row (contact,
+    // address, service, extra-property count): every public write that
+    // moves a label — the relabel (codex #3834 r13 P1) and the
+    // post-validation reopen (r14 P1) — is scoped to it, so two requests on
+    // one lookup token typing different inquiries never stamp or clear each
+    // other's label. The count is what the token path read off the row; the
+    // tokenless path labels only a row it inserted with no extra property.
+    let observedExtraCount = additionalProperties.length;
+    const scopedToTypedIdentity = (qb) => qb
+      .where({ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey })
+      .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [observedExtraCount]);
     if (leadId) {
       // OWNERSHIP (atomic): leadId is a client-supplied id on a public,
       // PII-accepting write surface, so prove ownership the same way /upsell
@@ -1915,15 +1927,25 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // service, extra-property count as observed on the row): two
         // requests on one lookup token typing different inquiries must not
         // stamp one request's marker onto the other's fields (r13 P1).
-        const observedExtraCount = parseExtracted(lead.extracted_data)?.additional_properties?.length || 0;
+        observedExtraCount = parseExtracted(lead.extracted_data)?.additional_properties?.length || 0;
         if (duplicateOfLeadId !== stored) {
           const relabelled = await db('leads')
-            .where({ id: lead.id, status: lead.status, email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey })
-            .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [observedExtraCount])
+            .where({ id: lead.id, status: lead.status })
+            .modify(scopedToTypedIdentity)
             .update(duplicateOfLeadId
             ? { status: 'duplicate', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }
             : { status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
           if (!relabelled) duplicateOfLeadId = stored;
+          if (relabelled && duplicateOfLeadId) {
+            // The row just filed as a repeat: a funnel row it carries at the
+            // lead stage — its own earlier stamp, or a concurrent repeat's
+            // root repair that picked it as root while this relabel was in
+            // flight (the r10 chain B → A → O) — is a second row for a
+            // prospect the root now carries. Drop it; the root's own row is
+            // rebuilt below when missing (codex #3834 r14 P1). A row already
+            // advanced past 'lead' is real engagement and stays.
+            await db('ad_service_attribution').where({ lead_id: lead.id, funnel_stage: 'lead' }).del();
+          }
         }
       }
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
@@ -1985,7 +2007,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (!targetOpen) {
         // 0 rows ⇒ a staff transition on this row won; its marker stands and
         // the request keeps following the database (no second funnel row).
-        const reopened = await db('leads').where({ id: lead.id, status: 'duplicate' }).update({ status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
+        // ...and to the identity this request typed plus the marker it just
+        // validated: a concurrent request on the same token that replaced
+        // the row's fields and stamped its own (valid) marker must not have
+        // that label erased by this request's failed validation of the old
+        // one (codex #3834 r14 P1).
+        const reopened = await db('leads')
+          .where({ id: lead.id, status: 'duplicate' })
+          .whereRaw("extracted_data->>'duplicate_of_lead_id' = ?", [duplicateOfLeadId])
+          .modify(scopedToTypedIdentity)
+          .update({ status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
         if (reopened) duplicateOfLeadId = null;
       }
     }
@@ -2151,7 +2182,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // its own run would have.
         // The current touch needs a mapped channel; a repeat's root repair
         // does not depend on this visit's channel at all (pre-push r12).
-        let touch = !channelAttr ? null : {
+        const touch = !channelAttr ? null : {
           leadId: lead.id, customerId, serviceInterest, leadDate: etDateString(), channel: channelAttr,
           leadSourceDetail: sourceMeta.leadSourceDetail, gclid, wbraid, gbraid, fbclid, fbc, fbp,
           utmCampaign: attr?.utm?.campaign || null, utmTerm: attr?.utm?.term || null,
@@ -2161,42 +2192,50 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // Facebook channel but must not count as paid spend attribution.
           isPaid: channelAttr.isPaid && sourceMeta.isPaidClick === true,
         };
+        // The row lands on the KEEPER — the chain root for a repeat, this row
+        // otherwise — and is re-checked against the keeper after the write:
+        // a keeper chosen while its own relabel was in flight (B picked A
+        // before A's relabel to O landed — the r10 chain) files as a
+        // duplicate a moment later, and the row this request added is then a
+        // second row for a prospect O carries. Paired with the relabel above
+        // dropping its own lead-stage row, every interleaving leaves one
+        // row, on the keeper (codex #3834 r14 P1).
+        let keeperId = lead.id;
+        let stampedId = null;
         if (duplicateOfLeadId) {
           const root = await followDuplicateLink(db, await db('leads').where({ id: duplicateOfLeadId }).first());
-          const rootId = root ? root.id : duplicateOfLeadId;
-          const rootHasRow = await db('ad_service_attribution').where({ lead_id: rootId }).first('id');
-          const rootSource = !rootHasRow && root?.lead_source_id ? await db('lead_sources').where({ id: root.lead_source_id }).first('source_type') : null;
-          const rootChannel = attributionForSourceType(rootSource?.source_type);
-          // The root row belongs to the ROOT's customer (a contact revision
-          // may have given the repeat another profile), and its paid evidence
-          // is every click id the row stored, fbc included (r13 P2s).
-          touch = rootHasRow || !root || !rootChannel ? null : {
-            leadId: root.id, customerId: root.customer_id || customerId, serviceInterest: root.service_interest || serviceInterest, leadDate: etDateString(new Date(root.created_at)), channel: rootChannel,
-            leadSourceDetail: null, gclid: root.gclid, wbraid: root.wbraid, gbraid: root.gbraid, fbclid: root.fbclid, fbc: root.fbc, fbp: root.fbp,
-            utmCampaign: null, utmTerm: null,
-            isPaid: rootChannel.isPaid && !!(root.gclid || root.wbraid || root.gbraid || root.fbclid || root.fbc),
-          };
+          // The root's row is the ORIGINAL touch rebuilt from what the root
+          // row stored and belongs to the ROOT's customer (r11 P2, r13 P2s):
+          // stampLeadFunnelRow. A vanished root (dead marker) gets nothing.
+          keeperId = root ? root.id : null;
+          stampedId = root ? await stampLeadFunnelRow(db, root, { customerId, serviceInterest }) : null;
+        } else if (touch) {
+          const [stamped] = await db('ad_service_attribution').insert({
+            customer_id: touch.customerId,
+            lead_id: touch.leadId,
+            service_line: inferServiceLine(touch.serviceInterest),
+            specific_service: inferSpecificService(touch.serviceInterest),
+            service_bucket: inferServiceBucket(touch.serviceInterest),
+            lead_date: touch.leadDate,
+            lead_source: touch.channel.leadSource,
+            lead_source_detail: touch.leadSourceDetail,
+            gclid: touch.gclid || null,
+            wbraid: touch.wbraid || null,
+            gbraid: touch.gbraid || null,
+            fbclid: touch.fbclid || null,
+            fbc: touch.fbc || null,
+            fbp: touch.fbp || null,
+            utm_campaign: touch.utmCampaign,
+            utm_term: touch.utmTerm,
+            funnel_stage: 'lead',
+            is_paid: touch.isPaid,
+          }).onConflict('lead_id').ignore().returning('id');
+          stampedId = stamped ? stamped.id : null;
         }
-        if (touch) await db('ad_service_attribution').insert({
-          customer_id: touch.customerId,
-          lead_id: touch.leadId,
-          service_line: inferServiceLine(touch.serviceInterest),
-          specific_service: inferSpecificService(touch.serviceInterest),
-          service_bucket: inferServiceBucket(touch.serviceInterest),
-          lead_date: touch.leadDate,
-          lead_source: touch.channel.leadSource,
-          lead_source_detail: touch.leadSourceDetail,
-          gclid: touch.gclid || null,
-          wbraid: touch.wbraid || null,
-          gbraid: touch.gbraid || null,
-          fbclid: touch.fbclid || null,
-          fbc: touch.fbc || null,
-          fbp: touch.fbp || null,
-          utm_campaign: touch.utmCampaign,
-          utm_term: touch.utmTerm,
-          funnel_stage: 'lead',
-          is_paid: touch.isPaid,
-        }).onConflict('lead_id').ignore();
+        if (stampedId) {
+          const keeper = await db('leads').where({ id: keeperId }).first('status');
+          if (keeper?.status === 'duplicate') await db('ad_service_attribution').where({ id: stampedId, funnel_stage: 'lead' }).del();
+        }
       }
     } catch (attrErr) {
       logger.error(`[public-quote] Ad attribution insert failed: ${attrErr.message}`);

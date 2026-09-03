@@ -118,11 +118,16 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // source's channel, click ids, service, date), resolved through the
     // chain root; a root that already has a row, or whose stored source has
     // no channel, gets nothing (codex r10 P2, pre-push r10, r11 P2).
+    // The rebuild lives in the funnel-row module (stampLeadFunnelRow, one
+    // implementation for the root repair and the winner stamp).
     expect(src).toMatch(/const root = await followDuplicateLink\(db, await db\('leads'\)\.where\(\{ id: duplicateOfLeadId \}\)\.first\(\)\);/);
-    expect(src).toMatch(/const rootHasRow = await db\('ad_service_attribution'\)\.where\(\{ lead_id: rootId \}\)\.first\('id'\);/);
-    expect(src).toMatch(/const rootChannel = attributionForSourceType\(rootSource\?\.source_type\);/);
-    expect(src).toMatch(/touch = rootHasRow \|\| !root \|\| !rootChannel \? null : \{\n\s+leadId: root\.id, customerId: root\.customer_id \|\| customerId, serviceInterest: root\.service_interest \|\| serviceInterest, leadDate: etDateString\(new Date\(root\.created_at\)\), channel: rootChannel,/);
-    expect(src).toMatch(/if \(touch\) await db\('ad_service_attribution'\)\.insert\(\{\n\s+customer_id: touch\.customerId,\n\s+lead_id: touch\.leadId,/);
+    expect(src).toMatch(/stampedId = root \? await stampLeadFunnelRow\(db, root, \{ customerId, serviceInterest \}\) : null;/);
+    expect(src).toMatch(/\} else if \(touch\) \{\n\s+const \[stamped\] = await db\('ad_service_attribution'\)\.insert\(\{\n\s+customer_id: touch\.customerId,\n\s+lead_id: touch\.leadId,/);
+    // Every funnel insert is re-checked against its keeper after the write:
+    // a keeper that filed as a duplicate meanwhile loses the row this request
+    // added (codex r14 P1) — on both the current-touch and root-repair paths.
+    expect(src).toMatch(/\}\)\.onConflict\('lead_id'\)\.ignore\(\)\.returning\('id'\);\n\s+stampedId = stamped \? stamped\.id : null;/);
+    expect(src).toMatch(/if \(stampedId\) \{\n\s+const keeper = await db\('leads'\)\.where\(\{ id: keeperId \}\)\.first\('status'\);\n\s+if \(keeper\?\.status === 'duplicate'\) await db\('ad_service_attribution'\)\.where\(\{ id: stampedId, funnel_stage: 'lead' \}\)\.del\(\);/);
     // A submission that adds properties is a wider inquiry, never a repeat
     // (codex r10 P1) — on both paths.
     expect(src).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
@@ -130,7 +135,10 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // target the office closed in the window makes this a fresh inquiry,
     // reopened on THIS row only (codex r12 P1).
     expect(src).toMatch(/const targetOpen = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, onlyLeadId: duplicateOfLeadId \}\);/);
-    expect(src).toMatch(/const reopened = await db\('leads'\)\.where\(\{ id: lead\.id, status: 'duplicate' \}\)\.update\(\{ status: 'new'/);
+    // ...scoped to the identity this request typed AND the marker it just
+    // validated, so a concurrent request's valid label on the same token is
+    // never erased by this one's failed validation (codex r14 P1).
+    expect(src).toMatch(/const reopened = await db\('leads'\)\n\s+\.where\(\{ id: lead\.id, status: 'duplicate' \}\)\n\s+\.whereRaw\("extracted_data->>'duplicate_of_lead_id' = \?", \[duplicateOfLeadId\]\)\n\s+\.modify\(scopedToTypedIdentity\)\n\s+\.update\(\{ status: 'new'/);
     expect(src).toMatch(/if \(reopened\) duplicateOfLeadId = null;/);
     expect(src).toMatch(/if \(!lead && !additionalProperties\.length\) \{\n\s+duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
     // The replace path carries the marker forward...
@@ -150,7 +158,14 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // The relabel is scoped to the status just read (codex r9 P1): a staff
     // transition in between wins and this public retry updates 0 rows.
     // ...and the identity this request wrote (codex r13 P1).
-    expect(block).toMatch(/const relabelled = await db\('leads'\)\n\s+\.where\(\{ id: lead\.id, status: lead\.status, email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey \}\)\n\s+\.whereRaw\("COALESCE\(jsonb_array_length\(COALESCE\(extracted_data, '\{\}'::jsonb\)->'additional_properties'\), 0\) = \?", \[observedExtraCount\]\)\n\s+\.update\(/);
+    // The identity predicate is defined once and shared with the reopen.
+    expect(src).toMatch(/const scopedToTypedIdentity = \(qb\) => qb\n\s+\.where\(\{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey \}\)\n\s+\.whereRaw\("COALESCE\(jsonb_array_length\(COALESCE\(extracted_data, '\{\}'::jsonb\)->'additional_properties'\), 0\) = \?", \[observedExtraCount\]\);/);
+    expect(block).toMatch(/const relabelled = await db\('leads'\)\n\s+\.where\(\{ id: lead\.id, status: lead\.status \}\)\n\s+\.modify\(scopedToTypedIdentity\)\n\s+\.update\(/);
+    // A row that just filed as a repeat drops its own lead-stage funnel row
+    // (its earlier stamp, or a concurrent repeat's root repair that picked
+    // it while the relabel was in flight) — the root carries the prospect
+    // (codex r14 P1).
+    expect(block).toMatch(/if \(relabelled && duplicateOfLeadId\) \{[\s\S]*?await db\('ad_service_attribution'\)\.where\(\{ lead_id: lead\.id, funnel_stage: 'lead' \}\)\.del\(\);/);
     // ...and a relabel that did not land leaves the request on the marker
     // the row actually carries (pre-push P1 on r9).
     expect(block).toMatch(/if \(!relabelled\) duplicateOfLeadId = stored;/);

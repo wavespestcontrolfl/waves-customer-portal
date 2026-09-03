@@ -42,7 +42,7 @@ describe('public-quote ad_service_attribution wiring', () => {
     // A current touch needs a mapped channel; a repeat's root repair runs
     // regardless of this visit's channel (#3834).
     expect(src).toMatch(/else if\s*\(channelAttr \|\| duplicateOfLeadId\)\s*\{/);
-    expect(src).toMatch(/let touch = !channelAttr \? null : \{/);
+    expect(src).toMatch(/const touch = !channelAttr \? null : \{/);
   });
 });
 

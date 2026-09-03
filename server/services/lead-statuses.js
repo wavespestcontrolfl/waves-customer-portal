@@ -16,4 +16,19 @@ const NON_ENGAGED_LEAD_STATUSES = ['cancelled', 'spam', 'duplicate'];
 // filter to exactly this set.
 const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
 
-module.exports = { NON_ENGAGED_LEAD_STATUSES, OPEN_LEAD_STATUSES };
+// Rows counted as prospects by every lead-volume denominator (the leads
+// analytics overview, its rolling median, calculateSourceROI): not a
+// non-engaged status, and not a SECOND WIN — a wizard repeat that took the
+// booking or accept win keeps its ancestry marker (lead-estimate-link.js),
+// and when its original is ALSO won that is one deal credited twice
+// (pre-push P1 on #3834 r13). A won repeat whose original is anything else
+// (lost by staff, another customer's, vanished) is the only won row the
+// deal has and counts (codex #3834 r14 P2); a suppressed repeat is already
+// out by status. NULL-safe: no marker, or a marker naming nothing, never
+// excludes. Applied through knex .modify() on an unaliased `leads` query.
+const SECOND_WIN_SQL = "(leads.status IS DISTINCT FROM 'won' OR NOT EXISTS (SELECT 1 FROM leads o WHERE o.id::text = leads.extracted_data->>'duplicate_of_lead_id' AND o.status = 'won' AND o.deleted_at IS NULL))";
+function scopeToProspects(qb) {
+  return qb.whereNotIn('status', NON_ENGAGED_LEAD_STATUSES).whereRaw(SECOND_WIN_SQL);
+}
+
+module.exports = { NON_ENGAGED_LEAD_STATUSES, OPEN_LEAD_STATUSES, scopeToProspects };

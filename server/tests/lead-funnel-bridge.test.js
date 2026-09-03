@@ -9,12 +9,24 @@
  * "completed sticky", "lost collapse" and "lost recovery via booked only"
  * are checked as a full matrix — not just per happy path.
  */
+// The channel map is the shared source_type → channel table; the stamp only
+// needs "paid channel / organic channel / no channel" to exercise its rules.
+jest.mock('../services/ads/call-attribution', () => ({
+  attributionForSourceType: (sourceType) => ({
+    google_ads: { leadSource: 'google_ads', isPaid: true },
+    organic: { leadSource: 'organic', isPaid: false },
+  })[sourceType] || null,
+}));
+
 const {
   bridgeLeadFunnelStage,
   bridgeLeadsFunnelStage,
+  stampLeadFunnelRow,
   FUNNEL_STAGE_RANK,
   LEAD_STATUS_TO_FUNNEL_STAGE,
 } = require('../services/lead-funnel-bridge');
+const { etDateString } = require('../utils/datetime-et');
+const { inferServiceLine } = require('../utils/service-line-infer');
 
 // Fake knex that records the WHERE chain the bridge builds. Supports the
 // grouped `where((q) => q.whereIn(...).orWhereNull(...))` form; whereIn calls
@@ -297,5 +309,90 @@ describe('bridgeLeadFunnelStage — no-ops and failure containment', () => {
     const database = makeCaptureDb({ updatedRows: 0 });
     const res = await bridgeLeadFunnelStage('L-none', 'won', database);
     expect(res).toEqual({ updated: 0, stage: 'booked' });
+  });
+});
+
+describe('stampLeadFunnelRow — the one row a lead row\'s own intake would have stamped', () => {
+  function makeStampDb({ sourceType = 'google_ads', conflict = false, throwOnInsert = false } = {}) {
+    const captured = { sourceLookup: null, insert: null, onConflict: null };
+    const database = (table) => {
+      if (table === 'lead_sources') {
+        return { where(clause) { captured.sourceLookup = clause; return { first: async () => (sourceType ? { source_type: sourceType } : null) }; } };
+      }
+      if (table === 'ad_service_attribution') {
+        return {
+          insert(row) {
+            if (throwOnInsert) throw new Error('db boom');
+            captured.insert = row;
+            return { onConflict(col) { captured.onConflict = col; return { ignore: () => ({ returning: async () => (conflict ? [] : [{ id: 'asa-1' }]) }) }; } };
+          },
+        };
+      }
+      throw new Error(`unexpected table ${table}`);
+    };
+    database._captured = captured;
+    return database;
+  }
+  const stored = {
+    id: 'lead-1', lead_source_id: 'ls-1', customer_id: null, service_interest: 'Lawn Care', created_at: '2026-08-30T15:00:00Z',
+    gclid: 'g-1', wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fbp-1',
+  };
+
+  test('rebuilds the row from what the lead stored — its source channel, click ids, service, first-contact date — and fills only what the row lacks', async () => {
+    const database = makeStampDb();
+    const id = await stampLeadFunnelRow(database, stored, { customerId: 'c-9', serviceInterest: 'Pest Control' });
+    expect(id).toBe('asa-1');
+    expect(database._captured.sourceLookup).toEqual({ id: 'ls-1' });
+    expect(database._captured.onConflict).toBe('lead_id');
+    expect(database._captured.insert).toEqual(expect.objectContaining({
+      lead_id: 'lead-1',
+      customer_id: 'c-9',
+      lead_source: 'google_ads',
+      lead_source_detail: null,
+      is_paid: true,
+      funnel_stage: 'lead',
+      gclid: 'g-1',
+      fbc: null,
+      fbp: 'fbp-1',
+      utm_campaign: null,
+      utm_term: null,
+      lead_date: etDateString(new Date('2026-08-30T15:00:00Z')),
+    }));
+    // The ROW's service wins over the caller's fallback.
+    expect(database._captured.insert.service_line).toBe(inferServiceLine('Lawn Care'));
+  });
+
+  test("the row's own customer beats the fallback, and a stage override lands as given (the booked winner)", async () => {
+    const database = makeStampDb();
+    await stampLeadFunnelRow(database, { ...stored, customer_id: 'c-own' }, { customerId: 'c-9', funnelStage: 'booked' });
+    expect(database._captured.insert).toEqual(expect.objectContaining({ customer_id: 'c-own', funnel_stage: 'booked' }));
+  });
+
+  test('paid needs BOTH a paid channel and a stored click id (fbc counts); an organic channel is never paid', async () => {
+    let database = makeStampDb();
+    await stampLeadFunnelRow(database, { ...stored, gclid: null });
+    expect(database._captured.insert.is_paid).toBe(false);
+    database = makeStampDb();
+    await stampLeadFunnelRow(database, { ...stored, gclid: null, fbc: 'fb.1.1.abc' });
+    expect(database._captured.insert.is_paid).toBe(true);
+    database = makeStampDb({ sourceType: 'organic' });
+    await stampLeadFunnelRow(database, stored);
+    expect(database._captured.insert).toEqual(expect.objectContaining({ lead_source: 'organic', is_paid: false }));
+  });
+
+  test('an existing row wins (conflict → null) and a stored source with no channel, or no source at all, gets no row', async () => {
+    expect(await stampLeadFunnelRow(makeStampDb({ conflict: true }), stored)).toBeNull();
+    let database = makeStampDb({ sourceType: 'walk_in' });
+    expect(await stampLeadFunnelRow(database, stored)).toBeNull();
+    expect(database._captured.insert).toBeNull();
+    database = makeStampDb();
+    expect(await stampLeadFunnelRow(database, { ...stored, lead_source_id: null })).toBeNull();
+    expect(database._captured.sourceLookup).toBeNull();
+    expect(database._captured.insert).toBeNull();
+  });
+
+  test('a db failure is swallowed (null, never thrown into the conversion)', async () => {
+    await expect(stampLeadFunnelRow(makeStampDb({ throwOnInsert: true }), stored)).resolves.toBeNull();
+    await expect(stampLeadFunnelRow(makeStampDb(), null)).resolves.toBeNull();
   });
 });

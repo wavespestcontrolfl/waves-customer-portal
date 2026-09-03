@@ -125,7 +125,7 @@ const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate
 // `status=open` filter (the Pipeline table's default) to this set — shared
 // with the dashboard alerts service so action queues use the same
 // membership.
-const { OPEN_LEAD_STATUSES, NON_ENGAGED_LEAD_STATUSES } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, scopeToProspects } = require('../services/lead-statuses');
 
 // Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
@@ -225,14 +225,13 @@ router.get('/analytics/overview', async (req, res, next) => {
     // Non-engaged rows (spam, cancelled, and the wizard's auto-filed
     // 'duplicate' repeats — public-quote.js) are not prospects: they must
     // not inflate the total or dilute the conversion rate (codex #3834 r6).
-    // A repeat that later took a win keeps its ancestry marker and is
-    // excluded by the marker too (pre-push P1 on r13).
+    // A repeat that took the win beside an already-won original is a second
+    // win, not a second prospect (scopeToProspects, lead-statuses.js).
     const leads = await db('leads')
       .whereNull('deleted_at')
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)
-      .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
-      .whereRaw("COALESCE(extracted_data->>'duplicate_of_lead_id', '') = ''");
+      .modify(scopeToProspects);
 
     const total = leads.length;
     const won = leads.filter(l => l.status === 'won').length;
@@ -293,8 +292,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     // the page's date filter.
     const recentResponded = await db('leads')
       .whereNull('deleted_at')
-      .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
-      .whereRaw("COALESCE(extracted_data->>'duplicate_of_lead_id', '') = ''")
+      .modify(scopeToProspects)
       .whereNotNull('response_time_minutes')
       .whereNotNull('first_contact_at')
       .whereRaw(

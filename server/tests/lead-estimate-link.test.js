@@ -15,6 +15,7 @@ jest.mock('../services/lead-source-resolver', () => ({
 // here we only assert the transitions CALL it with the right stage + db handle.
 jest.mock('../services/lead-funnel-bridge', () => ({
   bridgeLeadFunnelStage: jest.fn(async () => ({ updated: 1 })),
+  stampLeadFunnelRow: jest.fn(async () => 'asa-stamped'),
 }));
 
 const db = require('../models/db');
@@ -24,7 +25,8 @@ const db = require('../models/db');
 db.transaction = async (fn) => fn(db);
 const leadAttribution = require('../services/lead-attribution');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
-const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
+const { bridgeLeadFunnelStage, stampLeadFunnelRow } = require('../services/lead-funnel-bridge');
+const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const {
   attachLeadToEstimate,
   markLinkedLeadEstimateAccepted,
@@ -448,6 +450,9 @@ describe('lead-estimate link service', () => {
     // The re-read proved the original now belongs to ANOTHER estimate, so it
     // is no longer this opportunity: its funnel is not booked (pre-push r12).
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    // ...so the named row's win gets the funnel row its own run would have
+    // stamped, straight at booked (codex r14 P2).
+    expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, expect.objectContaining({ id: 'lead-dup6' }), { customerId: 'customer-1', funnelStage: 'booked' });
   });
 
   test('an original closed as won between the read and the atomic stamp records no second win on the duplicate row', async () => {
@@ -527,6 +532,9 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig5', expect.anything());
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1' }));
     expect(database._updates).toEqual([{ id: 'lead-dup5', patch: expect.objectContaining({ estimate_id: 'estimate-2f' }), conditional: true }]);
+    // The other offer's funnel is not ours to book; the named row gets its own (codex r14 P2).
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, expect.objectContaining({ id: 'lead-dup5' }), { customerId: 'customer-1', funnelStage: 'booked' });
   });
 
   test('an indirectly resolved original that is ALREADY won records no second win on the duplicate row', async () => {
@@ -541,6 +549,25 @@ describe('lead-estimate link service', () => {
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2h', customerId: 'customer-1', database });
     expect(leadAttribution.markConverted).not.toHaveBeenCalled();
     expect(database._updates).toEqual([]);
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+  });
+
+  test('a won original that belongs to a DIFFERENT customer (shared household contact) does not suppress the named row: this deal is credited once, on the named row, with its own funnel row', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2k', estimate_data: { lead_id: 'lead-dup9' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-dup9': { id: 'lead-dup9', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-orig9' } },
+        'lead-orig9': { id: 'lead-orig9', status: 'won', customer_id: 'customer-OTHER', phone: '9415550142', email: 'a@example.com' },
+      },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2k', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig9', expect.anything());
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup9', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
+    expect(database._updates).toEqual([{ id: 'lead-dup9', patch: expect.objectContaining({ estimate_id: 'estimate-2k' }), conditional: true }]);
+    // The other customer's won funnel is not ours to book (codex r14 P1 + P2).
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, expect.objectContaining({ id: 'lead-dup9' }), { customerId: 'customer-1', funnelStage: 'booked' });
   });
 
   test('a duplicate lead whose original is gone takes the win itself (no contact-fallback sweep)', async () => {
@@ -554,6 +581,7 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-dup2', patch: expect.objectContaining({ estimate_id: 'estimate-2c' }), conditional: true }]);
     // No original ⇒ no surviving attribution row to advance.
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, expect.objectContaining({ id: 'lead-dup2' }), { customerId: 'customer-1', funnelStage: 'booked' });
   });
 
   test('standalone estimate: rescues a single unlinked lead by contact and stamps the link', async () => {
@@ -591,6 +619,7 @@ describe('lead-estimate link service', () => {
 });
 
 describe('convertLeadFromEvent (backfill resolver)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
   // Captures the whereNull column used by findUnconvertedLeadsByContact so a
   // test can assert the customer_id IS NULL guard is applied.
   function makeConvertDb(opts = {}) {
@@ -974,6 +1003,26 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
     expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-root'] });
     expect(markConverted).toHaveBeenCalledWith('L-root', expect.objectContaining({ customerId: 'c1' }));
+    // An ancestry-resolved root converts on the open-status claim (codex r14 P1);
+    // its own funnel row is bridged by markConverted, nothing is stamped.
+    expect(markConverted).toHaveBeenCalledWith('L-root', expect.objectContaining({ onlyIfStatusIn: OPEN_LEAD_STATUSES }));
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+  });
+
+  test('self-booking: a root staff closed between the ancestry read and the status write is not overwritten — the claim loses and this event converts nothing', async () => {
+    const markConverted = jest.fn().mockResolvedValue(false);
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLead: { id: 'L-rep-r', status: 'duplicate', customer_id: 'c1', extracted_data: { duplicate_of_lead_id: 'L-root-r' }, first_contact_at: '2026-09-01T12:00:00Z' },
+      leadsById: { 'L-root-r': { id: 'L-root-r', status: 'new', customer_id: 'c1', first_contact_at: '2026-08-30T12:00:00Z' } },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(markConverted).toHaveBeenCalledWith('L-root-r', expect.objectContaining({ onlyIfStatusIn: OPEN_LEAD_STATUSES }));
+    expect(result).toEqual({ converted: false, reason: 'root_claim_lost' });
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
   });
 
   test('self-booking: when the original belongs to a DIFFERENT customer, the authenticated repeat row takes the win', async () => {
@@ -992,6 +1041,9 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     // between can never be overwritten.
     expect(markConverted).toHaveBeenCalledWith('L-rep2', expect.objectContaining({ customerId: 'c2', onlyIfStatusIn: ['duplicate'] }));
     expect(markConverted).not.toHaveBeenCalledWith('L-other', expect.anything());
+    // The foreign root's funnel is not ours to book and the booking recorder
+    // skips a converted lead: the repeat gets its own row at booked (codex r14 P2).
+    expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, expect.objectContaining({ id: 'L-rep2' }), { customerId: 'c2', funnelStage: 'booked' });
   });
 
   test('self-booking: a repeat row whose label was changed by staff before the claim converts nothing', async () => {
@@ -1006,6 +1058,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     });
     const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c2', enforceOriginating: true, database, leadAttributionService: { markConverted } });
     expect(result).toEqual({ converted: false, reason: 'duplicate_claim_lost' });
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
   });
 
   test('self-booking: two repeats of the SAME foreign original are one opportunity — the newest repeat takes the win', async () => {

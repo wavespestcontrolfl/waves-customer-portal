@@ -83,8 +83,12 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     await calculateSourceROI('src-1', start, end);
     const statusExclusion = mockWhereCalls.find((c) => c[0] === 'leads' && c[1] === 'whereNotIn' && c[2] === 'status');
     expect(statusExclusion).toBeTruthy();
-    // A converted repeat keeps its ancestry marker: excluded by the marker too (pre-push r13).
-    expect(mockWhereCalls.some((c) => c[0] === 'leads' && c[1] === 'whereRaw' && /duplicate_of_lead_id/.test(c[2]))).toBe(true);
+    // A converted repeat keeps its ancestry marker: it is excluded only as a
+    // SECOND win — when its original is won too (pre-push r13); a won repeat
+    // whose original is lost / foreign / gone is the deal's only won row and
+    // counts (codex r14 P2).
+    const secondWin = mockWhereCalls.find((c) => c[0] === 'leads' && c[1] === 'whereRaw' && /duplicate_of_lead_id/.test(c[2]));
+    expect(secondWin[2]).toMatch(/leads\.status IS DISTINCT FROM 'won' OR NOT EXISTS \(SELECT 1 FROM leads o WHERE o\.id::text = leads\.extracted_data->>'duplicate_of_lead_id' AND o\.status = 'won' AND o\.deleted_at IS NULL\)/);
     expect(statusExclusion[3]).toEqual(expect.arrayContaining(['duplicate', 'spam', 'cancelled']));
   });
 

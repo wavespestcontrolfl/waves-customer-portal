@@ -3,7 +3,7 @@ const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
 const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString } = require('../utils/datetime-et');
-const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
+const { bridgeLeadFunnelStage, stampLeadFunnelRow } = require('./lead-funnel-bridge');
 const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
@@ -699,24 +699,37 @@ async function markLinkedLeadEstimateAccepted({
     // merge. A named row closed by any OTHER status stays closed, and an
     // original that is ALREADY won (the office closed the inquiry before
     // this acceptance) means the deal is credited once — a second won row
-    // would double-count it in the raw lead KPIs (codex #3834 r6 P1). When
-    // the hop did not resolve, `lead` IS the named duplicate row, so the
-    // 'won' check is the original's check exactly when there is one.
-    if (named.status === 'duplicate' && !named.deleted_at && lead.status !== 'won' && (await convert(named, { claim: DUPLICATE_LEAD_CLAIM }))) {
+    // would double-count it in the raw lead KPIs (codex #3834 r6 P1) — but
+    // only when that won original was validated as THIS opportunity: a won
+    // root that failed the contact / customer / estimate checks is someone
+    // else's closed deal (a shared household contact), and this customer's
+    // accepted estimate still credits its own named row (codex #3834 r14
+    // P1). Judged as the original IS NOW (the lost claim refreshed it): won
+    // via a DIFFERENT estimate since the read is a different deal. When the
+    // hop did not resolve, `lead` IS the named duplicate row, never won here.
+    const creditedOnOriginal = lead.status === 'won' && sameOpportunity
+      && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
+    if (named.status === 'duplicate' && !named.deleted_at && !creditedOnOriginal) {
       // The duplicate row never got an ad_service_attribution row (/calculate
       // skips it for repeats), so markConverted's funnel bridge on the named
-      // id touched nothing. The one surviving attribution is the original's:
+      // id touches nothing. When the original was validated as the SAME
+      // opportunity, the one surviving attribution is the original's:
       // advance THAT funnel row to booked (monotonic, funnel table only — the
-      // original's lead row stays untouched, codex #3834 r8 P1) — but only
-      // when the original was validated as the SAME opportunity; an original
+      // original's lead row stays untouched, codex #3834 r8 P1). An original
       // that failed the contact/customer/estimate checks is someone else's
-      // inquiry and its funnel is not ours to book (pre-push P1 on #3834 r8).
+      // inquiry and its funnel is not ours to book (pre-push P1 on #3834 r8);
       // `lead` was refreshed by the lost claim, so judge the ORIGINAL AS IT
       // IS NOW: closed since the read, or linked to another estimate, means
-      // it is no longer this opportunity (pre-push P1 on r12).
+      // it is no longer this opportunity (pre-push P1 on r12). The win then
+      // reaches no funnel row at all, so the named row gets the one its own
+      // run would have stamped, straight at the booked stage (codex #3834
+      // r14 P2).
       const stillOurs = sameOpportunity && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at
         && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
-      if (stillOurs) await bridgeLeadFunnelStage(lead.id, 'won', database);
+      if (await convert(named, { claim: DUPLICATE_LEAD_CLAIM })) {
+        if (stillOurs) await bridgeLeadFunnelStage(lead.id, 'won', database);
+        else await stampLeadFunnelRow(database, named, { customerId, funnelStage: 'booked' });
+      }
     }
     return;
   }
@@ -950,7 +963,8 @@ async function convertLeadFromEvent({
     //  3. contact fallback — an open, never-linked lead matched by phone/email.
     let candidates = [];
     let resolution = null; // 'estimate' | 'customer_link' | 'contact'
-    let duplicateWinner = null; // the authenticated repeat row taking the win (tier 2)
+    let claimedLead = null; // the tier-2 candidate reached through duplicate ancestry — converts on a status claim
+    let ancestryClaim = null; // ...and the statuses that claim names (OPEN_LEAD_CLAIM for a root, DUPLICATE_LEAD_CLAIM for the repeat)
     if (estimateId) {
       candidates = await database('leads').where({ estimate_id: estimateId });
       if (candidates.length) resolution = 'estimate';
@@ -984,7 +998,7 @@ async function convertLeadFromEvent({
           .where({ customer_id: resolvedCustomerId, lead_type: 'quote_wizard', status: 'duplicate' })
           .whereNull('deleted_at')
           .orderBy('created_at', 'desc');
-        const winners = new Map(); // candidate id → the repeat row taking the win (foreign/unavailable root), or null
+        const claims = new Map(); // candidate id → the status claim its conversion carries (rows reached through ancestry only)
         const seenAncestry = new Set();
         for (const repeat of repeats) {
           // Only auto-filed repeats carry a server-issued marker; a row staff
@@ -1008,8 +1022,13 @@ async function convertLeadFromEvent({
             && (root.customer_id
               ? String(root.customer_id) === String(resolvedCustomerId)
               : leadMatchesEstimateContact(root, { customer_phone: resolvedPhone, customer_email: resolvedEmail }));
-          linked.push(rootIsOurs ? root : repeat);
-          winners.set(rootIsOurs ? root.id : repeat.id, rootIsOurs ? null : repeat);
+          // Either keeper converts on the label it was read with: the repeat
+          // on 'duplicate', an ancestry-resolved root on the open statuses —
+          // a staff closure of that root between this read and the status
+          // write wins, exactly as on the accept path (codex #3834 r14 P1).
+          const keeper = rootIsOurs ? root : repeat;
+          linked.push(keeper);
+          claims.set(keeper.id, rootIsOurs ? OPEN_LEAD_CLAIM : DUPLICATE_LEAD_CLAIM);
         }
         // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
         // estimate belongs to that deal — exclude it so we never convert it or
@@ -1033,7 +1052,8 @@ async function convertLeadFromEvent({
           }
           candidates = scoped;
           resolution = 'customer_link';
-          duplicateWinner = winners.get(scoped[0].id) || null;
+          ancestryClaim = claims.get(scoped[0].id) || null;
+          claimedLead = ancestryClaim ? scoped[0] : null;
         }
       }
 
@@ -1061,7 +1081,7 @@ async function convertLeadFromEvent({
     // deleted_at covers the tier-1 estimate-link candidates (queried without a
     // guard so an all-deleted linkage still counts as "accounted for" and
     // blocks the fuzzy tiers); tiers 2/3 come pre-filtered by their finders.
-    const open = (candidates || []).filter((lead) => lead && (!CLOSED_LEAD_STATUSES.has(lead.status) || lead === duplicateWinner) && !lead.deleted_at);
+    const open = (candidates || []).filter((lead) => lead && (!CLOSED_LEAD_STATUSES.has(lead.status) || (lead === claimedLead && ancestryClaim === DUPLICATE_LEAD_CLAIM)) && !lead.deleted_at);
     if (!open.length) return { converted: false, reason: 'no_open_lead' };
     // FK-linked leads are authoritatively tied to THIS estimate, so convert them
     // all; tier 2 already enforced a single first-close lead. Only the fuzzy
@@ -1088,12 +1108,24 @@ async function convertLeadFromEvent({
         conversion.initialServiceValue = valueHints.initialServiceValue;
         conversion.waveguardTier = valueHints.waveguardTier;
       }
-      // The repeat row taking the win is claimed on the label it was read
-      // with: a staff transition in between wins, and this event converts
-      // nothing (pre-push P1).
-      if (lead === duplicateWinner) conversion.onlyIfStatusIn = ['duplicate'];
+      // A candidate reached through duplicate ancestry converts on the label
+      // it was read with — the repeat on 'duplicate', a resolved root on the
+      // open statuses: a staff transition in between wins, and this event
+      // converts nothing (pre-push P1, codex #3834 r14 P1).
+      if (lead === claimedLead) conversion.onlyIfStatusIn = ancestryClaim;
       const converted = await leadAttributionService.markConverted(lead.id, conversion);
-      if (lead === duplicateWinner && !converted) return { converted: false, reason: 'duplicate_claim_lost' };
+      if (lead === claimedLead && !converted) {
+        return { converted: false, reason: ancestryClaim === DUPLICATE_LEAD_CLAIM ? 'duplicate_claim_lost' : 'root_claim_lost' };
+      }
+      // A repeat taking the win has no funnel row of its own (/calculate
+      // skipped it: its root carried the prospect) and that root is not ours
+      // to book, so markConverted's bridge advanced nothing — and the booking
+      // recorder, told a lead converted, adds no row either: the booked deal
+      // would vanish from the Ads funnel. Stamp the row the repeat's own run
+      // would have, straight at booked (codex #3834 r14 P2).
+      if (lead === claimedLead && ancestryClaim === DUPLICATE_LEAD_CLAIM) {
+        await stampLeadFunnelRow(database, lead, { customerId: conversion.customerId, funnelStage: 'booked' });
+      }
     }
     return { converted: true, count: open.length, leadIds: open.map((lead) => lead.id) };
   } catch (err) {
