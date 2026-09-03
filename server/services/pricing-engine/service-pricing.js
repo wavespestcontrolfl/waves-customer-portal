@@ -7037,7 +7037,10 @@ function bedBugCommonResult(normalized, fields) {
     requiresInspection: true,
     requiresPrepChecklist: true,
     requiresCustomerAcknowledgement: true,
-    warrantyEligible: false,
+    // Owner ruling 2026-09-03: bed bug treatment IS guaranteed (the site's
+    // written 30-day guarantee on the treated areas); the copy pack reads
+    // this flag. Metadata only — no billing path consumes it.
+    warrantyEligible: true,
     warnings,
     discountHandledByPricingFunction: true,
     recurringCustomerDiscountRate: 0,

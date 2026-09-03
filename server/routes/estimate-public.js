@@ -17247,6 +17247,7 @@ function normalizeOneTimeBreakdown(estData) {
         // trenching chemistry (repellent barriers get no colony-transfer
         // claim) and whether wasp nest removal was actually priced.
         chemistryType: item.chemistryType || null,
+        warrantyEligible: item.warrantyEligible === true,
         nestRemovalSelected: Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal,
       });
     }

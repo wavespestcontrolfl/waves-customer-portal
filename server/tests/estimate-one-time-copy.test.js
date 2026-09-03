@@ -144,14 +144,16 @@ describe('resolveOneTimeServiceCopy', () => {
   test('bed bug: the treatment-method bullet leads and follows the priced method', () => {
     const heat = resolveOneTimeServiceCopy({ service: 'bed_bug', label: 'Bed Bug Heat Treatment — 2 room(s) — trailer' });
     expect(heat.includes[0]).toMatch(/Whole-room heat to 120°F\+/);
-    const chem = resolveOneTimeServiceCopy({ service: 'bed_bug', label: 'Bed Bug Chemical Treatment — 2 room(s), 2 visit(s)' });
+    const chem = resolveOneTimeServiceCopy({ service: 'bed_bug', label: 'Bed Bug Chemical Treatment — 2 room(s), 2 visit(s)', warrantyEligible: true });
     expect(chem.includes[0]).toMatch(/Liquid and dust treatment/);
-    // The bed-bug pricer persists warrantyEligible:false — no guarantee line (codex #3823 r1).
-    expect(chem.assurance).toBeNull();
-    expect(chem.includes.join(' ')).not.toMatch(/guarantee/i);
+    // Owner ruling 2026-09-03: bed bug IS guaranteed — the pricer stamps
+    // warrantyEligible:true on priced results and the copy reads it.
+    expect(chem.assurance).toBe('Written 30-day guarantee on the treated areas');
+    // A quote-required / legacy row without the flag fails closed.
+    expect(resolveOneTimeServiceCopy({ service: 'bed_bug', label: 'Bed Bug Heat Treatment — 2 room(s)' }).assurance).toBeNull();
   });
 
-  test('one-time pest keeps the 30-day callback; termite, bed bug, and rodent exclusion/trapping carry NO guarantee line', () => {
+  test('one-time pest keeps the 30-day callback; termite and rodent exclusion/trapping carry NO guarantee line', () => {
     expect(resolveOneTimeServiceCopy({ service: 'one_time_pest', label: 'One-Time Pest Control' }).assurance).toMatch(/^30-day callback/);
     for (const row of [
       { service: 'termite_bait', label: 'Termite Bait Station Installation' },
@@ -159,7 +161,6 @@ describe('resolveOneTimeServiceCopy', () => {
       { service: 'bora_care', label: 'Bora-Care Wood Treatment' },
       { service: 'termite_foam', label: 'Termite Foam Treatment' },
       { service: 'trenching', label: 'Termite Trenching' },
-      { service: 'bed_bug', label: 'Bed Bug Heat Treatment — 2 room(s)' },
       { service: 'rodent_exclusion', label: 'Rodent Exclusion' },
       { service: 'rodent_trapping', label: 'Rodent Trapping' },
     ]) {

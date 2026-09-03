@@ -176,6 +176,11 @@ function resolveOneTimeServiceCopy(item = {}) {
       if (String(item.warrantyType || '').toLowerCase() === 'none') terms = entry.termsNoWarranty || terms;
     }
   }
+  // Bed bug: the guarantee line rides a priced (warranty-eligible) result
+  // only — quote-required rows fail closed (owner ruling 2026-09-03).
+  if (key === 'bed_bug' && item.warrantyEligible !== true) {
+    assurance = null;
+  }
   if (key === 'wasp' && item.nestRemovalSelected !== true) {
     lines = lines.map((line) => (line === entry.removalBullet ? entry.noRemovalBullet : line));
     outcome = entry.outcomeNoRemoval || outcome;
