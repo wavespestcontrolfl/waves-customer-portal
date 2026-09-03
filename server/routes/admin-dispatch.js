@@ -12581,6 +12581,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // What the accepted text WAS, so the catch can stamp the honest 'sent'
       // state (sentSmsBody is scoped inside the try).
       let completionSmsAcceptedSnapshot = null;
+      // The ONE committed-but-not-finalized exit for a recoverable completion
+      // text failure (GitHub Codex r3 P1): finalizing here would make every
+      // later submit replay the stored response, and there is no dedicated
+      // completion-SMS resend action (building one is a customer-comm side
+      // effect — Adam's call). Same release-for-resume + 503 as the
+      // token-mint failure: the 'failed' marker is not
+      // completionSmsAlreadyHandled, so the tech's retry re-enters the lane
+      // and re-sends. The email channel does not depend on the text: it is
+      // queued first so the customer keeps it even if the tech never retries
+      // (GitHub Codex r4 P1). Used by the provider-rejection path inside the
+      // try and by the catch when a rejection's audit insert threw.
+      const exitForCompletionSmsResume = async (sendErr) => {
+        await queueServiceReportEmailIfEligible();
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, sendErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return res.status(503).json({
+          error: released
+            ? 'The completion text could not be sent — the closeout is saved but NOT finalized. Retry the closeout to send it.'
+            : `The completion text could not be sent — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'completion_sms_send_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        });
+      };
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         // Use the recap STORED on the record (the server-generated effectiveCustomerRecap,
@@ -13107,33 +13133,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 });
               }
               if (resumable) {
-                // Keep the missing report / pay-link text RECOVERABLE
-                // (GitHub Codex r3 P1): finalizing succeeded here would make
-                // every later submit replay the stored response, and there
-                // is no dedicated completion-SMS resend action (building
-                // one is a customer-comm side effect — Adam's call). Same
-                // release-for-resume + 503 exit as the token-mint failure:
-                // the 'failed' marker above is not completionSmsAlreadyHandled,
-                // so the tech's retry re-enters this lane and re-sends.
-                // The email channel does not depend on the text: queue it
-                // now, before this exit, so the customer keeps it even if
-                // the tech never retries (GitHub Codex r4 P1).
-                await queueServiceReportEmailIfEligible();
-                const sendErr = holdEnqueueFailed
+                return exitForCompletionSmsResume(holdEnqueueFailed
                   ? completionHoldQueueError
-                  : new Error(smsResult.reason || smsResult.code || 'Completion SMS provider failure');
-                const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, sendErr);
-                if (!released) {
-                  logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
-                }
-                return res.status(503).json({
-                  error: released
-                    ? 'The completion text could not be sent — the closeout is saved but NOT finalized. Retry the closeout to send it.'
-                    : `The completion text could not be sent — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
-                  code: 'completion_sms_send_failed',
-                  ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
-                  serviceRecordId: record.id,
-                });
+                  : new Error(smsResult.reason || smsResult.code || 'Completion SMS provider failure'));
               }
             }
           } else {
@@ -13253,9 +13255,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
           logger.warn(`[dispatch] Completion SMS for service_record ${record.id} was accepted by the provider (${e.providerOutcome?.providerMessageId || 'no message id'}) but a post-send write failed (${e.message}) — recorded as sent, no failure bell, do not re-send`);
         } else {
+          // sendCustomerMessage attaches providerOutcome on BOTH outcomes
+          // when the audit insert throws: a definite provider REJECTION that
+          // reached here is the ordinary !smsResult.sent case wearing an
+          // exception — the text did not go out and the cause is the
+          // provider's, so it gets the same terminal/retryable split, the
+          // same one-bell rule, and the same release-for-resume (pre-push
+          // Codex P1 on the split PR).
+          const rejected = e.providerOutcome && e.providerOutcome.sent === false ? e.providerOutcome : null;
           const failedDelta = {
             completionSmsStatus: 'failed',
-            completionSmsError: e.message || 'SMS send failed',
+            completionSmsError: (rejected ? rejected.error : null) || e.message || 'SMS send failed',
             completionSmsFailedAt: new Date().toISOString(),
           };
           const failedNotes = { ...parseJsonObject(record.structured_notes), ...failedDelta };
@@ -13268,17 +13278,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // render failure) is not recovered by re-running it — the cause
           // needs an operator fix first, and holding the closeout open would
           // 503 every retry until then, stranding the email/PDF lanes behind
-          // it. So this path finalizes, and the bell says so (pre-push Codex
-          // P1 r5): resumable:false, no release-for-resume.
-          const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
-          await alertCompletionSmsFailed({
-            serviceRecordId: record.id,
-            customerId: svc.customer_id,
-            smsType: null,
-            errorClass: e.code || e.name || 'exception',
-            error: e,
-            resumable: false,
-          });
+          // it. So that path finalizes, and the bell says so (pre-push Codex
+          // P1 r5): resumable:false, no release-for-resume. A provider
+          // rejection is resumable unless the provider called it terminal.
+          const resumable = rejected ? rejected.terminal !== true : false;
+          if (rejected?.providerAlerted) {
+            logger.info(`[dispatch] completion SMS failure for ${record.id} already alerted as twilio_failure (${rejected.providerErrorCode || rejected.providerHttpStatus || 'api'}) — no completion_sms_failed bell`);
+          } else {
+            const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
+            await alertCompletionSmsFailed({
+              serviceRecordId: record.id,
+              customerId: svc.customer_id,
+              smsType: null,
+              errorClass: rejected
+                ? (rejected.providerErrorCode || 'provider_failure')
+                : (e.code || e.name || 'exception'),
+              error: rejected ? (rejected.error || e.message || 'Completion SMS provider failure') : e,
+              resumable,
+            });
+          }
+          if (resumable) {
+            return exitForCompletionSmsResume(new Error(rejected.error || 'Completion SMS provider failure'));
+          }
         }
       }
     } else if (effectiveSendCompletionSms && svc.cust_phone && recapSmsAlreadySentForVisit) {
