@@ -12603,6 +12603,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // tech's retry re-enters here — ensureReportToken runs again and, once
       // it succeeds, the 'failed' marker above is not completionSmsAlreadyHandled
       // so the report text sends normally.
+      // The payer AP channel does not depend on the report token or the
+      // homeowner text — deliver it before releasing, exactly as the SMS
+      // resume exit does, or a payer invoice sits as a draft until the tech
+      // retries (GitHub Codex r2 P1 on the split PR).
+      await sendPayerInvoiceToApIfEligible();
       const withheldErr = reportTokenMintError || new Error('report token unavailable');
       const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, withheldErr);
       if (!released) {
@@ -12627,6 +12632,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // state when acceptance is known only from the thrown error
       // (sentSmsBody is scoped inside the try).
       let completionSmsAcceptedSnapshot = null;
+      // A definite provider REJECTION (or failed quiet-hours requeue) seen
+      // inside the try, kept here so a route-local write that throws AFTER
+      // it (the failed-notes merge, the bundled-review release) still takes
+      // the rejection path in the catch instead of finalizing as a
+      // pre-acceptance exception (GitHub Codex r2 P1 on the split PR).
+      // Normalized to the providerOutcome shape the catch already reads.
+      let completionSmsRejectedOutcome = null;
       // The ONE committed-but-not-finalized exit for a recoverable completion
       // text failure (GitHub Codex r3 P1): finalizing here would make every
       // later submit replay the stored response, and there is no dedicated
@@ -13138,6 +13150,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // enqueue error.
             const holdEnqueueFailed = !!completionHoldQueueError;
             const policyBlocked = smsResult.blocked && !holdEnqueueFailed;
+            completionSmsRejectedOutcome = policyBlocked ? null : {
+              sent: false,
+              terminal: !holdEnqueueFailed && smsResult.terminal === true,
+              providerAlerted: !holdEnqueueFailed && !!smsResult.providerAlerted,
+              providerErrorCode: holdEnqueueFailed ? 'SEND_WINDOW_REQUEUE_FAILED' : (smsResult.providerErrorCode || smsResult.code || null),
+              providerHttpStatus: smsResult.providerHttpStatus || null,
+              error: holdEnqueueFailed
+                ? `send-window requeue failed: ${completionHoldQueueError.message || completionHoldQueueError}`
+                : (smsResult.reason || smsResult.code || 'SMS send failed'),
+            };
             Object.assign(smsNotesDelta, {
               completionSmsStatus: policyBlocked ? 'blocked' : 'failed',
               completionSmsError: holdEnqueueFailed
@@ -13317,7 +13339,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // provider's, so it gets the same terminal/retryable split, the
           // same one-bell rule, and the same release-for-resume (pre-push
           // Codex P1 on the split PR).
-          const rejected = e.providerOutcome && e.providerOutcome.sent === false ? e.providerOutcome : null;
+          const rejected = (e.providerOutcome && e.providerOutcome.sent === false ? e.providerOutcome : null)
+            || completionSmsRejectedOutcome;
           const failedDelta = {
             completionSmsStatus: 'failed',
             completionSmsError: (rejected ? rejected.error : null) || e.message || 'SMS send failed',
