@@ -173,6 +173,35 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(legacyAi.hero.sub).toBe(ONE_TIME_SERVICE_COPY.wasp.hero.sub);
   });
 
+  test('trap-only terms disclose the billing mode: monthly = 12-month agreement, annual = prepaid, unknown = generic', () => {
+    const pack = ONE_TIME_SERVICE_COPY.trap_only;
+    expect(resolveOneTimeServiceCopy({ service: 'trap_only_retainer', label: 'Trap-Only Monitoring Retainer', retainerBilling: 'monthly' }).terms).toBe(pack.termsMonthly);
+    expect(pack.termsMonthly).toMatch(/12-month agreement/);
+    expect(resolveOneTimeServiceCopy({ service: 'trap_only_retainer', label: 'Trap-Only Monitoring Retainer', retainerBilling: 'annual' }).terms).toBe(pack.termsAnnual);
+    // Legacy rows carry the mode only in the pricer's own row text.
+    expect(resolveOneTimeServiceCopy({ service: 'trap_only_retainer', name: 'Standard - Monthly, 12-month agreement', price: 49 }).terms).toBe(pack.termsMonthly);
+    expect(resolveOneTimeServiceCopy({ service: 'trap_only_retainer', name: 'Standard - Annual prepaid', price: 499 }).terms).toBe(pack.termsAnnual);
+    expect(resolveOneTimeServiceCopy({ service: 'trap_only_retainer', label: 'Trap-Only Monitoring Retainer' }).terms).toBe(pack.terms);
+  });
+
+  test('Bora-Care bullets and hero follow the measured area — a surface-only quote never promises attic framing', () => {
+    const pack = ONE_TIME_SERVICE_COPY.bora_care;
+    const surface = { service: 'bora_care', label: 'Bora-Care Wood Treatment', price: 450, atticSqFt: null, surfaceSqFt: 640 };
+    const attic = { service: 'bora_care', label: 'Bora-Care Wood Treatment', price: 900, atticSqFt: 1800, surfaceSqFt: null };
+    const both = { service: 'bora_care', label: 'Bora-Care Wood Treatment', price: 1200, atticSqFt: 1800, surfaceSqFt: 640 };
+    const legacy = { service: 'bora_care', label: 'Bora-Care Wood Treatment', price: 700 };
+    expect(resolveOneTimeServiceCopy(surface).includes[0]).toBe(pack.woodBulletSurface);
+    expect(resolveOneTimeServiceCopy(surface).includes.join(' ')).not.toMatch(/attic/i);
+    expect(resolveOneTimeServiceCopy(attic).includes[0]).toBe(pack.woodBulletAttic);
+    expect(resolveOneTimeServiceCopy(both).includes[0]).toBe(pack.woodBullet);
+    expect(resolveOneTimeServiceCopy(legacy).includes[0]).toBe(pack.woodBulletNeutral);
+    expect(oneTimeOnlyIntelligenceCopy([surface]).hero.sub).toMatch(/measured wood surfaces/);
+    expect(oneTimeOnlyIntelligenceCopy([surface]).hero.sub).not.toMatch(/attic|\{Areas\}/);
+    expect(oneTimeOnlyIntelligenceCopy([attic]).hero.sub).toMatch(/measured attic framing/);
+    expect(oneTimeOnlyIntelligenceCopy([both]).hero.sub).toMatch(/measured attic and surface areas/);
+    expect(oneTimeOnlyIntelligenceCopy([legacy]).hero.sub).toMatch(/measured treatment area/);
+  });
+
   test('standalone-safe wording: sanitation, dethatching, and top dressing promise no companion service or season the engine cannot enforce', () => {
     const san = ONE_TIME_SERVICE_COPY.rodent_sanitation;
     expect(`${san.outcome} ${san.hero.sub}`).not.toMatch(/coordinated|timed with|exclusion/i);
@@ -259,6 +288,8 @@ describe('resolveOneTimeServiceCopy', () => {
         { service: 'rodent_inspection', name: 'Rodent Inspection', price: 149, creditableWithinDays: 14 },
         { service: 'exclusion_v2', name: 'Full Rodent Exclusion', price: 895, includesScreening: true },
         { service: 'one_time_pest', name: 'One-Time Pest Control', price: 189, includedScope: 'interior_unit_general_pest', scopeExclusions: ['interior only'], scopeNote: 'Interior of your unit only' },
+        { service: 'trap_only_retainer', name: 'Standard', price: 49, trapOnlyRetainerBilling: 'monthly', retainerBilling: 'monthly' },
+        { service: 'bora_care', name: 'Bora-Care Wood Treatment', price: 450, atticSqFt: null, surfaceSqFt: 640 },
       ],
       total: { oneTime: 2164, monthly: 0, annual: 0 },
     });
@@ -271,6 +302,9 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(byService.rodent_inspection.creditableWithinDays).toBe(14);
     expect(byService.exclusion_v2.includesScreening).toBe(true);
     expect(byService.one_time_pest.includedScope).toBe('interior_unit_general_pest');
+    expect(byService.trap_only_retainer.retainerBilling).toBe('monthly');
+    expect(byService.bora_care.atticSqFt).toBeNull();
+    expect(byService.bora_care.surfaceSqFt).toBe(640);
   });
 
   test('bed bug: the treatment-method bullet leads and follows the priced method', () => {
@@ -328,6 +362,10 @@ describe('oneTimeOnlyIntelligenceCopy', () => {
 
   test('discount rows do not break the single-key rule; mixed services return null; hero-only packs carry no AI copy', () => {
     expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'one_time_adjustment', kind: 'discount', amount: -50 }]).key).toBe('german_roach');
+    expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'one_time_adjustment', label: 'WaveGuard Member Discount', price: -110 }]).key).toBe('german_roach');
+    // A POSITIVE adjustment is the residual "Other one-time services" charge — a second, unknown service (codex r8 P0).
+    expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'one_time_adjustment', label: 'Other one-time services', amount: 200 }])).toBeNull();
+    expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'one_time_adjustment', label: 'Other one-time services', price: 200 }])).toBeNull();
     expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'wasp', label: 'Wasp Nest Treatment', amount: 150 }])).toBeNull();
     // Included (service-credit) and quote-required rows are services too — their presence makes the quote mixed.
     expect(oneTimeOnlyIntelligenceCopy([roach2, { service: 'wasp', label: 'Wasp Nest Treatment', amount: 0, kind: 'included', serviceSpecificDiscountApplied: true }])).toBeNull();

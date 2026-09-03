@@ -5088,6 +5088,8 @@ function priceTrapOnlyRetainer(options = {}) {
     name: plan.label,
     trapOnlyRetainerPlan: planKey,
     trapOnlyRetainerBilling: billing,
+    // Customer-facing terms read the billing mode off the row (codex #3823 r8 P1).
+    retainerBilling: billing,
     trapOnlyRetainerAnnualPrice: plan.annualPrice,
     trapOnlyRetainerMonthlyPrice: plan.monthlyPrice,
     trapOnlyScheduledVisitsIncluded: plan.scheduledVisitsIncluded,
@@ -5116,6 +5118,7 @@ function priceTrapOnlyRetainer(options = {}) {
         name: `${plan.label} - ${billing === 'annual' ? 'Annual prepaid' : 'Monthly, 12-month agreement'}`,
         price: retainerPrice,
         discountEligible: false,
+        retainerBilling: billing,
         detail: billing === 'annual'
           ? `$${plan.annualPrice}/year. Includes ${plan.scheduledVisitsIncluded} scheduled checks and ${plan.responseCallbacksIncluded} response callbacks per year.`
           : `$${plan.monthlyPrice}/month with 12-month agreement. Includes ${plan.scheduledVisitsIncluded} scheduled checks and ${plan.responseCallbacksIncluded} response callbacks per year.`,

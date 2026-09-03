@@ -1122,6 +1122,11 @@ function mapV1ToLegacyShape(v1Result) {
         ...(li.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: li.debrisRemovalIncluded === true } : {}),
         ...(Number(li.creditableWithinDays) > 0 ? { creditableWithinDays: Number(li.creditableWithinDays) } : {}),
         ...(li.includesScreening !== undefined ? { includesScreening: li.includesScreening === true } : {}),
+        // Trap-only billing mode + Bora-Care purchased areas (codex #3823 r8 P1s).
+        ...(li.retainerBilling || li.trapOnlyRetainerBilling
+          ? { retainerBilling: li.retainerBilling || li.trapOnlyRetainerBilling } : {}),
+        ...(li.atticSqFt !== undefined ? { atticSqFt: Number(li.atticSqFt) > 0 ? Number(li.atticSqFt) : null } : {}),
+        ...(li.surfaceSqFt !== undefined ? { surfaceSqFt: Number(li.surfaceSqFt) > 0 ? Number(li.surfaceSqFt) : null } : {}),
         fleaExteriorZones: li.fleaExteriorZones || [],
         addOns: li.addOns || [],
         serviceSpecificDiscountApplied: !!li.serviceSpecificDiscountApplied,
@@ -1330,6 +1335,9 @@ function mapV1ToLegacyShape(v1Result) {
           ...(s.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: s.debrisRemovalIncluded === true } : {}),
           ...(Number(s.creditableWithinDays) > 0 ? { creditableWithinDays: Number(s.creditableWithinDays) } : {}),
           ...(s.includesScreening !== undefined ? { includesScreening: s.includesScreening === true } : {}),
+          ...(s.retainerBilling ? { retainerBilling: s.retainerBilling } : {}),
+          ...(s.atticSqFt !== undefined ? { atticSqFt: s.atticSqFt } : {}),
+          ...(s.surfaceSqFt !== undefined ? { surfaceSqFt: s.surfaceSqFt } : {}),
           source: s.source,
           pricingModel: s.pricingModel,
           legacyPricingModel: s.legacyPricingModel,

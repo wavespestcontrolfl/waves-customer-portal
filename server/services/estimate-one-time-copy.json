@@ -227,6 +227,8 @@
     ],
     "assurance": null,
     "terms": "Setup is billed once; the monitoring plan bills on its scheduled cadence.",
+    "termsMonthly": "Setup, when charged, is billed once; the monitoring plan bills monthly on a 12-month agreement.",
+    "termsAnnual": "Setup, when charged, is billed once; the monitoring plan is prepaid for the year.",
     "hero": {
       "eyebrow": "Your trap-only monitoring plan",
       "h1": "Hello {first}, your trap-only monitoring plan is ready!",
@@ -383,8 +385,12 @@
     "hero": {
       "eyebrow": "Your Bora-Care wood treatment",
       "h1": "Hello {first}, your Bora-Care treatment quote is ready!",
-      "sub": "A borate wood treatment for the measured attic and surface areas — approve online and pick a day. Licensed & insured."
-    }
+      "sub": "A borate wood treatment for the measured {Areas} — approve online and pick a day. Licensed & insured."
+    },
+    "woodBullet": "Bora-Care applied to bare, accessible wood — sill plates, studs, headers, band joists, and attic framing where accessible",
+    "woodBulletAttic": "Bora-Care applied to bare, accessible attic framing — rafters, trusses, and decking where accessible",
+    "woodBulletSurface": "Bora-Care applied to the measured exposed wood surfaces — bare, accessible framing where accessible",
+    "woodBulletNeutral": "Bora-Care applied to the bare, accessible wood in the measured treatment area"
   },
   "plugging": {
     "outcome": "Bare spots stitched back together with live plugs of your own grass — no re-sod.",

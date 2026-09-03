@@ -155,6 +155,29 @@ function isStingingV2(item = {}) {
   return String(item.service || '').toLowerCase() === 'stinging_insect_v2';
 }
 
+// Trap-only retainer billing mode: the persisted flag (carried through the
+// legacy mapper), else the pricer's own row text ("Monthly, 12-month
+// agreement" / "Annual prepaid"); unknown → null (generic terms).
+function trapOnlyBilling(item = {}) {
+  const flag = String(item.retainerBilling || item.trapOnlyRetainerBilling || '').toLowerCase();
+  if (flag === 'monthly' || flag === 'annual') return flag;
+  const text = searchText(item);
+  if (/12 month agreement|per month|\/month/.test(text)) return 'monthly';
+  if (/annual prepaid|\/year/.test(text)) return 'annual';
+  return null;
+}
+
+// Bora-Care purchased area: the pricer persists atticSqFt (null on a
+// surface-only job) and surfaceSqFt (null on an attic-only job).
+function boraCareScope(item = {}) {
+  const attic = Number(item.atticSqFt) > 0;
+  const surface = Number(item.surfaceSqFt) > 0;
+  if (attic && surface) return 'both';
+  if (attic) return 'attic';
+  if (surface) return 'surface';
+  return 'unknown';
+}
+
 function bedBugMethod(item = {}) {
   const text = searchText(item);
   if (/\bhybrid\b/.test(text)) return 'hybrid';
@@ -247,6 +270,24 @@ function resolveOneTimeServiceCopy(item = {}) {
   if (key === 'rodent_exclusion' && item.includesScreening !== true) {
     lines = lines.filter((line) => line !== entry.screeningBullet);
   }
+  // Trap-only: the monthly plan is a 12-month agreement — the terms must
+  // say so (codex #3823 r8 P1); annual is prepaid; unknown keeps generic.
+  if (key === 'trap_only') {
+    const billing = trapOnlyBilling(item);
+    if (billing === 'monthly') terms = entry.termsMonthly || terms;
+    else if (billing === 'annual') terms = entry.termsAnnual || terms;
+  }
+  // Bora-Care: the wood bullet follows the measured area — a surface-only
+  // quote never promises attic framing (codex #3823 r8 P1); a row with no
+  // measurements gets location-neutral wording.
+  if (key === 'bora_care') {
+    const scope = boraCareScope(item);
+    const bullet = scope === 'both' ? entry.woodBullet
+      : scope === 'attic' ? entry.woodBulletAttic
+        : scope === 'surface' ? entry.woodBulletSurface
+          : entry.woodBulletNeutral;
+    lines = lines.map((line) => (line === entry.woodBullet ? bullet : line));
+  }
   // Rodent inspection: the fee credit carries the row's configured window
   // (creditableWithinDays); no window on the row ⇒ no credit promise.
   if (key === 'rodent_inspection') {
@@ -275,9 +316,14 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
   // (service-credit) and quote-required rows ARE services: they resolve to
   // null below, so their presence makes the quote mixed and the page keeps
   // the generic copy (codex pre-push P1 — fail closed).
+  // A POSITIVE one_time_adjustment is the normalizer's residual "Other
+  // one-time services" charge — a billable row the quote must treat as a
+  // second (unknown) service, so it fails the single-key rule below and
+  // the page keeps the generic copy (codex #3823 r8 P0). Only a
+  // non-positive adjustment (a discount) is ignored.
   const rows = (Array.isArray(items) ? items : []).filter((item) => item
     && item.kind !== 'discount'
-    && String(item.service || '').toLowerCase() !== 'one_time_adjustment'
+    && !(String(item.service || '').toLowerCase() === 'one_time_adjustment' && !(Number(item.amount ?? item.price) > 0))
     && !(Number(item.amount ?? item.price) < 0));
   if (!rows.length) return null;
   const keys = new Set(rows.map(oneTimeCopyKeyFor));
@@ -300,6 +346,13 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
       .replace('{FollowUp}', visits >= 2 ? ', with the follow-up built in' : '');
   } else if (stingingV2) {
     heroSub = entry.hero.subV2 || heroSub;
+  } else if (key === 'bora_care') {
+    const scopes = new Set(rows.map(boraCareScope));
+    const areas = scopes.has('both') || (scopes.has('attic') && scopes.has('surface')) ? 'attic and surface areas'
+      : scopes.has('attic') ? 'attic framing'
+        : scopes.has('surface') ? 'wood surfaces'
+          : 'treatment area';
+    heroSub = heroSub.replace('{Areas}', areas);
   }
   const aiBody = stingingV2 ? (entry.aiBodyV2 || entry.aiBody) : entry.aiBody;
   return {

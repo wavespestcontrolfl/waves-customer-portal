@@ -4691,7 +4691,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // pack only when EVERY billable row resolves to the same key (a mixed
   // roach + wasp quote must not read as a roach cleanout — codex pre-push
   // P1) and never on a regulated certificate surface.
-  const oneTimeHeroCopy = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems) && oneTimeOnlyIntelligenceCopy(oneTimeItems)
+  // Single-service check spans the raw rows AND the normalized breakdown
+  // (whose residual positive one_time_adjustment is a billable unknown
+  // charge) — the same superset the React /data contract reads, so both
+  // renderers agree on when a quote is mixed (codex #3823 r8 P0).
+  const oneTimeIntelligenceRows = [...oneTimeItems, ...boraCareOneTimeRows];
+  const oneTimeHeroCopy = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems) && oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows)
     ? oneTimeItems.map(resolveOneTimeServiceCopy).find(Boolean) || null
     : null;
   const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
@@ -5911,7 +5916,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // a boolean, never per row.
   // One-time-only service copy pack chips lead (roach, flea, wasp, bed
   // bug, …) — same source the React contract's askChips reads.
-  const oneTimeOnlyAskCopy = isOneTimeOnly && !isRegulatedCertificateSurface ? oneTimeOnlyIntelligenceCopy(oneTimeItems) : null;
+  const oneTimeOnlyAskCopy = isOneTimeOnly && !isRegulatedCertificateSurface ? oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows) : null;
   const askPrompts = oneTimeOnlyAskCopy?.askChips?.length
     ? oneTimeOnlyAskCopy.askChips.slice(0, 6)
     : buildEstimateAskPrompts(
@@ -16822,6 +16827,9 @@ function oneTimeItemsForRender(estResult, estData) {
     creditableWithinDays: row.creditableWithinDays || null,
     includesScreening: row.includesScreening === true,
     includedScope: row.includedScope || null,
+    retainerBilling: row.retainerBilling || null,
+    atticSqFt: row.atticSqFt ?? null,
+    surfaceSqFt: row.surfaceSqFt ?? null,
   }));
 }
 
@@ -17275,6 +17283,9 @@ function normalizeOneTimeBreakdown(estData) {
         creditableWithinDays: Number(item.creditableWithinDays) > 0 ? Number(item.creditableWithinDays) : null,
         includesScreening: item.includesScreening === true || /\+screening\b/.test(String(item.detail || item.det || '')),
         includedScope: item.includedScope || null,
+        retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
+        atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
+        surfaceSqFt: Number(item.surfaceSqFt) > 0 ? Number(item.surfaceSqFt) : null,
       });
     }
   };

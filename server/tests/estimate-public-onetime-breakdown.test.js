@@ -6578,7 +6578,10 @@ describe('public estimate one-time breakdown', () => {
       satelliteUrl: 'https://maps.example/mosquito-onetime.png',
     }, estimateData);
 
-    expect(html).toContain("your mosquito treatment quote is ready!");
+    // The $50 residual is a billable unknown charge, so the quote is mixed for
+    // the service copy pack: generic headline, category mosquito copy below.
+    expect(html).toContain('your estimate is ready!');
+    expect(html).not.toContain("your mosquito treatment quote is ready!");
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
