@@ -1339,7 +1339,7 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
     case 'no_time':
       return rule(false, `A card is saved, but this visit has no scheduled time to measure the ${hours}-hour window from, so nothing will be charged.`);
     case 'past_start':
-      return rule(false, `A card is saved, but the visit's start time (${fmtETWhen(start)}) has already passed, so nothing will be charged and the card is released.`);
+      return rule(false, `A card is saved, but the visit's start time (${fmtETWhen(start)}) has already passed, so nothing will be charged.`);
     case 'booking_age': {
       const ago = anchorAt ? fmtAgo(now.getTime() - new Date(anchorAt).getTime()) : 'moments';
       return rule(false, `A card is saved, but the fee terms were agreed only ${ago} ago — inside the ${hours}-hour window — so the free-cancel period is still open and nothing will be charged.`);
@@ -1357,6 +1357,8 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
       return rule(true, `A card is saved. The customer rescheduled on ${fmtETWhen(sticky?.rescheduledAt)} while inside the ${hours}-hour window of the earlier slot (${fmtETWhen(sticky?.originalStart)}), so the window carried over to this visit. ${fee} will be charged — rule: a reschedule made inside the window doesn't reset it.`);
     case 'capture_in_flight':
       return rule(null, 'The customer is saving a card for this visit right now (secure link mid-completion), so fee terms may land in a moment. This cancel can\'t preview them — check the visit\'s billing after cancelling.');
+    case 'competing_consent':
+      return rule(null, 'This visit carries two card agreements (an estimate card hold and a saved appointment card). The charge path refuses to pick one, so nothing is charged automatically — the office is notified to decide which applies and bill the fee by hand.');
     case 'charge_in_flight':
       return rule(null, 'A fee charge for this visit is already in progress or under billing review. This cancel starts no new charge — check the visit\'s billing before promising the customer either way.');
     case 'unresolved':
@@ -1864,7 +1866,11 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
     const state = String(latest.status || '');
     const latestFee = Number(latest.no_show_fee_amount) > 0 ? Number(latest.no_show_fee_amount) : cardHoldNoShowFee();
     if (state === 'charging' || state === 'charge_review') {
-      return { held: false, feeApplies: false, unresolved: true, rule: describeCancelFeeRule({ code: 'charge_in_flight', feeAmount: latestFee }) };
+      // Legacy shape stays fee-may-apply (held + feeApplies + unresolved):
+      // admin-cancellation's previewVisitFees counts fee exposure from these
+      // fields, and a PaymentIntent that may still land IS exposure (Codex
+      // #3800 r2 P1). The rule's willCharge:null keeps the UI neutral.
+      return { held: true, feeApplies: true, feeAmount: latestFee, unresolved: true, rule: describeCancelFeeRule({ code: 'charge_in_flight', feeAmount: latestFee }) };
     }
     return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'fee_settled', feeAmount: latestFee, detail: state.replace(/_/g, ' ') || 'closed' }) };
   }
@@ -1929,6 +1935,21 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
     } catch (err) {
       logger.warn('[estimate-card-holds] sticky-window lookup for cancel preview failed — reporting fee-may-apply', { error: err.message });
       return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'reschedule history lookup failed' }) };
+    }
+  }
+  if (feeApplies) {
+    // Competing consents (a /secure appointment-card row beside the hold):
+    // chargeNoShowFee refuses to pick a winner and bells the office, so the
+    // notice must not promise a charge (Codex #3800 r2 P2). Fail toward
+    // undetermined on an unreadable table, same as the charge path.
+    try {
+      const laneRow = await db('appointment_card_requests')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first('id');
+      if (laneRow) return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('competing_consent') };
+    } catch (err) {
+      logger.warn('[estimate-card-holds] competing-consent lookup for cancel preview failed — reporting undetermined', { error: err.message });
+      return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'card consent lookup failed', onFailure: 'unknown' }) };
     }
   }
   return { held: true, feeApplies, feeAmount, rule: describe(ruleCode, { start, sticky }) };

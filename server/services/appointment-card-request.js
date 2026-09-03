@@ -2842,19 +2842,25 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
         currentStart: previewStartLive ? new Date(previewStartMs) : null,
       });
       feeApplies = !!sticky;
-      if (feeApplies) {
-        ruleCode = 'sticky';
-        // Card removal is revocation on the charge path — the preview must
-        // agree (Codex #3342 r5 P2): a removed card means the charge leg
-        // closes released, so no fee prompt.
-        const pmRow = await db('payment_methods')
-          .where({ customer_id: request.customer_id, stripe_payment_method_id: request.stripe_payment_method_id })
-          .first('id');
-        if (!pmRow) { feeApplies = false; ruleCode = 'card_removed'; }
-      }
+      if (feeApplies) ruleCode = 'sticky';
     } catch (err) {
       logger.warn(`[appt-card-request] sticky-window lookup for cancel preview failed — reporting fee-may-apply: ${err.message}`);
       return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'reschedule history lookup failed' }) };
+    }
+  }
+  if (feeApplies) {
+    // Card removal is revocation on the charge path — the preview must
+    // agree (Codex #3342 r5 P2; #3800 r2 P2 extends it to the direct
+    // in-window verdict, not only sticky): a removed card means the charge
+    // leg closes released, so no fee prompt. A THROWN lookup is unresolved.
+    try {
+      const pmRow = await db('payment_methods')
+        .where({ customer_id: request.customer_id, stripe_payment_method_id: request.stripe_payment_method_id })
+        .first('id');
+      if (!pmRow) { feeApplies = false; ruleCode = 'card_removed'; }
+    } catch (err) {
+      logger.warn(`[appt-card-request] card-revocation lookup for cancel preview failed — reporting fee-may-apply: ${err.message}`);
+      return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'saved card lookup failed' }) };
     }
   }
   return { secured: true, feeApplies, feeAmount, rule: describe(ruleCode, { start, sticky }) };

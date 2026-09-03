@@ -767,7 +767,8 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
   it('no HELD row but a charging/charge_review hold → undetermined in-flight verdict, never "no card"', async () => {
     stubDb([null, { id: 'h1', status: 'charging', no_show_fee_amount: 49 }]);
     const res = await cardHoldCancelPreview('svc1', now);
-    expect(res).toMatchObject({ held: false, feeApplies: false, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    // Legacy shape stays fee-may-apply so previewVisitFees keeps the exposure.
+    expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: 49, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
     expect(res.rule.text).toMatch(/already in progress or under billing review/);
   });
   it('hold-state lookup FAILURE → undetermined, promising neither release nor review (rail ownership unknown)', async () => {
@@ -791,6 +792,13 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     // ET wall clock of the start + the fee + the rule, in one sentence.
     // Stubbed ET formatters (see the datetime-et mock) — the shape is what's under test.
     expect(res.rule.text).toBe('A card is saved and the visit starts Monday, July 13, 2026 at 9:00 AM, within the 24-hour late-cancel window. The $49 late-cancel fee will be charged — rule: cancellations within 24 hours of the visit.');
+  });
+  it('in-window hold beside a /secure appointment-card row → undetermined (the charge path refuses competing consents)', async () => {
+    stubDb(holdRow, { laneRows: { id: 'lane-row' } });
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'competing_consent', willCharge: null } });
+    expect(res.rule.text).toMatch(/two card agreements/);
   });
   it('parked hold → never a charge prompt, matching the handler\'s already_parked (no window math)', async () => {
     stubDb({ ...holdRow, parked_at: new Date('2026-07-05T12:00:00Z') });
@@ -816,7 +824,10 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
   it('held but start past the arrival-window grace → no fee, no prompt', async () => {
     stubDb(holdRow);
     mockApptTime.mockResolvedValue(new Date('2026-07-01T12:00:00Z'));
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: expect.objectContaining({ code: 'past_start', willCharge: false }) });
+    const pastRes = await cardHoldCancelPreview('svc1', now);
+    expect(pastRes).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: expect.objectContaining({ code: 'past_start', willCharge: false }) });
+    // Park-on-cancel may keep the authorization — never assert a release.
+    expect(pastRes.rule.text).not.toMatch(/released/);
   });
   it('feature flag off → fee never applies (chargeNoShowFee would no-op)', async () => {
     process.env.ONE_TIME_CARD_HOLD = 'false';

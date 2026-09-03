@@ -1032,6 +1032,12 @@ describe('appointmentCardCancelPreview', () => {
     expect(res.rule).toMatchObject({ code: 'card_hold_lane', willCharge: false });
     expect(res.rule.text).not.toMatch(/released|settled/);
   });
+  test('in-window but the saved card was removed → card_removed, no charge prompt (direct verdict, not only sticky)', async () => {
+    mockTableHandlers = handlersWith({ pmRow: null });
+    mockApptTime = new Date(Date.now() + 3 * HOUR);
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: true, feeApplies: false, rule: { code: 'card_removed', willCharge: false } });
+  });
   test('outside-window → no fee, and the rule names the visit start and the free-cancel reason', async () => {
     mockApptTime = new Date(Date.now() + 100 * HOUR);
     const res = await appointmentCardCancelPreview('svc-1');
