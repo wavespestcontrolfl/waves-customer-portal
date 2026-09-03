@@ -41,7 +41,8 @@ then the only remedy is a human.
 - `ops_queue` is **counts only**. Item titles never cross the wire (customer
   names live there), and neither does a job's error text — open the portal's
   Agents → Queue tab for both. A sub-read that fails says `available: false`
-  and nothing else.
+  and nothing else (and becomes a `<read>:unavailable` reason); `ops_queue`
+  with `disabled: true` just means the Queue gate is off, which is not a reason.
 - `reasons` are stable keys. The script diffs them against the previous poll.
 - Off → `404 { "error": "watchdog lane disabled" }`. That is a configuration
   state, not an outage: stop and tell the operator.

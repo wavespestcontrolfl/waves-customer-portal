@@ -20,7 +20,8 @@ Paging rules (deterministic — the portal computes the health, this only
 decides whether it is NEWS):
   * HTTP 401 / 403 / 404                            → CONFIGURATION, not an
     outage (the lane gate is off, the worker gate is off, or the key/secret is
-    wrong). One page per 24 h naming the fix; the outage streak is NOT advanced.
+    wrong). The portal answered, so the outage streak RESETS; one page per
+    24 h naming the fix.
   * unreachable / other non-200 / database.ok == false → failure streak += 1;
     page at exactly 3 consecutive (~30 min), then at most every 6 h while it
     stays down; one "back" page on recovery.
@@ -147,8 +148,11 @@ def main():
     out = []
 
     if result == "config":
-        # Deliberate portal state (kill switch, key scope, secret): say so once a
-        # day, never count it toward the outage streak.
+        # Deliberate portal state (kill switch, key scope, secret). The portal
+        # answered, so any outage streak ends here — otherwise failures hours
+        # apart would read as consecutive. Say so once a day.
+        state["consecutive_failures"] = 0
+        state["down_since"] = None
         since = hours_since(state["config_paged_at"])
         if since is None or since >= REPAGE_CONFIG_HOURS:
             out.append(f"🔧 Waves watchdog not configured: {detail}. Polls continue; nothing is down.")

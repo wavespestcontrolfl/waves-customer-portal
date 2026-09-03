@@ -9,7 +9,10 @@
  *   result   += 'observed'   (a served snapshot — the row IS the heartbeat the
  *                             reciprocal liveness cron reads)
  * EXPAND only: no drops of existing values, no data rewrites. Down restores
- * the prior sets (safe only while no 'watchdog'/'observed' rows exist).
+ * the prior sets; the rows that only this lane can write (endpoint='watchdog')
+ * are removed first, because they cannot satisfy the restored constraint and
+ * mean nothing once the lane is gone (they are watchdog heartbeats, not
+ * prospect evidence).
  */
 
 const ENDPOINTS = ['claim', 'report', 'vendor_price', 'vendor_login'];
@@ -29,6 +32,7 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('seo_link_worker_requests'))) return;
+  await knex('seo_link_worker_requests').where({ endpoint: 'watchdog' }).del();
   await replaceCheck(knex, 'seo_link_worker_requests_endpoint_check', inSet('endpoint', ENDPOINTS));
   await replaceCheck(knex, 'seo_link_worker_requests_result_check', inSet('result', RESULTS));
 };

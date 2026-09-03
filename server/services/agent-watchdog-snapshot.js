@@ -17,7 +17,7 @@
  * reports a fixed `unavailable` marker, never its message.
  *
  * `reasons` are stable string keys (job:<name>:<state>, ops:<lane>:failed=<n>,
- * db:degraded, link_worker:stale_leases=<n>) so the Hermes side diffs them
+ * db:degraded, link_worker:stale_leases=<n>, <read>:unavailable) so the Hermes side diffs them
  * against its last poll without a model call and pages only on CHANGE.
  *
  * Every sub-read is contained: a failing read reports `available: false` and the
@@ -31,6 +31,7 @@ const config = require('../config');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const { isDatabaseReady } = require('../utils/db-health');
+const { sanitizeJobError } = require('../utils/cron-lock');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
 const { getOpsQueue } = require('./ops-queue');
 
@@ -41,11 +42,12 @@ const STALE_LEASE_HOURS = 2;
 
 const ATTENTION_JOB_STATES = new Set(['failing', 'stuck', 'stale']);
 
-// A failed read reports ONLY that it is unavailable — the message stays in
-// the server log (SQL/provider errors can carry bound customer data).
+// A failed read reports ONLY that it is unavailable. The message never leaves
+// the process, and even the log line goes through the cron-lock sanitizer
+// (SQL/provider errors can echo bound customer data — phone numbers above all).
 function contain(label, fn, fallback) {
   return fn().catch((err) => {
-    logger.warn(`[agent-watchdog] ${label} read failed: ${err.message}`);
+    logger.warn(`[agent-watchdog] ${label} read failed: ${sanitizeJobError(err.message)}`);
     return { ...fallback, available: false };
   });
 }
@@ -74,13 +76,16 @@ async function readJobs() {
 }
 
 // Counts only — never the items (customer names live in the titles).
+// `disabled` (boolean, never text) separates "the queue gate is off" from a
+// failed read: only the latter is an attention reason.
 async function readOpsQueue() {
   if (!gateEnvValue('GATE_ADMIN_OPS_QUEUE')) {
-    return { available: false, reason: 'GATE_ADMIN_OPS_QUEUE off', pending: 0, parked: 0, failed: 0, lanes: [] };
+    return { available: false, disabled: true, pending: 0, parked: 0, failed: 0, lanes: [] };
   }
   const q = await getOpsQueue();
   return {
     available: true,
+    disabled: false,
     pending: q.totals.pending,
     parked: q.totals.parked,
     failed: q.totals.failed,
@@ -122,6 +127,7 @@ function judge({ database, jobs, ops_queue: ops, link_worker: lw }) {
   if (database && database.ok === false) reasons.push('db:degraded');
   if (jobs && jobs.available === false) reasons.push('jobs:unavailable');
   for (const j of (jobs && jobs.items) || []) reasons.push(`job:${j.job}:${j.state}`);
+  if (ops && ops.available === false && !ops.disabled) reasons.push('ops:unavailable');
   if (ops && ops.available) {
     for (const l of ops.lanes || []) {
       if (l.error) reasons.push(`ops:${l.key}:error`);
@@ -137,7 +143,7 @@ async function buildWatchdogSnapshot() {
   const [database, jobs, opsQueue, linkWorker] = await Promise.all([
     contain('database', readDatabase, { ok: false, latency_ms: null }),
     contain('jobs', readJobs, { total: 0, unhealthy: 0, items: [] }),
-    contain('ops_queue', readOpsQueue, { pending: 0, parked: 0, failed: 0, lanes: [] }),
+    contain('ops_queue', readOpsQueue, { disabled: false, pending: 0, parked: 0, failed: 0, lanes: [] }),
     contain('link_worker', readLinkWorker, { last_claim_at: null, last_report_at: null, open_leases: 0, stale_leases: 0 }),
   ]);
   const parts = { database, jobs, ops_queue: opsQueue, link_worker: linkWorker };

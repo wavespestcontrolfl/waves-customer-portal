@@ -24,10 +24,12 @@ jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn
 jest.mock('../config', () => ({ nodeEnv: 'test' }));
 jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => true) }));
 jest.mock('../utils/db-health', () => ({ isDatabaseReady: jest.fn(async () => true) }));
+jest.mock('../utils/cron-lock', () => ({ sanitizeJobError: jest.fn((m) => `sanitized(${String(m).length})`) }));
 jest.mock('../services/intelligence-bar/job-health-tools', () => ({ getScheduledJobHealth: jest.fn() }));
 jest.mock('../services/ops-queue', () => ({ getOpsQueue: jest.fn() }));
 
 const { gateEnvValue } = require('../config/feature-gates');
+const logger = require('../services/logger');
 const { isDatabaseReady } = require('../utils/db-health');
 const { getScheduledJobHealth } = require('../services/intelligence-bar/job-health-tools');
 const { getOpsQueue } = require('../services/ops-queue');
@@ -63,6 +65,7 @@ describe('buildWatchdogSnapshot', () => {
     expect(snap.database).toEqual({ ok: true, latency_ms: expect.any(Number) });
     expect(snap.jobs).toEqual({ available: true, total: 2, unhealthy: 0, items: [] });
     expect(snap.ops_queue.lanes[0]).toEqual({ key: 'calls', label: 'Call processing', pending: 3, parked: 4, failed: 0, error: false });
+    expect(snap.ops_queue.disabled).toBe(false);
     expect(JSON.stringify(snap)).not.toContain('Jane Customer');
     expect(snap.link_worker).toEqual({ available: true, last_claim_at: '2026-09-03T10:00:00.000Z', last_report_at: '2026-09-03T10:00:00.000Z', open_leases: 0, stale_leases: 0 });
     expect(snap.environment).toBe('test');
@@ -105,17 +108,30 @@ describe('buildWatchdogSnapshot', () => {
     gateEnvValue.mockImplementation((name) => name !== 'GATE_ADMIN_OPS_QUEUE');
     const snap = await buildWatchdogSnapshot();
     expect(getOpsQueue).not.toHaveBeenCalled();
-    expect(snap.ops_queue.available).toBe(false);
+    expect(snap.ops_queue).toEqual({ available: false, disabled: true, pending: 0, parked: 0, failed: 0, lanes: [] });
     expect(snap.verdict).toBe('healthy');
+  });
+
+  test('a FAILED ops-queue read (gate on) is an attention reason, with no message', async () => {
+    getOpsQueue.mockRejectedValue(new Error('relation "ops" does not exist for 941-555-0100'));
+    const snap = await buildWatchdogSnapshot();
+    expect(snap.ops_queue).toEqual({ available: false, disabled: false, pending: 0, parked: 0, failed: 0, lanes: [] });
+    expect(snap.reasons).toEqual(['ops:unavailable']);
+    expect(snap.verdict).toBe('attention');
+    expect(JSON.stringify(snap)).not.toContain('relation');
   });
 
   test('a throwing sub-read degrades to available:false WITHOUT its message and the rest still judges', async () => {
     getScheduledJobHealth.mockRejectedValue(new Error('relation "job_health" does not exist'));
-    dbTables.seo_link_worker_requests = () => { throw new Error('boom: jane@example.com'); };
+    dbTables.seo_link_worker_requests = () => { throw new Error('boom: +1 941 555 0100'); };
     const snap = await buildWatchdogSnapshot();
     expect(snap.jobs).toEqual({ available: false, total: 0, unhealthy: 0, items: [] });
+    // the log line is sanitized too — the raw message never reaches the logger
+    const logged = logger.warn.mock.calls.map((c) => c[0]).join('\n');
+    expect(logged).not.toContain('555 0100');
+    expect(logged).toContain('sanitized(');
     expect(snap.link_worker.available).toBe(false);
-    expect(JSON.stringify(snap)).not.toMatch(/job_health|jane@example/);
+    expect(JSON.stringify(snap)).not.toMatch(/job_health|555 0100|sanitized/);
     expect(snap.reasons).toEqual(['jobs:unavailable', 'link_worker:unavailable']);
     expect(snap.verdict).toBe('attention');
     expect(snap.database.ok).toBe(true);
