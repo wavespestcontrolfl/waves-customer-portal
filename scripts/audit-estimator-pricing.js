@@ -389,10 +389,22 @@ function expectRodentBait({ homeSqFt, stories = 1 }) {
 // TERMITE BAIT — perimeter from footprint, the REQUESTED system's label spacing and
 // station cost (Trelona 15 ft is the menu default; Advance 10 ft stays priceable so
 // an existing estimate replays at its own system — codex r16 P2), 1.45× material
-// markup, station-bracket monitoring
-function expectTermiteBait({ homeSqFt, stories = 1, complexity = 'standard', system = constants.TERMITE.defaultSystem }) {
+// markup, station-bracket monitoring.
+// Property-driven modifiers (codex r19 P2) mirrored as literals from
+// modifiers.js so an edit moves only one side: the construction material scales
+// the marked-up install material (wood frame 1.15, steel frame 0.95, ICF 0.9,
+// block / CMU / concrete / unknown 1.0 — case-insensitive) and the foundation
+// adds a flat trenching adjustment after it (crawlspace $150, pier-and-beam
+// $125, raised $100, slab / unknown $0). Monitoring is untouched by either.
+const TERMITE_CONSTRUCTION_MULT = { WOOD_FRAME: 1.15, STEEL_FRAME: 0.95, BLOCK: 1, CMU: 1, CONCRETE: 1, ICF: 0.9 };
+const TERMITE_FOUNDATION_ADJ = { CRAWLSPACE: 150, RAISED: 100, PIER_AND_BEAM: 125, SLAB: 0 };
+const termiteConstructionMultOf = (material) => TERMITE_CONSTRUCTION_MULT[String(material || '').toUpperCase()] ?? 1;
+const termiteFoundationAdjOf = (foundation) => TERMITE_FOUNDATION_ADJ[String(foundation || '').toUpperCase()] ?? 0;
+function expectTermiteBait({ homeSqFt, stories = 1, complexity = 'standard', system = constants.TERMITE.defaultSystem, constructionMaterial = null, foundationType = null }) {
   const T = constants.TERMITE;
   const fp = footprintOf(homeSqFt, stories);
+  const constructionMult = termiteConstructionMultOf(constructionMaterial);
+  const foundationAdj = termiteFoundationAdjOf(foundationType);
   // moderate and complex both take the complex multiplier; anything else is
   // standard (service-pricing.js normalizeTermiteComplexity).
   const perimMult = complexity === 'complex' || complexity === 'moderate' ? T.perimeterMultiplier.complex : T.perimeterMultiplier.standard;
@@ -402,12 +414,12 @@ function expectTermiteBait({ homeSqFt, stories = 1, complexity = 'standard', sys
   const stations = Math.max(T.minStations, Math.ceil(perimeter / spacingFt));
   const installMaterial = stations * (sys.stationCost + sys.laborMaterial + sys.misc);
   const installLabor = stations * 0.083 * constants.GLOBAL.LABOR_RATE;
-  const installPrice = Math.round(installMaterial * T.installMultiplier);
+  const installPrice = Math.round(installMaterial * T.installMultiplier * constructionMult + foundationAdj);
   const steps = Math.max(0, Math.ceil(stations / T.monitoring.bracketStations) - 2);
   const monitoringMonthly = round2(T.monitoring.baseMonthly + steps * T.monitoring.stepMonthly);
   const monitoringAnnual = round2(monitoringMonthly * 12);
   const perApp = round2(monitoringAnnual / T.monitoringVisitsPerYear);
-  return { system, spacingFt, complexity, perimMult, footprint: fp, perimeter, stations, installMaterial: round2(installMaterial), installLabor: round2(installLabor), installPrice, installMarkupOnMaterial: T.installMultiplier - 1, monitoringMonthly, monitoringAnnual, perApp, visits: T.monitoringVisitsPerYear };
+  return { system, spacingFt, complexity, perimMult, footprint: fp, perimeter, stations, installMaterial: round2(installMaterial), installLabor: round2(installLabor), installPrice, installMarkupOnMaterial: T.installMultiplier - 1, constructionMult, foundationAdj, monitoringMonthly, monitoringAnnual, perApp, visits: T.monitoringVisitsPerYear };
 }
 
 // ONE-TIME PEST — max(floor, round(quarterlyBase × 2.2)) × urgency; 15% perk; strict > visit-1 clamp
@@ -464,7 +476,16 @@ function expectTreeShrub({ bedArea, treeCount = 0, palmCount = 0, access = 'easy
 }
 
 // WDO / German roach / foam drill / top dressing / plugging / palm — flat & cost-plus formulas
-function expectWdo() { return { price: constants.SPECIALTY.wdo.brackets[0].price }; }
+// WDO is one terminal bracket in code ($250 flat), but the --db overlay can
+// install tiered onetime_wdo brackets (db-bridge); the expected price is the
+// first bracket whose maxSqFt covers the footprint (living area / stories, 2,000
+// when absent — resolvePestFootprint), else the last one (codex r19 P2).
+function expectWdo(homeSqFt = 2000, stories = 1) {
+  const fp = footprintOf(homeSqFt, stories) || 2000;
+  const brackets = constants.SPECIALTY.wdo.brackets;
+  const b = brackets.find((x) => fp <= x.maxSqFt) || brackets[brackets.length - 1];
+  return { footprint: fp, price: b.price, bracketMaxSqFt: b.maxSqFt, bracketsLive: brackets.length };
+}
 function expectGermanRoach(severity = 'light') {
   const cfg = constants.SPECIALTY.germanRoach;
   const key = severity === 'severe' ? 'heavy' : (cfg.tiers[severity] ? severity : cfg.defaultSeverity);
@@ -505,7 +526,7 @@ function expectPlugging(lawnSqFt, spacing = 12) {
 // (quote: floor / custom, fixed 4 apps, eligible statuses only) and Tree-Age
 // (DBH tier floor / custom, quote-only above the last priced tier, 0.5 apps/yr).
 // A branch the engine must refuse returns null; pricing it is a P1 below.
-function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, appsPerYear = null, intervalMonths = null, customPricePerPalm = null, diagnosisConfirmed = false, selectedProduct = null, palmStatus = null, dbhInches = null, highDose = false, largeDiameter = false, nonstandardProduct = false }) {
+function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, appsPerYear = null, intervalMonths = null, customPricePerPalm = null, diagnosisConfirmed = false, selectedProduct = null, palmStatus = null, dbhInches = null, highDose = false, largeDiameter = false, nonstandardProduct = false, product = null, restrictedUseProduct = false, licensedApplicator = false }) {
   const P = constants.PALM;
   const t = P.treatments[treatmentType];
   if (!t) return null;
@@ -536,6 +557,10 @@ function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, apps
     if (!(Number(dbhInches) > 0)) return null;
     const tier = t.tiers.find((x) => x.dbhMax === null || Number(dbhInches) <= x.dbhMax);
     if (tier.quoteBased && customPricePerPalm == null) return null;
+    // A restricted-use product — Tree-Age R10 by name or the restrictedUseProduct
+    // flag — prices only for a licensed applicator, and the licence is strictly
+    // `true` (a truthy string is not a licence) — codex r19 P2.
+    if ((product === 'Tree-Age R10' || restrictedUseProduct === true) && licensedApplicator !== true) return null;
     apps = t.appsPerYear; perPalm = quote(tier.pricePerPalm || 110);
   } else return null;
   const rawPerVisit = round2(perPalm * palmCount);
@@ -948,6 +973,43 @@ function runTermiteMatrix() {
       flagIf(!!li && li.complexity !== cc.complexity, 'P1', section, `complexity resolved ${sqft} [${cc.name}]`, `expected ${cc.complexity}, engine resolved ${li.complexity}`);
     }
   }
+  // Property-driven install modifiers (codex r19 P2): the construction
+  // multiplier and foundation adjustment come from the top-level property
+  // profile (deriveModifiers on constructionMaterial / foundationType), never
+  // from the service line — a service-line `modifiers` object must be ignored.
+  // Each recognised value, lower-case spellings, an unrecognised pair (neutral)
+  // and a lone foundation; monitoring is asserted unchanged from the neutral
+  // install for every case.
+  const modifierCases = [
+    { constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB' },
+    { constructionMaterial: 'wood_frame', foundationType: 'crawlspace' },
+    { constructionMaterial: 'STEEL_FRAME', foundationType: 'RAISED' },
+    { constructionMaterial: 'ICF', foundationType: 'PIER_AND_BEAM' },
+    { constructionMaterial: 'BLOCK', foundationType: 'CRAWLSPACE' },
+    { constructionMaterial: 'CMU', foundationType: 'SLAB' },
+    { constructionMaterial: 'CONCRETE', foundationType: null },
+    { constructionMaterial: 'BRICK', foundationType: 'BASEMENT' },
+    { constructionMaterial: null, foundationType: 'PIER_AND_BEAM' },
+  ];
+  for (const mc of modifierCases) {
+    const label = `${mc.constructionMaterial ?? 'none'} / ${mc.foundationType ?? 'none'}`;
+    for (const sqft of [1200, 2000, 3200]) {
+      const neutral = expectTermiteBait({ homeSqFt: sqft });
+      const exp = expectTermiteBait({ homeSqFt: sqft, ...mc });
+      const r = runEngine({ ...BASE, homeSqFt: sqft, constructionMaterial: mc.constructionMaterial, foundationType: mc.foundationType, services: { termite: { system: 'trelona' } } });
+      const li = line(r.result, 'termite_bait');
+      record(section, `install footprint ${sqft} [property ${label}]`, { homeSqFt: sqft, ...mc }, exp.installPrice, li ? (li.installation?.price ?? li.installPrice ?? null) : null, { extra: { constructionMult: exp.constructionMult, foundationAdj: exp.foundationAdj, neutralInstall: neutral.installPrice, stationsExpected: exp.stations, stationsActual: li ? (li.stations ?? li.stationCount) : null, engineError: r.ok ? null : r.error } });
+      record(section, `monitoring monthly footprint ${sqft} [property ${label} — unchanged]`, { homeSqFt: sqft, ...mc }, neutral.monitoringMonthly, li ? (li.monitoring?.monthly ?? li.monthly ?? null) : null);
+    }
+  }
+  {
+    // A modifiers object on the service line must not reach the pricer: the
+    // engine derives modifiers from the property and overrides the option.
+    const neutral = expectTermiteBait({ homeSqFt: 2000 });
+    const r = runEngine({ ...BASE, homeSqFt: 2000, services: { termite: { system: 'trelona', modifiers: { termiteConstructionMult: 2, termiteFoundationAdj: 999 } } } });
+    const li = line(r.result, 'termite_bait');
+    record(section, 'install footprint 2000 [service-line modifiers object ignored — property neutral]', { homeSqFt: 2000, serviceLineModifiers: { termiteConstructionMult: 2, termiteFoundationAdj: 999 } }, neutral.installPrice, li ? (li.installation?.price ?? li.installPrice ?? null) : null, { extra: { engineError: r.ok ? null : r.error } });
+  }
 }
 
 function runOneTimeMatrix() {
@@ -1004,8 +1066,27 @@ function runTreeShrubMatrix() {
 
 function runSpecialtyMatrix() {
   const section = 'specialty';
-  const wdo = line(runEngine({ ...BASE, services: { wdo: {} } }).result, 'wdo_inspection');
-  record(section, 'WDO flat', {}, expectWdo().price, wdo ? wdo.price : null);
+  // WDO (codex r19 P2): boundary footprints are DERIVED from the live bracket
+  // array — BASE, every finite edge and edge + 1, and a footprint past the last
+  // finite edge — so a tiered --db overlay exercises each band and the in-code
+  // single-bracket run still prices the flat fee. The resolved footprint
+  // (living area / stories) is asserted alongside the price.
+  const wdoBrackets = constants.SPECIALTY.wdo.brackets;
+  const wdoEdges = wdoBrackets.map((b) => b.maxSqFt).filter((m) => Number.isFinite(m));
+  const wdoFootprints = [...new Set([BASE.homeSqFt, ...wdoEdges.flatMap((m) => [m, m + 1]), (wdoEdges.length ? Math.max(...wdoEdges) : 3500) + 1000])].sort((a, b) => a - b);
+  for (const sqft of wdoFootprints) {
+    const exp = expectWdo(sqft);
+    const li = line(runEngine({ ...BASE, homeSqFt: sqft, services: { wdo: {} } }).result, 'wdo_inspection');
+    record(section, `WDO footprint ${sqft} (bracket ≤ ${exp.bracketMaxSqFt}; ${exp.bracketsLive} live bracket${exp.bracketsLive === 1 ? '' : 's'})`, { homeSqFt: sqft }, exp.price, li ? li.price : null, { extra: { footprintUsed: li ? li.footprintUsed : null, bracketLabel: li ? li.bracketLabel : null } });
+    flagIf(!!li && li.footprintUsed !== exp.footprint, 'P1', section, `WDO footprint resolved ${sqft}`, `expected footprint ${exp.footprint}, engine used ${li && li.footprintUsed}`);
+  }
+  {
+    // living area / stories selects the bracket — not the living area itself
+    const exp = expectWdo(4000, 2);
+    const li = line(runEngine({ ...BASE, homeSqFt: 4000, stories: 2, services: { wdo: {} } }).result, 'wdo_inspection');
+    record(section, 'WDO 4,000 sf living area on 2 stories (footprint 2,000)', { homeSqFt: 4000, stories: 2 }, exp.price, li ? li.price : null, { extra: { footprintUsed: li ? li.footprintUsed : null, bracketLabel: li ? li.bracketLabel : null } });
+    flagIf(!!li && li.footprintUsed !== exp.footprint, 'P1', section, 'WDO footprint resolved 4,000 sf / 2 stories', `expected footprint ${exp.footprint}, engine used ${li && li.footprintUsed}`);
+  }
   for (const sev of ['light', 'moderate', 'heavy', 'severe', 'bogus', undefined]) {
     const exp = expectGermanRoach(sev);
     const li = line(runEngine({ ...BASE, services: { germanRoach: { severity: sev } } }).result, 'german_roach');
@@ -1018,12 +1099,27 @@ function runSpecialtyMatrix() {
     record(section, `foam drill points=${points}`, { points }, exp.price, li ? li.price : null, { extra: { cost: exp.cost, targetMargin: exp.targetMargin, realizedMargin: exp.realizedMargin, refusedOverMaxPoints: !!exp.refusedOverMaxPoints } });
     flagIf(exp.refusedOverMaxPoints && li, 'P1', section, `foam drill points=${points} priced above the ${exp.maxPoints}-point ceiling`, `engine price ${li && li.price} — expected a refusal`);
   }
-  for (const sqft of [1000, 2000, 4500, 8000, 12000]) {
-    for (const depth of ['eighth', 'quarter']) {
-      const exp = expectTopDressing(sqft, depth, false);
-      const li = line(runEngine({ ...BASE, lawnSqFt: sqft, services: { topDressing: { depth, area: sqft } } }).result, 'top_dressing');
-      record(section, `top dressing ${sqft}sf ${depth} (no recurring lawn → 65% treatable assumption)`, { sqft, depth }, exp.price, li ? li.price : null, { extra: { lawnEstExpected: exp.lawnEst, lawnEstActual: li ? li.lawnSqFt : null, material: exp.material, labor: exp.labor } });
-    }
+  // Top dressing (codex r19 P2): the engine's only explicit area input is
+  // services.topDressing.lawnSqFt — priced in full, exactly as entered;
+  // otherwise the property lawn area prices in full when a recurring lawn line
+  // is in the same estimate and at the 65% treatable assumption when it is
+  // not. `area` is not an engine input (one case proves it is inert). The
+  // priced area is asserted as well as the price: the floor hides a
+  // 0.65-vs-full difference on small lawns.
+  const LAWN_LINE = { track: 'st_augustine', tier: 'enhanced' };
+  const topDressingCases = [
+    ...[1000, 2000, 4500, 8000, 12000].flatMap((sqft) => ['eighth', 'quarter'].map((depth) => ({ name: `top dressing ${sqft}sf ${depth} (no recurring lawn → 65% treatable assumption)`, sqft, depth, area: sqft, full: false, input: { ...BASE, lawnSqFt: sqft, services: { topDressing: { depth } } } }))),
+    ...[1000, 4500, 8000].flatMap((sqft) => ['eighth', 'quarter'].map((depth) => ({ name: `top dressing ${sqft}sf ${depth} bundled with recurring lawn (full property area)`, sqft, depth, area: sqft, full: true, input: { ...BASE, lawnSqFt: sqft, services: { lawn: LAWN_LINE, topDressing: { depth } } } }))),
+    ...[[1500, 4500], [3000, 4500], [6000, 4500]].flatMap(([explicit, prop]) => ['eighth', 'quarter'].map((depth) => ({ name: `top dressing explicit ${explicit}sf ${depth} on a ${prop}sf lawn (full explicit area)`, sqft: explicit, depth, area: explicit, full: true, input: { ...BASE, lawnSqFt: prop, services: { topDressing: { depth, lawnSqFt: explicit } } } }))),
+    { name: 'top dressing explicit 2000sf eighth + recurring lawn (explicit area wins, full)', sqft: 2000, depth: 'eighth', area: 2000, full: true, input: { ...BASE, lawnSqFt: 4500, services: { lawn: LAWN_LINE, topDressing: { depth: 'eighth', lawnSqFt: 2000 } } } },
+    { name: 'top dressing explicit 0 sf eighth falls back to the property lawn at 65%', sqft: 4500, depth: 'eighth', area: 4500, full: false, input: { ...BASE, lawnSqFt: 4500, services: { topDressing: { depth: 'eighth', lawnSqFt: 0 } } } },
+    { name: 'top dressing legacy area key is not an engine input (property lawn at 65%)', sqft: 4500, depth: 'quarter', area: 4500, full: false, input: { ...BASE, lawnSqFt: 4500, services: { topDressing: { depth: 'quarter', area: 1000 } } } },
+  ];
+  for (const tc of topDressingCases) {
+    const exp = expectTopDressing(tc.area, tc.depth, tc.full);
+    const li = line(runEngine(tc.input).result, 'top_dressing');
+    record(section, tc.name, { sqft: tc.sqft, depth: tc.depth, fullArea: tc.full }, exp.price, li ? li.price : null, { extra: { lawnEstExpected: exp.lawnEst, lawnEstActual: li ? li.lawnSqFt : null, material: exp.material, labor: exp.labor, detail: li ? li.detail ?? null : null } });
+    flagIf(!!li && li.lawnSqFt !== exp.lawnEst, 'P1', section, `top dressing priced area — ${tc.name}`, `expected ${exp.lawnEst} sf, engine priced ${li && li.lawnSqFt} sf`);
   }
   for (const sqft of [1000, 4500, 10000]) for (const spacing of [6, 9, 12]) {
     const exp = expectPlugging(sqft, spacing);
@@ -1058,11 +1154,23 @@ function runSpecialtyMatrix() {
     { treatmentType: 'combo', palmCount: 1, palmSize: 'medium', nonstandardProduct: true },
     { treatmentType: 'combo', palmCount: 1, palmSize: 'medium', nonstandardProduct: true, customPricePerPalm: 130 },
     { treatmentType: 'insecticide', palmCount: 4, palmSize: 'medium', nonstandardProduct: true, customPricePerPalm: 30 },
+    // Tree-Age restricted-use licence (codex r19 P2): refused without
+    // licensedApplicator === true (the engine error must name the licence, so
+    // a refusal for another reason cannot pass as this one), priced with it,
+    // strict on a truthy non-boolean, unaffected by a non-restricted product name.
+    { treatmentType: 'treeAge', palmCount: 1, dbhInches: 12, product: 'Tree-Age R10', _refusal: /licensedApplicator/ },
+    { treatmentType: 'treeAge', palmCount: 1, dbhInches: 12, product: 'Tree-Age R10', licensedApplicator: true },
+    { treatmentType: 'treeAge', palmCount: 2, dbhInches: 18, restrictedUseProduct: true, _refusal: /licensedApplicator/ },
+    { treatmentType: 'treeAge', palmCount: 2, dbhInches: 18, restrictedUseProduct: true, licensedApplicator: true },
+    { treatmentType: 'treeAge', palmCount: 2, dbhInches: 18, restrictedUseProduct: true, licensedApplicator: 'yes', _refusal: /licensedApplicator/ },
+    { treatmentType: 'treeAge', palmCount: 1, dbhInches: 25, product: 'Tree-Age R10', licensedApplicator: true, customPricePerPalm: 200 },
+    { treatmentType: 'treeAge', palmCount: 1, dbhInches: 12, product: 'Tree-Age G4' },
   ];
-  for (const c of palmCases) {
+  for (const { _refusal, ...c } of palmCases) {
     const exp = c.palmCount > 0 && Number.isInteger(c.palmCount) ? expectPalm(c) : null;
     const r = runEngine({ ...BASE, services: { palmInjection: c } });
     const li = line(r.result, 'palm_injection');
+    flagIf(!!_refusal && !r.ok && !_refusal.test(r.error), 'P1', section, `palm ${JSON.stringify(c)} refused for the wrong reason`, `expected an error matching ${_refusal}, engine said: ${r.error}`);
     record(section, `palm ${JSON.stringify(c)}`, c, exp ? exp.annual : null, li ? li.annual : null, { extra: { perVisitExpected: exp ? exp.perVisit : null, perVisitActual: li ? li.perVisit : null, minimumApplied: exp ? exp.minimumApplied : null, engineError: r.ok ? null : r.error, palmSizeUsed: li ? li.palmSize : null } });
     // A tiered treatment with no palm size must be refused by the engine (fail
     // closed); pricing it silently would quote a defaulted size.
@@ -1482,6 +1590,11 @@ async function main() {
   runPrepayAndCadence();
   const economics = runAnnualEconomics();
 
+  // Counted BEFORE the summary is rendered or serialized (codex r19 P2): the
+  // Markdown line and the JSON field used to be written from an undefined
+  // count while only the exit code saw the real one.
+  const discrepancyRows = new Set(scenarios.filter((s) => s.status === 'MISMATCH' || s.status === 'NO_PRICE' || s.status === 'engine_error').map((s) => `${s.section}::${s.name}`));
+  const unrowedP1 = findings.filter((f) => (f.severity === 'P0' || f.severity === 'P1') && !discrepancyRows.has(`${f.section}::${f.name}`));
   const summary = {
     generatedAt: new Date().toISOString(),
     engineConstantsSource: dbInfo.synced ? 'pricing_config (DB overlay, read-only)' : 'constants.js (in-code defaults)',
@@ -1492,6 +1605,7 @@ async function main() {
     engineErrors: scenarios.filter((s) => s.status === 'engine_error').length,
     noPrice: scenarios.filter((s) => s.status === 'NO_PRICE').length,
     engineOnly: scenarios.filter((s) => s.status === 'engine_only').length,
+    unrowedP1Findings: unrowedP1.length,
     findings,
   };
 
@@ -1499,7 +1613,7 @@ async function main() {
   md.push('# Independent estimator pricing audit — run output');
   md.push('');
   md.push(`Generated ${summary.generatedAt}. Constants source: **${summary.engineConstantsSource}**.`);
-  md.push(`Scenarios: ${summary.scenarioCount} · independent-vs-engine matches: ${summary.matches} · mismatches: ${summary.mismatches} · expected a price but the engine returned none: ${summary.noPrice} · engine-only observations: ${summary.engineOnly} (${summary.matches} + ${summary.mismatches} + ${summary.noPrice} + ${summary.engineOnly} = ${summary.matches + summary.mismatches + summary.noPrice + summary.engineOnly}) · commercial engine errors: ${summary.engineErrors} · P0/P1 findings without a row: ${summary.unrowedP1Findings ?? 0}`);
+  md.push(`Scenarios: ${summary.scenarioCount} · independent-vs-engine matches: ${summary.matches} · mismatches: ${summary.mismatches} · expected a price but the engine returned none: ${summary.noPrice} · engine-only observations: ${summary.engineOnly} (${summary.matches} + ${summary.mismatches} + ${summary.noPrice} + ${summary.engineOnly} = ${summary.matches + summary.mismatches + summary.noPrice + summary.engineOnly}) · commercial engine errors: ${summary.engineErrors} · P0/P1 findings without a row: ${summary.unrowedP1Findings}`);
   md.push('');
   md.push('## Findings raised by this run');
   md.push('');
@@ -1539,10 +1653,8 @@ async function main() {
   // the report: exit nonzero so CI / a pre-push caller sees it (codex r6 P1).
   // Belt and braces (codex r18 P1): a P0/P1 finding pushed directly without a
   // discrepancy row (e.g. a bundle whose engine lines are missing) still fails
-  // the run — every P0/P1 finding is a discrepancy, rowed or not.
-  const discrepancyRows = new Set(scenarios.filter((s) => s.status === 'MISMATCH' || s.status === 'NO_PRICE' || s.status === 'engine_error').map((s) => `${s.section}::${s.name}`));
-  const unrowedP1 = findings.filter((f) => (f.severity === 'P0' || f.severity === 'P1') && !discrepancyRows.has(`${f.section}::${f.name}`));
-  summary.unrowedP1Findings = unrowedP1.length;
+  // the run — every P0/P1 finding is a discrepancy, rowed or not (counted
+  // above, before the artifacts were written).
   const discrepancies = summary.mismatches + summary.noPrice + summary.engineErrors + unrowedP1.length;
   if (discrepancies > 0) {
     console.error(`${discrepancies} discrepancy(ies): ${summary.mismatches} mismatches, ${summary.noPrice} expected-price-but-none, ${summary.engineErrors} commercial engine errors, ${unrowedP1.length} P0/P1 finding(s) without a row`);
