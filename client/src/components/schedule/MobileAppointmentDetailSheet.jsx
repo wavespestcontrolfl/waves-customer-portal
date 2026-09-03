@@ -22,6 +22,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { TIMEZONE } from '../../lib/timezone';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
+import CancelFeeNotice from './CancelFeeNotice';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
@@ -848,6 +849,7 @@ export default function MobileAppointmentDetailSheet({
                       Keep appointment
                     </button>
                   </div>
+                  <CancelFeeNotice serviceId={service.id} />
                 </div>
               )}
             </>

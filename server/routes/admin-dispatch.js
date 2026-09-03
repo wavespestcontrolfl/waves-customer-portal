@@ -3456,6 +3456,10 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
       held: apptPreview.secured === true,
       feeApplies: apptPreview.feeApplies === true,
       ...(apptPreview.feeAmount != null ? { feeAmount: apptPreview.feeAmount } : {}),
+      ...(apptPreview.unresolved ? { unresolved: true } : {}),
+      // Operator-facing rule (code + sentence): will the card be charged, and
+      // which rule decides it — rendered at the foot of the cancel card.
+      rule: apptPreview.rule,
     });
   } catch (err) { next(err); }
 });
