@@ -43,6 +43,10 @@ function makeTrx(state) {
       first: jest.fn(async () => {
         if (table === 'customers') {
           state.customerReadLocked = chain._forUpdate;
+          // Multi-profile states key customers by id; single-profile states
+          // answer the one customer whatever the id.
+          const wantedId = chain._where?.id;
+          if (wantedId && state.customersById) return state.customersById[wantedId] || null;
           return state.customer;
         }
         if (table === 'referral_promoters' || table === 'referral_promoters as rp') {
@@ -195,8 +199,11 @@ test('the promoter lookup takes FOR UPDATE — concurrent legacy repairs seriali
 describe('resolvePromoter — enroll-or-resolve the household promoter (the one path every caller uses)', () => {
   // cust-2 is a multi-property sibling: cust-1's promoter already owns the
   // household phone under the same account.
+  const owner = { id: 'cust-1', account_id: 'acct-1', phone: '+15555550100', email: 'x@example.com', first_name: 'Casey', last_name: 'Placeholder', referral_code: 'WAVES-HOUSE01' };
+  const sibling = { id: 'cust-2', account_id: 'acct-1', phone: '+15555550100', email: 'y@example.com', first_name: 'Sam', last_name: 'Placeholder', referral_code: null };
   const siblingState = (over = {}) => freshState({
-    customer: { id: 'cust-2', account_id: 'acct-1', phone: '+15555550100', email: 'y@example.com', first_name: 'Sam', last_name: 'Placeholder', referral_code: null },
+    customer: sibling,
+    customersById: { 'cust-1': owner, 'cust-2': sibling },
     promoter: { id: 'promo-house', customer_id: 'cust-1', customer_phone: '+15555550100', referral_code: 'WAVES-HOUSE01', referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-HOUSE01' },
     promoterAccountId: 'acct-1',
     ...over,
@@ -212,14 +219,36 @@ describe('resolvePromoter — enroll-or-resolve the household promoter (the one 
     expect(state.phoneFallbacks).toHaveLength(0);
   });
 
-  test('a sibling whose phone already backs a promoter resolves the household promoter read-only, scoped to the account', async () => {
+  test('a sibling whose phone already backs a promoter resolves the household promoter, scoped to the account — the owner row is handed back untouched', async () => {
     const state = siblingState();
     primeDb(state);
     const out = await engine.resolvePromoter('cust-2', { database: makeTrx(state) });
     expect(out.promoter.id).toBe('promo-house');
+    expect(out.promoter.referral_code).toBe('WAVES-HOUSE01');
     expect(out.household).toBe(true);
     expect(state.inserts).toHaveLength(0); // the insert lost to the unique phone
+    // The household read is read-only and account-scoped; the owner's row is
+    // then handed back through its own enrollment — nothing to repair, so it
+    // is not rewritten. (The sibling's pre-insert customers.referral_code
+    // write is rolled back with the failed transaction in Postgres; the fake
+    // keeps it, so it is not asserted on here.)
     expect(state.phoneFallbacks).toEqual([{ phone: '+15555550100', account: 'acct-1', locked: false }]);
+    expect(state.updates.filter((u) => u.table === 'referral_promoters')).toHaveLength(0);
+  });
+
+  test('a legacy household promoter with no code/link is repaired before the sibling gets it (GH codex #3850 r1 P2)', async () => {
+    const state = siblingState({
+      customersById: { 'cust-1': { ...owner, referral_code: null }, 'cust-2': sibling },
+      promoter: { id: 'promo-house', customer_id: 'cust-1', customer_phone: '+15555550100', referral_code: null, referral_link: null },
+    });
+    primeDb(state);
+    const out = await engine.resolvePromoter('cust-2', { database: makeTrx(state) });
+    expect(out.promoter.id).toBe('promo-house');
+    expect(out.promoter.referral_code).toMatch(/^WAVES-/);
+    expect(out.promoter.referral_link).toContain(out.promoter.referral_code);
+    const repaired = state.updates.find((u) => u.table === 'referral_promoters');
+    expect(repaired.values.referral_code).toBe(out.promoter.referral_code);
+    expect(state.inserts).toHaveLength(0);
   });
 
   test('no account-scoped match → the 23505 rethrows (never a guessed attribution)', async () => {
@@ -246,7 +275,8 @@ describe('resolvePromoter — enroll-or-resolve the household promoter (the one 
     const settings = { program_active: true, base_url: 'https://portal.wavespestcontrol.com/r/' };
     const out = await engine.resolvePromoter('cust-2', { conn, settings });
     expect(out.promoter.id).toBe('promo-house');
-    expect(conn.transaction).toHaveBeenCalledTimes(1);
+    // Two savepoints: the sibling's attempt, then the owner's enrollment.
+    expect(conn.transaction).toHaveBeenCalledTimes(2);
     expect(db.transaction).not.toHaveBeenCalled(); // never a second pool transaction
     expect(db).not.toHaveBeenCalledWith('referral_program_settings'); // preset settings, no second read
     expect(conn).toHaveBeenCalledWith('customers');

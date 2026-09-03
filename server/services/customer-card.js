@@ -58,15 +58,19 @@ function memberSinceYearET(customer = {}) {
 /**
  * Share/referral destination for a customer — shared by the card payload and
  * the Wallet pass so the two surfaces can't drift (Codex P2 #2592).
- * Attribution order: promoter row → rebuild from customers.referral_code →
- * only then the generic portal refer tab. Never the personal card token.
+ * Attribution order: own promoter row → the household promoter a
+ * multi-property sibling shares (account-scoped, referral-engine.
+ * findHouseholdPromoter — the same row the Refer tab resolves for it) →
+ * rebuild from customers.referral_code → only then the generic portal refer
+ * tab. Never the personal card token.
  */
 async function referralShareUrl(customer) {
   let referralUrl = null;
   try {
     const promoter = await db('referral_promoters')
       .where({ customer_id: customer.id })
-      .first('referral_link');
+      .first('referral_link')
+      || await require('./referral-engine').findHouseholdPromoter(customer.id);
     if (promoter?.referral_link) referralUrl = promoter.referral_link;
   } catch { /* table optional in older envs */ }
   if (!referralUrl && customer.referral_code) {

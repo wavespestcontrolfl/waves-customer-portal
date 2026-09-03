@@ -318,8 +318,15 @@ async function resolvePromoter(customerId, { conn = null, settings = null, datab
       : enrollPromoter(customerId));
   } catch (err) {
     if (err?.code !== '23505') throw err;
-    const promoter = await findHouseholdPromoter(customerId, dbx);
-    if (!promoter) throw err;
+    const household = await findHouseholdPromoter(customerId, dbx);
+    if (!household) throw err;
+    // Hand back the OWNER's enrollment rather than the raw row: enrollPromoter's
+    // existing-row branch repairs a legacy promoter's missing code/link (the
+    // unification backfill left nullable ones) under the same lock discipline
+    // (GH codex #3850 r1 P2) — the sibling shares whatever the owner shares.
+    const { promoter } = await (conn
+      ? conn.transaction((sp) => enrollPromoter(household.customer_id, { conn: sp, settings }))
+      : enrollPromoter(household.customer_id));
     return { promoter, alreadyEnrolled: true, household: true };
   }
 }
