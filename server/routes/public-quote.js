@@ -1038,7 +1038,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // Two DISTINCT verdicts (pre-push codex P0 r2/r3 + P1):
     //   lotVerifyFlagged — a returned profile whose lot the lookup flagged
     //     verify-first. Only this parks lot-priced services below; an
-    //     ordinary cache miss keeps today's synthetic-lot pricing.
+    //     ordinary cache miss keeps the synthetic-lot fallback for lot-derived
+    //     lawn / tree lines, while every mosquito line (recurring, one-time,
+    //     commercial) reads lotSizeMeasured in the engine and routes to
+    //     review on it (owner ruling 2026-09-03).
     //   The measured VALUE is server-or-confirmed ONLY — the posted
     //     lotSqFt never reaches pricing without lotSizeConfirmed, so a
     //     caller cannot select rodent-bait brackets by attesting a lot.

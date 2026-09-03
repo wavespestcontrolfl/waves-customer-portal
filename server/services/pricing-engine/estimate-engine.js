@@ -1009,6 +1009,11 @@ function generateEstimate(input) {
         modifiers,
         stationCount: services.mosquito.stationCount,
         dunkCount: services.mosquito.dunkCount,
+        // Same caller contract as commercial + one-time mosquito (owner
+        // ruling 2026-09-03: no mosquito quote prices off a guessed lot): a
+        // synthesized lot arrives as lotSizeMeasured:false and routes the
+        // line to review. Undefined = admin / measured lot, unchanged.
+        lotSizeMeasured: input.lotSizeMeasured,
       });
       result.annual = Math.round(result.annual);
       result.monthly = Math.round(result.annual / 12 * 100) / 100;
