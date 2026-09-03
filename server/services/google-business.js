@@ -2111,7 +2111,7 @@ class GoogleBusinessService {
         const body = reconcileFailure
           ? `Review sync for ${loc.name} pulled the GBP feed, but the ${cause}. New reviews are still syncing; REMOVALS will not be detected until the reconcile succeeds.`
           : upsertFailure
-            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored\)/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; the removal reconcile was skipped this run so the failed rows are not misreported as removed. This is a database write error, not a credentials problem — read the error and the code.`
+            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored\)/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; the failed rows were excluded from this run's removal reconcile so they are not misreported as removed (the rest of the location reconciled normally). This is a database write error, not a credentials problem — read the error and the code.`
             : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
         await NotificationService.notifyAdmin(
           'review',
