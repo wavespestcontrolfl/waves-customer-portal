@@ -732,8 +732,8 @@ async function searchAttributionCandidates(options = {}) {
   if (terms) {
     const like = `%${terms}%`;
     const likeLower = `%${terms.toLowerCase()}%`;
-    // A two-token Google display name ("slim berry") rarely equals the
-    // customer record ("John Berry"): the COMPLETE surname alone is also a
+    // A two-token Google display name ("slim northgate") rarely equals the
+    // customer record ("Sam Northgate"): the COMPLETE surname alone is also a
     // hit (owner ruling 2026-09-03) — every whole-word suffix of the name,
     // so "De La Cruz" is found and not just "Cruz" (GH codex r1 P1). The
     // suffixes are de-accented while LOWER(last_name) keeps accents, and no

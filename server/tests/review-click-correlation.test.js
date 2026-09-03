@@ -327,7 +327,7 @@ describe('findConfidentClickMatch', () => {
 
 describe('reviewerSurnames', () => {
   test('every whole-word suffix, lowercased and de-accented; one-token names offer no surname', () => {
-    expect(reviewerSurnames('slim berry')).toEqual(['slim berry', 'berry']);
+    expect(reviewerSurnames('slim northgate')).toEqual(['slim northgate', 'northgate']);
     // A compound surname is matched COMPLETE, never as its final token alone
     // (GH codex r1 P1): "De La Cruz" is a candidate surname, and so is "Cruz".
     expect(reviewerSurnames('Maria De La Cruz')).toEqual(['maria de la cruz', 'de la cruz', 'la cruz', 'cruz']);
@@ -339,48 +339,49 @@ describe('reviewerSurnames', () => {
 });
 
 describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)', () => {
-  // The prod case: John Berry tapped the Aug 18 email link 45s before
-  // "slim berry" posted at the same location; Chris Whitney had tapped a
-  // Bradenton link 39h earlier. Sole-clicker refuses; the surname decides.
-  const REVIEW = { review_created_at: REVIEW_AT, location_id: 'bradenton', reviewer_name: 'slim berry' };
-  const berry = (over = {}) => clickRow({
-    customer_id: 'cust-berry', first_name: 'John', last_name: 'Berry',
+  // Shape (synthetic names): one clicker sharing the reviewer's surname tapped
+  // the email link 45s before the review posted at the same location; an
+  // unrelated clicker had tapped a Bradenton link 39h earlier. Sole-clicker
+  // refuses; the surname decides.
+  const REVIEW = { review_created_at: REVIEW_AT, location_id: 'bradenton', reviewer_name: 'slim northgate' };
+  const northgate = (over = {}) => clickRow({
+    customer_id: 'cust-northgate', first_name: 'Sam', last_name: 'Northgate',
     redirected_at: '2026-08-07T17:59:15.000Z', // 45s before
     ...over,
   });
   const other = (over = {}) => clickRow({
-    customer_id: 'cust-whitney', first_name: 'Chris', last_name: 'Whitney',
+    customer_id: 'cust-riverside', first_name: 'Pat', last_name: 'Riverside',
     redirected_at: '2026-08-06T03:00:00.000Z', // 39h before
     ...over,
   });
 
   test('links the one surname-matching clicker even with a second clicker in the window', async () => {
-    const conn = makeConn({ clickRows: [berry(), other()] });
+    const conn = makeConn({ clickRows: [northgate(), other()] });
     const match = await findConfidentClickMatch(REVIEW, { conn });
-    expect(match).toMatchObject({ customerId: 'cust-berry', clickOffsetLabel: '1m before', rung: 'click_name' });
+    expect(match).toMatchObject({ customerId: 'cust-northgate', clickOffsetLabel: '1m before', rung: 'click_name' });
   });
 
   test('accepts a legacy (pre-migration) pair when the surname corroborates', async () => {
-    const conn = makeConn({ clickRows: [berry({ last_redirected_at: null, last_google_location: null }), other()] });
+    const conn = makeConn({ clickRows: [northgate({ last_redirected_at: null, last_google_location: null }), other()] });
     expect((await findConfidentClickMatch(REVIEW, { conn }))?.rung).toBe('click_name');
   });
 
   test('refuses two same-surname clickers (neither minutes-vs-hours apart) — a human decides', async () => {
-    const conn = makeConn({ clickRows: [berry(), berry({ customer_id: 'cust-berry-2', first_name: 'Blake', redirected_at: '2026-08-07T16:00:00.000Z' })] });
+    const conn = makeConn({ clickRows: [northgate(), northgate({ customer_id: 'cust-northgate-2', first_name: 'Blake', redirected_at: '2026-08-07T16:00:00.000Z' })] });
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
   });
 
   test('refuses when the second same-surname clicker is already linked to another review (raw-window ambiguity, pre-push P1)', async () => {
     const conn = makeConn({
-      clickRows: [berry(), berry({ customer_id: 'cust-berry-2', first_name: 'Blake', redirected_at: '2026-08-07T16:00:00.000Z' })],
-      linkedRows: [{ customer_id: 'cust-berry-2' }],
+      clickRows: [northgate(), northgate({ customer_id: 'cust-northgate-2', first_name: 'Blake', redirected_at: '2026-08-07T16:00:00.000Z' })],
+      linkedRows: [{ customer_id: 'cust-northgate-2' }],
     });
-    expect((await findLikelyReviewers(REVIEW, { conn })).map((c) => c.customerId)).toEqual(['cust-berry']);
+    expect((await findLikelyReviewers(REVIEW, { conn })).map((c) => c.customerId)).toEqual(['cust-northgate']);
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
   });
 
   test('refuses a surname match whose pair is stamped with a DIFFERENT location', async () => {
-    const conn = makeConn({ clickRows: [berry({ google_location: 'parrish', last_google_location: 'parrish' }), other()] });
+    const conn = makeConn({ clickRows: [northgate({ google_location: 'parrish', last_google_location: 'parrish' }), other()] });
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
   });
 
@@ -390,23 +391,23 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     // skipped by the location scan — its existence must still refuse.
     const conn = makeConn({
       clickRows: [
-        berry({ google_location: 'bradenton', last_redirected_at: '2026-08-07T18:05:00.000Z', last_google_location: 'parrish' }),
+        northgate({ google_location: 'bradenton', last_redirected_at: '2026-08-07T18:05:00.000Z', last_google_location: 'parrish' }),
         other(),
       ],
     });
     const list = await findLikelyReviewers(REVIEW, { conn });
-    expect(list.find((c) => c.customerId === 'cust-berry')).toMatchObject({ nameMatch: true, locationConflict: true, pairTrusted: false });
+    expect(list.find((c) => c.customerId === 'cust-northgate')).toMatchObject({ nameMatch: true, locationConflict: true, pairTrusted: false });
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
     // Same first pair with no conflicting stamp (a legacy pair): the
     // surname links.
-    const clean = makeConn({ clickRows: [berry({ google_location: 'bradenton', last_redirected_at: null, last_google_location: null }), other()] });
+    const clean = makeConn({ clickRows: [northgate({ google_location: 'bradenton', last_redirected_at: null, last_google_location: null }), other()] });
     expect((await findConfidentClickMatch(REVIEW, { conn: clean }))?.rung).toBe('click_name');
   });
 
   test('a compound surname matches the COMPLETE last name: "De La Cruz" links when unique, "Cruz" + "De La Cruz" together refuse (GH codex r1 P1)', async () => {
     const review = { ...REVIEW, reviewer_name: 'Maria De La Cruz' };
-    const deLaCruz = berry({ customer_id: 'cust-dlc', first_name: 'Maria', last_name: 'De La Cruz' });
-    const cruz = berry({ customer_id: 'cust-cruz', first_name: 'Ana', last_name: 'Cruz', redirected_at: '2026-08-07T16:00:00.000Z' });
+    const deLaCruz = northgate({ customer_id: 'cust-dlc', first_name: 'Maria', last_name: 'De La Cruz' });
+    const cruz = northgate({ customer_id: 'cust-cruz', first_name: 'Ana', last_name: 'Cruz', redirected_at: '2026-08-07T16:00:00.000Z' });
     // Unique complete-surname clicker among others: links.
     const unique = makeConn({ clickRows: [deLaCruz, other()] });
     expect(await findConfidentClickMatch(review, { conn: unique })).toMatchObject({ customerId: 'cust-dlc', rung: 'click_name' });
@@ -418,8 +419,8 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect(await findConfidentClickMatch(review, { conn: both })).toBeNull();
     // A partial-word tail never matches: "Lacruz" is not a whole-word
     // suffix of "Maria De La Cruz".
-    const partial = makeConn({ clickRows: [berry({ customer_id: 'cust-lacruz', last_name: 'Lacruz', redirected_at: '2026-08-07T16:00:00.000Z' }), other()] });
-    expect((await findLikelyReviewers(review, { conn: partial })).map((c) => [c.customerId, c.nameMatch])).toEqual([['cust-lacruz', false], ['cust-whitney', false]]);
+    const partial = makeConn({ clickRows: [northgate({ customer_id: 'cust-lacruz', last_name: 'Lacruz', redirected_at: '2026-08-07T16:00:00.000Z' }), other()] });
+    expect((await findLikelyReviewers(review, { conn: partial })).map((c) => [c.customerId, c.nameMatch])).toEqual([['cust-lacruz', false], ['cust-riverside', false]]);
     expect(await findConfidentClickMatch(review, { conn: partial })).toBeNull();
   });
 
@@ -430,16 +431,16 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
       { has_left_google_review: true },
       { active: null },
     ]) {
-      const conn = makeConn({ clickRows: [berry(over), other()] });
+      const conn = makeConn({ clickRows: [northgate(over), other()] });
       expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
     }
   });
 
   test('a one-token display name never name-matches; ranks surname matches first in suggestions', async () => {
-    const conn = makeConn({ clickRows: [other({ redirected_at: '2026-08-07T17:58:00.000Z' }), berry()] });
+    const conn = makeConn({ clickRows: [other({ redirected_at: '2026-08-07T17:58:00.000Z' }), northgate()] });
     expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'SunshineGal88' }, { conn })).toBeNull();
     const list = await findLikelyReviewers(REVIEW, { conn });
-    expect(list.map((c) => [c.customerId, c.nameMatch])).toEqual([['cust-berry', true], ['cust-whitney', false]]);
+    expect(list.map((c) => [c.customerId, c.nameMatch])).toEqual([['cust-northgate', true], ['cust-riverside', false]]);
   });
 });
 

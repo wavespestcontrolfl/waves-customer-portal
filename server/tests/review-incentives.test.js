@@ -801,12 +801,12 @@ describe('review incentives', () => {
     const daysAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const conn = createDbMock({
       customers: [
-        { id: 'customer-blake', first_name: 'Blake', last_name: 'Berry', active: true },
-        { id: 'customer-john', first_name: 'John', last_name: 'Berry', active: true },
+        { id: 'customer-blake', first_name: 'Blake', last_name: 'Northgate', active: true },
+        { id: 'customer-sam', first_name: 'Sam', last_name: 'Northgate', active: true },
       ],
       service_records: [{
         id: 'service-1',
-        customer_id: 'customer-john',
+        customer_id: 'customer-sam',
         technician_id: 'tech-1',
         service_date: daysAgo(17).slice(0, 10),
       }],
@@ -814,19 +814,19 @@ describe('review incentives', () => {
       google_reviews: [{
         id: 'google-1',
         customer_id: null,
-        reviewer_name: 'slim berry',
+        reviewer_name: 'slim northgate',
         star_rating: 5,
         review_created_at: daysAgo(10),
         location_id: 'bradenton',
-        google_review_id: 'accounts/1/locations/2/reviews/berry',
+        google_review_id: 'accounts/1/locations/2/reviews/northgate',
       }],
     });
 
     const result = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
     // Blake sorts first alphabetically by first name within the surname; the
-    // recent service moves John ahead.
+    // recent service moves Sam ahead.
     expect(result.candidates.map((c) => [c.id, c.services.length > 0])).toEqual([
-      ['customer-john', true],
+      ['customer-sam', true],
       ['customer-blake', false],
     ]);
     expect(result.likelyReviewers).toEqual([]);
@@ -836,13 +836,13 @@ describe('review incentives', () => {
     conn.__state.rows.google_reviews[0].customer_id = 'customer-blake';
     conn.__state.rows.google_reviews[0].link_source = 'click_auto';
     const pinned = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
-    expect(pinned.candidates.map((c) => c.id)).toEqual(['customer-blake', 'customer-john']);
+    expect(pinned.candidates.map((c) => c.id)).toEqual(['customer-blake', 'customer-sam']);
     // The service ranking happens in SQL before the page is cut: with
     // limit 1 the serviced customer still wins over the alphabetical first.
     conn.__state.rows.google_reviews[0].customer_id = null;
     conn.__state.rows.google_reviews[0].link_source = null;
     const paged = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn, limit: 1 });
-    expect(paged.candidates.map((c) => c.id)).toEqual(['customer-john']);
+    expect(paged.candidates.map((c) => c.id)).toEqual(['customer-sam']);
   });
 
   test('candidate search binds the COMPLETE surname both de-accented and as typed — LOWER(last_name) keeps accents (GH codex r1 P1/P2)', async () => {
