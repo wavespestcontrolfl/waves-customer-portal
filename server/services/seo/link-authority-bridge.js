@@ -82,12 +82,19 @@ const defaultNotify = (title, body, opts) => require('../notification-service').
 
 // A row is AUTHORIZED when it is satisfied, AUTO_*, or OWNER_* with a valid
 // (approved, not invalidated) approval attached — PR 2b writes those; the
-// bridge honours them so an approved placement is never re-parked.
+// bridge honours them so an approved placement is never re-parked. A CONSUMED
+// approval is spent (§3.6b): on a row still unsatisfied (a failed / ambiguous
+// terminal outcome awaits rotation) it authorizes nothing more — the owner
+// approves the retry afresh — while on a satisfied row it is the durable
+// prerequisite it reads as. The Owner queue reads it the same way.
 async function annotateApprovals(trx, rows) {
   const ids = [...new Set(rows.filter((r) => r.approval_id).map((r) => r.approval_id))];
-  const approvals = ids.length ? await trx('seo_link_approvals').whereIn('id', ids).select('id', 'decision', 'invalidated_at') : [];
-  const valid = new Set(approvals.filter((a) => a.decision === 'approved' && !a.invalidated_at).map((a) => a.id));
-  for (const r of rows) r.approved = Boolean(r.approval_id && valid.has(r.approval_id));
+  const approvals = ids.length ? await trx('seo_link_approvals').whereIn('id', ids).select('id', 'decision', 'invalidated_at', 'consumed_at') : [];
+  const byId = new Map(approvals.map((a) => [a.id, a]));
+  for (const r of rows) {
+    const a = r.approval_id ? byId.get(r.approval_id) : null;
+    r.approved = Boolean(a && a.decision === 'approved' && !a.invalidated_at && (!a.consumed_at || r.satisfied_at));
+  }
   return rows;
 }
 const authorized = (r) => Boolean(r.satisfied_at) || isAuto(r.level) || (isOwner(r.level) && r.approved === true);

@@ -264,6 +264,33 @@ describe('outreach-lane paths', () => {
     expect(domainState(db)).toBe('acquiring'); // the conversation is in flight, not owner-held
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
   });
+  test('a CONSUMED approval on a still-unsatisfied row is spent: the nightly re-parks the placement instead of releasing it again', async () => {
+    const { db, p } = scenario({ make: paidPath });
+    await run(db);
+    const fee = rows(db).find((x) => x.dimension === 'payment');
+    const approval = { id: uid(), prospect_id: fee.prospect_id, path_id: p.id, decision: 'approved', authority: 'OWNER_PAYMENT', dimension: 'payment', instance_key: '-:1', invalidated_at: null, consumed_at: null };
+    db._tables.seo_link_approvals.push(approval);
+    fee.approval_id = approval.id;
+    for (const r of rows(db).filter((x) => x.prospect_id === fee.prospect_id && x.dimension !== 'payment')) Object.assign(r, { satisfied_at: NOW, satisfied_reason: 'human_step_done' });
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 1000);
+    await run(db, { now: new Date(NOW.getTime() + 60000) });
+    const placement = placements(db).find((x) => x.id === fee.prospect_id);
+    expect(placement.status).toBe('prospect'); // released under the live approval
+    // the runner charged and reported a failed placement: the approval is consumed, the row stays unsatisfied
+    approval.consumed_at = new Date(NOW.getTime() + 120000);
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 130000);
+    const again = await run(db, { now: new Date(NOW.getTime() + 180000) });
+    expect(again.released).toBe(0);
+    expect(placements(db).find((x) => x.id === fee.prospect_id).status).toBe('awaiting_owner'); // parked for a fresh approval
+    expect(approval.invalidated_at).toBeNull(); // spent, not invalidated — the audit trail keeps it
+    // …and on a SATISFIED row the consumed approval is the durable prerequisite: nothing re-parks
+    Object.assign(fee, { satisfied_at: new Date(NOW.getTime() + 200000), satisfied_reason: 'charged' });
+    placements(db).find((x) => x.id === fee.prospect_id).status = 'prospect';
+    db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 210000);
+    const settled = await run(db, { now: new Date(NOW.getTime() + 240000) });
+    expect(settled.parked).toBe(0);
+  });
+
   test('an approved send with the fee DEFERRED to checkout reads ready_to_acquire — the deferred payment row holds nothing back', async () => {
     const { db, p } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
     await run(db);
