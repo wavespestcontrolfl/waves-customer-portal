@@ -1847,6 +1847,15 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 - If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
 - You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`;
 
+// The Anthropic API rejects a tool definition carrying keys it does not
+// know (`400 tools.N.custom._contracts: Extra inputs are not permitted`).
+// Tool modules may carry underscore-prefixed metadata for the contract gate
+// (`_contracts`, `_sideEffects`, `_sonnetBacked` — read by
+// server/contract-tests/registry.js); that metadata never leaves the process.
+function apiToolDefinition(tool) {
+  return Object.fromEntries(Object.entries(tool).filter(([key]) => !key.startsWith('_')));
+}
+
 function getToolsForContext(context, isAdmin = false) {
   // Tech portal stays isolated — no base, no infra, tech-tools only.
   if (context === 'tech') {
@@ -2161,7 +2170,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     } : null;
 
     // Select tools based on context and role (email tools are admin-only)
-    const tools = getToolsForContext(context, req.techRole === 'admin');
+    const tools = getToolsForContext(context, req.techRole === 'admin').map(apiToolDefinition);
 
     // For tech context, use a simpler model to reduce latency in the field
     const model = context === 'tech' ? (process.env.INTELLIGENCE_BAR_TECH_MODEL || MODELS.FLAGSHIP) : MODEL;
