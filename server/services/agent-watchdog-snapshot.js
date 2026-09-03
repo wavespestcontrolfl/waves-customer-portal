@@ -36,7 +36,6 @@
 const db = require('../models/db');
 const config = require('../config');
 const logger = require('./logger');
-const { gateEnvValue } = require('../config/feature-gates');
 const { isDatabaseReady } = require('../utils/db-health');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
 const { getOpsQueue } = require('./ops-queue');
