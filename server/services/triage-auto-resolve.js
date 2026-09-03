@@ -62,6 +62,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { etCalendarDayOf } = require('../utils/datetime-et');
+const { v2PrimaryLabelForCategory } = require('../utils/lead-service-interest');
 
 const SPAM_AGE_DAYS = 7;
 const ADVISORY_AGE_DAYS = 30;
@@ -158,6 +159,8 @@ const LIVE_BOOKING_STATUSES = new Set(['pending', 'confirmed', 'en_route', 'on_s
 const HUMAN_CONTACT_SOURCES = new Set(['admin', 'portal']);
 // Category words too generic to prove a visit is for the requested service.
 const SERVICE_STOPWORDS = new Set(['control', 'care', 'service', 'services', 'treatment', 'general', 'and', 'the', 'of']);
+// The meaningful service words of a text.
+const serviceTokens = (text) => [...new Set(String(text || '').toLowerCase().split(/[^a-z]+/).filter((t) => t && !SERVICE_STOPWORDS.has(t)))];
 
 function parseMaybeJson(raw) {
   if (raw == null) return null;
@@ -340,32 +343,39 @@ function bookingAtRequestedAddress(item, visit, places) {
 }
 
 // The requested service categories the CARD snapshotted at filing time
-// (call-routing-gates writes scheduling_window.requested_service_categories),
-// as match tokens — ONE token list PER CATEGORY, because a multi-service ask
-// (pest + lawn) is fulfilled only when bookings cover every category. Never
-// the call's ai_extraction_enriched: that column is a rolling snapshot a
-// force-reprocess overwrites while the open card keeps its original ask. A
-// card filed before the snapshot existed yields no categories, so its
-// association arm stays closed.
+// (call-routing-gates writes scheduling_window.requested_service_categories)
+// as match requirements — ONE requirement PER CATEGORY, because a
+// multi-service ask (pest + lawn) is fulfilled only when bookings cover every
+// category. A requirement is the token lists that each answer it: the
+// category enum's own words (the engine's estimate lines carry the enum as
+// their service key) and, when the enum stands for ONE catalog service, that
+// service's words through v2PrimaryLabelForCategory — the identity map the
+// compose path already reads, never a local copy: the catalog books
+// stinging_insect as "Bee / Wasp Nest Removal" under the specialty category,
+// so neither a booking's service_type nor its snapshot says "stinging" or
+// "insect" (codex r22 P2). Never the call's ai_extraction_enriched: that
+// column is a rolling snapshot a force-reprocess overwrites while the open
+// card keeps its original ask. A card filed before the snapshot existed
+// yields no categories, so its association arm stays closed.
 function requestedServiceTokens(item) {
   const ask = requestAsk(item);
   const cats = ask?.requested_service_categories;
   if (!Array.isArray(cats)) return [];
-  const tokensOf = (text) => [...new Set(String(text || '').toLowerCase().split(/[^a-z]+/).filter((t) => t && !SERVICE_STOPWORDS.has(t)))];
   const out = [];
   for (const c of cats) {
-    const tokens = tokensOf(c);
-    if (tokens.length) out.push(tokens);
+    const answers = [c, v2PrimaryLabelForCategory(c)].map(serviceTokens).filter((tokens) => tokens.length);
+    if (answers.length) out.push(answers);
   }
   // The specific service the caller named narrows the PRIMARY category —
   // one requirement, not two: a flea treatment filed under pest_general is
   // not answered by a generic quarterly pest booking, and a second
   // pest_general the model listed as a separate request stays its own
-  // requirement needing its own booking (codex r17 P1).
-  const specific = tokensOf(ask?.requested_specific_service);
+  // requirement needing its own booking (codex r17 P1). It narrows every
+  // answer alike.
+  const specific = serviceTokens(ask?.requested_specific_service);
   if (specific.length) {
-    if (out.length) out[0] = [...new Set([...out[0], ...specific])];
-    else out.push(specific);
+    if (out.length) out[0] = out[0].map((tokens) => [...new Set([...tokens, ...specific])]);
+    else out.push([specific]);
   }
   return out;
 }
@@ -389,15 +399,14 @@ function coveredByDistinct(requirements, records, wordsOf) {
   return requirements.length > 0 && place(0);
 }
 
-// A booking answers a requested category only when EVERY meaningful token
-// of the category appears in the booking's words (its service_type plus the
-// canonical category snapshot admin-schedule stamps): "Subterranean
-// Termite" is not drywood_termite, "Rodent Control" is not
-// rodent_exclusion.
-function serviceTypeMatches(serviceText, requestedTokens) {
-  if (!requestedTokens.length) return false;
+// A record answers a requirement only when EVERY token of one of its
+// answers appears in the record's words (a booking's service_type plus the
+// canonical category snapshot admin-schedule stamps; an estimate line's
+// names and families): "Subterranean Termite" is not drywood_termite,
+// "Rodent Control" is not rodent_exclusion.
+function serviceTypeMatches(serviceText, requirement) {
   const words = new Set(String(serviceText || '').toLowerCase().split(/[^a-z]+/).filter(Boolean));
-  return requestedTokens.every((t) => words.has(t));
+  return requirement.some((tokens) => tokens.length > 0 && tokens.every((t) => words.has(t)));
 }
 
 // The ET wall clock ('YYYY-MM-DDTHH:MM') the call CONFIRMED, from the
@@ -1105,14 +1114,16 @@ function lineCollector() {
 
 // An authored proposal's lines from the CANONICAL normalizer (the shape
 // the PDF, billing and the pricing audit read): programs → recurring,
-// building line items per their frequency, corrective work → one-time.
+// building line items per their frequency (a line's service is its
+// description, the normalizer's one name field; the building it sits under
+// is a place, not a service — codex r22 P2), corrective work → one-time.
 function proposalLines(row, add) {
   const proposal = require('./estimate-proposal').normalizeProposal(row);
   if (proposal.enabled !== true) return;
   for (const program of proposal.programs || []) add([program.label, program.service], RECURRING, program.annual > 0);
   for (const building of proposal.buildings || []) {
     for (const item of building.lineItems || []) {
-      add([item.label, item.service, building.name], item.frequency === 'one_time' ? ONE_TIME : RECURRING, item.amount > 0);
+      add([item.description], item.frequency === 'one_time' ? ONE_TIME : RECURRING, item.amount > 0);
     }
   }
   for (const work of proposal.correctiveWork || []) add([work.label, work.service], ONE_TIME, work.amount > 0);

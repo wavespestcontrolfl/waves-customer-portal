@@ -507,8 +507,9 @@ describe('evidence helpers', () => {
 
   test('requested service tokens ignore generic words; service types match on a specific token', () => {
     const categories = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_control', 'mosquito_control', 'control'] } } }));
-    // One token list per category (a stopword-only category yields none).
-    expect(categories).toEqual([['pest'], ['mosquito']]);
+    // One requirement per category, each the token lists that answer it
+    // (a stopword-only category yields none).
+    expect(categories).toEqual([[['pest']], [['mosquito']]]);
     const [pest, mosquito] = categories;
     // The call's rolling extraction is never the source (a reprocess rewrites it).
     expect(requestedServiceTokens(item({ payload: { scheduling_window: {} }, call_extraction: { service_request: { primary_service_category: 'pest_control' } } }))).toEqual([]);
@@ -524,14 +525,26 @@ describe('evidence helpers', () => {
     const [exclusion] = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['rodent_exclusion'] } } }));
     expect(serviceTypeMatches('Rodent Control', exclusion)).toBe(false);
     expect(serviceTypeMatches('Rodent Control rodent_exclusion', exclusion)).toBe(true);
+    // A category the catalog books under ONE service is answered by that
+    // service's words too (v2PrimaryLabelForCategory): stinging_insect is
+    // "Bee / Wasp Nest Removal" under specialty on a booking, while the
+    // engine's own estimate line carries the enum (codex r22 P2).
+    const [stinging] = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['stinging_insect'] } } }));
+    expect(stinging).toEqual([['stinging', 'insect'], ['bee', 'wasp', 'nest', 'removal']]);
+    expect(serviceTypeMatches('Bee / Wasp Nest Removal specialty', stinging)).toBe(true);
+    expect(serviceTypeMatches('Stinging Insect — Paper Wasp', stinging)).toBe(true);
+    expect(serviceTypeMatches('Quarterly Pest Control specialty', stinging)).toBe(false);
+    expect(serviceTypeMatches('Wasp Nest Removal', stinging)).toBe(false);
     // The specific service the caller named narrows the PRIMARY category
     // into one requirement: a flea treatment filed under pest_general is
     // not a generic pest booking, and it is one ask, not two.
     const flea = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_general'], requested_specific_service: 'Flea Treatment' } } }));
-    expect(flea).toEqual([['pest', 'flea']]);
-    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: [], requested_specific_service: 'Flea Treatment' } } }))).toEqual([['flea']]);
+    expect(flea).toEqual([[['pest', 'flea']]]);
+    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: [], requested_specific_service: 'Flea Treatment' } } }))).toEqual([[['flea']]]);
+    // ...and it narrows every answer of the primary alike.
+    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['stinging_insect'], requested_specific_service: 'Yellow Jacket' } } }))).toEqual([[['stinging', 'insect', 'yellow', 'jacket'], ['bee', 'wasp', 'nest', 'removal', 'yellow', 'jacket']]]);
     // quote_promised cards carry the same ask under quote_scope.
-    expect(requestedServiceTokens(item({ payload: { quote_scope: { requested_service_categories: ['lawn_care'] } } }))).toEqual([['lawn']]);
+    expect(requestedServiceTokens(item({ payload: { quote_scope: { requested_service_categories: ['lawn_care'] } } }))).toEqual([[['lawn']]]);
     expect(flea.every((tokens) => serviceTypeMatches('Quarterly Pest Control pest_control', tokens))).toBe(false);
     expect(flea.every((tokens) => serviceTypeMatches('Flea Treatment pest_control', tokens))).toBe(true);
   });
@@ -607,6 +620,17 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(card({ requested_service_categories: ['pest_general'] }), authored)).toBe(true);
     expect(estimateCoversAsk(card({ requested_service_categories: ['lawn_care'], requested_specific_service: null }), authored)).toBe(false);
     expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['lawn_care'] }), authored)).toBe(false);
+    // A legacy authored proposal itemizes per BUILDING: a line's service is
+    // its description (the canonical normalizer's one name field) and the
+    // building it sits under is a place, not a service (codex r22 P2).
+    const towers = est({ estimate_data: { proposal: { enabled: true, buildings: [{ name: 'Lawn House', lineItems: [{ description: 'Monthly pest', unitPrice: 200, frequency: 'monthly' }] }] } } });
+    expect(estimateCoversAsk(card(plan), towers)).toBe(true);
+    expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['lawn_care'] }), towers)).toBe(false);
+    // The engine's stinging line carries the category enum as its service
+    // key; the enum's own words answer it (codex r22 P2).
+    const wasps = card({ requested_service_categories: ['stinging_insect'], requested_specific_service: null });
+    expect(estimateCoversAsk(wasps, est({ estimate_data: { result: { oneTime: { items: [{ service: 'stinging_insect', name: 'Stinging Insect — Paper Wasp', price: 150 }] } } } }))).toBe(true);
+    expect(estimateCoversAsk(wasps, est({ estimate_data: { result: { oneTime: { items: [{ service: 'One-Time Pest Treatment', price: 120 }] } } } }))).toBe(false);
     // An annual-only recurring row (a termite bond: annual set, mo zero) is
     // a priced recurring line (codex r21 P2).
     const bond = est({ estimate_data: { result: { recurring: { services: [{ name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5', mo: 0, annual: 300 }, { name: 'Pest Control', mo: 40 }] } } } });
@@ -722,6 +746,13 @@ describe('evidence helpers', () => {
     expect(bookingCoversRequest(two, [genericVisit], ctx)).toBe(false);
     expect(bookingCoversRequest(two, [fleaVisit, genericVisit], ctx)).toBe(true);
     expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30', requested_service_categories: ['pest_general'], requested_specific_service: 'Flea Treatment' }), [fleaVisit], ctx)).toBe(true);
+    // A category the catalog books under another name and category: the
+    // "Bee / Wasp Nest Removal" row stamped specialty answers a
+    // stinging_insect ask; a pest booking does not (codex r22 P2).
+    const waspVisit = booking({ id: 'b3', service_type: 'Bee / Wasp Nest Removal', service_category_snapshot: 'specialty' });
+    const stingingAsk = card({ requested_date_range_start: '2026-07-30', requested_service_categories: ['stinging_insect'] });
+    expect(bookingCoversRequest(stingingAsk, [waspVisit], ctx)).toBe(true);
+    expect(bookingCoversRequest(stingingAsk, [genericVisit], ctx)).toBe(false);
     const infestation = card({ requested_date_range_start: '2026-07-30', requested_service_intent: 'active_infestation_treatment' });
     expect(bookingCoversRequest(infestation, [booking({ is_recurring: true })], ctx)).toBe(true);
     expect(bookingCoversRequest(infestation, [booking({})], ctx)).toBe(true);
