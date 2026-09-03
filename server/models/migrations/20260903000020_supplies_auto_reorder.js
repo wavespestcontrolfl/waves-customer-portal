@@ -192,7 +192,7 @@ exports.up = async function up(knex) {
       unit: 'each',
       stock_before: 0,
       stock_after: onHand,
-      metadata: { source: 'seed_migration', reason: 'Opening count — Gemplers order #666365 (2026-07-28) less ~10 used, owner ruling 2026-09-03' },
+      metadata: { source: 'seed_migration', reason: 'Opening count from the prior Gemplers purchase (2026-07-28) less ~10 used, owner ruling 2026-09-03' },
     };
   }
 };
