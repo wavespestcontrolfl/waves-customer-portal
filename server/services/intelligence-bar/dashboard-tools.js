@@ -172,6 +172,17 @@ period can be: "this_week", "last_week", "this_month", "last_month", "this_quart
     },
   },
   {
+    name: 'get_report_engagement',
+    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Use for "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?". Defaults to the last 30 days.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        date_from: { type: 'string', description: 'YYYY-MM-DD (ET). Default: 30 days ago' },
+        date_to: { type: 'string', description: 'YYYY-MM-DD (ET). Default: today' },
+      },
+    },
+  },
+  {
     name: 'get_customer_acquisition',
     description: `Analyze customer acquisition: new customers over time, lead sources, conversion from lead to active. Use for "where are new customers coming from?" or "which lead source converts best?"`,
     input_schema: {
@@ -223,6 +234,7 @@ async function executeDashboardTool(toolName, input) {
       case 'get_estimate_funnel': return await getEstimateFunnel(input);
       case 'get_churn_analysis': return await getChurnAnalysis(input);
       case 'get_service_mix': return await getServiceMix(input);
+      case 'get_report_engagement': return await getReportEngagement(input);
       case 'get_customer_acquisition': return await getCustomerAcquisition(input);
       case 'get_outstanding_balances': return await getOutstandingBalances(input);
       case 'get_payer_ar_aging': return await getPayerArAging();
@@ -870,6 +882,121 @@ async function getServiceMix(input) {
       revenue: parseFloat(m.revenue || 0),
       unique_customers: parseInt(m.unique_customers),
     })),
+  };
+}
+
+
+// Report engagement — the read path for the service-report telemetry that
+// completion + the public report page already write (service_report_events,
+// service_report_deliveries.sent_at, service_records.report_viewed_at).
+// Cohort = records whose report was FIRST sent inside the window (email via
+// the delivery queue, or the completion SMS/MMS event). Opens are the
+// first-view stamp; in-report actions are distinct records with the event.
+const REPORT_ACTION_EVENTS = [
+  'pdf_downloaded',
+  'photo_opened',
+  'map_interacted',
+  'reentry_timer_viewed',
+  'review_request_clicked',
+  'referral_cta_clicked',
+  'cross_sell_requested',
+  'followup_requested',
+  'report_question_asked',
+];
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+async function getReportEngagement(input = {}) {
+  const now = new Date();
+  const from = input.date_from || etDateString(addETDays(now, -30));
+  const to = input.date_to || etDateString(now);
+  if (!ISO_DATE_RE.test(from) || !ISO_DATE_RE.test(to)) {
+    return { error: 'date_from and date_to must be YYYY-MM-DD' };
+  }
+  // ET wall-clock day bounds as real Dates — the send timestamps are
+  // timestamptz, so a naive string here would shift the window 4-5 hours.
+  const fromTs = parseETDateTime(`${from}T00:00`);
+  const toTs = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${to}T12:00`), 1))}T00:00`);
+  if (!(fromTs < toTs)) return { error: 'date_from must be on or before date_to' };
+
+  const actionFlags = REPORT_ACTION_EVENTS
+    .map((name) => `BOOL_OR(sre.event_name = '${name}') AS ${name}`)
+    .join(',\n           ');
+  const actionCounts = REPORT_ACTION_EVENTS
+    .map((name) => `(COUNT(*) FILTER (WHERE act.${name}))::int AS ${name}`)
+    .join(',\n           ');
+  const actionList = REPORT_ACTION_EVENTS.map((name) => `'${name}'`).join(', ');
+
+  const { rows } = await db.raw(`
+    WITH sends AS (
+      SELECT service_record_id, MIN(sent_at) AS first_sent_at
+      FROM (
+        SELECT service_record_id, sent_at
+        FROM service_report_deliveries
+        WHERE status = 'sent' AND sent_at IS NOT NULL
+        UNION ALL
+        SELECT service_record_id, occurred_at AS sent_at
+        FROM service_report_events
+        WHERE event_name IN ('sms_sent', 'mms_sent')
+      ) snd
+      GROUP BY service_record_id
+    ),
+    cohort AS (
+      SELECT srec.id,
+             COALESCE(NULLIF(srec.service_line, ''), 'unknown') AS service_line,
+             snd.first_sent_at,
+             srec.report_viewed_at
+      FROM sends snd
+      JOIN service_records srec ON srec.id = snd.service_record_id
+      WHERE snd.first_sent_at >= ? AND snd.first_sent_at < ?
+    ),
+    acts AS (
+      SELECT sre.service_record_id,
+           ${actionFlags}
+      FROM service_report_events sre
+      JOIN cohort rpt ON rpt.id = sre.service_record_id
+      WHERE sre.event_name IN (${actionList})
+      GROUP BY sre.service_record_id
+    )
+    SELECT rpt.service_line,
+           GROUPING(rpt.service_line) AS is_total,
+           COUNT(*)::int AS sent,
+           (COUNT(*) FILTER (WHERE rpt.report_viewed_at IS NOT NULL))::int AS opened,
+           percentile_cont(0.5) WITHIN GROUP (
+             ORDER BY EXTRACT(EPOCH FROM (rpt.report_viewed_at - rpt.first_sent_at)) / 60.0
+           ) FILTER (WHERE rpt.report_viewed_at IS NOT NULL AND rpt.report_viewed_at >= rpt.first_sent_at) AS median_minutes_to_open,
+           ${actionCounts}
+    FROM cohort rpt
+    LEFT JOIN acts act ON act.service_record_id = rpt.id
+    GROUP BY ROLLUP (rpt.service_line)
+    ORDER BY is_total DESC, sent DESC
+  `, [fromTs, toTs]);
+
+  const shape = (row) => {
+    const sent = parseInt(row.sent, 10) || 0;
+    const opened = parseInt(row.opened, 10) || 0;
+    const out = {
+      sent,
+      opened,
+      open_rate_pct: sent > 0 ? Math.round(opened / sent * 100) : 0,
+      median_minutes_to_open: row.median_minutes_to_open == null ? null : Math.round(parseFloat(row.median_minutes_to_open)),
+    };
+    for (const name of REPORT_ACTION_EVENTS) out[name] = parseInt(row[name], 10) || 0;
+    return out;
+  };
+  const totalRow = rows.find((r) => Number(r.is_total) === 1);
+  const byLine = rows.filter((r) => Number(r.is_total) !== 1);
+
+  return {
+    period: { from, to },
+    cohort: 'service reports first sent to the customer (report email or completion SMS/MMS) in the period',
+    total: totalRow ? shape(totalRow) : shape({ sent: 0, opened: 0 }),
+    by_service_line: byLine.map((r) => ({ service_line: r.service_line, ...shape(r) })),
+    notes: [
+      'opened = the report page was viewed at least once by the customer (first-view stamp; staff/static views do not count)',
+      'median_minutes_to_open counts opens that happened after the first send',
+      'action counts are distinct reports with at least one such event, any time after the send',
+      "service_line 'unknown' = records completed before the line was stamped on the record",
+    ],
   };
 }
 
