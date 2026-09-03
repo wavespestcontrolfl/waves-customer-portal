@@ -320,8 +320,10 @@ describe('lead-estimate link service', () => {
       },
     });
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2d', customerId: 'customer-1', database });
-    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
-    expect(database._updates).toEqual([]);
+    // The hop cannot land, so the acceptance credits the run's own row.
+    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig3', expect.anything());
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup3', expect.objectContaining({ customerId: 'customer-1' }));
+    expect(database._updates).toEqual([{ id: 'lead-dup3', patch: expect.objectContaining({ estimate_id: 'estimate-2d' }) }]);
   });
 
   test('an indirectly resolved original whose contact does not match the estimate is never converted', async () => {
@@ -334,10 +336,11 @@ describe('lead-estimate link service', () => {
       },
     });
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2e', customerId: 'customer-1', database });
-    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig4', expect.anything());
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup4', expect.anything());
   });
 
-  test('an indirectly resolved original already FK-linked to a DIFFERENT estimate is never converted (the win would credit the wrong offer)', async () => {
+  test('an indirectly resolved original already FK-linked to a DIFFERENT estimate is never converted (the win would credit the wrong offer) — the named row takes the win instead', async () => {
     const database = makeAcceptDb({
       linked: [],
       estimate: { id: 'estimate-2f', estimate_data: { lead_id: 'lead-dup5' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
@@ -347,19 +350,20 @@ describe('lead-estimate link service', () => {
       },
     });
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2f', customerId: 'customer-1', database });
-    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
-    expect(database._updates).toEqual([]);
+    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig5', expect.anything());
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1' }));
+    expect(database._updates).toEqual([{ id: 'lead-dup5', patch: expect.objectContaining({ estimate_id: 'estimate-2f' }) }]);
   });
 
-  test('a duplicate lead whose original is gone stays closed (no conversion, no fallback sweep)', async () => {
+  test('a duplicate lead whose original is gone takes the win itself (no contact-fallback sweep)', async () => {
     const database = makeAcceptDb({
       linked: [],
       estimate: { id: 'estimate-2c', estimate_data: { lead_id: 'lead-dup2' } },
       leadsById: { 'lead-dup2': { id: 'lead-dup2', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-missing' } } },
     });
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2c', customerId: 'customer-1', database });
-    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
-    expect(database._updates).toEqual([]);
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup2', expect.anything());
+    expect(database._updates).toEqual([{ id: 'lead-dup2', patch: expect.objectContaining({ estimate_id: 'estimate-2c' }) }]);
   });
 
   test('standalone estimate: rescues a single unlinked lead by contact and stamps the link', async () => {

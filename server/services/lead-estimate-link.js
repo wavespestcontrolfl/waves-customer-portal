@@ -623,7 +623,16 @@ async function markLinkedLeadEstimateAccepted({
         && (!lead.customer_id || !customerId || lead.customer_id === customerId)
         && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId))
       ));
-    if (eligible) await convert(lead);
+    if (eligible) { await convert(lead); return; }
+    // The hop could not land (original gone, another customer's, contact
+    // mismatch, or already FK-linked to a different estimate). An accepted
+    // estimate must still credit SOME lead (pre-push P1 on #3834): fall back
+    // to the run's own named row — its 'duplicate' status was a dedupe label,
+    // not a lost/won decision, and the acceptance is stronger evidence. It
+    // converts with the accepted estimate stamped, so nothing on the
+    // original is overwritten and the office still sees one open lead to
+    // merge. A named row closed by any OTHER status stays closed.
+    if (named && named.status === 'duplicate' && !named.deleted_at) await convert(named);
     return;
   }
 
