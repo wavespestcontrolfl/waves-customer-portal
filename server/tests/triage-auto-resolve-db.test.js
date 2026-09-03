@@ -198,6 +198,25 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     expect(hold.last_error).toBe('email_denied_await_correction');
   });
 
+  test('the resolution_source migration backfills the cards the sweep closed before the column existed', async () => {
+    const [call] = await db('call_log').insert({
+      twilio_call_sid: SID.replace(/e2$/, 'b1'), direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
+      status: 'completed', duration_seconds: 120, processing_status: 'processed', review_status: 'open', created_at: new Date(Date.now() - 3600000),
+    }).returning('id');
+    ids.calls.push(call.id);
+    const row = (over) => ({ call_log_id: call.id, category: 'address_review', severity: 'advisory', reason_code: 'address_unverified', summary: 'fixture', status: 'resolved', resolved_at: new Date(), created_at: new Date(), updated_at: new Date(), payload: '{}', resolution_source: null, ...over });
+    const [sweptResolve] = await db('triage_items').insert(row({ resolution_note: 'Auto-resolved: customer record now has a service address on file.' })).returning('id');
+    const [sweptDismiss] = await db('triage_items').insert(row({ status: 'dismissed', resolution_note: 'Auto-dismissed: spam card aged out.' })).returning('id');
+    const [human] = await db('triage_items').insert(row({ resolution_note: 'Verified by phone.' })).returning('id');
+    const [stillOpen] = await db('triage_items').insert(row({ status: 'open', resolved_at: null, resolution_note: 'Auto-resolved: stale note on an open card.' })).returning('id');
+    await require('../models/migrations/20260903000040_triage_items_resolution_source').up(db);
+    const source = async (id) => (await db('triage_items').where({ id }).first()).resolution_source;
+    expect(await source(sweptResolve.id)).toBe('auto');
+    expect(await source(sweptDismiss.id)).toBe('auto');
+    expect(await source(human.id)).toBeNull();
+    expect(await source(stillOpen.id)).toBeNull();
+  });
+
   test('quote_promised resolves on a call-stamped estimate DELIVERED after the card — not one sent before it, a suppressed send, or another customer\'s estimate', async () => {
     const fresh = await seedQuoteCall(SID.replace(/e2$/, 'q1'), { cardAgeMin: 60, estimateAgeMin: 10 });
     const stale = await seedQuoteCall(SID.replace(/e2$/, 'q2'), { cardAgeMin: 10, estimateAgeMin: 60 });
