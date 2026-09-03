@@ -232,7 +232,7 @@ function lawnCostStack({ track, lawnSqFt, visits, onSiteMinutesOverride = null, 
 }
 
 // MOSQUITO — treatable = lot − footprint − hardscape; anchors at category top edges; 500-sf steps
-function expectMosquito({ homeSqFt, stories = 1, lotSqFt, features = {}, program = 'seasonal9' }) {
+function expectMosquito({ homeSqFt, stories = 1, lotSqFt, features = {}, program = 'seasonal9', stationCount = 0, dunkCount = 0 }) {
   const M = constants.MOSQUITO;
   const footprint = footprintOf(homeSqFt, stories);
   const hardscape = hardscapeOf(lotSqFt, 'single_family', features);
@@ -295,12 +295,16 @@ function expectMosquito({ homeSqFt, stories = 1, lotSqFt, features = {}, program
   pressure = Math.min(pressure, M.pressureCap);
   const perVisit = Math.round(base * pressure);
   const visits = M.tierVisits[program];
-  const annual = perVisit * visits;
+  // Recurring add-ons are ANNUAL charges (station $39/yr, dunk $4/yr), never
+  // per visit; counts round to integers and clamp at 0 (codex r10 P2).
+  const addOnQty = (n) => Math.max(0, Math.round(Number(n) || 0));
+  const annualAddOns = addOnQty(stationCount) * M.addOns.in2CareStation.price + addOnQty(dunkCount) * M.addOns.dunkTablet.price;
+  const annual = perVisit * visits + annualAddOns;
   const monthly = round2(annual / 12);
   // material per visit from the engine's own product assumptions
   const k = Math.max(1, treatable / 1000);
   const materialPerVisit = round2(Math.max(M.productUsage.bifenthrinBaseOz, M.productUsage.bifenthrinOzPer1000 * k) * M.productCosts.bifenthrinOz + M.productUsage.tekkoProOz * M.productCosts.tekkoProOz);
-  return { footprint, hardscape, treatable, category: cat.key, pricingSqFt, base, pressure: round2(pressure), perVisit, visits, annual, monthly, materialPerVisit };
+  return { footprint, hardscape, treatable, category: cat.key, pricingSqFt, base, pressure: round2(pressure), perVisit, visits, annualAddOns, annual, monthly, materialPerVisit };
 }
 
 // RODENT BAIT — footprint bracket, per quarterly visit, ladder extension
@@ -642,6 +646,19 @@ function runMosquitoMatrix() {
       const r = runEngine({ ...BASE, lotSqFt: lot, lawnSqFt: undefined, services: { mosquito: { tier: program } } });
       const li = line(r.result, 'mosquito');
       record(section, `lot ${lot} ${program}`, { lotSqFt: lot, program }, exp.perVisit, li ? li.perVisit : null, { extra: { treatableExpected: exp.treatable, treatableActual: li ? (li.mosquitoTreatableSqFt ?? li.treatableSqFt) : null, category: li ? li.lotCategory : null, annualExpected: exp.annual, annualActual: li ? li.annual : null } });
+    }
+  }
+  // Add-ons: stations and dunks are annual charges folded into `annual` (and
+  // therefore `monthly`), not `perVisit` — so these cases compare the totals
+  // the customer pays, which the perVisit matrix above cannot see (codex r10 P2).
+  for (const c of [{ stationCount: 2 }, { dunkCount: 5 }, { stationCount: 3, dunkCount: 10 }, { stationCount: 1.6 }, { stationCount: -2, dunkCount: 'x' }]) {
+    for (const program of ['seasonal9', 'monthly12']) {
+      const exp = expectMosquito({ homeSqFt: 2000, lotSqFt: 8000, program, ...c });
+      const r = runEngine({ ...BASE, lotSqFt: 8000, lawnSqFt: undefined, services: { mosquito: { tier: program, ...c } } });
+      const li = line(r.result, 'mosquito');
+      const extra = { annualAddOnsExpected: exp.annualAddOns, annualAddOnsActual: li ? li.annualAddOns ?? li.addOns?.annualAddOns ?? null : null, perVisitExpected: exp.perVisit, perVisitActual: li ? li.perVisit : null, stationCountUsed: li ? li.stationCount ?? li.addOns?.stationCount ?? null : null, dunkCountUsed: li ? li.dunkCount ?? li.addOns?.dunkCount ?? null : null, warnings: li ? (li.warnings || []).slice(0, 3) : null, engineError: r.ok ? null : r.error };
+      record(section, `add-ons ${JSON.stringify(c)} ${program} annual`, { lotSqFt: 8000, program, ...c }, exp.annual, li ? li.annual : null, { extra });
+      record(section, `add-ons ${JSON.stringify(c)} ${program} monthly`, { lotSqFt: 8000, program, ...c }, exp.monthly, li ? li.monthly : null, { extra });
     }
   }
   // Category boundaries are defined on TREATABLE area (lot − footprint −
@@ -1009,7 +1026,7 @@ async function maybeSyncFromDb() {
 
 function hardCodedRateInventory() {
   // Catalogue of every dollar / rate / minute constant that shapes a price (read from the live constants object).
-  // `prices` carries every price-shaping family whole (lawn brackets, the PEST, ONE_TIME and RODENT families, property-type
+  // `prices` carries every price-shaping family whole (lawn brackets, the PEST, ONE_TIME, RODENT, TERMITE and TREE_SHRUB families, property-type
   // adjustments, the commercial families, specialty, bed bug) — a curated subset hid changes (codex r6 P2; the
   // pest members and ONE_TIME.lawn / .mosquito were still cherry-picked until codex r8 P2).
   const G = constants.GLOBAL;
@@ -1019,7 +1036,7 @@ function hardCodedRateInventory() {
     prices: { pest: constants.PEST, oneTime: constants.ONE_TIME, // the whole mosquito family: pressure factors/cap, lot buckets, the 500-sf interpolation step and tier visit counts all move the price (codex r7 P2)
       mosquito: { basePrices: constants.MOSQUITO.basePrices, tierVisits: constants.MOSQUITO.tierVisits, priceStepSqFt: constants.MOSQUITO.priceStepSqFt, lotCategories: constants.MOSQUITO.lotCategories.map((c) => ({ ...c, maxSqFt: Number.isFinite(c.maxSqFt) ? c.maxSqFt : 'Infinity' })), grossLotGuardrailMaxDrop: constants.MOSQUITO.grossLotGuardrailMaxDrop, pressureFactors: constants.MOSQUITO.pressureFactors, pressureCap: constants.MOSQUITO.pressureCap, addOns: constants.MOSQUITO.addOns },
       // treatable-area derivation: HARDSCAPE is a per-property-type function family, recorded as source text so a slope change is visible
-      property: { hardscape: Object.fromEntries(Object.entries(constants.HARDSCAPE).map(([k, f]) => [k, typeof f === 'function' ? f.toString() : f])), hardscapeAdditions: constants.HARDSCAPE_ADDITIONS }, rodent: constants.RODENT, termiteInstallMultiplier: constants.TERMITE.installMultiplier, termiteMonitoring: constants.TERMITE.monitoring, termiteBond: constants.TERMITE.bond, wdo: constants.SPECIALTY.wdo.brackets, germanRoach: constants.SPECIALTY.germanRoach.tiers, palm: { nutrition: constants.PALM.treatments.nutrition.pricePerPalm, insecticide: constants.PALM.treatments.insecticide.tiers, combo: constants.PALM.treatments.combo.tiers, minPerVisit: constants.PALM.minPerVisit }, lawnBrackets: constants.LAWN_BRACKETS, propertyTypeAdj: constants.PROPERTY_TYPE_ADJ, lawnFreqs: constants.LAWN_FREQS, lawnCadenceDiscount: constants.LAWN_CADENCE_DISCOUNT, lawnPricingV2: constants.LAWN_PRICING_V2, bedBug: constants.BED_BUG, specialty: constants.SPECIALTY, achDiscount: constants.ACH_DISCOUNT, processingAdjustment: constants.PROCESSING_ADJUSTMENT, commercial: { lawn: constants.COMMERCIAL_LAWN, treeShrub: constants.COMMERCIAL_TREE_SHRUB, pest: constants.COMMERCIAL_PEST, mosquito: constants.COMMERCIAL_MOSQUITO, termiteBait: constants.COMMERCIAL_TERMITE_BAIT, rodentBait: constants.COMMERCIAL_RODENT_BAIT }, waveguard: constants.WAVEGUARD.tiers, oneTimePerk: constants.WAVEGUARD.recurringCustomerOneTimePerk, prepayDiscount: constants.ANNUAL_PREPAY_DISCOUNT_PCT, deposit: constants.DEPOSIT, cardHold: constants.CARD_HOLD, inspectionCredit: constants.INSPECTION_CREDIT, urgency: constants.URGENCY, tsTiers: constants.TREE_SHRUB.tiers, lawnTiers: constants.LAWN_TIERS },
+      property: { hardscape: Object.fromEntries(Object.entries(constants.HARDSCAPE).map(([k, f]) => [k, typeof f === 'function' ? f.toString() : f])), hardscapeAdditions: constants.HARDSCAPE_ADDITIONS }, rodent: constants.RODENT, termite: constants.TERMITE, wdo: constants.SPECIALTY.wdo.brackets, germanRoach: constants.SPECIALTY.germanRoach.tiers, palm: { nutrition: constants.PALM.treatments.nutrition.pricePerPalm, insecticide: constants.PALM.treatments.insecticide.tiers, combo: constants.PALM.treatments.combo.tiers, minPerVisit: constants.PALM.minPerVisit }, lawnBrackets: constants.LAWN_BRACKETS, propertyTypeAdj: constants.PROPERTY_TYPE_ADJ, lawnFreqs: constants.LAWN_FREQS, lawnCadenceDiscount: constants.LAWN_CADENCE_DISCOUNT, lawnPricingV2: constants.LAWN_PRICING_V2, bedBug: constants.BED_BUG, specialty: constants.SPECIALTY, achDiscount: constants.ACH_DISCOUNT, processingAdjustment: constants.PROCESSING_ADJUSTMENT, commercial: { lawn: constants.COMMERCIAL_LAWN, treeShrub: constants.COMMERCIAL_TREE_SHRUB, pest: constants.COMMERCIAL_PEST, mosquito: constants.COMMERCIAL_MOSQUITO, termiteBait: constants.COMMERCIAL_TERMITE_BAIT, rodentBait: constants.COMMERCIAL_RODENT_BAIT }, waveguard: constants.WAVEGUARD.tiers, oneTimePerk: constants.WAVEGUARD.recurringCustomerOneTimePerk, prepayDiscount: constants.ANNUAL_PREPAY_DISCOUNT_PCT, deposit: constants.DEPOSIT, cardHold: constants.CARD_HOLD, inspectionCredit: constants.INSPECTION_CREDIT, urgency: constants.URGENCY, treeShrub: constants.TREE_SHRUB, lawnTiers: constants.LAWN_TIERS },
     marginDivisors: { plugging: constants.SPECIALTY.plugging.marginDivisor, topDressingEighth: constants.SPECIALTY.topDressing.eighth.marginDivisor, topDressingQuarter: constants.SPECIALTY.topDressing.quarter.marginDivisor, dethatching: constants.SPECIALTY.dethatching.marginDivisor, boraCare: constants.SPECIALTY.boraCare.marginDivisor, foamDrill: constants.SPECIALTY.foamDrill.marginDivisor, preSlabTermidor: constants.SPECIALTY.preSlabTermiticide.products.termidor_sc.marginDivisor, bedBugCostRatio: constants.BED_BUG.chemical.targetCostRatio, tsMarginTarget: constants.TREE_SHRUB.marginTarget, commercialTargetGrossMargin: constants.COMMERCIAL_PEST.targetGrossMargin, termiteInstallMarkup: constants.TERMITE.installMultiplier, trenchingProductPremiumMarkup: constants.SPECIALTY.trenching.productPremiumMultiplier },
   };
 }

@@ -110,12 +110,15 @@ const CHECKS = [
     // is_active only, archived rows included if still active. Owners are
     // DISTINCT rows: a member repeated inside one row's array expands to two
     // lateral rows but the runtime containment query still returns one service
-    // and accepts it (codex r8 P2).
+    // and accepts it (codex r8 P2). Only USABLE members (non-empty strings —
+    // the HAS_ENGINE_KEY_SQL predicate) can collide: two rows sharing a "" or
+    // null placeholder are not co-owners of anything (codex r10 P2).
     title: 'Active catalog rows that claim the same engine key (slot-reservation refuses to stamp service_id on these)',
-    sql: `select k.engine_key, count(distinct s.id) as active_owners, string_agg(distinct s.service_key, ', ' order by s.service_key) as service_keys
-          from services s cross join lateral jsonb_array_elements_text(s.engine_keys) as k(engine_key)
+    sql: `select k.member #>> '{}' as engine_key, count(distinct s.id) as active_owners, string_agg(distinct s.service_key, ', ' order by s.service_key) as service_keys
+          from services s cross join lateral jsonb_array_elements(s.engine_keys) as k(member)
           where s.is_active and jsonb_typeof(s.engine_keys) = 'array'
-          group by k.engine_key having count(distinct s.id) > 1 order by k.engine_key`,
+            and jsonb_typeof(k.member) = 'string' and btrim(k.member #>> '{}') <> ''
+          group by 1 having count(distinct s.id) > 1 order by 1`,
   },
   {
     key: 'catalog_cadence_drift',
