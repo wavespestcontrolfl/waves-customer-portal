@@ -10648,6 +10648,12 @@ export function CompletionPanel({
   // are bypassed for the replay — the stored body already passed them when
   // it committed (Codex r1 P1).
   const [committedReplayReady, setCommittedReplayReady] = useState(false);
+  // Synchronous lock for the restore await in handleSubmit: `submitting` is
+  // state and may not have re-rendered between two quick taps, so without
+  // it both could pass the guard, await the same restore, and issue
+  // concurrent replays whose cleanup and marker persistence race (Codex r2
+  // P2).
+  const committedReplayLockRef = useRef(false);
   const [resumeBodyLoad] = useState(() => (
     sideEffectsCommittedRef.current
       ? restoreCompletionResumeBody(service?.id).then((body) => {
@@ -13403,8 +13409,16 @@ export function CompletionPanel({
     // it resolves null when nothing was stored, and that case falls through
     // to the ordinary build → completion_resume_payload_mismatch handler.
     if (sideEffectsCommittedRef.current) {
+      if (committedReplayLockRef.current) return;
+      committedReplayLockRef.current = true;
+      setSubmitting(true);
       await resumeBodyLoad;
+      committedReplayLockRef.current = false;
       if (lastSubmitBodyRef.current) return replayCommittedCompletion(reconcileConfirmed);
+      // Nothing restored: fall through to the ordinary build (which lands on
+      // the completion_resume_payload_mismatch handler) with the button
+      // released for its own validation returns.
+      setSubmitting(false);
     }
     // Upload-mode dictation lands asynchronously after the mic stops; a
     // completion posted now would ship notes without it (pre-push P1).
