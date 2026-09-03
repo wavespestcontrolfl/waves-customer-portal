@@ -16,6 +16,9 @@ describe('classifyDraft', () => {
   test.each([
     ['a reciprocal promise', "we'll link back to your guide from our resources page", ['reciprocal_promise']],
     ['a link swap', 'happy to do a link exchange', ['reciprocal_promise']],
+    ['an offer phrased as capability', 'We can add a link to your website too', ['reciprocal_promise']],
+    ['an offer phrased as willingness', "we'd be happy to include a link to your guide", ['reciprocal_promise']],
+    ['a link for you', 'a link for your readers from our resources page', ['reciprocal_promise']],
     ['payment', 'we can pay a $150 placement fee', ['payment']],
     ['sponsorship', 'open to a sponsored post', ['payment']],
     ['a discount', 'your readers get 20% off their first treatment', ['discount']],

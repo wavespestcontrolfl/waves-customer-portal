@@ -57,6 +57,7 @@ const nightly = (db, opts = {}) => bridge.runAuthorityBridge(db, { now: NOW, exc
 const commRow = (db) => db._tables.seo_link_placement_authorities.find((r) => r.dimension === 'communication' && !r.ended_at);
 const placement = (db) => db._tables.seo_link_prospects[0];
 const approvals = (db) => db._tables.seo_link_approvals;
+const storedPath = (db) => db._tables.seo_link_acquisition_paths[0];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -213,6 +214,20 @@ describe('sendOutreach under the contract', () => {
     expect(approvals(t.db)).toHaveLength(2);
     expect(commRow(t.db).approval_id).not.toBe(stale.id);
   });
+  test('refusals: a rejected / watched domain, and a placement no longer on the domain\'s best path', async () => {
+    const rej = scenario();
+    await nightly(rej.db);
+    rej.db._tables.seo_link_domains[0].agent_state = 'rejected';
+    expect(await Outreach.sendOutreach({ prospectId: rej.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/rejected/) });
+    rej.db._tables.seo_link_domains[0].agent_state = 'watching';
+    expect((await Outreach.sendOutreach({ prospectId: rej.row.id, approvedBy: 'Adam' })).error).toMatch(/watching/);
+    const rerank = scenario();
+    await nightly(rerank.db);
+    const other = outreachPath(rerank.d); rerank.db._tables.seo_link_acquisition_paths.push(other); rerank.db._tables.seo_link_domains[0].best_path_id = other.id;
+    expect(await Outreach.sendOutreach({ prospectId: rerank.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/best path/) });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    expect(approvals(rej.db)).toHaveLength(0); expect(approvals(rerank.db)).toHaveLength(0);
+  });
   test('refusals: no row yet, a prior-path row, a stale decision, a non-owner level, a terms-accepting send', async () => {
     const none = scenario();
     expect(await Outreach.sendOutreach({ prospectId: none.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/decides it first/) });
@@ -317,6 +332,19 @@ describe('one conversation per inbox (§13)', () => {
   });
 });
 
+describe('inboxConflict is the guard every conversation writer takes', () => {
+  test('returns the open conversation for the recipient (canonical, gmail aliases), null when the inbox is free', async () => {
+    const s = scenario();
+    const db = s.db;
+    db._tables.seo_link_prospects.push({ id: 'o1', target_domain: 'x.org', target_page: '/', location_key: '-', status: 'contacted', outreach_status: 'sent', outreach_to_email: ' Edi.tor+a@googlemail.com', outreach_sent_at: EARLIER, link_type: 'editorial', updated_at: EARLIER });
+    expect((await Outreach.inboxConflict(db, { recipient: 'editor@gmail.com' }))?.id).toBe('o1');
+    expect(await Outreach.inboxConflict(db, { recipient: 'editor@gmail.com', excludeId: 'o1' })).toBeNull();
+    expect(await Outreach.inboxConflict(db, { recipient: 'someone@else.org' })).toBeNull();
+    expect(await Outreach.inboxConflict(db, { recipient: '' })).toBeNull();
+    expect(db._raws.some((r) => /hashtext/.test(String(r)))).toBe(true);
+  });
+});
+
 describe('submit-first outreach paths (execution_after_send=false)', () => {
   test('nothing sends while the execution instance is open — the nightly skips it and the sender refuses; a satisfied execution releases the pitch', async () => {
     const s = scenario({ policy: AUTO_POLICY, path: { execution_after_send: false, account_required: true } });
@@ -366,10 +394,20 @@ describe('reconcileSendError', () => {
     expect(commRow(s.db)).toMatchObject({ satisfied_reason: 'sent' });
     expect(a.consumed_at).toBeTruthy();
   });
+  test("'sent' satisfies the instance when only another dimension was revised earlier (overall revision ≠ communication revision)", async () => {
+    // the path's payment inputs were revised before the draft: overall revision 3, communication revision 1; the draft is stamped 3
+    const s = scenario({ path: { revision: 3, revision_payment: 3, revision_communication: 1 }, placement: { leased_path_revision: 3 } });
+    await nightly(s.db);
+    expect(commRow(s.db).path_revision).toBe(1);
+    Object.assign(placement(s.db), { outreach_status: 'send_error', outreach_send_token: null });
+    expect((await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'sent', approvedBy: 'Adam' })).ok).toBe(true);
+    expect(commRow(s.db).satisfied_reason).toBe('sent');
+  });
   test("'sent' never satisfies a later generation: the open instance must sit on the path revision the send was bound to", async () => {
     const s = scenario();
     await nightly(s.db);
-    // the path was revised in place after the ambiguous send (the draft's stamp is revision 1; the open row now reads revision 2)
+    // the path was revised in place after the ambiguous send (the draft's stamp is revision 1; the path now reads revision 2)
+    Object.assign(storedPath(s.db), { revision: 2, revision_communication: 2 });
     commRow(s.db).path_revision = 2;
     Object.assign(placement(s.db), { outreach_status: 'send_error', outreach_send_token: null });
     const r = await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'sent', approvedBy: 'Adam' });
@@ -414,6 +452,16 @@ describe('the nightly auto-send (§6.4)', () => {
     const gated = scenario({ policy: AUTO_POLICY });
     expect((await nightly(gated.db, { autoSend: true, send })).autoSend).toBeUndefined();
     expect(send).not.toHaveBeenCalled();
+  });
+  test('a draft the cap deferred is attempted again on the next nightly even though its domain is not re-selected', async () => {
+    const s = scenario({ policy: AUTO_POLICY });
+    const capped = jest.fn(async () => ({ ok: false, code: 'rate_limited' }));
+    expect((await nightly(s.db, { autoSend: true, send: capped })).autoSend).toMatchObject({ attempted: 1, sent: 0 });
+    const send = jest.fn(async () => ({ ok: true }));
+    const again = await nightly(s.db, { autoSend: true, send, now: new Date(NOW.getTime() + 24 * 3600 * 1000) });
+    expect(again.selected).toBe(0); // nothing changed on the domain
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ prospectId: s.row.id, mode: 'auto' }));
+    expect(again.autoSend).toEqual({ attempted: 1, sent: 1, skipped: [] });
   });
   test('the real sender over the store: the run sends, the placement reads contacted and the instance is satisfied', async () => {
     const s = scenario({ policy: AUTO_POLICY });

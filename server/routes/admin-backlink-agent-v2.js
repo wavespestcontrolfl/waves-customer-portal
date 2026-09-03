@@ -621,6 +621,14 @@ router.patch('/prospects/:id', async (req, res, next) => {
         const { inFlight } = await claimProspectDomain(trx, current.target_domain);
         if (inFlight && inFlight.id !== current.id) return { inFlight };
       }
+      // recording a conversation by hand (→ contacted / negotiating) OPENS one for the recipient: the same
+      // recipient-level lock + predicate the send claim takes (plan §13), so no two writers open the same inbox
+      const opensConversation = 'status' in patch && ['contacted', 'negotiating'].includes(patch.status) && !['contacted', 'negotiating'].includes(current.status);
+      if (opensConversation) {
+        const withRecipient = await trx('seo_link_prospects').where({ id: current.id }).first('outreach_to_email');
+        const open = withRecipient && withRecipient.outreach_to_email ? await require('../services/seo/link-prospect-outreach').inboxConflict(trx, { recipient: withRecipient.outreach_to_email, excludeId: current.id }) : null;
+        if (open) return { inbox: open };
+      }
       // A target_page edit is a placement move: under the same domain lock,
       // refuse if another row already represents (domain, page) under ANY
       // spelling — a textual variant would slip past the unique key, an exact
@@ -639,6 +647,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     });
     if (result.missing) return res.status(404).json({ error: 'prospect not found' });
     if (result.inFlight) return res.status(409).json({ error: `domain already has a prospect in active outreach (${result.inFlight.status}${result.inFlight.target_page ? ` for ${result.inFlight.target_page}` : ''}) — one conversation per inbox`, id: result.inFlight.id });
+    if (result.inbox) return res.status(409).json({ error: `another placement already has a conversation with this recipient (${result.inbox.status}${result.inbox.outreach_status ? ` / ${result.inbox.outreach_status}` : ''}) — one conversation per inbox`, id: result.inbox.id });
     if (result.taken) return res.status(409).json({ error: `another prospect already represents this domain + target page (${result.taken.status})`, id: result.taken.id });
     res.json({ prospect: result.row });
   } catch (err) { next(err); }
@@ -693,7 +702,7 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     const staleCutoff = new Date(Date.now() - Outreach.STALE_SENDING_MS);
     const needsReconcile = await orderByPriority(
       db('seo_link_prospects')
-        .where({ status: 'prospect' })
+        .whereIn('status', [...Outreach.SENDABLE_STATUSES]) // an owner-parked draft sends too, so its ambiguous send reconciles here too
         .where((b) => b
           .where('outreach_status', 'send_error')
           .orWhere((s) => s.where('outreach_status', 'sending').andWhere('updated_at', '<', staleCutoff)))

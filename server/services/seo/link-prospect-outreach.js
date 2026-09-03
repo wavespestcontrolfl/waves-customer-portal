@@ -41,9 +41,29 @@ const { OUTREACH_TYPES, isValidEmail } = require('./link-prospect-worker');
 const CONVERSATION_OPEN = (row) => ['contacted', 'negotiating'].includes(row.status)
   || (row.status === 'awaiting_owner' && ['contacted', 'negotiating'].includes(row.parked_from_status))
   || ['sending', 'sent', 'send_error'].includes(row.outreach_status) || Boolean(row.outreach_sent_at);
+
+/**
+ * The RECIPIENT-level guard (plan §13: one conversation per inbox — the domain lock covers the domain, not the
+ * inbox). Takes `pg_advisory_xact_lock(hashtext('link_outreach_inbox:' || recipient))` in the caller's transaction
+ * and returns the other placement whose conversation with this inbox is open (null = free). EVERY writer that opens
+ * a conversation — the send claim, and the manual status edit that records one — takes it, so two writers cannot
+ * both enter under each other. Candidates come by host (both google hosts for gmail) and match in the canonical form.
+ */
+async function inboxConflict(trx, { recipient, excludeId = null }) {
+  const inbox = M.normalizeEmail(recipient);
+  if (!inbox) return null;
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`link_outreach_inbox:${inbox}`]);
+  const inboxHost = inbox.slice(inbox.lastIndexOf('@') + 1);
+  const hosts = M.GOOGLE_HOSTS.includes(inboxHost) ? [...M.GOOGLE_HOSTS] : [inboxHost];
+  let q = trx('seo_link_prospects').whereRaw(`split_part(${M.STORED_SQL}, '@', 2) = ANY(?)`, ['outreach_to_email', hosts]);
+  if (excludeId) q = q.where('id', '<>', excludeId);
+  const others = (await q.select('id', 'status', 'parked_from_status', 'outreach_status', 'outreach_sent_at', 'outreach_to_email')).filter((o) => M.normalizeEmail(o.outreach_to_email) === inbox);
+  return others.find(CONVERSATION_OPEN) || null;
+}
 const P = require('./link-authority-policy');
 const M = require('./link-outreach-mandate');
 const { DEFAULT_OUTREACH_DAILY_CAP: DEFAULT_DAILY_CAP, outreachDailyCeiling } = P;
+const { BRIDGE_STATES } = require('./link-authority-selection');
 
 const AUTH = 'seo_link_placement_authorities';
 const SEND_MODES = Object.freeze(['owner', 'auto']);
@@ -268,118 +288,15 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
   // locked — every later mutation is gated on that token, which no other writer
   // touches (so unrelated edits to updated_at can't strand a finalize).
   const sendToken = randomUUID();
-  const claim = await db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(?)', [OUTREACH_LOCK_KEY]);
-    // the RECIPIENT-level guard (plan §13: one conversation per inbox — the domain lock covers the domain, not the
-    // inbox): serialized on the recipient the pre-read draft names; the locked row must still name it below
-    const inbox = M.normalizeEmail(prospect.outreach_to_email);
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`link_outreach_inbox:${inbox}`]);
-    // prospect → path lock order, same as saveDraft (settlement locks the path)
-    await trx('seo_link_prospects').where({ id: prospectId }).forUpdate().first('id');
-    // candidates by host (gmail aliases included), matched in the recipient's canonical form — a dotted or +tagged
-    // draft to the same mailbox is the same inbox
-    const inboxHost = inbox.slice(inbox.lastIndexOf('@') + 1);
-    const hosts = M.GOOGLE_HOSTS.includes(inboxHost) ? [...M.GOOGLE_HOSTS] : [inboxHost];
-    const others = (await trx('seo_link_prospects').whereRaw(`split_part(${M.STORED_SQL}, '@', 2) = ANY(?)`, ['outreach_to_email', hosts]).where('id', '<>', prospectId).select('id', 'status', 'parked_from_status', 'outreach_status', 'outreach_sent_at', 'outreach_to_email'))
-      .filter((o) => M.normalizeEmail(o.outreach_to_email) === inbox);
-    const open = others.find(CONVERSATION_OPEN);
-    if (open) return { ok: false, code: 'inbox_in_flight', error: `another placement already has a conversation with this recipient (${open.status}${open.outreach_status ? ` / ${open.outreach_status}` : ''}) — one conversation per inbox` };
-    // the policy row read under the lock: the §6.4 cap below and the §7 authority hash
-    const { policy } = await P.loadPolicy(trx);
-    // Settle the drafted row BEFORE taking it in flight: its acquisition path
-    // may have been superseded, revised or disproven since the draft was
-    // saved. A settlement that moves the row has cleared the draft (it was
-    // composed for a retired route) — abort here rather than email obsolete
-    // copy; once the row is `sending` settlement refuses to touch it.
-    const moved = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospectId] });
-    if (moved) return { ok: false, code: 'path_moved' };
-    // zero moved is not proof of a live path: a chain settlement could not
-    // resolve (bounded hops) or refused leaves the row on a retired path —
-    // re-read and require the path it will send on to be non-superseded
-    // …and STANDING: settlement reconciles a disproof only against a lease
-    // stamp, so a later disproof (confidence 0 / NULL) or a human-step ruling
-    // (agent_completable=false) on the same path is re-checked here
-    const current = await trx('seo_link_prospects').where({ id: prospectId }).first();
-    // an UNLINKED prospect (the registry catch-up has not linked it yet) has
-    // passed no standing check at all — it is not sent until it has a path
-    if (!current || !SENDABLE_STATUSES.includes(current.status) || (mode === 'auto' && current.status !== 'prospect')) return { ok: false, code: 'not_actionable' };
-    if (!current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
-    // …read FOR UPDATE, held through the drafted→sending CAS below (as
-    // worker.claim() holds its path locks through the lease): an investigation
-    // superseding or revising the path waits for this commit instead of
-    // slipping in between the standing read and the CAS
-    const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first();
-    const standing = onPath && !onPath.superseded_by && require('./link-registry').isStandingConfidence(onPath.confidence) && onPath.agent_completable !== false; // NULL confidence = never assessed = not standing
-    if (!standing) return { ok: false, code: 'path_moved' };
-    // …and the draft must still be bound to the path's CURRENT revision: a
-    // stamp that no longer matches means the path changed in place after the
-    // draft was written (terms, lane, URL) — copy composed for a route that
-    // no longer exists as such is not sent. The stamp is REQUIRED: every
-    // draft carries one (the lease that produced it, saveDraft, or the
-    // migration's backfill of pre-existing drafts), so a missing stamp is a
-    // draft nothing bound to a revision — not sent either.
-    if (current.leased_path_revision == null || onPath.revision == null || Number(onPath.revision) !== Number(current.leased_path_revision)) return { ok: false, code: 'path_moved' };
-    // the draft the claim will send is the LOCKED row's — its hash is what an
-    // approval binds to and what the customer exclusion reviews
-    const draft = { outreach_to_email: current.outreach_to_email, outreach_subject: current.outreach_subject, outreach_body: current.outreach_body };
-    if (!isValidEmail(draft.outreach_to_email) || !draft.outreach_subject || !draft.outreach_body) return { ok: false, code: 'incomplete_draft' };
-    // the inbox lock above was taken on the pre-read recipient: a draft re-addressed under us is not this claim's to send
-    if (M.normalizeEmail(draft.outreach_to_email) !== inbox) return { ok: false, code: 'recipient_changed', error: 'the draft was re-addressed while you looked at it — reload and send again' };
-    // §13 — inside EVERY send claim, auto and owner alike; a lookup failure is fail-closed
-    let review;
-    try { review = await M.recipientReview(trx, draft.outreach_to_email); } catch (err) {
-      logger.error(`[link-outreach] recipient lookup failed for ${prospectId} (code=${(err && (err.code || err.name)) || 'unknown'}) — parked`);
-      return { ok: false, code: 'recipient_lookup_failed', error: 'the customer-recipient lookup failed; not sent (fail-closed) — retry, or review the recipient' };
-    }
-    if (review.kind === 'customer') return { ok: false, code: 'customer_recipient', review, error: 'the recipient is a customer contact — outreach never goes to a customer' };
-    if (review.kind === 'ambiguous' && (mode === 'auto' || reviewedLookupHash !== review.lookup_hash)) {
-      return { ok: false, code: 'recipient_review_required', review, error: 'the recipient shares a domain with a customer or lead contact — review the match, then send with it acknowledged' };
-    }
-    const attemptAt = new Date();
-    // the cap, enforced ONLY here under the lock (§6.4): an automatic send is
-    // bounded by the OWNER's policy value as well as the hard ceiling — a policy
-    // cap of 0 (the shipped default) authorizes no automatic send at all; an
-    // owner-approved send keeps the hard cap only. Checked BEFORE the authority
-    // step so a capped click never records an approval for a send that did not happen.
-    const policyCap = Number(policy.auto_outreach_daily_cap);
-    if (mode === 'auto' && !(Number.isFinite(policyCap) && policyCap > 0)) return { ok: false, code: 'not_authorized', error: 'auto_outreach_daily_cap is 0 — automatic sends are off' };
-    const effectiveCap = mode === 'auto' ? Math.min(policyCap, cap) : cap;
-    if ((await dailySendCount(trx)) >= effectiveCap) return { ok: false, code: 'rate_limited' };
-    // §7 — the authority contract, re-validated under the same lock as the claim.
-    // From here on the owner's approval may have been written: a refusal below
-    // ROLLS the transaction BACK (thrown, caught by the caller) rather than
-    // committing an approval for a send that never claimed.
-    const authority = await sendAuthority(trx, { placement: current, path: onPath, policy, mode, draft, review, approvedBy, now: attemptAt });
-    if (!authority.ok) return authority;
-    const claimedRows = await trx('seo_link_prospects')
-      .where({ id: prospectId, outreach_status: 'drafted', status: current.status, path_id: current.path_id }) // the CAS is bound to the path whose standing was just verified, and to the status the checks read
-      .whereNull('outreach_sent_at')
-      // Stamp the attempt (counts toward the cap regardless of outcome) and release any
-      // Hermes lease as we take the row in-flight, so a stale worker report (optimistic
-      // concurrency on claimed_at) can't overwrite the send.
-      .update({ outreach_status: 'sending', outreach_send_token: sendToken, outreach_attempted_at: attemptAt, claimed_at: null, claimed_by: null, updated_at: attemptAt })
-      .returning('*');
-    if (!claimedRows || claimedRows.length === 0) throw new Rollback({ ok: false, code: 'already_sent' });
-    return { ok: true, row: claimedRows[0], authority };
-  }).catch((err) => { if (err instanceof Rollback) return err.result; throw err; });
+  const claim = await db.transaction((trx) => claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLookupHash, approvedBy, sendToken }))
+    .catch((err) => { if (err instanceof Rollback) return err.result; throw err; });
   if (!claim.ok) return claim;
-  const claimed = claim.row;
-  const authority = claim.authority;
+  const { row: claimed, authority } = claim;
 
-  // Send the CLAIMED version. Re-validate it (a draft saved without subject/body
-  // could have slipped past the pre-read); on failure release only our own claim.
-  if (!isValidEmail(claimed.outreach_to_email) || !claimed.outreach_subject || !claimed.outreach_body) {
-    await releaseOurClaim(prospectId, sendToken);
-    return { ok: false, code: 'incomplete_draft' };
-  }
-
+  // Send the CLAIMED version (the locked claim validated it — recipient, subject, body).
   let sent;
   try {
-    sent = await gmailClient.sendMessage(
-      claimed.outreach_to_email,
-      claimed.outreach_subject,
-      textToHtml(claimed.outreach_body)
-    );
+    sent = await gmailClient.sendMessage(claimed.outreach_to_email, claimed.outreach_subject, textToHtml(claimed.outreach_body));
   } catch (err) {
     // AMBIGUOUS: a timeout/error here may have still reached Gmail (it accepted the
     // message but we never saw the response). Do NOT reopen to 'drafted' — that would
@@ -387,18 +304,31 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
     // human checks the Sent folder and re-drafts only if it truly didn't go out.
     await markSendError(prospectId, sendToken);
     // Log a code/name only — a raw Gmail error message can echo the recipient (PII).
-    logger.error(`[link-outreach] send failed (ambiguous) for ${prospectId} (code=${(err && (err.code || err.name)) || 'unknown'}) — needs reconciliation`);
+    logger.error(`[link-outreach] send failed (ambiguous) for ${prospectId} (code=${err.code || err.name || 'unknown'}) — needs reconciliation`);
     return { ok: false, code: 'send_failed', error: err.message };
   }
+  const ids = { message_id: sent.id || null, thread_id: sent.threadId || null };
+  const threadRef = ids.thread_id || ids.message_id;
+  const rows = await finalizeSend({ prospectId, sendToken, claimed, authority, threadRef, approvedBy });
 
+  // The email DID send. If finalize somehow matched ≠1 row, surface it loudly for
+  // manual reconciliation rather than reporting a clean success (or silently retrying).
+  if (rows.length !== 1) {
+    logger.error(`[link-outreach] FINALIZE MISSED after a successful send for ${prospectId} msg=${ids.message_id} thread=${threadRef} — reconcile manually`);
+    return { ok: false, code: 'finalize_failed', ...ids, error: 'email sent but DB finalize matched no row; reconcile manually' };
+  }
+  logger.info(`[link-outreach] sent ${prospectId} msg=${ids.message_id} thread=${threadRef} mode=${mode}`); // no recipient (PII)
+  return { ok: true, prospect: rows[0], ...ids, authority: authority.rowId ? { level: authority.level, approval_id: authority.approvalId } : null };
+}
+
+// Finalize ONLY our own claim (the send token still matches). The token is private
+// to the send path, so this can't be stranded by an unrelated updated_at write.
+// The communication instance is satisfied and its approval consumed in the
+// same transaction (§3.3b: only satisfaction proves the send happened).
+async function finalizeSend({ prospectId, sendToken, claimed, authority, threadRef, approvedBy }) {
   const now = new Date();
-  const threadRef = (sent && (sent.threadId || sent.id)) || null;
   const note = `Outreach sent ${now.toISOString()} to ${claimed.outreach_to_email} by ${approvedBy}`;
-  // Finalize ONLY our own claim (the send token still matches). The token is private
-  // to the send path, so this can't be stranded by an unrelated updated_at write.
-  // The communication instance is satisfied and its approval consumed in the
-  // same transaction (§3.3b: only satisfaction proves the send happened).
-  const rows = await db.transaction(async (trx) => {
+  return db.transaction(async (trx) => {
     const r = await trx('seo_link_prospects')
       .where({ id: prospectId, outreach_send_token: sendToken })
       .update({
@@ -414,19 +344,101 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
         updated_at: now,
       })
       .returning('*');
-    if (r && r.length === 1 && authority.rowId) await satisfySendInstance(trx, { prospectId, rowId: authority.rowId, now });
-    return r;
+    const rows = r || [];
+    if (rows.length === 1 && authority.rowId) await satisfySendInstance(trx, { prospectId, rowId: authority.rowId, now });
+    return rows;
   });
+}
 
-  // The email DID send. If finalize somehow matched ≠1 row, surface it loudly for
-  // manual reconciliation rather than reporting a clean success (or silently retrying).
-  if (!rows || rows.length !== 1) {
-    logger.error(`[link-outreach] FINALIZE MISSED after a successful send for ${prospectId} msg=${sent && sent.id} thread=${threadRef} — reconcile manually`);
-    return { ok: false, code: 'finalize_failed', message_id: (sent && sent.id) || null, thread_id: (sent && sent.threadId) || null, error: 'email sent but DB finalize matched no row; reconcile manually' };
+/**
+ * The locked claim phase of a send: cap lock → inbox guard → row lock → settlement + path standing → the locked
+ * draft's recipient review → cap → authority → the drafted→sending CAS. Returns { ok, row, authority } or a
+ * refusal; a refusal after the authority step wrote an approval is THROWN (Rollback) so nothing commits.
+ */
+async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLookupHash, approvedBy, sendToken }) {  await trx.raw('SELECT pg_advisory_xact_lock(?)', [OUTREACH_LOCK_KEY]);
+  // the inbox guard, serialized on the recipient the pre-read draft names; the locked row must still name it below
+  const inbox = M.normalizeEmail(prospect.outreach_to_email);
+  const open = await inboxConflict(trx, { recipient: inbox, excludeId: prospectId });
+  if (open) return { ok: false, code: 'inbox_in_flight', error: `another placement already has a conversation with this recipient (${open.status}${open.outreach_status ? ` / ${open.outreach_status}` : ''}) — one conversation per inbox` };
+  // prospect → path lock order, same as saveDraft (settlement locks the path)
+  await trx('seo_link_prospects').where({ id: prospectId }).forUpdate().first('id');
+  // the policy row read under the lock: the §6.4 cap below and the §7 authority hash
+  const { policy } = await P.loadPolicy(trx);
+  // Settle the drafted row BEFORE taking it in flight: its acquisition path
+  // may have been superseded, revised or disproven since the draft was
+  // saved. A settlement that moves the row has cleared the draft (it was
+  // composed for a retired route) — abort here rather than email obsolete
+  // copy; once the row is `sending` settlement refuses to touch it.
+  const moved = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospectId] });
+  if (moved) return { ok: false, code: 'path_moved' };
+  // zero moved is not proof of a live path: a chain settlement could not
+  // resolve (bounded hops) or refused leaves the row on a retired path —
+  // re-read and require the path it will send on to be non-superseded
+  // …and STANDING: settlement reconciles a disproof only against a lease
+  // stamp, so a later disproof (confidence 0 / NULL) or a human-step ruling
+  // (agent_completable=false) on the same path is re-checked here
+  const current = await trx('seo_link_prospects').where({ id: prospectId }).first();
+  // an UNLINKED prospect (the registry catch-up has not linked it yet) has
+  // passed no standing check at all — it is not sent until it has a path
+  if (!current || !SENDABLE_STATUSES.includes(current.status) || (mode === 'auto' && current.status !== 'prospect')) return { ok: false, code: 'not_actionable' };
+  if (!current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
+  // …read FOR UPDATE, held through the drafted→sending CAS below (as
+  // worker.claim() holds its path locks through the lease): an investigation
+  // superseding or revising the path waits for this commit instead of
+  // slipping in between the standing read and the CAS
+  const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first();
+  const standing = onPath && !onPath.superseded_by && require('./link-registry').isStandingConfidence(onPath.confidence) && onPath.agent_completable !== false; // NULL confidence = never assessed = not standing
+  if (!standing) return { ok: false, code: 'path_moved' };
+  // …and the draft must still be bound to the path's CURRENT revision: a
+  // stamp that no longer matches means the path changed in place after the
+  // draft was written (terms, lane, URL) — copy composed for a route that
+  // no longer exists as such is not sent. The stamp is REQUIRED: every
+  // draft carries one (the lease that produced it, saveDraft, or the
+  // migration's backfill of pre-existing drafts), so a missing stamp is a
+  // draft nothing bound to a revision — not sent either.
+  if (current.leased_path_revision == null || onPath.revision == null || Number(onPath.revision) !== Number(current.leased_path_revision)) return { ok: false, code: 'path_moved' };
+  // the draft the claim will send is the LOCKED row's — its hash is what an
+  // approval binds to and what the customer exclusion reviews
+  const draft = { outreach_to_email: current.outreach_to_email, outreach_subject: current.outreach_subject, outreach_body: current.outreach_body };
+  if (!isValidEmail(draft.outreach_to_email) || !draft.outreach_subject || !draft.outreach_body) return { ok: false, code: 'incomplete_draft' };
+  // the inbox lock above was taken on the pre-read recipient: a draft re-addressed under us is not this claim's to send
+  if (M.normalizeEmail(draft.outreach_to_email) !== inbox) return { ok: false, code: 'recipient_changed', error: 'the draft was re-addressed while you looked at it — reload and send again' };
+  // §13 — inside EVERY send claim, auto and owner alike; a lookup failure is fail-closed
+  let review;
+  try { review = await M.recipientReview(trx, draft.outreach_to_email); } catch (err) {
+    logger.error(`[link-outreach] recipient lookup failed for ${prospectId} (code=${(err && (err.code || err.name)) || 'unknown'}) — parked`);
+    return { ok: false, code: 'recipient_lookup_failed', error: 'the customer-recipient lookup failed; not sent (fail-closed) — retry, or review the recipient' };
   }
-
-  logger.info(`[link-outreach] sent ${prospectId} msg=${sent && sent.id} thread=${threadRef} mode=${mode}`); // no recipient (PII)
-  return { ok: true, prospect: rows[0], message_id: (sent && sent.id) || null, thread_id: (sent && sent.threadId) || null, authority: authority.rowId ? { level: authority.level, approval_id: authority.approvalId } : null };
+  if (review.kind === 'customer') return { ok: false, code: 'customer_recipient', review, error: 'the recipient is a customer contact — outreach never goes to a customer' };
+  if (review.kind === 'ambiguous' && (mode === 'auto' || reviewedLookupHash !== review.lookup_hash)) {
+    return { ok: false, code: 'recipient_review_required', review, error: 'the recipient shares a domain with a customer or lead contact — review the match, then send with it acknowledged' };
+  }
+  const attemptAt = new Date();
+  // the cap, enforced ONLY here under the lock (§6.4): an automatic send is
+  // bounded by the OWNER's policy value as well as the hard ceiling — a policy
+  // cap of 0 (the shipped default) authorizes no automatic send at all; an
+  // owner-approved send keeps the hard cap only. Checked BEFORE the authority
+  // step so a capped click never records an approval for a send that did not happen.
+  const policyCap = Number(policy.auto_outreach_daily_cap);
+  if (mode === 'auto' && !(Number.isFinite(policyCap) && policyCap > 0)) return { ok: false, code: 'not_authorized', error: 'auto_outreach_daily_cap is 0 — automatic sends are off' };
+  const effectiveCap = mode === 'auto' ? Math.min(policyCap, cap) : cap;
+  if ((await dailySendCount(trx)) >= effectiveCap) return { ok: false, code: 'rate_limited' };
+  // §7 — the authority contract, re-validated under the same lock as the claim.
+  // From here on the owner's approval may have been written: a refusal below
+  // ROLLS the transaction BACK (thrown, caught by the caller) rather than
+  // committing an approval for a send that never claimed.
+  const authority = await sendAuthority(trx, { placement: current, path: onPath, policy, mode, draft, review, approvedBy, now: attemptAt });
+  if (!authority.ok) return authority;
+  const claimedRows = await trx('seo_link_prospects')
+    .where({ id: prospectId, outreach_status: 'drafted', status: current.status, path_id: current.path_id }) // the CAS is bound to the path whose standing was just verified, and to the status the checks read
+    .whereNull('outreach_sent_at')
+    // Stamp the attempt (counts toward the cap regardless of outcome) and release any
+    // Hermes lease as we take the row in-flight, so a stale worker report (optimistic
+    // concurrency on claimed_at) can't overwrite the send.
+    .update({ outreach_status: 'sending', outreach_send_token: sendToken, outreach_attempted_at: attemptAt, claimed_at: null, claimed_by: null, updated_at: attemptAt })
+    .returning('*');
+  if (!claimedRows || claimedRows.length === 0) throw new Rollback({ ok: false, code: 'already_sent' });
+  return { ok: true, row: claimedRows[0], authority };
 }
 
 /**
@@ -451,6 +463,12 @@ async function sendAuthority(trx, { placement, path, policy, mode, draft, review
   if (row.path_id !== path.id) return { ok: false, code: 'not_authorized', error: 'the send authority was decided on a prior path — the nightly bridge rotates it' };
   const domain = placement.domain_id ? await trx('seo_link_domains').where({ id: placement.domain_id }).first() : null;
   if (!domain) return { ok: false, code: 'not_authorized', error: 'the placement is not bound to a registry domain' };
+  // the owner's Reject / Watch stands (decideDomain leaves the rows open; agent_state is not in the hash): only a
+  // bridge-owned domain sends — the same eligibility the Owner queue's Approve applies
+  if (!BRIDGE_STATES.includes(domain.agent_state)) return { ok: false, code: 'not_authorized', error: `the domain is ${String(domain.agent_state).replace(/_/g, ' ')} — the owner's domain decision stands; reopen it first` };
+  // …and only on the route the registry selects NOW: a re-rank to another live path leaves the placement on the
+  // old one until the bridge moves it (settlement follows supersession only) — the queue's Approve refuses the same
+  if (!domain.best_path_id || domain.best_path_id !== path.id) return { ok: false, code: 'not_authorized', error: 'the placement is no longer on the domain\'s best path — the nightly bridge rotates it' };
   const ctx = { path, domain, policy, score: domain.score, instanceKey: row.instance_key };
   const hash = P.decisionInputsHash('communication', ctx);
   const revision = Number(path.revision_communication ?? path.revision ?? 1);
@@ -510,26 +528,22 @@ async function satisfySendInstance(trx, { prospectId, rowId = null, now }) {
   let rows;
   if (rowId) rows = await trx(AUTH).where({ id: rowId }).whereNull('satisfied_at').select('id', 'approval_id');
   else {
+    // the draft's stamp is the path's OVERALL revision; the row's is the COMMUNICATION revision (§3.6b): the send's
+    // instance is the open row at the path's current communication revision, provided the path did not change AT ALL
+    // since the draft (overall revision still equals the stamp) — any in-place change bumps the overall revision
     const p = await trx('seo_link_prospects').where({ id: prospectId }).first('path_id', 'leased_path_revision');
     if (!p || !p.path_id || p.leased_path_revision == null) return 0;
+    const path = await trx('seo_link_acquisition_paths').where({ id: p.path_id }).first('id', 'revision', 'revision_communication');
+    if (!path || Number(path.revision) !== Number(p.leased_path_revision)) return 0;
+    const commRevision = Number(path.revision_communication ?? path.revision ?? 1);
     rows = (await trx(AUTH).where({ prospect_id: prospectId, dimension: 'communication', instance_kind: '-', path_id: p.path_id }).whereNull('ended_at').whereNull('satisfied_at').select('id', 'approval_id', 'path_revision'))
-      .filter((r) => Number(r.path_revision) === Number(p.leased_path_revision));
+      .filter((r) => Number(r.path_revision) === commRevision);
   }
   if (!rows.length) return 0;
   await trx(AUTH).whereIn('id', rows.map((r) => r.id)).update({ satisfied_at: now, satisfied_reason: 'sent', updated_at: now });
   const approvalIds = rows.map((r) => r.approval_id).filter(Boolean);
   if (approvalIds.length) await trx('seo_link_approvals').whereIn('id', approvalIds).whereNull('consumed_at').update({ consumed_at: now, updated_at: now });
   return rows.length;
-}
-
-// Revert a send claim to 'drafted' — but ONLY if it's still ours (the send token
-// matches), so a hung attempt can't reopen a newer in-flight retry. Clears the token.
-// Used only for failures KNOWN to be pre-send (no Gmail call happened), so reopening
-// for retry is safe.
-async function releaseOurClaim(prospectId, sendToken) {
-  return db('seo_link_prospects')
-    .where({ id: prospectId, outreach_send_token: sendToken })
-    .update({ outreach_status: 'drafted', outreach_send_token: null, updated_at: new Date() });
 }
 
 // Park OUR claim in a non-sendable 'send_error' state after an AMBIGUOUS send (the
@@ -608,6 +622,7 @@ module.exports = {
   saveDraft,
   sendOutreach,
   sendAuthority,
+  inboxConflict,
   SEND_MODES,
   reconcileSendError,
   dailySendCount,

@@ -37,7 +37,7 @@ const { isValidEmail } = require('./link-prospect-worker');
 // The commitments §6.4 keeps out of an automatic send. Conservative by design:
 // a false positive costs one owner click; a false negative sends a promise.
 const CLASSIFIER_RULES = Object.freeze([
-  { flag: 'reciprocal_promise', re: /\b(link\s*back|in\s+return|in\s+exchange|reciprocal|link\s+(?:to|at)\s+you|we(?:'ll|\s+will)\s+link|link\s+swap|link\s+exchange|exchange\s+links)\b/i },
+  { flag: 'reciprocal_promise', re: /\b(link\s*back|in\s+return|in\s+exchange|reciprocal|link\s+(?:to|at)\s+you|we(?:'ll|\s+will)\s+link|link\s+swap|link\s+exchange|exchange\s+links|(?:can|could|would|will|happy\s+to|glad\s+to|able\s+to)\s+(?:also\s+)?(?:add|include|place|feature|put|give)\s+(?:a\s+|the\s+|your\s+)?link|link\s+(?:to|for)\s+your)\b/i },
   { flag: 'payment', re: /(\$\s?\d|\b(?:pay(?:ment|ing)?|paid|fee|fees|sponsor(?:ed|ship)?|compensat(?:e|ion)|invoice|budget\s+for|rate\s+card)\b)/i },
   { flag: 'discount', re: /\b(discount|%\s*off|percent\s+off|coupon|complimentary|free\s+(?:service|treatment|inspection|month|visit)|on\s+the\s+house|no\s+charge)\b/i },
   { flag: 'guarantee', re: /\b(guarantee[ds]?|we\s+promise|promise\s+to|assure\s+you|100%)\b/i },

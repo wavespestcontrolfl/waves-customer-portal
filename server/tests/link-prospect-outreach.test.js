@@ -227,23 +227,18 @@ describe('sendOutreach', () => {
     expect(gmail.sendMessage).not.toHaveBeenCalled();
   });
 
-  test('claimed draft is incomplete (raced revision) → incomplete_draft, releases claim, no send', async () => {
+  test('the LOCKED draft is incomplete (a revision raced the pre-read) → incomplete_draft before the CAS, nothing claimed, no send', async () => {
     outreachGateOn();
-    const release = chain({ result: 1 });
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),                            // pre-read looks complete
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
       chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
-      chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)
-      chain({ returning: [draftedProspect({ outreach_body: '' })] }), // but the claimed row is incomplete
-      release,                                                        // release our claim
+      chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1, outreach_body: '' }) }), // …but the locked row is incomplete
     ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.code).toBe('incomplete_draft');
     expect(gmail.sendMessage).not.toHaveBeenCalled();
-    expect(release.update).toHaveBeenCalledWith(expect.objectContaining({ outreach_status: 'drafted' }));
   });
 
   test('not connected → gmail_not_connected, no claim, draft untouched', async () => {
@@ -518,7 +513,8 @@ describe('reconcileSendError', () => {
       chain({ first: draftedProspect({ outreach_status: 'send_error' }) }),
       upd,
       chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }), // the revision the send was bound to
-    ], seo_link_placement_authorities: [chain({ result: [] })] }); // the Sent folder proved the send: its open instance (none here) is satisfied
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', revision: 1, revision_communication: 1 } })],
+    seo_link_placement_authorities: [chain({ result: [] })] }); // the Sent folder proved the send: its open instance (none here) is satisfied
     const res = await Outreach.reconcileSendError({ prospectId: 'p1', outcome: 'sent', approvedBy: 'Adam' });
     expect(res.ok).toBe(true);
     expect(upd.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'contacted', outreach_status: 'sent' }));
