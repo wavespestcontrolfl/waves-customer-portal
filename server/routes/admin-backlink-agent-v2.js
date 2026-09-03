@@ -8,6 +8,7 @@ const { claimProspectDomain, lockProspectDomain, findPlacementRow, ACTIVE_OUTREA
 const linkIntake = require('../services/seo/link-registry-intake');
 const { etDateString } = require('../utils/datetime-et');
 const { SIGNUP_TYPES } = require('../services/seo/link-prospect-worker');
+const linkPolicy = require('../services/seo/link-authority-policy');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -438,6 +439,41 @@ router.patch('/registry/:id', async (req, res, next) => {
     }
     logger.info(`[backlink-registry] admin ${action}: ${domain.domain} (${domain.agent_state} -> ${nextState})`);
     res.json({ id: domain.id, domain: domain.domain, agent_state: nextState, watch_recheck_at: patch.watch_recheck_at });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// §3.8 / §6.2 / §11 item 4 — acquisition-authority policy (step 4a). The DB row
+// is the only source of thresholds; env may only tighten (reported as
+// `overrides`); every edit is audited. Nothing consumes the row until the
+// step-4 bridge/claim PRs, and GATE_LINK_AUTHORITY is display-only here.
+// ---------------------------------------------------------------------------
+// GET /api/admin/backlink-agent/policy
+router.get('/policy', async (req, res, next) => {
+  try {
+    const { stored, policy, overrides, updated_at, updated_by } = await linkPolicy.loadPolicy(db);
+    const audit = await db('seo_link_policy_audit').orderBy('changed_at', 'desc').limit(25)
+      .select('id', 'field', 'old_value', 'new_value', 'changed_by', 'changed_at');
+    res.json({
+      stored, policy, overrides, updated_at, updated_by, audit,
+      fields: linkPolicy.POLICY_FIELDS,
+      gateOn: isEnabled('linkAuthority'),
+    });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/backlink-agent/policy — { field: value, ... }; whole patch
+// rejected on any invalid field; changed fields audited.
+router.patch('/policy', async (req, res, next) => {
+  try {
+    const patch = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+    if (!patch || !Object.keys(patch).length) return res.status(400).json({ error: 'a non-empty object of policy fields is required' });
+    const actor = req.technician ? (req.technician.name || String(req.technician.id)) : null;
+    const r = await linkPolicy.updatePolicy(db, patch, { actor });
+    if (r.errors) return res.status(400).json({ error: r.errors.join('; '), errors: r.errors });
+    if (r.changed.length) logger.info(`[backlink-policy] ${actor || 'admin'} changed ${r.changed.map((c) => `${c.field}: ${c.old} -> ${c.new}`).join(', ')}`);
+    const { policy, overrides } = await linkPolicy.loadPolicy(db);
+    res.json({ changed: r.changed, stored: r.policy, policy, overrides });
   } catch (err) { next(err); }
 });
 
