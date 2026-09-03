@@ -234,6 +234,80 @@ router.get('/calls/:id/intelligence', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /commitments/open — the Owed queue: open promises across calls,
+// overdue first, then soonest due. Filters: party (waves|customer),
+// customer_id, lead_id, hints=0 to hide rows that only carry an
+// association hint. Fulfillment is refreshed for the calls on the page so a
+// promise a later record already kept does not linger.
+// A page can span more than REFRESH_CALLS_PER_READ calls and the listing
+// order is stable, so a fixed first-N slice would verify the same calls on
+// every reload and never reach the rest — a customer-side promise on call
+// 26 that was already kept would stay open for good, since the watchdog
+// refreshes Waves promises only (Codex #3725 r16 P2). The window rotates
+// across reads instead: each read verifies the next N distinct calls.
+const REFRESH_CALLS_PER_READ = 25;
+let refreshWindowStart = 0;
+function rotatingRefreshWindow(ids) {
+  if (ids.length <= REFRESH_CALLS_PER_READ) return ids;
+  const start = refreshWindowStart % ids.length;
+  refreshWindowStart = (start + REFRESH_CALLS_PER_READ) % ids.length;
+  return [...ids.slice(start), ...ids.slice(0, start)].slice(0, REFRESH_CALLS_PER_READ);
+}
+
+router.get('/commitments/open', async (req, res, next) => {
+  try {
+    const { party, customer_id: customerId, lead_id: leadId, limit, offset, hints } = req.query;
+    if (party && party !== 'waves' && party !== 'customer') return res.status(400).json({ error: 'party must be waves or customer' });
+    if (customerId && !UUID_RE.test(String(customerId))) return res.status(400).json({ error: 'customer_id must be a UUID' });
+    if (leadId && !UUID_RE.test(String(leadId))) return res.status(400).json({ error: 'lead_id must be a UUID' });
+    if (offset !== undefined && !/^\d{1,9}$/.test(String(offset))) return res.status(400).json({ error: 'offset must be a non-negative integer' });
+    const { listOpenCommitments, refreshFulfillment, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../services/call-commitments');
+    // Pages: the client walks the queue with offset; the read asks for ONE
+    // row past the page so the response can say has_more instead of a
+    // 200-row page passing as the whole worklist (Codex #3725 r17 P2).
+    const pageLimit = Math.max(1, Math.min(200, Number(limit) || 100));
+    const pageOffset = Number(offset) || 0;
+    const opts = { party: party || null, customerId: customerId || null, leadId: leadId || null, limit: pageLimit + 1, offset: pageOffset, includeHints: hints !== '0' };
+    const { isEnabled } = require('../config/feature-gates');
+    const enabled = isEnabled('callCommitments');
+    let rows = await listOpenCommitments(db, opts);
+    // Refresh at most REFRESH_CALLS_PER_READ distinct calls per read — cheap
+    // indexed lookups, rotating window across reads (see above) —
+    // then re-list whenever ANY fulfillment field moved (a row kept, a
+    // "possibly kept" hint found or withdrawn) so the page shows what the
+    // refresh just learned instead of the rows read before it. Gate off
+    // means nothing is written (fulfillment stamps included, same as
+    // loadCallIntelligence); rows already recorded are still listed.
+    if (enabled) {
+      // hints=0 hides rows that carry an association hint — but a hint the
+      // facts no longer support is cleared only by a refresh, so the refresh
+      // candidates come from the UNFILTERED page or such a row would stay
+      // hidden for good.
+      // …and the DISPLAYED rows are always candidates too: with hints hidden
+      // the unfiltered page at the same offset is a different logical page,
+      // so a call the operator is looking at could otherwise never be
+      // refreshed (Codex #3725 r18 P2).
+      const candidates = opts.includeHints ? rows : [...rows, ...await listOpenCommitments(db, { ...opts, includeHints: true })];
+      const callIds = rotatingRefreshWindow([...new Set(candidates.map((r) => r.call_log_id))]);
+      let changed = 0;
+      for (const id of callIds) {
+        const r = await refreshFulfillment(db, id).catch(() => ({}));
+        changed += (r.fulfilled || 0) + (r.hinted || 0) + (r.cleared || 0);
+      }
+      if (changed > 0) rows = await listOpenCommitments(db, opts);
+    }
+    const hasMore = rows.length > pageLimit;
+    res.json({
+      commitments: hasMore ? rows.slice(0, pageLimit) : rows,
+      has_more: hasMore,
+      next_offset: hasMore ? pageOffset + pageLimit : null,
+      overdue_implicit_days: OVERDUE_IMPLICIT_DAYS,
+      overdue_implicit_estimate_hours: OVERDUE_IMPLICIT_ESTIMATE_HOURS,
+      enabled,
+    });
+  } catch (err) { next(err); }
+});
+
 // POST /calls/:id/commitments — the office records a promise the AI missed.
 // Staff-wide (router-level requireTechOrAdmin), like tagging a disposition.
 router.post('/calls/:id/commitments', requireCommitmentsEnabled, async (req, res, next) => {

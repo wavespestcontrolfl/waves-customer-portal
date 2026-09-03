@@ -11,6 +11,10 @@ jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.f
 jest.mock('../services/call-commitments', () => ({
   applyHumanUpdate: jest.fn(),
   addHumanCommitment: jest.fn(),
+  listOpenCommitments: jest.fn(),
+  refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })),
+  OVERDUE_IMPLICIT_DAYS: 3,
+  OVERDUE_IMPLICIT_ESTIMATE_HOURS: 24,
 }));
 
 // `mock`-prefixed so the jest.mock factory may read it (it is read lazily,
@@ -114,6 +118,105 @@ describe('GET /calls/:id/intelligence', () => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
       expect(res.status).toBe(404);
     });
+  });
+});
+
+describe('GET /commitments/open — the Owed queue', () => {
+  test('validates its filters before any query', async () => {
+    await withServer(async (base) => {
+      expect((await fetch(`${base}/admin/call-recordings/commitments/open?party=aliens`)).status).toBe(400);
+      expect((await fetch(`${base}/admin/call-recordings/commitments/open?customer_id=nope`)).status).toBe(400);
+      expect((await fetch(`${base}/admin/call-recordings/commitments/open?lead_id=nope`)).status).toBe(400);
+    });
+    expect(commitments.listOpenCommitments).not.toHaveBeenCalled();
+  });
+
+  test('staff can read the queue; filters pass through; kept promises are refreshed off the page before it is returned', async () => {
+    mockRole = 'tech';
+    const open = [{ id: 'c1', call_log_id: CALL_ID, kind: 'callback', status: 'open', overdue: true }, { id: 'c2', call_log_id: CALL_ID, kind: 'send_estimate', status: 'open', overdue: false }];
+    // filtered page → unfiltered refresh candidates → filtered re-list
+    commitments.listOpenCommitments.mockResolvedValueOnce(open).mockResolvedValueOnce(open).mockResolvedValueOnce([open[0]]);
+    commitments.refreshFulfillment.mockResolvedValueOnce({ fulfilled: 1 });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open?party=waves&customer_id=${CUSTOMER_ID}&hints=0&limit=50`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.commitments).toEqual([open[0]]);
+      expect(body.overdue_implicit_days).toBe(3);
+      expect(body.enabled).toBe(true);
+    });
+    // limit + 1: the probe row behind has_more.
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: false });
+    // hints=0: the refresh candidates come from the UNFILTERED page, so a
+    // hint the facts no longer support gets cleared instead of hiding the
+    // row for good.
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: true });
+    expect(commitments.refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
+    expect(commitments.listOpenCommitments).toHaveBeenCalledTimes(3);
+  });
+
+  test('the queue is paged: a full page plus the probe row says has_more with the next offset; offset is validated (codex #3725 r17 P2)', async () => {
+    const open = Array.from({ length: 3 }, (_, i) => ({ id: `c${i}`, call_log_id: CALL_ID, kind: 'callback', status: 'open', overdue: false }));
+    commitments.listOpenCommitments.mockResolvedValue(open);
+    await withServer(async (base) => {
+      expect((await fetch(`${base}/admin/call-recordings/commitments/open?offset=-1`)).status).toBe(400);
+      expect((await fetch(`${base}/admin/call-recordings/commitments/open?offset=abc`)).status).toBe(400);
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open?limit=2&offset=4`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.commitments.map((r) => r.id)).toEqual(['c0', 'c1']);
+      expect(body.has_more).toBe(true);
+      expect(body.next_offset).toBe(6);
+      commitments.listOpenCommitments.mockResolvedValue(open.slice(0, 2));
+      const last = await (await fetch(`${base}/admin/call-recordings/commitments/open?limit=2&offset=6`)).json();
+      expect(last.commitments).toHaveLength(2);
+      expect(last.has_more).toBe(false);
+      expect(last.next_offset).toBeNull();
+    });
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, expect.objectContaining({ limit: 3, offset: 4 }));
+  });
+
+  test('a page spanning more than 25 calls is verified in a ROTATING window, so every call is refreshed across reads (codex #3725 r16 P2)', async () => {
+    const calls = Array.from({ length: 30 }, (_, i) => `0000000${String(i).padStart(1, '0')}-0000-4000-8000-0000000000${String(i).padStart(2, '0')}`);
+    const open = calls.map((id, i) => ({ id: `c${i}`, call_log_id: id, kind: 'callback', status: 'open', overdue: false }));
+    commitments.listOpenCommitments.mockResolvedValue(open);
+    await withServer(async (base) => {
+      expect((await fetch(`${base}/admin/call-recordings/commitments/open`)).status).toBe(200);
+      expect((await fetch(`${base}/admin/call-recordings/commitments/open`)).status).toBe(200);
+    });
+    const refreshed = commitments.refreshFulfillment.mock.calls.map((c) => c[1]);
+    expect(refreshed).toHaveLength(50);
+    expect(new Set(refreshed).size).toBe(30);
+  });
+
+  test('a refresh that only found or withdrew a "possibly kept" hint re-lists too, so the page shows what the refresh learned', async () => {
+    const open = [{ id: 'c1', call_log_id: CALL_ID, kind: 'callback', status: 'open', overdue: false, fulfillment: null }];
+    const hinted = [{ ...open[0], fulfillment: { strength: 'association' } }];
+    commitments.listOpenCommitments.mockResolvedValueOnce(open).mockResolvedValueOnce(hinted);
+    commitments.refreshFulfillment.mockResolvedValueOnce({ checked: 1, fulfilled: 0, hinted: 1, cleared: 0 });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.commitments).toEqual(hinted);
+      expect(body.overdue_implicit_estimate_hours).toBe(24);
+    });
+    expect(commitments.listOpenCommitments).toHaveBeenCalledTimes(2);
+  });
+
+  test('gate off: rows already recorded are still listed, but no fulfillment refresh runs (nothing is written)', async () => {
+    isEnabled.mockReturnValue(false);
+    const open = [{ id: 'c1', call_log_id: CALL_ID, kind: 'callback', status: 'open', overdue: true }];
+    commitments.listOpenCommitments.mockResolvedValueOnce(open);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.commitments).toEqual(open);
+      expect(body.enabled).toBe(false);
+    });
+    expect(commitments.refreshFulfillment).not.toHaveBeenCalled();
+    expect(commitments.listOpenCommitments).toHaveBeenCalledTimes(1);
   });
 });
 

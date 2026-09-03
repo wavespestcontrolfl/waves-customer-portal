@@ -64,6 +64,87 @@ function leadAdditionalProperties(lead) {
     .filter(Boolean);
 }
 
+// Open promises on this lead's calls (call_commitments) — same data the
+// Communications → Owed tab works from, rendered in this file's own inline
+// style system. Renders nothing when nothing is owed.
+// A failed load keeps the last rows it had and says so (an empty rollup
+// must mean nothing is owed, never that the request failed); a failed
+// action is shown beside the controls. The rollup shows up to
+// LEAD_OWED_LIMIT rows and says when more are owed (the Owed tab is the
+// full queue) instead of silently truncating.
+const LEAD_OWED_LIMIT = 10;
+function LeadOwedPromises({ leadId }) {
+  const et = (v) => (v ? new Date(v).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
+  const [rows, setRows] = useState([]);
+  const [enabled, setEnabled] = useState(true);
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState(null);
+  const load = useCallback(async () => {
+    if (!leadId) return;
+    try {
+      const data = await adminFetch(`/admin/call-recordings/commitments/open?lead_id=${encodeURIComponent(leadId)}&limit=${LEAD_OWED_LIMIT + 1}`);
+      setRows(data.commitments || []);
+      setEnabled(data.enabled !== false);
+      setError(null);
+    } catch (err) {
+      setError(err.message || "Could not load what is owed on this lead.");
+    }
+  }, [leadId]);
+  useEffect(() => { setRows([]); setError(null); load(); }, [load]);
+  const act = async (row, action) => {
+    if (busyId) return;
+    setBusyId(row.id);
+    try {
+      await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action }) });
+      await load();
+    } catch (err) {
+      setError(err.message || "That change did not save.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+  if (!rows.length && !error) return null;
+  return (
+    <div style={{ marginTop: 12 }} data-testid="lead-owed">
+      <h4 style={{ margin: "0 0 8px", color: C.heading, fontSize: 14 }}>Owed on this lead</h4>
+      {error && (
+        <div role="alert" style={{ color: C.red, fontSize: 12, marginBottom: 8 }}>
+          {error}{" "}
+          <button type="button" onClick={load} style={{ minHeight: 32, padding: "4px 10px", border: `1px solid ${C.border}`, borderRadius: 6, background: "transparent", color: C.text, cursor: "pointer", font: "inherit", fontSize: 12 }}>
+            Retry
+          </button>
+        </div>
+      )}
+      {rows.slice(0, LEAD_OWED_LIMIT).map((row) => (
+        <div key={row.id} style={{ border: `1px solid ${row.overdue ? C.red : C.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: C.text }}>
+          <div style={{ marginBottom: 4 }}>
+            <strong>{row.party === "waves" ? "Waves promised" : "Customer agreed"}:</strong> {row.description}
+          </div>
+          <div style={{ color: row.overdue ? C.red : C.muted, marginBottom: 6 }}>
+            {row.overdue ? "Overdue" : row.due_at ? `Due ${et(row.due_at)} ET` : "No due time"}
+            {" · call "}{et(row.call_started_at)} ET
+          </div>
+          {enabled && (
+            <>
+              <button type="button" disabled={busyId === row.id} onClick={() => act(row, "fulfill")} style={{ marginRight: 8, minHeight: 32, padding: "4px 10px", border: `1px solid ${C.border}`, borderRadius: 6, background: "transparent", color: C.text, cursor: "pointer", font: "inherit", fontSize: 12 }}>
+                Mark done
+              </button>
+              <button type="button" disabled={busyId === row.id} onClick={() => act(row, "dismiss")} style={{ minHeight: 32, padding: "4px 10px", border: "none", background: "transparent", color: C.muted, cursor: "pointer", font: "inherit", fontSize: 12 }}>
+                Dismiss
+              </button>
+            </>
+          )}
+        </div>
+      ))}
+      {rows.length > LEAD_OWED_LIMIT && (
+        <div style={{ color: C.muted, fontSize: 12 }}>
+          More promises are owed on this lead — <a href="/admin/communications#tab=owed" style={{ color: C.text }}>open the Owed tab</a> for the full queue.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function adminFetch(path, opts = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...opts,
@@ -2052,6 +2133,7 @@ export function LeadsSection() {
                                         );
                                       })()}
                                     </div>{" "}
+                                    <LeadOwedPromises leadId={lead.id} />
                                     {leadCalls.length > 0 && (
                                       <div style={{ marginTop: 12 }}>
                                         <h4

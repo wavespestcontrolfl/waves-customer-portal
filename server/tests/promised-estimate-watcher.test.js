@@ -3,6 +3,7 @@ jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: jest.fn(() => true),
   sendOne: jest.fn(async () => ({})),
 }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../models/db', () => {
   // Marker reads/writes are try/caught in the service; loaders are injected.
   const qb = () => { throw new Error('db must not be touched when loadRows is injected'); };
@@ -13,8 +14,10 @@ jest.mock('../models/db', () => {
 const sendgrid = require('../services/sendgrid-mail');
 const {
   runPromisedEstimateWatcher,
+  commitmentsHandoffClause,
   _private: { composePromisedEstimateDigest },
 } = require('../services/promised-estimate-watcher');
+const { isEnabled } = require('../config/feature-gates');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 function row(ageDays, overrides = {}) {
@@ -36,6 +39,26 @@ beforeEach(() => {
   sendgrid.isConfigured.mockReturnValue(true);
   delete process.env.PROMISED_ESTIMATE_WATCHER_DISABLED;
   delete process.env.PROMISED_ESTIMATE_WATCHER_EMAIL;
+});
+
+describe('commitmentsHandoffClause', () => {
+  test('gate off: no handoff — this lane keeps covering every call', () => {
+    isEnabled.mockReturnValue(false);
+    expect(commitmentsHandoffClause('send_estimate')).toBe('');
+  });
+  test('gate on: stands down only for a LIVE commitment row — a stale untouched AI row (last_seen_generation behind the call) leaves the call with this lane', () => {
+    isEnabled.mockReturnValue(true);
+    try {
+      const clause = commitmentsHandoffClause('send_estimate');
+      expect(clause).toContain("cc.call_log_id = c.id AND cc.kind = 'send_estimate'");
+      // Stale = a LATER commitments pass completed on the call (a row with a
+      // higher last_seen_generation), never the claim-time processing_generation.
+      expect(clause).toContain("AND NOT (cc.human_state IS NULL AND cc.source = 'ai' AND cc.last_seen_generation IS NOT NULL AND cc.last_seen_generation < (SELECT MAX(later.last_seen_generation) FROM call_commitments later WHERE later.call_log_id = cc.call_log_id))");
+      expect(clause).not.toContain('processing_generation');
+    } finally {
+      isEnabled.mockReturnValue(false);
+    }
+  });
 });
 
 describe('composePromisedEstimateDigest', () => {

@@ -57,6 +57,14 @@ afterEach(() => {
 });
 
 describe("CallIntelligencePanel", () => {
+  it("opens when a deep link reaches an already-mounted panel (defaultOpen turning true after mount)", async () => {
+    const { rerender } = render(<CallIntelligencePanel callId={CALL_ID} onJumpToQuote={() => {}} />);
+    expect(calls).toHaveLength(0);
+    rerender(<CallIntelligencePanel callId={CALL_ID} onJumpToQuote={() => {}} defaultOpen />);
+    await waitFor(() => expect(screen.getByText("Complete")).toBeInTheDocument());
+    expect(calls[0].url).toContain(`/admin/call-recordings/calls/${CALL_ID}/intelligence`);
+  });
+
   it("loads only when opened and renders the honest processing state, the commitments, and their provenance", async () => {
     render(<CallIntelligencePanel callId={CALL_ID} onJumpToQuote={() => {}} />);
     expect(calls).toHaveLength(0);

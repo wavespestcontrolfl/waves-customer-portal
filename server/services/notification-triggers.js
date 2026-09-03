@@ -219,6 +219,24 @@ const TRIGGER_REGISTRY = {
       link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
     }),
   },
+  // Written directly by call-commitments-watchdog (notifyAdmin with its own
+  // per-commitment per-ET-day dedupeKey and bell: true — the 'alert'
+  // category is silenced under the bell policy and a pager must page);
+  // registered here so the persisted rows are tech-visible: the Owed tab is
+  // staff-wide and the people who work it must see its overdue bell. `build`
+  // is the shape the watchdog writes, for triggerNotification parity.
+  call_commitment_overdue: {
+    techVisible: true,
+    label: 'Promise to a caller is overdue',
+    category: 'alert',
+    priority: 'high',
+    group: 'Communication',
+    build: (p) => ({
+      title: p.count > 1 ? `${p.count} promises to callers are overdue` : 'A promise to a caller is overdue',
+      body: p.summary || 'Open the Owed tab to mark it done or dismiss it.',
+      link: '/admin/communications#tab=owed',
+    }),
+  },
   // Fired by call-recording-processor (GATE_VOICEMAIL_CALLBACK_ALERT) for a
   // voicemail with concrete service intent that did NOT take the workable
   // lead path — usually an existing customer asking for service. Without

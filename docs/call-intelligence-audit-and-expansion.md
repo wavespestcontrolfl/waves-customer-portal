@@ -317,3 +317,63 @@ index exists), commitment rows for relay (Sandy) calls (they bypass
 `processRecording` by design), an explicit-unlink that also suppresses
 phone-based re-association during a pass. Blocked: prod read-only evidence
 for status distributions and duplicate `recording_sid` rows. Policy: none.
+
+
+## 8. Follow-on: the Owed queue, Sandy's promises, and the rollups (PR 2)
+
+Built on top of the commitments slice, all behind the same
+`GATE_CALL_COMMITMENTS`:
+
+- **Owed tab** (Communications → Owed, `client/src/pages/admin/OwedTabV2.jsx`):
+  every open promise across calls, overdue first, then soonest due, then
+  oldest call. Filters: Waves / Customer / all, and "show possibly-kept".
+  Mark done, Dismiss, and Open call (deep link `#tab=calls&call=<id>`,
+  which opens that call's intelligence panel). Read:
+  `GET /api/admin/call-recordings/commitments/open` (staff), which also
+  refreshes fulfillment for up to 25 calls on the page so a kept promise
+  drops off. `listOpenCommitments` lives in `services/call-commitments.js`.
+- **Overdue bell** (`services/call-commitments-watchdog.js`, daily 7:20am ET):
+  a Waves promise is overdue when its stated due time passed, or, for the
+  prompt kinds, when its implicit deadline passed (`implicitDueAt`): an
+  estimate 24 hours after the call (`OVERDUE_IMPLICIT_ESTIMATE_HOURS`, the
+  promised-estimate watcher's grace), a callback at the end of the call's
+  ET day (the EOD digest's contract), confirmation / report / paperwork
+  after `OVERDUE_IMPLICIT_DAYS` (3); a human-recorded promise ages from
+  its own `created_at`. The queue's SQL ordering (`effectiveDueSql`) is the
+  same rule. One bell per promise per ET day (dedupeKey), `bell: true`,
+  tech-visible (`call_commitment_overdue` in notification-triggers),
+  aggregate above 5, demo account filtered, a call whose fulfillment
+  refresh failed is left out (`unverified`), rows re-checked as still open
+  right before paging, unannounced writes reported as such.
+- **Hand-off from the old watcher**: `promised-estimate-watcher` skips a
+  call once a LIVE `send_estimate` commitment row exists for it (a stale
+  untouched AI row does not count — `staleAiRowSql`), so a promised
+  estimate is reported by exactly one lane and calls processed before the
+  gate flip keep their old coverage until they resolve. The callbacks lane
+  of `unworked-comms-watcher` is NOT handed off: it pages the same evening,
+  and the watchdog only rings the next morning — the Owed queue tracks the
+  callback row and the morning bell is the escalation. Deleting
+  `promised-estimate-watcher.js` outright is proposed for after the flip
+  (rule 5: whole-file deletions are explicit instructions).
+- **Sandy's promises**: at relay session close, after the fenced reconcile
+  UPDATE lands, `recordRelayCommitments` reads the AGENT lines of the
+  scrubbed transcript (never the raw turns) and records a `callback` for
+  "someone will call you back" wording and a `send_estimate` when the
+  capture_lead tool confirmed the estimate was queued (`ctx.notePromise`);
+  a refused estimate never becomes a promise. Owner-fenced on its own:
+  `recordRelayCommitments` takes the session's claim nonce, locks the
+  `call_log` row and re-reads `relay_session_claim_owner` in the same
+  transaction as the upsert, so a socket superseded between the reconcile
+  and this write records nothing (relay rows carry no processing token,
+  so this fence is the only one).
+- **Rollups**: Customer 360 → Comms shows "Owed to this customer" above the
+  thread (`OwedCommitmentsSummary`); the Pipeline lead card shows "Owed on
+  this lead" in its own inline style system. Both use the same queue read
+  and the same PATCH actions.
+
+Tests: `call-commitments-queue.test.js` (overdue rules, relay derivation),
+`call-commitments-watchdog.test.js` (dedupe keys, aggregate, gate, demo
+filter, unannounced), `voice-relay-commitments.test.js` (the tool→session→
+close contract), the queue read on live Postgres in
+`call-commitments-db.test.js`, the route in
+`admin-call-recordings-intelligence.test.js`, and `OwedTabV2.test.jsx`.

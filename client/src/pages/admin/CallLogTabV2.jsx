@@ -425,6 +425,56 @@ export default function CallLogTabV2() {
   // transcript, which opens and marks it so the office can check a promise
   // against the words in seconds instead of replaying the audio.
   const [transcriptHighlights, setTranscriptHighlights] = useState(() => new Map());
+  // Deep link from the Owed tab (#tab=calls&call=<id>): open that call's
+  // intelligence panel and scroll to it once the list has rendered.
+  const [focusCallId, setFocusCallId] = useState(() => {
+    try { return new URLSearchParams(window.location.hash.replace(/^#/, "")).get("call") || null; } catch { return null; }
+  });
+  useEffect(() => {
+    const onHash = () => {
+      try { setFocusCallId(new URLSearchParams(window.location.hash.replace(/^#/, "")).get("call") || null); } catch { setFocusCallId(null); }
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  useEffect(() => {
+    if (!focusCallId) return;
+    const el = document.getElementById(`call-intel-${focusCallId}`);
+    if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [focusCallId, calls]);
+  // A deep-linked call outside the loaded window (older than the default
+  // 365 days, or past the newest 200) is fetched by exact id and pinned to
+  // the top of the list so the link never opens an empty tab. One attempt
+  // per id: a call the server says is missing stays missing rather than
+  // refetching on every render. A FAILED request (transport, 5xx) is not a
+  // missing call: the latch is released and the failure shown with a
+  // retry, so the link is not silently empty until the tab remounts.
+  const pinnedFetchRef = useRef(null);
+  const [pinnedError, setPinnedError] = useState(null);
+  const [pinnedRetry, setPinnedRetry] = useState(0);
+  useEffect(() => {
+    // No focus (hash cleared): nothing pinned, and no stale failure either.
+    if (!focusCallId) { setPinnedError(null); return; }
+    if (loading) return;
+    if (calls.some((c) => c.id === focusCallId)) return;
+    if (pinnedFetchRef.current === focusCallId) return;
+    pinnedFetchRef.current = focusCallId;
+    setPinnedError(null);
+    adminFetch(`/ai/admin/calls?id=${encodeURIComponent(focusCallId)}`)
+      .then((d) => {
+        const pinned = d?.calls?.[0];
+        if (!pinned) return;
+        setCalls((prev) => (prev.some((c) => c.id === pinned.id) ? prev : [pinned, ...prev]));
+      })
+      .catch((err) => {
+        // A failure belongs to the request's own focus: after the hash moved
+        // on, an obsolete rejection must not release the latch or paint an
+        // error over the call now in focus (Codex #3725 r19 P3).
+        if (pinnedFetchRef.current !== focusCallId) return;
+        pinnedFetchRef.current = null;
+        setPinnedError(err?.message || "Could not load the linked call.");
+      });
+  }, [focusCallId, calls, loading, pinnedRetry]);
   const jumpToQuote = (id, quote) => {
     setTranscriptHighlights((prev) => new Map(prev).set(id, quote));
     setExpandedTranscripts((prev) => new Set(prev).add(id));
@@ -449,6 +499,7 @@ export default function CallLogTabV2() {
         const d = callsResult.value;
         setCalls(d.calls || []);
         setTranscriptSyncEnabled(d.transcript_sync_enabled === true);
+        pinnedFetchRef.current = null;
         if (calibrationResult.status === "fulfilled") {
           setRouteCalibration(calibrationResult.value);
         }
@@ -790,6 +841,12 @@ export default function CallLogTabV2() {
 
   return (
     <div className="flex min-w-0 max-w-full flex-col gap-4 overflow-x-hidden">
+      {pinnedError && (
+        <div role="alert" className="flex flex-wrap items-center gap-2 text-14 md:text-12 text-alert-fg">
+          <span>{pinnedError}</span>
+          <Button size="sm" variant="ghost" onClick={() => setPinnedRetry((n) => n + 1)}>Retry</Button>
+        </div>
+      )}
       {/* Stats filter bar — desktop only */}
       <div className="hidden md:flex gap-2 flex-wrap">
         {" "}
@@ -1582,6 +1639,7 @@ export default function CallLogTabV2() {
                       })()}
                     <CallIntelligencePanel
                       callId={c.id}
+                      defaultOpen={focusCallId === c.id}
                       onJumpToQuote={c.transcription ? (quote) => jumpToQuote(c.id, quote) : null}
                       onCallChanged={() => loadCalls(callLogSearch.trim())}
                       refreshKey={[c.processing_status, c.processing_generation, c.updated_at].map((v) => v ?? "").join("|")}

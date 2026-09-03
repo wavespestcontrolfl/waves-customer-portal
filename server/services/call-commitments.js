@@ -747,20 +747,24 @@ function windowEnd(after) {
   return new Date(after.getTime() + ASSOCIATION_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 }
 
-function leadIdOf(call) {
+// The lead this call minted (metadata.lead_id) or, for a relay call that
+// REUSED an existing prospect, the lead it was stamped with (relay_lead_id
+// — the lead keeps its original twilio_call_sid, so the SID hop would find
+// the earlier call instead).
+function leadIdsOf(call) {
   try {
     const meta = typeof call?.metadata === "string" ? JSON.parse(call.metadata) : (call?.metadata || {});
-    return meta?.lead_id || null;
-  } catch { return null; }
+    return [...new Set([meta?.lead_id, meta?.relay_lead_id].filter(Boolean).map(String))];
+  } catch { return []; }
 }
 
 // The END of the call — the boundary the promised-estimate watcher already
 // uses (its `sent_at > CASE …` clause): a record stamped while the caller
 // was still on the line (an estimate sent mid-call) cannot have kept a
-// promise made later in the same call (Codex #3738 r13 P1). Normal inbound
-// rows are inserted at ring time, so their end is created_at + duration;
-// bridged rows end at bridge + duration; other rows (recovered outbound,
-// inserted near the end by status callbacks) end at created_at.
+// promise made later in the same call. Normal inbound rows are inserted at
+// ring time, so their end is created_at + duration; bridged rows end at
+// bridge + duration; other rows (recovered outbound, inserted near the end
+// by status callbacks) end at created_at.
 function callEndedAt(call) {
   const created = call?.created_at ? new Date(call.created_at) : null;
   if (!created || Number.isNaN(created.getTime())) return null;
@@ -773,22 +777,32 @@ function callEndedAt(call) {
   return created;
 }
 
-// Where each kind looks for its proof. Every match is AFTER THE CALL ENDED;
-// the strength says whether the record is linked to this call or merely to
-// the same customer/phone inside the window.
+// Where each kind looks for its proof. Every match happened AFTER THE CALL
+// ENDED (`after`); the strength says whether the record is linked to this
+// call or merely to the same customer/phone inside the window. An
+// estimate's creation time is deliberately NOT a condition (r14): "I'll
+// resend that estimate" to an existing customer is kept by a send of an
+// estimate created long before the call — the promised-estimate watcher
+// this lane stands in for accepts exactly that send.
 async function resolveFulfillment(conn, commitment, call) {
+  const started = call?.created_at ? new Date(call.created_at) : null;
   const after = callEndedAt(call);
-  if (!after) return null;
+  if (!started || Number.isNaN(started.getTime()) || !after) return null;
   const until = windowEnd(after);
   const phone = contactPhoneOf(call);
   const customerId = call?.customer_id || null;
-  const leadId = leadIdOf(call);
+  const leadIds = leadIdsOf(call);
 
   switch (commitment.kind) {
     case "send_estimate": {
-      // Direct: the estimate on the lead this call minted (or that carries
-      // this call's SID). Association: any later estimate sent to the
-      // call's customer inside the window.
+      // Direct: an estimate LINKED to this call by any exact route the
+      // promised-estimate watcher honours — the lead FK (leads.estimate_id)
+      // on the lead this call minted, was stamped with, or that carries its
+      // SID; the estimator's own provenance stamp
+      // (estimate_data.estimatorEngine.callLogId); or the public-quote
+      // mirror (estimate_data.lead_id) on a standalone estimate that never
+      // got the lead FK. Association: any later estimate sent to the call's
+      // customer inside the window.
       // sent_at alone is not delivery (#3725 r13 P1 class): report
       // click-to-estimate and plan_restart mints stamp sent_at for the
       // publish-without-delivery shape. For those sources the witness is
@@ -810,30 +824,44 @@ async function resolveFulfillment(conn, commitment, call) {
         .catch(() => null);
       if (stamped) return { kind: "estimate_sent", record_type: "estimate", record_id: stamped.id, matched_at: stamped.sent_at, strength: "direct", basis: "estimate_stamped_with_this_call" };
       // Same guard as buildCallOutcomes: no lead key, no lead lookup.
-      const leadRows = (leadId || call.twilio_call_sid) ? await conn("leads")
+      const leads = (leadIds.length || call.twilio_call_sid) ? await conn("leads")
         .where(function scope() {
-          if (leadId) this.orWhere("id", leadId);
+          if (leadIds.length) this.orWhereIn("id", leadIds);
           if (call.twilio_call_sid) this.orWhere("twilio_call_sid", call.twilio_call_sid);
         })
-        .whereNotNull("estimate_id")
-        .select("id", "estimate_id", "twilio_call_sid")
-        .catch(() => []) : [];
-      // A lead that carries THIS call's SID was minted by this call. A lead
-      // reached only through the metadata.lead_id stamp is a REUSED one
-      // (the processor stamps an earlier call's lead on a phone-less
-      // retry) — an estimate later sent on it is not necessarily this
-      // call's, so it is a hint, never direct proof (Codex #3738 r13 P1).
+        // No local catch: a failed lead lookup reaches refreshFulfillment's
+        // failed accounting (r13 P2) instead of reading as "no leads".
+        .select("id", "estimate_id", "twilio_call_sid") : [];
+      // A lead that carries THIS call's SID was minted by this call (the
+      // processor and the relay both stamp the SID at INSERT and never on
+      // reuse). A lead reached only through the lead_id / relay_lead_id
+      // stamp is a REUSED earlier call's lead: an estimate later sent on it
+      // is not necessarily this call's, so it is a hint, never direct proof
+      // (Codex #3738 r13 P1). Either way the estimate must have been SENT
+      // (delivered) after THIS call ended; when it was created does not
+      // matter (r14).
       const mintedHere = (lead) => Boolean(lead.twilio_call_sid) && lead.twilio_call_sid === call.twilio_call_sid;
-      for (const lead of [...leadRows].sort((a, b) => Number(mintedHere(b)) - Number(mintedHere(a)))) {
-        // Its estimate must have been sent after THIS call ended to count —
-        // and CREATED after it too: a reused lead can carry a draft an
-        // earlier call produced that was sent later for its own reasons.
-        const est = await reallyDelivered(conn("estimates").where({ id: lead.estimate_id }).whereNotNull("sent_at").where("sent_at", ">", after).where("created_at", ">", after)).first("id", "sent_at", "status");
-        if (!est) continue;
-        return mintedHere(lead)
-          ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "direct", basis: "estimate_sent_on_the_lead_this_call_created" }
-          : { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
-      }
+      const minted = leads.filter(mintedHere);
+      const reused = leads.filter((l) => !mintedHere(l));
+      const mintedLeadIds = minted.map((l) => String(l.id));
+      const reusedLeadIds = [...new Set([...leadIds.filter((id) => !mintedLeadIds.includes(id)), ...reused.map((l) => String(l.id))])];
+      const estimateOnLeads = (leadRows, leadIdList) => {
+        const estimateIds = leadRows.map((l) => l.estimate_id).filter(Boolean);
+        if (!estimateIds.length && !leadIdList.length) return null;
+        return reallyDelivered(conn("estimates")
+          .where(function linkedToLeads() {
+            if (estimateIds.length) this.orWhereIn("id", estimateIds);
+            if (leadIdList.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${leadIdList.map(() => "?").join(", ")})`, leadIdList);
+          })
+          .whereNotNull("sent_at")
+          .where("sent_at", ">", after)
+          .orderBy("sent_at", "asc")
+          .first("id", "sent_at", "status"));
+      };
+      const linked = await estimateOnLeads(minted, mintedLeadIds);
+      if (linked) return { kind: "estimate_sent", record_type: "estimate", record_id: linked.id, matched_at: linked.sent_at, strength: "direct", basis: "estimate_linked_to_this_call_sent" };
+      const onReused = await estimateOnLeads(reused, reusedLeadIds);
+      if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: onReused.sent_at, strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
       // An estimate linked only through estimates.customer_phone still keeps
       // the promise (commercial proposals store the phone with a NULL
       // customer_id, so a same-customer lookup misses them). Mirror the
@@ -872,17 +900,44 @@ async function resolveFulfillment(conn, commitment, call) {
       return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "callback": {
+      // A returned callback IS the fulfilment — the phone is the linkage.
+      // Same completion predicate as the callbacks digest
+      // (unworked-comms-watcher, "Already returned"): a CONNECTED outbound
+      // call to the caller's number after this call (>= 60 s — the stored
+      // duration is the parent leg, so a pickup-and-abandon is short), or
+      // a HUMAN-authored text to it (manual / ai_approved / ai_revised —
+      // never the assistant's automatic reply, and not a proactive draft
+      // with no inbound anchor). A LINKED call is returned only by a
+      // record linked to the same customer (shared household numbers);
+      // an unlinked call keeps the phone-level match. No outer window: a
+      // callback returned late was still returned.
       if (!phone) return null;
+      const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
       const outbound = await conn("call_log")
-        .where("direction", "like", "outbound%")
+        .where("direction", "outbound")
         .where("created_at", ">", after)
-        .where("created_at", "<=", until)
-        .where("status", "completed")
-        .where("duration_seconds", ">=", 20)
-        .modify((b) => phoneWhere(b, "to_phone", phone))
+        .whereRaw("COALESCE(duration_seconds, 0) >= 60")
+        .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomer(b, "customer_id"); })
         .orderBy("created_at", "asc")
         .first("id", "created_at");
-      return outbound ? { kind: "outbound_call", record_type: "call_log", record_id: outbound.id, matched_at: outbound.created_at, strength: "association", basis: `completed_outbound_call_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+      if (outbound) return { kind: "outbound_call", record_type: "call_log", record_id: outbound.id, matched_at: outbound.created_at, strength: "direct", basis: "callback_returned_connected_outbound_call" };
+      const text = await conn("sms_log as os")
+        .where("os.direction", "outbound")
+        .whereIn("os.message_type", ["manual", "ai_approved", "ai_revised"])
+        .whereIn("os.status", ["queued", "sent", "delivered"])
+        .where("os.created_at", ">", after)
+        .whereNotExists(function proactiveDraft() {
+          this.select(1).from("message_drafts as mdx")
+            .whereNull("mdx.sms_log_id")
+            .whereRaw("(mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10)))")
+            .whereRaw("mdx.sent_at BETWEEN os.created_at - interval '2 minutes' AND os.created_at + interval '2 minutes'");
+        })
+        .modify((b) => { phoneWhere(b, "os.to_phone", phone); sameCustomer(b, "os.customer_id"); })
+        .orderBy("os.created_at", "asc")
+        .first("os.id", "os.created_at");
+      // No local catch: a failed lookup must reach refreshFulfillment's
+      // `failed` accounting so the watchdog leaves this call out of the bell.
+      return text ? { kind: "sms_sent", record_type: "sms_log", record_id: text.id, matched_at: text.created_at, strength: "direct", basis: "callback_returned_by_human_text" } : null;
     }
     case "call_back": {
       // The CUSTOMER's promise to call us back: the inbound counterpart of
@@ -991,17 +1046,36 @@ async function resolveFulfillment(conn, commitment, call) {
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
 async function refreshFulfillment(conn, callLogId, call = null) {
-  const row = call || await conn("call_log").where({ id: callLogId }).first("id", "twilio_call_sid", "customer_id", "from_phone", "to_phone", "direction", "created_at", "metadata");
+  const row = call || await conn("call_log").where({ id: callLogId }).first("id", "twilio_call_sid", "customer_id", "from_phone", "to_phone", "direction", "created_at", "bridged_at", "duration_seconds", "metadata");
   if (!row) return { checked: 0, fulfilled: 0, hinted: 0 };
   const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereNull("human_state");
   let fulfilled = 0;
   let hinted = 0;
+  let cleared = 0;
+  // A lookup that threw proves nothing either way: the row is left as is
+  // and the failure is COUNTED, so the watchdog can keep that call out of
+  // the bell instead of paging on a row it could not verify.
+  let failed = 0;
+  const LOOKUP_FAILED = Symbol("lookup_failed");
   for (const c of open) {
     const proof = await resolveFulfillment(conn, c, row).catch((err) => {
       logger.warn(`[call-commitments] fulfillment lookup failed for ${c.id}: ${err.message}`);
-      return null;
+      return LOOKUP_FAILED;
     });
-    if (!proof) continue;
+    if (proof === LOOKUP_FAILED) { failed += 1; continue; }
+    if (!proof) {
+      // A hint the current facts no longer support — the call was relinked
+      // to another customer, or the record it pointed at is gone — must not
+      // keep saying "possibly kept": the panel would steer a manual
+      // completion off a record that is not this customer's. Only a
+      // completed lookup clears it; an error above leaves it alone.
+      cleared += await conn("call_commitments")
+        .where({ id: c.id, status: "open" })
+        .whereNull("human_state")
+        .whereRaw("fulfillment ->> 'strength' = 'association'")
+        .update({ fulfillment: null, updated_at: new Date() });
+      continue;
+    }
     if (proof.strength === "direct") {
       fulfilled += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
@@ -1016,7 +1090,292 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
   }
-  return { checked: open.length, fulfilled, hinted };
+  return { checked: open.length, fulfilled, hinted, cleared, failed };
+}
+
+
+// ── Queue reads (the Owed tab, Customer 360, the lead card, the bell) ─────
+// A Waves promise with no stated due time is still owed promptly. The
+// implicit deadline per kind preserves what the lanes this queue takes
+// over from already enforced, so handing a promise to the pager never
+// loosens it: an estimate is owed within 24 hours (the promised-estimate
+// watcher's grace), a callback by the end of the call's ET day (the
+// end-of-day unworked digest), the other prompt kinds (confirmation,
+// report, paperwork) within OVERDUE_IMPLICIT_DAYS. Follow-up visits and
+// scheduling without a date are not judged this way — they wait for the
+// office to set a time. The clock starts at the call for an AI row and at
+// the moment it was recorded for a human one (a promise the office adds to
+// a weeks-old call is not overdue the instant it is typed).
+// `effectiveDueSql` is the same rule for the queue's SQL ordering.
+const OVERDUE_IMPLICIT_DAYS = 3;
+const OVERDUE_IMPLICIT_ESTIMATE_HOURS = 24;
+const PROMPT_KINDS = new Set(['send_estimate', 'send_appointment_confirmation', 'callback', 'send_report', 'send_paperwork']);
+
+// The first ET midnight after `date`.
+function endOfETDay(date) {
+  return parseETDateTime(`${etDateString(addETDays(date, 1))}T00:00`);
+}
+
+function implicitDueAt(row) {
+  if (row.party !== 'waves' || !PROMPT_KINDS.has(row.kind)) return null;
+  const basis = row.source === 'human' ? row.created_at : (row.call_started_at || row.created_at);
+  const from = basis ? new Date(basis) : null;
+  if (!from || Number.isNaN(from.getTime())) return null;
+  if (row.kind === 'send_estimate') return new Date(from.getTime() + OVERDUE_IMPLICIT_ESTIMATE_HOURS * 60 * 60 * 1000);
+  if (row.kind === 'callback') return endOfETDay(from);
+  return new Date(from.getTime() + OVERDUE_IMPLICIT_DAYS * 24 * 60 * 60 * 1000);
+}
+
+function isOverdue(row, now = new Date()) {
+  if (!row || row.status !== 'open' || row.human_state === 'dismissed') return false;
+  if (row.due_at) return new Date(row.due_at).getTime() < now.getTime();
+  const implicit = implicitDueAt(row);
+  return !!implicit && implicit.getTime() < now.getTime();
+}
+
+// isOverdue's deadline as SQL over a call_commitments alias and its
+// call_log alias: the stated due time, else the implicit one, else NULL.
+// Static SQL — every value is a constant from this module.
+function effectiveDueSql(cc = 'cc', cl = 'cl') {
+  const basis = `CASE WHEN ${cc}.source = 'human' THEN ${cc}.created_at ELSE ${cl}.created_at END`;
+  const promptKinds = [...PROMPT_KINDS].map((k) => `'${k}'`).join(', ');
+  return `CASE WHEN ${cc}.due_at IS NOT NULL THEN ${cc}.due_at`
+    + ` WHEN ${cc}.party <> 'waves' THEN NULL`
+    + ` WHEN ${cc}.kind = 'send_estimate' THEN (${basis}) + interval '${OVERDUE_IMPLICIT_ESTIMATE_HOURS} hours'`
+    + ` WHEN ${cc}.kind = 'callback' THEN (((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`
+    + ` WHEN ${cc}.kind IN (${promptKinds}) THEN (${basis}) + interval '${OVERDUE_IMPLICIT_DAYS} days'`
+    + ' ELSE NULL END';
+}
+
+// An untouched AI row a LATER commitments pass no longer detected: kept for
+// the audit trail, labelled stale by the panel, never live work — not in
+// the queue, not a bell, and not a reason for the legacy watcher to stand
+// down. "Later pass" means a pass that demonstrably COMPLETED its
+// commitments step on this call — some row of the call carries a higher
+// last_seen_generation — never the call's processing_generation, which
+// advances the moment a reprocess claims the row (r15): a reprocess that
+// times out or fails before recording commitments must not hide the
+// promises the last good pass found. (A later pass that detected nothing
+// at all leaves the earlier rows live — the safe direction.) A
+// human-confirmed or edited row is the office's call and never stale.
+// Static SQL; `cc` is the call_commitments alias of the enclosing query.
+function staleAiRowSql(cc = 'cc') {
+  return `(${cc}.human_state IS NULL AND ${cc}.source = 'ai' AND ${cc}.last_seen_generation IS NOT NULL AND ${cc}.last_seen_generation < (SELECT MAX(later.last_seen_generation) FROM call_commitments later WHERE later.call_log_id = ${cc}.call_log_id))`;
+}
+
+// Pure, exported for the watchdog tests.
+function selectOverdue(rows, { now = new Date() } = {}) {
+  return (rows || []).filter((r) => isOverdue(r, now));
+}
+
+async function listOpenCommitments(conn, { party = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, now = new Date() } = {}) {
+  let leadSid = null;
+  if (leadId) {
+    // No local catch: a failed lookup must reach the route's error handler
+    // (a SID-only linked call would otherwise read as nothing owed — Codex
+    // #3725 r18 P2).
+    const lead = await conn('leads').where({ id: leadId }).first('twilio_call_sid');
+    leadSid = lead?.twilio_call_sid || null;
+  }
+  const rows = await conn('call_commitments as cc')
+    .join('call_log as cl', 'cl.id', 'cc.call_log_id')
+    .leftJoin('customers as cu', 'cu.id', 'cl.customer_id')
+    .where('cc.status', 'open')
+    .whereRaw(`NOT ${staleAiRowSql('cc')}`)
+    .modify((b) => {
+      if (party === 'waves' || party === 'customer') b.where('cc.party', party);
+      if (customerId) b.where('cl.customer_id', customerId);
+      if (leadId) {
+        b.where(function leadScope() {
+          this.whereRaw("cl.metadata ->> 'lead_id' = ?", [String(leadId)]);
+          // A relay call that REUSED an existing lead leaves leads.twilio_call_sid
+          // on the original call and stamps itself relay_lead_id (capture_lead).
+          this.orWhereRaw("cl.metadata ->> 'relay_lead_id' = ?", [String(leadId)]);
+          if (leadSid) this.orWhere('cl.twilio_call_sid', leadSid);
+        });
+      }
+      if (!includeHints) b.whereNull('cc.fulfillment');
+    })
+    // Overdue first — by the SAME rule isOverdue applies (the stated due
+    // time, else the per-kind implicit deadline, in the past) — then
+    // soonest EFFECTIVE due (a callback owed by tonight ahead of an
+    // estimate owed tomorrow morning; undated scheduling rows last), then
+    // oldest call.
+    // cc.id last: a page boundary between rows tied on deadline and call
+    // (several undated promises from one call) must fall the same way on
+    // every offset query, or Load more / the watchdog scan would duplicate
+    // one row and skip another (Codex #3725 r19 P2).
+    .orderByRaw(`CASE WHEN (${effectiveDueSql('cc', 'cl')}) < NOW() THEN 0 ELSE 1 END, (${effectiveDueSql('cc', 'cl')}) ASC NULLS LAST, cl.created_at ASC, cc.id ASC`)
+    // 200 rows per page + one probe row the route uses to say has_more.
+    .limit(Math.max(1, Math.min(201, Number(limit) || 100)))
+    .offset(Math.max(0, Number(offset) || 0))
+    .select(
+      'cc.*',
+      'cl.twilio_call_sid', 'cl.created_at as call_started_at', 'cl.direction', 'cl.from_phone', 'cl.to_phone',
+      'cl.customer_id', 'cu.first_name as customer_first_name', 'cu.last_name as customer_last_name',
+    );
+  return rows.map((r) => ({ ...normalizeRow(r), overdue: isOverdue(r, now) }));
+}
+
+// Which of these commitment ids are still LIVE work right now — open, not
+// dismissed, and not gone stale (a reprocess that finished after the
+// snapshot and no longer detects the row: the same predicate that keeps it
+// out of the queue). The watchdog re-checks its snapshot immediately
+// before paging, so a promise the office settled — or a pass withdrew —
+// while the scan was refreshing never rings.
+async function stillOpenIds(conn, ids) {
+  if (!ids?.length) return new Set();
+  const rows = await conn('call_commitments as cc')
+    .join('call_log as cl', 'cl.id', 'cc.call_log_id')
+    .whereIn('cc.id', ids)
+    .where('cc.status', 'open')
+    .whereRaw("cc.human_state IS DISTINCT FROM 'dismissed'")
+    .whereRaw(`NOT ${staleAiRowSql('cc')}`)
+    .select('cc.id');
+  return new Set(rows.map((r) => r.id));
+}
+
+// ── The AI phone assistant's own promises ────────────────────────────────
+// Relay calls never go through processRecording, so Sandy's "someone will
+// call you back" existed only in the transcript. The session's close writes
+// the scrubbed transcript; this reads the AGENT lines of that text (never
+// the raw turns) and records a commitment for each promise it finds. The
+// capture_lead tool's own verdict on the estimate (queued or refused) is
+// the stronger signal and outranks the wording.
+// English AND Spanish: a caller who chose Spanish on the keypad hears the
+// model and the deterministic closes (relay-language COPY.es — "le
+// devolverá la llamada", "se comunicará con usted", "le dé seguimiento")
+// in Spanish, and those promises are owed just the same. Accented letters
+// are not \\w, so the Spanish alternatives end without a trailing \\b.
+const RELAY_PROMISE_PATTERNS = Object.freeze([
+  { kind: 'callback', re: /\b(call(?:ing)? you back|give you a call( back)?|get back to you|reach out to you|follow(?:s|ing)? up with you|team member will follow up|someone will follow up|(?:a )?note for the team to follow up|team to follow up|will follow up (?:with you )?(?:shortly|as soon as possible|first thing|when the office opens))\b/i },
+  { kind: 'callback', re: /\b(le devolver(?:á|a|emos) la llamada|devolverle la llamada|se comunicar(?:á|a|án) con usted|nos comunicar(?:emos|íamos) con usted|le llamar(?:á|a|emos|án)(?: de vuelta)?|le regresar(?:á|a|emos) la llamada|nos pondremos en contacto|se pondr(?:á|a|án) en contacto con usted|le d(?:é|e|ar(?:á|a|án|emos)) seguimiento|dar(?:á|a|án|emos)? seguimiento a (?:esto|su))/i },
+  { kind: 'send_estimate', re: /\b(written estimate|send (?:you )?(?:an?|the|your) (?:written )?(?:estimate|quote)|(?:estimate|quote) (?:usually )?(?:goes|will go|will be sent|is sent) out|email (?:you )?(?:an?|the|your) (?:estimate|quote))\b/i },
+  { kind: 'send_estimate', re: /\b((?:le )?(?:enviar|mandar)(?:é|emos|á|án|le|emos)?(?: a usted)? (?:un|una|el|la|su) (?:presupuesto|cotizaci(?:ó|o)n)(?: por escrito)?|(?:presupuesto|cotizaci(?:ó|o)n)(?: por escrito)? (?:se (?:le )?(?:enviar(?:á|a)|env(?:í|i)a)|(?:le )?llegar(?:á|a)|(?:normalmente )?sale)|(?:presupuesto|cotizaci(?:ó|o)n) por escrito)/i },
+]);
+const RELAY_EXTRACTOR_VERSION = 'relay-v1';
+
+// The phrase has to be an AFFIRMATIVE promise. "Would you like me to call
+// you back?" is an offer and "I can't send you an estimate yet" a refusal;
+// both contain the pattern and neither is work the office owes (Codex
+// #3725 r16 P2). The check runs on the CLAUSE that carries the match —
+// sentences, and ", but" / "pero" splits — so "I can't send the estimate
+// yet, but someone will call you back" still records the callback.
+const RELAY_NON_PROMISE_RE = /\b(can(?:'|’)?t|cannot|can not|won(?:'|’)?t|will not|not able|unable|not be able|not going to|no puedo|no podemos|no podr(?:é|e|á|a|emos|án|an)|no (?:le |se )?(?:va|vamos|voy) a|would you like|do you want|want me to|shall i|should i|quiere que|quisiera que|le gustar(?:í|i)a|desea que)\b/i;
+function relayClauses(line) {
+  return String(line).split(/(?<=[.!?])\s+|,?\s+(?:but|pero)\s+/i).map((c) => c.trim()).filter(Boolean);
+}
+function isAffirmativePromise(clause) {
+  return !/\?\s*$/.test(clause) && !clause.startsWith('¿') && !RELAY_NON_PROMISE_RE.test(clause);
+}
+function affirmativeRelayHit(line, re) {
+  // The first clause that matches AND is affirmative: "Would you like me to
+  // call you back? Someone will follow up tomorrow." rejects the offer and
+  // still records the promise that follows it (Codex #3725 r17 P2).
+  const clause = relayClauses(line).find((c) => re.test(c) && isAffirmativePromise(c));
+  return clause ? line : null;
+}
+
+// capture_lead's spoken expectation for the estimate ('about_15_minutes'
+// when the office is open; 'when_office_opens' / 'as_soon_as_possible'
+// otherwise). Only the 15-minute wording names a time the caller can hold
+// Waves to; the other two carry no timestamp and keep the implicit window.
+const RELAY_ESTIMATE_DUE_MS = { about_15_minutes: 15 * 60 * 1000 };
+
+// `estimatePromisedAt` is when capture_lead spoke the expectation ("about
+// 15 minutes"): the deadline runs from that instant, not from the close of
+// a conversation that may have gone on for minutes afterwards.
+function deriveRelayCommitments({ transcript = '', estimateQueued = null, estimateExpectation = null, estimatePromisedAt = null, now = new Date() } = {}) {
+  const promisedAt = estimatePromisedAt && !Number.isNaN(new Date(estimatePromisedAt).getTime()) ? new Date(estimatePromisedAt) : now;
+  const agentLines = String(transcript || '')
+    .split('\n')
+    .filter((l) => l.startsWith('Agent: '))
+    .map((l) => l.slice('Agent: '.length).trim())
+    .filter(Boolean);
+  const items = [];
+  for (const { kind, re } of RELAY_PROMISE_PATTERNS) {
+    let hit = null;
+    for (const line of agentLines) { hit = affirmativeRelayHit(line, re); if (hit) break; }
+    if (!hit) continue;
+    // The tool refused the estimate (missing fields / could not queue): the
+    // prompt tells Sandy not to promise one, and a stray phrase is not an
+    // obligation the office can act on.
+    if (kind === 'send_estimate' && estimateQueued === false) continue;
+    const dueMs = kind === 'send_estimate' ? RELAY_ESTIMATE_DUE_MS[estimateExpectation] : null;
+    items.push({
+      party: 'waves',
+      kind,
+      description: kind === 'callback'
+        ? 'Call the caller back (promised by the AI phone assistant)'
+        : 'Send the caller a written estimate (promised by the AI phone assistant)',
+      channel: kind === 'callback' ? 'call' : 'unknown',
+      due_at: dueMs ? new Date(promisedAt.getTime() + dueMs).toISOString() : null,
+      due_basis: dueMs ? 'stated' : null,
+      confidence: kind === 'send_estimate' && estimateQueued === true ? 0.95 : 0.75,
+      evidence: [{ quote: hit.slice(0, 300), speaker: 'agent' }],
+      origin: 'relay',
+    });
+  }
+  if (estimateQueued === true && !items.some((i) => i.kind === 'send_estimate')) {
+    const dueMs = RELAY_ESTIMATE_DUE_MS[estimateExpectation];
+    items.push({
+      party: 'waves',
+      kind: 'send_estimate',
+      description: 'Send the caller a written estimate (queued by the AI phone assistant)',
+      channel: 'unknown',
+      due_at: dueMs ? new Date(promisedAt.getTime() + dueMs).toISOString() : null,
+      due_basis: dueMs ? 'stated' : null,
+      confidence: 0.9,
+      evidence: [],
+      origin: 'relay_tool',
+    });
+  }
+  return items;
+}
+
+// Called from the relay session's end() after its reconcile UPDATE landed.
+// No claim fence: relay rows never carry processing_token, and the session
+// that owns the record is the only writer at close. Never throws.
+function relayClaimOwner(metadata) {
+  try {
+    const meta = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
+    const owner = meta?.relay_session_claim_owner;
+    return owner == null ? null : String(owner);
+  } catch {
+    return null;
+  }
+}
+
+// `sessionKey` is the closing session's claim nonce. The reconcile UPDATE
+// that precedes this call is owner-fenced, but a replacement socket can take
+// the claim between that UPDATE and this write; the row is therefore locked
+// and its owner re-checked in the SAME transaction as the upsert, so a
+// superseded conversation's promises never reach the Owed queue. A NULL
+// owner is an unclaimed row (an unverified session still records its own
+// honest promises); only a FOREIGN owner refuses.
+async function recordRelayCommitments(conn, { callSid, transcript, estimateQueued = null, estimateExpectation = null, estimatePromisedAt = null, sessionKey = null } = {}) {
+  const summary = { found: 0, written: 0 };
+  try {
+    if (!callSid) return summary;
+    return await conn.transaction(async (trx) => {
+      const call = await trx('call_log').where({ twilio_call_sid: callSid }).forUpdate().first('id', 'metadata');
+      if (!call) return summary;
+      if (sessionKey) {
+        const owner = relayClaimOwner(call.metadata);
+        if (owner && owner !== String(sessionKey)) return { ...summary, superseded: true };
+      }
+      const items = deriveRelayCommitments({ transcript, estimateQueued, estimateExpectation, estimatePromisedAt })
+        .map((item) => ({ ...item, evidence: anchorEvidence(item.evidence, { transcript }) }));
+      summary.found = items.length;
+      if (!items.length) return summary;
+      const result = await upsertCommitments(trx, call.id, items, { generation: null, extractorVersion: RELAY_EXTRACTOR_VERSION });
+      summary.written = result.written;
+      return summary;
+    });
+  } catch (err) {
+    logger.warn(`[call-commitments] relay commitments not recorded for ${callSid ? String(callSid).slice(0, 2) + '…' + String(callSid).slice(-6) : 'n/a'}: ${err.message}`);
+    return { ...summary, error: err.message };
+  }
 }
 
 // ── Human corrections ──────────────────────────────────────────────────────
@@ -1218,6 +1577,12 @@ module.exports = {
   parseDueAt,
   anchorEvidence,
   deriveCommitmentsFromExtraction,
+  callbackDueAt,
+  callEndedAt,
+  implicitDueAt,
+  staleAiRowSql,
+  stillOpenIds,
+  OVERDUE_IMPLICIT_ESTIMATE_HOURS,
   buildCommitmentsPrompt,
   groundModelCommitments,
   toRow,
@@ -1226,10 +1591,17 @@ module.exports = {
   recordCallCommitments,
   listForCall,
   normalizeRow,
-  callEndedAt,
   resolveFulfillment,
   refreshFulfillment,
   applyHumanUpdate,
   addHumanCommitment,
   buildCallOutcomes,
+  OVERDUE_IMPLICIT_DAYS,
+  PROMPT_KINDS,
+  RELAY_EXTRACTOR_VERSION,
+  isOverdue,
+  selectOverdue,
+  listOpenCommitments,
+  deriveRelayCommitments,
+  recordRelayCommitments,
 };

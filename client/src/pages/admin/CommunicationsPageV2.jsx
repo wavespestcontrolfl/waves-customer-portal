@@ -74,11 +74,13 @@ import {
   PhoneCall,
   Sparkles,
   Zap,
+  ClipboardList,
 } from "lucide-react";
 import { useOutletContext } from "react-router-dom";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
+import OwedTabV2 from "./OwedTabV2";
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
 import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
 import NotificationEventsTabV2 from "./NotificationEventsTabV2";
@@ -223,6 +225,8 @@ const TABS = [
   { key: "sms", label: "SMS", Icon: MessageSquare },
   { key: "calls", label: "Calls", Icon: PhoneCall },
   { key: "triage", label: "Triage", Icon: Inbox },
+  // Open promises across calls (call_commitments) — staff-wide like Calls.
+  { key: "owed", label: "Owed", Icon: ClipboardList },
   // Management tabs below are owner-only (2026-08-25 role lockdown):
   // template/routing/notification CONFIG and staff-performance scoring are
   // not day-to-day comms work. Events/SMS/Calls/Triage stay staff-wide.
@@ -3308,6 +3312,7 @@ export default function CommunicationsPageV2() {
       {tab === "sms" && <SmsTab />}
       {tab === "calls" && <CallLogTabV2 />}
       {tab === "triage" && <TriageInboxTabV2 />}
+      {tab === "owed" && <OwedTabV2 />}
       {tab === "templates" && (
         <>
           {templateKind === "sms" ? (

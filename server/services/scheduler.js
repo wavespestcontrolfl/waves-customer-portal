@@ -1317,6 +1317,33 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Overdue promises to callers (call_commitments) — daily 7:20am ET, one
+  // exception bell per overdue promise per ET day. No-op while
+  // GATE_CALL_COMMITMENTS is off. See services/call-commitments-watchdog.js.
+  cron.schedule('0 20 7 * * *', async () => {
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      // gated_off is the expected no-op and lease_held is a peer running
+      // the day's tick; anything else (no_connection: pool exhausted) is a
+      // MISSED daily run and job_health must say so — the skip path returns
+      // before runExclusive's own bookkeeping (same rule as the
+      // promised-estimate watcher above).
+      if (result?.skipped && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`call-commitments watchdog tick skipped: ${result.reason || 'no_connection'}`);
+      }
+      if (!result.skipped && (result.overdue > 0 || result.alerted > 0)) {
+        logger.warn(`[call-commitments-watchdog] scanned=${result.scanned} overdue=${result.overdue} alerted=${result.alerted}${result.aggregate ? ' (aggregate)' : ''}${result.unannounced ? ` unannounced=${result.unannounced}` : ''}`);
+      }
+    } catch (err) {
+      logger.error(`Call-commitments watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Autopay texts that actually went out (kill: AUTOPAY_SMS_DIGEST_DISABLED=1)
   // — 9:41am + 10:41am ET, after the 8:00 charge, 9:00 pre-charge, 9:17
   // card-expiry and 10:07 retry jobs. Marker-based window, so the second
