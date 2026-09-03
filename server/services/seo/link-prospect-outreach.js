@@ -41,6 +41,8 @@ const { DEFAULT_OUTREACH_DAILY_CAP: DEFAULT_DAILY_CAP, outreachDailyCeiling } = 
 
 const AUTH = 'seo_link_placement_authorities';
 const SEND_MODES = Object.freeze(['owner', 'auto']);
+// thrown inside the claim transaction to roll it back while returning a refusal to the caller
+class Rollback extends Error { constructor(result) { super(result.code); this.result = result; } }
 // An open prospect, or one the nightly bridge PARKED for the owner's send
 // (awaiting_owner, §3.3b) — the owner's click is what the park waits for; an
 // automatic send acts on `prospect` rows only (a parked row is the owner's).
@@ -314,17 +316,21 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
       return { ok: false, code: 'recipient_review_required', review, error: 'the recipient shares a domain with a customer or lead contact — review the match, then send with it acknowledged' };
     }
     const attemptAt = new Date();
-    // §7 — the authority contract, re-validated under the same lock as the claim
-    const authority = await sendAuthority(trx, { placement: current, path: onPath, policy, mode, draft, review, approvedBy, now: attemptAt });
-    if (!authority.ok) return authority;
     // the cap, enforced ONLY here under the lock (§6.4): an automatic send is
     // bounded by the OWNER's policy value as well as the hard ceiling — a policy
     // cap of 0 (the shipped default) authorizes no automatic send at all; an
-    // owner-approved send keeps the hard cap only
+    // owner-approved send keeps the hard cap only. Checked BEFORE the authority
+    // step so a capped click never records an approval for a send that did not happen.
     const policyCap = Number(policy.auto_outreach_daily_cap);
     if (mode === 'auto' && !(Number.isFinite(policyCap) && policyCap > 0)) return { ok: false, code: 'not_authorized', error: 'auto_outreach_daily_cap is 0 — automatic sends are off' };
     const effectiveCap = mode === 'auto' ? Math.min(policyCap, cap) : cap;
     if ((await dailySendCount(trx)) >= effectiveCap) return { ok: false, code: 'rate_limited' };
+    // §7 — the authority contract, re-validated under the same lock as the claim.
+    // From here on the owner's approval may have been written: a refusal below
+    // ROLLS the transaction BACK (thrown, caught by the caller) rather than
+    // committing an approval for a send that never claimed.
+    const authority = await sendAuthority(trx, { placement: current, path: onPath, policy, mode, draft, review, approvedBy, now: attemptAt });
+    if (!authority.ok) return authority;
     const claimedRows = await trx('seo_link_prospects')
       .where({ id: prospectId, outreach_status: 'drafted', status: current.status, path_id: current.path_id }) // the CAS is bound to the path whose standing was just verified, and to the status the checks read
       .whereNull('outreach_sent_at')
@@ -333,9 +339,9 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
       // concurrency on claimed_at) can't overwrite the send.
       .update({ outreach_status: 'sending', outreach_send_token: sendToken, outreach_attempted_at: attemptAt, claimed_at: null, claimed_by: null, updated_at: attemptAt })
       .returning('*');
-    if (!claimedRows || claimedRows.length === 0) return { ok: false, code: 'already_sent' };
+    if (!claimedRows || claimedRows.length === 0) throw new Rollback({ ok: false, code: 'already_sent' });
     return { ok: true, row: claimedRows[0], authority };
-  });
+  }).catch((err) => { if (err instanceof Rollback) return err.result; throw err; });
   if (!claim.ok) return claim;
   const claimed = claim.row;
   const authority = claim.authority;
@@ -431,8 +437,10 @@ async function sendAuthority(trx, { placement, path, policy, mode, draft, review
   if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== revision) return { ok: false, code: 'not_authorized', error: 'the send inputs changed since the authority was decided — the nightly bridge re-decides it' };
   if (row.level === P.LEVELS.AUTO_OUTREACH) {
     // the draft is deliberately outside the decision hash (the approval binds it): a draft edited after the
-    // nightly stamped AUTO_OUTREACH is re-reviewed on the LOCKED text — an unclean one is the owner's, never automatic
-    if (mode === 'auto' && !M.draftReview({ ...placement, ...draft }).clean) return { ok: false, code: 'not_authorized', error: 'the draft changed since the automatic decision and is no longer clean — the nightly bridge re-decides it for the owner' };
+    // nightly stamped AUTO_OUTREACH is re-reviewed on the LOCKED text in EVERY mode — an unclean one is not
+    // this row's to send (no approval can bind it to an AUTO level, §3.6b): the nightly re-decides it OWNER_*
+    // and the owner's click then writes the approval for that text
+    if (!M.draftReview({ ...placement, ...draft }).clean) return { ok: false, code: 'not_authorized', error: 'the draft changed since the automatic decision and is no longer clean — the nightly bridge re-decides it for the owner' };
     return { ok: true, rowId: row.id, approvalId: null, level: row.level };
   }
   if (mode === 'auto') return { ok: false, code: 'not_authorized', error: `${row.level}: the owner's click is the send authority` };
@@ -458,11 +466,18 @@ async function sendAuthority(trx, { placement, path, policy, mode, draft, review
   return { ok: true, rowId: row.id, approvalId: approval.id, level: row.level };
 }
 
-// a confirmed send: the instance is satisfied, its approval consumed (§3.6b)
+// a confirmed send: the instance is satisfied, its approval consumed (§3.6b). Without the claim's row id (a
+// reconciled send) the instance is the open one on the placement's path at the revision the send was bound to
+// (leased_path_revision) — never a later generation rotated in since.
 async function satisfySendInstance(trx, { prospectId, rowId = null, now }) {
-  const rows = rowId
-    ? await trx(AUTH).where({ id: rowId }).whereNull('satisfied_at').select('id', 'approval_id')
-    : await trx(AUTH).where({ prospect_id: prospectId, dimension: 'communication', instance_kind: '-' }).whereNull('ended_at').whereNull('satisfied_at').select('id', 'approval_id');
+  let rows;
+  if (rowId) rows = await trx(AUTH).where({ id: rowId }).whereNull('satisfied_at').select('id', 'approval_id');
+  else {
+    const p = await trx('seo_link_prospects').where({ id: prospectId }).first('path_id', 'leased_path_revision');
+    if (!p || !p.path_id || p.leased_path_revision == null) return 0;
+    rows = (await trx(AUTH).where({ prospect_id: prospectId, dimension: 'communication', instance_kind: '-', path_id: p.path_id }).whereNull('ended_at').whereNull('satisfied_at').select('id', 'approval_id', 'path_revision'))
+      .filter((r) => Number(r.path_revision) === Number(p.leased_path_revision));
+  }
   if (!rows.length) return 0;
   await trx(AUTH).whereIn('id', rows.map((r) => r.id)).update({ satisfied_at: now, satisfied_reason: 'sent', updated_at: now });
   const approvalIds = rows.map((r) => r.approval_id).filter(Boolean);

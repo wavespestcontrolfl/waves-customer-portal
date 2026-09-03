@@ -506,6 +506,7 @@ describe('reconcileSendError', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect({ outreach_status: 'send_error' }) }),
       upd,
+      chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }), // the revision the send was bound to
     ], seo_link_placement_authorities: [chain({ result: [] })] }); // the Sent folder proved the send: its open instance (none here) is satisfied
     const res = await Outreach.reconcileSendError({ prospectId: 'p1', outcome: 'sent', approvedBy: 'Adam' });
     expect(res.ok).toBe(true);

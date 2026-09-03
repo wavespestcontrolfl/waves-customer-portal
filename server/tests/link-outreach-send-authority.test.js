@@ -111,8 +111,15 @@ describe('sendOutreach under the contract', () => {
     expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/no longer clean/) });
     expect(gmail.sendMessage).not.toHaveBeenCalled();
     expect(placement(s.db).outreach_status).toBe('drafted');
+    // the owner's click on the AUTO row sends nothing either: no approval can bind an edited draft to an AUTO level
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/no longer clean/) });
+    // the next nightly re-decides it OWNER_OUTREACH; the click then writes the approval for the new text
+    Object.assign(placement(s.db), { updated_at: new Date(NOW.getTime() + 1000) });
+    await nightly(s.db, { now: new Date(NOW.getTime() + 60000) });
+    expect(commRow(s.db).level).toBe('OWNER_OUTREACH');
     const r = await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner' });
-    expect(r).toMatchObject({ ok: true, authority: { level: 'AUTO_OUTREACH', approval_id: null } });
+    expect(r).toMatchObject({ ok: true, authority: { level: 'OWNER_OUTREACH' } });
+    expect(approvals(s.db)[0].action_hash).toBe(M.draftHash(placement(s.db)));
   });
   test('the policy cap bounds an automatic send inside the claim: cap 0 ⇒ not_authorized, cap reached ⇒ rate_limited; the owner keeps the hard cap only', async () => {
     const zero = scenario({ policy: { auto_outreach_min_score: 60, auto_outreach_daily_cap: 0 } });
@@ -132,7 +139,7 @@ describe('sendOutreach under the contract', () => {
     expect(r.ok).toBe(true);
   });
   test('OWNER_OUTREACH: the owner\'s click IS the approval — written under the lock, bound to the draft hash and the recipient review, consumed by the send', async () => {
-    const s = scenario();
+    const s = scenario({ policy: { auto_outreach_min_score: 99, auto_outreach_daily_cap: 5 } }); // the policy is on but the score is below its floor ⇒ OWNER_OUTREACH
     await nightly(s.db);
     // parked for the owner: an automatic send never acts on the parked row; an unparked OWNER row refuses on the level
     expect(placement(s.db).status).toBe('awaiting_owner');
@@ -151,6 +158,26 @@ describe('sendOutreach under the contract', () => {
     // the released placement reads contacted; a second click is already_sent
     expect(placement(s.db).status).toBe('contacted');
     expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'already_sent' });
+  });
+  test('a capped click writes no approval; a claim lost after the approval rolls it back', async () => {
+    process.env.LINK_OUTREACH_DAILY_CAP = '1';
+    const s = scenario();
+    await nightly(s.db);
+    s.db._tables.seo_link_prospects.push(draftedRow(s.d, s.p, { id: uid(), location_key: 'x', outreach_status: 'sent', outreach_attempted_at: new Date(NOW.getTime() - 3600 * 1000) }));
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'rate_limited' });
+    expect(approvals(s.db)).toHaveLength(0);
+    delete process.env.LINK_OUTREACH_DAILY_CAP;
+    // the CAS misses (the row's outreach_status moved under the lock): the approval written by the click is rolled back
+    const t = scenario();
+    await nightly(t.db);
+    t.db._beforeUpdate = (table, db) => { if (table === 'seo_link_prospects' && db._tables.seo_link_approvals.length) { placement(db).outreach_status = 'sending'; db._beforeUpdate = null; } };
+    let rolled = false;
+    const realTx = t.db.transaction;
+    t.db.transaction = async (cb) => { try { return await cb(t.db); } catch (err) { if (err && err.result) { rolled = true; t.db._tables.seo_link_approvals.length = 0; } throw err; } };
+    expect(await Outreach.sendOutreach({ prospectId: t.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'already_sent' });
+    expect(rolled).toBe(true);
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    t.db.transaction = realTx;
   });
   test('a live approval bound to THIS draft is reused; one bound to an earlier text is spent by the edit and replaced', async () => {
     const s = scenario();
@@ -254,6 +281,17 @@ describe('reconcileSendError', () => {
     expect(r.ok).toBe(true);
     expect(commRow(s.db)).toMatchObject({ satisfied_reason: 'sent' });
     expect(a.consumed_at).toBeTruthy();
+  });
+  test("'sent' never satisfies a later generation: the open instance must sit on the path revision the send was bound to", async () => {
+    const s = scenario();
+    await nightly(s.db);
+    // the path was revised in place after the ambiguous send (the draft's stamp is revision 1; the open row now reads revision 2)
+    commRow(s.db).path_revision = 2;
+    Object.assign(placement(s.db), { outreach_status: 'send_error', outreach_send_token: null });
+    const r = await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'sent', approvedBy: 'Adam' });
+    expect(r.ok).toBe(true);
+    expect(placement(s.db).status).toBe('contacted');
+    expect(commRow(s.db).satisfied_at).toBeFalsy();
   });
 });
 
