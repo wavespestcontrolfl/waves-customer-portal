@@ -48,7 +48,7 @@ describe('model-switchboard', () => {
         expect(typeof lane.fallback.model).toBe('string');
         expect(models[lane.fallback.model]).toBeDefined();
       }
-      expect(['live', 'restart']).toContain(lane.applies);
+      expect(['live', 'restart', 'registration']).toContain(lane.applies);
     }
   });
 
@@ -58,6 +58,70 @@ describe('model-switchboard', () => {
     expect(flagship.laneCount).toBeGreaterThan(5);
     expect(flagship.overridden).toBe(!!process.env.MODEL_FLAGSHIP);
     expect(flagship.current).toBe(MODELS.FLAGSHIP);
+    // Every non-derived selector reports the default it returns to when its
+    // override is deleted, and that default is the registry's own.
+    for (const sel of selectors) {
+      if (sel.derivesFrom) expect(sel.codeDefault).toBeNull();
+      else expect(sel.codeDefault).toBe(MODELS.DEFAULTS[sel.key]);
+    }
+    expect(MODELS.DEFAULTS.FLAGSHIP).toMatch(/^claude-/);
+  });
+
+  it('an override set through a legacy alias is deleted by its own name, and the next alias takes over', () => {
+    const prev = { MODEL_OPENAI_BALANCED: process.env.MODEL_OPENAI_BALANCED, MODEL_OPENAI_BEST: process.env.MODEL_OPENAI_BEST, OPENAI_VISION_MODEL: process.env.OPENAI_VISION_MODEL, OPENAI_MODEL: process.env.OPENAI_MODEL };
+    try {
+      delete process.env.MODEL_OPENAI_BALANCED;
+      process.env.MODEL_OPENAI_BEST = 'gpt-9.9-alias';
+      process.env.OPENAI_VISION_MODEL = 'gpt-9.9-vision';
+      process.env.OPENAI_MODEL = 'gpt-9.9-generic';
+      jest.resetModules();
+      const { selectors, lanes } = require('../services/model-switchboard').getSwitchboard();
+      const balanced = selectors.find((s) => s.key === 'OPENAI_BALANCED');
+      expect(balanced.overridden).toBe(true);
+      expect(balanced.overrideEnv).toBe('MODEL_OPENAI_BEST');
+      expect(balanced.current).toBe('gpt-9.9-alias');
+      expect(balanced.unpinnedModel).toBe(require('../config/models').DEFAULTS.OPENAI_BALANCED);
+      // Both aliases set: deleting the active one lands on the next, not the code default.
+      const sat = lanes.find((l) => l.id === 'satellite').also[0];
+      expect(sat.pinEnv).toBe('OPENAI_VISION_MODEL');
+      expect(sat.setEnv).toBe('OPENAI_VISION_MODEL');
+      expect(sat.unpinnedModel).toBe('gpt-9.9-generic');
+      delete process.env.OPENAI_VISION_MODEL;
+      jest.resetModules();
+      const sat2 = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'satellite').also[0];
+      expect(sat2.pinned).toBe(true);
+      expect(sat2.setEnv).toBe('OPENAI_MODEL');
+      expect(sat2.unpinnedModel).toBe('gpt-5-mini');
+    } finally {
+      for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+  });
+
+  it('managed agents are registration-locked: not counted in a selector blast radius, applies at re-registration', () => {
+    const { selectors, lanes } = sb.getSwitchboard();
+    const agents = lanes.filter((l) => l.policy === 'agents');
+    expect(agents.length).toBeGreaterThan(0);
+    for (const lane of agents) {
+      expect(lane.lock.kind).toBe('registration');
+      expect(lane.applies).toBe('registration');
+    }
+    const flagship = selectors.find((s) => s.key === 'FLAGSHIP');
+    const following = lanes.filter((l) => l.primary.selector === 'FLAGSHIP' && !l.primary.pinned && l.lock?.kind !== 'registration').length;
+    expect(flagship.laneCount).toBe(following);
+  });
+
+  it('turf OCR is a two-model consensus (fan-out), and the SMS canary probes are lanes of their own', () => {
+    const { lanes } = sb.getSwitchboard();
+    const turf = lanes.find((l) => l.id === 'turf_ocr');
+    expect(turf.fanout).toBe(true);
+    expect(turf.fallback).toBeNull();
+    expect(turf.also.map((a) => a.model)).toEqual([MODELS.VISION]);
+    const canary = lanes.find((l) => l.id === 'sms_canary_default');
+    expect(canary.primary.model).toBe(MODELS.ROUTES.smsDraftDefault.model);
+    expect(canary.fallback).toBeNull();
+    expect(lanes.find((l) => l.id === 'sms_canary_save_sale').primary.model).toBe(MODELS.ROUTES.smsDraftSaveSale.model);
+    // lead triage maps the JSON without validating it → nothing catches a regression.
+    expect(lanes.find((l) => l.id === 'lead_triage').continuity).toBe('unchecked');
   });
 
   it('reflects an env override as the running model and as a pin', () => {
@@ -79,8 +143,9 @@ describe('model-switchboard', () => {
       expect(ib.primary.pinEnv).toBe('INTELLIGENCE_BAR_MODEL');
       // Deleting the pin returns the lane to its selector (which is overridden here).
       expect(ib.primary.unpinnedModel).toBe('claude-opus-5');
-      // A pinned lane no longer follows its selector, so it is not counted there.
-      const following = lanes.filter((l) => l.primary.selector === 'FLAGSHIP' && !l.primary.pinned).length;
+      // A pinned lane no longer follows its selector, so it is not counted
+      // there; nor does a registration-locked managed agent.
+      const following = lanes.filter((l) => l.primary.selector === 'FLAGSHIP' && !l.primary.pinned && l.lock?.kind !== 'registration').length;
       expect(flagship.laneCount).toBe(following);
     } finally {
       if (prevFlagship === undefined) delete process.env.MODEL_FLAGSHIP; else process.env.MODEL_FLAGSHIP = prevFlagship;
@@ -187,6 +252,9 @@ describe('model-switchboard', () => {
 
   it('only DEEP-path selectors may take Fable, and inbound-content lanes are flagged', () => {
     const { selectors, lanes } = sb.getSwitchboard();
+    // FLAGSHIP feeds image payloads (satellite, property lookup v2): the
+    // picker must require vision, so a text-only find cannot be drafted.
+    expect(selectors.find((s) => s.key === 'FLAGSHIP').accepts.cap).toBe('vision');
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
     expect(deepSafe).toEqual(['DEEP', 'EXTREME']);
     for (const id of Object.keys(sb.MODEL_CATALOG).filter((k) => /fable|mythos/.test(k))) {
@@ -195,7 +263,9 @@ describe('model-switchboard', () => {
     // A pin on a DEEP lane inherits the deep-safe accepts; a FLAGSHIP pin does not.
     expect(lanes.find((l) => l.id === 'fact_check_gate').primary.accepts.deep).toBe(true);
     expect(lanes.find((l) => l.id === 'ib_admin').primary.accepts.deep).toBeUndefined();
-    for (const id of ['sms_draft', 'call_extraction', 'pest_id', 'ask_waves']) {
+    // intent_composer: the prompt carries the transcript, SMS thread and
+    // customer profile, so a pinned ESTIMATOR_ENGINE_MODEL needs per-lane review.
+    for (const id of ['sms_draft', 'call_extraction', 'pest_id', 'ask_waves', 'intent_composer']) {
       expect(lanes.find((l) => l.id === id).inbound).toBe(true);
     }
     expect(lanes.find((l) => l.id === 'tax_advisor').inbound).toBe(false);
