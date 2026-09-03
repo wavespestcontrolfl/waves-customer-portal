@@ -554,7 +554,7 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   if (STOCK_PHRASE_RE.test(body)) return reject('stock_phrase', body.match(STOCK_PHRASE_RE)[0]);
   // The greeting line is judged by the greeting rule below, not here: a
   // reviewer named April, June or August is a name, not a date claim.
-  const afterGreeting = body.replace(/^[^\n]*,/, '');
+  const afterGreeting = body.replace(/^[^\n,]*,/, '');
   for (const phrase of afterGreeting.match(new RegExp(DATE_CLAIM_RE.source, 'gi')) || []) {
     if (!hasPhrase(grounding.review.text.toLowerCase(), phrase.toLowerCase())) return reject('date_claim', phrase);
   }
@@ -1013,7 +1013,7 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
     // Stored for diagnosis: attempt, code and — for phrase-class codes only —
     // the words that tripped it. Never the whole rejected draft. The retry
     // prompt is built from verdict.span directly.
-    rejectionDetails.push({ attempt: attempts, code: verdict.code, span: STORED_SPAN_CODES.has(verdict.code) ? verdict.span : null, promptSpan: verdict.span });
+    rejectionDetails.push({ attempt: attempts, code: verdict.code, span: STORED_SPAN_CODES.has(verdict.code) ? scrubNames(verdict.span, grounding) : null, promptSpan: verdict.span });
     // Code only in the log: a span can be a phone number, an address or a
     // name. The words live in rejectionDetails, stored on the review row.
     logger.info(`[review-reply-drafter] attempt ${attempts} rejected (${verdict.code}) review=${grounding.reviewId} mode=${mode}`);
@@ -1030,6 +1030,19 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
   return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: 'verifier_reject' };
 }
 const stored = (details) => details.map(({ attempt, code, span }) => ({ attempt, code, span }));
+
+// A phrase-class span can still carry a person: several banned patterns
+// span intervening words ("give ... stars", "take ... off"), so "wait with
+// Dana for thirty minutes" is one match. Every name the grounding knows —
+// the reviewer, the allowed and forbidden names, the mentioned technicians —
+// is masked before the span is stored. The retry prompt still sees the words.
+function scrubNames(span, grounding) {
+  if (!span) return span;
+  const names = new Set([grounding.review?.firstName, ...(grounding.allow?.names || []), ...(grounding.allow?.forbiddenNames || []), ...(grounding.review?.mentionedTechNames || [])].filter(Boolean));
+  let out = String(span);
+  for (const name of names) out = out.replace(new RegExp(`\\b${escapeRe(name)}\\b`, 'gi'), '(name)');
+  return out;
+}
 
 /**
  * Deterministic last-resort reply. Uses only the reviewer's first name and

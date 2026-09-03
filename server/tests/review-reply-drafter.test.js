@@ -708,6 +708,19 @@ describe('draftReviewReply — fallback ladder', () => {
     mockDispatch.mockResolvedValue({ ok: true, text: good('Hi April, glad Marcus got out fast on Monday and the ants are gone.') });
     const r3 = await Drafter.draftReviewReply({ grounding: { ...gm, review: { ...gm.review, rating: 3 } }, recentReplies: [] });
     expect(r3.rejectionDetails.every((d) => d.code === 'date_claim' && d.span === null)).toBe(true);
+    // Only the greeting is exempt from the date scan: a second comma on the first line does not widen it (GitHub r5 P2).
+    expect(Drafter.verifyReplyDetailed(good('Hi Dana, today, thanks for the review and your support from Marcus.'), grounding())).toMatchObject({ code: 'date_claim' });
+    // A stored phrase-class span masks every known name (GitHub r5 P1): the retry prompt still sees the words.
+    const banned = good('Hi Dana,\n\nGlad Marcus got the ants. Please give Dana and Marcus five stars.');
+    expect(Drafter.verifyReplyDetailed(banned, grounding()).span).toMatch(/Dana/);
+    mockDispatch.mockReset();
+    mockDispatch.mockResolvedValue({ ok: true, text: banned });
+    const r4 = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [] });
+    expect(r4.rejectionDetails[0].code).toBe('banned_phrase');
+    expect(r4.rejectionDetails[0].span).not.toMatch(/Dana|Marcus/);
+    expect(r4.rejectionDetails[0].span).toMatch(/\(name\)/);
+    const prompts = mockDispatch.mock.calls.map((c) => c[1].text);
+    expect(prompts.some((p) => p.includes('give Dana and Marcus five stars'))).toBe(true);
   });
   test('safe copy never names a technician, and its variants dodge the non-repetition rule', () => {
     const g = grounding({ mentionedTechNames: [], topics: [] });
