@@ -1012,6 +1012,16 @@ const gates = {
   // ends keep today's operator-bell-only behavior.
   estimateClarifyAsks: process.env.GATE_ESTIMATE_CLARIFY_ASKS === 'true',
 
+  // Clarify unit write-back — when the customer texts back the apartment/
+  // unit the completed-call clarify ask requested, write it into the record:
+  // lead address line 2; the customer's line 2 when their own address IS
+  // that building; otherwise the building + unit as a property row on the
+  // account (owner ruling 2026-09-03). Off → the reply is stamped on the
+  // Triage Inbox card only (the office enters it by hand). Reads
+  // GATE_ESTIMATE_CLARIFY_ASKS' lane; meaningless alone. The call's
+  // estimate is NOT re-drafted by this lane (PR C2 of the #3775 split).
+  clarifyUnitWriteback: process.env.GATE_CLARIFY_UNIT_WRITEBACK === 'true',
+
   // Ads Budget Live Push — allow the 2-hourly capacity-based budget cron
   // (BudgetManager.adjustBudgets) to push its budget changes to the Google
   // Ads API. Off until the owner verifies campaign links + base budgets in
