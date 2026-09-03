@@ -543,12 +543,14 @@ describe('approveRow', () => {
 });
 
 describe('decideDomain (Reject / Watch)', () => {
-  test('a pitch in flight (a placement `sending`) refuses the decision: the send finalizes or reconciles first', async () => {
-    const { db, d } = await parked({ make: paidPath, path: { currency: 'unknown' } });
-    placements(db)[0].outreach_status = 'sending';
-    await expect(Q.decideDomain(db, { domainId: d.id, decision: 'rejected', actor: ACTOR, now: NOW })).rejects.toThrow(/being sent right now/);
-    expect(db._tables.seo_link_domains[0].agent_state).not.toBe('rejected');
-    expect(approvals(db)).toHaveLength(0);
+  test('a pitch whose outcome is not settled (a placement `sending`, or `send_error` awaiting reconciliation) refuses the decision', async () => {
+    for (const outreach_status of ['sending', 'send_error']) {
+      const { db, d } = await parked({ make: paidPath, path: { currency: 'unknown' } });
+      placements(db)[0].outreach_status = outreach_status;
+      await expect(Q.decideDomain(db, { domainId: d.id, decision: 'rejected', actor: ACTOR, now: NOW })).rejects.toThrow(/being sent or awaits reconciliation/);
+      expect(db._tables.seo_link_domains[0].agent_state).not.toBe('rejected');
+      expect(approvals(db)).toHaveLength(0);
+    }
   });
   test('reject: audit rows for approvable rows only, domain rejected by the owner, nothing ended or moved, nightly leaves it alone, Reopen brings the cards back', async () => {
     const { db, d } = await parked({ make: paidPath, path: { currency: 'unknown' } }); // payment = OWNER_INPUT_REQUIRED (not auditable), execution = OWNER_FREE

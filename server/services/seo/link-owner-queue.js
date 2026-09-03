@@ -481,10 +481,10 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     // every other state is decidable here — the Registry table's Reject / Watch is THIS decision too, and a domain that
     // left the queue (Reopen → investigating) can still carry approved rows a plain state flip would leave live
     const placements = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'path_id', 'status', 'outreach_status');
-    // a pitch in flight (the claim committed `sending`, Gmail is being called outside any lock): deciding the domain now
-    // would invalidate the approval that send stands on and land a `contacted` placement under a rejected / watching
-    // domain — the send finalizes or reconciles first
-    if (placements.some((p) => p.outreach_status === 'sending')) refuse(409, 'a pitch for this domain is being sent right now — let it finish (or reconcile it from the Link Building board) before deciding the domain');
+    // a pitch whose outcome is not settled (the claim committed `sending` and Gmail is being called outside any lock, or
+    // it errored and may still have been delivered): deciding the domain now would invalidate the approval that send
+    // stands on and land a `contacted` placement under a rejected / watching domain — it finalizes or reconciles first
+    if (placements.some((p) => require('./link-outreach-mandate').AMBIGUOUS_SEND_STATUSES.includes(p.outreach_status))) refuse(409, 'a pitch for this domain is being sent or awaits reconciliation — let it finish (or reconcile it from the Link Building board) before deciding the domain');
     const ids = placements.map((p) => p.id);
     const open = ids.length ? await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at')) : [];
     // every owner-level row is audited, the already-approved ones included: a Reject / Watch is the owner's LATER word

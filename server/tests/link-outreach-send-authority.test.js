@@ -93,6 +93,14 @@ describe('the decision on the draft (§6.3 2c)', () => {
 });
 
 describe('sendOutreach under the contract', () => {
+  test('a lifecycle the admin advanced while Gmail was being called stays: the finalize lands the send stamp on it and satisfies the instance, never overwriting it with contacted', async () => {
+    const s = scenario({ policy: AUTO_POLICY });
+    await nightly(s.db);
+    gmail.sendMessage.mockImplementationOnce(async () => { placement(s.db).status = 'watching'; return { id: 'msg1', threadId: 'thr1' }; }); // moved on mid-send
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'auto-outreach', mode: 'auto' })).ok).toBe(true);
+    expect(placement(s.db)).toMatchObject({ status: 'watching', outreach_status: 'sent', outreach_thread_ref: 'thr1', outreach_send_token: null });
+    expect(commRow(s.db)).toMatchObject({ satisfied_reason: 'sent' });
+  });
   test('AUTO_OUTREACH: an automatic send goes out, satisfies the instance, writes no approval', async () => {
     const s = scenario({ policy: AUTO_POLICY });
     await nightly(s.db);

@@ -178,7 +178,8 @@ describe('sendOutreach', () => {
       chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
       chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)
       chain({ returning: [draftedProspect()] }), // CAS claim
-      chain({ returning: [] }),                  // finalize matched 0 rows
+      chain({ returning: [] }),                  // finalize (row still awaiting its conversation) matched 0 rows…
+      chain({ returning: [] }),                  // …and so did the lifecycle-preserving fallback: the token is gone
     ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.ok).toBe(false);

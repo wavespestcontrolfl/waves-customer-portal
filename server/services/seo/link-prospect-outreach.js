@@ -345,21 +345,22 @@ async function finalizeSend({ prospectId, sendToken, claimed, authority, threadR
   const now = new Date();
   const note = `Outreach sent ${now.toISOString()} to ${claimed.outreach_to_email} by ${approvedBy}`;
   return db.transaction(async (trx) => {
-    const r = await trx('seo_link_prospects')
-      .where({ id: prospectId, outreach_send_token: sendToken })
-      .update({
-        status: 'contacted', // a parked row leaves the park by the send itself
-        parked_from_status: null,
-        outreach_status: 'sent',
-        outreach_sent_at: now,
-        outreach_thread_ref: threadRef,
-        outreach_send_token: null,
-        claimed_at: null,
-        claimed_by: null,
-        notes: claimed.notes ? `${claimed.notes}\n${note}` : note,
-        updated_at: now,
-      })
-      .returning('*');
+    const sent = {
+      outreach_status: 'sent',
+      outreach_sent_at: now,
+      outreach_thread_ref: threadRef,
+      outreach_send_token: null,
+      claimed_at: null,
+      claimed_by: null,
+      notes: claimed.notes ? `${claimed.notes}\n${note}` : note,
+      updated_at: now,
+    };
+    const own = () => trx('seo_link_prospects').where({ id: prospectId, outreach_send_token: sendToken });
+    // a row still awaiting its conversation leaves the park by the send itself (→ contacted); a lifecycle the admin
+    // advanced while Gmail was being called (lost / watching / placed …) is the later decision and stays — the send
+    // stamp alone lands on it (the reconcile keeps a hand-advanced lifecycle the same way)
+    let r = await own().whereIn('status', [...SENDABLE_STATUSES]).update({ ...sent, status: 'contacted', parked_from_status: null }).returning('*');
+    if (!(r || []).length) r = await own().update(sent).returning('*');
     const rows = r || [];
     if (rows.length === 1 && authority.rowId) await satisfySendInstance(trx, { prospectId, rowId: authority.rowId, now });
     return rows;
