@@ -110,6 +110,10 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
         continue;
       }
       const pricing = await vendorPricingFor(conn, p.id, p.auto_reorder_vendor_id);
+      // PR 2: when the dispatcher will order from this vendor (master +
+      // vendor gate on, adapter exists) the "order manually" bell is wrong —
+      // the green path is silent and every exception bells from the ledger.
+      const autoOrder = await require('./order-dispatch').canAutoOrder({ conn, vendorId: p.auto_reorder_vendor_id });
       const onHand = num(p.inventory_on_hand);
       const threshold = num(p.low_stock_threshold);
       const existing = await conn('product_restock_requests')
@@ -135,6 +139,7 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
             });
             result.refreshed.push({ productId: p.id, requestId: existing.id });
           }
+          if (autoOrder) continue;
           try {
             await ringRestockBell({ notify, product: p, request: existing, pricing, onHand, reorderQty });
             result.renotified.push({ productId: p.id, requestId: existing.id });
@@ -199,7 +204,7 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
           .ignore()
           .returning('*');
         const row = inserted && inserted[0];
-        return row ? { request: row, pricing: lockedPricing, vendorName, reorderQty: lockedQty } : { conflict: true };
+        return row ? { request: row, pricing: lockedPricing, vendorName, vendorId: lockedVendorId, reorderQty: lockedQty } : { conflict: true };
       });
       if (outcome.stale) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: 'no_longer_low' }); continue; }
       if (outcome.unconfigured) { result.unconfigured.push({ productId: p.id, name: p.name, reason: outcome.unconfigured }); continue; }
@@ -207,9 +212,14 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
       const { request } = outcome;
       result.created.push({ productId: p.id, name: p.name, requestId: request.id, requestedQuantity: outcome.reorderQty, vendor: outcome.vendorName });
 
-      // One bell per request, deduped on the request id. Green-path silence
-      // is not possible here: with no order adapter, a human has to click.
+      // One bell per request, deduped on the request id, unless the
+      // dispatcher orders from this vendor (then it owns the outcome bell).
       // A failure here is retried by the next sweep (existing branch above).
+      // The request was built from the LOCKED vendor, which may differ from
+      // the scan's: re-decide the bell from that vendor (Codex hook P1).
+      const lockedVendorId = outcome.vendorId ?? null;
+      const willAutoOrder = lockedVendorId === (p.auto_reorder_vendor_id || null) ? autoOrder : await require('./order-dispatch').canAutoOrder({ conn, vendorId: lockedVendorId });
+      if (willAutoOrder) { result.autoOrder = [...(result.autoOrder || []), request.id]; continue; }
       try {
         await ringRestockBell({ notify, product: { ...p, vendor_name: outcome.vendorName, auto_reorder_vendor_id: request.metadata?.vendorId ?? p.auto_reorder_vendor_id }, request, pricing: outcome.pricing, onHand: num(request.current_stock) ?? onHand, reorderQty: outcome.reorderQty });
       } catch (notifyErr) {
@@ -224,4 +234,4 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
   return result;
 }
 
-module.exports = { runSuppliesAutoReorderSweep, findLowStockCandidates, AUTO_REORDER_GATE: GATE, AUTO_REORDER_SOURCE: SOURCE };
+module.exports = { runSuppliesAutoReorderSweep, findLowStockCandidates, vendorPricingFor, AUTO_REORDER_GATE: GATE, AUTO_REORDER_SOURCE: SOURCE };

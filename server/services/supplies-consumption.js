@@ -41,16 +41,21 @@ const SOURCE = 'completion_consumable';
 // A scheduled inspection (no application) leaves no yard sign.
 const INSPECTION_SERVICE_RE = /\binspection\b/i;
 
+// A real DB NULL = every line. Anything else must be a JSON array of line
+// ids; malformed JSON or a non-array value is a corrupt scope and FAILS
+// CLOSED (consumes on no line) — never widens to every line (Codex hook P1).
+const MALFORMED = Symbol('malformed');
 function parseLines(raw) {
   if (raw == null) return null;
-  const arr = typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : raw;
-  return Array.isArray(arr) ? arr.map((x) => String(x)) : null;
+  let arr = raw;
+  if (typeof raw === 'string') { try { arr = JSON.parse(raw); } catch { return MALFORMED; } }
+  return Array.isArray(arr) ? arr.map((x) => String(x)) : MALFORMED;
 }
 
-// null/unparseable = every line. A scoped list needs a resolvable line.
 function appliesToLine(rawLines, serviceLine) {
   const lines = parseLines(rawLines);
-  if (!lines) return true;
+  if (lines === null) return true;
+  if (lines === MALFORMED) return false;
   return !!serviceLine && lines.includes(String(serviceLine));
 }
 

@@ -30,6 +30,7 @@ Codes assigned in original insertion order from `20260401000019_inventory.js:50-
 | 22   | Helena Agri-Enterprises   | distributor           |
 | 23   | TruGreen                  | competitor_reference  |
 | 24   | Gemplers                  | online                |
+| 25   | Sticker Mule              | online                |
 
 ---
 

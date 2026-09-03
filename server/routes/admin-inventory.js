@@ -3212,6 +3212,9 @@ router.get('/restock-requests', async (req, res, next) => {
       return res.json({ requests: [] });
     }
     const status = String(req.query.status || 'open').toLowerCase();
+    // vendor_orders (PR 2 ledger) is one row per request at most; absent
+    // table (older schema) → no order columns.
+    const hasOrders = await db.schema.hasTable('vendor_orders');
     let query = db('product_restock_requests as prr')
       .leftJoin('products_catalog as pc', 'prr.product_id', 'pc.id')
       .leftJoin('scheduled_services as ss', 'prr.scheduled_service_id', 'ss.id')
@@ -3229,7 +3232,9 @@ router.get('/restock-requests', async (req, res, next) => {
         'c.last_name',
         'c.address_line1',
         'c.city',
+        ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter'] : []),
       )
+      .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
       .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
       .orderByRaw('prr.needed_by asc nulls last')
       .orderBy('prr.created_at', 'desc')
@@ -3255,6 +3260,17 @@ router.get('/restock-requests', async (req, res, next) => {
         // metadata; the tab renders them as the order link (Codex r3 P2).
         vendorSku: restockMeta(row.metadata).vendorSku || null,
         vendorProductUrl: restockMeta(row.metadata).vendorProductUrl || null,
+        // Automatic order outcome (null = never dispatched): placing | placed
+        // | failed | needs_review, with the vendor number, total and the
+        // parked reason so the tab explains why a request still needs a hand.
+        order: hasOrders && row.order_status ? {
+          status: row.order_status,
+          adapter: row.order_adapter,
+          externalOrderNumber: row.order_number || null,
+          amountCents: row.order_amount_cents != null ? Number(row.order_amount_cents) : null,
+          error: row.order_error || null,
+          placedAt: row.order_placed_at || null,
+        } : null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,

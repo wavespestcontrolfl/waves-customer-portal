@@ -50,6 +50,8 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 
+jest.mock('../services/procurement/order-dispatch', () => ({ canAutoOrder: jest.fn(async ({ vendorId }) => mockState.autoOrder === true && (!mockState.autoOrderVendor || vendorId === mockState.autoOrderVendor)) }));
+
 const { runSuppliesAutoReorderSweep } = require('../services/procurement/auto-reorder');
 
 const lowSign = {
@@ -217,4 +219,35 @@ test('a per-product failure is recorded and the sweep continues', async () => {
   const res = await runSuppliesAutoReorderSweep({ notify: jest.fn() });
   expect(res.errors).toHaveLength(2);
   expect(res.created).toHaveLength(0);
+});
+
+test('PR 2: when the dispatcher will order from the vendor, the request is raised with NO manual bell', async () => {
+  mockState.autoOrder = true;
+  mockState.candidates = [lowSign];
+  const notify = jest.fn(async () => ({ id: 'n' }));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.created).toHaveLength(1);
+  expect(r.autoOrder).toEqual([r.created[0].requestId]);
+  expect(notify).not.toHaveBeenCalled();
+  // …and the re-bell branch for an already-open auto request stays silent too.
+  mockState.existing = { id: 'req-open', status: 'open', source: 'auto_reorder', metadata: {} };
+  const r2 = await runSuppliesAutoReorderSweep({ notify });
+  expect(r2.deduped).toHaveLength(1);
+  expect(notify).not.toHaveBeenCalled();
+  mockState.autoOrder = false;
+});
+
+test('PR 2: the bell decision follows the LOCKED vendor — a switch to a manual vendor mid-sweep still bells', async () => {
+  mockState.autoOrder = true;
+  mockState.autoOrderVendor = 'vend-gemplers'; // only the scan-time vendor auto-orders
+  mockState.candidates = [lowSign];
+  // Between the scan and the locked insert the admin moved the product to a manual vendor.
+  mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: true, active: true, reorder_quantity: '650', auto_reorder_vendor_id: 'vend-manual', inventory_unit: 'each' };
+  const notify = jest.fn(async () => ({ id: 'n' }));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.created).toHaveLength(1);
+  expect(r.autoOrder).toBeUndefined();
+  expect(notify).toHaveBeenCalledTimes(1);
+  mockState.autoOrder = false;
+  mockState.autoOrderVendor = null;
 });

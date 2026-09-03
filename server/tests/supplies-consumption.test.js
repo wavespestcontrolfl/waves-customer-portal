@@ -143,11 +143,15 @@ describe('service-line scope', () => {
 
   test('appliesToLine: null = every line; jsonb string or array both parse; unknown line excluded', () => {
     expect(appliesToLine(null, 'termite')).toBe(true);
+    // Malformed scope fails CLOSED, never widens to every line.
+    expect(appliesToLine('{not json', 'pest')).toBe(false);
+    expect(appliesToLine('"pest"', 'pest')).toBe(false);
+    expect(appliesToLine({ pest: true }, 'pest')).toBe(false);
     expect(appliesToLine(['pest'], 'pest')).toBe(true);
     expect(appliesToLine(JSON.stringify(['pest']), 'pest')).toBe(true);
     expect(appliesToLine(['pest'], 'termite')).toBe(false);
     expect(appliesToLine(['pest'], null)).toBe(false);
-    expect(appliesToLine('not json', 'termite')).toBe(true);
+    expect(appliesToLine('not json', 'termite')).toBe(false); // corrupt scope fails closed (PR 2 hook P1)
   });
 
   test('a pest visit consumes the kit item', async () => {

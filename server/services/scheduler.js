@@ -899,8 +899,8 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 6:10AM ET — Supplies auto-reorder sweep. Low-stock auto-reorder
-  // products → one open restock request each + one deduped bell (no order
-  // is placed; PR 2 adds the adapters). Gate GATE_AUTO_REORDER is checked
+  // products → one open restock request each + one deduped bell, then the
+  // order dispatcher places the ones whose vendor has an adapter. Gate GATE_AUTO_REORDER is checked
   // INSIDE the sweep at call time; kill = unset. runExclusive: a deploy
   // overlap must not raise the same request twice.
   // =========================================================================
@@ -912,6 +912,17 @@ function initScheduledJobs() {
         require('./procurement/auto-reorder').runSuppliesAutoReorderSweep());
     } catch (err) {
       logger.error(`Supplies auto-reorder sweep failed: ${err.message}`);
+    }
+    // Order dispatch (PR 2): places the requests the sweep just raised, for
+    // vendors with an adapter, under the env spend caps. GATE_AUTO_ORDER +
+    // per-vendor gates are re-read inside; kill = unset. Own lock: a failed
+    // order goes red on ITS job_health row, not the sweep's.
+    if (!gateEnvValue('GATE_AUTO_ORDER')) return;
+    try {
+      await runExclusive('vendor-order-dispatch', () =>
+        require('./procurement/order-dispatch').runVendorOrderDispatch());
+    } catch (err) {
+      logger.error(`Vendor order dispatch failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

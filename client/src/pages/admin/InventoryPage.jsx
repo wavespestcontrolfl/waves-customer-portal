@@ -2893,7 +2893,7 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                       )}
                     </td>
                     <td style={tdS}>
-                      <div>{request.customerName || request.source}</div>
+                      <div>{request.customerName || (request.source === "auto_reorder" ? "Auto-reorder sweep" : request.source)}</div>
                       <div style={{ color: D.muted, fontSize: 12 }}>
                         {request.scheduledDate || request.createdAt?.slice?.(0, 10)} · {request.serviceType || "inventory"}
                       </div>
@@ -2911,6 +2911,18 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                       }}>
                         {request.status}
                       </span>
+                      {request.order && (
+                        <div style={{ marginTop: 6, fontSize: 12, color: request.order.status === "placed" ? D.green : request.order.status === "placing" ? D.muted : D.amber }}>
+                          {request.order.status === "placed"
+                            ? `Ordered automatically${request.order.externalOrderNumber ? ` · #${request.order.externalOrderNumber}` : ""}${request.order.amountCents != null ? ` · $${(request.order.amountCents / 100).toFixed(2)}` : ""}`
+                            : request.order.status === "placing"
+                              ? "Auto-order in progress"
+                              : `Auto-order ${request.order.status === "failed" ? "failed" : "needs review"}`}
+                          {request.order.status !== "placed" && request.order.error && (
+                            <div style={{ color: D.muted, marginTop: 2, maxWidth: 260 }}>{request.order.error}</div>
+                          )}
+                        </div>
+                      )}
                       {request.status === "open" && (
                         <button
                           onClick={() => runAction(request, "mark_ordered")}
