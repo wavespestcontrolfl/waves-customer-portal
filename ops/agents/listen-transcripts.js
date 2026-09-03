@@ -188,7 +188,11 @@ function readCodexTranscript(file, { sinceMs = 0 } = {}) {
     }
   }
   return turns;
-  function pushTurn(role, text) {
+  function pushTurn(role, raw) {
+    // Same harness-block strip as the Claude reader — Codex user turns carry
+    // the same <system-reminder> / <command-*> / <local-command-*> families.
+    const text = stripHarnessBlocks(raw);
+    if (!text) return;
     if (role === 'assistant' && turns.some((t) => t.role === 'assistant' && t.text === text)) return;
     turns.push({ role, text });
   }

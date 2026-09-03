@@ -51,6 +51,8 @@ describe('transcript readers', () => {
     // The fixture records the assistant message twice (agent_message + response_item) — one turn survives.
     expect(turns.map((t) => t.role)).toEqual(['user', 'assistant']);
     expect(turns.filter((t) => t.role === 'assistant')).toHaveLength(1);
+    // A Codex user turn that is only a harness block is dropped, same as the Claude reader.
+    expect(turns.map((t) => t.text).join(' ')).not.toContain('postgres://leak');
     expect(turns.map((t) => t.text).join(' ')).not.toContain('You are Codex');
   });
 });

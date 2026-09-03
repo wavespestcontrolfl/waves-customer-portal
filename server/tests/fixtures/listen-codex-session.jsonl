@@ -3,3 +3,4 @@
 {"timestamp":"2026-09-03T04:14:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Review the chinch bug seasonal guard; owner ruling: no fixed re-entry minutes in copy."}]}}
 {"timestamp":"2026-09-03T04:14:02.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Noted: chinch bug pressure peaks in Bradenton mid-summer."}}
 {"timestamp":"2026-09-03T04:14:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Noted: chinch bug pressure peaks in Bradenton mid-summer."}]}}
+{"timestamp":"2026-09-03T04:14:04.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<local-command-stdout>DATABASE_URL=postgres://leak</local-command-stdout>"}]}}
