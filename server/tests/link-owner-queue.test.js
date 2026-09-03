@@ -321,6 +321,39 @@ describe('approveRow', () => {
     expect(approvals(db2).every((a) => a.terms_snapshot.legal_terms_url === 'https://example.org/terms')).toBe(true);
   });
 
+  test('an attested path without a viewable agreement url is not approvable (terms AND the payment beside it)', async () => {
+    const { db } = await parked({ make: paidPath, path: { legal_attestation: true, legal_terms_hash: HASH, investigation: JSON.stringify({ reasons: 'terms fetched, url lost' }) } });
+    const card = (await Q.listOwnerQueue(db)).cards[0];
+    for (const r of card.rows) expect(r).toMatchObject({ approvable: false, why_not: expect.stringMatching(/not viewable/) });
+    for (const r of openRows(db).filter((x) => x.prospect_id === card.placement.id)) {
+      await expect(Q.approveRow(db, { authorityId: r.id, actor: ACTOR, approvedAmountCents: 4500, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/not viewable/) });
+    }
+    expect(approvals(db)).toHaveLength(0);
+  });
+
+  test('a card whose stamp went stale shows why instead of a button (the click\'s own test, applied at listing)', async () => {
+    const { db } = await parked();
+    expect((await Q.listOwnerQueue(db)).cards[0].rows[0]).toMatchObject({ approvable: true, why_not: null });
+    db._tables.seo_link_policy[0].auto_free_acquisition = true; // the row would now be AUTO_FREE
+    expect((await Q.listOwnerQueue(db)).cards[0].rows[0]).toMatchObject({ approvable: false, why_not: expect.stringMatching(/policy now yields AUTO_FREE/) });
+    db._tables.seo_link_policy[0].auto_free_acquisition = false;
+    storedPath(db).submission_url = 'https://example.org/add-v2'; // an execution input moved
+    expect((await Q.listOwnerQueue(db)).cards[0].rows[0]).toMatchObject({ approvable: false, why_not: expect.stringMatching(/inputs changed/) });
+    storedPath(db).submission_url = 'https://example.org/add';
+    expect((await Q.listOwnerQueue(db)).cards[0].rows[0].approvable).toBe(true);
+  });
+
+  test('account-wide fee: a sibling row stamped at another path revision does not inherit the approval', async () => {
+    const { db } = await parked({ make: paidPath, path: { fee_scope: 'account_wide' } });
+    const primaryId = (await Q.listOwnerQueue(db)).cards.find((c) => c.rows.some((r) => r.dimension === 'payment' && r.approvable)).placement.id;
+    const pay = openRows(db, 'payment').find((r) => r.prospect_id === primaryId);
+    const older = openRows(db, 'payment').find((r) => r.prospect_id !== primaryId);
+    older.path_revision = 0; // an older stamp whose hash happens to equal the current one
+    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 4500, now: NOW, bridge: inline });
+    expect(r.attached).toHaveLength(N - 1);
+    expect(rows(db).find((x) => x.id === older.id).approval_id).toBeUndefined();
+  });
+
   test('accept_terms binds the agreement hash; the row and its terms url land in the snapshot', async () => {
     const { db } = await parked({ path: { legal_attestation: true, legal_terms_hash: HASH, investigation: JSON.stringify({ legal_terms_url: 'https://example.org/terms' }) } });
     const terms = openRows(db, 'execution').find((r) => r.instance_kind === 'terms');

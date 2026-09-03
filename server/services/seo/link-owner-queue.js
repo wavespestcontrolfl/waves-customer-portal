@@ -66,7 +66,7 @@ function actionFor(row) {
 }
 
 // null = Approve applies; otherwise the reason the card shows instead of a button
-function whyNotApprovable(row) {
+function whyNotApprovable(row, path = null) {
   if (row.ended_at) return 'instance ended';
   if (row.satisfied_at) return `already satisfied (${row.satisfied_reason})`;
   if (row.approved === true) return 'approved';
@@ -79,7 +79,25 @@ function whyNotApprovable(row) {
   if (row.level === P.LEVELS.OWNER_INPUT_REQUIRED) return 'price entry required — re-investigate with a USD quote';
   if (row.level === P.LEVELS.OWNER_MANUAL_PAYMENT) return 'settled outside the system at checkout';
   if (!(APPROVE_HERE[row.level] || []).includes(row.dimension)) return `${row.level} is not approvable from the queue`;
+  // an attested path whose agreement the owner cannot open (no terms url in the evidence) authorizes nothing —
+  // neither the acceptance nor the payment it accompanies — until re-investigation restores the url
+  if (path && path.legal_attestation === true && !legalTermsUrlOf(path)) return 'the agreement is not viewable (no terms url in the evidence) — re-investigate before approving';
   return null;
+}
+
+// The card's frozen inputs vs the live ones (§3.6b) — ONE test for the listing and the click: the hash, the
+// per-dimension path revision and the level the policy yields now must all still match, else the row waits
+// for the nightly bridge to re-decide it. A renewal instance (`2027:1`, `annual:1`) is opened by the renewal
+// claim, not by the decision function — it takes the payment dimension's current `-` verdict.
+function stalenessOf(row, ctx, waiver) {
+  const hash = P.decisionInputsHash(row.dimension, { ...ctx, instanceKey: row.instance_key });
+  const pathRevision = pathRevisionFor(ctx.path, row.dimension);
+  if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== pathRevision) return { reason: 'inputs changed since the card — the nightly bridge re-decides it; refresh the queue', hash, pathRevision };
+  const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: false, waiver });
+  const renewal = row.dimension === 'payment' && R.RENEWAL_KIND_RE.test(String(row.instance_kind));
+  const inst = decided.instances.find((i) => i.dimension === row.dimension && i.instance_kind === (renewal ? '-' : row.instance_kind));
+  if (!inst || inst.level !== row.level) return { reason: `the policy now yields ${inst ? inst.level : 'no instance'} for this step, not ${row.level} — the nightly bridge re-decides it`, hash, pathRevision };
+  return { reason: null, hash, pathRevision };
 }
 
 // the valid (approved, not invalidated) approval per authority row + the audit trail for display
@@ -119,7 +137,7 @@ function investigationOf(path) {
 }
 const legalTermsUrlOf = (path) => { const inv = investigationOf(path); return inv && inv.legal_terms_url ? inv.legal_terms_url : null; };
 
-const pathRevisionFor = (path, dimension) => Number(path[`revision_${dimension}`] ?? path.revision ?? 1);
+function pathRevisionFor(path, dimension) { return Number(path[`revision_${dimension}`] ?? path.revision ?? 1); }
 const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
 
 // ---------------------------------------------------------------------------
@@ -141,10 +159,16 @@ async function listOwnerQueue(db) {
   const rows = await loadApprovals(db, await db(AUTH).whereIn('prospect_id', cardsFor.map((p) => p.id)).whereNull('ended_at'));
   const waivers = await db('seo_link_floor_waivers').whereIn('domain_id', domains.map((d) => d.id)).whereNull('invalidated_at').orderBy('approved_at', 'desc')
     .select('id', 'domain_id', 'path_id', 'overridden_floors', 'decision_inputs_hash', 'note', 'approved_by', 'approved_at');
+  const activeWaiverFor = new Map(); // (domain|path) → { id } when the floors hash still holds
   const waiverFor = new Map();
   for (const w of waivers) {
     if (typeof w.overridden_floors === 'string') { try { w.overridden_floors = JSON.parse(w.overridden_floors); } catch { /* shown raw */ } }
     if (!waiverFor.has(`${w.domain_id}|${w.path_id}`)) waiverFor.set(`${w.domain_id}|${w.path_id}`, w);
+  }
+  for (const d of domains) {
+    const path = pathById.get(d.best_path_id);
+    const w = path ? waiverFor.get(`${d.id}|${path.id}`) : null;
+    if (path && w && w.decision_inputs_hash === P.floorInputsHash({ path, domain: d, policy, score: d.score })) activeWaiverFor.set(`${d.id}|${path.id}`, { id: w.id });
   }
 
   // account-wide fee: ONE payment approval covers the group — the lowest-id parked sibling carries the button
@@ -160,8 +184,11 @@ async function listOwnerQueue(db) {
     const path = pathById.get(p.path_id) || pathById.get(d.best_path_id) || null;
     const onBestPath = Boolean(path && path.id === d.best_path_id);
     const shared = Boolean(path && path.fee_scope === 'account_wide' && p.payment_group_id);
+    const ctx = onBestPath ? { path, domain: d, policy, score: d.score } : null;
     const mine = rows.filter((r) => r.prospect_id === p.id).map((r) => {
-      const whyNot = onBestPath ? whyNotApprovable(r) : 'placement is not on the domain\'s current best path — the nightly bridge rotates it';
+      let whyNot = onBestPath ? whyNotApprovable(r, path) : 'placement is not on the domain\'s current best path — the nightly bridge rotates it';
+      // the same freshness test the click applies — a stale stamp never shows a button that can only 409
+      if (!whyNot) whyNot = stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null).reason;
       const sharedFee = shared && r.dimension === 'payment';
       const primary = !sharedFee || groupPrimary.get(p.payment_group_id) === p.id;
       return {
@@ -197,7 +224,7 @@ async function listOwnerQueue(db) {
       // (lane-owned) those buttons would only ever 409 — the card says so instead
       decidable: !R.LANE_OWNED_STATES.includes(d.agent_state),
       // shown only while the bridge would still honour it: the same floors-hash test approveRow / activeWaiver apply
-      waiver: path && waiverFor.get(`${d.id}|${path.id}`) && waiverFor.get(`${d.id}|${path.id}`).decision_inputs_hash === P.floorInputsHash({ path, domain: d, policy, score: d.score }) ? waiverFor.get(`${d.id}|${path.id}`) : null,
+      waiver: path && activeWaiverFor.has(`${d.id}|${path.id}`) ? waiverFor.get(`${d.id}|${path.id}`) : null,
       d30_confidence: null, // step 7 (D30 loop) — no evidence yet
       price_tolerance_cents: policy.owner_price_tolerance_cents,
       rows: mine,
@@ -231,25 +258,20 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     if (!BRIDGE_STATES.includes(domain.agent_state)) refuse(409, `the domain is ${domain.agent_state.replace(/_/g, ' ')} — it left the queue; refresh`);
     Object.assign(placement, placementNow);
     await loadApprovals(trx, [row]);
-    const whyNot = whyNotApprovable(row);
-    if (whyNot) refuse(409, `not approvable: ${whyNot}`);
+    const whyNotLevel = whyNotApprovable(row);
+    if (whyNotLevel) refuse(409, `not approvable: ${whyNotLevel}`);
     if (!domain.best_path_id || row.path_id !== domain.best_path_id) refuse(409, 'the placement is no longer on the domain\'s best path — the nightly bridge rotates it; refresh the queue');
     const path = await trx('seo_link_acquisition_paths').where({ id: domain.best_path_id }).first();
     if (!path || path.superseded_by || path.baseline === true) refuse(409, 'the path was superseded since the card — refresh the queue');
+    const whyNotPath = whyNotApprovable(row, path);
+    if (whyNotPath) refuse(409, `not approvable: ${whyNotPath}`);
     const { policy } = await P.loadPolicy(trx);
     const ctx = { path, domain, policy, score: domain.score, instanceKey: row.instance_key };
-    // the card's frozen inputs must still be the live ones (§3.6b): hash + per-dimension revision + the level the
-    // policy yields now — "an owner approved THESE numbers, not whatever they became"
-    const hash = P.decisionInputsHash(row.dimension, ctx);
-    const pathRevision = pathRevisionFor(path, row.dimension);
-    if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== pathRevision) refuse(409, 'inputs changed since the card — the nightly bridge re-decides it; refresh the queue');
+    // the card's frozen inputs must still be the live ones (§3.6b) — "an owner approved THESE numbers, not
+    // whatever they became": the ONE test the listing applies before it shows a button
     const { waiver } = await activeWaiver(trx, domain.id, path.id, ctx);
-    const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: false, waiver });
-    // a renewal instance (`2027:1`, `annual:1`) is opened by the renewal claim, not by the decision function — it takes
-    // the payment dimension's current verdict (plan §6.3: the ordinary route), so it is checked against the `-` instance
-    const renewal = row.dimension === 'payment' && R.RENEWAL_KIND_RE.test(String(row.instance_kind));
-    const inst = decided.instances.find((i) => i.dimension === row.dimension && i.instance_kind === (renewal ? '-' : row.instance_kind));
-    if (!inst || inst.level !== row.level) refuse(409, `the policy now yields ${inst ? inst.level : 'no instance'} for this step, not ${row.level} — the nightly bridge re-decides it`);
+    const { reason: stale, hash, pathRevision } = stalenessOf(row, ctx, waiver);
+    if (stale) refuse(409, stale);
 
     const money = row.dimension === 'payment';
     let amounts = { approved_amount_cents: null, max_payable_cents: null };
@@ -282,13 +304,14 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     }).returning('*');
     const attached = [row.id];
     if (shared) {
-      // only siblings that are themselves CARDS on THIS path: parked from prospect, unleased, bound to the best path
-      // (the hash carries no path identity, so a stale-path or in-flight row with an equal hash must never inherit
+      // only siblings that are themselves CARDS on THIS path at THIS revision: parked from prospect, unleased, bound to
+      // the best path, same per-dimension path_revision (an older stamp with a reverted-equal hash must not inherit an
+      // approval the next bridge pass would invalidate for the whole group) — the hash carries no path identity, so a stale-path or in-flight row with an equal hash must never inherit
       // the owner's spending authority) — locked, like the clicked placement
       const siblings = (await trx('seo_link_prospects').where({ domain_id: domain.id, payment_group_id: placement.payment_group_id, path_id: path.id, status: PARKED, parked_from_status: PARKABLE }).whereNull('claimed_at').forUpdate().select('id'))
         .map((s) => s.id).filter((id) => id !== placement.id);
       if (siblings.length) {
-        const candidates = await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', siblings).where({ path_id: path.id, dimension: 'payment', instance_key: row.instance_key, level: row.level, decision_inputs_hash: hash }).whereNull('ended_at').whereNull('satisfied_at'));
+        const candidates = await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', siblings).where({ path_id: path.id, path_revision: pathRevision, dimension: 'payment', instance_key: row.instance_key, level: row.level, decision_inputs_hash: hash }).whereNull('ended_at').whereNull('satisfied_at'));
         for (const c of candidates) if (!c.approved) attached.push(c.id);
       }
     }
