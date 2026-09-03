@@ -432,7 +432,8 @@ describe('Google Business review sync', () => {
       }
       return jsonResponse({ reviews });
     });
-    const upsert = jest.spyOn(service, '_upsertGbpReview').mockRejectedValue(new Error('Knex: Timeout acquiring a connection'));
+    // A socket-level code (not a SQLSTATE) is connection-class too (pre-push audit r6).
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockRejectedValue(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }));
     const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
     const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
     const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation').mockResolvedValue({ synced: 0, new: 0 });
@@ -441,7 +442,7 @@ describe('Google Business review sync', () => {
 
     expect(upsert).toHaveBeenCalledTimes(3);
     expect(reconcile).not.toHaveBeenCalled();
-    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp', error: expect.stringMatching(/3 consecutive review rows failed on connection-class errors.*Timeout acquiring/) })]);
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp', error: expect.stringMatching(/3 consecutive review rows failed on connection-class errors.*ECONNRESET/) })]);
     expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/3 consecutive review rows failed/));
     expect(places).toHaveBeenCalledTimes(1);
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();

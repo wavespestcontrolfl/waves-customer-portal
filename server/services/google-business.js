@@ -37,8 +37,13 @@ const GBP_ROW_FAILURE_BREAKER = 3;
 // errors are about ONE row and never trip the breaker.
 function isSystemicDbFailure(err) {
   const code = String((err && err.code) || '');
+  // Node socket codes ride in err.code too (ECONNRESET / ECONNREFUSED /
+  // ETIMEDOUT / EPIPE) and Knex's pool timeout is a KnexTimeoutError —
+  // classify those before any SQLSTATE test, or they read as row errors.
+  if (/^E(CONNRESET|CONNREFUSED|TIMEDOUT|PIPE|HOSTUNREACH|AI_AGAIN)$/i.test(code)) return true;
+  if (String((err && err.name) || '') === 'KnexTimeoutError') return true;
   if (/^(08|53)/.test(code) || /^57P0[123]$/.test(code)) return true;
-  if (code) return false;
+  if (/^\d{5}$/.test(code)) return false; // any other SQLSTATE is about the statement/row
   return /timeout acquiring a connection|econnreset|econnrefused|etimedout|connection terminated|socket hang up/i.test(String((err && err.message) || ''));
 }
 
