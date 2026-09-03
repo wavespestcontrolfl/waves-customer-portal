@@ -46,9 +46,13 @@ const PREPAY_PCT = Number(converter.ANNUAL_PREPAY_DISCOUNT_PCT ?? constants.ANNU
 const CARD_FIXED_FEE = 0.30;
 
 const args = process.argv.slice(2);
+// A value-taking flag with no following non-flag value is an invocation error,
+// never a silently skipped artifact (codex r6 P2).
 const argValue = (flag) => {
   const i = args.indexOf(flag);
-  return i >= 0 ? args[i + 1] : null;
+  if (i < 0) return null;
+  const v = args[i + 1];
+  return v != null && !v.startsWith('--') ? v : null;
 };
 const WANT_DB = args.includes('--db');
 const JSON_OUT = argValue('--json');
@@ -64,9 +68,27 @@ if (require.main === module) {
       console.error(`Unknown argument ${JSON.stringify(args[i])}. Known flags: ${[...KNOWN_FLAGS.keys()].join(' ')}`);
       process.exit(2);
     }
-    i += KNOWN_FLAGS.get(args[i]);
+    const arity = KNOWN_FLAGS.get(args[i]);
+    if (arity && (args[i + 1] == null || args[i + 1].startsWith('--'))) {
+      console.error(`${args[i]} needs a value (got ${JSON.stringify(args[i + 1] ?? null)})`);
+      process.exit(2);
+    }
+    i += arity;
   }
 }
+// Shared prepay cadence vocabulary — the independent expectation for the
+// converter resolver below (codex r6 P1). visitsPerYearForCadence is the
+// coverage count a stored cadence pays for; prepayCoverageCadenceForPattern
+// is null for every cadence the term-creation path fails closed on.
+const { visitsPerYearForCadence, prepayCoverageCadenceForPattern } = require(path.join(ROOT, 'server', 'services', 'prepay-cadence'));
+// Termite station economics are the owner-reviewed cartridge model in
+// docs/estimator-pricing-plan-2026-09-03.md §A1 (BASF Trelona ATBS: two
+// cartridges per station, label-driven replacement, 25-pack cartridge rate,
+// an ASSUMED activity follow-up reserve). The termite pricer defines no
+// per-station monitoring cost of its own; the rodent bait / amortization
+// rates are rodent inputs and must never stand in for it (codex r6 P1).
+const TERMITE_CARTRIDGE_MODEL = Object.freeze({ cartridgesPerStation: 2, replacementRate: 0.33, cartridgeCost: 6.83, followUpVisitsPerYear: 0.25, followUpVisitCost: 55 });
+const termiteAnnualCost = (stations) => round2(stations * TERMITE_CARTRIDGE_MODEL.cartridgesPerStation * TERMITE_CARTRIDGE_MODEL.replacementRate * TERMITE_CARTRIDGE_MODEL.cartridgeCost + TERMITE_CARTRIDGE_MODEL.followUpVisitsPerYear * TERMITE_CARTRIDGE_MODEL.followUpVisitCost);
 
 // ── Money helpers (kept local on purpose — this file must not import engine helpers) ──
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -854,7 +876,8 @@ function runAnnualEconomics() {
     // another qualifier) carry no setup fee (codex r2 P2).
     { service: 'rodent_bait (2,000 sf)', revenuePerVisit: rod.perVisit, visits: 4, modeledMinutes: rod.stations * 5, observed: null, materialPerVisit: rod.stations * 1.5, extraAnnual: rod.stations * 7.5, setupFee: rod.setupFee, setupStandaloneOnly: true },
     { service: 'tree_shrub 6x (1,440 sf beds, 6 trees)', revenuePerVisit: ts.perApp, visits: 6, modeledMinutes: ts.onSiteMin + 10, driveMinutes: 0, observed: null, materialPerVisit: round2(ts.materialCost / 6) },
-    { service: 'termite_bait monitoring (2,000 sf)', revenuePerVisit: term.perApp, visits: 4, modeledMinutes: term.stations * 5, observed: null, materialPerVisit: term.stations * 1.5, extraAnnual: term.stations * 7.5, setupFee: term.installPrice /* billed installation — first-year revenue includes it (codex r2 P2) */ },
+    // Cartridge replacement + follow-up reserve per year, no per-visit bait material (plan §A1; codex r6 P1).
+    { service: 'termite_bait monitoring (2,000 sf)', revenuePerVisit: term.perApp, visits: 4, modeledMinutes: term.stations * 5, observed: null, materialPerVisit: 0, extraAnnual: termiteAnnualCost(term.stations), setupFee: term.installPrice /* billed installation — first-year revenue includes it (codex r2 P2) */ },
   ];
   for (const row of rows) {
     for (const tier of ['bronze', 'silver', 'gold', 'platinum']) {
@@ -931,9 +954,20 @@ function runPrepayAndCadence() {
     record(section, `${c.key} annual prepay total (converter resolver, ${feeMix ? 'fee mix: 0%' : `${PREPAY_PCT * 100}%`})`, { key: c.key }, round2(li.annual * (1 - prepayRate)), resolved ? resolved.amount : null, { extra: { rate: resolved ? resolved.rate : null, discount: resolved ? resolved.discount : null, error: resolveErr, note: 'protected lawn floor not exercised (empty estimateData)' } });
     let coverage = null; let coverageErr = null;
     try { coverage = converter.annualPrepayCoverageCadence(svc, li.frequency || null); } catch (e) { coverageErr = e.message; }
-    scenarios.push({ section, name: `${c.key} (${visits}/yr) annual-prepay coverage cadence`, expected: null, actual: coverage, status: 'engine_only', extra: { coverageCadence: coverage, error: coverageErr } });
-    flagIf(c.key === 'mosquito' && visits === 9 && coverage !== 'seasonal_feb_oct', 'P2', section, `${c.key} seasonal-9 coverage cadence`, `expected seasonal_feb_oct, got ${coverage} ${coverageErr ? `(${coverageErr})` : ''}`);
-    flagIf(!coverageErr && coverage === null, 'P2', section, `${c.key} (${visits}/yr) coverage cadence`, 'annualPrepayCoverageCadence returned null — the prepay term would record no coverage cadence for this plan');
+    // Independent expectation (codex r6 P1): the cadence whose shared coverage
+    // count equals the plan's visits — the mosquito 9x program is seasonal by
+    // design. A cadence the term path fails closed on (seasonal_feb_oct) is an
+    // expected REJECTION, recorded as such; every other case must resolve to the
+    // supported cadence that covers exactly the visits the customer prepaid, or
+    // the term under-covers the plan and the uncovered visits complete-bill again.
+    const expectedLabel = c.key === 'mosquito' && c.visits === 9 ? 'seasonal_feb_oct' : ['monthly', 'every_6_weeks', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'annual'].find((l) => visitsPerYearForCadence(l) === c.visits) || null;
+    const expectedSupported = prepayCoverageCadenceForPattern(expectedLabel);
+    const describe = (label) => (label == null ? 'null' : (prepayCoverageCadenceForPattern(label) ? label : `${label} (unsupported: term creation fails closed, no prepay term)`));
+    const expectedText = describe(expectedLabel);
+    const actualText = coverageErr ? `error: ${coverageErr}` : describe(coverage);
+    const cadenceStatus = expectedText === actualText ? 'match' : 'MISMATCH';
+    scenarios.push({ section, name: `${c.key} (${visits}/yr) annual-prepay coverage cadence`, expected: expectedText, actual: actualText, status: cadenceStatus, extra: { coverageCadence: coverage, expectedCadence: expectedLabel, coveredVisits: visitsPerYearForCadence(coverage), expectedSupported, error: coverageErr } });
+    flagIf(cadenceStatus === 'MISMATCH', 'P1', section, `${c.key} (${visits}/yr) annual-prepay coverage cadence`, `expected ${expectedText}, resolver returned ${actualText}${coverage && visitsPerYearForCadence(coverage) != null && visitsPerYearForCadence(coverage) < visits ? ` — the term would cover ${visitsPerYearForCadence(coverage)} of ${visits} prepaid visits` : ''}`);
   }
 }
 
@@ -968,11 +1002,13 @@ async function maybeSyncFromDb() {
 
 function hardCodedRateInventory() {
   // Catalogue of every dollar / rate / minute constant that shapes a price (read from the live constants object).
+  // `prices` carries every price-shaping family whole (lawn brackets, pest footprint brackets, property-type
+  // adjustments, the commercial families, specialty, bed bug) — a curated subset hid changes (codex r6 P2).
   const G = constants.GLOBAL;
   return {
     labor: { LABOR_RATE: G.LABOR_RATE, DRIVE_TIME_MIN: G.DRIVE_TIME, ADMIN_ANNUAL: G.ADMIN_ANNUAL, MARGIN_FLOOR: G.MARGIN_FLOOR, MARGIN_TARGET_TS: G.MARGIN_TARGET_TS, lawnLaborMinutesBase: constants.LAWN_PRICING_V2.laborMinutesBase, lawnLaborMinutesPer1000: constants.LAWN_PRICING_V2.laborMinutesPer1000Sqft, lawnRouteDrive: constants.LAWN_PRICING_V2.routeDensityMinutes, pestOnSiteMinutes: { quarterly: 25, bimonthly: 25, monthly: 20 }, mosquitoOnSiteMinutes: 30, rodentBaitMinutesPerStation: 5, termiteInstallMinutesPerStation: 5, tsOnSiteFloorMinutes: 25, tsOverheadMinutesPerVisit: 10 },
-    materials: { pestChemPerVisit: { talak: 1.3, taurus: 4.87, surfactant: 0.5 }, mosquito: constants.MOSQUITO.productCosts, mosquitoUsage: constants.MOSQUITO.productUsage, tsMaterialModel: constants.TREE_SHRUB.materialModel, termiteSystems: constants.TERMITE.systems, boraCare: { galCost: constants.SPECIALTY.boraCare.galCost, coverage: constants.SPECIALTY.boraCare.coverage }, preSlab: Object.fromEntries(Object.entries(constants.SPECIALTY.preSlabTermiticide.products).map(([k, v]) => [k, { containerCost: v.containerCost, containerOz: v.containerOz, ozPer10SqFt: v.productOzPer10SqFt }])), trenching: Object.fromEntries(Object.entries(constants.SPECIALTY.trenching.products).map(([k, v]) => [k, { containerCost: v.containerCost, containerOz: v.containerOz }])), foamCan: constants.SPECIALTY.foamDrill.canCost, plugCost: constants.SPECIALTY.plugging.costPerPlug, topDressSand: constants.SPECIALTY.topDressing.eighth.sandRate, dethatchPer1K: constants.SPECIALTY.dethatching.materialPer1K, bedBugPerRoom: constants.BED_BUG.chemical.materialPerRoomVisit1, palmInternalCost: constants.PALM.internalCostBasis },
-    prices: { pestBase: constants.PEST.base, pestFloor: constants.PEST.floor, pestSetupFee: constants.PEST.initialFee, pestFreqMult: constants.PEST.frequencyDiscounts.v2, oneTimePest: constants.ONE_TIME.pest, mosquitoBase: constants.MOSQUITO.basePrices, rodentBrackets: constants.RODENT.baitBrackets, rodentSetup: constants.RODENT.baitSetupFee, rodentTrapping: constants.RODENT.trapping.standardPrice, termiteInstallMultiplier: constants.TERMITE.installMultiplier, termiteMonitoring: constants.TERMITE.monitoring, termiteBond: constants.TERMITE.bond, wdo: constants.SPECIALTY.wdo.brackets, germanRoach: constants.SPECIALTY.germanRoach.tiers, palm: { nutrition: constants.PALM.treatments.nutrition.pricePerPalm, insecticide: constants.PALM.treatments.insecticide.tiers, combo: constants.PALM.treatments.combo.tiers, minPerVisit: constants.PALM.minPerVisit }, waveguard: constants.WAVEGUARD.tiers, oneTimePerk: constants.WAVEGUARD.recurringCustomerOneTimePerk, prepayDiscount: constants.ANNUAL_PREPAY_DISCOUNT_PCT, deposit: constants.DEPOSIT, cardHold: constants.CARD_HOLD, inspectionCredit: constants.INSPECTION_CREDIT, urgency: constants.URGENCY, tsTiers: constants.TREE_SHRUB.tiers, lawnTiers: constants.LAWN_TIERS },
+    materials: { pestChemPerVisit: { talak: 1.3, taurus: 4.87, surfactant: 0.5 }, mosquito: constants.MOSQUITO.productCosts, mosquitoUsage: constants.MOSQUITO.productUsage, tsMaterialModel: constants.TREE_SHRUB.materialModel, termiteSystems: constants.TERMITE.systems, boraCare: { galCost: constants.SPECIALTY.boraCare.galCost, coverage: constants.SPECIALTY.boraCare.coverage }, preSlab: Object.fromEntries(Object.entries(constants.SPECIALTY.preSlabTermiticide.products).map(([k, v]) => [k, { containerCost: v.containerCost, containerOz: v.containerOz, ozPer10SqFt: v.productOzPer10SqFt }])), trenching: Object.fromEntries(Object.entries(constants.SPECIALTY.trenching.products).map(([k, v]) => [k, { containerCost: v.containerCost, containerOz: v.containerOz }])), foamCan: constants.SPECIALTY.foamDrill.canCost, plugCost: constants.SPECIALTY.plugging.costPerPlug, topDressSand: constants.SPECIALTY.topDressing.eighth.sandRate, dethatchPer1K: constants.SPECIALTY.dethatching.materialPer1K, bedBugPerRoom: constants.BED_BUG.chemical.materialPerRoomVisit1, palmInternalCost: constants.PALM.internalCostBasis, termiteCartridgeModel: TERMITE_CARTRIDGE_MODEL },
+    prices: { pestBase: constants.PEST.base, pestFloor: constants.PEST.floor, pestSetupFee: constants.PEST.initialFee, pestFreqMult: constants.PEST.frequencyDiscounts.v2, oneTimePest: constants.ONE_TIME.pest, mosquitoBase: constants.MOSQUITO.basePrices, rodentBrackets: constants.RODENT.baitBrackets, rodentSetup: constants.RODENT.baitSetupFee, rodentTrapping: constants.RODENT.trapping.standardPrice, termiteInstallMultiplier: constants.TERMITE.installMultiplier, termiteMonitoring: constants.TERMITE.monitoring, termiteBond: constants.TERMITE.bond, wdo: constants.SPECIALTY.wdo.brackets, germanRoach: constants.SPECIALTY.germanRoach.tiers, palm: { nutrition: constants.PALM.treatments.nutrition.pricePerPalm, insecticide: constants.PALM.treatments.insecticide.tiers, combo: constants.PALM.treatments.combo.tiers, minPerVisit: constants.PALM.minPerVisit }, lawnBrackets: constants.LAWN_BRACKETS, pestFootprintBrackets: constants.PEST.footprintBrackets, propertyTypeAdj: constants.PROPERTY_TYPE_ADJ, lawnFreqs: constants.LAWN_FREQS, lawnCadenceDiscount: constants.LAWN_CADENCE_DISCOUNT, lawnPricingV2: constants.LAWN_PRICING_V2, bedBug: constants.BED_BUG, specialty: constants.SPECIALTY, achDiscount: constants.ACH_DISCOUNT, processingAdjustment: constants.PROCESSING_ADJUSTMENT, commercial: { lawn: constants.COMMERCIAL_LAWN, treeShrub: constants.COMMERCIAL_TREE_SHRUB, pest: constants.COMMERCIAL_PEST, mosquito: constants.COMMERCIAL_MOSQUITO, termiteBait: constants.COMMERCIAL_TERMITE_BAIT, rodentBait: constants.COMMERCIAL_RODENT_BAIT }, waveguard: constants.WAVEGUARD.tiers, oneTimePerk: constants.WAVEGUARD.recurringCustomerOneTimePerk, prepayDiscount: constants.ANNUAL_PREPAY_DISCOUNT_PCT, deposit: constants.DEPOSIT, cardHold: constants.CARD_HOLD, inspectionCredit: constants.INSPECTION_CREDIT, urgency: constants.URGENCY, tsTiers: constants.TREE_SHRUB.tiers, lawnTiers: constants.LAWN_TIERS },
     marginDivisors: { plugging: constants.SPECIALTY.plugging.marginDivisor, topDressingEighth: constants.SPECIALTY.topDressing.eighth.marginDivisor, topDressingQuarter: constants.SPECIALTY.topDressing.quarter.marginDivisor, dethatching: constants.SPECIALTY.dethatching.marginDivisor, boraCare: constants.SPECIALTY.boraCare.marginDivisor, foamDrill: constants.SPECIALTY.foamDrill.marginDivisor, preSlabTermidor: constants.SPECIALTY.preSlabTermiticide.products.termidor_sc.marginDivisor, bedBugCostRatio: constants.BED_BUG.chemical.targetCostRatio, tsMarginTarget: constants.TREE_SHRUB.marginTarget, commercialTargetGrossMargin: constants.COMMERCIAL_PEST.targetGrossMargin, termiteInstallMarkup: constants.TERMITE.installMultiplier, trenchingProductPremiumMarkup: constants.SPECIALTY.trenching.productPremiumMultiplier },
   };
 }
@@ -1062,6 +1098,13 @@ async function main() {
   if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify({ summary, scenarios, economics: economics.rows, hardCodedRates: hardCodedRateInventory(), markupSites: markupVsMarginAudit() }, null, 1));
   console.log(text);
   console.log(`\n(${summary.scenarioCount} scenarios, ${summary.mismatches} mismatches, ${summary.noPrice} expected-price-but-none, ${findings.length} findings)`);
+  // A discrepancy is a failed verification, not a passing run with a note in
+  // the report: exit nonzero so CI / a pre-push caller sees it (codex r6 P1).
+  const discrepancies = summary.mismatches + summary.noPrice + summary.engineErrors;
+  if (discrepancies > 0) {
+    console.error(`${discrepancies} discrepancy(ies): ${summary.mismatches} mismatches, ${summary.noPrice} expected-price-but-none, ${summary.engineErrors} commercial engine errors`);
+    process.exitCode = 4;
+  }
 }
 
 if (require.main === module) {

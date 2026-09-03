@@ -24,7 +24,8 @@ const path = require('path');
 const { Client } = require(path.join(__dirname, '..', 'node_modules', 'pg'));
 
 const args = process.argv.slice(2);
-const argValue = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };
+// A value-taking flag needs a following non-flag value (codex r6 P2).
+const argValue = (flag) => { const i = args.indexOf(flag); if (i < 0) return null; const v = args[i + 1]; return v != null && !v.startsWith('--') ? v : null; };
 const JSON_OUT = argValue('--json');
 const MD_OUT = argValue('--md');
 // Reject unknown flags: a not-yet-built mode (the plan names --lawn-rates for
@@ -47,7 +48,8 @@ const INTERNAL_TEST_SQL = INTERNAL_TEST_CUSTOMERS.length ? `and lower(coalesce(c
 const { visitsPerYearForCadence } = require(path.join(__dirname, '..', 'server', 'services', 'prepay-cadence'));
 const CADENCE_LABELS = ['monthly', 'monthly_nth_weekday', 'every_6_weeks', 'seasonal_feb_oct', 'bimonthly', 'bi_monthly', 'quarterly', 'triannual', 'every_4_months', 'semiannual', 'biannual', 'annual', 'yearly'];
 const CADENCE_CASE_SQL = `(case lower(trim(frequency)) ${CADENCE_LABELS.map((l) => `when '${l}' then ${visitsPerYearForCadence(l)}`).join(' ')} else null end)`;
-const HAS_ENGINE_KEY_SQL = "(jsonb_typeof(engine_keys) = 'array' and jsonb_array_length(engine_keys) > 0)";
+// coalesce: a NULL engine_keys makes the bare predicate NULL, and NOT NULL is NULL — null rows are gaps (codex r6 P2).
+const HAS_ENGINE_KEY_SQL = "coalesce(jsonb_typeof(engine_keys) = 'array' and jsonb_array_length(engine_keys) > 0, false)";
 const EFFECTIVE_PRICE_SQL = "coalesce(nullif(ss.estimated_price, 0), case when c.billing_mode = 'per_application' then c.per_application_fee end, 0)";
 // CLI-only validation (a library require under another argv must not exit):
 // unknown flags are rejected, and the window is validated as YYYY-MM-DD and
@@ -59,7 +61,12 @@ if (require.main === module) {
       console.error(`Unknown argument ${JSON.stringify(args[i])}. Known flags: ${[...KNOWN_FLAGS.keys()].join(' ')}`);
       process.exit(2);
     }
-    i += KNOWN_FLAGS.get(args[i]);
+    const arity = KNOWN_FLAGS.get(args[i]);
+    if (arity && (args[i + 1] == null || args[i + 1].startsWith('--'))) {
+      console.error(`${args[i]} needs a value (got ${JSON.stringify(args[i + 1] ?? null)})`);
+      process.exit(2);
+    }
+    i += arity;
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(SINCE)) {
     console.error(`--since must be YYYY-MM-DD (got ${JSON.stringify(SINCE)})`);

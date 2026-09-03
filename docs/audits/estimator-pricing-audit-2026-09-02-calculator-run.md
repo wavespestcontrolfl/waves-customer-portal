@@ -1,7 +1,7 @@
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-03T11:56:17.324Z. Constants source: **constants.js (in-code defaults)**.
-Scenarios: 1259 · independent-vs-engine matches: 1204 · mismatches: 0 · expected a price but the engine returned none: 0 · engine-only observations: 55 (1204 + 0 + 0 + 55 = 1259) · commercial engine errors: 0
+Generated 2026-09-03T13:26:23.786Z. Constants source: **constants.js (in-code defaults)**.
+Scenarios: 1259 · independent-vs-engine matches: 1215 · mismatches: 1 · expected a price but the engine returned none: 0 · engine-only observations: 43 (1215 + 1 + 0 + 43 = 1259) · commercial engine errors: 0
 
 ## Findings raised by this run
 
@@ -18,11 +18,13 @@ Scenarios: 1259 · independent-vs-engine matches: 1204 · mismatches: 0 · expec
 - **P2** [tree_shrub] explicit treeCount=0 suppresses density fallback without review — 0 trees → 45.25/mo vs density-estimated 10 trees → 58.75/mo
 - **P2** [specialty] german roach severity defaulted (undefined) to cheapest tier silently — price 350 (light)
 - **P2** [waveguard_discounts] FIXED manual discount can zero a Platinum estimate with no cap — year1Total 0, recurringAnnualAfterDiscount 0
+- **P1** [cadence_identities] tree_shrub (9/yr) annual-prepay coverage cadence — expected every_6_weeks, resolver returned bimonthly — the term would cover 6 of 9 prepaid visits
 
 ## Mismatches (independent formula vs engine)
 
 | section | scenario | independent | engine | diff |
 |---|---|---:|---:|---:|
+| cadence_identities | tree_shrub (9/yr) annual-prepay coverage cadence | every_6_weeks | bimonthly | — |
 
 ## Annual economics per recurring service (engine labor model; recorded visit spans shown for context only)
 
@@ -50,10 +52,10 @@ Recorded span = check-in → check-out, which often includes driving to the next
 | tree_shrub 6x (1,440 sf beds, 6 trees) | silver | $95.83 | $517.48 | $517.48 | 42 | 38.9% | 63.7% | — | — | — | — |
 | tree_shrub 6x (1,440 sf beds, 6 trees) | gold | $95.83 | $488.73 | $488.73 | 42 | 35.3% | 54.6% | — | — | — | — |
 | tree_shrub 6x (1,440 sf beds, 6 trees) | platinum | $95.83 | $459.98 | $459.98 | 42 | 31.3% | 45.5% | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | bronze | $72.00 | $288.00 | $898.00 | 75 | -65.0% | -39.4% | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | silver | $72.00 | $259.20 | $869.20 | 75 | -83.3% | -45.5% | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | gold | $72.00 | $244.80 | $854.80 | 75 | -94.1% | -48.5% | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | platinum | $72.00 | $230.40 | $840.40 | 75 | -106.2% | -51.5% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | bronze | $72.00 | $288.00 | $898.00 | 75 | -22.9% | -18.7% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | silver | $72.00 | $259.20 | $869.20 | 75 | -36.6% | -26.8% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | gold | $72.00 | $244.80 | $854.80 | 75 | -44.6% | -30.9% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | platinum | $72.00 | $230.40 | $840.40 | 75 | -53.7% | -34.9% | — | — | — | — |
 
 ## Markup vs margin sites
 
@@ -108,15 +110,3 @@ Recorded span = check-in → check-out, which often includes driving to the next
 - [commercial] commercial rodent bait: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_rodent_bait","annual":476,"price":null,"perApp":119,"visits":4,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":null,"review":false},{"service":"rodent_bait_setup","annual":null,"price":99,"perApp":null,"visits":null,"manualQuote":false,"taxable":null,"taxCategory":null,"margin":null,"review":null}]}
 - [commercial] commercial termite bait: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_termite_bait","annual":813.27,"price":null,"perApp":203.32,"visits":4,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}
 - [commercial] commercial tree & shrub: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_tree_shrub","annual":2670.91,"price":null,"perApp":445.15,"visits":6,"manualQuote":false,"taxable":false,"taxCategory":"lawn_spraying_or_treatment","margin":0.45,"review":false}]}
-- [cadence_identities] pest_control (4/yr) annual-prepay coverage cadence: {"coverageCadence":"quarterly","error":null}
-- [cadence_identities] pest_control (6/yr) annual-prepay coverage cadence: {"coverageCadence":"bimonthly","error":null}
-- [cadence_identities] pest_control (12/yr) annual-prepay coverage cadence: {"coverageCadence":"monthly","error":null}
-- [cadence_identities] lawn_care (6/yr) annual-prepay coverage cadence: {"coverageCadence":"bimonthly","error":null}
-- [cadence_identities] lawn_care (9/yr) annual-prepay coverage cadence: {"coverageCadence":"every_6_weeks","error":null}
-- [cadence_identities] lawn_care (12/yr) annual-prepay coverage cadence: {"coverageCadence":"monthly","error":null}
-- [cadence_identities] mosquito (9/yr) annual-prepay coverage cadence: {"coverageCadence":"seasonal_feb_oct","error":null}
-- [cadence_identities] mosquito (12/yr) annual-prepay coverage cadence: {"coverageCadence":"monthly","error":null}
-- [cadence_identities] tree_shrub (4/yr) annual-prepay coverage cadence: {"coverageCadence":"quarterly","error":null}
-- [cadence_identities] tree_shrub (6/yr) annual-prepay coverage cadence: {"coverageCadence":"bimonthly","error":null}
-- [cadence_identities] tree_shrub (9/yr) annual-prepay coverage cadence: {"coverageCadence":"bimonthly","error":null}
-- [cadence_identities] rodent_bait (4/yr) annual-prepay coverage cadence: {"coverageCadence":"quarterly","error":null}
