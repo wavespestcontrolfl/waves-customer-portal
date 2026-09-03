@@ -333,6 +333,7 @@ function buildTriageItem({
     // until a booking answers the snapshotted ask.
     'missing_service_address', 'low_confidence_address', 'address_unverifiable',
     'address_unverified', 'address_validation_unavailable',
+    'address_not_validated',
   ]);
   if (SCHEDULING_PAYLOAD_FLAGS.has(flag) && extraction?.scheduling) {
     const s = extraction.scheduling;
@@ -387,6 +388,7 @@ function buildTriageItem({
   const ADDRESS_SNAPSHOT_FLAGS = new Set([
     'missing_service_address', 'low_confidence_address', 'address_unverifiable',
     'address_unverified', 'address_validation_unavailable',
+    'address_not_validated',
   ]);
   if (ADDRESS_SNAPSHOT_FLAGS.has(flag)) {
     const sa = extraction?.property?.service_address || {};

@@ -95,7 +95,9 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   // (estimator provenance), sent at the given age.
   // estimateOwner 'other': the stamped estimate belongs to a different
   // customer (the shape a relink leaves behind).
-  async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin, deliveredAgeMin = estimateAgeMin, estimateOwner = 'call' }) {
+  // firstSendAccept: accepted during the first send — admin-estimates
+  // finalization keeps accepted_at + lastDeliveredAt with sent_at null.
+  async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin, deliveredAgeMin = estimateAgeMin, estimateOwner = 'call', firstSendAccept = false }) {
     const { customerId } = await seedCustomer(sid.slice(-2));
     const ownerId = estimateOwner === 'other' ? (await seedCustomer(`${sid.slice(-2)}x`)).customerId : customerId;
     const callAt = new Date(Date.now() - (cardAgeMin + 5) * 60000);
@@ -112,7 +114,9 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
       payload: JSON.stringify({ flag: 'quote_promised' }),
     }).returning('id');
     const [est] = await db('estimates').insert({
-      customer_id: ownerId, status: 'sent', sent_at: new Date(Date.now() - estimateAgeMin * 60000),
+      customer_id: ownerId, status: firstSendAccept ? 'accepted' : 'sent',
+      sent_at: firstSendAccept ? null : new Date(Date.now() - estimateAgeMin * 60000),
+      accepted_at: firstSendAccept ? new Date(Date.now() - estimateAgeMin * 60000) : null,
       estimate_data: JSON.stringify({
         estimatorEngine: { callLogId: String(call.id) },
         ...(deliveredAgeMin === null ? {} : { deliveryState: { lastDeliveredAt: new Date(Date.now() - deliveredAgeMin * 60000).toISOString() } }),
@@ -180,6 +184,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const stale = await seedQuoteCall(SID.replace(/e2$/, 'q2'), { cardAgeMin: 10, estimateAgeMin: 60 });
     const suppressed = await seedQuoteCall(SID.replace(/e2$/, 'q3'), { cardAgeMin: 60, estimateAgeMin: 10, deliveredAgeMin: null });
     const foreign = await seedQuoteCall(SID.replace(/e2$/, 'q4'), { cardAgeMin: 60, estimateAgeMin: 10, estimateOwner: 'other' });
+    const acceptedOnSend = await seedQuoteCall(SID.replace(/e2$/, 'q5'), { cardAgeMin: 60, estimateAgeMin: 10, firstSendAccept: true });
     const result = await sweep.runTriageAutoResolve({ now: new Date() });
     expect(result.skipped).toBe(false);
     const closed = await db('triage_items').where({ id: fresh.cardId }).first();
@@ -194,6 +199,10 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     // the call, not the estimate): not this customer's proof.
     const foreignCard = await db('triage_items').where({ id: foreign.cardId }).first();
     expect(foreignCard.status).toBe('open');
+    // Accepted during the first send (sent_at null, accepted_at + delivery
+    // state after the card): delivered proof all the same.
+    const acceptedCard = await db('triage_items').where({ id: acceptedOnSend.cardId }).first();
+    expect(acceptedCard.status).toBe('resolved');
   });
 
   test('a CONFIRMED call closes only on a booking at the confirmed hour; a recurring-plan ask only on a recurring series; a requested morning only in the morning', async () => {

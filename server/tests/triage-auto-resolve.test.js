@@ -575,7 +575,13 @@ describe('evidence helpers', () => {
     const plan = card({ requested_date_range_start: '2026-07-30', requested_service_intent: 'recurring_membership_inquiry' });
     expect(bookingCoversRequest(plan, [booking({})], ctx)).toBe(false);
     expect(bookingCoversRequest(plan, [booking({ is_recurring: true })], ctx)).toBe(true);
-    expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30' }), [booking({ is_recurring: true })], ctx)).toBe(true);
+    // An explicit one-time ask is answered only by a single visit; an
+    // active-infestation ask by either; a snapshot with no intent by nothing.
+    expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30' }), [booking({ is_recurring: true })], ctx)).toBe(false);
+    expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30' }), [booking({ is_recurring: false })], ctx)).toBe(true);
+    const infestation = card({ requested_date_range_start: '2026-07-30', requested_service_intent: 'active_infestation_treatment' });
+    expect(bookingCoversRequest(infestation, [booking({ is_recurring: true })], ctx)).toBe(true);
+    expect(bookingCoversRequest(infestation, [booking({})], ctx)).toBe(true);
     expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30', requested_service_intent: undefined }), [booking({})], ctx)).toBe(false);
   });
 

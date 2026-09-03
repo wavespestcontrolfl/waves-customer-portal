@@ -73,6 +73,9 @@ const MAX_TRANSITIONS_PER_RUN = 500;
 const ADDRESS_MOOT_CODES = new Set([
   'missing_service_address', 'low_confidence_address', 'address_unverifiable',
   'address_unverified', 'address_validation_unavailable',
+  // The central routing gate's own address reason files an address_review
+  // card too; it carries the same snapshots and answers to the same visit.
+  'address_not_validated',
 ]);
 // missing_unit_number is deliberately NOT address-moot: the moot rule fires on
 // street + zip existing on file, and a multi-unit building address has both
@@ -407,14 +410,20 @@ function timeOfDayMatches(item, visit) {
 
 // Does a booking's cadence answer the card's snapshotted service intent? A
 // recurring-plan ask is answered only by a recurring series — a one-time
-// visit in the same category is not the plan the caller asked for. Every
-// other intent is answered by any booking (a series still delivers the
-// one-time visit). A snapshot without the intent binds nothing: fail closed.
+// visit in the same category is not the plan the caller asked for — and
+// an explicit one-time ask only by a single visit (the booking path keeps
+// the single service on an explicit "just one-time"; a series booked
+// instead is not that ask). Any other intent (an active infestation) is
+// answered by either. A snapshot without the intent binds nothing: fail
+// closed.
 const RECURRING_INTENT = 'recurring_membership_inquiry';
+const ONE_TIME_INTENT = 'preventative_one_time';
 function cadenceMatches(item, visit) {
   const intent = parseMaybeJson(item.payload)?.scheduling_window?.requested_service_intent;
   if (intent == null) return false;
-  return intent !== RECURRING_INTENT || visit.is_recurring === true;
+  if (intent === RECURRING_INTENT) return visit.is_recurring === true;
+  if (intent === ONE_TIME_INTENT) return visit.is_recurring !== true;
+  return true;
 }
 
 // The calendar days (ET, YYYY-MM-DD) the caller asked for, from the card's

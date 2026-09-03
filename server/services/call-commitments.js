@@ -883,9 +883,12 @@ async function directEstimatesSentAfter(conn, probes) {
     }
   };
   const callIds = [...probesByCall.keys()];
+  // No sent_at prefilter anywhere below: the handoff witness is the whole
+  // contract, and an estimate accepted during its first send keeps
+  // accepted_at + lastDeliveredAt with sent_at still null (admin-estimates
+  // finalization) — it is delivered proof all the same.
   const stamped = await handedOffWithin(conn("estimates")
-    .whereRaw(`estimate_data #>> '{estimatorEngine,callLogId}' IN (${callIds.map(() => "?").join(", ")})`, callIds)
-    .whereNotNull("sent_at"), minAfter)
+    .whereRaw(`estimate_data #>> '{estimatorEngine,callLogId}' IN (${callIds.map(() => "?").join(", ")})`, callIds), minAfter)
     .select(cols);
   for (const r of stamped) consider(r.stamped_call_id, r, "estimate_stamped_with_this_call");
 
@@ -903,8 +906,7 @@ async function directEstimatesSentAfter(conn, probes) {
     .where(function linkedToLeads() {
       if (estimateIds.length) this.orWhereIn("id", estimateIds);
       this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${leadIds.map(() => "?").join(", ")})`, leadIds);
-    })
-    .whereNotNull("sent_at"), minAfter)
+    }), minAfter)
     .select(cols);
   // Several leads can share one estimate_id — every call behind them is a
   // match, not an arbitrary one of them.
@@ -965,8 +967,7 @@ async function resolveFulfillment(conn, commitment, call) {
           .where(function linkedToLeads() {
             if (reusedEstimateIds.length) this.orWhereIn("id", reusedEstimateIds);
             if (reusedLeadIds.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${reusedLeadIds.map(() => "?").join(", ")})`, reusedLeadIds);
-          })
-          .whereNotNull("sent_at"), after)
+          }), after)
           .orderByRaw(HANDOFF_ORDER_SQL)
           .first(...HANDOFF_COLS(conn));
         if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
@@ -979,7 +980,7 @@ async function resolveFulfillment(conn, commitment, call) {
       // by an UNLINKED estimate whose phone matches the caller — a shared
       // household number never lets one customer's estimate clear another's
       // promise.
-      const estQ = handedOffWithin(conn("estimates").whereNotNull("sent_at"), after, until);
+      const estQ = handedOffWithin(conn("estimates"), after, until);
       if (customerId) {
         estQ.where("customer_id", customerId);
       } else if (phone) {
