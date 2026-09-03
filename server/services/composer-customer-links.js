@@ -298,6 +298,7 @@ const AUTOPAY_SKIP_REASONS = {
   completion_in_progress: 'This customer is finishing an Auto Pay setup right now — try again in a few minutes',
   autopay_sms_gate_off: 'Auto Pay customer texts are switched off (GATE_AUTOPAY_CUSTOMER_SMS)',
   template_inactive: 'The Auto Pay setup text is inactive in Templates — activate it before texting a setup link',
+  template_missing_link: 'The Auto Pay setup text in Templates has no {secure_link} placeholder — add it before texting a setup link',
 };
 
 // The composer's insert IS an SMS delivery (the operator's /sms send goes
@@ -354,6 +355,10 @@ async function buildAutopaySetupLink(customerId) {
     const profile = await db('customers').where({ id: customerId }).first('first_name');
     const body = await renderTemplate({ first_name: profile?.first_name || 'there', secure_link: result.secureUrl }, 'autopay_setup_link');
     if (!body) return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS.template_inactive };
+    // validateTemplateBody does not require {secure_link} for this key — an
+    // edit that drops it renders fine and would text setup copy with no
+    // link (GH Codex #3812 r4 P2). The minted URL must be in the body.
+    if (!String(body).includes(result.secureUrl)) return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS.template_missing_link };
     return {
       url: result.secureUrl,
       line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
@@ -369,7 +374,9 @@ async function buildAutopaySetupLink(customerId) {
 // 16 random bytes base64url = 22 chars; the visit lane's card requests share
 // the page and the table). Bodies carry the link scheme-stripped
 // (stripSmsLinkScheme), so the match is host + path, scheme optional.
-const SECURE_PATH_RE = /\/secure\/([A-Za-z0-9_-]{16,})/g;
+// Case-insensitive: the React route is not case-sensitive, so /Secure/<tok>
+// still opens the page and must still be judged (GH Codex #3812 r4 P1).
+const SECURE_PATH_RE = /\/secure\/([A-Za-z0-9_-]{16,})/gi;
 // A canonical link: the portal host (exact, port included) preceded by a
 // scheme or a token boundary — never by a path separator, so
 // "https://evil.example/portal.wavespestcontrol.com/secure/<token>" is not

@@ -134,7 +134,7 @@ const AUTOPAY_LINK_IN_DRAFT = 'Auto Pay setup links cannot go out through draft 
 // Presence only (customer-kind /secure links or a look-alike host): the
 // composer-links seam does the lookups; a draft never sends one at all.
 async function draftCarriesAutopayLink(body) {
-  if (!/\/secure\//.test(String(body || ''))) return false;
+  if (!/\/secure\//i.test(String(body || ''))) return false;
   const { autopayLinkSendCheck } = require('../services/composer-customer-links');
   return (await autopayLinkSendCheck(body, null)).present;
 }
@@ -779,7 +779,18 @@ router.put('/:id/approve', async (req, res, next) => {
     // An Auto Pay setup link never rides draft approval: only the composer's
     // /sms carries the delivery seam (levers, liveness, ownership,
     // reclassification) — refuse and hand the claim back (GH Codex #3812 r3 P1).
-    if (await draftCarriesAutopayLink(draft.draft_response)) {
+    // The claim is already taken, so a lookup failure inside the check must
+    // hand it back too (GH Codex #3812 r4 P2) — never strand the draft.
+    let autopayInDraft = false;
+    try {
+      autopayInDraft = await draftCarriesAutopayLink(draft.draft_response);
+    } catch (checkErr) {
+      logger.warn(`[drafts] Auto Pay link check failed for draft ${draft.id} — releasing claim: ${checkErr.message}`);
+      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id);
+      else await releaseDraftClaim(draft.id);
+      return res.status(503).json({ error: 'Pre-send check unavailable - draft left pending, try again' });
+    }
+    if (autopayInDraft) {
       if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id);
       else await releaseDraftClaim(draft.id);
       return res.status(409).json({ error: AUTOPAY_LINK_IN_DRAFT });

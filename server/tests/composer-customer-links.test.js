@@ -345,6 +345,14 @@ describe('buildAutopaySetupLink', () => {
     expect(r.reason).toBeUndefined();
   });
 
+  test('a template edited to drop {secure_link} refuses — never setup copy with no link', async () => {
+    requestAutopaySetupLink.mockResolvedValue({ requested: true, action: 'link_created', reason: 'created', secureUrl: 'https://portal.wavespestcontrol.com/secure/tok123' });
+    renderTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay today. Reply STOP to opt out.');
+    const r = await buildAutopaySetupLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/no \{secure_link\} placeholder/);
+  });
+
   test('a template that stops rendering between the lever probe and the mint refuses (no hand-written fallback copy)', async () => {
     requestAutopaySetupLink.mockResolvedValue({ requested: true, action: 'link_created', reason: 'created', secureUrl: 'https://portal.wavespestcontrol.com/secure/tok123' });
     renderTemplate.mockResolvedValue(null);
@@ -454,6 +462,13 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
     // Same body with a second, canonical link: the foreign one still refuses.
     const r2 = await autopayLinkSendCheck('https://evil.example/portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY ' + BODY, '9415550184');
     expect(r2.ok).toBe(false);
+  });
+
+  test('a differently-cased /Secure/ path is still detected and judged', async () => {
+    wire({ row: { ...live, expires_at: new Date(Date.now() - 1000) } });
+    const r = await autopayLinkSendCheck('Set it up here: portal.wavespestcontrol.com/Secure/abcDEF123_-xyz789QWERTY', '9415550184');
+    expect(r.present).toBe(true);
+    expect(r.ok).toBe(false);
   });
 
   test('the scheme-stripped form the composer inserts is accepted', async () => {

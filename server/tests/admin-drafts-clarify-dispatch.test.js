@@ -397,6 +397,30 @@ describe('Auto Pay setup links never ride draft approval (GH Codex #3812 r3 P1)'
     expect(release).toBeTruthy();
   });
 
+  test('a lookup failure during the approve check hands the claim back (503, draft left pending)', async () => {
+    enqueue('message_drafts', { returning: [clarifyDraft({ intent: null, draft_response: SECURE })] }); // claim
+    enqueue('message_drafts', { update: 1 });                                                            // release
+    autopayLinkSendCheck.mockRejectedValueOnce(new Error('db down'));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-9/approve`, { method: 'PUT' });
+      expect(res.status).toBe(503);
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates.find((u) => u.payload.status === 'pending')).toBeTruthy();
+  });
+
+  test('a differently-cased /Secure/ path still consults the seam', async () => {
+    autopayLinkSendCheck.mockResolvedValueOnce({ present: true, ok: true, tokens: ['abcDEF123_-xyz789QWERTY'] });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-9/revise`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'portal.wavespestcontrol.com/Secure/abcDEF123_-xyz789QWERTY' }),
+      });
+      expect(res.status).toBe(409);
+    });
+  });
+
   test('a body without /secure never consults the seam', async () => {
     autopayLinkSendCheck.mockClear();
     await withServer(async (baseUrl) => {

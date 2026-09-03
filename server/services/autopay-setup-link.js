@@ -340,16 +340,18 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
     const secureUrl = portalUrl(`/secure/${request.token}`);
     const linkMeta = { secureUrl, expiresAt: request.expires_at || null };
 
+    // A row mid-completion is never handed out, texted or stamped (GH Codex
+    // #3726 P2, #3812 r4 P2): the customer is finishing right now, its
+    // updated_at is the completion lease token — a stamp here would break
+    // the worker's guarded final write — and a copied/inserted link would
+    // only be refused at send.
+    if (request.status === 'completing') return skip('completion_in_progress', linkMeta);
+
     if (delivery !== 'sms') {
       return { requested: true, action: 'link_created', reason: existing && request.id === existing.id ? 'request_exists' : 'created', ...linkMeta };
     }
 
     if (!customer.phone) return skip('no_customer_phone', linkMeta);
-    // A row mid-completion is never texted or stamped (GH Codex #3726 P2):
-    // the customer is finishing right now, and its updated_at is the
-    // completion lease token — a stamp here would break the worker's
-    // guarded final write.
-    if (request.status === 'completing') return skip('completion_in_progress', linkMeta);
     // Third lever, surfaced instead of silently blocked in the pipeline
     // (GH Codex #3726 r1 P1): original_message_type 'autopay_setup_link'
     // classifies as an Auto Pay customer SMS, which sendCustomerMessage

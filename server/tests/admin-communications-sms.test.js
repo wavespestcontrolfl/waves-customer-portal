@@ -445,6 +445,25 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('an Auto Pay refusal never claims the review row riding the same body', async () => {
+      const ReviewService = require('../services/review-request');
+      require('../services/autopay-setup-link').setupLinkIneligibility.mockResolvedValue({ reason: null, customer: { id: 'cust-A', phone: '+15551234567' } });
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'appointment_card_requests') first.mockResolvedValue({ id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() - 1000), customer_id: 'cust-A' });
+        else if (table === 'review_requests') first.mockResolvedValue({ id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123' });
+        else if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+        else if (table === 'sms_templates') first.mockResolvedValue({ is_active: true });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), first };
+      });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { customerId: 'cust-A', reviewRequestId: 'rr-1', body: `${SECURE_BODY} Review us: portal.wavespestcontrol.com/rate/tok-abc123` });
+        expect(res.status).toBe(409);
+        expect(ReviewService.claimInlineForSend).not.toHaveBeenCalled();
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
     test('an expired link aborts the send before the provider call', async () => {
       wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() - 1000), customer_id: 'cust-A' } });
       await withServer(async (baseUrl) => {

@@ -1779,7 +1779,20 @@ function SmsTab() {
       // customer when none was picked, so the send carries customerId and
       // the link's owner policy applies (server refuses otherwise).
       const linkCustomerId = d.customerId || requestCustomerId;
-      if (!requestCustomerId && d.customerId) setSelectedCustomerId(d.customerId);
+      if (!requestCustomerId && d.customerId) {
+        // The phone did not change — links already minted for this
+        // recipient with no selected customer adopt the resolved owner too,
+        // or the recipient-change effects would strip them (r4 P2).
+        const adopt = (e) => (
+          e && e.recipientKey === requestRecipientKey && e.customerId == null
+            ? { ...e, customerId: d.customerId }
+            : e
+        );
+        setSelectedCustomerId(d.customerId);
+        setInsertedResched(adopt);
+        setInsertedReservice(adopt);
+        setInsertedCustomerLinks((m) => Object.fromEntries(Object.entries(m).map(([k, e]) => [k, adopt(e)])));
+      }
       // Replace-don't-stack per kind (same rule as the reschedule insert).
       // A replaced review link's row is NOT canceled: reuse means the fresh
       // insert hands back the same shared row anyway.

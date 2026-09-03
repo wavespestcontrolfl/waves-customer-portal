@@ -420,6 +420,24 @@ router.post('/sms', async (req, res, next) => {
       });
       return res.status(status).json({ error });
     };
+    // Composer-inserted Auto Pay setup link (or a pasted one): re-run the
+    // check BEFORE the review claim below, so a refusal never strands a
+    // claimed review row in 'sending' (GH Codex #3812 r4 P2). Re-run the
+    // canonical levers + row liveness + ownership NOW (the insert-time check
+    // is stale once a draft sits open) and reclassify the send so
+    // send-customer-message's Auto Pay gate applies at delivery. FAIL CLOSED
+    // on any miss (GH Codex #3812 r2 P1/P2).
+    let autopayLinkTokens = null;
+    try {
+      const { autopayLinkSendCheck } = require('../services/composer-customer-links');
+      const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to), { trustedCustomerId: trustedCustomerId || null });
+      if (autopayCheck.present && !autopayCheck.ok) return abortUnsent(409, autopayCheck.error);
+      if (autopayCheck.present) autopayLinkTokens = autopayCheck.tokens;
+    } catch (autopayErr) {
+      logger.warn(`[communications] Auto Pay link pre-send check failed — aborting send: ${autopayErr.message}`);
+      return abortUnsent(503, 'Could not verify the inserted Auto Pay setup link — try again in a moment.');
+    }
+
     if (reviewRequestId) {
       try {
         const ReviewService = require('../services/review-request');
@@ -514,22 +532,6 @@ router.post('/sms', async (req, res, next) => {
         }
         return abortUnsent(503, 'Could not verify the inserted review link — try again in a moment.');
       }
-    }
-
-    // Composer-inserted Auto Pay setup link (or a pasted one): re-run the
-    // canonical levers + row liveness + ownership NOW (the insert-time check
-    // is stale once a draft sits open) and reclassify the send so
-    // send-customer-message's Auto Pay gate applies at delivery. FAIL CLOSED
-    // on any miss (GH Codex #3812 r2 P1/P2).
-    let autopayLinkTokens = null;
-    try {
-      const { autopayLinkSendCheck } = require('../services/composer-customer-links');
-      const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to), { trustedCustomerId: trustedCustomerId || null });
-      if (autopayCheck.present && !autopayCheck.ok) return abortUnsent(409, autopayCheck.error);
-      if (autopayCheck.present) autopayLinkTokens = autopayCheck.tokens;
-    } catch (autopayErr) {
-      logger.warn(`[communications] Auto Pay link pre-send check failed — aborting send: ${autopayErr.message}`);
-      return abortUnsent(503, 'Could not verify the inserted Auto Pay setup link — try again in a moment.');
     }
 
     const sendStartedAt = new Date();
