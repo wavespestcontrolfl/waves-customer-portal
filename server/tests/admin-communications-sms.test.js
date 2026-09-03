@@ -45,12 +45,21 @@ jest.mock('../services/appointment-card-request', () => ({
   }),
 }));
 jest.mock('../services/payer-statement-email', () => ({ markStatementSent: jest.fn() }));
+// The share-link writer's send-time half (activate before the provider call,
+// restore on a no-send exit, record after a real send) — its own suite covers
+// the writes; the route tests pin WHEN the route calls each.
+jest.mock('../routes/admin-contracts', () => ({
+  activatePreparedShareLinks: jest.fn(async (links) => ({ ok: true, activations: links.map((l) => ({ ...l, customerId: 'cust-A', previous: { status: 'draft', shared_at: null } })) })),
+  restorePreparedShareLinks: jest.fn(async () => {}),
+  recordPreparedShareLinkSends: jest.fn(async () => {}),
+}));
 jest.mock('../services/sms-media', () => ({
   mediaFromOutboundAttachments: jest.fn(() => []),
   signMediaForClient: jest.fn(async (media) => media),
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({
-  alertTwilioFailure: jest.fn(),
+  // Returns a promise like the real one — the /sms catch path chains .catch on it.
+  alertTwilioFailure: jest.fn(async () => {}),
 }));
 // Inert suggest-mode plumbing: the route fails CLOSED if pre-send parking
 // throws (503), and the bare db mock above can't run the real park
@@ -595,6 +604,118 @@ describe('admin communications SMS route', () => {
         expect(res.status).toBe(409);
         expect((await res.json()).error).toMatch(/contract signing link is expired or no longer live/);
         expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
+    // A prepared (composer-inserted) contract link in the body: activated
+    // BEFORE the provider call, restored on every no-send exit, recorded
+    // after a real send (GH Codex #3844 r3 P1).
+    describe('prepared contract signing link in the body', () => {
+      const CONTRACT_BODY = 'Please sign: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY';
+      const { hashContractToken } = jest.requireActual('../services/contracts');
+      const TOKEN_HASH = hashContractToken('abcDEF123_-xyz789QWERTY');
+      const contracts = () => require('../routes/admin-contracts');
+      function wireContractDb() {
+        db.mockImplementation((table) => {
+          const first = jest.fn();
+          if (table === 'customer_contracts') first.mockResolvedValue({ id: 'k1', customer_id: 'cust-A', status: 'draft', share_token_expires_at: null });
+          else if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+          return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        });
+      }
+      beforeEach(() => {
+        contracts().activatePreparedShareLinks.mockClear();
+        contracts().restorePreparedShareLinks.mockClear();
+        contracts().recordPreparedShareLinkSends.mockClear();
+      });
+
+      test('a real send: activated BEFORE the provider call, recorded after it, never restored', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM7', provider: 'twilio' });
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(200);
+          const { activatePreparedShareLinks, recordPreparedShareLinkSends, restorePreparedShareLinks } = contracts();
+          expect(activatePreparedShareLinks).toHaveBeenCalledWith([{ id: 'k1', tokenHash: TOKEN_HASH }], expect.anything());
+          expect(activatePreparedShareLinks.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+          expect(recordPreparedShareLinkSends).toHaveBeenCalledWith(
+            [expect.objectContaining({ id: 'k1', tokenHash: TOKEN_HASH })], expect.anything(), expect.objectContaining({ providerMessageId: 'SM7' }),
+          );
+          expect(restorePreparedShareLinks).not.toHaveBeenCalled();
+        });
+      });
+
+      test('activation refused (rotated meanwhile) → 409 before any provider call', async () => {
+        contracts().activatePreparedShareLinks.mockResolvedValueOnce({ ok: false, error: 'This contract signing link is no longer live — remove it and insert a fresh one.' });
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(409);
+          expect((await res.json()).error).toMatch(/no longer live/);
+          expect(sendCustomerMessage).not.toHaveBeenCalled();
+        });
+      });
+
+      test.each([
+        ['blocked', { sent: false, blocked: true, reason: 'quiet hours' }, 422],
+        ['suppressed (non-provider)', { sent: true, blocked: false, suppressed: true }, 200],
+      ])('a %s send hands the prepared link back and records nothing', async (_label, outcome, status) => {
+        sendCustomerMessage.mockResolvedValue(outcome);
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(status);
+          expect(contracts().restorePreparedShareLinks).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })]);
+          expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a throw AFTER provider acceptance records the delivery; a throw before it restores', async () => {
+        const accepted = new Error('audit row failed');
+        accepted.providerOutcome = { sent: true, providerMessageId: 'SM8', provider: 'twilio' };
+        sendCustomerMessage.mockRejectedValueOnce(accepted);
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(500);
+          expect(contracts().recordPreparedShareLinkSends).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })], expect.anything(), accepted.providerOutcome);
+          expect(contracts().restorePreparedShareLinks).not.toHaveBeenCalled();
+        });
+        contracts().recordPreparedShareLinkSends.mockClear();
+        sendCustomerMessage.mockRejectedValueOnce(new Error('provider down'));
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(500);
+          expect(contracts().restorePreparedShareLinks).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })]);
+          expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
+        });
+      });
+    });
+
+    test('a statement link on a throw AFTER provider acceptance is still stamped finalized → sent (GH Codex #3844 r3 P1); a throw before it is not', async () => {
+      const STMT_BODY = `Pay here: portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`;
+      const { markStatementSent } = require('../services/payer-statement-email');
+      markStatementSent.mockClear();
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'finalized' });
+        else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+      });
+      const accepted = new Error('audit row failed');
+      accepted.providerOutcome = { sent: true, providerMessageId: 'SM9' };
+      sendCustomerMessage.mockRejectedValueOnce(accepted);
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(500);
+        expect(markStatementSent).toHaveBeenCalledWith(31);
+      });
+      markStatementSent.mockClear();
+      sendCustomerMessage.mockRejectedValueOnce(new Error('provider down'));
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(500);
+        expect(markStatementSent).not.toHaveBeenCalled();
       });
     });
 
