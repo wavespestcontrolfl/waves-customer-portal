@@ -38,6 +38,7 @@ const COMMENTS = {
     codexComment({ pr: 1, sev: 'P0', title: 'Document the new public field', path: 'server/routes/lead-webhook.js', line: 20, cite: 3, body: 'public route contract' }),
     { user: { login: 'chatgpt-codex-connector[bot]' }, body: 'Codex Review Summary — no badge here' },
     { user: { login: 'someone' }, body: '![P1 Badge](x) human comment' },
+    { user: { login: 'codex-fan-human' }, body: '**<sub><sub>![P1 Badge](x)</sub></sub>  Looks like a bot but is not**', path: 'a.js', line: 1 },
   ],
   2: [
     codexComment({ pr: 2, sev: 'P1', title: 'Remove customer PII from the commit message', path: 'server/services/invoice.js', line: 30, body: 'commit message carries a surname' }),
@@ -93,6 +94,14 @@ describe('run + clusterFindings', () => {
     expect(_internals.candidateHome(pii)).toBe('waves-ship');
     expect(_internals.candidateHome(pub)).toBe('docs/public-route-contracts.md');
     expect(_internals.candidateHome(_internals.parseFinding(COMMENTS[2][1], PRS[1]))).toBe('waves-db');
+  });
+
+  test('cited findings never double as uncited phrase classes; unfetchable head AGENTS.md leaves the cite unresolved', () => {
+    const cited = runFixture().clusters.filter((c) => c.kind === 'phrase' && /public/.test(c.label));
+    expect(cited).toHaveLength(0);
+    const { findings, clusters } = runFixture({ agentsMdAt: () => null });
+    expect(findings.filter((f) => f.agentsLines).every((f) => f.agentsRule === null)).toBe(true);
+    expect(clusters.find((c) => c.kind === 'rule')).toBeUndefined();
   });
 
   test('markdown report renders the three sections with one example per PR', () => {

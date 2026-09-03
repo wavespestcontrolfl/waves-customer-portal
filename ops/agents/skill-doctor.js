@@ -34,7 +34,9 @@ const os = require('os');
 const path = require('path');
 
 const DEFAULT_REPO = 'wavespestcontrolfl/waves-customer-portal';
-const CODEX_LOGIN = /codex/i;
+// Exact bot account — a human or service login that merely contains "codex"
+// must never enter the evidence corpus (Codex r1).
+const CODEX_LOGIN = /^chatgpt-codex-connector(\[bot\])?$/;
 const SEVERITY_WEIGHT = { P0: 8, P1: 4, P2: 2, P3: 1 };
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -75,7 +77,7 @@ function listPrs({ repo, days, includeOpen }) {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const sinceDay = since.toISOString().slice(0, 10);
   const out = gh([
-    'pr', 'list', '--repo', repo, '--state', 'all', '--limit', '300',
+    'pr', 'list', '--repo', repo, '--state', 'all', '--limit', '1000',
     '--search', `updated:>=${sinceDay}`,
     '--json', 'number,title,state,mergedAt,closedAt,updatedAt,headRefOid',
   ]);
@@ -283,9 +285,12 @@ function clusterFindings(findings, { minPrs = 2, root = REPO_ROOT, agentsLines }
     buckets.get(key).findings.push(f);
   };
   for (const f of findings) {
-    add('rule', f.agentsRule !== undefined ? f.agentsRule : agentsRuleTitle(f.agentsLines, agentsLines), f);
+    const rule = f.agentsRule !== undefined ? f.agentsRule : agentsRuleTitle(f.agentsLines, agentsLines);
+    add('rule', rule, f);
     add('path', topLevelPath(f.path), f);
-    add('phrase', normalizePhrase(f.title), f);
+    // A finding that cites a rule is evidence for THAT rule; it must not also
+    // surface as an "uncited" phrase class (Codex r1).
+    if (!rule) add('phrase', normalizePhrase(f.title), f);
   }
   const clusters = [];
   for (const b of buckets.values()) {
@@ -381,8 +386,11 @@ function run(args, deps = {}) {
       const f = parseFinding(c, pr);
       if (!f) continue;
       if (f.agentsLines) {
-        if (prAgentsLines === undefined) prAgentsLines = (deps.agentsMdAt || agentsMdAt)(args.repo, pr.headRefOid) || agentsMdLines();
-        f.agentsRule = agentsRuleTitle(f.agentsLines, prAgentsLines);
+        // PR-head AGENTS.md only. When it cannot be fetched the citation
+        // stays unresolved (null) — resolving against the CURRENT local file
+        // is exactly the mis-filing this lookup exists to avoid (Codex r1).
+        if (prAgentsLines === undefined) prAgentsLines = (deps.agentsMdAt || agentsMdAt)(args.repo, pr.headRefOid);
+        f.agentsRule = prAgentsLines ? agentsRuleTitle(f.agentsLines, prAgentsLines) : null;
       }
       findings.push(f);
     }
