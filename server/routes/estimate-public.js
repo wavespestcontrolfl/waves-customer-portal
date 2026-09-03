@@ -8,7 +8,7 @@ const { createDefaultCustomerRows } = require('../services/customer-default-rows
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
 // shared with the admin routes so every whole-blob write applies the same
 // rule (dependency-free module: partial test mocks can't blank a guard).
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL, callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -528,7 +528,9 @@ function isEstimateAskAnswerable(estimate = {}, now = new Date()) {
   // invalidation_pending_at the row is not yet archived, and this endpoint
   // would keep answering questions about — and disclosing — the wrong
   // lead's estimate content.
-  if (estimateLinkageInvalidated(estimate)) return false;
+  // Same for a clarify re-price hold: the held row is off the customer
+  // surface, so its ask token answers nothing about it either.
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
@@ -8650,7 +8652,11 @@ async function handleEstimateView(req, res, next) {
     if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
       || estimate.archived_at
       || estimate.status === 'send_failed'
-      || estimateLinkageInvalidated(estimate)
+      // Linkage markers AND the clarify re-price hold (isEstimateCustomerViewable
+      // parity): a V1/holdback link opened while the hold sits on a
+      // 'sending' row would otherwise render the stale whole-building
+      // quote (codex r4 P1 on #3804).
+      || estimateOffCustomerSurface(estimate)
       // The DURABLE call-side verdict too (codex P1, PR #3304 GH r9):
       // when the estimate-side marker could not be written, the block
       // lives on the CALL — and this page would otherwise keep serving a
@@ -9181,6 +9187,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.error(`[estimate-accept] already-accepted payload rebuild failed for estimate ${estimate.id}: ${e.message}`);
         return res.json({ success: true, alreadyAccepted: true });
       }
+    }
+    // The documented re-price response first (codex r6 P0 on #3804): a
+    // browser opened before the hold landed must see the contract's 409
+    // copy, not the generic "no longer active" the accept-active preflight
+    // now returns for a held row. The locked read below re-checks it.
+    if (require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) {
+      return res.status(409).json({ error: 'This estimate is being re-priced — please try again in a few minutes' });
     }
     if (!isEstimateAcceptActive(estimate)) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
@@ -14117,6 +14130,10 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -14410,6 +14427,10 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       // Compare-and-swap on the read snapshot (pre-push P0): any concurrent
       // write — an accept, a preference toggle, another bond switch — makes
       // this update 0-row and the caller reloads server truth. Millisecond
@@ -14672,6 +14693,10 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -15456,6 +15481,10 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+        // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+        // marker off) a held row — the ms-truncated CAS below does not exclude
+        // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         // Same ms-truncated CAS as the bond/interior writes: any concurrent
         // write — an accept, a preference toggle, another opt-out — makes this
         // a zero-row update and the caller reloads server truth.
@@ -15681,6 +15710,10 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -16114,6 +16147,11 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       .where({ id: estimate.id })
       .whereNull('extension_auto_granted_at')
       .where(DEDUPE_OPEN)
+      // A clarify re-price hold that landed after the eligibility read
+      // must not burn the grant (codex r7 P0 on #3804): the zero-row
+      // falls through to the notify-office path — a human hears, no link
+      // goes out.
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .update({
         extension_requested_at: db.fn.now(),
         extension_auto_granted_at: db.fn.now(),
@@ -16199,12 +16237,22 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     }
 
     // Step 2 — cap already burned (or the auto claim lost a race and burned
-    // the dedupe window): try the plain 24h notify-only claim.
+    // the dedupe window): try the plain 24h notify-only claim. The hold
+    // predicate rides this claim too (codex r10 P0 on #3804): a hold that
+    // landed after the eligibility read zero-rows the auto claim above and
+    // must not fall through to a 201 that pages the office — the row is off
+    // the surface, so the answer is the same generic 404 as an unknown
+    // token (no enumeration). A zero row is re-read to tell the two apart.
     const claimed = await db('estimates')
       .where({ id: estimate.id })
       .where(DEDUPE_OPEN)
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .update({ extension_requested_at: db.fn.now() });
     if (!claimed) {
+      const fresh = await db('estimates').where({ id: estimate.id }).first('id', 'estimate_data');
+      if (!fresh || estimateOffCustomerSurface(fresh)) {
+        return res.status(404).json({ error: 'Estimate not found' });
+      }
       return res.json({ success: true, alreadyRequested: true });
     }
 
@@ -16377,6 +16425,10 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
         .whereNull('archived_at')
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+        // …and the clarify re-price hold (codex r4 P1 on #3804): a hold
+        // stamped between the pre-read and this write parks the decline
+        // on the guard's 409 via the re-read below.
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         .update({
           status: 'declined',
@@ -18250,7 +18302,12 @@ function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   // A pending or full linkage invalidation kills acceptance the moment the
   // marker lands — accepting wrong-lead content creates the money-bearing
   // terminal state the deferred-invalidation finalizer must then preserve.
-  if (estimateLinkageInvalidated(estimate)) return false;
+  // A clarify re-price hold is the same verdict: the row is off the customer
+  // surface, so no public mutation (tier / bond / interior / preferences /
+  // service mix) may run on it either — their whole-blob writes would
+  // otherwise erase the marker (pre-push codex P0 on #3804). Accept refuses
+  // it again under its locked read.
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
   // acceptable through the public link. The legacy server-HTML page short-
@@ -18284,11 +18341,19 @@ function estimateLinkageInvalidated(estimate = {}) {
   return !!(eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at));
 }
 
+// The "off the customer surface" verdict (linkage marker OR clarify
+// re-price hold) is estimate-claim-sql.estimateOffCustomerSurface — shared
+// with the services that judge a locked row (the add-service request), so
+// the route's pre-read and the service's locked read can never disagree.
+// Every public predicate below calls it, never the pieces.
+
 function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
   // Before the accepted/declined early-allow: acceptance does not change
-  // whose data the row was composed from — an invalidated row never renders.
-  if (estimateLinkageInvalidated(estimate)) return false;
+  // whose data the row was composed from — an invalidated row never
+  // renders, and a held row staff flip to 'declined' must not render again
+  // (codex r5 P0 on #3804).
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return true;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (['expired', 'send_failed'].includes(estimate.status)) return false;
@@ -18317,7 +18382,11 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   // auto-extension would revive the expired token's frozen dollars with no
   // recompute in the loop.
   if (String(estimate.source || '') === 'plan_restart') return false;
-  if (estimateLinkageInvalidated(estimate)) return false;
+  // A held row (clarify re-price) is ineligible too — the renderer refuses
+  // it, so an auto-grant would re-send a link that 404s (codex r7 P0 on
+  // #3804); the extension writes carry the same predicate for the window
+  // between this read and the claim.
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (!estimate.sent_at && !estimate.viewed_at) return false;
@@ -18347,6 +18416,16 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   // itself carries matching marker predicates for the TOCTOU window.
   if (estimate.estimate_data !== undefined && estimateLinkageInvalidated(estimate)) {
     return { ok: false, status: 404, error: 'Estimate not found' };
+  }
+  // A clarify re-price hold refuses the decline the way accept refuses it
+  // (same 409 + copy): a browser that loaded the estimate before the hold
+  // landed would otherwise flip the held row to 'declined' — a terminal
+  // that renders again in full at the stale price and can no longer be
+  // corrected. Checked BEFORE alreadyDeclined so the order matches the
+  // UPDATE's predicate (codex r4 P1 on #3804).
+  if (estimate.estimate_data !== undefined
+    && require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) {
+    return { ok: false, status: 409, error: 'This estimate is being re-priced — please try again in a few minutes' };
   }
   if (estimate.status === 'declined') {
     return { ok: true, alreadyDeclined: true };
@@ -24770,6 +24849,17 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     const contact = await resolveEstimateContactFields(estimate);
     const firstName = String(contact.customerName || estimate.customer_name || '').trim().split(/\s+/)[0] || 'there';
     const serviceTitle = SERVICE_DETAILS_COPY[serviceKey].title.replace(/ — Service Details$/, '');
+    // The pre-read verdict above is re-asserted IMMEDIATELY before each
+    // provider handoff (codex r14 P0 on #3804): a clarify re-price hold —
+    // or a linkage invalidation — stamped between the pre-read and the
+    // SendGrid/Twilio call would otherwise deliver a stale packet and an
+    // estimate link the renderer now refuses. Same generic 404 as the
+    // pre-read, the family's door; a fresh row, never the stale object.
+    const stillOnCustomerSurface = async () => {
+      const fresh = await db('estimates').where({ id: estimate.id }).first();
+      if (!fresh || !isEstimateCustomerViewable(fresh)) return false;
+      return !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(fresh)));
+    };
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
     const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
@@ -24779,6 +24869,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       const content = await buildServiceDetailsContent(serviceKey, estimate);
       const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
       const buffer = await renderServiceDetailsPdf(content);
+      if (!(await stillOnCustomerSurface())) return res.status(404).json({ error: 'Estimate not found' });
       const EmailTemplateLibrary = require('../services/email-template-library');
       let result;
       try {
@@ -24891,6 +24982,9 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           return { success: true, deduped: true };
         }
       } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup check skipped: ${e.message}`); }
+      // Last read before the handoff — inside the claim, so a withheld send
+      // releases it below and a later legitimate retap can send.
+      if (!(await stillOnCustomerSurface())) return { success: false, withheld: true };
       return TwilioService.sendSMS(
         contact.customerPhone,
         `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
@@ -24940,6 +25034,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // claim would reopen the duplicate window it is guarding.
       if (smsResult?.claimHeldElsewhere) serviceDetailsSmsClaims.delete(dedupKey);
       else releaseClaims();
+      if (smsResult?.withheld) return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     // Confirmed success only: start the dedup window and prune stale entries
@@ -25105,7 +25200,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const docPinViewBypass = docRenderPin !== null
       && !estimate.archived_at
       && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
-      && !estimateLinkageInvalidated(estimate);
+      && !estimateOffCustomerSurface(estimate);
     // Call-side verdict check runs alongside the estimate-side gate (codex
     // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
     // a pinned document render of a blocked estimate is the same
@@ -26176,6 +26271,7 @@ module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmen
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.estimateLinkageInvalidated = estimateLinkageInvalidated;
+module.exports.estimateOffCustomerSurface = estimateOffCustomerSurface;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;

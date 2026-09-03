@@ -247,7 +247,11 @@ estimate+service+day, suppression-blocked addresses return 409 with no
 send, generic errors — no PII in responses or logs; while
 GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
 the engine-pricing-authority verdict (#3750) answers the same generic 404
-before either provider path).
+before either provider path; both provider paths re-read the row and repeat
+the customer-viewable + call-side-hold check as the LAST step before the
+SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
+PDF render withholds the packet with the same generic 404 and releases the
+SMS dedup claim so a later legitimate retap can send).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
@@ -592,6 +596,43 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+A clarify RE-PRICE HOLD (`estimate_data.estimatorEngine.reprice_pending_at`
+non-empty — stamped by `estimate-clarify-asks` when a customer's unit or
+bedroom reply proves the row's address or dollars stale; lifted only by the
+operator's revision / proposal save or by the replacement draft's supersede
+archive) takes the row out of the customer surface for as long as the
+marker is on the row, whatever the row's status becomes afterwards. The
+marker is stamped on UNSENT rows only (draft / scheduled / send_failed /
+sending — a delivery that has not published yet); a building-level quote
+staff already SENT before the customer's reply is NOT retracted by this
+mechanism (the office is belled and the unit lands on the CRM record; an
+automatic retract-and-replace is the C2b follow-up). While the marker is on:
+the GET view (React `/data`, the legacy SSR page, `/pdf`, the slots
+routes, every `isEstimateCustomerViewable` consumer) answers the same
+generic 404 as an unknown token, and the two writes refuse with 409
+`{ error: 'This estimate is being re-priced — please try again in a few
+minutes' }` — `/accept` inside its locked read, `/decline` at the
+guard AND on the UPDATE's own predicate (a hold landing between the two
+parks the decline on that 409, never a stale 'declined' terminal); the
+pricing mutations (`/select-tier`, `/bond`, `/interior-service`,
+`/service-opt-out`, `/preferences`) and the ask endpoint treat a held
+row as not accept-active / not answerable at the pre-read, and the five
+mutations predicate their whole-blob writes on the marker's absence, so
+none of them can overwrite the hold off the row; `/extension-request`
+treats a held row as ineligible (the generic 404), and the auto-grant
+claim, the notify-only claim, the guarded expiry write, and the sibling
+revive all carry the marker predicate — a hold that lands after the
+eligibility read never burns the grant, texts a link the renderer
+refuses, or pages the office with a 201 (the zero-row claim re-reads and
+answers the generic 404); `/bundle-inquiry` judges the locked row with
+the same verdict (409 "no longer active", the route's existing shape for
+an inactive row); the slots `/reserve` write re-judges the LOCKED row
+with the same verdict before minting a hold (generic 404, no
+reservation). A
+group's held siblings are skipped at preflight, claim and publication;
+a held ANCHOR parks as `send_failed`. No enumeration signal: the hold
+is unobservable from outside beyond the accept/decline 409, which a held
+row can only reach through a link that went out before the hold.
 `/select-tier` refuses any tier above the tier the ENGINE wrote for the
 estimate's qualifying services (400 `tier_not_available_for_current_services`
 + `maxTier`; downgrades stay allowed): the ceiling is the last opt-out

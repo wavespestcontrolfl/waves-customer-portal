@@ -453,6 +453,14 @@ async function maybeBuildCommercialProposalDraft({
           // Marker-only invalidated terminals are not live drafts
           // (codex P1, PR #3304 GH r6).
           .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+          // Rows the same clarify hold marked stay held, never block the
+          // reply's replacement (codex r2 P2 + r4 P2 on #3804; mirrors the
+          // residential creator).
+          .modify((q) => {
+            if (context?.supersedeAttempt) {
+              q.whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_attempt', '') <> ?", [String(context.supersedeAttempt)]);
+            }
+          })
           .first();
         if (existingForCall) return { duplicate: existingForCall };
         // LIVE call-linkage fence, same as the residential creator (codex
@@ -469,6 +477,15 @@ async function maybeBuildCommercialProposalDraft({
           const { callRejectedForDrafting } = require('../admin-estimate-persistence');
           const rejected = await callRejectedForDrafting(trx, call.id, { lockCallRow: true });
           if (rejected) return { staleLinkage: rejected };
+        }
+        // UNIT-ANSWER fence, same as the residential creator (clarify
+        // write-back, codex r5 P1 on #3785): a scaffold composed for the
+        // whole building before the caller texted their unit is blocked
+        // under the call-row lock; a later composer adopts the answer.
+        {
+          const { callUnitAnswerFence } = require('../../utils/estimate-claim-sql');
+          const fenceReason = await callUnitAnswerFence(trx, call.id, { address: intent.address, adopted: context?.adoptedUnitAnswer || null });
+          if (fenceReason) return { staleLinkage: fenceReason };
         }
         // GENERATION fence for EVERY call-origin insert — commercial
         // scaffolds included (codex P1, PR #3304 — generation-rework GH
@@ -567,6 +584,13 @@ async function maybeBuildCommercialProposalDraft({
       return { estimate };
     });
 
+    if (creation.staleLinkage === 'unit_answer_pending' || creation.staleLinkage === 'unit_answer_retracted') {
+      // Preserved, not collapsed into stale_call_linkage: the engine exits
+      // quietly on these reasons instead of the "existing estimate covers
+      // this prospect" bell.
+      logger.info(`[commercial-proposal] scaffold abandoned — ${creation.staleLinkage === 'unit_answer_retracted' ? 'the adopted unit answer was retired by staff while this run composed' : 'the caller answered the unit after this run composed; the re-draft with the unit replaces it'}`);
+      return { created: false, blocked: true, reason: creation.staleLinkage };
+    }
     if (creation.staleLinkage) {
       logger.info(`[commercial-proposal] scaffold abandoned — the call's lead linkage changed while composing (${creation.staleLinkage}); the corrected run rebuilds it`);
       return { created: false, blocked: true, reason: 'stale_call_linkage' };

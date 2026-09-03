@@ -124,6 +124,17 @@ describe('clearStaleProposalDelivery (re-authored proposal)', () => {
   });
 });
 
+describe('assertEstimateSendable re-price hold', () => {
+  test('a held row is refused with a 409 REPRICE_PENDING — the follow-up nudge would otherwise text a link the renderer refuses (codex r6 P2 on #3804)', () => {
+    const held = JSON.stringify({ estimatorEngine: { reprice_pending_at: '2026-09-03T12:00:00Z', reprice_attempt: 'att-1' } });
+    let caught = null;
+    try { assertEstimateSendable({ id: 'e1', status: 'draft', estimate_data: held }); } catch (e) { caught = e; }
+    expect(caught).toBeTruthy();
+    expect(caught.statusCode).toBe(409);
+    expect(caught.code).toBe('REPRICE_PENDING');
+  });
+});
+
 describe('assertEstimateSendable proposal exemption', () => {
   // The send snapshot re-derives quoteRequired:true from proposal.enabled, so
   // the gate must exempt authored proposals rather than rely on scrubbed flags
