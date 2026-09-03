@@ -579,7 +579,7 @@ describe('the nightly auto-send (§6.4)', () => {
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ prospectId: sendFirst.id, mode: 'auto' }));
     expect(r).toEqual({ attempted: 1, sent: 1, skipped: [] });
   });
-  test('rows the claim refuses without touching (a customer recipient, a held inbox) do not starve the valid drafts behind them: the batch bounds sends, not attempts', async () => {
+  test('rows the claim refuses without touching (a customer recipient, a held inbox) do not starve the valid drafts behind them: a refused row is re-stamped behind them, the batch stays bounded', async () => {
     const db = makeDb({ seo_link_domains: [], seo_link_acquisition_paths: [], seo_link_prospects: [], seo_link_placement_authorities: [], seo_link_policy: [policyRow()] });
     const seedDraft = (i) => {
       const d = domainRow({ domain: `d${i}.org` }); const p = outreachPath(d); d.best_path_id = p.id;
@@ -591,11 +591,17 @@ describe('the nightly auto-send (§6.4)', () => {
     const refused = []; for (let i = 0; i < 120; i += 1) refused.push(seedDraft(i)); // 120 older drafts the claim refuses every night (customer recipients)
     const valid = seedDraft(120);
     const send = jest.fn(async ({ prospectId }) => (prospectId === valid.id ? { ok: true } : { ok: false, code: 'customer_recipient' }));
-    const r = await bridge.autoSendDecided(db, { send, now: NOW });
-    expect(send).toHaveBeenCalledTimes(121);
-    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ prospectId: valid.id, mode: 'auto' }));
-    expect(r).toMatchObject({ attempted: 121, sent: 1 });
-    expect(r.skipped).toHaveLength(120);
+    // night 1: the batch (100 attempts) is refused rows only — each re-stamped behind the valid draft
+    const r1 = await bridge.autoSendDecided(db, { send, now: NOW });
+    expect(r1).toMatchObject({ attempted: 100, sent: 0 });
+    expect(r1.skipped).toHaveLength(100);
+    expect(db._tables.seo_link_prospects.filter((p) => new Date(p.updated_at).getTime() === NOW.getTime())).toHaveLength(100);
+    // night 2: the 20 refused rows not yet attempted, then the valid draft (the 21st attempt), then the batch's
+    // remaining 79 are re-stamped rows — bounded at 100 again
+    const r2 = await bridge.autoSendDecided(db, { send, now: new Date(NOW.getTime() + 24 * 3600 * 1000) });
+    expect(r2).toMatchObject({ attempted: 100, sent: 1 });
+    expect(send.mock.calls[120][0]).toMatchObject({ prospectId: valid.id, mode: 'auto' });
+    expect(send).toHaveBeenCalledTimes(200);
   });
   test('the real sender over the store: the run sends, the placement reads contacted and the instance is satisfied', async () => {
     const s = scenario({ policy: AUTO_POLICY });
