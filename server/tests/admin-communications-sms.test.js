@@ -647,8 +647,8 @@ describe('admin communications SMS route', () => {
       });
 
       test('an unwritten composer insert: the body\'s minted token + the composer\'s contractId reach activation as delivered:false', async () => {
-        const MINTED = 'B'.repeat(43);
         const CONTRACT_UUID = 'aaaa1111-0000-4000-8000-000000000001';
+        const MINTED = require('../utils/composer-contract-token').mintComposerContractToken(CONTRACT_UUID);
         sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM7', provider: 'twilio' });
         // Every db(table) call is a fresh builder — count contract lookups
         // across them: by hash → nothing stored; by id → the composer's contract.

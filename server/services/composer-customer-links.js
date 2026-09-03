@@ -714,10 +714,12 @@ async function immediateOnlyLinkSendCheck(body) {
  *               unexpired, non-terminal customer_contracts row (a rotated
  *               or expired link matches nothing → refuse) — OR be the
  *               composer's own unwritten insert: the caller names the
- *               contract (`contractId`), the token is one the insert
- *               minted (32 random bytes, base64url) and the contract's
- *               customer owns the recipient; the send then activates it
- *               under the row lock (activatePreparedShareLinks).
+ *               contract (`contractId`), the token VERIFIES as the
+ *               server's mint for that contract, unexpired (HMAC —
+ *               composer-contract-token.js; a caller can never choose the
+ *               bearer) and the contract's customer owns the recipient; the
+ *               send then activates it under the row lock
+ *               (activatePreparedShareLinks).
  *   prep      — /prep/<token>: the public page's own predicates at the send
  *               (GH Codex #3844 r3 P2) — the token still resolves
  *               (unexpired) and its guide still has an active version.
@@ -753,9 +755,6 @@ async function immediateOnlyLinkSendCheck(body) {
  * statement id so a real send can stamp finalized → sent
  * (markStatementsSent).
  */
-// The composer's own mint (contracts.js mintContractToken): 32 random bytes, base64url.
-const UNWRITTEN_CONTRACT_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
-
 async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, contractId = null } = {}) {
   const runs = decodedRuns(body);
   const host = new URL(publicPortalUrl()).host.toLowerCase();
@@ -794,13 +793,14 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, contract
       continue;
     }
     // No stored link: the composer's own unwritten insert, or a dead one.
-    // The composer names the contract and the token must be one the insert
-    // minted; the row's customer must own the recipient, and the row must
-    // be one a fresh link may be written over (the writer's own rule — an
-    // expired document request re-opens, other expired contracts do not;
-    // pre-push Codex P1). Delivered-live is judged under the row lock at
-    // activation.
-    if (!contractId || !UNWRITTEN_CONTRACT_TOKEN_RE.test(token)) {
+    // The composer names the contract and the token must VERIFY as the
+    // server's mint for that contract, unexpired (HMAC, 12h — the caller
+    // never chooses the bearer; pre-push Codex P0); the row's customer must
+    // own the recipient, and the row must be one a fresh link may be
+    // written over (the writer's own rule — an expired document request
+    // re-opens, other expired contracts do not; pre-push Codex P1).
+    // Delivered-live is judged under the row lock at activation.
+    if (!contractId || !require('../utils/composer-contract-token').verifyComposerContractToken(contractId, token)) {
       return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
     }
     const contract = await db('customer_contracts').where({ id: contractId }).first('id', 'customer_id', 'status', 'contract_type');
@@ -1252,7 +1252,9 @@ const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
  * recipient rule). The insert mints the token IN MEMORY and writes nothing:
  * a bearer nobody can use exists only once the /sms send ACTIVATES it
  * (bearerLinkSendCheck → activatePreparedShareLinks, the composer naming
- * the contract), which writes the hash with status sent and a window
+ * the contract and the token proving it was minted here for it — an HMAC
+ * over the contract id and a 12-hour expiry, composer-contract-token.js),
+ * which writes the hash with status sent and a window
  * opened from the send — the document delivery's prepare → activate →
  * send shape, spread across the insert and the send (GH Codex #3844 r3 P1
  * + pre-push P0: nothing is publicly live before delivery, an abandoned
@@ -1281,8 +1283,13 @@ async function buildContractSigningLink(customerIds) {
       reason: `A signing link for ${title} was already sent and is still live — the customer can use it, or resend it from the Contracts page`,
     };
   }
-  const { mintContractToken, publicContractUrl, documentRequiresSignature } = require('./contracts');
-  const url = publicContractUrl(mintContractToken());
+  // Server-minted, contract-bound, short-lived (composer-contract-token.js):
+  // the send proves the token is this insert's before it writes the hash —
+  // the caller can never choose the bearer (pre-push Codex P0).
+  const token = require('../utils/composer-contract-token').mintComposerContractToken(row.id);
+  if (!token) return { url: null, line: '', reason: 'Contract signing links are not configured on this server (no signing secret)' };
+  const { publicContractUrl, documentRequiresSignature } = require('./contracts');
+  const url = publicContractUrl(token);
   // A document request whose template needs no signature is review-only —
   // the text must not ask for one (pre-push Codex P1). contracts.js's own
   // predicate: the creation-time snapshot, defaulting to signature required.

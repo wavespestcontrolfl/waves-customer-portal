@@ -957,7 +957,8 @@ describe('buildServiceReportLink', () => {
 });
 
 describe('buildContractSigningLink', () => {
-  const MINTED = /^https:\/\/portal\.wavespestcontrol\.com\/contract\/[A-Za-z0-9_-]{43}$/;
+  const { verifyComposerContractToken } = require('../utils/composer-contract-token');
+  const MINTED = /^https:\/\/portal\.wavespestcontrol\.com\/contract\/([A-Za-z0-9_-]{53})$/;
   beforeEach(() => { createShareLink.mockReset(); });
 
   test('no contract awaiting signature → reason, nothing minted', async () => {
@@ -971,14 +972,15 @@ describe('buildContractSigningLink', () => {
     mockBuilders = { customer_contracts: chainBuilder({ firstRow: { id: 'k1', title: 'Auto Pay Authorization', contract_type: 'autopay_authorization', share_token_hash: 'deadbeef', share_token_expires_at: new Date(Date.now() - 1000) } }) };
     const r = await buildContractSigningLink(['c1']);
     expect(r.url).toMatch(MINTED);
+    // The token is the server's mint FOR THIS CONTRACT — the send verifies it before writing the hash.
+    expect(verifyComposerContractToken('k1', r.url.match(MINTED)[1])).toBe(true);
+    expect(verifyComposerContractToken('k2', r.url.match(MINTED)[1])).toBe(false);
     expect(r.line).toBe(`Please review and sign your Auto Pay Authorization here: ${r.url}\n\n`);
     expect(r.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true });
     expect(r.immediateOnly).toBe(true);
     expect(r.expiresAt).toBeUndefined();
     expect(createShareLink).not.toHaveBeenCalled();
     expect(mockBuilders.customer_contracts.update).not.toHaveBeenCalled();
-    // Two inserts, two different tokens — nothing shared, nothing rotated.
-    expect((await buildContractSigningLink(['c1'])).url).not.toBe(r.url);
   });
 
   test('a delivered link whose window is still open refuses (courtesy — the send re-judges it under the row lock)', async () => {
@@ -1136,7 +1138,8 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
   });
 
   describe('the composer\'s own unwritten insert (no stored hash — GH Codex #3844 r3 P1 + pre-push P0)', () => {
-    const MINTED = 'A'.repeat(43);
+    const { mintComposerContractToken } = require('../utils/composer-contract-token');
+    const MINTED = mintComposerContractToken('k9');
     const MINTED_BODY = `Please sign: portal.wavespestcontrol.com/contract/${MINTED}`;
     function wireUnwritten(contract = { id: 'k9', customer_id: 'c1', status: 'draft' }) {
       const contracts = wire().customer_contracts || mockBuilders.customer_contracts;
@@ -1164,9 +1167,15 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect((await bearerLinkSendCheck(MINTED_BODY, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/expired or no longer live/);
     });
 
-    test('a token that is not a composer mint refuses (the client cannot choose the bearer)', async () => {
+    test('a token that is not the server\'s mint for THIS contract refuses — the caller cannot choose the bearer (pre-push Codex P0)', async () => {
       wireUnwritten();
       expect((await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: 'c1', contractId: 'k9' })).error).toMatch(/expired or no longer live/);
+      wireUnwritten();
+      const other = mintComposerContractToken('k8');
+      expect((await bearerLinkSendCheck(`Please sign: portal.wavespestcontrol.com/contract/${other}`, '9415550100', { trustedCustomerId: 'c1', contractId: 'k9' })).error).toMatch(/expired or no longer live/);
+      wireUnwritten();
+      const stale = mintComposerContractToken('k9', Math.floor(Date.now() / 1000) - 13 * 3600);
+      expect((await bearerLinkSendCheck(`Please sign: portal.wavespestcontrol.com/contract/${stale}`, '9415550100', { trustedCustomerId: 'c1', contractId: 'k9' })).error).toMatch(/expired or no longer live/);
     });
 
     test.each([
