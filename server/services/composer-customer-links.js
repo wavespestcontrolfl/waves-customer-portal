@@ -1089,12 +1089,15 @@ async function buildStatementLink(customerIds, recipientLast10) {
   if (!matching.length) {
     return { url: null, line: '', reason: "This number is not the payer's AP phone on file — statement links go to the bill-to contact only" };
   }
-  const { isPayableStatementStatus } = require('./payer-statement-settle');
-  const statements = await db('payer_statements')
+  // Payability filtered in SQL (the settle module's own status set), so an
+  // older payable statement behind a run of paid ones is still found.
+  const { PAYABLE_STATEMENT_STATUSES } = require('./payer-statement-settle');
+  const stmt = await db('payer_statements')
     .whereIn('payer_id', matching.map((p) => p.id))
+    .whereIn('status', [...PAYABLE_STATEMENT_STATUSES])
+    .whereNotNull('token')
     .orderBy('created_at', 'desc')
-    .limit(20);
-  const stmt = statements.find((s) => isPayableStatementStatus(s.status) && s.token) || null;
+    .first();
   const names = matching.map((p) => p.display_name).join(' / ');
   if (!stmt) return { url: null, line: '', reason: `No payable statement for ${names}` };
   const payer = matching.find((p) => String(p.id) === String(stmt.payer_id)) || matching[0];

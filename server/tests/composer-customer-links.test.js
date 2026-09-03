@@ -60,6 +60,7 @@ jest.mock('../routes/reports-public', () => ({
 }));
 jest.mock('../routes/admin-contracts', () => ({ createShareLink: jest.fn() }));
 jest.mock('../services/payer-statement-settle', () => ({
+  PAYABLE_STATEMENT_STATUSES: new Set(['finalized', 'sent', 'viewed']),
   isPayableStatementStatus: (s) => ['finalized', 'sent', 'viewed'].includes(s),
 }));
 // getTemplate strips https:// from owned portal hosts before returning —
@@ -1007,7 +1008,7 @@ describe('buildStatementLink', () => {
     mockBuilders = {
       customers: chainBuilder({ rows: [{ payer_id: 7 }] }),
       payers: chainBuilder({ rows: [{ id: 7, display_name: 'Gulf Coast PM', ap_phone: '(941) 555-0100' }] }),
-      payer_statements: chainBuilder({ rows: [{ id: 31, status: 'sent', token: 'f'.repeat(64), total: '412.50' }] }),
+      payer_statements: chainBuilder({ firstRow: { id: 31, status: 'sent', token: 'f'.repeat(64), total: '412.50' } }),
     };
     const r = await buildStatementLink(['c1'], '5551234567');
     expect(r.url).toBeNull();
@@ -1019,16 +1020,15 @@ describe('buildStatementLink', () => {
     mockBuilders = {
       customers: chainBuilder({ rows: [{ payer_id: 7 }, { payer_id: 7 }] }),
       payers: chainBuilder({ rows: [{ id: 7, display_name: 'Gulf Coast PM', ap_phone: '+1 (941) 555-0100' }] }),
-      payer_statements: chainBuilder({
-        rows: [
-          { id: 40, status: 'open', token: 'e'.repeat(64), total: '99.00' },
-          { id: 31, status: 'sent', token: 'f'.repeat(64), total: '412.50' },
-        ],
-      }),
+      payer_statements: chainBuilder({ firstRow: { id: 31, payer_id: 7, status: 'sent', token: 'f'.repeat(64), total: '412.50' } }),
     };
     const r = await buildStatementLink(['c1', 'c2'], '9415550100');
     expect(mockBuilders.payers.whereIn).toHaveBeenCalledWith('id', [7]);
     expect(mockBuilders.payer_statements.whereIn).toHaveBeenCalledWith('payer_id', [7]);
+    // Payability is a SQL predicate (no row page to fall off), tokened rows only.
+    expect(mockBuilders.payer_statements.whereIn).toHaveBeenCalledWith('status', ['finalized', 'sent', 'viewed']);
+    expect(mockBuilders.payer_statements.whereNotNull).toHaveBeenCalledWith('token');
+    expect(mockBuilders.payer_statements.orderBy).toHaveBeenCalledWith('created_at', 'desc');
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`);
     expect(r.line).toContain('statement S-31');
     expect(r.immediateOnly).toBe(true);
@@ -1042,10 +1042,7 @@ describe('buildStatementLink', () => {
         { id: 7, display_name: 'Gulf Coast PM', ap_phone: '(941) 555-0100' },
         { id: 8, display_name: 'Gulf Coast HOA', ap_phone: '941-555-0100' },
       ] }),
-      payer_statements: chainBuilder({ rows: [
-        { id: 52, payer_id: 8, status: 'finalized', token: 'd'.repeat(64), total: '80.00' },
-        { id: 31, payer_id: 7, status: 'sent', token: 'f'.repeat(64), total: '412.50' },
-      ] }),
+      payer_statements: chainBuilder({ firstRow: { id: 52, payer_id: 8, status: 'finalized', token: 'd'.repeat(64), total: '80.00' } }),
     };
     const r = await buildStatementLink(['c1', 'c2'], '9415550100');
     expect(mockBuilders.payer_statements.whereIn).toHaveBeenCalledWith('payer_id', [7, 8]);
