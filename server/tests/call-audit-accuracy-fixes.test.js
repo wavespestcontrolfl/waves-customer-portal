@@ -234,6 +234,14 @@ describe('triage surfacing', () => {
     expect(JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction: withService }).payload).quote_scope).toBeUndefined();
   });
 
+  test('missing_last_name cards carry the names the call heard, at filing', () => {
+    const heard = { ...extraction, caller: { ...(extraction.caller || {}), first_name: 'Pat', last_name: null } };
+    const payload = JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'missing_last_name', extraction: heard, extraPayload: { heard_name_v1: { first_name: 'Pat', last_name: 'Sample' } } }).payload);
+    expect(payload.heard_name).toEqual({ first_name: 'Pat', last_name: null });
+    expect(payload.heard_name_v1).toEqual({ first_name: 'Pat', last_name: 'Sample' });
+    expect(JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction: heard }).payload).heard_name).toBeUndefined();
+  });
+
   test('multi_property_call cards carry the extra addresses and file as address_review', () => {
     const item = buildTriageItem({ callLogId: 'c1', flag: 'multi_property_call', extraction });
     expect(item.category).toBe('address_review');

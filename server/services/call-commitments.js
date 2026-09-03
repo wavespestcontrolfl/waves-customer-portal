@@ -794,6 +794,11 @@ function callEndedAt(call) {
 // against the window on its own (the later one may fall past `until`
 // while the earlier one qualifies).
 const OWN_HANDOFF_SQL = `NULLIF(estimates.estimate_data #>> '{deliveryState,lastDeliveredAt}', '')::timestamptz`;
+// Acceptance is a witness only when the CUSTOMER accepted: a manual accept
+// (mark-accepted — an admin recording a verbal yes) stamps accepted_at and
+// locks the price as 'manual_accept' with no document delivered, so it
+// proves nothing about the promised estimate going out (codex r18 P1).
+const ACCEPT_WITNESS_SQL = `CASE WHEN estimates.price_locked_by IS DISTINCT FROM 'manual_accept' THEN estimates.accepted_at END`;
 const ANCHOR_HANDOFF_SQL = `(SELECT NULLIF(a.estimate_data #>> '{deliveryState,lastDeliveredAt}', '')::timestamptz FROM estimates a
      WHERE a.id::text = estimates.estimate_data ->> 'groupPublishedByEstimateId')`;
 
@@ -807,7 +812,7 @@ const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWi
   const bind = until ? [after, until] : [after];
   this.whereRaw(within(OWN_HANDOFF_SQL), bind)
     .orWhereRaw(within(ANCHOR_HANDOFF_SQL), bind)
-    .orWhereRaw(within("accepted_at"), bind);
+    .orWhereRaw(within(ACCEPT_WITNESS_SQL), bind);
 });
 // Ordering by the QUALIFYING witness, not the earliest one on the row: a
 // row admitted for a post-call handoff may also carry a pre-call handoff
@@ -818,12 +823,12 @@ const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWi
 const handoffOrder = (conn, after, until = null) => {
   const inWindow = (expr) => `CASE WHEN ${expr} > ?${until ? ` AND ${expr} <= ?` : ''} THEN ${expr} END`;
   const bind = until ? [after, until] : [after];
-  return conn.raw(`LEAST(${inWindow(OWN_HANDOFF_SQL)}, ${inWindow(ANCHOR_HANDOFF_SQL)}, ${inWindow('accepted_at')}) asc`, [...bind, ...bind, ...bind]);
+  return conn.raw(`LEAST(${inWindow(OWN_HANDOFF_SQL)}, ${inWindow(ANCHOR_HANDOFF_SQL)}, ${inWindow(ACCEPT_WITNESS_SQL)}) asc`, [...bind, ...bind, ...bind]);
 };
-const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${OWN_HANDOFF_SQL} as handed_off_at`), conn.raw(`${ANCHOR_HANDOFF_SQL} as anchor_handed_off_at`)];
+const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${OWN_HANDOFF_SQL} as handed_off_at`), conn.raw(`${ANCHOR_HANDOFF_SQL} as anchor_handed_off_at`), conn.raw(`${ACCEPT_WITNESS_SQL} as accept_witness_at`)];
 // The EARLIEST post-boundary witness time on a fetched row, or null.
 const witnessAt = (row, after) => {
-  const times = [row.handed_off_at, row.anchor_handed_off_at, row.accepted_at]
+  const times = [row.handed_off_at, row.anchor_handed_off_at, row.accept_witness_at]
     .map((t) => (t ? new Date(t) : null))
     .filter((d) => d && !Number.isNaN(d.getTime()) && d > after);
   return times.length ? new Date(Math.min(...times.map((d) => d.getTime()))) : null;
@@ -879,15 +884,20 @@ async function directEstimatesSentAfter(conn, probes) {
     probesByCall.set(String(p.callId), list);
   }
   const minAfter = new Date(Math.min(...probes.map((p) => new Date(p.after).getTime())));
-  const SCOPE_COLS = ["service_interest", "estimate_data", "estimate_group_id"];
-  const cols = [
-    ...HANDOFF_COLS(conn), "source", "customer_id", "customer_phone", "address", ...SCOPE_COLS,
-    conn.raw("estimate_data #>> '{estimatorEngine,callLogId}' as stamped_call_id"),
-    conn.raw("estimate_data ->> 'lead_id' as mirror_lead_id"),
+  // The columns a scope test reads: what the estimate prices (service
+  // words + recurring / one-time totals) and where (address column or the
+  // property row) — on the candidate AND on every group sibling.
+  const SCOPE_COLS = ["service_interest", "estimate_data", "estimate_group_id", "monthly_total", "annual_total", "onetime_total", "address", "created_at"];
+  const PROPERTY_COLS = [
     conn.raw("(SELECT cp.address_line1 FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_address_line1"),
     conn.raw("(SELECT cp.address_line2 FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_address_line2"),
     conn.raw("(SELECT cp.city FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_city"),
     conn.raw("(SELECT cp.zip FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_zip"),
+  ];
+  const cols = [
+    ...HANDOFF_COLS(conn), "source", "customer_id", "customer_phone", ...SCOPE_COLS, ...PROPERTY_COLS,
+    conn.raw("estimate_data #>> '{estimatorEngine,callLogId}' as stamped_call_id"),
+    conn.raw("estimate_data ->> 'lead_id' as mirror_lead_id"),
   ];
   // Candidates are judged after BOTH routes ran: a scope test needs the
   // group siblings, fetched once for every candidate that has any.
@@ -898,14 +908,25 @@ async function directEstimatesSentAfter(conn, probes) {
     const groupIds = scoped ? [...new Set(candidates.map((c) => c.row.estimate_group_id).filter(Boolean))] : [];
     const siblingsByGroup = new Map();
     if (groupIds.length) {
-      const rows = await conn("estimates").whereIn("estimate_group_id", groupIds).select("id", "estimate_group_id", ...SCOPE_COLS);
+      const rows = await conn("estimates").whereIn("estimate_group_id", groupIds).select(...HANDOFF_COLS(conn), ...SCOPE_COLS, ...PROPERTY_COLS);
       for (const r of rows) siblingsByGroup.set(String(r.estimate_group_id), [...(siblingsByGroup.get(String(r.estimate_group_id)) || []), r]);
     }
     for (const { callId, row, basis } of candidates) {
       const siblings = row.estimate_group_id ? (siblingsByGroup.get(String(row.estimate_group_id)) || []).filter((s) => String(s.id) !== String(row.id)) : [];
       for (const p of probesByCall.get(String(callId)) || []) {
         if (!ownerAgrees(row, p)) continue;
-        if (typeof p.covers === "function" && !p.covers(row, siblings)) continue;
+        if (typeof p.covers === "function") {
+          // Only siblings that were IN a qualifying handoff count toward the
+          // scope: one with no post-boundary witness of its own, or created
+          // after the handoff it would inherit (a service added to the group
+          // after the anchor went out), was never delivered (codex r18 P1).
+          const after = new Date(p.after);
+          const delivered = siblings.filter((s) => {
+            const w = witnessAt(s, after);
+            return Boolean(w) && Boolean(s.created_at) && new Date(s.created_at) <= w;
+          });
+          if (!p.covers(row, delivered)) continue;
+        }
         const at = witnessAt(row, new Date(p.after));
         if (!at) continue;
         const cur = out.get(p.key);

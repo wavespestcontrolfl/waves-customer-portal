@@ -7937,7 +7937,15 @@ const CallRecordingProcessor = {
           for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
             if (flag === 'missing_unit_number') clarifyUnitOwed = true;
             await db('triage_items')
-              .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory', addressValidation }))
+              .insert(buildTriageItem({
+                callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory', addressValidation,
+                // The surname card's filing-time names include the merged V1
+                // extraction's — what backfillCustomerFromAppointmentContact
+                // writes onto the record (codex r18 P1).
+                ...(flag === 'missing_last_name'
+                  ? { extraPayload: { heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null } } }
+                  : {}),
+              }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
           }

@@ -610,23 +610,8 @@ function callSuppliedAddress(v2Raw, v1Raw) {
 function callerMatchesCustomerFirstName(item) {
   const onFile = String(item.customer_first_name || '').trim().toLowerCase();
   if (!onFile) return false;
-  const heard = [];
-  for (const raw of [item.call_extraction_v1, item.call_extraction]) {
-    if (raw == null) continue;
-    let parsed = raw;
-    if (typeof parsed === 'string') {
-      try {
-        parsed = JSON.parse(parsed);
-      } catch {
-        return false;
-      }
-    }
-    const v1Name = String(parsed?.first_name || '').trim().toLowerCase();
-    const v2Name = String(parsed?.caller?.first_name || '').trim().toLowerCase();
-    if (v1Name) heard.push(v1Name);
-    if (v2Name) heard.push(v2Name);
-  }
-  return heard.length > 0 && heard.includes(onFile);
+  const names = heardNames(item);
+  return Boolean(names) && names.first.length > 0 && names.first.includes(onFile);
 }
 
 // Was the customer record created BEFORE this call? If the record was born
@@ -690,26 +675,28 @@ function cardConfirmedUnbooked(item, ev) {
 // surname survives the merge while V2 emits missing_last_name) — a matching
 // surname is therefore not independent evidence. Fail closed on an
 // unparseable extraction.
+// The names THIS card heard, snapshotted at filing: payload.heard_name
+// (the V2 caller, call-routing-gates) and payload.heard_name_v1 (the merged
+// V1 extraction the processor passes — the one the surname backfill writes
+// from). Never the call's rolling extraction columns: a force-reprocess
+// rewrites those while the open card keeps its original ask, and a
+// surname the rewrite dropped would then read as independent evidence
+// (codex r18 P1). Null when the card predates the snapshot.
+function heardNames(item) {
+  const payload = parseMaybeJson(item.payload);
+  const snaps = [payload?.heard_name, payload?.heard_name_v1].filter((s) => s && typeof s === 'object');
+  if (!snaps.length) return null;
+  const pick = (key) => snaps.map((s) => String(s[key] || '').trim().toLowerCase()).filter(Boolean);
+  return { first: pick('first_name'), last: pick('last_name') };
+}
+
 function surnameCameFromCall(item) {
   const onFile = String(item.customer_last_name || '').trim().toLowerCase();
   if (!onFile) return false;
-  const heard = [];
-  for (const raw of [item.call_extraction_v1, item.call_extraction]) {
-    if (raw == null) continue;
-    let parsed = raw;
-    if (typeof parsed === 'string') {
-      try {
-        parsed = JSON.parse(parsed);
-      } catch {
-        return true;
-      }
-    }
-    const v1Name = String(parsed?.last_name || '').trim().toLowerCase();
-    const v2Name = String(parsed?.caller?.last_name || '').trim().toLowerCase();
-    if (v1Name) heard.push(v1Name);
-    if (v2Name) heard.push(v2Name);
-  }
-  return heard.includes(onFile);
+  const names = heardNames(item);
+  // No filing-time names (a pre-snapshot card): not independent evidence.
+  if (!names) return true;
+  return names.last.includes(onFile);
 }
 
 // Pure classifier, exported for tests. `item` is a triage_items row joined
@@ -1111,13 +1098,49 @@ function estimateAsVisit(row) {
 // the estimate itself must price the address the ask named — the on-file
 // one when it named none. A card with no quote_scope (filed before the
 // snapshot existed) has no ask to cover, so nothing qualifies.
+// Does an estimate price a recurring program / a one-time job? Read from
+// the engine result's line lists and the totals columns — an estimate can
+// carry both.
+function hasRecurringLines(row) {
+  const data = parseMaybeJson(row.estimate_data) || {};
+  const listed = [data.result, data.engineResult].some((r) => Array.isArray(r?.recurring?.services) && r.recurring.services.length > 0);
+  return listed || Number(row.monthly_total) > 0 || Number(row.annual_total) > 0;
+}
+function hasOneTimeLines(row) {
+  const data = parseMaybeJson(row.estimate_data) || {};
+  const listed = [data.result, data.engineResult].some((r) => [r?.oneTime?.items, r?.oneTime?.specItems, r?.specItems].some((l) => Array.isArray(l) && l.length > 0));
+  return listed || Number(row.onetime_total) > 0;
+}
+
+// The cadence the card's ask carries, against what the delivered estimates
+// price — the booking arm's rule (cadenceMatches) for estimates: a
+// recurring-plan ask is kept only by an estimate pricing a recurring
+// program, an explicit one-time ask only by one pricing a one-time job,
+// any other intent by either, and a snapshot with no intent by nothing
+// (codex r18 P1).
+function estimateCadenceMatches(item, priced) {
+  const intent = requestAsk(item)?.requested_service_intent;
+  if (typeof intent !== 'string' || !intent) return false;
+  if (intent === 'recurring_membership_inquiry') return priced.some(hasRecurringLines);
+  if (intent === 'preventative_one_time') return priced.some(hasOneTimeLines);
+  return priced.length > 0;
+}
+
 function estimateCoversAsk(item, row, siblings = []) {
   const requirements = requestedServiceTokens(item);
   if (!requirements.length) return false;
-  const words = [row, ...siblings].map(estimateWords).join(' ');
+  // Every service must be priced AT the asked address: a sibling pricing
+  // the other property in a multi-property proposal covers nothing here
+  // (codex r18 P1), and the cited estimate itself must be at the address.
+  const atAsk = (e) => {
+    const visit = estimateAsVisit(e);
+    return Boolean(visit) && bookingAtRequestedAddress(item, visit, new Map());
+  };
+  if (!atAsk(row)) return false;
+  const priced = [row, ...siblings.filter(atAsk)];
+  const words = priced.map(estimateWords).join(' ');
   if (!requirements.every((tokens) => serviceTypeMatches(words, tokens))) return false;
-  const visit = estimateAsVisit(row);
-  return Boolean(visit) && bookingAtRequestedAddress(item, visit, new Map());
+  return estimateCadenceMatches(item, priced);
 }
 
 // Bookings and completed visits for the not_confirmed / address arms.

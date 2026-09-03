@@ -402,6 +402,13 @@ function buildTriageItem({
   // scheduling cards, under its own key — quote cards carry no window.
   if (flag === 'quote_promised') flagPayload.quote_scope = askSnapshot(extraction);
 
+  // The surname card's provenance evidence: the names THIS call heard, at
+  // filing (codex r18 P1). The merged V1 names the surname backfill writes
+  // from arrive as extraPayload.heard_name_v1 from the processor.
+  if (flag === 'missing_last_name') {
+    flagPayload.heard_name = { first_name: extraction?.caller?.first_name ?? null, last_name: extraction?.caller?.last_name ?? null };
+  }
+
   // Address-review cards carry the address the call NAMED, snapshotted at
   // filing: the evidence sweep proves "a visit completed at the address this
   // call named" against THIS, never the call's rolling extraction columns

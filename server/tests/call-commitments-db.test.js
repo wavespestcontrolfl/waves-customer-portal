@@ -360,6 +360,14 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
       await db('estimates').where({ id: est.id }).update({ accepted_at: new Date(Date.now() - 30 * 1000) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      // A MANUAL accept (an admin recording a verbal yes — price locked by
+      // 'manual_accept') delivered nothing; the customer's own accept did
+      // (codex r18 P1).
+      await db('estimates').where({ id: est.id }).update({ price_locked_by: 'manual_accept' });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      await db('estimates').where({ id: est.id }).update({ price_locked_by: 'customer_accept' });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      await db('estimates').where({ id: est.id }).update({ price_locked_by: null });
       // An acceptance BEFORE the call is not this call's handoff either.
       await db('estimates').where({ id: est.id }).update({ accepted_at: new Date(call.created_at.getTime() - 60 * 1000) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();

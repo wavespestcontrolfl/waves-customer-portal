@@ -47,6 +47,9 @@ function item(over = {}) {
   };
 }
 const noBookings = { bookedCallIds: new Set(), bookedCallLatest: new Map() };
+// The surname card's filing-time names (the merged V1 extraction's, as the
+// processor snapshots them) — never the call's rolling columns.
+const heardV1 = (first, last) => ({ payload: { flag: 'missing_last_name', heard_name_v1: { first_name: first, last_name: last } } });
 // A LIVE booking created after the card (the current-routing-result case).
 const bookedCtx = (callId, at = new Date(NOW.getTime() - 24 * 3600 * 1000).toISOString()) => (
   { bookedCallIds: new Set([callId]), bookedCallLatest: new Map([[callId, at]]) }
@@ -152,7 +155,7 @@ describe('moot-condition resolves', () => {
     }), noBookings, { now: NOW })).toBeNull();
     expect(classifyTriageItem(item({
       reason_code: 'missing_last_name', customer_last_name: 'Sample',
-      customer_deleted_at: deletedAt,
+      customer_deleted_at: deletedAt, ...heardV1('Pat', null),
     }), noBookings, { now: NOW })).toBeNull();
   });
 
@@ -160,14 +163,11 @@ describe('moot-condition resolves', () => {
     // Phone matched the account, but the caller is someone else (spouse/new owner).
     expect(classifyTriageItem(item({
       reason_code: 'missing_last_name', customer_last_name: 'Sample',
-      customer_first_name: 'Alex',
-      call_extraction_v1: JSON.stringify({ first_name: 'Pat', last_name: null }),
+      customer_first_name: 'Alex', ...heardV1('Pat', null),
     }), noBookings, { now: NOW })).toBeNull();
     // No heard first name at all fails closed.
     expect(classifyTriageItem(item({
-      reason_code: 'missing_last_name', customer_last_name: 'Sample',
-      call_extraction_v1: JSON.stringify({ first_name: null, last_name: null }),
-      call_extraction: NO_ADDR_EXTRACTION,
+      reason_code: 'missing_last_name', customer_last_name: 'Sample', ...heardV1(null, null),
     }), noBookings, { now: NOW })).toBeNull();
   });
 
@@ -193,43 +193,56 @@ describe('moot-condition resolves', () => {
   });
 
   test('missing_last_name resolves once a PRE-EXISTING customer has a last name', () => {
-    const d = classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample' }), noBookings, { now: NOW });
+    const d = classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', ...heardV1('Pat', null) }), noBookings, { now: NOW });
     expect(d).toEqual({ action: 'resolve', rule: 'name_moot' });
+    // The V2 caller snapshot is read the same way.
+    expect(classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', payload: { heard_name: { first_name: 'Pat', last_name: null } } }), noBookings, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'name_moot' });
   });
 
   test('a customer born from the call never moots its own surname card (V1-merged surname is not independent evidence)', () => {
     expect(classifyTriageItem(item({
       reason_code: 'missing_last_name', customer_last_name: 'Sample',
-      customer_created_at: CUSTOMER_AFTER,
+      customer_created_at: CUSTOMER_AFTER, ...heardV1('Pat', null),
     }), noBookings, { now: NOW })).toBeNull();
   });
 
   test('a PRE-EXISTING customer whose surname matches what THIS call heard never moots (backfill provenance)', () => {
     // V1 heard "Sample" and the booking backfill wrote it onto the old record.
     expect(classifyTriageItem(item({
-      reason_code: 'missing_last_name', customer_last_name: 'Sample',
-      call_extraction_v1: JSON.stringify({ first_name: 'Pat', last_name: 'Sample' }),
+      reason_code: 'missing_last_name', customer_last_name: 'Sample', ...heardV1('Pat', 'Sample'),
     }), noBookings, { now: NOW })).toBeNull();
-    // Case-insensitive match still blocks; unparseable V1 fails closed.
+    // Case-insensitive match still blocks; the V2 snapshot blocks too.
     expect(classifyTriageItem(item({
-      reason_code: 'missing_last_name', customer_last_name: 'SAMPLE',
-      call_extraction_v1: JSON.stringify({ last_name: 'sample' }),
+      reason_code: 'missing_last_name', customer_last_name: 'SAMPLE', ...heardV1('Pat', 'sample'),
     }), noBookings, { now: NOW })).toBeNull();
     expect(classifyTriageItem(item({
       reason_code: 'missing_last_name', customer_last_name: 'Sample',
-      call_extraction_v1: 'not-json{',
+      payload: { heard_name: { first_name: 'Pat', last_name: 'Sample' } },
+    }), noBookings, { now: NOW })).toBeNull();
+    // A card filed before the snapshot existed carries no filing-time
+    // names: the rolling extraction columns are NOT consulted (a reprocess
+    // rewrites them), so it keeps its human verdict (codex r18 P1).
+    expect(classifyTriageItem(item({
+      reason_code: 'missing_last_name', customer_last_name: 'Sample',
+      call_extraction_v1: JSON.stringify({ first_name: 'Pat', last_name: null }),
+    }), noBookings, { now: NOW })).toBeNull();
+    // ...and a reprocess that DROPPED the heard surname from the columns
+    // does not turn the backfilled surname into independent evidence.
+    expect(classifyTriageItem(item({
+      reason_code: 'missing_last_name', customer_last_name: 'Sample', ...heardV1('Pat', 'Sample'),
+      call_extraction_v1: JSON.stringify({ first_name: 'Pat', last_name: null }),
     }), noBookings, { now: NOW })).toBeNull();
     // A surname the call did NOT hear is independent → resolves (caller's
     // first name still agrees with the record).
     expect(classifyTriageItem(item({
-      reason_code: 'missing_last_name', customer_last_name: 'Independent',
-      call_extraction_v1: JSON.stringify({ first_name: 'Pat', last_name: 'Sample' }),
+      reason_code: 'missing_last_name', customer_last_name: 'Independent', ...heardV1('Pat', 'Sample'),
     }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'name_moot' });
   });
 
   test('a card both old AND moot records the moot rule, not the age rule', () => {
     const d = classifyTriageItem(
-      item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', created_at: OLD_31D }),
+      item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', created_at: OLD_31D, ...heardV1('Pat', null) }),
       noBookings, { now: NOW },
     );
     expect(d.rule).toBe('name_moot');
@@ -522,7 +535,7 @@ describe('evidence helpers', () => {
   test('a delivered estimate keeps the quote only when it prices every requested service at the asked address', () => {
     const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
     const base = { call_log_id: 'call-1', call_customer_id: 'cust-1', customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205' };
-    const card = (scope) => item({ ...base, reason_code: 'quote_promised', payload: { quote_scope: { requested_service_categories: ['pest_general', 'lawn_care'], requested_specific_service: 'Flea Treatment', requested_address: none, ...scope } } });
+    const card = (scope) => item({ ...base, reason_code: 'quote_promised', payload: { quote_scope: { requested_service_categories: ['pest_general', 'lawn_care'], requested_specific_service: 'Flea Treatment', requested_service_intent: 'preventative_one_time', requested_address: none, ...scope } } });
     const est = (over) => ({ id: 'e1', service_interest: null, address: '77 Oak Street, Bradenton, FL 34205', estimate_data: { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }], grandTotal: 100 }, oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } } }, ...over });
     expect(estimateCoversAsk(card({}), est({}))).toBe(true);
     // A generic pest estimate is not the flea treatment — unless the
@@ -530,10 +543,28 @@ describe('evidence helpers', () => {
     // the estimate lacks counts when a sibling in its group prices it.
     const generic = { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }] } } };
     expect(estimateCoversAsk(card({}), est({ estimate_data: generic }))).toBe(false);
-    expect(estimateCoversAsk(card({}), est({ estimate_data: { ...generic, inputs: { svcFlea: true } } }))).toBe(true);
+    expect(estimateCoversAsk(card({}), est({ estimate_data: { ...generic, inputs: { svcFlea: true } }, onetime_total: 150 }))).toBe(true);
     const partial = est({ estimate_data: { result: { oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } } } });
     expect(estimateCoversAsk(card({}), partial)).toBe(false);
-    expect(estimateCoversAsk(card({}), partial, [{ id: 'e2', service_interest: 'Lawn Care', estimate_data: {} }])).toBe(true);
+    const lawnSibling = (over) => ({ id: 'e2', service_interest: 'Lawn Care', estimate_data: {}, address: '77 Oak Street, Bradenton, FL 34205', ...over });
+    expect(estimateCoversAsk(card({}), partial, [lawnSibling({})])).toBe(true);
+    // A sibling pricing the OTHER property of a multi-property proposal
+    // covers nothing at the asked address (codex r18 P1).
+    expect(estimateCoversAsk(card({}), partial, [lawnSibling({ address: '5 Pine Ave, Sarasota, FL 34236' })])).toBe(false);
+    expect(estimateCoversAsk(card({}), partial, [lawnSibling({ address: null })])).toBe(false);
+    // Cadence follows the ask: a recurring-plan ask needs a recurring
+    // program priced, an explicit one-time ask a one-time job, any other
+    // intent either, and a snapshot with no intent nothing (codex r18 P1).
+    const plan = { requested_service_intent: 'recurring_membership_inquiry' };
+    expect(estimateCoversAsk(card(plan), est({}))).toBe(true);
+    const oneTimeOnly = est({ estimate_data: { result: { oneTime: { items: [{ service: 'Flea Treatment' }, { service: 'Lawn Care Program' }] } } } });
+    expect(estimateCoversAsk(card(plan), oneTimeOnly)).toBe(false);
+    expect(estimateCoversAsk(card({}), oneTimeOnly)).toBe(true);
+    const recurringOnly = est({ estimate_data: { result: { recurring: { services: [{ name: 'Flea Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }] } } } });
+    expect(estimateCoversAsk(card({}), recurringOnly)).toBe(false);
+    expect(estimateCoversAsk(card({}), est({ estimate_data: recurringOnly.estimate_data, onetime_total: 150 }))).toBe(true);
+    expect(estimateCoversAsk(card({ requested_service_intent: 'active_infestation_treatment' }), recurringOnly)).toBe(true);
+    expect(estimateCoversAsk(card({ requested_service_intent: null }), est({}))).toBe(false);
     // Another address, a street with no locality, or no address at all;
     // the property row it prices stands in for a missing address column.
     expect(estimateCoversAsk(card({}), est({ address: '5 Pine Ave, Sarasota, FL 34236' }))).toBe(false);

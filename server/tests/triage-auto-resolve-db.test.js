@@ -98,7 +98,10 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   // firstSendAccept: accepted during the first send — admin-estimates
   // finalization keeps accepted_at + lastDeliveredAt with sent_at null.
   // estimateScope: 'ask' prices the card's ask (pest control at the on-file
-  // address); 'other_service' / 'other_address' do not (codex r17 P1).
+  // address); 'other_service' / 'other_address' do not (codex r17 P1);
+  // 'late_sibling' / 'delivered_sibling' ask for pest + lawn, the stamped
+  // estimate prices pest, and a group sibling prices lawn — added after the
+  // handoff (never delivered) or published with it (codex r18 P1).
   async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin, deliveredAgeMin = estimateAgeMin, estimateOwner = 'call', firstSendAccept = false, estimateScope = 'ask' }) {
     const { customerId } = await seedCustomer(sid.slice(-2));
     const ownerId = estimateOwner === 'other' ? (await seedCustomer(`${sid.slice(-2)}x`)).customerId : customerId;
@@ -113,11 +116,13 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const [card] = await db('triage_items').insert({
       call_log_id: call.id, category: 'time_ambiguous', severity: 'blocking', reason_code: 'quote_promised',
       status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
-      payload: JSON.stringify({ flag: 'quote_promised', quote_scope: { requested_service_categories: ['pest_control'], requested_specific_service: null, requested_service_intent: 'preventative_one_time', requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 } } }),
+      payload: JSON.stringify({ flag: 'quote_promised', quote_scope: { requested_service_categories: estimateScope.endsWith('_sibling') ? ['pest_control', 'lawn_care'] : ['pest_control'], requested_specific_service: null, requested_service_intent: 'preventative_one_time', requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 } } }),
     }).returning('id');
+    const groupId = estimateScope.endsWith('_sibling') ? require('crypto').randomUUID() : null;
     const [est] = await db('estimates').insert({
       customer_id: ownerId, status: firstSendAccept ? 'accepted' : 'sent',
       service_interest: estimateScope === 'other_service' ? 'Lawn Care' : 'Pest Control',
+      onetime_total: 150, estimate_group_id: groupId,
       address: estimateScope === 'other_address' ? '99 Elsewhere Rd, 34205' : '1234 Fixture Ave, 34205',
       sent_at: firstSendAccept ? null : new Date(Date.now() - estimateAgeMin * 60000),
       accepted_at: firstSendAccept ? new Date(Date.now() - estimateAgeMin * 60000) : null,
@@ -127,6 +132,16 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
       }),
     }).returning('id');
     ids.estimates.push(est.id);
+    if (groupId) {
+      const late = estimateScope === 'late_sibling';
+      const [sib] = await db('estimates').insert({
+        customer_id: ownerId, status: late ? 'draft' : 'sent', service_interest: 'Lawn Care', address: '1234 Fixture Ave, 34205',
+        onetime_total: 90, estimate_group_id: groupId,
+        created_at: late ? new Date() : new Date(Date.now() - (estimateAgeMin + 30) * 60000),
+        estimate_data: JSON.stringify(late ? {} : { groupPublishedByEstimateId: est.id }),
+      }).returning('id');
+      ids.estimates.push(sib.id);
+    }
     return { callId: call.id, cardId: card.id };
   }
 
@@ -191,6 +206,8 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const acceptedOnSend = await seedQuoteCall(SID.replace(/e2$/, 'q5'), { cardAgeMin: 60, estimateAgeMin: 10, firstSendAccept: true });
     const otherService = await seedQuoteCall(SID.replace(/e2$/, 'q6'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'other_service' });
     const otherAddress = await seedQuoteCall(SID.replace(/e2$/, 'q7'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'other_address' });
+    const lateSibling = await seedQuoteCall(SID.replace(/e2$/, 'q8'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'late_sibling' });
+    const deliveredSibling = await seedQuoteCall(SID.replace(/e2$/, 'q9'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'delivered_sibling' });
     const result = await sweep.runTriageAutoResolve({ now: new Date() });
     expect(result.skipped).toBe(false);
     const closed = await db('triage_items').where({ id: fresh.cardId }).first();
@@ -201,6 +218,10 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     // does not keep THIS card's promise (codex r17 P1).
     expect((await db('triage_items').where({ id: otherService.cardId }).first()).status).toBe('open');
     expect((await db('triage_items').where({ id: otherAddress.cardId }).first()).status).toBe('open');
+    // A group sibling added AFTER the handoff was never delivered; one
+    // published with the anchor was (codex r18 P1).
+    expect((await db('triage_items').where({ id: lateSibling.cardId }).first()).status).toBe('open');
+    expect((await db('triage_items').where({ id: deliveredSibling.cardId }).first()).status).toBe('resolved');
     const open = await db('triage_items').where({ id: stale.cardId }).first();
     expect(open.status).toBe('open');
     const suppressedCard = await db('triage_items').where({ id: suppressed.cardId }).first();
