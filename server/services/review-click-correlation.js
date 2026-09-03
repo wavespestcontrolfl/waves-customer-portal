@@ -294,9 +294,12 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       // location-gated rungs, but the surname rung must know that a second
       // same-surname customer tapped ANY location's link in the window
       // (pre-push r4 P1): two "Northgate" clickers = a human decides, no
-      // matter which form each landed on. Auto-link path only.
+      // matter which form each landed on. The matched customer's OWN
+      // other-location rows count too — a second review_requests row
+      // stamped elsewhere is the "any pair" conflict the main scan cannot
+      // see (pre-push r5 P1). Auto-link path only.
       _meta.surnameClickerElsewhere = surnames.length > 0 && reviewLocationId
-        ? await surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames, byCustomer })
+        ? await surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames })
         : false;
     }
 
@@ -315,13 +318,14 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
 }
 
 /**
- * Whether any OTHER customer with the reviewer's surname clicked a review
- * link in the window whose recorded pairs are all for a different location
- * — rows the main scan's location filter excludes. True on a truncated scan
- * (the window can't be proven clean). The location and surname predicates
- * repeat JS-side, as in the main scan.
+ * Whether any customer with the reviewer's surname holds a review-request
+ * row clicked in the window whose recorded pairs are all for a different
+ * location — rows the main scan's location filter excludes. A competing
+ * customer is ambiguity; the matched customer's own row is a conflicting
+ * pair. True on a truncated scan (the window can't be proven clean). The
+ * location and surname predicates repeat JS-side, as in the main scan.
  */
-async function surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames, byCustomer }) {
+async function surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames }) {
   const rows = await conn('review_requests as rr')
     .join('customers as c', 'rr.customer_id', 'c.id')
     .whereNull('c.deleted_at')
@@ -344,7 +348,6 @@ async function surnameClickerElsewhere({ conn, reviewLocationId, windowStart, wi
     return Boolean(at) && !Number.isNaN(at.getTime()) && at >= windowStart && at <= windowEnd;
   };
   return rows.some((row) => row.google_review_clicked === true
-    && !byCustomer.has(row.customer_id)
     && row.google_location && row.google_location !== reviewLocationId
     && (!row.last_google_location || row.last_google_location !== reviewLocationId)
     && (inWindow(row.redirected_at) || inWindow(row.last_redirected_at))
@@ -434,7 +437,8 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     // Cruz") = a human decides. A legacy pair is fine (the surname
     // corroborates); a customer with ANY pair stamped for a different
     // location is not — the retained pair may be the untrusted first click
-    // while their newer tap went elsewhere (GH codex r1 P1).
+    // while their newer tap went elsewhere (GH codex r1 P1), or a second
+    // request row of theirs may be stamped elsewhere (pre-push r5 P1).
     const all = meta.allCandidates || [];
     const namedAll = all.filter((c) => c.nameMatch === true);
     const named = namedAll.length === 1 && meta.surnameClickerElsewhere !== true

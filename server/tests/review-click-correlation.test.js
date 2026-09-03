@@ -385,7 +385,7 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
   });
 
-  test('refuses when a second same-surname customer clicked ONLY another location\'s link in the window (pre-push r4 P1)', async () => {
+  test('refuses when a same-surname request row clicked ONLY another location\'s link in the window — a competing customer or the matched customer\'s own second row (pre-push r4/r5 P1)', async () => {
     // Both of the third customer's pairs are stamped Parrish: the
     // location-filtered scan never lists them, so the surname rung runs a
     // second, inverse-location scan and finds them there. Auto-link path only.
@@ -411,6 +411,11 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     // unstamped is listed by the main scan and refuses the same way.
     const unstamped = makeConn({ clickRows: [northgate(legacy), northgate({ customer_id: 'cust-northgate-3', google_location: null, last_google_location: null, redirected_at: '2026-08-07T16:00:00.000Z' }), other()] });
     expect(await findConfidentClickMatch(REVIEW, { conn: unstamped })).toBeNull();
+    // The matched customer's OWN second request row stamped only for another
+    // location is a conflicting pair the main scan cannot see (pre-push r5 P1).
+    const ownRowElsewhere = makeConn({ clickRows: [northgate(legacy), northgate({ google_location: 'parrish', last_google_location: 'parrish', redirected_at: '2026-08-07T16:00:00.000Z' }), other()] });
+    expect((await findLikelyReviewers(REVIEW, { conn: ownRowElsewhere })).map((c) => c.customerId)).toEqual(['cust-northgate', 'cust-riverside']);
+    expect(await findConfidentClickMatch(REVIEW, { conn: ownRowElsewhere })).toBeNull();
     // A different-surname clicker elsewhere is no ambiguity: the surname links.
     const stranger = makeConn({ clickRows: [northgate(legacy), other({ customer_id: 'cust-riverside-2', google_location: 'parrish', last_google_location: 'parrish' }), other()] });
     expect((await findConfidentClickMatch(REVIEW, { conn: stranger }))?.rung).toBe('click_name');
