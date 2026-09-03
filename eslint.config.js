@@ -13,7 +13,7 @@
 // warning on a function the diff ADDS or REWRITES is a P2 for review; a
 // warning on untouched legacy code is noise and is ignored. Thresholds were
 // set from a baseline over the whole non-test tree so that only the top
-// ~4% of existing functions trip them (see PR #TBD for the distribution).
+// ~4% of existing functions trip them (see PR #3787 for the distribution).
 const globals = require('globals');
 const react = require('eslint-plugin-react');
 
