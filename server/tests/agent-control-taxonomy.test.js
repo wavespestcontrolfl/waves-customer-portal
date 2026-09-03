@@ -10,6 +10,13 @@ describe('agent-control taxonomy', () => {
     tax = require('../services/agent-control/taxonomy');
   });
 
+  it('taxonomy lookups reject inherited object keys like any unknown value', () => {
+    for (const bad of ['toString', '__proto__', 'constructor', 'nope']) {
+      expect(() => tax.riskTierFor(bad)).toThrow('unknown side_effect_class');
+      expect(() => tax.priorityToSeverity(bad)).toThrow('unknown priority');
+    }
+  });
+
   it('vocabularies are frozen and exact', () => {
     const expected = {
       LIFECYCLE: ['queued', 'leased', 'running', 'waiting_external', 'waiting_human', 'terminal'],

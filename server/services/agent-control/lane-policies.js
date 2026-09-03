@@ -71,8 +71,13 @@ const LANE_RUNTIME = {
   // offline, not measurement: the nightly judge goes through createDeepMessage,
   // which deliberately falls back to the OpenAI leg and records who judged.
   shadow_judge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_cadence: 'daily', maturity: 'M0', ...LONG_BATCH },
-  voice_profile: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'daily', ...LONG_BATCH },
-  sealed_eval: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'measurement', eval_family: 'routine_copy', expected_cadence: 'daily', ...LONG_BATCH },
+  // event, not daily: the distiller skips when a profile is pending or no new
+  // corpus exists, and the sealed exam returns already_examined once the
+  // current prompt/profile has been scored — healthy lanes that stay quiet.
+  // M3: a profile that passes its deterministic checks is approved by
+  // auto_distiller and made live without a human (audit-logged).
+  voice_profile: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3', ...LONG_BATCH },
+  sealed_eval: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'measurement', eval_family: 'routine_copy', ...LONG_BATCH },
   quarantine_arbiter: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'transcription_contact' },
   // Route canaries: one tiny probe per draft route at boot + every 6h; the
   // answer IS the measurement (a substitute provider would hide the outage

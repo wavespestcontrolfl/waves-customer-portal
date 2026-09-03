@@ -43,8 +43,11 @@ const RISK_TIER = Object.freeze({
   money: 3,
   irreversible_external: 3,
 });
+// Own-property lookups: a malformed persisted value such as 'toString' or
+// '__proto__' must throw like any other unknown, not return an inherited key.
+const own = (table, key) => (Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined);
 function riskTierFor(sideEffectClass) {
-  const tier = RISK_TIER[sideEffectClass];
+  const tier = own(RISK_TIER, sideEffectClass);
   if (tier === undefined) throw new Error(`unknown side_effect_class: ${sideEffectClass}`);
   return tier;
 }
@@ -53,7 +56,7 @@ const PRIORITY = Object.freeze(['P0', 'P1', 'P2', 'P3']);
 // admin_alerts.severity values.
 const PRIORITY_SEVERITY = Object.freeze({ P0: 'critical', P1: 'high', P2: 'medium', P3: 'low' });
 function priorityToSeverity(priority) {
-  const severity = PRIORITY_SEVERITY[priority];
+  const severity = own(PRIORITY_SEVERITY, priority);
   if (!severity) throw new Error(`unknown priority: ${priority}`);
   return severity;
 }
