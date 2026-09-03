@@ -3662,12 +3662,20 @@ function OwnerQueuePanel() {
                 onChange={(e) => setNotes({ ...notes, [c.domain.id]: e.target.value })}
                 style={{ ...inputStyle, fontFamily: "inherit", flex: "1 1 240px" }}
               />
-              <button onClick={() => decide(c, "watch")} disabled={domainBusy} style={btn(domainBusy)}>
-                Watch domain
-              </button>
-              <button onClick={() => decide(c, "reject")} disabled={domainBusy} style={btn(domainBusy, D.red)}>
-                Reject domain
-              </button>
+              {c.decidable ? (
+                <>
+                  <button onClick={() => decide(c, "watch")} disabled={domainBusy} style={btn(domainBusy)}>
+                    Watch domain
+                  </button>
+                  <button onClick={() => decide(c, "reject")} disabled={domainBusy} style={btn(domainBusy, D.red)}>
+                    Reject domain
+                  </button>
+                </>
+              ) : (
+                <span style={{ fontSize: 12, color: D.muted }}>
+                  {`Domain is ${String(c.domain.agent_state).replace(/_/g, " ")} — a sibling placement is approved or in flight; reject or watch it from the Link Building board`}
+                </span>
+              )}
             </div>
           </div>
         );

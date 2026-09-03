@@ -377,12 +377,20 @@ router.get('/registry/:id', async (req, res, next) => {
         .orderBy('created_at', 'desc').limit(50)
         .select('id', 'path_id', 'prospect_id', 'provider', 'action', 'outcome', 'cost_cents', 'sandbox', 'evidence_url', 'created_at')
       : [];
-    // the owner's active "Acquire anyway" waiver on the best path (step 4 PR 2b)
-    const waiver = domain.best_path_id
-      ? await db('seo_link_floor_waivers').where({ domain_id: domain.id, path_id: domain.best_path_id }).whereNull('invalidated_at').orderBy('approved_at', 'desc')
-        .first('id', 'overridden_floors', 'note', 'approved_by', 'approved_at')
-      : null;
-    res.json({ domain, paths, touches, placements, attempts, waiver: waiver || null });
+    // the owner's active "Acquire anyway" waiver on the best path (step 4 PR 2b) — shown only while the bridge
+    // would still honour it: its floors hash must equal the CURRENT floors (a moved score / spam / confidence /
+    // policy floor makes it stale until the next run invalidates it)
+    let waiver = null;
+    const bestPath = domain.best_path_id ? paths.find((p) => p.id === domain.best_path_id) : null;
+    if (bestPath) {
+      const w = await db('seo_link_floor_waivers').where({ domain_id: domain.id, path_id: bestPath.id }).whereNull('invalidated_at').orderBy('approved_at', 'desc')
+        .first('id', 'overridden_floors', 'decision_inputs_hash', 'note', 'approved_by', 'approved_at');
+      if (w) {
+        const { policy } = await linkPolicy.loadPolicy(db);
+        if (w.decision_inputs_hash === linkPolicy.floorInputsHash({ path: bestPath, domain, policy, score: domain.score })) waiver = w;
+      }
+    }
+    res.json({ domain, paths, touches, placements, attempts, waiver });
   } catch (err) { next(err); }
 });
 

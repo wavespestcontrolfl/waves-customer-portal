@@ -179,6 +179,9 @@ async function listOwnerQueue(db) {
         legal_terms_url: investigation && investigation.legal_terms_url ? investigation.legal_terms_url : null,
         agent_completable: path.agent_completable, execution_after_send: path.execution_after_send,
       } : null,
+      // Reject / Watch apply while the domain is still the owner's to decide; once a sibling is approved or in flight
+      // (lane-owned) those buttons would only ever 409 — the card says so instead
+      decidable: !R.LANE_OWNED_STATES.includes(d.agent_state),
       waiver: path ? waiverFor.get(`${d.id}|${path.id}`) || null : null,
       d30_confidence: null, // step 7 (D30 loop) — no evidence yet
       price_tolerance_cents: policy.owner_price_tolerance_cents,
@@ -235,8 +238,9 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     if (money) {
       if (path.payment_required !== true) refuse(409, 'the path no longer requires payment');
       if (path.currency !== 'USD') refuse(409, `checkout currency is ${path.currency}, not USD — an owner approval cannot change it`);
-      const approved = approvedAmountCents === null || approvedAmountCents === undefined || approvedAmountCents === '' ? path.estimated_cost_cents : approvedAmountCents;
-      const cents = Number(approved);
+      // the amount is the OWNER'S statement, never a server default: a stale or direct client that omits it gets 400
+      if (approvedAmountCents === null || approvedAmountCents === undefined || approvedAmountCents === '') refuse(400, 'approved_amount_cents is required for a payment approval (the card shows the quote; submit the amount you approve)');
+      const cents = Number(approvedAmountCents);
       if (!Number.isSafeInteger(cents) || cents <= 0) refuse(400, 'approved_amount_cents must be a positive whole number of cents');
       if (cents > P.PG_INT_MAX) refuse(400, 'approved_amount_cents is out of range');
       const tolerance = Number(policy.owner_price_tolerance_cents) || 0;

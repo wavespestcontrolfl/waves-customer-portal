@@ -89,6 +89,13 @@ describe('listOwnerQueue', () => {
     const byDim = Object.fromEntries(c.rows.map((r) => [r.dimension, r]));
     expect(byDim.execution).toMatchObject({ level: 'OWNER_FREE', action: 'acquire', approvable: true, why_not: null, shared_fee: null });
     expect(byDim.payment).toMatchObject({ level: 'OWNER_PAYMENT', action: 'purchase', approvable: true, shared_fee: null });
+    expect(c.decidable).toBe(true);
+    // a sibling approved ⇒ the domain is lane-owned ⇒ the remaining cards say so instead of offering Reject / Watch
+    await Q.approveRow(db, { authorityId: byDim.execution.id, actor: ACTOR, now: NOW, bridge: inline });
+    await Q.approveRow(db, { authorityId: byDim.payment.id, actor: ACTOR, approvedAmountCents: 4500, now: NOW, bridge: inline });
+    const after = await Q.listOwnerQueue(db);
+    expect(after.cards).toHaveLength(N - 1);
+    expect(after.cards.every((x) => x.domain.agent_state === 'ready_to_acquire' && x.decidable === false)).toBe(true);
   });
 
   test('a domain the owner rejected / is watching shows no cards; rows and placements are untouched', async () => {
@@ -216,14 +223,17 @@ describe('approveRow', () => {
     expect(approvals(s2.db)).toHaveLength(0);
   });
 
-  test('payment: the quote is the default amount, max_payable = amount + tolerance, bad amounts refuse', async () => {
+  test('payment: the amount is the owner\'s statement (never defaulted), max_payable = amount + tolerance, bad amounts refuse', async () => {
     const { db } = await parked({ make: paidPath, policy: { owner_price_tolerance_cents: 500 } });
     const pay = openRows(db, 'payment')[0];
     await expect(Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 0, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 400 });
     await expect(Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 12.5, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 400 });
     await expect(Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 'abc', now: NOW, bridge: inline })).rejects.toMatchObject({ status: 400 });
+    // omitted / blank ⇒ 400, never the quote
+    await expect(Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/required/) });
+    await expect(Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: '', now: NOW, bridge: inline })).rejects.toMatchObject({ status: 400 });
     expect(approvals(db)).toHaveLength(0);
-    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, now: NOW, bridge: inline });
+    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 4500, now: NOW, bridge: inline });
     expect(r.approval).toMatchObject({ dimension: 'payment', action: 'purchase', money_action: true, approved_amount_cents: 4500, max_payable_cents: 5000, authority: 'OWNER_PAYMENT' });
     expect(r.approval.terms_snapshot).toMatchObject({ estimated_cost_cents: 4500, currency: 'USD', fee_scope: 'per_location', merchant_binding: expect.objectContaining({ checkout_origin: 'https://example.org' }) });
     // the execution row is still owner-gated ⇒ the placement stays parked, the domain stays qualified
@@ -244,7 +254,7 @@ describe('approveRow', () => {
     expect(primaries).toHaveLength(1);
     expect(cards.find((c) => c.placement.id !== primaries[0].placement.id).rows.find((r) => r.dimension === 'payment')).toMatchObject({ approvable: false, why_not: expect.stringMatching(/one approval covers/), shared_fee: { group_id: groupId, placements: WAVES_LOCATIONS.length } });
     const pay = openRows(db, 'payment').find((r) => r.prospect_id === primaries[0].placement.id);
-    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, now: NOW, bridge: inline });
+    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 4500, now: NOW, bridge: inline });
     expect(approvals(db)).toHaveLength(1);
     expect(r.approval.prospect_id).toBe(groupId);
     expect(r.attached).toHaveLength(WAVES_LOCATIONS.length);
@@ -266,7 +276,7 @@ describe('approveRow', () => {
     leasedP.claimed_at = NOW;
     placements(db).push(staleP);
     rows(db).push({ ...pay, id: uid(), prospect_id: staleP.id, path_id: stalePath, approval_id: undefined });
-    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, now: LATER, bridge: inline });
+    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 4500, now: LATER, bridge: inline });
     expect(r.attached).toHaveLength(N - 1); // primary + the unleased in-shape siblings; not the leased one, not the stale-path one
     const staleRow = rows(db).find((x) => x.prospect_id === staleP.id);
     const leasedRow = rows(db).find((x) => x.prospect_id === leasedP.id && x.dimension === 'payment');
