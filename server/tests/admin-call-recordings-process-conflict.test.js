@@ -302,13 +302,15 @@ describe('claim ceiling is derived from the provider budgets', () => {
     });
   });
 
+  // csr-coach rides the dispatcher; its explicit timeoutMs is the shared
+  // wall-clock ceiling across both provider legs (llm/call.js).
   test.each([
-    ['../services/call-recording-processor', /timeout: PROVIDER_FETCH_TIMEOUTS_MS/],
-    ['../services/csr/csr-coach', /timeout: CSR_SCORE_TIMEOUT_MS/],
-  ])('%s bounds every direct Anthropic call', (modulePath, expectedTimeout) => {
+    ['../services/call-recording-processor', 'messages.create(', /timeout: PROVIDER_FETCH_TIMEOUTS_MS/],
+    ['../services/csr/csr-coach', 'dispatchWithFallback(', /timeoutMs: CSR_SCORE_TIMEOUT_MS/],
+  ])('%s bounds every provider call', (modulePath, callMarker, expectedTimeout) => {
     const source = require('fs').readFileSync(require.resolve(modulePath), 'utf8');
     const starts = [];
-    for (let i = source.indexOf('messages.create('); i !== -1; i = source.indexOf('messages.create(', i + 1)) {
+    for (let i = source.indexOf(callMarker); i !== -1; i = source.indexOf(callMarker, i + 1)) {
       starts.push(i);
     }
     expect(starts.length).toBeGreaterThan(0);
