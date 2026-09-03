@@ -385,7 +385,26 @@ function addressFromContextBase(context) {
   // P1 on the unit write-back).
   const ov = context.serviceAddressOverride;
   if (ov?.street_line_1) {
-    return [ov.street_line_1, ov.city, ['FL', ov.postal_code].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    let city = ov.city || null;
+    let zip = ov.postal_code || null;
+    if (!city && !zip) {
+      // A street-only building (unit_ask_building carries what the caller
+      // said) borrows locality ONLY from a record naming the SAME street —
+      // the extraction, this call's lead, the trusted profile — never from
+      // one that may describe another property; with no such record the
+      // street stands alone rather than a "…, FL" that geocodes nowhere
+      // (pre-push codex P1 on #3804, r9).
+      const { splitUnitFirstLine } = require('../../utils/address-normalizer');
+      const sa = context.extraction?.property?.service_address;
+      const trusted = (!context.customerPhoneAmbiguous && context.customer) || null;
+      const same = [
+        sa?.street_line_1 ? { street: sa.street_line_1, city: sa.city, zip: sa.postal_code } : null,
+        context.leadIsForThisCall && context.lead?.address ? { street: context.lead.address, city: context.lead.city, zip: context.lead.zip } : null,
+        trusted?.address_line1 ? { street: trusted.address_line1, city: trusted.city, zip: trusted.zip } : null,
+      ].find((c) => c && (c.city || c.zip) && sameStreetAddress(splitUnitFirstLine(c.street)?.rest || c.street, ov.street_line_1));
+      if (same) { city = same.city || null; zip = same.zip || null; }
+    }
+    return [ov.street_line_1, city, [city || zip ? 'FL' : null, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
   }
   const sa = context.extraction?.property?.service_address;
   if (sa?.street_line_1) {

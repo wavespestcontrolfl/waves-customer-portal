@@ -840,7 +840,20 @@ describe('review fixes', () => {
     expect(idxPriv.addressFromContext(noExtraction)).toBe('1048 Example Lakes Cir Apt 204, Sarasota, FL 34232');
     const otherExtraction = { extraction: { property: { service_address: { street_line_1: '9 Elsewhere Ave', city: 'Venice', postal_code: '34285' } } }, serviceAddressOverride: building };
     expect(idxPriv.addressFromContext(otherExtraction)).toBe('1048 Example Lakes Cir, Sarasota, FL 34232');
-    expect(idxPriv.addressFromContext({ extraction: null, lead: null, serviceAddressOverride: { street_line_1: '1048 Example Lakes Cir' } })).toBe('1048 Example Lakes Cir, FL');
+    // A street-only building: no "…, FL" stub (pre-push codex P1, r9) — the
+    // bare street, or the locality of a record naming the SAME street.
+    expect(idxPriv.addressFromContext({ extraction: null, lead: null, serviceAddressOverride: { street_line_1: '1048 Example Lakes Cir' } })).toBe('1048 Example Lakes Cir');
+    const streetOnly = { street_line_1: '1048 Example Lakes Cir' };
+    expect(idxPriv.addressFromContext({ extraction: { property: { service_address: { street_line_1: '1048 Example Lakes Circle', city: 'Sarasota', postal_code: '34232' } } }, serviceAddressOverride: streetOnly }))
+      .toBe('1048 Example Lakes Cir, Sarasota, FL 34232');
+    expect(idxPriv.addressFromContext({ extraction: null, lead: { address: '1048 Example Lakes Cir, Sarasota, FL 34232', city: 'Sarasota', zip: '34232' }, leadIsForThisCall: true, serviceAddressOverride: streetOnly }))
+      .toBe('1048 Example Lakes Cir, Sarasota, FL 34232');
+    // A record for ANOTHER street lends nothing — its locality could be another parcel's.
+    expect(idxPriv.addressFromContext({ extraction: { property: { service_address: { street_line_1: '9 Elsewhere Ave', city: 'Venice', postal_code: '34285' } } }, lead: { address: '5 Other Rd', city: 'Venice', zip: '34285' }, leadIsForThisCall: true, serviceAddressOverride: streetOnly }))
+      .toBe('1048 Example Lakes Cir');
+    // An ambiguous shared-phone profile never lends locality either.
+    expect(idxPriv.addressFromContext({ extraction: null, lead: null, customer: { address_line1: '1048 Example Lakes Cir', city: 'Sarasota', zip: '34232' }, customerPhoneAmbiguous: true, serviceAddressOverride: streetOnly }))
+      .toBe('1048 Example Lakes Cir');
   });
 
   test('existing-customer address beats a stale phone-matched lead', () => {
