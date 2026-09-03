@@ -169,6 +169,21 @@ describe('listOwnerQueue', () => {
     expect(placementOf(live.db, first).status).toBe('live');
   });
 
+  test('a paid outreach placement the reconciliation promoted to live while its initial fee awaits the owner: the fee is the card', async () => {
+    const s = await parked({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
+    const fee = openRows(s.db, 'payment')[0];
+    expect([fee.level, fee.instance_kind]).toEqual(['OWNER_PAYMENT', '-']);
+    Object.assign(placementOf(s.db, fee), { status: 'live', outreach_status: 'sent' });
+    storedDomain(s.db).agent_state = 'acquired';
+    const card = (await Q.listOwnerQueue(s.db)).cards.find((c) => c.placement.id === fee.prospect_id);
+    expect(card.placement.status).toBe('live');
+    expect(card.rows.find((r) => r.id === fee.id)).toMatchObject({ action: 'purchase', approvable: true, quote_cents: 20000 });
+    for (const r of card.rows.filter((r) => r.dimension !== 'payment')) expect(r.approvable).toBe(false);
+    const r = await Q.approveRow(s.db, { authorityId: fee.id, actor: ACTOR, approvedAmountCents: 20000, now: NOW, bridge: inline });
+    expect(r.approval).toMatchObject({ action: 'purchase', approved_amount_cents: 20000 });
+    expect(placementOf(s.db, fee).status).toBe('live'); // the Judge-owned status is never touched
+  });
+
   test('a consumed approval on a still-unsatisfied row is spent, not live authority: the card asks again and a fresh approval attaches', async () => {
     const { db } = await parked({ make: paidPath });
     const fee = openRows(db, 'payment')[0];

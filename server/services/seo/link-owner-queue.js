@@ -44,7 +44,8 @@ const AUTH = 'seo_link_placement_authorities';
 const PARKED = 'awaiting_owner';
 const PARKABLE = 'prospect';
 // §3.3b: two cards the bridge never parks — an outreach path's DEFERRED payment surfaces once the publisher exposes a
-// checkout (`ready_for_payment`), and a renewal instance sits on a placed / live / indexed placement the Judge owns
+// checkout (`ready_for_payment`), and a payment instance sits on a placed / live / indexed placement the Judge owns — a
+// renewal, or a paid outreach placement's INITIAL fee the §8 reconciliation promoted while the fee still awaits the owner
 const CHECKOUT = 'ready_for_payment';
 const PLACED_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
 const CARD_STATUSES = Object.freeze([PARKED, CHECKOUT, ...PLACED_STATUSES]);
@@ -73,11 +74,12 @@ function actionFor(row) {
 
 // Which of a placement's rows the owner decides from the queue in the placement's CURRENT status (plan §3.3b) — the
 // listing and the locked click apply the same test: parked from prospect ⇒ every row; at the publisher's checkout ⇒
-// the deferred payment; placed / live / indexed ⇒ the renewal payment instance. null = decided here.
+// the deferred payment; placed / live / indexed ⇒ its payment instance (a renewal, or the initial fee of a paid outreach
+// placement the reconciliation promoted before the fee settled — plan §6.4). null = decided here.
 function whyNotHere(placement, row) {
   if (placement.status === PARKED) return placement.parked_from_status === PARKABLE ? null : `parked from ${placement.parked_from_status} — not the queue's to decide`;
   if (placement.status === CHECKOUT) return row.dimension === 'payment' ? null : 'the placement is at the publisher\'s checkout — only its payment is decided here';
-  if (PLACED_STATUSES.includes(placement.status)) return row.dimension === 'payment' && actionFor(row) === 'renewal' ? null : `the placement is ${placement.status} — only its renewal is decided here`;
+  if (PLACED_STATUSES.includes(placement.status)) return row.dimension === 'payment' ? null : `the placement is ${placement.status} — only its payment is decided here`;
   return `the placement is ${placement.status} — not awaiting your decision`;
 }
 
