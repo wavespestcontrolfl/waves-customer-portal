@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   deleteCompletionResumeBody,
   getCompletionResumeBody,
+  pruneCompletionResumeBodies,
   putCompletionResumeBody,
 } from "./completion-resume-store";
 import {
@@ -95,6 +96,15 @@ describe("persistCompletionResumeOwed / restore / clear (marker + body)", () => 
     await putCompletionResumeBody("svc-1", committedBody());
     expect(completionResumeOwed("svc-1")).toBe(false);
     expect(await restoreCompletionResumeBody("svc-1")).toBeNull();
+  });
+
+  it("prune deletes bodies whose marker is gone and keeps owed ones", async () => {
+    await persistCompletionResumeOwed("svc-owed", committedBody());
+    await putCompletionResumeBody("svc-orphan", committedBody());
+    expect(await pruneCompletionResumeBodies(completionResumeOwed)).toBe(1);
+    expect(await getCompletionResumeBody("svc-orphan")).toBeNull();
+    expect(await getCompletionResumeBody("svc-owed")).not.toBeNull();
+    expect(await pruneCompletionResumeBodies(() => false)).toBe(1);
   });
 
   it("clear removes both the marker and the body", async () => {

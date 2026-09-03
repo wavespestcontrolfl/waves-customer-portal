@@ -60,6 +60,7 @@ import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import {
   deleteCompletionResumeBody,
   getCompletionResumeBody,
+  pruneCompletionResumeBodies,
   putCompletionResumeBody,
 } from "../../lib/completion-resume-store";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
@@ -10654,6 +10655,11 @@ export function CompletionPanel({
   // concurrent replays whose cleanup and marker persistence race (Codex r2
   // P2).
   const committedReplayLockRef = useRef(false);
+  // Orphan sweep rides on the same mount: bodies whose marker was cleared by
+  // a success path but whose delete never ran (page killed in between).
+  useEffect(() => {
+    pruneCompletionResumeBodies(completionResumeOwed).catch(() => {});
+  }, []);
   const [resumeBodyLoad] = useState(() => (
     sideEffectsCommittedRef.current
       ? restoreCompletionResumeBody(service?.id).then((body) => {
@@ -13236,6 +13242,7 @@ export function CompletionPanel({
     sideEffectsRetryRef.current = 0;
     sideEffectsCommittedRef.current = false;
     lastSubmitBodyRef.current = null;
+    setCommittedReplayReady(false);
     // Panel closed while the request was in flight (codex P2 r10): unmount
     // can't abort a fetch. The completion is durable server-side and the
     // parent's bookkeeping already ran (onSubmit / onCompletionResult) —
@@ -13308,6 +13315,7 @@ export function CompletionPanel({
   function resolveCrossKeyCompleted() {
     sideEffectsCommittedRef.current = false;
     lastSubmitBodyRef.current = null;
+    setCommittedReplayReady(false);
     completionIdempotencyKeyRef.current = null;
     localStorage.removeItem(completionDraftKey(service.id));
     clearCompletionResumeOwed(service.id);
@@ -13374,6 +13382,7 @@ export function CompletionPanel({
         // a fresh manual submit is correct — drop the chain so it rebuilds.
         sideEffectsCommittedRef.current = false;
         lastSubmitBodyRef.current = null;
+        setCommittedReplayReady(false);
         if (!completionPanelClosedRef.current) {
           alert(
             "Completion needs another try: " +
@@ -14242,6 +14251,11 @@ export function CompletionPanel({
       // persists beside the marker so the reopened panel replays it too.
       await persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current);
       sideEffectsCommittedRef.current = true;
+      // The pinned in-memory body is replay-ready now, not only after a
+      // reload: the operator may change the form (drop a required photo)
+      // before retrying, and the live-form gates must not block the replay
+      // of an already-validated payload (Codex r3 P2).
+      setCommittedReplayReady(true);
     } else if (e?.code === "completion_resume_payload_mismatch") {
       // A marker-resume whose body did not persist rebuilt from the draft
       // and differs from the committed body. The closeout itself is
@@ -14250,6 +14264,7 @@ export function CompletionPanel({
       // snapshot with it.
       sideEffectsCommittedRef.current = false;
       lastSubmitBodyRef.current = null;
+      setCommittedReplayReady(false);
       clearCompletionResumeOwed(service.id);
       alert(
         "This closeout is already saved — the retry didn't match the original submission. The office can bill the visit from Billing Recovery.",
@@ -14277,6 +14292,7 @@ export function CompletionPanel({
       // upload and this copy is the only one left.
       await persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current);
       sideEffectsCommittedRef.current = true;
+      setCommittedReplayReady(true);
       sideEffectsRetryRef.current = sideEffectsRetryCount;
       return pollCompletionSideEffects(reconcileConfirmed);
     }
@@ -14286,6 +14302,7 @@ export function CompletionPanel({
       // visit's panel after a reload (codex P1 r3; same marker as
       // backfill_invoice_mint_failed).
       await persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current);
+      setCommittedReplayReady(true);
       if (!completionPanelClosedRef.current) {
         alert(retryPlan.message);
         setSubmitting(false);

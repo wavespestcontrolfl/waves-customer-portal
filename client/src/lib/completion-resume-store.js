@@ -92,3 +92,18 @@ export function deleteCompletionResumeBody(serviceId) {
   return withStore("readwrite", false, (store) => store.delete(String(serviceId)))
     .then((result) => result !== false);
 }
+
+// Removes every stored body whose marker is gone. The success paths clear
+// the marker synchronously but the body delete is asynchronous, so a page
+// killed in between leaves an unreachable multi-megabyte row behind; run
+// once when a completion panel mounts so those rows never accumulate
+// (Codex r3 P2). `isOwed(serviceId)` is the marker predicate.
+export function pruneCompletionResumeBodies(isOwed) {
+  return withStore("readonly", [], (store) => store.getAllKeys())
+    .then((keys) => Promise.all(
+      (Array.isArray(keys) ? keys : [])
+        .filter((key) => !isOwed(String(key)))
+        .map((key) => deleteCompletionResumeBody(key)),
+    ))
+    .then((results) => results.filter(Boolean).length);
+}
