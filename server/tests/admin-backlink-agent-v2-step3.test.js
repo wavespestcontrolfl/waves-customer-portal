@@ -169,6 +169,7 @@ describe('GET /registry/:id', () => {
     const r = await call(handler('get', '/registry/:id'), { params: { id: 'd1' } });
     expect(r.body).toEqual({
       domain: mockState.firstDomain, paths: mockState.paths, touches: mockState.touches, placements: mockState.placements, attempts: mockState.attempts || [],
+      waiver: null, // the owner's active "Acquire anyway" waiver (step 4 PR 2b)
     });
   });
 });
