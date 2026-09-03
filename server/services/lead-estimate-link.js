@@ -37,14 +37,25 @@ function normalizeEmail(value) {
 // it — and the link is followed one hop only; the caller still re-validates
 // the target (open, unlinked, contact matches the estimate) exactly as it
 // would the named lead.
+// Follows the marker to the open root, hop by hop: two concurrent repeats
+// of an existing open lead O can chain B → A → O when B picked A before A's
+// own relabel landed (codex #3834 r10 P1), so one hop would stop on the
+// closed duplicate A. Bounded and cycle-safe; a dead end (marker without a
+// row) resolves to the named lead itself, as before.
 async function followDuplicateLink(database, lead) {
-  if (!lead || lead.status !== 'duplicate') return lead;
-  let data = lead.extracted_data;
-  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
-  const originalId = data && data.duplicate_of_lead_id;
-  if (!originalId) return lead;
-  const original = await database('leads').where({ id: originalId }).first();
-  return original || lead;
+  const seen = new Set();
+  let current = lead;
+  while (current && current.status === 'duplicate' && !seen.has(current.id) && seen.size < 8) {
+    seen.add(current.id);
+    let data = current.extracted_data;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+    const originalId = data && data.duplicate_of_lead_id;
+    if (!originalId) return current;
+    const original = await database('leads').where({ id: originalId }).first();
+    if (!original) return lead;
+    current = original;
+  }
+  return current;
 }
 
 function leadMatchesEstimateContact(lead, estimate) {

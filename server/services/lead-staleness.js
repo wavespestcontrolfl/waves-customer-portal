@@ -62,6 +62,16 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
         .whereRaw("lead_activities.activity_type IS DISTINCT FROM 'shared_phone_note'")
         .where('lead_activities.created_at', '>=', cutoff);
     })
+    // A quote-wizard repeat filed as a 'duplicate' of this lead inside the
+    // window is the customer re-engaging (the public route labels the new
+    // row and never writes the original — codex #3834 r10 P1), so the
+    // original is not stale.
+    .whereNotExists(function () {
+      this.select(1).from('leads as repeat')
+        .whereRaw("repeat.lead_type = 'quote_wizard' AND repeat.status = 'duplicate'")
+        .whereRaw("repeat.extracted_data->>'duplicate_of_lead_id' = leads.id::text")
+        .where('repeat.created_at', '>=', cutoff);
+    })
     // A lead linked to a customer with booked (or already-delivered) service
     // FROM THIS LEAD'S COURTSHIP is pending won-conversion, not
     // unresponsive. Two scopes keep one dead or unrelated visit from

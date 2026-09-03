@@ -102,7 +102,15 @@ describe('duplicate ancestry follows the token the browser holds', () => {
 
   test('the token path re-derives duplicate state against what THIS stage typed, and attribution is skipped for duplicates', () => {
     expect(src).toMatch(/returning\(\['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at'\]\)/);
-    expect(src).toMatch(/if \(!duplicateOfLeadId\) await db\('ad_service_attribution'\)\.insert\(/);
+    // A repeat inserts no attribution row of its own — unless the original
+    // never got one, in which case the single row is backfilled onto the
+    // original's id (codex r10 P2).
+    expect(src).toMatch(/const attributionLeadId = duplicateOfLeadId\n\s+\? \(\(await db\('ad_service_attribution'\)\.where\(\{ lead_id: duplicateOfLeadId \}\)\.first\('id'\)\) \? null : duplicateOfLeadId\)\n\s+: lead\.id;/);
+    expect(src).toMatch(/if \(attributionLeadId\) await db\('ad_service_attribution'\)\.insert\(\{\n\s+customer_id: customerId,\n\s+lead_id: attributionLeadId,/);
+    // A submission that adds properties is a wider inquiry, never a repeat
+    // (codex r10 P1) — on both paths.
+    expect(src).toMatch(/duplicateOfLeadId = additionalProperties\.length \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
+    expect(src).toMatch(/if \(!lead && !additionalProperties\.length\) \{\n\s+duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
     // The replace path carries the marker forward...
     expect(src).toMatch(/'duplicate_of_lead_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'duplicate_of_lead_id'/);
     // ...and then the predicate is re-run on the new fields (codex r4 P1): a
@@ -112,7 +120,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // documented lookup→calculate flow is where a repeat is first fully typed.
     const block = src.slice(src.indexOf("if (lead && lead.lead_type === 'quote_wizard' && (lead.status === 'new' || lead.status === 'duplicate')) {"), src.indexOf('if (lead && !lead.lead_source_id && sourceMeta.leadSourceId)'));
     expect(block.length).toBeGreaterThan(200);
-    expect(block).toMatch(/duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead\.id, beforeCreatedAt: lead\.created_at \}\)/);
+    expect(block).toMatch(/duplicateOfLeadId = additionalProperties\.length \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead\.id, beforeCreatedAt: lead\.created_at \}\)/);
     expect(block).toMatch(/if \(duplicateOfLeadId !== stored\)/);
     // The relabel is scoped to the status just read (codex r9 P1): a staff
     // transition in between wins and this public retry updates 0 rows.

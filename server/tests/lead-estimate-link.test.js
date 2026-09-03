@@ -324,6 +324,36 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-orig', patch: expect.objectContaining({ estimate_id: 'estimate-2b' }), conditional: true }]);
   });
 
+  test('a duplicate chain (B → A → O, two concurrent repeats of one open lead) resolves to the open root O and converts THAT lead', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2j', estimate_data: { lead_id: 'lead-B' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-B': { id: 'lead-B', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-A' } },
+        'lead-A': { id: 'lead-A', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-O' } },
+        'lead-O': { id: 'lead-O', status: 'new', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' },
+      },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2j', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-O', expect.objectContaining({ customerId: 'customer-1' }));
+    expect(database._updates).toEqual([{ id: 'lead-O', patch: expect.objectContaining({ estimate_id: 'estimate-2j' }), conditional: true }]);
+  });
+
+  test('a duplicate marker cycle (A ↔ B) terminates and credits the named row', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2k', estimate_data: { lead_id: 'lead-cA' } },
+      leadsById: {
+        'lead-cA': { id: 'lead-cA', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-cB' } },
+        'lead-cB': { id: 'lead-cB', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-cA' } },
+      },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2k', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-cA', expect.anything());
+  });
+
   test('an indirectly resolved original that loses the stamp race to a concurrent link is not converted — the named row takes the win', async () => {
     const database = makeAcceptDb({
       linked: [],

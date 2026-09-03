@@ -130,13 +130,19 @@ describe('lead staleness sweep', () => {
         + 'where lead_activities.lead_id = leads.id '
         + "and lead_activities.activity_type IS DISTINCT FROM 'shared_phone_note' "
         + 'and "lead_activities"."created_at" >= ?) '
+        // A quote-wizard repeat filed as a duplicate of this lead inside the
+        // window is the customer re-engaging (codex #3834 r10 P1).
+        + 'and not exists (select 1 from "leads" as "repeat" '
+        + "where repeat.lead_type = 'quote_wizard' AND repeat.status = 'duplicate' "
+        + "and repeat.extracted_data->>'duplicate_of_lead_id' = leads.id::text "
+        + 'and "repeat"."created_at" >= ?) '
         + 'and not exists (select 1 from "scheduled_services" '
         + 'where scheduled_services.customer_id = leads.customer_id '
         + 'and "scheduled_services"."status" not in (?, ?, ?, ?) '
         + "and scheduled_services.created_at >= COALESCE(leads.first_contact_at, leads.created_at) - interval '1 day') "
         + 'returning "id"'
       );
-      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show']);
+      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show']);
 
       return knex.destroy();
     });

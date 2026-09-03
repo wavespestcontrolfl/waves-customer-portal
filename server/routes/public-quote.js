@@ -1773,7 +1773,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // the label moves, lands, or clears on this row only; nothing on the
         // original is written.
         const stored = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
-        duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
+        // A submission that adds properties is a wider inquiry, never a
+        // repeat (codex #3834 r10 P1): the extra addresses live only on
+        // this row and each is a manual follow-up quote the pipeline must
+        // still show — a 'duplicate' label would bury them.
+        duplicateOfLeadId = additionalProperties.length ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
         // Scoped to the status just read: a staff transition landing in
         // between (won / lost / contacted) wins, and this public retry
         // updates 0 rows instead of regressing it (codex #3834 r9 P1). On 0
@@ -1801,7 +1805,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // lifecycle and upsells like any lead; folding it into the original is
     // a trusted-path job (the office merge). Two concurrent first runs can
     // still both land 'new' — the office merges those by hand, as before.
-    if (!lead) {
+    if (!lead && !additionalProperties.length) {
       duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey });
     }
     if (!lead) {
@@ -1979,10 +1983,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // A repeat run is not a second marketing lead: the funnel and
         // service-line queries count attribution rows without excluding
         // duplicate lead statuses (codex #3834 r2 P1), and the original's
-        // row already carries this prospect.
-        if (!duplicateOfLeadId) await db('ad_service_attribution').insert({
+        // row already carries this prospect — unless the original's own
+        // best-effort insert never landed, in which case this run backfills
+        // the ONE attribution row for the prospect onto the original's id
+        // (codex #3834 r10 P2): a transient write miss must not become a
+        // permanently missing funnel row.
+        const attributionLeadId = duplicateOfLeadId
+          ? ((await db('ad_service_attribution').where({ lead_id: duplicateOfLeadId }).first('id')) ? null : duplicateOfLeadId)
+          : lead.id;
+        if (attributionLeadId) await db('ad_service_attribution').insert({
           customer_id: customerId,
-          lead_id: lead.id,
+          lead_id: attributionLeadId,
           service_line: inferServiceLine(serviceInterest),
           specific_service: inferSpecificService(serviceInterest),
           service_bucket: inferServiceBucket(serviceInterest),
