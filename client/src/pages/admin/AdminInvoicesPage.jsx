@@ -653,6 +653,7 @@ const NOTICE_REASON_LABELS = {
   sender_unverified: "Sender could not be verified",
   parse_failed: "Notice could not be read",
   apply_failed: "Recording failed",
+  stale_notice: "Over 48 hours old when first processed",
 };
 // Red only for the two reasons that are genuine alerts (a spoof or a failed
 // settlement) — everything else is an ordinary review item.
@@ -701,7 +702,10 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
     const invoiceId = choice[n.id] || ordered[0]?.invoice_id;
     if (!invoiceId) return;
     const picked = ordered.find((c) => c.invoice_id === invoiceId);
-    const label = picked ? picked.invoice_number : invoiceId;
+    // The apply route only settles an exact-cent match; near-amount leads are
+    // dropdown context, recorded from the invoice itself.
+    if (!picked?.exact_amount) return;
+    const label = picked.invoice_number;
     if (!window.confirm(`Mark ${label} paid via Zelle (${noticeAmount(n)} from ${n.payer_name || "unknown payer"}) and send the receipt (email + SMS)?`)) return;
     setBusy(n.id);
     try {
@@ -719,6 +723,10 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
       onRefresh?.();
     } catch (err) {
       showToast(err.message || "Could not apply the Zelle payment");
+      // The server may have re-parked the notice as apply_failed, another
+      // operator may have resolved it, or the settlement may have committed
+      // before the response was lost — show its authoritative state.
+      await load();
     } finally {
       setBusy(null);
     }
@@ -751,6 +759,7 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
       {notices.map((n) => {
         const ordered = orderNoticeCandidates(n.candidates);
         const selected = choice[n.id] || ordered[0]?.invoice_id || "";
+        const selectedExact = Boolean(ordered.find((c) => c.invoice_id === selected)?.exact_amount);
         const alert = NOTICE_ALERT_REASONS.has(n.park_reason);
         return (
           <div
@@ -795,12 +804,15 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
               ) : (
                 <div style={{ fontSize: 13, color: D.muted }}>No candidate invoices — record it from the invoice if it exists, or ignore.</div>
               )}
+              {ordered.length > 0 && !selectedExact && (
+                <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Near-amount lead — record the payment from that invoice, then ignore this notice.</div>
+              )}
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: isMobile ? "stretch" : "flex-end" }}>
               <button
                 type="button"
-                style={{ ...sBtn(D.heading, D.white, isMobile), flex: isMobile ? 1 : undefined, opacity: !ordered.length || busy === n.id ? 0.5 : 1 }}
-                disabled={!ordered.length || busy === n.id}
+                style={{ ...sBtn(D.heading, D.white, isMobile), flex: isMobile ? 1 : undefined, opacity: !selectedExact || busy === n.id ? 0.5 : 1 }}
+                disabled={!selectedExact || busy === n.id}
                 onClick={() => apply(n)}
               >
                 Apply &amp; send receipt
