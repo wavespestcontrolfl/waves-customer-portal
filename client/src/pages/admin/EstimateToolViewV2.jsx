@@ -2951,6 +2951,7 @@ export default function EstimateToolViewV2({
     // of the edit state or it lingers over the next blank form.
     setExistingCustomerMatch(null);
     setAddressMatches([]);
+    preLinkContactRef.current = null;
   }
 
   const set = useCallback((key, val) => {
@@ -3165,6 +3166,13 @@ export default function EstimateToolViewV2({
   // the old silent first-hit link put the second person's quote on the first
   // person's profile.
   const [addressMatches, setAddressMatches] = useState([]);
+  // The address those matches were found for. Suggestions render only while
+  // form.address still equals it — an edited address must not keep a stale
+  // Link actionable for the previous property.
+  const [addressMatchesFor, setAddressMatchesFor] = useState("");
+  // Contact fields as typed before a link, so Unlink restores them instead
+  // of leaving the unlinked customer's name/phone/email on the estimate.
+  const preLinkContactRef = useRef(null);
 
   // The ONE way a customer row becomes the linked customer — shared by the
   // Customer Lookup list and the address-match suggestion. The lookup list
@@ -3172,6 +3180,14 @@ export default function EstimateToolViewV2({
   // suggestion keeps the address the operator just looked up.
   function applyCustomerLink(c, { adoptAddress }) {
     const name = `${c.firstName || ""} ${c.lastName || ""}`.trim();
+    if (!preLinkContactRef.current) {
+      preLinkContactRef.current = {
+        customerName: form.customerName || "",
+        customerPhone: form.customerPhone || "",
+        customerEmail: form.customerEmail || "",
+        isRecurringCustomer: form.isRecurringCustomer,
+      };
+    }
     // 'Commercial' is a flat non-member tier — exclude it so a commercial
     // customer doesn't unlock recurring-customer loyalty discounts.
     const hasActivePlan =
@@ -3205,7 +3221,14 @@ export default function EstimateToolViewV2({
   // link (address suggestion, deep link, or a mis-click) is one tap to undo.
   function unlinkCustomer() {
     setExistingCustomerMatch(null);
-    setForm((f) => ({ ...f, customerId: "", isRecurringCustomer: "NO" }));
+    const restore = preLinkContactRef.current || {
+      customerName: "",
+      customerPhone: "",
+      customerEmail: "",
+      isRecurringCustomer: "NO",
+    };
+    preLinkContactRef.current = null;
+    setForm((f) => ({ ...f, customerId: "", ...restore }));
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
@@ -3508,6 +3531,7 @@ export default function EstimateToolViewV2({
     setEnrichedProfile(null);
     setExistingCustomerMatch(null);
     setAddressMatches([]);
+    preLinkContactRef.current = null;
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     // A fresh lead/customer prefill is a new job — never chain it into a
@@ -3969,6 +3993,7 @@ export default function EstimateToolViewV2({
                   .includes(c.address.split(",")[0].trim().toLowerCase()),
             );
             setAddressMatches(matches);
+            setAddressMatchesFor(address);
           }
         } catch {
           /* ignore customer lookup errors */
@@ -5142,6 +5167,7 @@ export default function EstimateToolViewV2({
     setEnrichedProfile(null);
     setExistingCustomerMatch(null);
     setAddressMatches([]);
+    preLinkContactRef.current = null;
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     setCustomerSearch("");
@@ -5887,6 +5913,7 @@ export default function EstimateToolViewV2({
                     setEnrichedProfile(null);
                     setExistingCustomerMatch(null);
                     setAddressMatches([]);
+                    preLinkContactRef.current = null;
                     setSatelliteStatus({ type: "", msg: "" });
                     setSatelliteData(null);
                     setEstimate(null);
@@ -6032,6 +6059,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               {addressMatches.length > 0 &&
+                addressMatchesFor === form.address.trim() &&
                 !existingCustomerMatch &&
                 !form.customerId && (
                   <div className="mb-2.5 border-hairline border-zinc-300 rounded-xs overflow-hidden">

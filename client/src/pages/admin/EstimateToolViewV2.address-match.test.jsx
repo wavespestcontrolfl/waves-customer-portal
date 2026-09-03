@@ -159,6 +159,20 @@ describe("address match is a suggestion, never a silent link", () => {
     expect(screen.getByText("Jane Doe")).toBeInTheDocument();
   });
 
+  it("hides the suggestion once the address is edited, so a stale Link cannot fire", async () => {
+    renderTool();
+    await lookUp();
+
+    const addressInput = screen.getByPlaceholderText("Start typing an address...");
+    fireEvent.change(addressInput, { target: { value: "456 Other Rd, Venice, FL 34285" } });
+    expect(screen.queryByText(/This address matches/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Link" })).not.toBeInTheDocument();
+
+    // Same address again — the matches still belong to it.
+    fireEvent.change(addressInput, { target: { value: ADDRESS } });
+    expect(screen.getByText(/This address matches/)).toBeInTheDocument();
+  });
+
   it("does not second-guess a customer the operator already linked", async () => {
     customersAtStreet = [WIFE, HUSBAND];
     renderTool();
