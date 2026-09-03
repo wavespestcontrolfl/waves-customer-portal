@@ -124,6 +124,18 @@ test('gate on: an OUT-OF-ZONE stop across a real drive drops the touching window
   expect(starts).toContain('14:00');
 });
 
+test('gate on with a customerId and no estimate (AI assistant session): the customer pin, no estimates read', async () => {
+  process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+  listOccupiedWindows.mockResolvedValue([
+    { id: 'far', date: DATE, startMin: 600, endMin: 660, ...BRADENTON },
+  ]);
+  const result = await engine.getAvailableSlots('Palmetto', null, { customerId: 'cust-1' });
+  expect(seen).not.toContain('estimates');
+  expect(seen).toContain('customers');
+  expect(startsOf(result)).not.toContain('09:00');
+  expect(startsOf(result)).toContain('14:00');
+});
+
 test('gate on without an estimate: buffer-only pin, still mirrored; a failed range read serves unfiltered', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   listOccupiedWindows.mockResolvedValue([

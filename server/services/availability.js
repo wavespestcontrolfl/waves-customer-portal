@@ -100,7 +100,10 @@ async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingI
 
 class AvailabilityEngine {
 
-  async getAvailableSlots(city, estimateId) {
+  // opts.customerId: the booking's customer when no estimate links it (AI
+  // assistant check_availability with the session customer) — gives the
+  // travel-gap mirror the same pin confirmBooking measures with.
+  async getAvailableSlots(city, estimateId, opts = {}) {
     // 1. Resolve city → zone
     const zone = await this.resolveZone(city);
     if (!zone) return { zone: null, days: [], message: `No service zone found for ${city}` };
@@ -139,8 +142,9 @@ class AvailabilityEngine {
     // quoted slot would make the commit reject the exact option just
     // offered (offer/commit dead end). Gate on: one range read of every
     // occupying row with guarded coords + the same pin the commit measures
-    // with (customers.latitude/longitude via the estimate's customer; no
-    // estimate or no pin → buffer-only, never a skipped check). Gate off:
+    // with (customers.latitude/longitude via opts.customerId, else the
+    // estimate's customer; neither → buffer-only, never a skipped check;
+    // lead-response quotes have no customer row and no booking tool). Gate off:
     // no extra statements. Soft-degrade like /book's mirror: a failed read
     // serves unfiltered and the commit gate keeps correctness.
     let travelMirror = null;
@@ -157,11 +161,13 @@ class AvailabilityEngine {
           byDate.get(row.date).push(row);
         }
         let pin = { lat: null, lng: null };
-        if (estimateId) {
+        let pinCustomerId = opts.customerId || null;
+        if (!pinCustomerId && estimateId) {
           const est = await db('estimates').where('id', estimateId).first('customer_id');
-          const cust = est?.customer_id
-            ? await db('customers').where('id', est.customer_id).first('latitude', 'longitude')
-            : null;
+          pinCustomerId = est?.customer_id || null;
+        }
+        if (pinCustomerId) {
+          const cust = await db('customers').where('id', pinCustomerId).first('latitude', 'longitude');
           pin = { lat: cust?.latitude ?? null, lng: cust?.longitude ?? null };
         }
         travelMirror = { byDate, pin };
