@@ -1277,6 +1277,26 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     expect(verified.lotSqFt).toBe(0);
     expect(verified.stories).toBe(2);
     expect(verified.storiesSource).toBe('verified');
+    // The flag names what the earlier save kept, so a building figure saved
+    // under the unit address is visible and re-savable (codex r4).
+    expect(verified.fieldVerifyFlags.find((f) => f.field === 'propertyType').reason)
+      .toMatch(/field-verified 1,100 sq ft and 2 stories .* was kept/);
+  });
+
+  test('unit address on a stacked-association aggregate: one structure for the perimeter estimate', () => {
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord({
+        squareFootage: 1200, _source: 'county',
+        _fieldEvidence: { squareFootage: { value: 1200, sourceType: 'verified', fieldVerify: false } },
+        _parcel: { aggregated: true, residentialUnits: 48, buildingCount: 6, livingAreaSqft: 57600, lotSqft: 300000 },
+      }),
+      null, null, null, null, null, unit,
+    );
+    expect(profile.isCommercial).toBe(false);
+    expect(profile.buildingCount).toBe(1);
+    expect(profile.homeSqFt).toBe(1200);
+    // 4·√1200 ≈ 139 LF for one structure, not 6·4·√(1200/6) ≈ 339.
+    expect(profile.estimatedPerimeterLF).toBeLessThan(200);
   });
 
   test('unit address: parcel-scale satellite areas are discarded with the building dims', () => {

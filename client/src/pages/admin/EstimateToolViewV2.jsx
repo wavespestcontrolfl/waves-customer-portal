@@ -375,6 +375,10 @@ const ADDRESS_ASK_REASONS = new Set([
   "address_not_validated",
 ]);
 
+// A dwelling unit designator anywhere in a typed address (the server's
+// unit-scope model reads the same forms; "#" alone counts).
+const UNIT_DESIGNATOR_RE = /\b(?:apt|apartment|unit)\.?\s*#?\s*[\w-]+|#\s*\w+/i;
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...options,
@@ -4104,7 +4108,10 @@ export default function EstimateToolViewV2({
     // A unit lookup dropped every parcel-wide read on purpose; this action
     // would write them straight back (lot, bed area, canopy, densities,
     // pool, water) — pre-push codex P1 r4.
-    if (enrichedProfile?.residentialUnitLookup && unitLookupAddressRef.current === address) {
+    // …the same address, OR any address still carrying a dwelling unit
+    // ("Apt 204" corrected to "Apt 205" is the same parcel — codex r4 P1).
+    if (enrichedProfile?.residentialUnitLookup
+      && (unitLookupAddressRef.current === address || UNIT_DESIGNATOR_RE.test(address))) {
       setSatelliteStatus({
         type: "err",
         msg: "Satellite analysis reads the whole parcel — not applied to a single-unit lookup. Enter the unit's own figures.",

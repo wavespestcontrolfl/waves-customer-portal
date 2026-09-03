@@ -1819,6 +1819,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       _storiesSource: (rc._storiesSource === 'verified' || isVerified('stories')) ? rc._storiesSource : 'default',
       hasPool: null,
       poolCageSqft: null,
+      // A stacked-association aggregate's building count multiplies the
+      // perimeter estimate (N buildings of footprint/N) — for ONE unit it
+      // is one structure (codex r4 P2). The association totals stay on
+      // profile.association as context.
+      _parcel: rc._parcel ? { ...rc._parcel, buildingCount: 1 } : rc._parcel,
     };
     ai = null;
   }
@@ -1920,9 +1925,16 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup });
   if (residentialUnitLookup) {
     const wholeUnits = verifiedUnitCountOf(rc) ?? Math.max(Number(rc?.unitCount) || 0, Number(rc?._parcel?.residentialUnits) || 0);
+    // Name what a person's earlier field-verified save KEPT on this unit
+    // address, so an operator who saved the building's figures under the
+    // unit address can see exactly which values to re-save (codex r4).
+    const keptVerified = [
+      rc?.squareFootage ? `${Number(rc.squareFootage).toLocaleString()} sq ft` : null,
+      rc?._storiesSource === 'verified' ? `${rc.stories} stor${Number(rc.stories) === 1 ? 'y' : 'ies'}` : null,
+    ].filter(Boolean);
     fieldVerifyFlags.push({
       field: 'propertyType',
-      reason: `Unit address inside a${wholeUnits > 1 ? ` ${wholeUnits.toLocaleString()}-unit` : 'n'} apartment/condo building — quoted as ONE residential unit (condo pricing, ground floor, single level, no lot, no pool assumed), not the whole property. Confirm the floor, and get the unit's own sq ft from the customer: the building's sq ft, lot, story count, pool, and every satellite read were dropped as parcel-wide. Quote the whole property only if the association, complex owner, or property manager is the customer`,
+      reason: `Unit address inside a${wholeUnits > 1 ? ` ${wholeUnits.toLocaleString()}-unit` : 'n'} apartment/condo building — quoted as ONE residential unit (condo pricing, ground floor, single level, no lot, no pool assumed), not the whole property. Confirm the floor, and get the unit's own sq ft from the customer: the building's sq ft, lot, story count, pool, and every satellite read were dropped as parcel-wide${keptVerified.length ? `; the field-verified ${keptVerified.join(' and ')} saved on this unit address was kept — re-save if that was the building's figure` : ''}. Quote the whole property only if the association, complex owner, or property manager is the customer`,
       priority: 'HIGH',
     });
   }
