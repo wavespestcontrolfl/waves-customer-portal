@@ -1788,7 +1788,12 @@ unset its gate; budget kill = the issuer program's limit.
 3. **Path investigator** — job + schema-validated LLM call + probe list + cost caps;
    `GATE_LINK_INVESTIGATOR`. Run it over the full gap ingestion; ship the Registry view.
 4. **Authority policy** — `seo_link_policy`, decision function + tests, owner cards,
-   Policy panel; `GATE_LINK_AUTHORITY`; the post-scan inbound cross-link for outreach
+   Policy panel; `GATE_LINK_AUTHORITY`; shipped as four PRs (owner ruling 2026-09-02/03): 1 = policy row +
+   decision + panel (#3765); 2a = `seo_link_floor_waivers` + `seo_link_approvals` schema + the nightly
+   bridge (gated: selection-only while the gate is off; ONE bell per run, never per card; every bridged
+   placement targets the homepage until a topic is persisted on the domain; spend = 0 and D30 = null
+   until steps 5/7); 2b = Owner-queue cards + Approve/Reject/Watch/Acquire-anyway; 3 = the outreach
+   mandate; 4 = claim re-check, `mode=payment`, allowlist retirement; the post-scan inbound cross-link for outreach
    placements (§8 — not shipped today) and the `mode=payment` claim (§7). Bounded outreach mandate (§6.4) lands here and
    releases the June drafts through it.
 5. **Runner extension** — account creation + IMAP verification + resumable sessions +

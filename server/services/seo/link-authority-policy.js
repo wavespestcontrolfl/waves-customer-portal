@@ -27,6 +27,7 @@
  * job, owner cards and the claim-predicate re-check are the later step-4 PRs.
  */
 
+const crypto = require('crypto');
 const {
   ATTEMPT_PROVIDERS, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES, ACQUISITION_TYPES, CURRENCIES, FEE_SCOPES,
 } = require('./link-registry');
@@ -216,6 +217,43 @@ function isValidMerchantBinding(b) {
   return nonEmpty(p.host) && nonEmpty(p.merchant_account_id);
 }
 
+// ---------------------------------------------------------------------------
+// §3.6b decision-inputs hash — per DIMENSION, so a change invalidates only the
+// approvals of the dimension it belongs to (a price change never moves the
+// communication hash). Every dimension also carries the shared quality floors
+// (§6.3 1b) and the policy floor values, so a floor that moved re-decides the
+// row. The floors alone are what a floor waiver binds to (`floorInputsHash`).
+// The draft an outreach approval binds to is NOT here — that is the approval's
+// own `action_hash` (§3.6b), recomputed by the send claim.
+// ---------------------------------------------------------------------------
+const DIMENSION_INPUT_FIELDS = Object.freeze({
+  payment: Object.freeze(['estimated_cost_cents', 'renewal_cost_cents', 'renewal_period', 'currency', 'fee_scope', 'payment_required', 'legal_attestation', 'legal_terms_hash', 'merchant_binding']),
+  communication: Object.freeze(['acquisition_type', 'link_type', 'expected_rel', 'legal_attestation', 'legal_terms_hash', 'terms_accepted_by_send', 'execution_after_send']),
+  execution: Object.freeze(['acquisition_type', 'account_required', 'email_verification', 'agent_completable', 'legal_attestation', 'legal_terms_hash', 'execution_after_send', 'submission_url']),
+});
+const canonical = (v) => {
+  if (v === undefined) return null;
+  if (v === null || typeof v !== 'object') return v;
+  if (Array.isArray(v)) return v.map(canonical);
+  return Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])]));
+};
+const sha256 = (o) => crypto.createHash('sha256').update(JSON.stringify(canonical(o))).digest('hex');
+function floorInputs({ path = {}, domain = {}, policy = {}, score } = {}) {
+  const s = score === undefined ? num(domain.score) : num(score);
+  return {
+    spam_score: num(domain.spam_score), confidence: num(path.confidence), score: s,
+    max_spam_score: num(policy.max_spam_score), min_path_confidence: num(policy.min_path_confidence), min_score: num(policy.min_score),
+  };
+}
+const floorInputsHash = (ctx) => sha256(floorInputs(ctx));
+function decisionInputs(dimension, ctx = {}) {
+  const fields = DIMENSION_INPUT_FIELDS[dimension];
+  if (!fields) throw new Error(`unknown authority dimension '${dimension}'`);
+  const path = ctx.path || {};
+  return { dimension, ...Object.fromEntries(fields.map((f) => [f, path[f] === undefined ? null : path[f]])), floors: floorInputs(ctx) };
+}
+const decisionInputsHash = (dimension, ctx) => sha256(decisionInputs(dimension, ctx));
+
 // Which authority instances a path REQUIRES (§3.3b / §6.3 2a–2c), independent
 // of the level each gets. Exported so the bridge and tests share one answer.
 function requiredInstances(path) {
@@ -364,4 +402,5 @@ module.exports = {
   DEFAULT_OUTREACH_DAILY_CAP, outreachDailyCeiling,
   normalizePolicyRow, applyEnvTightening, loadPolicy, updatePolicy, parseField,
   requiredInstances, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
+  DIMENSION_INPUT_FIELDS, floorInputs, floorInputsHash, decisionInputs, decisionInputsHash,
 };
