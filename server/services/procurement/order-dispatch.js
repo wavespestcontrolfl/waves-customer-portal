@@ -539,7 +539,12 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
 
     const placeArgs = { vendorSku, quantity, quoteCents };
     if (adapterKey === 'siteone') {
-      placeArgs.credentials = await getVendorLoginCredentials(conn, vendor.id);
+      // A lookup that THROWS (DB hiccup) is run-level: nothing was sent, so
+      // the claim is released for tomorrow's tick instead of burning the
+      // request's one-shot claim as 'failed' (pre-push P1). A lookup that
+      // RETURNS null/incomplete is configuration and parks inside place().
+      try { placeArgs.credentials = await getVendorLoginCredentials(conn, vendor.id); }
+      catch (e) { await releaseClaim(); const err = new Error(`vendor credential lookup failed: ${e.message}`); err.runLevel = true; throw err; }
       // Cart total = screen; checkout total = the binding reservation.
       placeArgs.beforeSubmit = (cents) => reserveUnderCaps(conn, ledger.id, cents, { now, env });
     }

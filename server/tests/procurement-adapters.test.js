@@ -211,7 +211,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.billToAccountSelected) return el({ count: st.accountChecked ? 1 : 0 });
       if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, text: st.accountText === undefined ? 'Account # 12345' : st.accountText });
       if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
-      if (sel === S.checkoutTotal) return el({ count: 1, text: 'Order total $105.93' });
+      if (sel === S.checkoutTotal) return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: 'Order total $105.93' });
       if (sel === S.placeOrder) return el({ count: 1, onClick: () => { st.placeClicked += 1; } });
       if (sel === S.orderNumber) return el({ count: 1, text: 'Order # SO-778899' });
       return el();
@@ -248,6 +248,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     ['ship_to_mismatch', { shipToText: 'Ship to: 9 Other Rd, Venice, FL 34285' }],
     ['ship_to_unverified', { shipToText: null }],
     ['account_ambiguous', { accountCount: 2 }],
+    ['checkout_total_ambiguous', { totalCount: 2 }], // hidden desktop/mobile duplicate
+    ['checkout_total_hidden', { totalVisible: false }],
+    ['no_checkout_total', { totalCount: 0 }],
     ['ship_to_ambiguous', { shipToCount: 3 }],
     ['account_unverified', { accountCount: 0 }],
   ])('checkout %s → refused, no place-order click, cart cleaned (pre-push P0)', async (reason, patch) => {

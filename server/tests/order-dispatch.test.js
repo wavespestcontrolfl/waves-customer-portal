@@ -513,6 +513,21 @@ test('the run goes red while a bell is undelivered', async () => {
   await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
 });
 
+test('a credential lookup that THROWS is run-level: claim released, nothing parked failed, batch aborts (pre-push P1)', async () => {
+  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
+  getVendorLoginCredentials.mockRejectedValueOnce(new Error('connection reset'));
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  const place = jest.fn();
+  await expect(run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, place })).rejects.toMatchObject({ runLevel: true, message: expect.stringMatching(/credential lookup failed/) });
+  expect(place).not.toHaveBeenCalled();
+  expect(mockState.deletes).toContain('vendor_orders'); // claim released
+  expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status)).toHaveLength(0); // never parked
+  expect(notify).not.toHaveBeenCalled();
+});
+
 test('a prior dispatched order for the product that is neither received nor revoked blocks the claim — no second order on top of stock that may be on its way (pre-push P0)', async () => {
   mockState.priorUnreconciled = { id: 'ledger-prior' };
   const a = mockAdapter();

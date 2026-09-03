@@ -388,7 +388,14 @@ async function place(
     evidence.shipToVerified = shipToText.slice(0, 120);
     // The CHECKOUT total (tax + shipping applied) is the binding amount: the
     // cart pre-check above only screens; this is the cap that gates the click.
-    const checkoutText = await page.locator(SELECTORS.checkoutTotal).first().textContent().catch(() => '');
+    // Exactly ONE visible total element (pre-push P0): responsive checkouts
+    // keep hidden desktop/mobile copies, and `.first()` on a duplicate or a
+    // stale hidden node would cap-check a figure the vendor is not charging.
+    const totalEls = page.locator(SELECTORS.checkoutTotal);
+    const totalCount = await totalEls.count().catch(() => 0);
+    if (totalCount !== 1) { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(totalCount ? 'checkout_total_ambiguous' : 'no_checkout_total', totalCount ? `${totalCount} checkout-total elements — cannot tell which the order charges` : 'no checkout-total element at checkout', evidence); }
+    if (!(await totalEls.first().isVisible({ timeout: 1500 }).catch(() => false))) { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError('checkout_total_hidden', 'the checkout-total element is not visible — not the figure the order charges', evidence); }
+    const checkoutText = await totalEls.first().textContent().catch(() => '');
     const finalCents = parseMoney(checkoutText);
     await shot(page, 'pre-submit', evidence, upload);
     if (!finalCents) throw new RefusedError('no_checkout_total', `could not read the checkout total ("${String(checkoutText || '').trim().slice(0, 40)}")`, evidence);
