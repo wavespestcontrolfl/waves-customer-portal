@@ -111,6 +111,7 @@
     "terms": "Pay on service day. No recurring schedule.",
     "aiTitle": "Waves AI priced this by the nest, not a flat fee",
     "aiBody": "Wasp and hornet work is quoted by the nest — where it is, how high and how hard to reach, how aggressive the colony is, and whether you add removal — never a one-size fee.",
+    "aiBodyV2": "Stinging insect work is quoted by the nest — how many, what kind, and where they are, plus whether you need an urgent or after-hours visit — never a one-size fee.",
     "askChips": [
       "How do you remove the nest?",
       "What precautions should I follow for pets and children?",
@@ -120,11 +121,13 @@
     "hero": {
       "eyebrow": "Your wasp & hornet service",
       "h1": "Hello {first}, your wasp & hornet quote is ready!",
-      "sub": "Nest treatment priced by where the nest is and how hard it is to reach, physical removal when you add it — approve online and pick a day. Licensed & insured, 30-day callback included."
+      "sub": "Nest treatment priced by where the nest is and how hard it is to reach, physical removal when you add it — approve online and pick a day. Licensed & insured, 30-day callback included.",
+      "subV2": "Nest treatment priced by how many nests, what kind, and where they are — approve online and pick a day. Licensed & insured, 30-day callback included."
     },
     "outcomeNoRemoval": "The nest knocked out and the yard yours again — usually the same day.",
     "removalBullet": "Nest treatment and physical removal",
-    "noRemovalBullet": "Nest treatment — physical nest removal is available as an add-on"
+    "noRemovalBullet": "Nest treatment — physical nest removal is available as an add-on",
+    "noRemovalBulletV2": "Nest treatment at every nest on the quote"
   },
   "bed_bug": {
     "outcome": "Sleep in your own bed again. A full treatment cycle sized to the infestation, with a follow-up at the egg-hatch window.",
@@ -319,11 +322,11 @@
     "creditBullet": "Inspection fee credited toward the recommended service when you book it within {creditDays} days"
   },
   "rodent_sanitation": {
-    "outcome": "The droppings, nesting, and the scent trail that draws the next ones — gone, so the exclusion is not wasted.",
+    "outcome": "The droppings, nesting, and the scent trail that draws the next ones — gone.",
     "includes": [
       "PPE-protected removal of droppings and nesting material",
       "Disinfection with an EPA-registered antimicrobial — professional-grade, not household cleaner",
-      "Coordinated with exclusion so the cleanup holds",
+      "Recommendation on exclusion if entry points are still open, so the cleanup holds",
       "Sized to light, standard, or heavy contamination"
     ],
     "assurance": null,
@@ -331,7 +334,7 @@
     "hero": {
       "eyebrow": "Your rodent sanitation",
       "h1": "Hello {first}, your rodent sanitation quote is ready!",
-      "sub": "Droppings, nesting, and the pheromone trail removed and disinfected, timed with exclusion — approve online and pick a day. Licensed & insured."
+      "sub": "Droppings, nesting, and the pheromone trail removed and disinfected — approve online and pick a day. Licensed & insured."
     }
   },
   "rodent_bait_setup": {
@@ -401,12 +404,12 @@
     }
   },
   "dethatching": {
-    "outcome": "Real mechanical dethatching, done at the right time of year for your grass — not heavy raking.",
+    "outcome": "Real mechanical dethatching — not heavy raking.",
     "includes": [
       "Power dethatching pass across the lawn",
       "Removal and disposal of thatch debris",
       "Recommendation on top dressing or plugging for damaged areas",
-      "Timed so dethatching does not stress the lawn"
+      "Recommendation on the best window for your grass type, so dethatching does not stress the lawn"
     ],
     "assurance": null,
     "terms": "Pay on service day. No recurring schedule, no tier discount.",
@@ -421,7 +424,7 @@
     "outcome": "A thin layer of sand spread across the lawn that levels uneven turf and breaks down thatch over time.",
     "includes": [
       "Sand top dressing spread evenly at the depth you chose",
-      "Coordinated with dethatching for maximum effect",
+      "Recommendation on pairing with dethatching for maximum effect",
       "Watering and mowing recommendations afterward"
     ],
     "assurance": null,

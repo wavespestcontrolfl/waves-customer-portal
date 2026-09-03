@@ -99,7 +99,12 @@ function copyKeyFromText(item = {}) {
   if (/\bwasps?\b|\bhornets?\b|yellow ?jackets?|stinging insect/.test(nameText)) return 'wasp';
   if (/\btrap only\b/.test(text)) return 'trap_only';
   if (/\btrapping\b/.test(nameText)) return 'rodent_trapping';
-  if (/\bexclusion\b|entry point plugging|wire mesh/.test(nameText)) return 'rodent_exclusion';
+  // Component rodent work (measured wire mesh, a finite number of plugs)
+  // must never inherit the whole-home exclusion pack — even when the legacy
+  // label also says "Exclusion" (codex #3823 r7 P1). Checked BEFORE the
+  // broad exclusion match, mirroring the keyed no-copy handling above.
+  if (/wire mesh|entry[- ]?point|\bplugging\b|\bplugs?\b/.test(nameText)) return null;
+  if (/\bexclusion\b/.test(nameText)) return 'rodent_exclusion';
   if (/\bfoam\b/.test(nameText) && /termite|termidor/.test(text)) return 'termite_foam';
   if (/\btrench/.test(nameText)) return 'termite_trenching';
   if (/one ?time pest|initial pest cleanout|general pest cleanout/.test(nameText)) return 'one_time_pest';
@@ -141,6 +146,13 @@ function rowVisits(item = {}, key = null) {
   if (!m) return 0;
   const words = { one: 1, two: 2, three: 3, four: 4 };
   return Number(m[1]) || words[m[1].toLowerCase()] || 0;
+}
+
+// calculateStingingPrice() prices from nest count/type, location, urgency,
+// and after-hours only — no aggressiveness, height, or removal inputs — so
+// its rows get the v2 provenance/hero wording (codex #3823 r7 P2).
+function isStingingV2(item = {}) {
+  return String(item.service || '').toLowerCase() === 'stinging_insect_v2';
 }
 
 function bedBugMethod(item = {}) {
@@ -201,7 +213,11 @@ function resolveOneTimeServiceCopy(item = {}) {
   const nestRemovalSelected = item.nestRemovalSelected === true
     || Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal;
   if (key === 'wasp' && !nestRemovalSelected) {
-    lines = lines.map((line) => (line === entry.removalBullet ? entry.noRemovalBullet : line));
+    // The stinging-v2 pricer (calculateStingingPrice) has no removal
+    // input at all, so its rows never offer removal as an add-on (codex
+    // #3823 r7 P2); the legacy wasp/stinging pricers do.
+    const noRemoval = isStingingV2(item) ? entry.noRemovalBulletV2 : entry.noRemovalBullet;
+    lines = lines.map((line) => (line === entry.removalBullet ? noRemoval : line));
     outcome = entry.outcomeNoRemoval || outcome;
   }
   // Fail closed: the colony-transfer claim rides ONLY a row whose chemistry
@@ -276,11 +292,16 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
   // Flea hero subline follows the priced scope: exterior only when priced,
   // "follow-up built in" only on the two-visit package (codex pre-push P1).
   const fleaExteriorPriced = rows.some((row) => ['priced', 'requires_confirmation'].includes(String(row.exteriorStatus || '')));
-  const heroSub = key === 'flea'
-    ? entry.hero.sub
+  const stingingV2 = key === 'wasp' && rows.some(isStingingV2);
+  let heroSub = entry.hero.sub;
+  if (key === 'flea') {
+    heroSub = heroSub
       .replace('{Scope}', fleaExteriorPriced ? 'Interior and yard' : 'Interior')
-      .replace('{FollowUp}', visits >= 2 ? ', with the follow-up built in' : '')
-    : entry.hero.sub;
+      .replace('{FollowUp}', visits >= 2 ? ', with the follow-up built in' : '');
+  } else if (stingingV2) {
+    heroSub = entry.hero.subV2 || heroSub;
+  }
+  const aiBody = stingingV2 ? (entry.aiBodyV2 || entry.aiBody) : entry.aiBody;
   return {
     key,
     hero: {
@@ -288,7 +309,7 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
       h1: fillVisits(entry.hero.h1, visits),
       sub: fillVisits(heroSub, visits),
     },
-    ...(entry.aiTitle ? { aiTitle: entry.aiTitle, aiBody: entry.aiBody } : {}),
+    ...(entry.aiTitle ? { aiTitle: entry.aiTitle, aiBody } : {}),
     askChips: Array.isArray(entry.askChips) ? [...entry.askChips] : [],
   };
 }

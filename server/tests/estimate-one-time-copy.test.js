@@ -40,6 +40,10 @@ describe('oneTimeCopyKeyFor', () => {
     // Component rodent work (N entry points / measured mesh) is NOT the whole-home exclusion pack.
     expect(oneTimeCopyKeyFor({ service: 'rodent_plugging', label: 'Rodent Entry-Point Plugging' })).toBeNull();
     expect(oneTimeCopyKeyFor({ service: 'rodent_wire_mesh', label: 'Rodent Wire Mesh Exclusion Service' })).toBeNull();
+    // …and keyless legacy rows with those component labels stay bare too (codex r7 P1).
+    expect(oneTimeCopyKeyFor({ name: 'Rodent Wire Mesh Exclusion' })).toBeNull();
+    expect(oneTimeCopyKeyFor({ name: 'Rodent Entry-Point Plugging' })).toBeNull();
+    expect(oneTimeCopyKeyFor({ label: 'Full Rodent Exclusion' })).toBe('rodent_exclusion');
     expect(oneTimeCopyKeyFor({ service: 'rodent_trapping', label: 'Rodent Trapping' })).toBe('rodent_trapping');
     // Only the retainer row carries the monitoring pack; component fees stay bare.
     expect(oneTimeCopyKeyFor({ service: 'trap_only_setup', label: 'Trap-Only Setup / Inspection' })).toBeNull();
@@ -151,6 +155,32 @@ describe('resolveOneTimeServiceCopy', () => {
     const removed = resolveOneTimeServiceCopy({ service: 'wasp', label: 'Wasp Nest Treatment', nestRemovalSelected: true });
     expect(removed.includes[0]).toBe('Nest treatment and physical removal');
     expect(removed.outcome).toMatch(/^The nest gone/);
+  });
+
+  test('stinging-v2 rows never offer removal as an add-on, and the AI body / hero describe only the v2 pricer inputs', () => {
+    const v2 = resolveOneTimeServiceCopy({ service: 'stinging_insect_v2', name: 'Stinging Insect — wasp', price: 120 });
+    expect(v2.includes[0]).toBe(ONE_TIME_SERVICE_COPY.wasp.noRemovalBulletV2);
+    expect(v2.includes.join(' ')).not.toMatch(/add-on|removal/i);
+    const legacy = resolveOneTimeServiceCopy({ service: 'wasp', label: 'Wasp Nest Treatment', amount: 150 });
+    expect(legacy.includes[0]).toBe(ONE_TIME_SERVICE_COPY.wasp.noRemovalBullet);
+    const ai = oneTimeOnlyIntelligenceCopy([{ service: 'stinging_insect_v2', name: 'Stinging Insect — wasp', price: 120 }]);
+    expect(ai.aiBody).toBe(ONE_TIME_SERVICE_COPY.wasp.aiBodyV2);
+    expect(ai.aiBody).not.toMatch(/aggressive|removal|how high/i);
+    expect(ai.hero.sub).toBe(ONE_TIME_SERVICE_COPY.wasp.hero.subV2);
+    expect(ai.hero.sub).not.toMatch(/removal|hard to reach/i);
+    const legacyAi = oneTimeOnlyIntelligenceCopy([{ service: 'wasp', label: 'Wasp Nest Treatment', amount: 150 }]);
+    expect(legacyAi.aiBody).toBe(ONE_TIME_SERVICE_COPY.wasp.aiBody);
+    expect(legacyAi.hero.sub).toBe(ONE_TIME_SERVICE_COPY.wasp.hero.sub);
+  });
+
+  test('standalone-safe wording: sanitation, dethatching, and top dressing promise no companion service or season the engine cannot enforce', () => {
+    const san = ONE_TIME_SERVICE_COPY.rodent_sanitation;
+    expect(`${san.outcome} ${san.hero.sub}`).not.toMatch(/coordinated|timed with|exclusion/i);
+    expect(san.includes.join(' ')).not.toMatch(/coordinated with exclusion/i);
+    const de = ONE_TIME_SERVICE_COPY.dethatching;
+    expect(`${de.outcome} ${de.includes.join(' ')} ${de.hero.sub}`).not.toMatch(/right time of year|timed so/i);
+    const td = ONE_TIME_SERVICE_COPY.top_dressing;
+    expect(`${td.outcome} ${td.includes.join(' ')} ${td.hero.sub}`).not.toMatch(/coordinated with/i);
   });
 
   test('one-time pest: a unit-band (interior-only) row swaps the exterior-perimeter bullet for the interior-unit bullet', () => {
