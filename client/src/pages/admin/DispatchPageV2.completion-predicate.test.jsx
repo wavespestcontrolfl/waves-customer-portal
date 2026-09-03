@@ -10,7 +10,7 @@ vi.mock("./SchedulePage", () => ({
   completionResumeOwed: (id) => id === "svc-resume",
 }));
 
-import { CLOSEOUT_OWED_LABEL, completedVisitOwesCompletion, stopStatusBadge } from "./DispatchPageV2";
+import { CLOSEOUT_OWED_LABEL, completedVisitOwesCompletion, owedStopMember, stopStatusBadge } from "./DispatchPageV2";
 
 describe("completedVisitOwesCompletion", () => {
   it("opens completion for a completed visit with NO service record (status-only completion)", () => {
@@ -56,5 +56,21 @@ describe("completedVisitOwesCompletion — project-backed visits", () => {
   });
   it("keeps flagging a typed (non-project) profile", () => {
     expect(completedVisitOwesCompletion({ id: "svc-1", status: "completed", has_service_record: false, completionProfile: { projectBacked: false } })).toBe(true);
+  });
+});
+
+describe("owedStopMember — consolidated multi-service stops", () => {
+  it("finds the owed secondary row behind a fully closed primary and badges the stop", () => {
+    const primary = { id: "svc-1", status: "completed", has_service_record: true };
+    const secondary = { id: "svc-2", status: "completed", has_service_record: false };
+    const stop = { ...primary, _multiServices: [primary, secondary] };
+    expect(owedStopMember(stop)).toBe(secondary);
+    expect(stopStatusBadge(stop)).toEqual({ tone: "alert", label: CLOSEOUT_OWED_LABEL });
+  });
+  it("returns null when every member is closed, and falls back to the row itself without a group", () => {
+    const a = { id: "svc-1", status: "completed", has_service_record: true };
+    expect(owedStopMember({ ...a, _multiServices: [a, { ...a, id: "svc-2" }] })).toBeNull();
+    const owed = { id: "svc-1", status: "completed", has_service_record: false };
+    expect(owedStopMember(owed)).toBe(owed);
   });
 });

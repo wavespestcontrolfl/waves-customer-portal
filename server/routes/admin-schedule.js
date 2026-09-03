@@ -3557,7 +3557,7 @@ router.get('/', async (req, res, next) => {
         // 'completed' row (historical PUT /status completions) has none and
         // is what Billing Recovery deep-links here to finish through
         // CompletionPanel (fail-closed: readers require === false).
-        db.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id) as has_service_record'),
+        db.raw(HAS_SERVICE_RECORD_SQL),
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
@@ -4094,7 +4094,7 @@ router.get('/week', async (req, res, next) => {
           // Same completion-record flag the day endpoint serializes: the
           // mobile week list opens completion straight off these rows and
           // its "Closeout owed" badge keys off it (Codex #3799 r1).
-          db.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id) as has_service_record'),
+          db.raw(HAS_SERVICE_RECORD_SQL),
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
           'scheduled_services.estimated_price',
@@ -4658,6 +4658,23 @@ function duplicateSeriesConflictBody(existingSeries) {
     })),
   };
 }
+
+// Whether a scheduled visit has a completion record. FK first, then the
+// legacy soft-join: visits completed before migration 20260427000007 have
+// service_records rows with a NULL scheduled_service_id, matched the way
+// job-costing's resolveServiceRecord does — (customer_id, service_date,
+// service_type). Without the fallback every pre-migration completion would
+// read as a status-only completion and be offered a "Closeout owed" resume
+// that re-runs /complete (Codex #3799 r2 P0). Shared by the day and week
+// feeds so both surfaces agree.
+const HAS_SERVICE_RECORD_SQL = `EXISTS (
+  SELECT 1 FROM service_records sr
+  WHERE sr.scheduled_service_id = scheduled_services.id
+     OR (sr.scheduled_service_id IS NULL
+         AND sr.customer_id = scheduled_services.customer_id
+         AND sr.service_date = scheduled_services.scheduled_date
+         AND sr.service_type = scheduled_services.service_type)
+) as has_service_record`;
 
 // POST /api/admin/schedule — create new service
 router.post('/', requireAdmin, async (req, res, next) => {

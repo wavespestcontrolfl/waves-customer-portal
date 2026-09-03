@@ -130,8 +130,19 @@ export function completedVisitOwesCompletion(service) {
 // after a reload that the visit still needs a tap (the marker never
 // auto-opens the panel). Same predicate the tap-to-open path uses, so the
 // badge and the reopen decision cannot disagree.
+// A consolidated multi-service stop renders its first row and carries the
+// rest in _multiServices; the closeout owed may belong to a secondary row,
+// so the card's badge and its Resume action look at every member (Codex
+// #3799 r2 P2). Returns the owed member, or null.
+export function owedStopMember(service) {
+  const members = Array.isArray(service?._multiServices) && service._multiServices.length
+    ? service._multiServices
+    : [service];
+  return members.find((member) => completedVisitOwesCompletion(member)) || null;
+}
+
 export function stopStatusBadge(service) {
-  if (completedVisitOwesCompletion(service)) {
+  if (owedStopMember(service)) {
     return { tone: "alert", label: CLOSEOUT_OWED_LABEL };
   }
   const status = String(service?.status || "").toLowerCase();
@@ -849,12 +860,13 @@ function ServiceCardV2({
             </div>{" "}
           </>
         )}
-        {status === "completed" && completedVisitOwesCompletion(service) ? (
+        {status === "completed" && owedStopMember(service) ? (
           // The closeout is still owed (resume marker / status-only
           // completion): the card must offer the resume, not just wear the
           // badge — same handler the mobile list and day grid route through
-          // (pre-push Codex P1).
-          <Button size="sm" onClick={() => onComplete(service)}>
+          // (pre-push Codex P1). On a consolidated stop the owed member may
+          // be a secondary row, so the action targets that row.
+          <Button size="sm" onClick={() => onComplete(owedStopMember(service))}>
             Resume Closeout
           </Button>
         ) : (
@@ -1709,6 +1721,19 @@ export default function DispatchPageV2({
   const applyCompletionResult = useCallback(
     (serviceId, r, body) => {
       handleStatusChange(serviceId, "completed");
+      // A status-only completion just gained its service record: flip the
+      // cached day-payload flag so completedVisitOwesCompletion stops
+      // offering a resume the server would now refuse (Codex #3799 r2 P2).
+      // The resume marker is cleared by the panel itself on success.
+      setData((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          services: prev.services.map((s) =>
+            s.id === serviceId ? { ...s, has_service_record: true } : s,
+          ),
+        };
+      });
       // The mobile week list serves rows from its own cached /week payload —
       // completion was the one terminal transition that never invalidated
       // it, leaving the completed stop tappable for a duplicate /complete
