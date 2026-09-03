@@ -231,8 +231,8 @@ describe('outreach-lane paths', () => {
     db._tables.seo_link_domains[0].updated_at = new Date(NOW.getTime() + 1000);
     const r2 = await run(db, { now: new Date(NOW.getTime() + 60000) });
     expect(r2).toMatchObject({ selected: 0, errors: [] });
-    const r3 = await run(db, { domainIds: [d.id], now: new Date(NOW.getTime() + 120000) });
-    expect(r3).toMatchObject({ pinned: 1, placementsCreated: 0, errors: [] });
+    const r3 = await run(db, { domainIds: [d.id], now: new Date(NOW.getTime() + 120000) }); // forced: the conversation sits on another page AND path — reported, never doubled
+    expect(r3).toMatchObject({ placementsCreated: 0, errors: [{ domain: 'example.org', skipped: 'outreach conversation in flight on another path (contacted)' }] });
     expect(placements(db)).toHaveLength(1);
   });
   test('an ambiguous send (send_error / sending) is never parked — it stays in the reconciliation lifecycle; only a DRAFTED message is approval-ready', async () => {
