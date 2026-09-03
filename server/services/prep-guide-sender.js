@@ -76,7 +76,13 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
       // midnight ET "today's" visit would fall before the UTC date and the
       // email would say "To be confirmed" despite a real upcoming appointment.
       .where('scheduled_date', '>=', etDateString())
-      .orderBy('scheduled_date', 'asc')
+      // Soonest by date THEN window, with a stable id tie-breaker — two
+      // same-day visits must not pick arbitrarily (pre-push Codex P1).
+      .orderBy([
+        { column: 'scheduled_date', order: 'asc' },
+        { column: 'window_start', order: 'asc' },
+        { column: 'id', order: 'asc' },
+      ])
       .first('id', 'customer_id', 'scheduled_date', 'service_type', 'prep_template_key', 'prep_expires_at');
     return row || null;
   } catch (err) {
