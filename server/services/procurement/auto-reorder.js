@@ -26,6 +26,11 @@
  * product FOR UPDATE and re-checks enabled / active / stock <= threshold, so
  * a receive or a disable that landed after the candidate scan raises no
  * request (result.deduped reason no_longer_low).
+ *
+ * Every bell is derived from the REQUEST row, never from the product's
+ * current configuration: an admin edit to the vendor, reorder quantity or
+ * unit after the request was raised must not send the office to order
+ * goods the Restock queue does not show (Codex r6 P2).
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -33,11 +38,18 @@ const { gateEnvValue } = require('../../config/feature-gates');
 
 const GATE = 'GATE_AUTO_REORDER';
 const SOURCE = 'auto_reorder';
+const LIVE_STATUSES = ['open', 'ordered'];
 
 function num(v) {
   if (v == null || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+function parseMeta(raw) {
+  if (!raw) return {};
+  if (typeof raw !== 'string') return raw;
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
 }
 
 async function findLowStockCandidates(conn = db) {
@@ -74,14 +86,18 @@ async function vendorPricingFor(conn, productId, vendorId) {
   }
 }
 
-async function ringRestockBell({ notify, product, request, pricing, onHand, reorderQty }) {
+// The bell says exactly what the request row says (see the header).
+async function ringRestockBell({ notify, product, request }) {
   const notifyAdmin = notify || ((...args) => require('../notification-service').notifyAdmin(...args));
-  const where = product.vendor_name ? ` from ${product.vendor_name}` : '';
-  const link = pricing?.vendor_product_url ? ` Order link: ${pricing.vendor_product_url}` : '';
+  const meta = parseMeta(request.metadata);
+  const unit = request.unit || product.inventory_unit;
+  const onHand = num(request.current_stock) ?? num(product.inventory_on_hand);
+  const where = request.vendor ? ` from ${request.vendor}` : '';
+  const link = meta.vendorProductUrl ? ` Order link: ${meta.vendorProductUrl}` : '';
   return notifyAdmin(
     'system',
-    `Restock: ${product.name} is low (${onHand} ${product.inventory_unit})`,
-    `Reorder ${reorderQty} ${product.inventory_unit}${where} — order manually, then mark the restock request ordered.${link}`,
+    `Restock: ${product.name} is low (${onHand} ${unit})`,
+    `Reorder ${num(request.requested_quantity)} ${unit}${where} — order manually, then mark the restock request ordered.${link}`,
     {
       // bell: true — required handoff: under GATE_ADMIN_BELL_POLICY a bare
       // 'system' category is suppressed, and a suppressed restock alert is
@@ -92,129 +108,145 @@ async function ringRestockBell({ notify, product, request, pricing, onHand, reor
       // A later sweep that learned the vendor/price rewrites the standing
       // bell (title/body/metadata) instead of leaving the linkless original.
       refreshOnDedupe: true,
-      metadata: { restockRequestId: request.id, productId: product.id, vendorId: product.auto_reorder_vendor_id || null, vendorSku: pricing?.vendor_sku || null, vendorProductUrl: pricing?.vendor_product_url || null },
+      metadata: { restockRequestId: request.id, productId: product.id, vendorId: meta.vendorId || null, vendorSku: meta.vendorSku || null, vendorProductUrl: meta.vendorProductUrl || null },
     },
   );
 }
 
+async function bellOrWarn(ctx, product, request, bucket) {
+  try {
+    await ringRestockBell({ notify: ctx.notify, product, request });
+    ctx.result[bucket].push({ productId: product.id, requestId: request.id });
+  } catch (notifyErr) {
+    logger.warn(`[auto-reorder] bell failed for ${product.name} (request ${request.id}): ${notifyErr.message}`);
+  }
+}
+
+// Vendor configured after the request was raised (the seeded sticker starts
+// unpriced): carry the new vendor/SKU/URL onto the open request so the tab
+// and the refreshed bell show it. Only NULL fields are filled — a populated
+// request is never rewritten from the product's current configuration.
+// Returns the request as the bell must see it.
+async function refreshOpenRequest(ctx, p, existing, pricing) {
+  const meta = parseMeta(existing.metadata);
+  const learned = {
+    vendorId: meta.vendorId || p.auto_reorder_vendor_id || null,
+    vendorSku: meta.vendorSku || pricing?.vendor_sku || null,
+    vendorProductUrl: meta.vendorProductUrl || pricing?.vendor_product_url || null,
+  };
+  const vendor = existing.vendor || p.vendor_name || null;
+  const changed = vendor !== (existing.vendor || null)
+    || learned.vendorSku !== (meta.vendorSku || null)
+    || learned.vendorProductUrl !== (meta.vendorProductUrl || null);
+  if (!changed) return existing;
+  const metadata = { ...meta, ...learned };
+  await ctx.conn('product_restock_requests').where({ id: existing.id }).update({ vendor, metadata: JSON.stringify(metadata), updated_at: new Date() });
+  ctx.result.refreshed.push({ productId: p.id, requestId: existing.id });
+  return { ...existing, vendor, metadata };
+}
+
+// A still-open auto request whose bell failed earlier would otherwise sit
+// unworked forever: re-ring (the request-id dedupeKey makes a landed bell a
+// no-op). Requests of other sources, and ordered ones, are left alone.
+async function handleLiveRequest(ctx, p, existing, pricing) {
+  ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: existing.id });
+  if (existing.source !== SOURCE || existing.status !== 'open') return;
+  const request = await refreshOpenRequest(ctx, p, existing, pricing);
+  await bellOrWarn(ctx, p, request, 'renotified');
+}
+
+function stillLow(fresh) {
+  const onHand = num(fresh.inventory_on_hand);
+  const threshold = num(fresh.low_stock_threshold);
+  return fresh.auto_reorder_enabled === true && fresh.active !== false && onHand != null && threshold != null && onHand <= threshold;
+}
+
+// The request is derived from the LOCKED configuration, not the scan
+// snapshot: a reorder-quantity or vendor edit between the two must not send
+// the office to the old vendor for the old count (Codex r4 P2).
+async function lockedVendor(trx, p, fresh, scanPricing) {
+  const vendorId = fresh.auto_reorder_vendor_id || null;
+  if (vendorId === (p.auto_reorder_vendor_id || null)) return { vendorId, vendorName: p.vendor_name || null, pricing: scanPricing };
+  const v = vendorId ? await trx('vendors').where({ id: vendorId }).first('name') : null;
+  return { vendorId, vendorName: v?.name || null, pricing: await vendorPricingFor(trx, p.id, vendorId) };
+}
+
+// Re-read the product under a row lock right before the insert: a receive /
+// count correction / disable between the candidate scan and here must not
+// raise a stale request that no later sweep would revisit (Codex r3 P2).
+// Runs in one transaction with the insert so a concurrent receive waits on
+// the lock rather than racing past it.
+async function createRequestLocked(conn, p, scanPricing) {
+  return conn.transaction(async (trx) => {
+    const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate()
+      .first('inventory_on_hand', 'low_stock_threshold', 'auto_reorder_enabled', 'active', 'reorder_quantity', 'auto_reorder_vendor_id', 'inventory_unit');
+    if (!fresh || !stillLow(fresh)) return { deduped: 'no_longer_low' };
+    const qty = num(fresh.reorder_quantity);
+    const unit = fresh.inventory_unit || p.inventory_unit;
+    if (!unit) return { unconfigured: 'no_unit' };
+    if (!qty || qty <= 0) return { unconfigured: 'no_reorder_quantity' };
+    const vendor = await lockedVendor(trx, p, fresh, scanPricing);
+    const onHand = num(fresh.inventory_on_hand);
+    const threshold = num(fresh.low_stock_threshold);
+    const now = new Date();
+    const inserted = await trx('product_restock_requests').insert({
+      product_id: p.id,
+      status: 'open',
+      priority: 'normal',
+      requested_quantity: qty,
+      unit,
+      current_stock: onHand,
+      target_stock: Number((threshold + qty).toFixed(4)),
+      vendor: vendor.vendorName,
+      reason: `Auto-reorder: ${p.name} at ${onHand} ${unit} (low-stock threshold ${threshold} ${unit})`,
+      source: SOURCE,
+      created_by_name: 'Auto-reorder sweep',
+      metadata: {
+        vendorId: vendor.vendorId,
+        vendorSku: vendor.pricing?.vendor_sku || null,
+        vendorProductUrl: vendor.pricing?.vendor_product_url || null,
+        lowStockThreshold: threshold,
+      },
+      created_at: now,
+      updated_at: now,
+    })
+      .onConflict(trx.raw("(product_id) WHERE status IN ('open', 'ordered') AND source = 'auto_reorder'"))
+      .ignore()
+      .returning('*');
+    const request = inserted?.[0];
+    return request ? { request } : { deduped: 'concurrent_auto_request' };
+  });
+}
+
+async function sweepProduct(ctx, p) {
+  const { conn, result } = ctx;
+  if (!p.inventory_unit) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_unit' }); return; }
+  const reorderQty = num(p.reorder_quantity);
+  if (!reorderQty || reorderQty <= 0) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_reorder_quantity' }); return; }
+  const pricing = await vendorPricingFor(conn, p.id, p.auto_reorder_vendor_id);
+  const existing = await conn('product_restock_requests').where({ product_id: p.id }).whereIn('status', LIVE_STATUSES).first();
+  if (existing) { await handleLiveRequest(ctx, p, existing, pricing); return; }
+
+  const outcome = await createRequestLocked(conn, p, pricing);
+  if (outcome.deduped) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: outcome.deduped }); return; }
+  if (outcome.unconfigured) { result.unconfigured.push({ productId: p.id, name: p.name, reason: outcome.unconfigured }); return; }
+  const { request } = outcome;
+  result.created.push({ productId: p.id, name: p.name, requestId: request.id, requestedQuantity: num(request.requested_quantity), vendor: request.vendor });
+  // One bell per request, deduped on the request id. Green-path silence is
+  // not possible here: with no order adapter, a human has to click. A
+  // failure here is retried by the next sweep (handleLiveRequest).
+  await bellOrWarn(ctx, p, request, 'bells');
+}
+
 async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
   if (!gateEnvValue(GATE)) return { skipped: 'gated', created: [], deduped: [], unconfigured: [] };
-  const result = { created: [], deduped: [], unconfigured: [], errors: [], renotified: [], refreshed: [] };
+  const result = { created: [], deduped: [], unconfigured: [], errors: [], renotified: [], refreshed: [], bells: [] };
+  const ctx = { conn, notify, result };
 
   const candidates = await findLowStockCandidates(conn);
   for (const p of candidates) {
     try {
-      const reorderQty = num(p.reorder_quantity);
-      if (!reorderQty || reorderQty <= 0 || !p.inventory_unit) {
-        result.unconfigured.push({ productId: p.id, name: p.name, reason: !p.inventory_unit ? 'no_unit' : 'no_reorder_quantity' });
-        continue;
-      }
-      const pricing = await vendorPricingFor(conn, p.id, p.auto_reorder_vendor_id);
-      const onHand = num(p.inventory_on_hand);
-      const threshold = num(p.low_stock_threshold);
-      const existing = await conn('product_restock_requests')
-        .where({ product_id: p.id })
-        .whereIn('status', ['open', 'ordered'])
-        .first();
-      if (existing) {
-        result.deduped.push({ productId: p.id, name: p.name, requestId: existing.id });
-        // A still-open auto request whose bell failed earlier would otherwise
-        // sit unworked forever: re-ring (the request-id dedupeKey makes a
-        // landed bell a no-op).
-        if (existing.source === SOURCE && existing.status === 'open') {
-          // Vendor configured after the request was raised (the seeded
-          // sticker starts unpriced): carry the new vendor/SKU/URL onto the
-          // open request so the tab and the refreshed bell show it.
-          const meta = (typeof existing.metadata === 'string' ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })() : existing.metadata) || {};
-          const learned = (pricing?.vendor_sku && !meta.vendorSku) || (pricing?.vendor_product_url && !meta.vendorProductUrl) || (p.vendor_name && !existing.vendor);
-          if (learned) {
-            await conn('product_restock_requests').where({ id: existing.id }).update({
-              vendor: p.vendor_name || existing.vendor || null,
-              metadata: JSON.stringify({ ...meta, vendorId: p.auto_reorder_vendor_id || meta.vendorId || null, vendorSku: pricing?.vendor_sku || meta.vendorSku || null, vendorProductUrl: pricing?.vendor_product_url || meta.vendorProductUrl || null }),
-              updated_at: new Date(),
-            });
-            result.refreshed.push({ productId: p.id, requestId: existing.id });
-          }
-          try {
-            await ringRestockBell({ notify, product: p, request: existing, pricing, onHand, reorderQty });
-            result.renotified.push({ productId: p.id, requestId: existing.id });
-          } catch (notifyErr) {
-            logger.warn(`[auto-reorder] re-bell failed for ${p.name} (request ${existing.id}): ${notifyErr.message}`);
-          }
-        }
-        continue;
-      }
-
-      // Re-read the product under a row lock right before the insert: a
-      // receive / count correction / disable between the candidate scan and
-      // here must not raise a stale request that no later sweep would
-      // revisit (Codex r3 P2). Runs in one transaction with the insert so a
-      // concurrent receive waits on the lock rather than racing past it.
-      const outcome = await conn.transaction(async (trx) => {
-        const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate()
-          .first('inventory_on_hand', 'low_stock_threshold', 'auto_reorder_enabled', 'active', 'reorder_quantity', 'auto_reorder_vendor_id', 'inventory_unit');
-        const freshOnHand = num(fresh?.inventory_on_hand);
-        const freshThreshold = num(fresh?.low_stock_threshold);
-        const stillLow = !!fresh && fresh.auto_reorder_enabled === true && fresh.active !== false
-          && freshOnHand != null && freshThreshold != null && freshOnHand <= freshThreshold;
-        if (!stillLow) return { stale: true };
-        // The request is derived from the LOCKED configuration, not the scan
-        // snapshot: a reorder-quantity or vendor edit between the two must
-        // not send the office to the old vendor for the old count (Codex r4
-        // P2). Later sweeps never overwrite populated request metadata.
-        const lockedQty = num(fresh.reorder_quantity);
-        const lockedUnit = fresh.inventory_unit || p.inventory_unit;
-        if (!lockedQty || lockedQty <= 0 || !lockedUnit) return { unconfigured: !lockedUnit ? 'no_unit' : 'no_reorder_quantity' };
-        const lockedVendorId = fresh.auto_reorder_vendor_id || null;
-        const vendorChanged = lockedVendorId !== (p.auto_reorder_vendor_id || null);
-        const lockedPricing = vendorChanged ? await vendorPricingFor(trx, p.id, lockedVendorId) : pricing;
-        let vendorName = p.vendor_name || null;
-        if (vendorChanged) {
-          const v = lockedVendorId ? await trx('vendors').where({ id: lockedVendorId }).first('name') : null;
-          vendorName = v?.name || null;
-        }
-        const now = new Date();
-        const inserted = await trx('product_restock_requests').insert({
-          product_id: p.id,
-          status: 'open',
-          priority: 'normal',
-          requested_quantity: lockedQty,
-          unit: lockedUnit,
-          current_stock: freshOnHand,
-          target_stock: Number((freshThreshold + lockedQty).toFixed(4)),
-          vendor: vendorName,
-          reason: `Auto-reorder: ${p.name} at ${freshOnHand} ${lockedUnit} (low-stock threshold ${freshThreshold} ${lockedUnit})`,
-          source: SOURCE,
-          created_by_name: 'Auto-reorder sweep',
-          metadata: {
-            vendorId: lockedVendorId,
-            vendorSku: lockedPricing?.vendor_sku || null,
-            vendorProductUrl: lockedPricing?.vendor_product_url || null,
-            lowStockThreshold: freshThreshold,
-          },
-          created_at: now,
-          updated_at: now,
-        })
-          .onConflict(trx.raw("(product_id) WHERE status IN ('open', 'ordered') AND source = 'auto_reorder'"))
-          .ignore()
-          .returning('*');
-        const row = inserted && inserted[0];
-        return row ? { request: row, pricing: lockedPricing, vendorName, reorderQty: lockedQty } : { conflict: true };
-      });
-      if (outcome.stale) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: 'no_longer_low' }); continue; }
-      if (outcome.unconfigured) { result.unconfigured.push({ productId: p.id, name: p.name, reason: outcome.unconfigured }); continue; }
-      if (outcome.conflict) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: 'concurrent_auto_request' }); continue; }
-      const { request } = outcome;
-      result.created.push({ productId: p.id, name: p.name, requestId: request.id, requestedQuantity: outcome.reorderQty, vendor: outcome.vendorName });
-
-      // One bell per request, deduped on the request id. Green-path silence
-      // is not possible here: with no order adapter, a human has to click.
-      // A failure here is retried by the next sweep (existing branch above).
-      try {
-        await ringRestockBell({ notify, product: { ...p, vendor_name: outcome.vendorName, auto_reorder_vendor_id: request.metadata?.vendorId ?? p.auto_reorder_vendor_id }, request, pricing: outcome.pricing, onHand: num(request.current_stock) ?? onHand, reorderQty: outcome.reorderQty });
-      } catch (notifyErr) {
-        logger.warn(`[auto-reorder] bell failed for ${p.name} (request ${request.id}): ${notifyErr.message}`);
-      }
+      await sweepProduct(ctx, p);
     } catch (err) {
       logger.error(`[auto-reorder] ${p.name}: ${err.message}`);
       result.errors.push({ productId: p.id, name: p.name, message: err.message });

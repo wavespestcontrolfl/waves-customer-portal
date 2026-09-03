@@ -56,6 +56,133 @@ const KIT = [
   },
 ];
 
+function unitCost(item) {
+  return Number((item.pricing.price / Number(item.pricing.quantity)).toFixed(4));
+}
+
+// Admin-owned row: fill ONLY the auto-reorder fields that are still null (a
+// re-run after a rollback dropped them), never a value an admin may have
+// edited. undefined = nothing to fill for this item. A row that never
+// tracked stock can never sweep (findLowStockCandidates needs both counts
+// non-null) and needs the unit those counts are in, or the sweep reports
+// no_unit and the admin form cannot save stock values (GH codex r3 + r4 P2).
+const FILL_WHEN_NULL = [
+  ['reorder_quantity', (item) => item.reorder_quantity],
+  ['per_completion_usage', () => 1],
+  ['inventory_on_hand', (item) => item.inventory_on_hand],
+  ['low_stock_threshold', (item) => item.low_stock_threshold],
+  ['inventory_unit', () => 'each'],
+  ['per_completion_service_lines', () => JSON.stringify(KIT_SERVICE_LINES)],
+  ['auto_reorder_vendor_id', (item, ctx) => (item.pricing ? ctx.vendorId : undefined)],
+  ['cost_per_unit', (item) => (item.pricing ? unitCost(item) : undefined)],
+];
+
+function fillFor(existing, item, ctx) {
+  const fill = {};
+  for (const [col, valueFor] of FILL_WHEN_NULL) {
+    const value = existing[col] == null ? valueFor(item, ctx) : undefined;
+    if (value !== undefined) fill[col] = value;
+  }
+  // Enablement follows the same rule: switched on only when the row has
+  // never been configured; the cost unit travels with the cost.
+  if (fill.reorder_quantity != null) fill.auto_reorder_enabled = true;
+  if (fill.cost_per_unit != null) fill.cost_unit = 'each';
+  return fill;
+}
+
+function newProductRow(item, ctx) {
+  return {
+    name: item.name,
+    category: item.category,
+    inventory_unit: 'each',
+    inventory_on_hand: item.inventory_on_hand,
+    low_stock_threshold: item.low_stock_threshold,
+    reorder_quantity: item.reorder_quantity,
+    per_completion_usage: 1,
+    per_completion_service_lines: JSON.stringify(KIT_SERVICE_LINES),
+    auto_reorder_enabled: true,
+    auto_reorder_vendor_id: item.pricing ? ctx.vendorId : null,
+    // Priced kit items leave the pricing queue; the sticker (no vendor,
+    // no price until PR 2) stays in it.
+    needs_pricing: !item.pricing,
+    // Per-unit cost so completion movements carry cost_used for job
+    // costing (pack price / pack size).
+    ...(item.pricing ? { cost_per_unit: unitCost(item), cost_unit: 'each' } : {}),
+    customer_visibility: 'internal_only',
+  };
+}
+
+function pricingRow(productId, item, ctx) {
+  return {
+    product_id: productId,
+    vendor_id: ctx.vendorId,
+    price: item.pricing.price,
+    quantity: item.pricing.quantity,
+    unit: 'each',
+    vendor_sku: item.pricing.vendor_sku,
+    vendor_product_url: item.pricing.vendor_product_url,
+    is_best_price: true,
+    // Owner-supplied manual price: the best-price recalc only accepts
+    // approved / auto_approved rows, and the column defaults to pending
+    // (GH codex r3 P2). Same shape as the 20260710 pre-slab seed.
+    ...(ctx.hasApproval ? { approval_status: 'approved' } : {}),
+  };
+}
+
+function openingMovement(productId, onHand) {
+  return {
+    product_id: productId,
+    movement_type: 'restock',
+    quantity: onHand,
+    unit: 'each',
+    stock_before: 0,
+    stock_after: onHand,
+    metadata: { source: 'seed_migration', reason: 'Opening count from the prior Gemplers purchase (2026-07-28) less ~10 used, owner ruling 2026-09-03' },
+  };
+}
+
+// The vendor price (SKU + order link) and, when THIS run seeded the opening
+// count, the ledger movement that explains it — both idempotent (pre-push
+// codex P1). Shared by the new-row and reused-row paths.
+async function seedPriceAndOpening(knex, productId, item, ctx, seededOnHand) {
+  if (item.pricing && ctx.hasPricing) {
+    const priced = await knex('vendor_pricing').where({ product_id: productId, vendor_id: ctx.vendorId }).first('id');
+    if (!priced) await knex('vendor_pricing').insert(pricingRow(productId, item, ctx));
+  }
+  if (ctx.hasMovements && seededOnHand > 0) await knex('product_inventory_movements').insert(openingMovement(productId, seededOnHand));
+}
+
+async function seedKitItem(knex, item, ctx) {
+  const existing = await knex('products_catalog').whereRaw('LOWER(name) = ?', [item.name.toLowerCase()]).first();
+  if (existing) {
+    const fill = fillFor(existing, item, ctx);
+    if (Object.keys(fill).length) await knex('products_catalog').where({ id: existing.id }).update(fill);
+    await seedPriceAndOpening(knex, existing.id, item, ctx, fill.inventory_on_hand ?? 0);
+    return;
+  }
+  const [product] = await knex('products_catalog').insert(newProductRow(item, ctx)).returning('*');
+  await seedPriceAndOpening(knex, product.id, item, ctx, item.inventory_on_hand);
+}
+
+// A hand-created Gemplers row must still carry the reserved code so
+// code-based vendor lookups (.claude/vendor-codes.md) find it; a conflicting
+// non-null code is a real inconsistency — fail loudly.
+async function ensureGemplers(knex) {
+  const hasCode = await knex.schema.hasColumn('vendors', 'code');
+  const existing = await knex('vendors').whereRaw('LOWER(name) = ?', [GEMPLERS.name.toLowerCase()]).first();
+  if (!existing) {
+    const row = { ...GEMPLERS };
+    if (!hasCode) delete row.code;
+    const [inserted] = await knex('vendors').insert(row).returning('*');
+    return inserted;
+  }
+  if (hasCode && existing.code == null) await knex('vendors').where({ id: existing.id }).update({ code: GEMPLERS.code });
+  if (hasCode && existing.code != null && Number(existing.code) !== GEMPLERS.code) {
+    throw new Error(`vendors row "${existing.name}" has code ${existing.code}; expected ${GEMPLERS.code} (.claude/vendor-codes.md)`);
+  }
+  return existing;
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
 
@@ -70,7 +197,8 @@ exports.up = async function up(knex) {
     if (!cols.per_completion_service_lines) t.jsonb('per_completion_service_lines');
   });
 
-  if (await knex.schema.hasTable('product_inventory_movements')) {
+  const hasMovements = await knex.schema.hasTable('product_inventory_movements');
+  if (hasMovements) {
     await knex.raw(`
       CREATE UNIQUE INDEX IF NOT EXISTS product_inventory_movements_completion_consumable_uniq
         ON product_inventory_movements (product_id, scheduled_service_id)
@@ -89,112 +217,15 @@ exports.up = async function up(knex) {
   }
 
   if (!(await knex.schema.hasTable('vendors'))) return;
-
-  const hasCode = await knex.schema.hasColumn('vendors', 'code');
-  let gemplers = await knex('vendors').whereRaw('LOWER(name) = ?', [GEMPLERS.name.toLowerCase()]).first();
-  if (!gemplers) {
-    const row = { ...GEMPLERS };
-    if (!hasCode) delete row.code;
-    [gemplers] = await knex('vendors').insert(row).returning('*');
-  } else if (hasCode) {
-    // A hand-created Gemplers row must still carry the reserved code so
-    // code-based vendor lookups (.claude/vendor-codes.md) find it; a
-    // conflicting non-null code is a real inconsistency — fail loudly.
-    if (gemplers.code == null) {
-      await knex('vendors').where({ id: gemplers.id }).update({ code: GEMPLERS.code });
-    } else if (Number(gemplers.code) !== GEMPLERS.code) {
-      throw new Error(`vendors row "${gemplers.name}" has code ${gemplers.code}; expected ${GEMPLERS.code} (.claude/vendor-codes.md)`);
-    }
-  }
-
+  const gemplers = await ensureGemplers(knex);
   const hasPricing = await knex.schema.hasTable('vendor_pricing');
-  const hasApproval = hasPricing && await knex.schema.hasColumn('vendor_pricing', 'approval_status');
-  const hasMovements = await knex.schema.hasTable('product_inventory_movements');
-  for (const item of KIT) {
-    const existing = await knex('products_catalog').whereRaw('LOWER(name) = ?', [item.name.toLowerCase()]).first();
-    if (existing) {
-      // Admin-owned row: fill ONLY the auto-reorder fields that are still
-      // null (a re-run after a rollback dropped them), never a value an
-      // admin may have edited. Enablement follows the same rule: switched
-      // on only when the row has never been configured.
-      const fill = {};
-      if (existing.reorder_quantity == null) { fill.reorder_quantity = item.reorder_quantity; fill.auto_reorder_enabled = true; }
-      if (existing.per_completion_usage == null) fill.per_completion_usage = 1;
-      // A row that never tracked stock can never sweep (findLowStockCandidates
-      // needs both non-null) — seed the opening count and threshold only when
-      // absent (GH codex r3 P2).
-      if (existing.inventory_on_hand == null) fill.inventory_on_hand = item.inventory_on_hand;
-      if (existing.low_stock_threshold == null) fill.low_stock_threshold = item.low_stock_threshold;
-      // …and the unit those counts are in, or the sweep reports no_unit and
-      // the admin form cannot save stock values (GH codex r4 P2).
-      if (existing.inventory_unit == null) fill.inventory_unit = 'each';
-      if (existing.per_completion_service_lines == null) fill.per_completion_service_lines = JSON.stringify(KIT_SERVICE_LINES);
-      if (existing.auto_reorder_vendor_id == null && item.pricing) fill.auto_reorder_vendor_id = gemplers.id;
-      if (existing.cost_per_unit == null && item.pricing) { fill.cost_per_unit = Number((item.pricing.price / Number(item.pricing.quantity)).toFixed(4)); fill.cost_unit = 'each'; }
-      if (Object.keys(fill).length) await knex('products_catalog').where({ id: existing.id }).update(fill);
-      // A reused row still needs its vendor price (SKU + order link) and,
-      // when THIS run seeded the opening count, the ledger movement that
-      // explains it — both idempotent (pre-push codex P1).
-      if (item.pricing && hasPricing) {
-        const priced = await knex('vendor_pricing').where({ product_id: existing.id, vendor_id: gemplers.id }).first('id');
-        if (!priced) await knex('vendor_pricing').insert(pricingRow(existing.id, item));
-      }
-      if (hasMovements && fill.inventory_on_hand != null && fill.inventory_on_hand > 0) {
-        await knex('product_inventory_movements').insert(openingMovement(existing.id, fill.inventory_on_hand));
-      }
-      continue;
-    }
-    const [product] = await knex('products_catalog').insert({
-      name: item.name,
-      category: item.category,
-      inventory_unit: 'each',
-      inventory_on_hand: item.inventory_on_hand,
-      low_stock_threshold: item.low_stock_threshold,
-      reorder_quantity: item.reorder_quantity,
-      per_completion_usage: 1,
-      per_completion_service_lines: JSON.stringify(KIT_SERVICE_LINES),
-      auto_reorder_enabled: true,
-      auto_reorder_vendor_id: item.pricing ? gemplers.id : null,
-      // Priced kit items leave the pricing queue; the sticker (no vendor,
-      // no price until PR 2) stays in it.
-      needs_pricing: !item.pricing,
-      // Per-unit cost so completion movements carry cost_used for job
-      // costing (pack price / pack size).
-      ...(item.pricing ? { cost_per_unit: Number((item.pricing.price / Number(item.pricing.quantity)).toFixed(4)), cost_unit: 'each' } : {}),
-      customer_visibility: 'internal_only',
-    }).returning('*');
-
-    if (item.pricing && hasPricing) await knex('vendor_pricing').insert(pricingRow(product.id, item));
-    if (hasMovements && item.inventory_on_hand > 0) await knex('product_inventory_movements').insert(openingMovement(product.id, item.inventory_on_hand));
-  }
-
-  function pricingRow(productId, item) {
-    return {
-      product_id: productId,
-      vendor_id: gemplers.id,
-      price: item.pricing.price,
-      quantity: item.pricing.quantity,
-      unit: 'each',
-      vendor_sku: item.pricing.vendor_sku,
-      vendor_product_url: item.pricing.vendor_product_url,
-      is_best_price: true,
-      // Owner-supplied manual price: the best-price recalc only accepts
-      // approved / auto_approved rows, and the column defaults to pending
-      // (GH codex r3 P2). Same shape as the 20260710 pre-slab seed.
-      ...(hasApproval ? { approval_status: 'approved' } : {}),
-    };
-  }
-  function openingMovement(productId, onHand) {
-    return {
-      product_id: productId,
-      movement_type: 'restock',
-      quantity: onHand,
-      unit: 'each',
-      stock_before: 0,
-      stock_after: onHand,
-      metadata: { source: 'seed_migration', reason: 'Opening count from the prior Gemplers purchase (2026-07-28) less ~10 used, owner ruling 2026-09-03' },
-    };
-  }
+  const ctx = {
+    vendorId: gemplers.id,
+    hasPricing,
+    hasApproval: hasPricing && await knex.schema.hasColumn('vendor_pricing', 'approval_status'),
+    hasMovements,
+  };
+  for (const item of KIT) await seedKitItem(knex, item, ctx);
 };
 
 exports.down = async function down(knex) {
