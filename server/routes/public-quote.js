@@ -38,6 +38,16 @@ async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKe
     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
     .whereRaw("LOWER(regexp_replace(COALESCE(address, ''), '\\s+', ' ', 'g')) = ?", [addressLc])
     .whereIn('status', OPEN_LEAD_STATUSES)
+    // A lead whose FK-linked estimate already closed (expired / declined /
+    // archived) is not a live courtship (codex #3834 r4 P1): a draft stamped
+    // at it would be skipped at send behind the stale FK and mis-stamped at
+    // accept. That rerun is a fresh inquiry and files as a normal new lead.
+    // A lead still holding an OPEN estimate stays a duplicate target — the
+    // same-phone estimate guard withholds the rerun's draft in that case.
+    .whereRaw(
+      `(estimate_id IS NULL OR EXISTS (SELECT 1 FROM estimates e WHERE e.id = leads.estimate_id AND e.archived_at IS NULL AND e.status IN (${OPEN_ESTIMATE_STATUSES.map(() => '?').join(', ')})))`,
+      OPEN_ESTIMATE_STATUSES,
+    )
     .where('created_at', '>', new Date(now - WIZARD_LEAD_REUSE_DAYS * 24 * 60 * 60 * 1000))
     .orderBy('created_at', 'desc')
     .first('id');
@@ -71,6 +81,7 @@ const { isHoneypotTripped } = require('../utils/lead-abuse');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
+  OPEN_ESTIMATE_STATUSES,
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const {
@@ -1717,8 +1728,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // ownership-predicated UPDATE atomic (no read-then-write).
         // The replace branch carries forward additional_properties and the
         // declared timeline captured at the property-lookup stage, and the
-        // duplicate_of_lead_id ancestry a repeat run stamped (codex #3834
-        // r2 P1 — lifecycle events follow it to the open original)
+        // duplicate_of_lead_id marker a repeat run stamped (codex #3834 r2
+        // P1 — it is re-derived below against what THIS stage typed)
         // (jsonb_strip_nulls drops a key the prior row never had); a value in
         // THIS stage's snapshot wins the merge.
         extracted_data: db.raw(
@@ -1741,7 +1752,20 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .update(updateFields)
         .returning(['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data']);
       lead = rows[0];
-      if (lead && lead.status === 'duplicate') duplicateOfLeadId = duplicateOfFromExtracted(lead.extracted_data);
+      if (lead && lead.status === 'duplicate') {
+        // The marker was computed from an earlier stage's fields; this stage
+        // may have changed the property or the service (codex #3834 r4 P1),
+        // and a different inquiry is not a duplicate of the old one. Re-run
+        // the exact predicate against what was just typed — own row only:
+        // the marker moves or clears on THIS row, nothing on the original.
+        const stored = duplicateOfFromExtracted(lead.extracted_data);
+        duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey });
+        if (duplicateOfLeadId !== stored) {
+          await db('leads').where({ id: lead.id }).update(duplicateOfLeadId
+            ? { extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }
+            : { status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
+        }
+      }
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
         await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
       }
@@ -2106,6 +2130,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     let draftEstimateId = null;
     try {
       const estimateDataObj = {
+        // Always THIS run's row, duplicate or not (pre-push P0 on #3834 r4):
+        // the draft is what /upsell may touch under this token, and a
+        // pointer at the open original would let a typed-contact repeat
+        // reach a draft it never proved ownership of. The pipeline does not
+        // read this key (estimates carry no lead_id; a wizard draft is its
+        // own Draft opportunity), so nothing is lost by keeping it local.
         lead_id: lead.id,
         // setupFeeQuote is injected just before each write, decided under
         // the same transaction/row lock as the write — see applySetupFeeQuote.

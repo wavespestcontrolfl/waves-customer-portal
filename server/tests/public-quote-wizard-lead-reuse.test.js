@@ -8,6 +8,7 @@
  */
 const { _internals } = require('../routes/public-quote');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+const { OPEN_ESTIMATE_STATUSES } = require('../services/estimate-automation-duplicates');
 
 function chainMock(firstResult) {
   const calls = { where: [], whereRaw: [], whereIn: [], whereNull: [], orderBy: [] };
@@ -37,6 +38,10 @@ describe('findPriorOpenWizardLeadId', () => {
     expect(calls.whereRaw[1][1]).toEqual(['%9415550142']);
     expect(calls.whereRaw[2][1]).toEqual(['123 sample st, parrish, fl 34219']);
     expect(calls.whereIn[0]).toEqual(['status', OPEN_LEAD_STATUSES]);
+    // An original whose FK-linked estimate already closed is not a live
+    // courtship — the rerun files as a fresh lead (codex r4 P1).
+    expect(calls.whereRaw[3][0]).toMatch(/estimate_id IS NULL OR EXISTS \(SELECT 1 FROM estimates e WHERE e\.id = leads\.estimate_id AND e\.archived_at IS NULL AND e\.status IN \(\?, \?, \?, \?\)\)/);
+    expect(calls.whereRaw[3][1]).toEqual(OPEN_ESTIMATE_STATUSES);
     const [col, op, cutoff] = calls.where[1];
     expect([col, op]).toEqual(['created_at', '>']);
     expect(cutoff.getTime()).toBe(now - _internals.WIZARD_LEAD_REUSE_DAYS * 86400000);
@@ -73,12 +78,28 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(_internals.duplicateOfFromExtracted(null)).toBeNull();
   });
 
-  test('the token path re-derives duplicate state from the stored row, and attribution is skipped for duplicates', () => {
+  test('the token path re-derives duplicate state against what THIS stage typed, and attribution is skipped for duplicates', () => {
     expect(src).toMatch(/returning\(\['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data'\]\)/);
-    expect(src).toMatch(/if \(lead && lead\.status === 'duplicate'\) duplicateOfLeadId = duplicateOfFromExtracted\(lead\.extracted_data\)/);
     expect(src).toMatch(/if \(!duplicateOfLeadId\) await db\('ad_service_attribution'\)\.insert\(/);
-    // The replace path carries the marker forward.
+    // The replace path carries the marker forward...
     expect(src).toMatch(/'duplicate_of_lead_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'duplicate_of_lead_id'/);
+    // ...and then the predicate is re-run on the new fields (codex r4 P1): a
+    // changed property/service clears the marker and reopens the row as new,
+    // on THIS row only.
+    const block = src.slice(src.indexOf("if (lead && lead.status === 'duplicate') {"), src.indexOf('if (lead && !lead.lead_source_id && sourceMeta.leadSourceId)'));
+    expect(block).toMatch(/duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey \}\)/);
+    expect(block).toMatch(/if \(duplicateOfLeadId !== stored\)/);
+    expect(block).toMatch(/await db\('leads'\)\.where\(\{ id: lead\.id \}\)\.update\(/);
+    expect(block).toMatch(/status: 'new', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) - 'duplicate_of_lead_id'"\)/);
+  });
+
+  test("a repeat run's draft estimate stays on THIS run's row, and /upsell touches only the authenticated lead's draft", () => {
+    // A pointer at the open original would let a typed-contact repeat reach
+    // a draft it never proved ownership of (pre-push P0, r4). The pipeline
+    // does not read the key, so the draft is its own Draft opportunity.
+    expect(src).toMatch(/lead_id: lead\.id,\n\s+\/\/ setupFeeQuote is injected/);
+    expect(src).toMatch(/estimate_data->>'lead_id' = \?", \[leadId\]/);
+    expect(src).not.toMatch(/estimate_data->>'lead_id' IN \(/);
   });
 
   test('nothing on the public surface follows the marker to the original (label only — the merge is a trusted-path job)', () => {
