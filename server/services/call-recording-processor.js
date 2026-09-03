@@ -15598,6 +15598,32 @@ const CallRecordingProcessor = {
     // stale and must not record verdicts, stamp a disposition, or enrich.
     if (finalized > 0) {
       await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription });
+
+      // Commitments — what Waves promised and what the caller agreed to, as
+      // evidence-linked rows (services/call-commitments.js). Runs after
+      // finalization, fenced on this pass's GENERATION (the token is already cleared by
+      // finalization — same fence the detached estimator lanes use). Seeds
+      // from the V2 extraction plus one bounded model pass; a human-touched
+      // row is never rewritten. Dark behind GATE_CALL_COMMITMENTS; never
+      // blocks the call.
+      if (transcription && !extracted.is_spam && isEnabled('callCommitments')) {
+        try {
+          const commitmentsStartedAt = Date.now();
+          const settled = await db('call_log').where({ id: call.id }).first('transcript_structured', 'processing_status');
+          if (settled && settled.processing_status !== 'spam') {
+            const commitmentSummary = await require('./call-commitments').recordCallCommitments({
+              conn: db,
+              call: { ...call, transcript_structured: settled.transcript_structured ?? call.transcript_structured },
+              transcript: transcription,
+              v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
+              procGeneration,
+            });
+            logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
+          }
+        } catch (err) {
+          logger.warn(`[call-proc] commitments step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+        }
+      }
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization

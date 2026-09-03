@@ -1,13 +1,18 @@
-// The operator-correction admin endpoints: every correction is admin-only,
-// ids are validated before any query, the customer relink stamps the
-// override that the processor honours, and recording adoption keeps the
-// PAN-quarantine invariant.
+// The call-intelligence admin endpoints: reads are staff-visible, every
+// correction is admin-only, ids are validated before any query, and the
+// customer relink stamps the override that the processor honours.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'auth_test' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/call-recording-processor', () => ({ processRecording: jest.fn(), quarantineCardRecording: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(() => Promise.resolve(true)) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
+jest.mock('../services/call-commitments', () => ({
+  applyHumanUpdate: jest.fn(),
+  addHumanCommitment: jest.fn(),
+}));
+
 // `mock`-prefixed so the jest.mock factory may read it (it is read lazily,
 // per request, never at factory time).
 let mockRole = 'admin';
@@ -20,7 +25,9 @@ jest.mock('../middleware/admin-auth', () => ({
 const express = require('express');
 const db = require('../models/db');
 const processor = require('../services/call-recording-processor');
+const intelligence = require('../services/call-intelligence');
 const { isEnabled } = require('../config/feature-gates');
+const commitments = require('../services/call-commitments');
 const router = require('../routes/admin-call-recordings');
 
 function withServer(fn) {
@@ -75,6 +82,86 @@ beforeEach(() => {
   isEnabled.mockReturnValue(true);
 });
 
+describe('GET /calls/:id/intelligence', () => {
+  test('rejects a non-UUID id before touching the database', async () => {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/not-a-uuid/intelligence`);
+      expect(res.status).toBe(400);
+      expect(intelligence.loadCallIntelligence).not.toHaveBeenCalled();
+    });
+  });
+  test('returns the normalized object for staff', async () => {
+    mockRole = 'tech';
+    intelligence.loadCallIntelligence.mockResolvedValue({ call_id: CALL_ID, commitments: [] });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.intelligence.call_id).toBe(CALL_ID);
+      // The panel hides its write controls on these flags: commitments while
+      // the gate is off, the admin-only corrections for non-admins.
+      expect(body.features).toEqual({ commitments: true, admin: false });
+    });
+    isEnabled.mockReturnValue(false);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
+      expect((await res.json()).features).toEqual({ commitments: false, admin: false });
+    });
+  });
+  test('404s when the call does not exist', async () => {
+    intelligence.loadCallIntelligence.mockResolvedValue(null);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
+      expect(res.status).toBe(404);
+    });
+  });
+});
+
+describe('commitment writes are staff-wide but fail closed when the gate is off', () => {
+  test.each([
+    ['PATCH', `/commitments/${COMMIT_ID}`, { action: 'confirm' }],
+    ['POST', `/calls/${CALL_ID}/commitments`, { party: 'waves', kind: 'callback', description: 'x' }],
+  ])('%s %s → 409 COMMITMENTS_DISABLED with the gate off, no service call', async (method, path, body) => {
+    isEnabled.mockReturnValue(false);
+    mockDb([]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings${path}`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('COMMITMENTS_DISABLED');
+    });
+    expect(commitments.applyHumanUpdate).not.toHaveBeenCalled();
+    expect(commitments.addHumanCommitment).not.toHaveBeenCalled();
+  });
+
+  test('a technician receives the intelligence without billing outcomes (invoices, revenue) — admin-only everywhere else (codex gh-r11 P1)', async () => {
+    mockRole = 'technician';
+    require('../services/call-intelligence').loadCallIntelligence.mockImplementation(async () => ({ call_id: CALL_ID, outcomes: { lead: null, estimates: [], appointments: [], invoices: [{ id: 'inv-1', total: 250, status: 'paid', paid_at: 'T' }], revenue_cents: 25000, basis_note: '' } }));
+    mockDb([]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.features.admin).toBe(false);
+      expect(body.intelligence.outcomes).toMatchObject({ invoices: [], revenue_cents: null, billing_hidden: true });
+    });
+    mockRole = 'admin';
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`)).json();
+      expect(body.intelligence.outcomes.invoices).toHaveLength(1);
+      expect(body.intelligence.outcomes.revenue_cents).toBe(25000);
+    });
+  });
+
+  test('a technician can settle a promise (staff-wide, like tagging a disposition)', async () => {
+    mockRole = 'tech';
+    commitments.applyHumanUpdate.mockResolvedValue({ id: COMMIT_ID, human_state: 'confirmed' });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+      expect(res.status).toBe(200);
+    });
+  });
+});
+
 describe('PUT /calls/:id/customer repairs an earlier customer_creation_failed', () => {
   test('the correction resolves that card in the same transaction and clears review when nothing else is open', async () => {
     const updates = mockDb([{ id: CALL_ID, customer_id: null, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
@@ -111,7 +198,25 @@ describe('customer relink and recording adoption stay admin-only', () => {
       const res = await fetch(`${base}/admin/call-recordings${path}`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       expect(res.status).toBe(403);
     });
+    expect(commitments.applyHumanUpdate).not.toHaveBeenCalled();
+    expect(commitments.addHumanCommitment).not.toHaveBeenCalled();
     expect(processor.processRecording).not.toHaveBeenCalled();
+  });
+});
+
+describe('PATCH /commitments/:id', () => {
+  test('passes the verdict and the reviewer through; service 4xx errors keep their status', async () => {
+    commitments.applyHumanUpdate.mockResolvedValue({ id: COMMIT_ID, human_state: 'confirmed' });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm', note: 'checked' }) });
+      expect(res.status).toBe(200);
+      expect(commitments.applyHumanUpdate).toHaveBeenCalledWith(db, COMMIT_ID, expect.objectContaining({ action: 'confirm', note: 'checked', reviewedBy: 'tech-1' }));
+    });
+    commitments.applyHumanUpdate.mockRejectedValue(Object.assign(new Error('Unknown commitment action: explode'), { status: 400 }));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'explode' }) });
+      expect(res.status).toBe(400);
+    });
   });
 });
 

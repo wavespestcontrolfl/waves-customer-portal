@@ -239,6 +239,8 @@ describe('claim ceiling is derived from the provider budgets', () => {
     // one aggregate deadline, plus the one validation it may have in flight),
     // the download and the V2 fallback chain — the worst case a HEALTHY pass
     // can reach while holding its claim.
+    // The commitments model pass is NOT counted: it runs after finalization
+    // cleared the claim, so it cannot extend a held one.
     const expected = PROVIDER_FETCH_TIMEOUTS_MS.recording_download
       + (3 * PROVIDER_FETCH_TIMEOUTS_MS.transcription)
       + (2 * PROVIDER_FETCH_TIMEOUTS_MS.transcript_label)
@@ -246,6 +248,9 @@ describe('claim ceiling is derived from the provider budgets', () => {
       + 30000
       + require('../services/llm/call').DEFAULT_FALLBACK_BUDGET_MS;
     expect(providerBudgetMs()).toBe(expected);
+    // The commitments leg reads the same env-tunable timeout the processor
+    // does, so the two cannot drift apart silently.
+    expect(require('../services/call-commitments').MODEL_TIMEOUT_MS).toBe(PROVIDER_FETCH_TIMEOUTS_MS.extraction);
   });
 
   test('the bell sits above every budgeted provider path', () => {
