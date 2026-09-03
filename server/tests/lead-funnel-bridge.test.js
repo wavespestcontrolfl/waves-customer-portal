@@ -14,8 +14,20 @@
 jest.mock('../services/ads/call-attribution', () => ({
   attributionForSourceType: (sourceType) => ({
     google_ads: { leadSource: 'google_ads', isPaid: true },
+    facebook: { leadSource: 'facebook', isPaid: true },
     organic: { leadSource: 'organic', isPaid: false },
+    website: { leadSource: 'website', isPaid: false },
   })[sourceType] || null,
+}));
+// The intake resolver — real classification is unit-tested in its own suite;
+// here it only has to answer for the stored snapshot it is handed.
+jest.mock('../services/lead-source-resolver', () => ({
+  resolveLeadSource: jest.fn(async (a) => {
+    const utm = a?.utm || {};
+    if (a?.gclid || (utm.source === 'google' && utm.medium === 'cpc')) return { sourceType: 'google_ads', leadSourceDetail: a?.gclid ? 'Google Ads click (gclid)' : `google ${utm.medium} ${utm.campaign}`, isPaidClick: true };
+    if (utm.source === 'facebook') return { sourceType: 'facebook', leadSourceDetail: `facebook ${utm.medium || ''}`.trim(), isPaidClick: utm.medium === 'cpc' };
+    return { sourceType: 'website', leadSourceDetail: a?.referrer ? `Referrer: ${a.referrer}` : null, isPaidClick: false };
+  }),
 }));
 
 const {
@@ -27,6 +39,7 @@ const {
 } = require('../services/lead-funnel-bridge');
 const { etDateString } = require('../utils/datetime-et');
 const { inferServiceLine } = require('../utils/service-line-infer');
+const { resolveLeadSource } = require('../services/lead-source-resolver');
 
 // Fake knex that records the WHERE chain the bridge builds. Supports the
 // grouped `where((q) => q.whereIn(...).orWhereNull(...))` form; whereIn calls
@@ -397,6 +410,39 @@ describe('stampLeadFunnelRow — the one row a lead row\'s own intake would have
     expect(await stampLeadFunnelRow(database, { ...stored, lead_source_id: null })).toBeNull();
     expect(database._captured.sourceLookup).toBeNull();
     expect(database._captured.insert).toBeNull();
+  });
+
+  test('a row with a stored attribution snapshot is rebuilt through the intake resolver: detail, campaign/term and paid evidence (a cpc UTM without a click id) come back as intake stamped them', async () => {
+    resolveLeadSource.mockClear();
+    const database = makeStampDb();
+    const withSnapshot = {
+      ...stored, gclid: null,
+      extracted_data: { stage: 'quote_calculated', utm: { source: 'google', medium: 'cpc', campaign: 'summer-ants', term: 'ant control' }, referrer: null, landing_url: 'https://wavespestcontrol.com/quote' },
+    };
+    const id = await stampLeadFunnelRow(database, withSnapshot);
+    expect(id).toBe('asa-1');
+    expect(resolveLeadSource).toHaveBeenCalledWith({
+      utm: { source: 'google', medium: 'cpc', campaign: 'summer-ants', term: 'ant control' },
+      referrer: null, landing_url: 'https://wavespestcontrol.com/quote',
+      gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fbp-1',
+    });
+    // The snapshot beats the lead_sources fallback (no lookup at all).
+    expect(database._captured.sourceLookup).toBeNull();
+    expect(database._captured.insert).toEqual(expect.objectContaining({
+      lead_source: 'google_ads', lead_source_detail: 'google cpc summer-ants', utm_campaign: 'summer-ants', utm_term: 'ant control', is_paid: true,
+    }));
+  });
+
+  test('a snapshot that resolves to an unpaid channel is not paid, keeps its detail, and a legacy string snapshot parses too', async () => {
+    const database = makeStampDb();
+    await stampLeadFunnelRow(database, { ...stored, gclid: null, extracted_data: JSON.stringify({ utm: null, referrer: 'https://www.google.com/', landing_url: 'https://wavespestcontrol.com/' }) });
+    expect(database._captured.insert).toEqual(expect.objectContaining({
+      lead_source: 'website', lead_source_detail: 'Referrer: https://www.google.com/', utm_campaign: null, utm_term: null, is_paid: false,
+    }));
+    // utm_source=facebook without cpc or a click id lands in the Facebook channel but is not paid (same rule as intake).
+    const organicSocial = makeStampDb();
+    await stampLeadFunnelRow(organicSocial, { ...stored, gclid: null, extracted_data: { utm: { source: 'facebook', medium: 'social' }, referrer: null, landing_url: null } });
+    expect(organicSocial._captured.insert).toEqual(expect.objectContaining({ lead_source: 'facebook', is_paid: false }));
   });
 
   test('a db failure is swallowed (null, never thrown into the conversion)', async () => {

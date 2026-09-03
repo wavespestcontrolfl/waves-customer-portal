@@ -162,13 +162,65 @@ async function bridgeLeadsFunnelStage(leadIds, leadStatus, database = null) {
   }
 }
 
+// The attribution snapshot intake stored on a wizard row (public-quote.js
+// extracted_data: utm / referrer / landing_url; the click ids are first-class
+// columns), shaped as the request attribution intake fed the resolver. Null
+// for a row that never stored one.
+function storedTouch(lead) {
+  let data = lead.extracted_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  if (!data || !('utm' in data || 'referrer' in data || 'landing_url' in data)) return null;
+  return {
+    utm: data.utm || null,
+    referrer: data.referrer || null,
+    landing_url: data.landing_url || null,
+    ...Object.fromEntries(CLICK_ID_COLUMNS.map((col) => [col, lead[col] || null])),
+  };
+}
+
+// The channel the row's own intake stamped — through the SAME resolver
+// intake used (lead-source-resolver), fed the stored snapshot, so source
+// detail, campaign / term and paid evidence (a cpc UTM counts even without a
+// click id) come back exactly as the row's own run computed them (pre-push
+// P1 on #3834 r15). A row with no snapshot (older rows) falls back to its
+// lead source's channel with its click ids as the paid evidence (r11 P2).
+// Null when the row should get no funnel row at all (no channel — offline /
+// word-of-mouth / undecided), exactly as its own intake would have decided.
+async function resolveStoredTouch(db, lead) {
+  // Lazy: both modules load the db module at require time.
+  const { attributionForSourceType } = require('./ads/call-attribution');
+  const touch = storedTouch(lead);
+  if (touch) {
+    const { resolveLeadSource } = require('./lead-source-resolver');
+    const meta = await resolveLeadSource(touch);
+    const channel = attributionForSourceType(meta.sourceType);
+    return channel && {
+      channel,
+      detail: meta.leadSourceDetail || null,
+      utmCampaign: touch.utm?.campaign || null,
+      utmTerm: touch.utm?.term || null,
+      isPaid: !!channel.isPaid && meta.isPaidClick === true,
+    };
+  }
+  const source = lead.lead_source_id ? await db('lead_sources').where({ id: lead.lead_source_id }).first('source_type') : null;
+  const channel = attributionForSourceType(source?.source_type);
+  return channel && {
+    channel,
+    detail: null,
+    utmCampaign: null,
+    utmTerm: null,
+    isPaid: !!channel.isPaid && PAID_CLICK_ID_COLUMNS.some((col) => !!lead[col]),
+  };
+}
+
 /**
  * stampLeadFunnelRow(database, lead, { customerId?, serviceInterest?, funnelStage? })
  * Create the ONE ad_service_attribution row a lead row's own intake would
- * have stamped, rebuilt from what the row stored — its lead source's channel,
- * its click ids, its service, its first-contact date — never from the
- * current request's touch, which would credit acquisition to the wrong visit
- * and corrupt first-touch ROI (codex #3834 r11 P2). Two callers:
+ * have stamped, rebuilt from what the row stored — its attribution snapshot
+ * through the intake resolver (resolveStoredTouch), its click ids, its
+ * service, its first-contact date — never from the current request's touch,
+ * which would credit acquisition to the wrong visit and corrupt first-touch
+ * ROI (codex #3834 r11 P2). Two callers:
  *   • the quote wizard's repeat-run root repair (routes/public-quote.js): a
  *     repeat skips its own row because the chain root carries the prospect,
  *     and rebuilds the root's row when the root's own best-effort insert
@@ -181,9 +233,8 @@ async function bridgeLeadsFunnelStage(leadIds, leadStatus, database = null) {
  *     all (codex #3834 r14 P2) — stamped straight at 'booked', the stage the
  *     bridge would have set.
  * `customerId` / `serviceInterest` fill in only what the row lacks — the row
- * belongs to ITS customer (codex #3834 r13 P2). Paid means the channel is a
- * paid one AND the row stored a click id (fbc included). A stored source with
- * no channel gets no row, exactly as the row's own intake would have.
+ * belongs to ITS customer (codex #3834 r13 P2). A stored touch with no
+ * channel gets no row, exactly as the row's own intake would have.
  * `funnelStage` overrides the status-derived stage (the winner is stamped
  * at 'booked' while its row still reads 'duplicate'). Idempotent on the
  * UNIQUE lead_id; returns the id of the row THIS call inserted, or null when
@@ -195,11 +246,8 @@ async function stampLeadFunnelRow(database, lead, { customerId = null, serviceIn
   try {
     if (!lead) return null;
     const stage = funnelStage || LEAD_STATUS_TO_FUNNEL_STAGE[lead.status] || 'lead';
-    // Lazy: call-attribution loads the db module at require time.
-    const { attributionForSourceType } = require('./ads/call-attribution');
-    const source = lead.lead_source_id ? await db('lead_sources').where({ id: lead.lead_source_id }).first('source_type') : null;
-    const channel = attributionForSourceType(source?.source_type);
-    if (!channel) return null;
+    const touch = await resolveStoredTouch(db, lead);
+    if (!touch) return null;
     const interest = lead.service_interest || serviceInterest;
     const [inserted] = await db('ad_service_attribution').insert({
       customer_id: lead.customer_id || customerId,
@@ -208,13 +256,13 @@ async function stampLeadFunnelRow(database, lead, { customerId = null, serviceIn
       specific_service: inferSpecificService(interest),
       service_bucket: inferServiceBucket(interest),
       lead_date: etDateString(new Date(lead.created_at || Date.now())),
-      lead_source: channel.leadSource,
-      lead_source_detail: null,
+      lead_source: touch.channel.leadSource,
+      lead_source_detail: touch.detail,
       ...Object.fromEntries(CLICK_ID_COLUMNS.map((col) => [col, lead[col] || null])),
-      utm_campaign: null,
-      utm_term: null,
+      utm_campaign: touch.utmCampaign,
+      utm_term: touch.utmTerm,
       funnel_stage: stage,
-      is_paid: !!channel.isPaid && PAID_CLICK_ID_COLUMNS.some((col) => !!lead[col]),
+      is_paid: touch.isPaid,
     }).onConflict('lead_id').ignore().returning('id');
     return inserted ? inserted.id : null;
   } catch (err) {
