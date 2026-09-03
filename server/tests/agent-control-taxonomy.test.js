@@ -78,6 +78,7 @@ describe('agent-control taxonomy', () => {
     ['openai_incomplete', { pastBudget: true }, 'timeout'],
     ['openai_incomplete', {}, 'incomplete'],
     ['anthropic_incomplete', {}, 'incomplete'],
+    ['gemini_incomplete', {}, 'incomplete'],
     ['anthropic_incomplete', { pastBudget: true }, 'timeout'],
     ['budget_exhausted', {}, 'budget'],
     ['max_cost', {}, 'budget'],

@@ -316,6 +316,15 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
     const data = await resp.json();
     const served = { servedModel: data?.modelVersion, providerRef: data?.responseId, usage: usageOf('gemini', data), latencyMs: elapsedMs(t0) };
     const out = (data?.candidates?.[0]?.content?.parts || []).map((p) => p && p.text).filter(Boolean).join('');
+    // A MAX_TOKENS finish is an incomplete leg, as OpenAI's `incomplete`
+    // status and Anthropic's 'max_tokens' stop are: the output was cut off,
+    // so the call row and the caller agree it failed and the caller's
+    // fallback runs instead of a truncated answer shipping.
+    if (data?.candidates?.[0]?.finishReason === 'MAX_TOKENS') {
+      logger.warn(`[llm] Gemini response finished at MAX_TOKENS (${maxTokens})`);
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'gemini_incomplete', response: out });
+      return { ok: false, reason: 'gemini_incomplete' };
+    }
     const json = jsonMode ? parseLooseJson(out) : null;
     if (jsonMode && !json) {
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json', response: out });

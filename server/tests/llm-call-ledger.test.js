@@ -191,6 +191,18 @@ describe('llm call ledger', () => {
     });
   });
 
+  describe('callGemini', () => {
+    it('a MAX_TOKENS finish is a FAILED leg in both modes — gemini_incomplete recorded (with usage) AND returned, like the other providers', async () => {
+      const { call } = load();
+      global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"g":' }] } }] });
+      expect(await call.callGemini({ model: 'g', text: 't' })).toEqual({ ok: false, reason: 'gemini_incomplete' });
+      global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: 'The first half of' }] } }] });
+      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'gemini_incomplete' });
+      await flush();
+      expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'gemini_incomplete', 'incomplete', 50], [false, 'gemini_incomplete', 'incomplete', 50]]);
+    });
+  });
+
   describe('callAnthropic', () => {
     it('records the SDK usage block incl. cache read/write and the message id', async () => {
       mockAnthropicCreate.mockResolvedValue(ANTHROPIC_MESSAGE);
