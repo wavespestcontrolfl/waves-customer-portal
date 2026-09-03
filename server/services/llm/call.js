@@ -162,7 +162,8 @@ function providerErrorReason(provider, err) {
 // structured-output mode on — the model is constrained to the schema instead
 // of being asked in prose to "return only JSON". Anthropic:
 // output_config.format json_schema; OpenAI Responses: text.format json_schema
-// (strict). Gemini keeps response_mime_type only. The reply still goes through
+// (strict); Gemini: generationConfig.response_json_schema alongside the JSON
+// mime type. The reply still goes through
 // parseLooseJson, so a site converts by adding its schema and deleting its
 // JSON-shape prose — nothing else about the site changes.
 async function callOpenAI({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low' } = {}) {
@@ -214,7 +215,7 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
  * Gemini generateContent. jsonMode sets response_mime_type and joins ALL text
  * parts (a thinking model can emit a thought part before the answer part).
  */
-async function callGemini({ model, system, text, images = [], jsonMode = true, maxTokens = 2048, temperature = 0.2, timeoutMs } = {}) {
+async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, timeoutMs } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
   try {
@@ -222,6 +223,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, m
     const parts = [...images.map(toGeminiImage), { text: promptText }];
     const generationConfig = { temperature, maxOutputTokens: maxTokens };
     if (jsonMode) generationConfig.response_mime_type = 'application/json';
+    if (jsonMode && jsonSchema) generationConfig.response_json_schema = jsonSchema;
     const resp = await fetch(geminiUrl(model, key), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

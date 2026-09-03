@@ -190,6 +190,19 @@ describe('callAnthropic prompt caching', () => {
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].system).toBeUndefined();
   });
 
+  test('jsonSchema sets generationConfig.response_json_schema on the Gemini request', async () => {
+    process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-key';
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: '{"interest":"pest"}' }] } }] }) });
+    const schema = { type: 'object', additionalProperties: false, required: ['interest'], properties: { interest: { type: 'string' } } };
+    const r = await callGemini({ model: GEMINI_VISION_BEST, text: 'classify', jsonMode: true, jsonSchema: schema });
+    expect(r.json).toEqual({ interest: 'pest' });
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(body.generationConfig.response_mime_type).toBe('application/json');
+    expect(body.generationConfig.response_json_schema).toEqual(schema);
+    await callGemini({ model: GEMINI_VISION_BEST, text: 'draft', jsonMode: false, jsonSchema: schema });
+    expect(JSON.parse(global.fetch.mock.calls.at(-1)[1].body).generationConfig.response_json_schema).toBeUndefined();
+  });
+
   test('jsonSchema sets output_config.format json_schema on the Anthropic request', async () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"interest":"lawn"}' }] });
     const schema = { type: 'object', additionalProperties: false, required: ['interest'], properties: { interest: { type: 'string' } } };
