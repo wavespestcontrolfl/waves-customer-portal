@@ -1252,6 +1252,9 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     // The building's floor count would derive a fractional footprint from
     // the unit's sqft; the complex pool is not the tenant's.
     expect(whole.stories).toBe(1);
+    // …and that 1 is a DEFAULT nobody observed — the client's verified save
+    // must skip it.
+    expect(whole.storiesSource).toBe('default');
     expect(whole.pool).not.toBe('YES');
     expect(whole.poolCage).not.toBe('YES');
     // The county master-parcel guidance (which asks to collect the unit
@@ -1273,6 +1276,7 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     expect(verified.homeSqFt).toBe(1100);
     expect(verified.lotSqFt).toBe(0);
     expect(verified.stories).toBe(2);
+    expect(verified.storiesSource).toBe('verified');
   });
 
   test('unit address: parcel-scale satellite areas are discarded with the building dims', () => {
@@ -1334,6 +1338,24 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
       rentalComplexRecord(), { propertyUse: 'COMMERCIAL' }, null, null, null, null, unit,
     );
     expect(profile.isCommercial).toBe(true);
+    const office = buildEnrichedProfile(
+      rentalComplexRecord(), { propertyUse: 'COMMERCIAL', commercialUseType: 'OFFICE_RETAIL' }, null, null, null, null, unit,
+    );
+    expect(office.isCommercial).toBe(true);
+  });
+
+  test('vision\'s own MULTIFAMILY_COMMON_AREA read is the same whole-property verdict — the unit override still applies; MIXED use does not', () => {
+    const apartments = buildEnrichedProfile(
+      rentalComplexRecord(), { propertyUse: 'COMMERCIAL', commercialUseType: 'MULTIFAMILY_COMMON_AREA' },
+      null, null, null, null, unit,
+    );
+    expect(apartments.isCommercial).toBe(false);
+    expect(apartments.propertyType).toBe('Condo');
+    const mixed = buildEnrichedProfile(
+      rentalComplexRecord(), { propertyUse: 'MIXED', commercialUseType: 'MULTIFAMILY_COMMON_AREA' },
+      null, null, null, null, unit,
+    );
+    expect(mixed.isCommercial).toBe(true);
   });
 
   test('gate OFF: unit address changes nothing', () => {

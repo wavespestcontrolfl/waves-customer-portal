@@ -2726,6 +2726,11 @@ export default function EstimateToolViewV2({
   // never autofill — or stamp its customer match onto — a newer one.
   const lookupSeqRef = useRef(0);
   const lookupAbortRef = useRef(null);
+  // The address a unit-scoped lookup was run for — the satellite guard
+  // below keys on it, not on the (possibly stale) profile alone, so editing
+  // the address after a unit lookup re-enables the standalone analysis
+  // (codex r2 P2).
+  const unitLookupAddressRef = useRef("");
   // Live mirror of form.address for the in-flight lookup's apply gate: the
   // seq only advances when ANOTHER lookup starts, so an address
   // edit/select/clear during a lookup needs its own invalidation — the
@@ -3824,6 +3829,7 @@ export default function EstimateToolViewV2({
       const ep = data.enriched;
       setEnrichedProfile(ep);
       setVerifySaveState("");
+      unitLookupAddressRef.current = ep.residentialUnitLookup ? address : "";
 
       const upd = {};
       if (ep.homeSqFt) upd.homeSqFt = String(ep.homeSqFt);
@@ -3909,7 +3915,10 @@ export default function EstimateToolViewV2({
         // With derivation suppressed nothing would refresh a previous
         // address's auto-derived footprint — clear it (manual entries keep
         // the same never-overwritten contract as the boxes below).
-        if (ep.footprintUnknown === true && f._termiteFootprintAuto) {
+        // A unit lookup has no building footprint to offer either, and the
+        // bare-building lookup's auto-derived one must not survive as a
+        // "manual" termite measurement (codex r2 P1).
+        if ((ep.footprintUnknown === true || ep.residentialUnitLookup) && f._termiteFootprintAuto) {
           next.termiteFootprintSqFt = "";
           next._termiteFootprintAuto = false;
         }
@@ -4095,7 +4104,7 @@ export default function EstimateToolViewV2({
     // A unit lookup dropped every parcel-wide read on purpose; this action
     // would write them straight back (lot, bed area, canopy, densities,
     // pool, water) — pre-push codex P1 r4.
-    if (enrichedProfile?.residentialUnitLookup) {
+    if (enrichedProfile?.residentialUnitLookup && unitLookupAddressRef.current === address) {
       setSatelliteStatus({
         type: "err",
         msg: "Satellite analysis reads the whole parcel — not applied to a single-unit lookup. Enter the unit's own figures.",

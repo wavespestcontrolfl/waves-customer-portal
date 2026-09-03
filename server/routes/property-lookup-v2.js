@@ -1781,7 +1781,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     commercialSubtype: wholePropertySubtype,
     commercialDetectionSource: wholePropertyCategory === 'COMMERCIAL'
       ? resolveCommercialDetectionSource(rc, ai) : null,
-    structuredCommercialSignal: hasStructuredCommercialAiSignal(ai),
+    structuredCommercialSignal: visionCommercialUseSignal(ai),
     commercialUseSignal: recordCommercialUseSignal(rc),
   });
   const category = residentialUnitLookup ? 'RESIDENTIAL' : wholePropertyCategory;
@@ -1813,6 +1813,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       squareFootage: isVerified('squareFootage') ? rc.squareFootage : 0,
       lotSize: 0,
       stories: (rc._storiesSource === 'verified' || isVerified('stories')) ? rc.stories : 1,
+      // The assumed 1 is a DEFAULT nobody observed: stamped so the client's
+      // "save as field-verified" skips it unless the operator touches the
+      // field (codex r2 P1 — same contract as the unknown-stories aggregate).
+      _storiesSource: (rc._storiesSource === 'verified' || isVerified('stories')) ? rc._storiesSource : 'default',
       hasPool: null,
       poolCageSqft: null,
     };
@@ -2923,6 +2927,19 @@ const COMMERCIAL_USE_RE = /(commercial|office|retail|industrial|warehouse|restau
 // for (pre-push codex P1 r5). Every OTHER use token detectCategory
 // recognizes still vetoes — the two lists differ by exactly that token.
 const COMMERCIAL_USE_VETO_RE = /(office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/;
+
+// The structured satellite read as a unit-override veto: vision's
+// MULTIFAMILY_COMMON_AREA / HOA_COMMON_AREA are the SAME whole-property
+// multifamily verdict residentialMultifamilyVerdict permits, not an office
+// or retail tenant — only a MIXED-use read, or a genuine commercial use
+// type, vetoes (codex r2 P1).
+const VISION_MULTIFAMILY_USE_TYPES = new Set(['MULTIFAMILY_COMMON_AREA', 'HOA_COMMON_AREA']);
+function visionCommercialUseSignal(ai) {
+  const propertyUse = String(ai?.propertyUse || '').trim().toUpperCase();
+  const useType = String(ai?.commercialUseType || '').trim().toUpperCase();
+  if (VISION_MULTIFAMILY_USE_TYPES.has(useType) && propertyUse !== 'MIXED') return false;
+  return hasStructuredCommercialAiSignal(ai);
+}
 
 function recordCommercialUseSignal(rc) {
   return COMMERCIAL_USE_VETO_RE.test(commercialSignalText(commercialSignalRecord(rc), {}));
