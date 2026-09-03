@@ -56,6 +56,7 @@ describe('managed assistant — the turn recorder sees how the stream ended', ()
   beforeEach(() => {
     jest.resetModules();
     mockRecordSessionUsage.mockReset();
+    mockRecordSessionUsage.mockResolvedValue(null); // the real recorder resolves (never rejects)
     mockInsert.mockReset();
     process.env = { ...ORIGINAL_ENV, ANTHROPIC_API_KEY: 'k', MANAGED_AGENT_ID: 'agent_assistant_1' };
   });

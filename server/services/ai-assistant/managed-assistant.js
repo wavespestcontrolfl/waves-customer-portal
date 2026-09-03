@@ -232,7 +232,7 @@ class ManagedAssistant {
       // customer's reply must not wait on a usage GET — up to 15 s on a slow
       // provider — and this server process is long-lived, unlike the
       // one-shot runners, which await it.
-      if (sessionId) void recordSessionUsage({ laneId: 'agent_assistant', sessionId, agentId: MANAGED_AGENT_ID, model: AGENT_CONFIG.model, startedAt: turnStartedAt, failure });
+      if (sessionId) void recordSessionUsage({ laneId: 'agent_assistant', sessionId, agentId: MANAGED_AGENT_ID, model: AGENT_CONFIG.model, startedAt: turnStartedAt, failure }).catch((err) => logger.error(`[managed-assistant] session ledger: ${err.message}`));
     }
   }
 
