@@ -19,6 +19,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { anthropicText } = require('./llm/call');
 const { etDateString } = require('../utils/datetime-et');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 
@@ -83,7 +84,7 @@ async function assessPhotoQuality(base64Image, mimeType) {
         ],
       }],
     });
-    const text = response.content[0].text;
+    const text = anthropicText(response);
     const result = JSON.parse(text.replace(/```json|```/g, '').trim());
     const score = Math.round((result.sharpness * 0.4 + result.lawn_coverage_pct * 0.35 + result.lighting * 0.25));
     return {

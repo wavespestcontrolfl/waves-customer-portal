@@ -65,6 +65,16 @@ function extractOpenAIText(data) {
 }
 
 // Fence/preamble-tolerant JSON parse (from lawn-diagnostic-prompt.js). Returns null on failure.
+/**
+ * First text block of an Anthropic response. Reasoning-capable models put a
+ * thinking block first, so `content[0].text` reads undefined on a valid
+ * reply; every direct SDK site reads through this instead. Older SDK/test
+ * adapters may omit the block type while still carrying text — accepted.
+ */
+function anthropicText(response) {
+  return (response?.content || []).find((b) => b?.type === 'text' || (b?.type == null && typeof b?.text === 'string'))?.text || '';
+}
+
 function parseLooseJson(text) {
   if (!text) return null;
   const clean = String(text).replace(/```json|```/g, '').trim();
@@ -250,9 +260,7 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
     const resp = timeoutMs
       ? await client.messages.create(req, { timeout: timeoutMs, maxRetries: 0 })
       : await client.messages.create(req);
-    // Older SDK/test adapters may omit the explicit block type while still
-    // returning a valid text field; accept both shapes.
-    const out = (resp?.content || []).find((b) => b?.type === 'text' || (b?.type == null && typeof b?.text === 'string'))?.text || '';
+    const out = anthropicText(resp);
     const json = jsonMode ? parseLooseJson(out) : null;
     if (jsonMode && !json) return { ok: false, reason: 'empty_json' };
     return { ok: true, text: out, json, model, response: resp };
@@ -386,6 +394,7 @@ function recordDispatchOutcome(policy, outcome) {
 }
 
 module.exports = {
+  anthropicText,
   // Exported so a caller reasoning about how long one pass can run reads the
   // dispatcher's REAL budget instead of mirroring the number (see
   // utils/claim-ceiling.js).

@@ -19,6 +19,7 @@
 
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { anthropicText } = require('../llm/call');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -83,7 +84,7 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
       }],
     });
 
-    const alt = sanitizeAlt(response.content?.[0]?.text);
+    const alt = sanitizeAlt(anthropicText(response));
     if (!alt) {
       logger.warn('[hero-alt-vision] unusable vision output — keeping writer alt (fail-open)');
       return null;

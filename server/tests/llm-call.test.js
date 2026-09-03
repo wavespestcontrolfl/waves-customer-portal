@@ -190,6 +190,14 @@ describe('callAnthropic prompt caching', () => {
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].system).toBeUndefined();
   });
 
+  test('anthropicText reads the first TEXT block, skipping a leading thinking block', () => {
+    const { anthropicText } = require('../services/llm/call');
+    expect(anthropicText({ content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: '{"ok":true}' }] })).toBe('{"ok":true}');
+    expect(anthropicText({ content: [{ text: 'untyped adapter block' }] })).toBe('untyped adapter block');
+    expect(anthropicText({ content: [] })).toBe('');
+    expect(anthropicText(null)).toBe('');
+  });
+
   test('a vision-style call carries no sampling controls', async () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
     await callAnthropic({ model: FLAGSHIP, text: 'inspect', temperature: 0.2 });

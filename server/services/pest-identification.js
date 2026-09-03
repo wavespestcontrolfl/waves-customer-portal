@@ -23,6 +23,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { anthropicText } = require('./llm/call');
 const {
   safePublicFirstName,
   safePublicCity,
@@ -381,7 +382,7 @@ async function callClaudeVision(base64Image, mimeType) {
         ],
       }],
     });
-    const text = response.content?.[0]?.text;
+    const text = anthropicText(response);
     if (!text) { logger.warn('[pest-identification] Claude returned empty content'); return null; }
     return JSON.parse(text.replace(/```json|```/g, '').trim());
   } catch (err) {

@@ -12,6 +12,7 @@
  * the tech's adjusted trace goes through the existing save route.
  */
 const MODELS = require('../config/models');
+const { anthropicText } = require('./llm/call');
 const logger = require('./logger');
 
 let Anthropic = null;
@@ -259,7 +260,7 @@ async function claudeSuggest(base64Png, prompt) {
         ],
       }],
     });
-    return parseModelJson(response.content?.[0]?.text);
+    return parseModelJson(anthropicText(response));
   } catch (err) {
     logger.warn(`[treatment-zone-suggest] Claude vision failed: ${err.message}`);
     return null;

@@ -25,6 +25,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { anthropicText } = require('./llm/call');
 // Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
@@ -346,7 +347,7 @@ function anthropicClient() {
 }
 
 function parseJsonResponse(response) {
-  const text = response?.content?.[0]?.text;
+  const text = anthropicText(response);
   if (!text) return null;
   return JSON.parse(text.replace(/```json|```/g, '').trim());
 }
