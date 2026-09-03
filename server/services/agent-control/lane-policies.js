@@ -119,9 +119,10 @@ const LANE_RUNTIME = {
   voice_relay: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
 
   // ── Photos & property ──
-  pest_id: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
-  lawn_assess: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
-  tree_shrub: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  // direct_sdk: the photo lanes call Anthropic directly and Gemini over raw HTTP, not llm/call.js (Codex r13).
+  pest_id: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
+  lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
+  tree_shrub: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'vision_id' },
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'property_measurement' },
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   satellite: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
@@ -190,9 +191,11 @@ const LANE_RUNTIME = {
   prospect_score: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   // event, not weekly: a healthy weekly tick over an empty board (or only
   // known directories, handled heuristically) makes no model call.
-  signup_classifier: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
-  outreach_drafter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M2' },
-  form_filler: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: null, ...LONG_BATCH },
+  // direct_sdk: signup-classifier, outreach-drafter and browser-form-filler call anthropic.messages.create directly (Codex r13).
+  // form_filler M3: the live runner submits allowlisted forms with no per-item approval and persists attempt + screenshot evidence.
+  signup_classifier: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification' },
+  outreach_drafter: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M2' },
+  form_filler: { side_effect_class: 'irreversible_external', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null, maturity: 'M3', ...LONG_BATCH },
   // M3: the gated runner submits allowlisted listings with no per-item approval and records evidence in seo_link_attempts (Codex r12).
   signup_worker: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3', ...LONG_BATCH },
   link_investigator: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
@@ -207,9 +210,10 @@ const LANE_RUNTIME = {
   ads_advisor: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null },
 
   // ── Intelligence Bar & knowledge ──
-  ib_admin: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
+  // offline: the /query handler runs every tool-loop round on one Anthropic client — 503 without a key, error path on failure, no second provider (Codex r13).
+  ib_admin: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
   // internal_write: every tech IB request logs an intelligence_bar_queries row and tool use a tool_health_events row — Codex r10.
-  ib_tech: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'sql_tool' },
+  ib_tech: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool' },
   ib_tools: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
   chart_builder_image: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   // offline, not interactive: one callAnthropic() with no cross-provider chain and no
@@ -230,7 +234,8 @@ const LANE_RUNTIME = {
   portal_assistant: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
 
   // ── Managed agents (sessions) ──
-  agent_bi: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', expected_cadence: 'weekly', ...AGENT_SESSION },
+  // M3: the Monday session sends the owner SMS and saves the report without approval (bi-agent-tools) — Codex r13.
+  agent_bi: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', maturity: 'M3', expected_cadence: 'weekly', ...AGENT_SESSION },
   // offline: Managed Agents are Anthropic-only sessions (switchboard: "Managed agents (Anthropic only)") — no cross-provider path (Codex r12).
   agent_lead: { side_effect_class: 'customer_visible', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', maturity: 'M3', ...AGENT_SESSION },
   // irreversible_external: distribute_to_social → SocialMedia.publishToAll

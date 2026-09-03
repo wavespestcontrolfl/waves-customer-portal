@@ -136,7 +136,7 @@ function classifyFailure(errorCode, ctx = {}) {
   if (code === 'eval_regression') return 'regression';
   // 401/403/404 are provider-side too (credentials, access, model not found) — Codex r12.
   if (code === 'no_key' || code === 'all_providers_failed' || /_(5\d\d|429|529|503|401|403|404)$/.test(code)) return 'provider';
-  if (code === 'timeout_budget_exhausted' || code === 'timeout') return 'timeout';
+  if (code === 'timeout_budget_exhausted' || code === 'timeout' || /_408$/.test(code)) return 'timeout'; // status-qualified 408s too (Codex r13)
   if (code === 'openai_incomplete') return ctx.pastBudget ? 'timeout' : 'incomplete';
   if (code === 'budget_exhausted' || code === 'max_cost' || code === 'max_tool_calls') return 'budget';
   if (code === 'bad_request' || /_(400|413)$/.test(code)) return 'bad_input';
