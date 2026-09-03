@@ -1278,25 +1278,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         let openTie = false;
         try {
           const priorReq = prior.service_request_id
-            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'metadata')
+            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
             : null;
           openTie = !!priorReq && priorReq.status === 'new';
-          let resolvedTie = !!priorReq && priorReq.status === 'resolved'
-            && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000;
-          // The window alone is not proof of a retry: a customer won back
-          // and cancelling the same still-current term inside 24h must
-          // process fresh, or the live account stays billable behind an
-          // echo. A resolved run that stamped its churn episode is a retry
-          // only while the customer is STILL in that episode (row churned,
-          // same stamp); an unstamped resolved run (pre-episode, scoped)
-          // keeps the window rule.
-          const priorEpisode = resolvedTie ? (requestCancelPlanMeta(priorReq) || {}).churnEpisodeId : null;
-          if (priorEpisode) {
-            const live = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churn_episode_id');
-            resolvedTie = !!live && live.pipeline_stage === 'churned'
-              && String(live.churn_episode_id || '') === String(priorEpisode);
-          }
-          tied = openTie || resolvedTie;
+          tied = openTie
+            || (!!priorReq && priorReq.status === 'resolved'
+              && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000);
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
         }
@@ -1402,8 +1389,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       const outcome = priorSnap && priorSnap.outcome ? priorSnap.outcome : null;
       const isConfirmErr = (e) => String(e).startsWith('confirmation_');
       const hasTermiteErr = !!(outcome && Array.isArray(outcome.errors) && outcome.errors.includes('termite_retrieval_task'));
-      const hasEpisodeStampErr = !!(outcome && Array.isArray(outcome.errors) && outcome.errors.includes('churn_episode_stamp'));
-      if (outcome && (refundRepairedNow || hasTermiteErr || hasEpisodeStampErr
+      if (outcome && (refundRepairedNow || hasTermiteErr
         || (Array.isArray(outcome.errors) && outcome.errors.some(isConfirmErr)))) {
         try {
           const reqRow = prior.service_request_id
@@ -1421,13 +1407,6 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             // error the lost task recorded.
             let promotedErrors = (outcome.errors || []).filter((e) => !(refundRepairedNow
               && (e === 'prepay_term_disposition' || e === 'prepay_refund_task')));
-            // A lost churn-episode stamp is WITHDRAWN here, never retro-
-            // fitted: that run's side effects went out under the REQUEST key
-            // (stampRequestEpisode's contract), and stamping now would hand
-            // a later resend a second, term-keyed identity. The office was
-            // belled once; the acceptance closes on the identity the run
-            // actually used, so a later win-back cancel never reuses it.
-            promotedErrors = promotedErrors.filter((e) => e !== 'churn_episode_stamp');
             // A lost DEFERRED retrieval task repairs here too — dated
             // (end-of-coverage) or immediate (end-now): the decided-term
             // latch is the only path a retried run reaches, and without
@@ -1990,11 +1969,13 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // processor, which re-derives the pending task from live rows.
   // The episode the processor churned this request under — stamped on the
   // request BEFORE the term-keyed side effects, and carried on the case.
-  // A stamp that did not persist is a follow-up failure like a lost case
-  // write (belled below): this run stays request-keyed and the office sees
-  // why a later repeat commit on the term could re-tell the customer.
+  // A stamp that did not persist is NOT a run error: this run simply stays
+  // request-keyed (the identity its repair resolves to as well, so nothing
+  // double-fires) and closes on that identity. The only cost is that a
+  // repeat commit on the same term after the 24h latch could re-tell the
+  // customer — logged by stampRequestEpisode, never a parked acceptance a
+  // later win-back cancel would keep reusing.
   const episodeStamped = !!(result && result.churnEpisodeId) && await stampRequestEpisode(request, result.churnEpisodeId);
-  if (result && result.churnEpisodeId && !episodeStamped) errors.push('churn_episode_stamp');
   const termEpisode = episodeStamped ? termEpisodeOf(term, result.churnEpisodeId, prepayPlan.keepThrough || null) : null;
   if (result && result.termiteRetrievalPending) {
     if (processed && ['ends_at_term', 'ended_now', 'decision_already_recorded'].includes(termOutcome)) {
