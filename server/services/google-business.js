@@ -42,7 +42,10 @@ function isSystemicDbFailure(err) {
   // classify those before any SQLSTATE test, or they read as row errors.
   if (/^E(CONNRESET|CONNREFUSED|TIMEDOUT|PIPE|HOSTUNREACH|AI_AGAIN)$/i.test(code)) return true;
   if (String((err && err.name) || '') === 'KnexTimeoutError') return true;
-  if (/^(08|53)/.test(code) || /^57P0[123]$/.test(code)) return true;
+  // 57014 (query_canceled) is what statement_timeout raises under database
+  // overload — every row would wait the full timeout under the location
+  // lock, the exact crawl the breaker exists to stop (codex r3 P1).
+  if (/^(08|53)/.test(code) || /^57P0[123]$/.test(code) || code === '57014') return true;
   if (/^\d{5}$/.test(code)) return false; // any other SQLSTATE is about the statement/row
   return /timeout acquiring a connection|econnreset|econnrefused|etimedout|connection terminated|socket hang up/i.test(String((err && err.message) || ''));
 }
@@ -1521,6 +1524,12 @@ class GoogleBusinessService {
             // the rest of the location reconciled (pre-push audit r7).
             if (feed.cause) await this._notifyDegradedSync(loc, `review upsert failed: ${feed.cause}`, { reconcileFailed });
           } catch (gbpErr) {
+            if (gbpErr.partial) {
+              // Breaker trip after some rows stored: count the durable work.
+              totalNew += gbpErr.partial.inserted;
+              totalSynced += gbpErr.partial.stored;
+              errors.push(...gbpErr.partial.errors.map((e) => ({ location: loc.name, ...e })));
+            }
             gbpFailure = gbpErr.message;
             gbpFailures[loc.id] = gbpErr.message;
             errors.push({ location: loc.name, error: gbpErr.message, source: 'gbp' });
@@ -1827,7 +1836,12 @@ class GoogleBusinessService {
         logger.error(`[gbp] review upsert failed for ${loc.name} (${name}): ${rowErr.message}`);
         if (!isSystemicDbFailure(rowErr)) { consecutiveSystemic = 0; continue; }
         if (++consecutiveSystemic >= GBP_ROW_FAILURE_BREAKER) {
-          throw new Error(`${consecutiveSystemic} consecutive review rows failed on connection-class errors — aborting the location (last: ${rowErr.message})`);
+          const abort = new Error(`${consecutiveSystemic} consecutive review rows failed on connection-class errors — aborting the location (last: ${rowErr.message})`);
+          // Rows stored before the trip are durable — hand the counts to the
+          // caller so the run log and the manual sync response report them
+          // (codex r3 P2).
+          abort.partial = { stored: reviews.indexOf(review) + 1 - rowFailures.length, inserted, errors };
+          throw abort;
         }
       }
     }
