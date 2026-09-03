@@ -3244,7 +3244,7 @@ router.get('/restock-requests', async (req, res, next) => {
         'c.last_name',
         'c.address_line1',
         'c.city',
-        ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter'] : []),
+        ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at")] : []),
       )
       .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
       .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
@@ -3288,6 +3288,7 @@ router.get('/restock-requests', async (req, res, next) => {
           // the reason code only.
           error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
           placedAt: row.order_placed_at || null,
+          revokedAt: row.order_revoked_at || null,
         } : null,
         neededBy: row.needed_by,
         reason: row.reason,
@@ -3321,10 +3322,10 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 404;
         throw err;
       }
-      // An automatic order for this request is being placed right now →
-      // 409 for every manual transition (pre-push P0); settled claims are
-      // what these actions reconcile.
-      await require('../services/procurement/order-dispatch').assertRequestNotPlacing(trx, request.id);
+      // Automatic-order guard (pre-push P0s): 409 for every action while the
+      // order is placing; 409 for cancel while a dispatched order is not yet
+      // received or revoked (the next sweep would order again).
+      await require('../services/procurement/order-dispatch').assertManualActionAllowed(trx, request.id, action);
       const status = String(request.status || '').toLowerCase();
       if (action === 'receive' && !['open', 'ordered'].includes(status)) {
         const err = new Error(`Restock request is already ${status}; refresh the list`);

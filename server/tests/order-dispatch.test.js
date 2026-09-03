@@ -30,15 +30,16 @@ jest.mock('../services/vendor-credentials', () => ({ getVendorLoginCredentials: 
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/procurement/auto-reorder', () => ({ vendorPricingFor: jest.fn(async () => mockState.pricing) }));
 
-const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null };
+const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
+    for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
     q.whereIn = (col) => { if (col === 'vo.status') q._pendingBells = true; return q; };
     q.first = async (...cols) => {
       if (cols[0] === 'vo.status') return mockState.liveAutoOrder; // assertNoLiveAutoOrder's aliased join
+      if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (table === 'product_restock_requests') {
         if (cols[0] === 'status') return { status: mockState.freshRequestStatus };
         if (cols[0] === 'id') return mockState.sibling; // the sibling live-request probe
@@ -86,7 +87,7 @@ function mockAdapter(overrides = {}) {
 
 let notify;
 beforeEach(() => {
-  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null });
+  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null });
   for (const k of Object.keys(ENV)) process.env[k] = ENV[k];
   notify = jest.fn(async () => ({ id: 'n1' }));
   auditVendorOrder.mockClear();
@@ -510,6 +511,14 @@ test('the run goes red while a bell is undelivered', async () => {
   mockState.pendingBells = [{ id: 'ledger-9', evidence: { bell: { title: 'Auto-order needs review: x', body: 'y' } }, request_id: 'req-9', product_name: 'x', vendor_name: 'v' }];
   mockState.request = { ...baseRequest(), status: 'ordered' };
   await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
+});
+
+test('a prior dispatched order for the product that is neither received nor revoked blocks the claim — no second order on top of stock that may be on its way (pre-push P0)', async () => {
+  mockState.priorUnreconciled = { id: 'ledger-prior' };
+  const a = mockAdapter();
+  expect(await run(a)).toMatchObject({ skipped: 'prior_order_unreconciled' });
+  expect(mockState.ledgerRows).toHaveLength(0);
+  expect(a.place).not.toHaveBeenCalled();
 });
 
 test('a live manual/forecast request for the same product blocks the claim — staff are ordering', async () => {

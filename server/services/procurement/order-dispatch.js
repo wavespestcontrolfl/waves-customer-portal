@@ -220,21 +220,29 @@ async function assertNoLiveAutoOrder(trx, productId) {
 }
 
 /**
- * Refuse a manual transition (mark ordered / cancel / receive) on a request
- * whose automatic order is being placed RIGHT NOW (vendor_orders 'placing').
- * Marking it ordered would double the purchase, cancelling would hide the
- * in-flight order, receiving is premature. Once the claim settles — placed,
- * or parked needs_review/failed — the actions are exactly the reconciliation
- * they exist for, so only 'placing' blocks. Call under the request row lock
- * (pre-push P0). Throws { statusCode: 409, code: 'auto_order_placing' }.
+ * Manual transitions (mark ordered / cancel / receive) against a request's
+ * automatic order (pre-push P0s):
+ *   - 'placing' → every action refuses: marking ordered would double the
+ *     purchase, cancelling would hide the in-flight order, receiving is
+ *     premature. Placed / parked claims are what the actions reconcile.
+ *   - dispatched (placed_at set: placed, or a post-submit park whose money
+ *     may have moved) → 'cancel' refuses until the operator has RECORDED a
+ *     revoke (evidence.revokedAt, ops/agents/auto-order-revoke.js). A
+ *     cancelled request drops out of the sweep's dedupe and the next tick
+ *     would raise a fresh request and order AGAIN on top of an order that
+ *     may already be on its way. Receive stays open (the stock arrived);
+ *     mark ordered stays open (it is already ordered).
+ * Call under the request row lock. Throws { statusCode: 409, code:
+ * 'auto_order_placing' | 'auto_order_out' }.
  */
-async function assertRequestNotPlacing(trx, requestId) {
-  const placing = await trx('vendor_orders').where({ restock_request_id: requestId, status: 'placing' }).first('id');
-  if (!placing) return;
-  const err = new Error('An automatic order for this request is being placed right now — wait for it to place or park (Restock tab), then act.');
-  err.statusCode = 409;
-  err.code = 'auto_order_placing';
-  throw err;
+async function assertManualActionAllowed(trx, requestId, action) {
+  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id', 'status', 'placed_at', 'external_order_number', 'evidence');
+  if (!row) return;
+  const refuse = (code, message) => { const err = new Error(message); err.statusCode = 409; err.code = code; throw err; };
+  if (row.status === 'placing') refuse('auto_order_placing', 'An automatic order for this request is being placed right now — wait for it to place or park (Restock tab), then act.');
+  if (action === 'cancel' && row.placed_at && !meta(row.evidence).revokedAt) {
+    refuse('auto_order_out', `An automatic order for this request${row.external_order_number ? ` (#${row.external_order_number})` : ''} may already have gone out. Receive it when it arrives, or cancel it with the vendor and record the revoke (ops/agents/auto-order-revoke.js --order=${row.id}) — only then cancel the request.`);
+  }
 }
 
 // Month-to-date money that is spent OR may be: live reservations (placing)
@@ -457,6 +465,20 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
     // covers the vendor call — never both orders.
     const sibling = await trx('product_restock_requests').where({ product_id: request.product_id }).whereIn('status', ['open', 'ordered']).whereNot('id', request.id).first('id', 'source', 'status');
     if (sibling) return { skipped: 'sibling_live_request', sibling };
+    // Belt to the cancel guard's braces (pre-push P0): a PRIOR automatic
+    // order for this product that was dispatched (placed_at set) and is
+    // neither received nor revoked is stock that may be on its way — never
+    // claim a second order on top of it, however the earlier request was
+    // closed. The earlier park's bell already asked for the reconciliation.
+    const unreconciled = await trx('vendor_orders as vo')
+      .join('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
+      .where('prr.product_id', request.product_id)
+      .whereNot('prr.id', request.id)
+      .whereNotNull('vo.placed_at')
+      .whereNot('prr.status', 'received')
+      .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
+      .first('vo.id');
+    if (unreconciled) return { skipped: 'prior_order_unreconciled', ledgerId: unreconciled.id };
     const quantity = Number(request.requested_quantity);
     if (!Number.isFinite(quantity) || quantity <= 0) return { skipped: 'no_quantity' };
     // The eligible price row is read under the same lock so the claim's
@@ -689,7 +711,7 @@ module.exports = {
   findDispatchable,
   vendorOrderQuantity,
   assertNoLiveAutoOrder,
-  assertRequestNotPlacing,
+  assertManualActionAllowed,
   AUTO_ORDER_GATE: GATE,
   _internals: { adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS },
 };

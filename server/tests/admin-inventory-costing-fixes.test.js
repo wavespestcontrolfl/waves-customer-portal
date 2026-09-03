@@ -106,7 +106,7 @@ describe('POST /restock-requests/:id/action', () => {
         }
         return { id: 'prod-1', inventory_on_hand: 10, inventory_unit: 'gal' };
       }
-      if (q._table === 'vendor_orders') return requestRow.placingClaim ? { id: 'vo-1' } : null; // assertRequestNotPlacing
+      if (q._table === 'vendor_orders') return requestRow.ledger || null; // assertManualActionAllowed's one read
       if (q._table === 'product_inventory_movements') {
         movements.push(q.args('insert')[0]);
         return [{ id: 'movement-1', ...q.args('insert')[0] }];
@@ -156,7 +156,7 @@ describe('POST /restock-requests/:id/action', () => {
 
   test.each(['cancel', 'mark_ordered', 'receive'])('%s while the automatic order is placing → 409, request untouched (pre-push P0)', async (action) => {
     const { statusUpdates, stockUpdates } = wireRestock({
-      id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal', placingClaim: true,
+      id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal', ledger: { id: 'vo-1', status: 'placing', placed_at: null, evidence: {} },
     });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
@@ -168,6 +168,35 @@ describe('POST /restock-requests/:id/action', () => {
       expect((await res.json()).error).toMatch(/being placed right now/);
       expect(statusUpdates).toHaveLength(0);
       expect(stockUpdates).toHaveLength(0);
+    });
+  });
+
+  test('cancel while a dispatched automatic order is unreceived and unrevoked → 409 naming the revoke script (pre-push P0)', async () => {
+    const { statusUpdates } = wireRestock({
+      id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal',
+      ledger: { id: 'vo-7', status: 'needs_review', placed_at: new Date(), external_order_number: null, evidence: {} },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'cancel' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/may already have gone out.*auto-order-revoke\.js --order=vo-7/);
+      expect(statusUpdates).toHaveLength(0);
+    });
+  });
+
+  test.each([
+    ['cancel', { id: 'vo-7', status: 'needs_review', placed_at: new Date(), evidence: { revokedAt: '2026-09-03T10:00:00Z' } }, 'cancelled'],
+    ['mark_ordered', { id: 'vo-7', status: 'needs_review', placed_at: new Date(), evidence: {} }, 'ordered'],
+  ])('%s proceeds once the order is revoked / when it only confirms the order', async (action, ledger, expected) => {
+    const { statusUpdates } = wireRestock({ id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal', ledger });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
+      });
+      expect(res.status).toBe(200);
+      expect(statusUpdates.some((u) => u.status === expected)).toBe(true);
     });
   });
 

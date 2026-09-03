@@ -2961,13 +2961,18 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                             >
                               Receive
                             </button>
-                            <button
-                              onClick={() => runAction(request, "cancel")}
-                              disabled={receivingId === request.id}
-                              style={sBtn(D.card, D.red)}
-                            >
-                              Cancel
-                            </button>
+                            {request.order?.placedAt && !request.order?.revokedAt ? (
+                              // A dispatched automatic order that is not yet received or revoked: cancelling would let the next sweep order again (server 409s it too).
+                              <span style={{ color: D.muted, fontSize: 12, alignSelf: "center" }}>Order out — receive, or revoke first</span>
+                            ) : (
+                              <button
+                                onClick={() => runAction(request, "cancel")}
+                                disabled={receivingId === request.id}
+                                style={sBtn(D.card, D.red)}
+                              >
+                                Cancel
+                              </button>
+                            )}
                           </div>
                         </div>
                       ) : (

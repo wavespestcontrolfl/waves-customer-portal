@@ -1340,10 +1340,10 @@ async function updateRestockRequest(input) {
     if (lockedRequest.status === 'received' || lockedRequest.status === 'cancelled') {
       return { error: `This request is already ${lockedRequest.status} — no further actions allowed` };
     }
-    // An automatic order for this request is being placed right now: no
-    // manual transition until it places or parks (pre-push P0).
-    try { await require('../procurement/order-dispatch').assertRequestNotPlacing(trx, request.id); }
-    catch (err) { if (err.code === 'auto_order_placing') return { error: err.message, auto_order_placing: true }; throw err; }
+    // Automatic-order guard (pre-push P0s): no action while the order is
+    // placing; no cancel while a dispatched order is unreceived and unrevoked.
+    try { await require('../procurement/order-dispatch').assertManualActionAllowed(trx, request.id, action); }
+    catch (err) { if (err.code === 'auto_order_placing' || err.code === 'auto_order_out') return { error: err.message, [err.code]: true }; throw err; }
 
     if (action === 'mark_ordered') {
       await trx('product_restock_requests').where('id', request.id).update({ status: 'ordered', updated_at: new Date() });
