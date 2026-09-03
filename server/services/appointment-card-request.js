@@ -2756,8 +2756,9 @@ async function alertUnresolvedCancellationFee({ scheduledServiceId, outcome }) {
 async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()) {
   // Dark rail: no lookups, no fee-may-apply previews (Codex #3153 r11 P1)
   // — the disabled rail cannot charge, so the lane presents as absent.
-  if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false };
-  const { request, unresolved } = await feeEligibleRequestForVisit(scheduledServiceId);
+  const { describeCancelFeeRule, freeCancelReason } = require('./estimate-card-holds');
+  if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
+  const { request, unresolved, reason: skipReason } = await feeEligibleRequestForVisit(scheduledServiceId);
   if (!request) {
     if (unresolved) {
       // Lane state unverifiable (Codex #3153 r9 P1): reporting "no fee"
@@ -2772,10 +2773,15 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
           .first('no_show_fee_amount');
         feeAmount = Number(row?.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : null;
       } catch (err) { /* best-effort */ }
-      return { secured: true, feeApplies: true, feeAmount, unresolved: true };
+      return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', feeAmount, detail: String(skipReason || 'lookup failed').replace(/_/g, ' ') }) };
     }
-    return { secured: false, feeApplies: false };
+    return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
   }
+  const feeAmount = Number(request.no_show_fee_amount);
+  const windowHours = Number(request.cancel_window_hours) > 0 ? Number(request.cancel_window_hours) : 24;
+  // Every exit carries the operator-facing rule (code + sentence) so the
+  // cancel card can say whether the card WILL be charged and why.
+  const describe = (code, extra = {}) => describeCancelFeeRule({ code, feeAmount, windowHours, now, anchorAt: request.fee_agreed_at, ...extra });
   let start = null;
   try {
     const { scheduledServiceApptTime } = require('./appointment-reminders');
@@ -2790,9 +2796,11 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
     // free. (A cleanly-null time stays fee-free — the charge path refuses
     // unresolvable starts the same way.)
     logger.warn(`[appt-card-request] appt-time resolution for cancel preview failed — reporting fee-may-apply: ${err.message}`);
-    return { secured: true, feeApplies: true, feeAmount: Number(request.no_show_fee_amount), unresolved: true };
+    return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'appointment time lookup failed' }) };
   }
   let feeApplies = isApptCardFeeRailEnabled() && !!start && isWithinApptCancelWindow({ request, serviceStart: start, now });
+  let ruleCode = feeApplies ? 'in_window' : freeCancelReason({ start, now, windowHours, anchorAt: request.fee_agreed_at });
+  let sticky = null;
   const { CARD_HOLD_POST_START_GRACE_MS: PREVIEW_GRACE_MS } = require('./estimate-card-holds');
   const previewStartMs = start ? new Date(start).getTime() : NaN;
   const previewStartLive = Number.isFinite(previewStartMs) && (previewStartMs - now.getTime()) > -PREVIEW_GRACE_MS;
@@ -2804,27 +2812,29 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
     // prompt must surface the waiver choice.
     try {
       const { findStickyLateReschedule, isStickyCancelWindowEnabled } = require('./estimate-card-holds');
-      feeApplies = !isStickyCancelWindowEnabled() ? false : !!(await findStickyLateReschedule({
+      sticky = !isStickyCancelWindowEnabled() ? null : await findStickyLateReschedule({
         scheduledServiceId,
         isWithinWindow: (s, at) => isWithinApptCancelWindow({ request, serviceStart: s, now: at }),
         notBefore: request.fee_agreed_at,
         currentStart: previewStartLive ? new Date(previewStartMs) : null,
-      }));
+      });
+      feeApplies = !!sticky;
       if (feeApplies) {
+        ruleCode = 'sticky';
         // Card removal is revocation on the charge path — the preview must
         // agree (Codex #3342 r5 P2): a removed card means the charge leg
         // closes released, so no fee prompt.
         const pmRow = await db('payment_methods')
           .where({ customer_id: request.customer_id, stripe_payment_method_id: request.stripe_payment_method_id })
           .first('id');
-        if (!pmRow) feeApplies = false;
+        if (!pmRow) { feeApplies = false; ruleCode = 'card_removed'; }
       }
     } catch (err) {
       logger.warn(`[appt-card-request] sticky-window lookup for cancel preview failed — reporting fee-may-apply: ${err.message}`);
-      return { secured: true, feeApplies: true, feeAmount: Number(request.no_show_fee_amount), unresolved: true };
+      return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'reschedule history lookup failed' }) };
     }
   }
-  return { secured: true, feeApplies, feeAmount: Number(request.no_show_fee_amount) };
+  return { secured: true, feeApplies, feeAmount, rule: describe(ruleCode, { start, sticky }) };
 }
 
 // Office heads-up for recap completions the lane could not auto-charge —

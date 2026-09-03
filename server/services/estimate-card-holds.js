@@ -1263,6 +1263,81 @@ function isWithinCancelWindow({ hold, serviceStart, now = new Date() }) {
   return msUntilStart > -CARD_HOLD_POST_START_GRACE_MS && msUntilStart <= windowMs;
 }
 
+// ── Cancel-fee rule explanation (operator copy) ─────────────────────────
+// The admin cancel card states, in plain words, whether the saved card WILL
+// be charged and the exact rule that decides it — both directions. One
+// describer for both fee rails so the wording never drifts between the
+// estimate card hold and the appointment-card (/secure) lane. Pure: the
+// previews supply the verdict they already computed plus the evidence.
+//
+// `code` names the deciding rule; `willCharge` is true / false / null
+// (null = unresolved: the cancel parks for billing review, nothing is
+// charged automatically); `text` is the sentence the UI shows.
+function fmtFeeAmount(amount) {
+  const n = Number(amount);
+  if (!(n > 0)) return 'The late-cancel fee';
+  return `The $${Number.isInteger(n) ? n : n.toFixed(2)} late-cancel fee`;
+}
+function fmtETWhen(dt) {
+  const d = dt instanceof Date ? dt : (dt ? new Date(dt) : null);
+  if (!d || Number.isNaN(d.getTime())) return 'an unknown time';
+  const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+  return `${formatETDay(d)}, ${formatETDate(d)} at ${formatETTime(d)}`;
+}
+function fmtAgo(ms) {
+  const mins = Math.max(1, Math.round(ms / 60000));
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'}`;
+  const hours = Math.round(mins / 60);
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+// Which no-fee rule applies once the window predicate said "no fee": past
+// the post-start grace, still inside the booking-age free period (the
+// anchor — held_at / fee_agreed_at — is younger than the window), or simply
+// outside the window. Same inputs as the window predicates above.
+function freeCancelReason({ start, now = new Date(), windowHours, anchorAt = null }) {
+  const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
+  if (!startDate || Number.isNaN(startDate.getTime())) return 'no_time';
+  const msUntilStart = startDate.getTime() - now.getTime();
+  if (msUntilStart <= -CARD_HOLD_POST_START_GRACE_MS) return 'past_start';
+  const fullWindowMs = (Number(windowHours) > 0 ? Number(windowHours) : cardHoldCancelWindowHours()) * 3600000;
+  const anchor = anchorAt ? new Date(anchorAt) : null;
+  if (anchor && !Number.isNaN(anchor.getTime())) {
+    const msSinceAnchor = now.getTime() - anchor.getTime();
+    if (msSinceAnchor >= 0 && msSinceAnchor < fullWindowMs && msUntilStart <= fullWindowMs) return 'booking_age';
+  }
+  return 'outside_window';
+}
+function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now = new Date(), anchorAt = null, sticky = null, detail = null }) {
+  const fee = fmtFeeAmount(feeAmount);
+  const hours = Number(windowHours) > 0 ? Number(windowHours) : cardHoldCancelWindowHours();
+  const rule = (willCharge, text) => ({ code, willCharge, text });
+  switch (code) {
+    case 'no_card':
+      return rule(false, 'No card is saved for this visit, so nothing will be charged.');
+    case 'rail_off':
+      return rule(false, 'A card is saved, but fee collection is switched off, so nothing will be charged.');
+    case 'no_time':
+      return rule(false, `A card is saved, but this visit has no scheduled time to measure the ${hours}-hour window from, so nothing will be charged.`);
+    case 'past_start':
+      return rule(false, `A card is saved, but the visit's start time (${fmtETWhen(start)}) has already passed, so nothing will be charged and the card is released.`);
+    case 'booking_age': {
+      const ago = anchorAt ? fmtAgo(now.getTime() - new Date(anchorAt).getTime()) : 'moments';
+      return rule(false, `A card is saved, but the fee terms were agreed only ${ago} ago — inside the ${hours}-hour window — so the free-cancel period is still open and nothing will be charged.`);
+    }
+    case 'outside_window':
+      return rule(false, `A card is saved. The visit starts ${fmtETWhen(start)}, more than ${hours} hours from now, so this is a free cancel and nothing will be charged.`);
+    case 'card_removed':
+      return rule(false, 'The customer removed the saved card, so nothing can be charged.');
+    case 'in_window':
+      return rule(true, `A card is saved and the visit starts ${fmtETWhen(start)}, less than ${hours} hours from now. ${fee} will be charged — rule: cancellations less than ${hours} hours before the visit.`);
+    case 'sticky':
+      return rule(true, `A card is saved. The customer rescheduled on ${fmtETWhen(sticky?.rescheduledAt)} while inside the ${hours}-hour window of the earlier slot (${fmtETWhen(sticky?.originalStart)}), so the window carried over to this visit. ${fee} will be charged — rule: a reschedule made inside the window doesn't reset it.`);
+    case 'unresolved':
+    default:
+      return rule(null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. Nothing will be charged automatically — the cancel will be parked for billing review.`);
+  }
+}
+
 // Sticky cancel window (owner ruling 2026-08-10): a customer-initiated
 // reschedule made while the THEN-CURRENT slot was inside the fee window must
 // not launder a later cancel into a free one. Before this check, rebooker's
@@ -1737,14 +1812,18 @@ async function cardHoldReminderLine(scheduledServiceId) {
 // would no-op anyway.
 async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   const hold = await heldCardForScheduledService(scheduledServiceId);
-  if (!hold) return { held: false, feeApplies: false };
+  if (!hold) return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
+  const windowHours = Number(hold.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
+  // Every exit carries the operator-facing rule (code + sentence) so the
+  // cancel card can say whether the card WILL be charged and why.
+  const describe = (code, extra = {}) => describeCancelFeeRule({ code, feeAmount, windowHours, now, anchorAt: hold.held_at, ...extra });
   // Rail OFF (ONE_TIME_CARD_HOLD kill switch) with a historical held row:
   // no fee can be collected, so nothing below may report one — including
   // the fee-may-apply posture of a FAILED time lookup, which would make the
   // cancel card warn of, fingerprint, and invite a waiver for a charge the
   // disabled rail never makes (codex GH r31 P2).
-  if (!isCardHoldEnabled()) return { held: true, feeApplies: false, feeAmount };
+  if (!isCardHoldEnabled()) return { held: true, feeApplies: false, feeAmount, rule: describe('rail_off') };
   let start = null;
   try {
     const { scheduledServiceApptTime } = require('./appointment-reminders');
@@ -1756,9 +1835,11 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
     start = await scheduledServiceApptTime(scheduledServiceId, { throwOnError: true });
   } catch (err) {
     logger.warn('[estimate-card-holds] appt-time resolution for cancel preview failed — reporting fee-may-apply', { error: err.message });
-    return { held: true, feeApplies: true, feeAmount, unresolved: true };
+    return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'appointment time lookup failed' }) };
   }
   let feeApplies = isCardHoldEnabled() && !!start && isWithinCancelWindow({ hold, serviceStart: start, now });
+  let ruleCode = feeApplies ? 'in_window' : freeCancelReason({ start, now, windowHours, anchorAt: hold.held_at });
+  let sticky = null;
   const previewStartMs = start ? new Date(start).getTime() : NaN;
   const previewStartLive = Number.isFinite(previewStartMs) && (previewStartMs - now.getTime()) > -CARD_HOLD_POST_START_GRACE_MS;
   if (!feeApplies && isCardHoldEnabled() && previewStartLive && hold.sticky_window_disclosed && isStickyCancelWindowEnabled()) {
@@ -1767,27 +1848,29 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
     // evidence). A THROWN lookup is unresolved, not fee-free (same posture
     // as the time-resolution catch above and the appointment-card preview).
     try {
-      feeApplies = !!(await findStickyLateReschedule({
+      sticky = await findStickyLateReschedule({
         scheduledServiceId,
         isWithinWindow: (s, at) => isWithinCancelWindow({ hold, serviceStart: s, now: at }),
         notBefore: hold.held_at,
         currentStart: start ? new Date(start) : null,
-      }));
+      });
+      feeApplies = !!sticky;
       if (feeApplies) {
+        ruleCode = 'sticky';
         // Card removal is revocation on the charge path — the preview must
         // agree (Codex #3342 r5 P2): the handler releases free when the
         // local payment_methods row is gone, so no fee prompt.
         const pmRow = await db('payment_methods')
           .where({ customer_id: hold.customer_id, stripe_payment_method_id: hold.stripe_payment_method_id })
           .first('id');
-        if (!pmRow) feeApplies = false;
+        if (!pmRow) { feeApplies = false; ruleCode = 'card_removed'; }
       }
     } catch (err) {
       logger.warn('[estimate-card-holds] sticky-window lookup for cancel preview failed — reporting fee-may-apply', { error: err.message });
-      return { held: true, feeApplies: true, feeAmount, unresolved: true };
+      return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'reschedule history lookup failed' }) };
     }
   }
-  return { held: true, feeApplies, feeAmount };
+  return { held: true, feeApplies, feeAmount, rule: describe(ruleCode, { start, sticky }) };
 }
 
 // ── No-show fee settlement: refundable invoice + customer receipt ─────────
@@ -2061,6 +2144,8 @@ module.exports = {
   cardHoldReminderLine,
   cardHoldReminderNote,
   isWithinCancelWindow,
+  describeCancelFeeRule,
+  freeCancelReason,
   settleNoShowFee,
   // Shared with the appointment-card-request fee rail, which mirrors this
   // rail's postures and must never drift from it: the fee-window guards and

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { MoreHorizontal, X } from 'lucide-react';
 import { adminFetch } from '../../lib/adminFetch';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
+import CancelFeeNotice from './CancelFeeNotice';
 import { TIMEZONE } from '../../lib/timezone';
 import { appointmentHistory as buildAppointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
@@ -101,6 +102,9 @@ export default function ScheduleCustomerSidebar({
   const [savedNote, setSavedNote] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [showCancelModal, setShowCancelModal] = useState(false);
+  // Cancel-fee preview fetched by the dialog's CancelFeeNotice; reused by
+  // the fee-choice prompt so both read one verdict.
+  const [cancelFeePreview, setCancelFeePreview] = useState(null);
   const [cancelScope, setCancelScope] = useState('this_only');
   const [notificationType, setNotificationType] = useState('text');
   const [notificationMessage, setNotificationMessage] = useState('');
@@ -208,7 +212,7 @@ export default function ScheduleCustomerSidebar({
     setCancelling(true);
     // Card-hold visits inside the late-cancel window: ask whether this is a
     // business-initiated cancel (waive the fee) before committing.
-    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id);
+    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id, cancelFeePreview);
     if (!proceed) { setCancelling(false); return; }
     try {
       const reasonParts = [];
@@ -569,6 +573,7 @@ export default function ScheduleCustomerSidebar({
                   This message is saved with the cancellation note. A cancellation text is sent when a reminder record exists.
                 </div>
               </div>
+              <CancelFeeNotice serviceId={service.id} onPreview={setCancelFeePreview} />
             </div>
 
             <div className="border-t border-hairline border-zinc-200 px-6 py-4 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
