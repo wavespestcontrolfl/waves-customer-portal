@@ -75,6 +75,18 @@ function regexClassify(body) {
   return null;
 }
 
+// Structured-output contract for the classifier (the provider constrains the
+// reply to this shape; see llm/call.js jsonSchema).
+const INTENT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['interest', 'confidence'],
+  properties: {
+    interest: { type: 'string', enum: ['pest', 'lawn', 'one_time', 'unknown'] },
+    confidence: { type: 'number', description: '0 to 1' },
+  },
+};
+
 async function claudeClassify(body) {
   if (!body) return { interest: null, confidence: 0, method: 'none' };
 
@@ -92,13 +104,12 @@ Classify into ONE of:
 Rules:
 - Classify by what the customer is ASKING FOR, not by which pest/lawn words appear — a species or yard word is evidence, not the request.
 - An explicit statement of cadence or scope (single visit vs recurring plan) outranks any species mention.
-- Customers phrase these intents in unseen ways; match the meaning at the least-specific reading that fits, not keywords.
-
-Return ONLY JSON: {"interest":"pest"|"lawn"|"one_time"|"unknown","confidence":0.0-1.0}`;
+- Customers phrase these intents in unseen ways; match the meaning at the least-specific reading that fits, not keywords.`;
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
       text: prompt,
       jsonMode: true,
+      jsonSchema: INTENT_SCHEMA,
       maxTokens: 60,
     });
     if (!response.ok || !response.json) return { interest: null, confidence: 0, method: 'ai' };

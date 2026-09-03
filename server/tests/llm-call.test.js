@@ -193,6 +193,16 @@ describe('callAnthropic prompt caching', () => {
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].system).toBeUndefined();
   });
 
+  test('jsonSchema sets output_config.format json_schema on the Anthropic request', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"interest":"lawn"}' }] });
+    const schema = { type: 'object', additionalProperties: false, required: ['interest'], properties: { interest: { type: 'string' } } };
+    const r = await callAnthropic({ model: FLAGSHIP, text: 'classify', jsonMode: true, jsonSchema: schema });
+    expect(r.json).toEqual({ interest: 'lawn' });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toEqual({ format: { type: 'json_schema', schema } });
+    await callAnthropic({ model: FLAGSHIP, text: 'draft', jsonMode: false, jsonSchema: schema });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+  });
+
   test('forwards temperature for repeatable vision scoring', async () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
     await callAnthropic({ model: FLAGSHIP, text: 'inspect', temperature: 0.2 });
@@ -262,6 +272,18 @@ describe('callOpenAI jsonMode parsing', () => {
   // classifier cap can be consumed entirely by reasoning, returning
   // status:"incomplete" with no visible JSON. Tiny caps must drop to effort 'none'
   // effort with a widened wire cap; big lanes stay exactly as before.
+  test('jsonSchema turns on Responses structured outputs (text.format json_schema, strict)', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"interest":"pest"}' }) });
+    const schema = { type: 'object', additionalProperties: false, required: ['interest'], properties: { interest: { type: 'string' } } };
+    const r = await callOpenAI({ model: 'gpt-5.6-luna', text: 'classify', jsonMode: true, jsonSchema: schema, maxTokens: 60 });
+    expect(r.json).toEqual({ interest: 'pest' });
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(body.text).toEqual({ format: { type: 'json_schema', name: 'structured_response', schema, strict: true } });
+    // Free-text calls never carry a format, even with a schema in the payload.
+    await callOpenAI({ model: 'gpt-5.6-luna', text: 'draft', jsonMode: false, jsonSchema: schema });
+    expect(JSON.parse(global.fetch.mock.calls.at(-1)[1].body).text).toBeUndefined();
+  });
+
   test('tiny maxTokens → reasoning effort none and widened wire cap', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"interest":"pest"}' }) });
     const r = await callOpenAI({ model: 'gpt-5.6-luna', text: 'classify', jsonMode: true, maxTokens: 60 });

@@ -63,7 +63,7 @@ describe('semantic compliance gate', () => {
         primary: expect.objectContaining({ provider: 'anthropic' }),
         fallback: expect.objectContaining({ provider: 'openai' }),
       }),
-      expect.objectContaining({ timeoutMs: expect.any(Number), jsonMode: true }),
+      expect.objectContaining({ timeoutMs: expect.any(Number), jsonMode: true, jsonSchema: expect.objectContaining({ required: ['findings'] }) }),
       expect.objectContaining({ validate: expect.any(Function) }),
     );
     const payload = mockDispatch.mock.calls.at(-1)[1];
