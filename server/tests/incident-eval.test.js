@@ -178,16 +178,18 @@ describe('runIncidentEval semantics', () => {
     expect(contact.status).toBe('pass');
   });
 
-  test('classifier drift to lead_inquiry on our own newsletter is a regression (non-destructive branch would still auto-create a lead)', async () => {
+  test('classifier drift to lead_inquiry on our own newsletter is contained — the owned-sender guard skips every branch, so no lead is created and nobody is paged', async () => {
+    // Before the owned-sender guard (shouldSkipAutoAction: our own addresses
+    // skip every non-destructive handler too) this drift was a regression:
+    // branch=create_lead would have fired on our own send.
     const h = harness({
       evaluate: healthyEvaluate,
       classify: classifyBySender({ 'events@wavespestcontrol.com': 'lead_inquiry' }),
     });
     const result = await runIncidentEval(h.opts);
     const contact = result.results.find((r) => r.id === 'waves-own-newsletter-no-destructive-action');
-    expect(contact.status).toBe('fail');
-    expect(contact.detail).toMatch(/branch=create_lead/);
-    expect(h.notifications).toHaveLength(1);
+    expect(contact.status).toBe('pass');
+    expect(h.notifications).toHaveLength(0);
   });
 
   test('classifier drift to "other" on an external newsletter is a regression (inbox stops cleaning itself)', async () => {

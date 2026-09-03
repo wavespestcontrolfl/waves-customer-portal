@@ -365,6 +365,10 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
     const labelIds = parsed.label_ids || [];
     // Update read/starred/archive label status
     await db('emails').where('id', existing.id).update({
+      // The owned-sender invariant holds on resync too: a row an older pod
+      // linked during a rolling deploy (after migration 20260903000070
+      // scanned) is unlinked the next time Gmail lists it (GH codex r1 P2).
+      ...(existing.customer_id && isInternalEmailRecipient(parsed.from_address) ? { customer_id: null } : {}),
       is_read: parsed.is_read,
       is_starred: parsed.is_starred,
       is_archived: !labelIds.includes('INBOX') || labelIds.includes('TRASH'),

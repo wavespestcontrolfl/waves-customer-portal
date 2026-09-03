@@ -87,6 +87,22 @@ describe('upsertEmail — owned-sender guard', () => {
     }
   });
 
+  test('a stored row an older pod linked to an owned sender is unlinked on resync (rolling-deploy gap)', async () => {
+    results.emails.first = { id: 'e-old', gmail_id: 'g-1', customer_id: 'cust-with-our-address', auto_action: null, label_ids: ['SENT'] };
+    await upsertEmail(parsedFrom('contact@wavespestcontrol.com'));
+    const update = calls.find((c) => c.table === 'emails' && c.ops.some(([op]) => op === 'update')).ops.find(([op]) => op === 'update')[1][0];
+    expect(update.customer_id).toBeNull();
+    expect(customerLookups()).toHaveLength(0);
+  });
+
+  test('a stored customer-sender row keeps its link on resync (the update never touches customer_id)', async () => {
+    results.emails.first = { id: 'e-old', gmail_id: 'g-1', customer_id: 'cust-jane', auto_action: null, label_ids: ['SENT'] };
+    results.customers = { id: 'cust-jane' };
+    await upsertEmail(parsedFrom('jane@example.com'));
+    const update = calls.find((c) => c.table === 'emails' && c.ops.some(([op]) => op === 'update')).ops.find(([op]) => op === 'update')[1][0];
+    expect('customer_id' in update).toBe(false);
+  });
+
   test('a customer sender still matches case-insensitively and links', async () => {
     results.customers = { id: 'cust-jane' };
     await upsertEmail(parsedFrom('Jane@Example.com'));
