@@ -43,6 +43,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => mockGates[gate] !== false),
 }));
 const mockPreDispatchCheck = jest.fn(async () => ({ ok: true }));
+jest.mock('../services/composer-customer-links', () => ({ autopayLinkSendCheck: jest.fn(async () => ({ present: false })) }));
 jest.mock('../services/estimate-clarify-asks', () => ({
   claimClarifyDispatch: jest.fn(),
   clarifyPreDispatchCheck: jest.fn(() => mockPreDispatchCheck),
@@ -361,5 +362,50 @@ describe('revise — clarify dispatch wiring', () => {
       dispatchedMissing: ['street_address'],
       releaseFields: { revised_response: null, final_response: null },
     });
+  });
+});
+
+describe('Auto Pay setup links never ride draft approval (GH Codex #3812 r3 P1)', () => {
+  const { autopayLinkSendCheck } = require('../services/composer-customer-links');
+  const SECURE = 'Set it up: portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY';
+
+  test('revise with a /secure link → 409 before any claim, no send', async () => {
+    autopayLinkSendCheck.mockResolvedValueOnce({ present: true, ok: true, tokens: ['abcDEF123_-xyz789QWERTY'] });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-9/revise`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: SECURE }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/send them from the composer/);
+    });
+    expect(updates).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('approve of a draft whose body carries a /secure link → 409 and the claim is released', async () => {
+    enqueue('message_drafts', { returning: [clarifyDraft({ intent: null, draft_response: SECURE })] }); // claim
+    enqueue('message_drafts', { update: 1 });                                                            // release
+    autopayLinkSendCheck.mockResolvedValueOnce({ present: true, ok: false, error: 'expired' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-9/approve`, { method: 'PUT' });
+      expect(res.status).toBe(409);
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const release = updates.find((u) => u.payload.status === 'pending');
+    expect(release).toBeTruthy();
+  });
+
+  test('a body without /secure never consults the seam', async () => {
+    autopayLinkSendCheck.mockClear();
+    await withServer(async (baseUrl) => {
+      await fetch(`${baseUrl}/admin/drafts/draft-9/revise`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'See you Tuesday' }),
+      });
+    });
+    expect(autopayLinkSendCheck).not.toHaveBeenCalled();
   });
 });

@@ -343,16 +343,21 @@ async function buildAutopaySetupLink(customerId) {
     return { url: null, line: '', autoSecured: true };
   }
   if (result?.action === 'link_created' && result.secureUrl) {
+    // The customer-facing copy is the reviewed autopay_setup_link SMS
+    // template — the SAME body the direct Auto Pay text path renders — not
+    // a second hand-written copy (GH Codex #3812 r3 P1). Rendered here with
+    // the real link, collapsed to ONE line so the composer's recipient-
+    // change strip removes the whole message with the tracked URL (r1 P2),
+    // and flagged standalone: it already greets, so the composer inserts it
+    // as-is instead of wrapping it in the generic prefill.
+    const { renderTemplate } = require('./appointment-card-request');
+    const profile = await db('customers').where({ id: customerId }).first('first_name');
+    const body = await renderTemplate({ first_name: profile?.first_name || 'there', secure_link: result.secureUrl }, 'autopay_setup_link');
+    if (!body) return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS.template_inactive };
     return {
       url: result.secureUrl,
-      // Mirrors the seeded autopay_setup_link SMS template: no bank-option
-      // promise (ACH is gated at page time), nothing charged today. ONE line
-      // — the composer's recipient-change strip removes newline-delimited
-      // lines carrying the tracked URL, so the whole clause must ride with
-      // it (GH Codex #3812 r1 P2).
-      // Lane-neutral charge unit: billingLaneSupported admits per-visit AND
-      // per-application customers (GH Codex #3812 r2 P1).
-      line: `Save a payment method for Auto Pay and each completed service is paid automatically - nothing is charged today. Set it up here: ${result.secureUrl}\n\n`,
+      line: `${String(body).replace(/\s*\n+\s*/g, ' ').trim()}\n\n`,
+      standalone: true,
       expiresAt: result.expiresAt || null,
     };
   }
@@ -384,8 +389,12 @@ function canonicalSecureLinkRe() {
  * after it), each must sit on the canonical portal host (pre-push P1 — a
  * look-alike host carrying a real token is not a Waves link), and each
  * customer-kind row is re-run through the mint's own side-effect-free
- * eligibility (pre-push P1). Called by /sms and /schedule-sms with the
- * recipient's last-10:
+ * eligibility (pre-push P1). Called by /sms (with the recipient's last-10
+ * AND the customer id the route trusts — the link's owner must be that
+ * customer, so the send rides the owner's own SMS preferences instead of
+ * the lead policy that permits a missing preferences row; GH Codex #3812
+ * r3 P1), by /schedule-sms and the draft approve/revise endpoints
+ * (presence is enough — they refuse):
  *   { present: false }                       — no customer-kind Auto Pay link in the body
  *   { present: true, ok: true, tokens }      — every Auto Pay link is live, eligible and
  *                                              owned by the recipient; the caller reclassifies
@@ -393,7 +402,7 @@ function canonicalSecureLinkRe() {
  * Visit-lane card requests (kind 'visit') use the same page but their own
  * gates — they are neither judged nor reclassified here.
  */
-async function autopayLinkSendCheck(body, toLast10) {
+async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
   const text = String(body || '');
   const anySecure = [...text.matchAll(SECURE_PATH_RE)];
   if (!anySecure.length) return { present: false };
@@ -428,6 +437,9 @@ async function autopayLinkSendCheck(body, toLast10) {
     const ownerLast10 = String(eligibility.customer?.phone || '').replace(/\D/g, '').slice(-10);
     if (!ownerLast10 || ownerLast10 !== String(toLast10 || '')) {
       return refuse('This Auto Pay setup link belongs to a different customer — remove it before sending.');
+    }
+    if (trustedCustomerId !== undefined && String(trustedCustomerId || '') !== String(customerId)) {
+      return refuse('Pick this customer from the search dropdown before sending an Auto Pay setup link — the text must ride their own SMS preferences.');
     }
   }
   return { present: true, ok: true, tokens: live.map((l) => l.token) };

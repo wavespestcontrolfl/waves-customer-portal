@@ -215,7 +215,8 @@ describe('POST /admin/communications/customer-link', () => {
     wireDb({ customers: soloCustomer() });
     builders.buildAutopaySetupLink.mockResolvedValue({
       url: 'https://portal.wavespestcontrol.com/secure/tok123',
-      line: 'Set up Auto Pay for your Waves service here: https://portal.wavespestcontrol.com/secure/tok123\n\n',
+      line: 'Hi PersonA! Set up Auto Pay for your Waves service here: https://portal.wavespestcontrol.com/secure/tok123\n\n',
+      standalone: true,
     });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'autopay_setup' });
@@ -225,6 +226,10 @@ describe('POST /admin/communications/customer-link', () => {
       expect(body.kind).toBe('autopay_setup');
       expect(body.url).toContain('/secure/tok123');
       expect(body.line).toContain('Set up Auto Pay');
+      // The resolved owner rides back so the composer selects it and the
+      // /sms send carries customerId; the line is inserted as-is.
+      expect(body.customerId).toBe(CUSTOMER_UUID);
+      expect(body.standalone).toBe(true);
     });
   });
 

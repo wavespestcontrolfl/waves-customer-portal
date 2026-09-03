@@ -397,13 +397,14 @@ describe('admin communications SMS route', () => {
         const first = jest.fn();
         if (table === 'appointment_card_requests') first.mockResolvedValue(row);
         else if (table === 'sms_templates') first.mockResolvedValue({ is_active: true });
-        return { where: jest.fn(function () { return this; }), first };
+        else if (table === 'customers') first.mockResolvedValue(owner);
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), first };
       });
     }
-    const send = (baseUrl) => fetch(`${baseUrl}/admin/communications/sms`, {
+    const send = (baseUrl, extra = { customerId: 'cust-A' }) => fetch(`${baseUrl}/admin/communications/sms`, {
       method: 'POST',
       headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to: '+15551234567', body: SECURE_BODY, messageType: 'manual' }),
+      body: JSON.stringify({ to: '+15551234567', body: SECURE_BODY, messageType: 'manual', ...extra }),
     });
 
     test('a live link reclassifies the send as an Auto Pay customer SMS', async () => {
@@ -434,6 +435,16 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('a send without the resolved owner as customerId is refused — the link must ride the owner policy', async () => {
+      wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'cust-A' } });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, {});
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/search dropdown/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
     test('an expired link aborts the send before the provider call', async () => {
       wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() - 1000), customer_id: 'cust-A' } });
       await withServer(async (baseUrl) => {
@@ -450,7 +461,9 @@ describe('admin communications SMS route', () => {
         owner: { id: 'cust-B', phone: '+19998887777' },
       });
       await withServer(async (baseUrl) => {
-        const res = await send(baseUrl);
+        // No customerId: the route's own phone-match 400 would fire first
+        // with one — the seam's ownership refusal is what's pinned here.
+        const res = await send(baseUrl, {});
         expect(res.status).toBe(409);
         expect(sendCustomerMessage).not.toHaveBeenCalled();
       });

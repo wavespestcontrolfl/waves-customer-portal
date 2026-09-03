@@ -26,6 +26,7 @@ jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: je
 // Only the Auto Pay customer-SMS gate reads true — every other gate (the
 // pricing-authority send gate the estimate builder consults) stays off.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'autopayCustomerSms') }));
+jest.mock('../services/appointment-card-request', () => ({ renderTemplate: jest.fn() }));
 jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
   checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
@@ -44,6 +45,7 @@ const { enrollPromoter, getLiveSettings } = require('../services/referral-engine
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { requestAutopaySetupLink, setupLinkIneligibility } = require('../services/autopay-setup-link');
 const { isEnabled } = require('../config/feature-gates');
+const { renderTemplate } = require('../services/appointment-card-request');
 const ReviewService = require('../services/review-request');
 const {
   buildPayBalanceLink,
@@ -268,8 +270,17 @@ describe('buildAutopaySetupLink', () => {
   beforeEach(() => {
     requestAutopaySetupLink.mockReset();
     isEnabled.mockReset().mockImplementation((g) => g === 'autopayCustomerSms');
-    // The seeded autopay_setup_link template row, active.
-    mockBuilders = { sms_templates: chainBuilder({ firstRow: { is_active: true } }) };
+    // The seeded autopay_setup_link template row, active; the customer's
+    // first name for the render.
+    mockBuilders = {
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+      customers: chainBuilder({ firstRow: { first_name: 'Pat' } }),
+    };
+    renderTemplate.mockReset().mockImplementation(async (vars, key) => (
+      key === 'autopay_setup_link'
+        ? `Hi ${vars.first_name}! Set up Auto Pay here: ${vars.secure_link}\nNothing is charged today. Reply STOP to opt out.`
+        : null
+    ));
   });
 
   test('the customer-SMS gate is enforced before anything mints (the composer send is an SMS)', async () => {
@@ -308,13 +319,13 @@ describe('buildAutopaySetupLink', () => {
     const r = await buildAutopaySetupLink('c1');
     expect(requestAutopaySetupLink).toHaveBeenCalledWith({ customerId: 'c1', delivery: 'inline', trigger: 'admin' });
     expect(r.url).toBe('https://portal.wavespestcontrol.com/secure/tok123');
-    expect(r.line).toContain(r.url);
-    expect(r.line).toMatch(/nothing is charged today/);
-    // ACH is judged at page time — the clause never promises a bank option.
-    expect(r.line).not.toMatch(/bank/i);
-    // One line: the composer strips newline-delimited lines carrying the
-    // tracked URL on a recipient change — the whole clause must go with it.
-    expect(r.line.trim()).not.toMatch(/\n/);
+    // The reviewed SMS template IS the copy — rendered with the real link
+    // and the customer's name, collapsed to one line (the composer strips
+    // newline-delimited lines carrying the tracked URL on a recipient
+    // change — the whole message must go with it), inserted as-is.
+    expect(renderTemplate).toHaveBeenCalledWith({ first_name: 'Pat', secure_link: r.url }, 'autopay_setup_link');
+    expect(r.line).toBe('Hi Pat! Set up Auto Pay here: https://portal.wavespestcontrol.com/secure/tok123 Nothing is charged today. Reply STOP to opt out.\n\n');
+    expect(r.standalone).toBe(true);
   });
 
   test('a reused live row (request_exists) still inserts — same link, no second mint', async () => {
@@ -334,11 +345,12 @@ describe('buildAutopaySetupLink', () => {
     expect(r.reason).toBeUndefined();
   });
 
-  test('the clause names a lane-neutral charge unit (per-visit AND per-application customers get it)', async () => {
+  test('a template that stops rendering between the lever probe and the mint refuses (no hand-written fallback copy)', async () => {
     requestAutopaySetupLink.mockResolvedValue({ requested: true, action: 'link_created', reason: 'created', secureUrl: 'https://portal.wavespestcontrol.com/secure/tok123' });
+    renderTemplate.mockResolvedValue(null);
     const r = await buildAutopaySetupLink('c1');
-    expect(r.line).toMatch(/each completed service/);
-    expect(r.line).not.toMatch(/each visit/);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/inactive in Templates/);
   });
 
   test.each([
@@ -406,6 +418,15 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
   test('a link owned by a different customer refuses the send', async () => {
     wire({ row: live, owner: { phone: '+19998887777' } });
     expect((await autopayLinkSendCheck(BODY, '9415550184')).error).toMatch(/different customer/);
+  });
+
+  test('/sms must trust the link owner as the recipient customer — an unresolved customer refuses', async () => {
+    wire({ row: live });
+    const r = await autopayLinkSendCheck(BODY, '9415550184', { trustedCustomerId: null });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/search dropdown/);
+    expect((await autopayLinkSendCheck(BODY, '9415550184', { trustedCustomerId: 'c1' })).ok).toBe(true);
+    expect((await autopayLinkSendCheck(BODY, '9415550184', { trustedCustomerId: 'c9' })).ok).toBe(false);
   });
 
   test('the mint\'s own eligibility is re-run at send — a customer gone payer-billed since the insert refuses', async () => {

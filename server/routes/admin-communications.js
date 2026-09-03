@@ -524,7 +524,7 @@ router.post('/sms', async (req, res, next) => {
     let autopayLinkTokens = null;
     try {
       const { autopayLinkSendCheck } = require('../services/composer-customer-links');
-      const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to));
+      const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to), { trustedCustomerId: trustedCustomerId || null });
       if (autopayCheck.present && !autopayCheck.ok) return abortUnsent(409, autopayCheck.error);
       if (autopayCheck.present) autopayLinkTokens = autopayCheck.tokens;
     } catch (autopayErr) {
@@ -1749,6 +1749,12 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       balance: result.balance || undefined,
       estimate: result.estimate || undefined,
       expiresAt: result.expiresAt || undefined,
+      // Auto Pay: the resolved owner rides back so the composer can select
+      // it — the /sms send then carries customerId and the link's owner
+      // policy applies (GH Codex #3812 r3 P1). standalone: the line is a
+      // complete greeted message, inserted as-is.
+      customerId: kind === 'autopay_setup' ? primaryId : undefined,
+      standalone: result.standalone || undefined,
     });
   } catch (err) {
     logger.error(`customer-link lookup failed: ${err.message}`);

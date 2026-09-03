@@ -1772,7 +1772,14 @@ function SmsTab() {
         return;
       }
       const clause = String(d.line || "").trim() || `${d.url}`;
-      const prefill = buildCustomerLinkPrefill({ firstName: d.firstName, clause });
+      // A standalone line (Auto Pay: the reviewed SMS template, already
+      // greeted) goes in as-is; the generic prefill wraps the others.
+      const prefill = d.standalone ? clause : buildCustomerLinkPrefill({ firstName: d.firstName, clause });
+      // Auto Pay hands back the resolved owner: adopt it as the selected
+      // customer when none was picked, so the send carries customerId and
+      // the link's owner policy applies (server refuses otherwise).
+      const linkCustomerId = d.customerId || requestCustomerId;
+      if (!requestCustomerId && d.customerId) setSelectedCustomerId(d.customerId);
       // Replace-don't-stack per kind (same rule as the reschedule insert).
       // A replaced review link's row is NOT canceled: reuse means the fresh
       // insert hands back the same shared row anyway.
@@ -1789,7 +1796,7 @@ function SmsTab() {
         [kind]: {
           url: d.url,
           recipientKey: requestRecipientKey,
-          customerId: requestCustomerId,
+          customerId: linkCustomerId,
           requestId: d.requestId || null,
         },
       }));
