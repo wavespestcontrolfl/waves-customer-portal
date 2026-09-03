@@ -620,7 +620,7 @@ const LANE_DESCRIBE = {
 const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
 // fact_check_gate is NOT verified: fact-check-gate.js accepts any truthy JSON
 // and treats a missing findings array as "no findings", so `{}` passes.
-const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative"]);
+const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
 
 // ── Resolution ────────────────────────────────────────────────────────
 function firstSetEnv(names) {
