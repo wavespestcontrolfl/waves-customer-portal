@@ -76,9 +76,21 @@ describe('typedFollowupVerdict — the shared override chain', () => {
     expect(included.reason).toBe('included_followup_visit');
   });
 
+  test('flea package (flea_tick, ALERT since 20260903000050): visit 1 owes the included follow-up, visit 2 owes nothing', () => {
+    const fleaProfile = { serviceKey: 'flea_tick', findingsType: 'flea', followupPolicy: 'alert', defaultFollowupDays: 14 };
+    const first = typedFollowupVerdict({ scheduledService: VISIT, profile: fleaProfile, findingsType: 'flea', values: {} });
+    expect(first).toMatchObject({ required: true, days: 14, suggestedDate: '2026-08-13', alertType: 'follow_up_needed' });
+    const second = typedFollowupVerdict({
+      scheduledService: { ...VISIT, followup_included: true }, profile: fleaProfile, findingsType: 'flea', values: {},
+    });
+    expect(second.required).toBe(false);
+    expect(second.reason).toBe('included_followup_visit');
+  });
+
   test('two-treatment packages stop at visit 2: the included follow-up owes nothing', () => {
     expect(TWO_TREATMENT_PACKAGE_KEYS.has('bed_bug_treatment')).toBe(true);
     expect(TWO_TREATMENT_PACKAGE_KEYS.has('cockroach_control')).toBe(true);
+    expect(TWO_TREATMENT_PACKAGE_KEYS.has('flea_tick')).toBe(true);
     const v = typedFollowupVerdict({
       scheduledService: { ...VISIT, followup_included: true },
       profile: BED_BUG_PROFILE,
