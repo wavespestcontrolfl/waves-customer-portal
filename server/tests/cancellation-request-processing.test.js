@@ -184,6 +184,13 @@ jest.mock('../models/db', () => {
     return q;
   }
   const db = (table) => makeQuery(table);
+  // The retrieval-task raise runs retire + insert on one transaction under
+  // an advisory lock; the fake shares the same tables and swallows raw().
+  db.transaction = async (fn) => {
+    const trx = (table) => makeQuery(table);
+    trx.raw = async () => ({});
+    return fn(trx);
+  };
   db.__tables = tables;
   db.__reset = () => { Object.keys(tables).forEach((k) => delete tables[k]); };
   return db;
