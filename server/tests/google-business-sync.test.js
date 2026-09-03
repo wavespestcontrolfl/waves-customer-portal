@@ -326,14 +326,14 @@ describe('Google Business review sync', () => {
     ]));
   });
 
-  test('one review row failing to store does not abort the location: the rest sync, reconcile is skipped, the alert names the row error (Parrish 2026-09-03)', async () => {
+  test('one review row failing to store does not abort the location: the rest sync, reconcile is skipped, the alert names the row error', async () => {
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('maps.googleapis.com')) {
         return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
       }
       return jsonResponse({ reviews: [
-        { name: 'accounts/1/locations/2/reviews/rev-bad', reviewer: { displayName: 'G' }, starRating: 'FIVE', comment: 'Superb', createTime: '2026-08-26T19:52:51Z' },
-        { name: 'accounts/1/locations/2/reviews/rev-ok', reviewer: { displayName: 'Trent Ryals' }, starRating: 'FIVE', comment: 'Great', createTime: '2026-08-14T01:22:29Z' },
+        { name: 'accounts/1/locations/2/reviews/rev-bad', reviewer: { displayName: 'Reviewer Alpha' }, starRating: 'FIVE', comment: 'Superb', createTime: '2026-05-26T19:52:51Z' },
+        { name: 'accounts/1/locations/2/reviews/rev-ok', reviewer: { displayName: 'Reviewer Beta' }, starRating: 'FIVE', comment: 'Great', createTime: '2026-05-14T01:22:29Z' },
       ] });
     });
     const realUpsert = service._upsertGbpReview.bind(service);
@@ -352,7 +352,7 @@ describe('Google Business review sync', () => {
     expect(result.sources).toEqual({ bradenton: 'gbp' });
     expect(result.synced).toBe(1);
     expect(db.__state.rows.google_reviews).toEqual(expect.arrayContaining([
-      expect.objectContaining({ gbp_review_name: 'accounts/1/locations/2/reviews/rev-ok', reviewer_name: 'Trent Ryals' }),
+      expect.objectContaining({ gbp_review_name: 'accounts/1/locations/2/reviews/rev-ok', reviewer_name: 'Reviewer Beta' }),
     ]));
     // No Places fallback: the pull itself succeeded.
     expect(places).not.toHaveBeenCalled();
@@ -361,6 +361,33 @@ describe('Google Business review sync', () => {
     expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringContaining('1 of 2 review row(s) failed to store') })]);
     expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^review upsert failed: 1 of 2 .*duplicate key value/));
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
+  test('a post-write side-effect failure is NOT a row storage failure: no gbp_row error, reconcile still runs', async () => {
+    db.__state.rows.customers.push({ id: 'cust-1', first_name: 'Reviewer', last_name: 'Gamma', active: true, has_left_google_review: false });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [
+        { name: 'accounts/1/locations/2/reviews/rev-3', reviewer: { displayName: 'Reviewer Gamma' }, starRating: 'FIVE', comment: 'Great', createTime: '2026-05-14T01:22:29Z' },
+      ] });
+    });
+    const mark = jest.spyOn(service, '_markCustomerLeftReview').mockRejectedValue(new Error('suppression write failed'));
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+
+    const result = await service.syncAllReviews();
+
+    expect(mark).toHaveBeenCalled();
+    expect(result.synced).toBe(1);
+    expect(result.errors).toEqual([]);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(degraded).not.toHaveBeenCalled();
+    expect(db.__state.rows.google_reviews).toEqual(expect.arrayContaining([
+      expect.objectContaining({ gbp_review_name: 'accounts/1/locations/2/reviews/rev-3', customer_id: 'cust-1' }),
+    ]));
+    mark.mockRestore(); reconcile.mockRestore(); degraded.mockRestore();
   });
 
   test('upgrades a legacy Places row to the GBP review resource identity', async () => {

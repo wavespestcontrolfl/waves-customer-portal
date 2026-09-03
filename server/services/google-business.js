@@ -930,8 +930,14 @@ class GoogleBusinessService {
       // snapshot is stale by definition (codex r48).
       if (edited === 'yielded') return { id: existing.id, inserted: false, yielded: true };
       // The action bell only after the park is durable.
-      if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, normalized);
       result = { id: existing.id, inserted: false };
+      if (edited === 'posted_parked') {
+        // Post-write (the park is durable): a bell failure is not a storage failure.
+        try { await this._bellEditedAfterPost(existing, normalized); } catch (bellErr) {
+          logger.error(`[gbp] edited-after-post bell failed for review row ${existing.id}: ${bellErr.message}`);
+          result.sideEffectError = bellErr.message;
+        }
+      }
     } else {
       try {
         // Auto-reply lane: a review the sync sees for the FIRST time enters
@@ -990,63 +996,74 @@ class GoogleBusinessService {
         result = { id: winner.id, inserted: false };
       }
     }
-    // Reinstatement clear — a review present in the feed is not missing. The
-    // main update above deliberately never touches missing_since; the clear
-    // is its own conditional UPDATE evaluated against the CURRENT column
-    // value, so a stamp committed by a newer reconciliation between our
-    // snapshot read and this statement survives (only stamps older than this
-    // runner's fetch start may be cleared). A fresh insert carries no stamp.
-    if (!result.inserted) {
-      const clear = db('google_reviews')
-        .where({ id: result.id })
-        .whereNotNull('missing_since');
-      if (syncStart) clear.where('missing_since', '<', new Date(syncStart).toISOString());
-      const cleared = await clear.update({ missing_since: null }, ['id']);
-      // A stamped→clear transition means a review the removal alert reported
-      // gone is back on Google — tell the admin, or the "removed" bell is the
-      // last word they ever hear about it. Collected per run and flushed as
-      // one bell per location (a profile-wide reinstatement would otherwise
-      // ring dozens of bells).
-      if ((cleared || []).length > 0 && Array.isArray(pendingRestoredNotifications)) {
-        pendingRestoredNotifications.push({
-          review_id: result.id,
-          location_id: normalized.location_id,
-          reviewer_name: normalized.reviewer_name,
-          star_rating: normalized.star_rating,
-        });
+    // Everything below is post-write: the row is stored and its synced_at
+    // token advanced. A failure here (reinstatement clear, suppression mark,
+    // thank-you enrollment, unlinked bell) must not read as a storage
+    // failure to the caller — the loop's per-row isolation skips the
+    // removal reconcile on storage failures precisely because the token did
+    // NOT advance, which is false here (pre-push audit P1).
+    try {
+      // Reinstatement clear — a review present in the feed is not missing. The
+      // main update above deliberately never touches missing_since; the clear
+      // is its own conditional UPDATE evaluated against the CURRENT column
+      // value, so a stamp committed by a newer reconciliation between our
+      // snapshot read and this statement survives (only stamps older than this
+      // runner's fetch start may be cleared). A fresh insert carries no stamp.
+      if (!result.inserted) {
+        const clear = db('google_reviews')
+          .where({ id: result.id })
+          .whereNotNull('missing_since');
+        if (syncStart) clear.where('missing_since', '<', new Date(syncStart).toISOString());
+        const cleared = await clear.update({ missing_since: null }, ['id']);
+        // A stamped→clear transition means a review the removal alert reported
+        // gone is back on Google — tell the admin, or the "removed" bell is the
+        // last word they ever hear about it. Collected per run and flushed as
+        // one bell per location (a profile-wide reinstatement would otherwise
+        // ring dozens of bells).
+        if ((cleared || []).length > 0 && Array.isArray(pendingRestoredNotifications)) {
+          pendingRestoredNotifications.push({
+            review_id: result.id,
+            location_id: normalized.location_id,
+            reviewer_name: normalized.reviewer_name,
+            star_rating: normalized.star_rating,
+          });
+        }
       }
-    }
-    if (row.customer_id) {
-      // A matched review means the customer left one — stop asking them.
-      await this._markCustomerLeftReview(row.customer_id);
-      // Thank-you sequence on the ATTRIBUTION moment only (a new review, or
-      // an existing one that just matched a customer) — not on every hourly
-      // re-sync; the helper's once-ever dedupe backstops replays anyway.
-      // Gate / 4-5-star bar / location mapping live in the shared helper so
-      // the manual-match flow (review-incentives) behaves identically.
-      const justAttributed = result.inserted || !existing?.customer_id;
-      if (justAttributed) {
-        const { enrollReviewThankYou } = require('./automation-enroll');
-        await enrollReviewThankYou({
-          customerId: row.customer_id,
-          locationId: row.location_id,
-          starRating: row.star_rating,
-          source: 'google_review',
-        });
+      if (row.customer_id) {
+        // A matched review means the customer left one — stop asking them.
+        await this._markCustomerLeftReview(row.customer_id);
+        // Thank-you sequence on the ATTRIBUTION moment only (a new review, or
+        // an existing one that just matched a customer) — not on every hourly
+        // re-sync; the helper's once-ever dedupe backstops replays anyway.
+        // Gate / 4-5-star bar / location mapping live in the shared helper so
+        // the manual-match flow (review-incentives) behaves identically.
+        const justAttributed = result.inserted || !existing?.customer_id;
+        if (justAttributed) {
+          const { enrollReviewThankYou } = require('./automation-enroll');
+          await enrollReviewThankYou({
+            customerId: row.customer_id,
+            locationId: row.location_id,
+            starRating: row.star_rating,
+            source: 'google_review',
+          });
+        }
+      } else if (result.inserted) {
+        // New review we couldn't tie to a customer — alert the office to match
+        // it. During a batch sync the notification is DEFERRED to the end of
+        // the run: the likely-reviewer exclusion inside it queries
+        // google_reviews.customer_id links, and a matched review later in the
+        // same provider response isn't inserted yet — notifying inline could
+        // name that customer as an earlier unlinked review's likely reviewer
+        // (codex #3264 r2).
+        if (Array.isArray(pendingUnlinkedNotifications)) {
+          pendingUnlinkedNotifications.push(row);
+        } else if (!(await this._attemptClickAutoLink(row))) {
+          await this._notifyUnlinkedReview(row);
+        }
       }
-    } else if (result.inserted) {
-      // New review we couldn't tie to a customer — alert the office to match
-      // it. During a batch sync the notification is DEFERRED to the end of
-      // the run: the likely-reviewer exclusion inside it queries
-      // google_reviews.customer_id links, and a matched review later in the
-      // same provider response isn't inserted yet — notifying inline could
-      // name that customer as an earlier unlinked review's likely reviewer
-      // (codex #3264 r2).
-      if (Array.isArray(pendingUnlinkedNotifications)) {
-        pendingUnlinkedNotifications.push(row);
-      } else if (!(await this._attemptClickAutoLink(row))) {
-        await this._notifyUnlinkedReview(row);
-      }
+    } catch (sideErr) {
+      logger.error(`[gbp] post-write side effect failed for review row ${result.id} (${normalized.gbp_review_name || normalized.google_review_id || '?'}): ${sideErr.message}`);
+      result.sideEffectError = sideErr.message;
     }
     return result;
   }
