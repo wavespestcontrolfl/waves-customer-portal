@@ -23,6 +23,9 @@ jest.mock('../services/referral-engine', () => ({
 }));
 jest.mock('../routes/estimate-public', () => ({ isEstimateCustomerViewable: jest.fn() }));
 jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: jest.fn() }));
+// Only the Auto Pay customer-SMS gate reads true — every other gate (the
+// pricing-authority send gate the estimate builder consults) stays off.
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'autopayCustomerSms') }));
 jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
   checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
@@ -40,6 +43,7 @@ const { combinedEligibleSiblings } = require('../services/pay-combined');
 const { enrollPromoter, getLiveSettings } = require('../services/referral-engine');
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { requestAutopaySetupLink } = require('../services/autopay-setup-link');
+const { isEnabled } = require('../config/feature-gates');
 const ReviewService = require('../services/review-request');
 const {
   buildPayBalanceLink,
@@ -260,7 +264,40 @@ describe('buildReferralLink', () => {
 });
 
 describe('buildAutopaySetupLink', () => {
-  beforeEach(() => requestAutopaySetupLink.mockReset());
+  beforeEach(() => {
+    requestAutopaySetupLink.mockReset();
+    isEnabled.mockReset().mockImplementation((g) => g === 'autopayCustomerSms');
+    // The seeded autopay_setup_link template row, active.
+    mockBuilders = { sms_templates: chainBuilder({ firstRow: { is_active: true } }) };
+  });
+
+  test('the customer-SMS gate is enforced before anything mints (the composer send is an SMS)', async () => {
+    isEnabled.mockReturnValue(false);
+    const r = await buildAutopaySetupLink('c1');
+    expect(isEnabled).toHaveBeenCalledWith('autopayCustomerSms');
+    expect(requestAutopaySetupLink).not.toHaveBeenCalled();
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/GATE_AUTOPAY_CUSTOMER_SMS/);
+  });
+
+  test.each([
+    ['inactive row', { is_active: false }],
+    ['missing row', null],
+  ])('an %s autopay_setup_link template refuses before anything mints', async (_label, row) => {
+    mockBuilders = { sms_templates: chainBuilder({ firstRow: row }) };
+    const r = await buildAutopaySetupLink('c1');
+    expect(requestAutopaySetupLink).not.toHaveBeenCalled();
+    expect(r.reason).toMatch(/inactive in Templates/);
+  });
+
+  test('an unreadable template row fails closed', async () => {
+    const b = chainBuilder();
+    b.first = jest.fn(async () => { throw new Error('db down'); });
+    mockBuilders = { sms_templates: b };
+    const r = await buildAutopaySetupLink('c1');
+    expect(requestAutopaySetupLink).not.toHaveBeenCalled();
+    expect(r.url).toBeNull();
+  });
 
   test('delegates inline to the single entry point and inserts the secure link', async () => {
     requestAutopaySetupLink.mockResolvedValue({
@@ -271,9 +308,12 @@ describe('buildAutopaySetupLink', () => {
     expect(requestAutopaySetupLink).toHaveBeenCalledWith({ customerId: 'c1', delivery: 'inline', trigger: 'admin' });
     expect(r.url).toBe('https://portal.wavespestcontrol.com/secure/tok123');
     expect(r.line).toContain(r.url);
-    expect(r.line).toMatch(/Nothing is charged today/);
+    expect(r.line).toMatch(/nothing is charged today/);
     // ACH is judged at page time — the clause never promises a bank option.
     expect(r.line).not.toMatch(/bank/i);
+    // One line: the composer strips newline-delimited lines carrying the
+    // tracked URL on a recipient change — the whole clause must go with it.
+    expect(r.line.trim()).not.toMatch(/\n/);
   });
 
   test('a reused live row (request_exists) still inserts — same link, no second mint', async () => {

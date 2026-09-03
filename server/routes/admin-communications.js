@@ -1690,22 +1690,25 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     // expansion has no ORDER BY of its own).
     const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
     let primaryId = selectedId;
-    if (!primaryId) {
+    // Auto Pay is money-affecting and per row (a consented saved card can
+    // enroll on the spot) — never guess the row. The body's customerId is
+    // NOT proof of an operator pick (opening a thread auto-fills whichever
+    // sibling the latest message carried — see firstNameForPhone), so the
+    // check runs whether or not one was supplied: the phone must belong to
+    // exactly ONE row on the account, else 409 to the customer's own
+    // profile card (GH Codex #3812 r1 P1 + pre-push P0).
+    if (!primaryId || kind === 'autopay_setup') {
       const phoneRows = await db('customers')
         .whereNull('deleted_at')
         .whereIn('id', customerIds)
         .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
         .select('id');
-      // Auto Pay is money-affecting and per row (a consented saved card can
-      // enroll on the spot) — never guess the row. Without an operator-
-      // selected customer, the phone must belong to exactly ONE sibling;
-      // otherwise 409 to the dropdown, same as the cross-account case.
       if (kind === 'autopay_setup' && phoneRows.length !== 1) {
         return res.status(409).json({
-          error: 'That number is on file for more than one customer on this account — pick the customer from the search dropdown before inserting an Auto Pay setup link',
+          error: 'That number is on file for more than one customer on this account — send the Auto Pay setup link from that customer\'s profile instead',
         });
       }
-      primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
+      if (!primaryId) primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
     }
 
     const result = await builderByKind[kind](customerIds, primaryId);

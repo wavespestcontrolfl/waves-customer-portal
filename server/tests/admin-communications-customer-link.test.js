@@ -228,10 +228,11 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test('autopay_setup: 409 when the phone belongs to more than one sibling and no customer was picked', async () => {
+  test('autopay_setup: 409 when the phone belongs to more than one sibling — with or without a customerId', async () => {
     // Two rows on one account share the number: referral falls back to the
     // sorted first id, but Auto Pay must never guess (a consented card can
-    // enroll on the spot) — the operator picks from the dropdown first.
+    // enroll on the spot). A body customerId is no proof of an operator
+    // pick (thread open auto-fills it), so the check applies either way.
     const siblingsSharingPhone = () => makeCustomersBuilder({
       selectResults: [
         [{ id: 'aaaa1111-0000-4000-8000-000000000001', account_id: 'acct-1' }, { id: 'aaaa1111-0000-4000-8000-000000000002', account_id: 'acct-1' }],
@@ -244,7 +245,26 @@ describe('POST /admin/communications/customer-link', () => {
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'autopay_setup' });
       expect(res.status).toBe(409);
-      expect((await res.json()).error).toMatch(/pick the customer/);
+      expect((await res.json()).error).toMatch(/profile instead/);
+      expect(builders.buildAutopaySetupLink).not.toHaveBeenCalled();
+    });
+    // Explicit customerId path: the selected-customer branch issues a
+    // customers.first() then the account expansion select, then the
+    // firstName select, then the shared-phone rows.
+    const picked = makeCustomersBuilder({
+      firstRow: { id: 'aaaa1111-0000-4000-8000-000000000001', phone: '+15551234567', account_id: 'acct-1' },
+      selectResults: [
+        [{ id: 'aaaa1111-0000-4000-8000-000000000001' }, { id: 'aaaa1111-0000-4000-8000-000000000002' }],
+        [{ first_name: 'PersonA' }],
+        [{ id: 'aaaa1111-0000-4000-8000-000000000001' }, { id: 'aaaa1111-0000-4000-8000-000000000002' }],
+      ],
+    });
+    wireDb({ customers: picked });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', {
+        phone: '+15551234567', customerId: 'aaaa1111-0000-4000-8000-000000000001', kind: 'autopay_setup',
+      });
+      expect(res.status).toBe(409);
       expect(builders.buildAutopaySetupLink).not.toHaveBeenCalled();
     });
   });

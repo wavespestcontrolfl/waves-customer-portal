@@ -1187,6 +1187,16 @@ function SmsTab() {
       });
       return;
     }
+    // An Auto Pay setup link is a 30-day bearer credential and the schedule
+    // picker has no upper bound — a send scheduled past expiry delivers a
+    // dead /secure link. Immediate sends only, same rule as review links.
+    if (insertedCustomerLinks.autopay_setup && (scheduledFor || loadedMessageDraft?.id)) {
+      setSendResult({
+        ok: false,
+        text: "Auto Pay setup links expire — send now, or remove the Auto Pay link first.",
+      });
+      return;
+    }
     // SYNCHRONOUS bearer-link check at the send boundary: the recipient-
     // change strip runs in an effect (and defers while `sending`), so a
     // recipient edit followed immediately by Send can race it and transmit

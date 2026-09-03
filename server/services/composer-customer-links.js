@@ -296,7 +296,27 @@ const AUTOPAY_SKIP_REASONS = {
   autopay_paused: 'Auto Pay is already set up but paused — resume it instead of sending a setup link',
   unsupported_billing_lane: 'Auto Pay setup links are only for per-visit and per-application customers',
   completion_in_progress: 'This customer is finishing an Auto Pay setup right now — try again in a few minutes',
+  autopay_sms_gate_off: 'Auto Pay customer texts are switched off (GATE_AUTOPAY_CUSTOMER_SMS)',
+  template_inactive: 'The Auto Pay setup text is inactive in Templates — activate it before texting a setup link',
 };
+
+// The composer's insert IS an SMS delivery (the operator's /sms send goes
+// out as original_message_type 'manual', so the Auto Pay classifier never
+// re-applies its gates). Enforce the same two levers the service's own SMS
+// branch checks — the customer-SMS rollout gate and the template's active
+// toggle — BEFORE anything mints or enrolls (GH Codex #3812 r1 P1). Fail
+// closed on an unreadable template row.
+async function autopaySmsLever() {
+  if (!require('../config/feature-gates').isEnabled('autopayCustomerSms')) return 'autopay_sms_gate_off';
+  try {
+    const row = await db('sms_templates').where({ template_key: 'autopay_setup_link' }).first('is_active');
+    if (!row || row.is_active === false) return 'template_inactive';
+  } catch (err) {
+    logger.warn(`[composer-links] autopay template lookup failed: ${err.message}`);
+    return 'template_inactive';
+  }
+  return null;
+}
 
 /**
  * Auto Pay setup link — delegates entirely to autopay-setup-link's ONE
@@ -313,6 +333,8 @@ const AUTOPAY_SKIP_REASONS = {
  * matters.
  */
 async function buildAutopaySetupLink(customerId) {
+  const lever = await autopaySmsLever();
+  if (lever) return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS[lever] };
   const { requestAutopaySetupLink } = require('./autopay-setup-link');
   const result = await requestAutopaySetupLink({ customerId, delivery: 'inline', trigger: 'admin' });
   if (result?.action === 'auto_secured') {
@@ -322,8 +344,11 @@ async function buildAutopaySetupLink(customerId) {
     return {
       url: result.secureUrl,
       // Mirrors the seeded autopay_setup_link SMS template: no bank-option
-      // promise (ACH is gated at page time), nothing charged today.
-      line: `Set up Auto Pay for your Waves service here: ${result.secureUrl}\nSave a payment method and each visit is paid automatically after it is completed. Nothing is charged today.\n\n`,
+      // promise (ACH is gated at page time), nothing charged today. ONE line
+      // — the composer's recipient-change strip removes newline-delimited
+      // lines carrying the tracked URL, so the whole clause must ride with
+      // it (GH Codex #3812 r1 P2).
+      line: `Save a payment method for Auto Pay and each visit is paid automatically after it is completed - nothing is charged today. Set it up here: ${result.secureUrl}\n\n`,
       expiresAt: result.expiresAt || null,
     };
   }
