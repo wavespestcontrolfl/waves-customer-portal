@@ -239,6 +239,7 @@ const CHECKS = [
             where ss.status='completed' and ss.scheduled_date >= $1::date
               and not coalesce(ss.is_callback,false)
               and not (coalesce(ss.prepaid_amount,0) > 0 or ss.annual_prepay_term_id is not null)
+              and coalesce(c.billing_mode,'') <> 'monthly_membership' -- dues cover these visits; no per-visit invoice is expected (admin-dispatch.js dues_covered_priced_series)
               and not exists (select 1 from invoices i where (i.scheduled_service_id = ss.id or (i.service_record_id is not null and i.service_record_id in (select id from service_records sr where sr.scheduled_service_id = ss.id))) and i.archived_at is null))
           select coalesce(billing_mode,'NULL') as lane, count(*) as uninvoiced,
                  count(*) filter (where not exists (select 1 from invoices i where i.customer_id = u.customer_id and i.archived_at is null and i.service_date between u.scheduled_date - 3 and u.scheduled_date + 3)) as no_invoice_within_3_days,

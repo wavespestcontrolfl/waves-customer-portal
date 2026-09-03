@@ -182,12 +182,13 @@ _(0 rows)_
 
 ## Completed billable visits since 2026-06-01 with no invoice (by lane)
 
+_Round 2 (Codex P2): membership-covered visits (`billing_mode = monthly_membership`) are excluded — dues cover them and no per-visit invoice is expected. The query groups by lane, so the filter removes exactly that lane's row (2 visits, $196.60); the remaining rows are unchanged from the 2026-09-03T05:43Z run and were not re-queried._
+
 | lane | uninvoiced | no_invoice_within_3_days | est_price_at_risk |
 |---|---|---|---|
 | per_application | 26 | 15 | 966.20 |
 | per_visit | 22 | 3 | 367.00 |
 | NULL | 4 | 0 | 0.00 |
-| monthly_membership | 2 | 2 | 196.60 |
 | annual_prepay | 1 | 0 | 0.00 |
 
 ## Completed-visit RECORDED span minutes (check-in→check-out, often includes drive — not on-site time) by service type since 2026-06-01 (n ≥ 3)
