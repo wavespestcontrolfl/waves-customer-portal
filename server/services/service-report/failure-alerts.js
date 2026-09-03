@@ -17,6 +17,12 @@ function sanitizeErrorText(value) {
   return String(value || '')
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
     .replace(/\b[a-f0-9]{24,}\b/gi, '[token]')
+    // Provider error text quotes the destination number ("Carrier violation
+    // for +1941…"); the bell and push are tech-visible, and the tech does
+    // not need it (pre-push Codex P1 on #3772).
+    // Ten or more digits in a run of phone punctuation — a date or a
+    // Twilio error code is not a number.
+    .replace(/\+?[\d\s().-]{10,}/g, (m) => (m.replace(/\D/g, '').length >= 10 ? '[phone]' : m))
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 240);

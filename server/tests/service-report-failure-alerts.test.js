@@ -184,6 +184,9 @@ describe('service report failure alerts', () => {
       dedupeKey: 'completion_sms_failed:svc-4:resumable',
     }));
     expect(trigger.mock.calls[0][1].errorMessage).toContain('Carrier violation');
+    // The destination number is redacted from the tech-visible bell text.
+    expect(trigger.mock.calls[0][1].errorMessage).toContain('[phone]');
+    expect(trigger.mock.calls[0][1].errorMessage).not.toContain('9415550100');
 
     // A terminal follow-up on the same record is a different outcome — its
     // own dedupe identity, so it can replace the "held for retry" copy.
