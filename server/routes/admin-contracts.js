@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const logger = require('../services/logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { logAutopay } = require('../services/autopay-log');
@@ -308,205 +307,59 @@ router.post('/customer/:customerId/autopay-authorization', async (req, res, next
   } catch (err) { next(err); }
 });
 
-// Expiry window for a fresh signing link — a document request follows its
-// template's window; every other contract the default TTL.
-async function shareLinkExpiresAt(trx, contract) {
-  if (contract.contract_type === 'document_template' && contract.document_template_id) {
-    const template = await trx('document_templates')
-      .where({ id: contract.document_template_id })
-      .first('expire_after_days', 'requires_signature');
-    return documentContractExpiresAt(new Date(), template?.expire_after_days || 14, {
-      requires_signature_snapshot: contract.requires_signature_snapshot,
-      requires_signature: template?.requires_signature,
-    });
-  }
-  return contractExpiresAt();
-}
-
-// A signing link the customer may hold: hashed, and either its window is
-// still open or it has none — the public route serves a null expiry as
-// live indefinitely (contracts-public isExpired), so a legacy hash with no
-// window is a customer's live link too and is never rotated by the
-// composer (pre-push Codex P0: in-flight tokenized links must keep
-// working). Only a hash whose window has closed is nobody's link.
-function deliveredLiveShareLink(contract) {
-  if (!contract?.share_token_hash) return false;
-  if (!contract.share_token_expires_at) return true;
-  return new Date(contract.share_token_expires_at).getTime() > Date.now();
-}
-
-const SHARE_LINK_TERMINAL_STATUSES = ['signed', 'cancelled', 'voided'];
-// Statuses a fresh signing link may be written over — an expired document
-// request re-opens on a fresh window; every other contract type does not.
-const shareLinkWritableStatuses = (contract) => (contract.contract_type === 'document_template'
-  ? ['draft', 'sent', 'viewed', 'expired']
-  : ['draft', 'sent', 'viewed']);
-
-// Mint a fresh signing link for a live contract — the Contracts page's
-// deliberate action (the route below). The raw token is never stored (hash
-// only), so every mint ROTATES the previous link. Returns { signingUrl,
-// expiresAt, contract } or { error: { status, message } }.
-async function createShareLink(contractId, req) {
-  const token = mintContractToken();
-  let expiresAt = null;
-  let error = null;
-  await db.transaction(async (trx) => {
-    const contract = await trx('customer_contracts')
-      .where({ id: contractId })
-      .forUpdate()
-      .first();
-    if (!contract) {
-      error = { status: 404, message: 'Contract not found' };
-      return;
-    }
-    if (SHARE_LINK_TERMINAL_STATUSES.includes(contract.status)) {
-      error = { status: 400, message: `Cannot create a signing link for a ${contract.status} contract.` };
-      return;
-    }
-    expiresAt = await shareLinkExpiresAt(trx, contract);
-    const now = new Date();
-    const updated = await trx('customer_contracts')
-      .where({ id: contract.id })
-      .whereIn('status', shareLinkWritableStatuses(contract))
-      .update({
-        status: 'sent',
-        share_token_hash: hashContractToken(token),
-        share_token_expires_at: expiresAt,
-        shared_at: now,
-        updated_at: now,
-      });
-    if (updated !== 1) {
-      error = { status: 409, message: 'Contract status changed. Refresh and try again.' };
-      return;
-    }
-    await insertEvent(trx, contract.id, contract.customer_id, 'share_link_created', req, {
-      expiresAt: expiresAt.toISOString(),
-    });
-  });
-  if (error) return { error };
-  const contract = await loadContract(contractId);
-  return { signingUrl: publicContractUrl(token), expiresAt, contract };
-}
-
-const NOT_LIVE = 'This contract signing link is no longer live — remove it and insert a fresh one.';
-
-/**
- * The composer's contract signing link, second half (GH Codex #3844 r3 P1):
- * the Insert Link sheet mints the token IN MEMORY and writes nothing — a
- * prepared link is nobody's until the /sms send activates it here, BEFORE
- * the provider call, the way the document delivery activates its prepared
- * token before it sends. Under the row lock: a link the customer may
- * already hold (delivered, window open) refuses — two composers racing on
- * one contract serialize here and the second loses, nothing is ever
- * rotated; otherwise the hash lands with status sent, shared_at now and a
- * window opened from the send. A link the customer already holds (one
- * pasted from the Contracts page, `delivered`) is re-verified and needs
- * no write. Returns { ok: true, activations } for restorePreparedShareLinks
- * (a send that never left) or recordPreparedShareLinkSends (a real one),
- * else { ok: false, error } with every activation this call made undone —
- * and a throw part-way (a later link's lock, template read or event write
- * failing) undoes them too before it surfaces, so no signing credential
- * this call committed outlives a send that never happened (pre-push P0).
- */
-async function activatePreparedShareLinks(links, req) {
-  const activations = [];
-  try {
-    return await activateEachPreparedShareLink(links, req, activations);
-  } catch (err) {
-    await restorePreparedShareLinks(activations, req, { reason: `Activation failed: ${err.message}` }).catch((restoreErr) => {
-      logger.error(`[contracts] prepared link restore after an activation throw failed (contracts ${activations.map((a) => a.id).join(', ')} keep their activated link until it expires): ${restoreErr.message}`);
-    });
-    throw err;
-  }
-}
-
-async function activateEachPreparedShareLink(links, req, activations) {
-  for (const link of links) {
-    let refusal = null;
-    await db.transaction(async (trx) => {
-      const locked = await trx('customer_contracts').where({ id: link.id }).forUpdate().first();
-      if (!locked) { refusal = NOT_LIVE; return; }
-      if (SHARE_LINK_TERMINAL_STATUSES.includes(locked.status)) {
-        refusal = 'This contract is no longer awaiting a signature — remove the signing link before sending.';
-        return;
-      }
-      if (link.delivered) {
-        if (locked.share_token_hash !== link.tokenHash || !deliveredLiveShareLink(locked)) { refusal = NOT_LIVE; return; }
-        activations.push({ id: locked.id, customerId: locked.customer_id, tokenHash: link.tokenHash, expiresAt: locked.share_token_expires_at, previous: null });
-        return;
-      }
-      if (deliveredLiveShareLink(locked)) {
-        refusal = `A signing link for ${String(locked.title || '').trim() || 'this contract'} was already sent and is still live — remove this one; the customer can use theirs, or resend it from the Contracts page.`;
-        return;
-      }
-      if (!shareLinkWritableStatuses(locked).includes(locked.status)) {
-        refusal = 'Contract status changed. Refresh and try again.';
-        return;
-      }
-      const expiresAt = await shareLinkExpiresAt(trx, locked);
-      const now = new Date();
-      await trx('customer_contracts')
-        .where({ id: locked.id })
-        .update({ status: 'sent', share_token_hash: link.tokenHash, share_token_expires_at: expiresAt, shared_at: now, updated_at: now });
-      await insertEvent(trx, locked.id, locked.customer_id, 'share_link_created', req, { expiresAt: expiresAt.toISOString(), source: 'composer' });
-      activations.push({
-        id: locked.id,
-        customerId: locked.customer_id,
-        tokenHash: link.tokenHash,
-        expiresAt,
-        previous: {
-          status: locked.status,
-          share_token_hash: locked.share_token_hash,
-          share_token_expires_at: locked.share_token_expires_at,
-          shared_at: locked.shared_at,
-        },
-      });
-    });
-    if (refusal) {
-      await restorePreparedShareLinks(activations, req, { reason: 'A later link in the same message refused' });
-      return { ok: false, error: refusal };
-    }
-  }
-  return { ok: true, activations };
-}
-
-// A send that never left puts the contract back exactly as it was —
-// conditional on the hash, so a link rotated meanwhile belongs to its new
-// owner and is left alone. Records the document delivery's own
-// delivery_failed event; a link the customer already held needs nothing.
-async function restorePreparedShareLinks(activations, req, { reason = null } = {}) {
-  for (const a of activations) {
-    if (!a.previous) continue;
-    const restored = await db('customer_contracts')
-      .where({ id: a.id, share_token_hash: a.tokenHash })
-      .update({ ...a.previous, updated_at: new Date() });
-    if (restored === 1) {
-      await insertEvent(db, a.id, a.customerId, 'delivery_failed', req, { channel: 'sms', action: 'composer', reason });
-    }
-  }
-}
-
-// A REAL provider send is the delivery — the event the document delivery
-// records for its own SMS sends (recordDeliverySuccess), so the contract's
-// timeline shows it. The row was activated before the call.
-async function recordPreparedShareLinkSends(activations, req, result = {}) {
-  for (const a of activations) {
-    await insertEvent(db, a.id, a.customerId, 'sms_sent', req, {
-      channel: 'sms',
-      action: 'composer',
-      provider: result.provider || null,
-      providerMessageId: result.providerMessageId || null,
-      expiresAt: a.expiresAt ? new Date(a.expiresAt).toISOString() : null,
-    });
-  }
-}
-
 router.post('/:id/share-link', async (req, res, next) => {
   try {
-    const result = await createShareLink(req.params.id, req);
-    if (result.error) return res.status(result.error.status).json({ error: result.error.message });
-    const { contract, signingUrl } = result;
-    res.json({ contract: serializeContract(contract, { signingUrl }), signingUrl });
+    const token = mintContractToken();
+    let expiresAt = contractExpiresAt();
+    let response;
+    await db.transaction(async (trx) => {
+      const contract = await trx('customer_contracts')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!contract) {
+        response = { status: 404, body: { error: 'Contract not found' } };
+        return;
+      }
+      if (['signed', 'cancelled', 'voided'].includes(contract.status)) {
+        response = { status: 400, body: { error: `Cannot create a signing link for a ${contract.status} contract.` } };
+        return;
+      }
+      const isDocumentRequest = contract.contract_type === 'document_template';
+      if (isDocumentRequest && contract.document_template_id) {
+        const template = await trx('document_templates')
+          .where({ id: contract.document_template_id })
+          .first('expire_after_days', 'requires_signature');
+        expiresAt = documentContractExpiresAt(new Date(), template?.expire_after_days || 14, {
+          requires_signature_snapshot: contract.requires_signature_snapshot,
+          requires_signature: template?.requires_signature,
+        });
+      }
+
+      const updated = await trx('customer_contracts')
+        .where({ id: contract.id })
+        .whereIn('status', isDocumentRequest ? ['draft', 'sent', 'viewed', 'expired'] : ['draft', 'sent', 'viewed'])
+        .update({
+          status: 'sent',
+          share_token_hash: hashContractToken(token),
+          share_token_expires_at: expiresAt,
+          shared_at: new Date(),
+          updated_at: new Date(),
+        });
+      if (updated !== 1) {
+        response = { status: 409, body: { error: 'Contract status changed. Refresh and try again.' } };
+        return;
+      }
+      await insertEvent(trx, contract.id, contract.customer_id, 'share_link_created', req, {
+        expiresAt: expiresAt.toISOString(),
+      });
+    });
+
+    if (response) return res.status(response.status).json(response.body);
+
+    const updated = await loadContract(req.params.id);
+    const signingUrl = publicContractUrl(token);
+    res.json({ contract: serializeContract(updated, { signingUrl }), signingUrl });
   } catch (err) { next(err); }
 });
 
@@ -649,9 +502,3 @@ router.post('/:id/renewal-notice', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports.createShareLink = createShareLink;
-module.exports.deliveredLiveShareLink = deliveredLiveShareLink;
-module.exports.shareLinkWritableStatuses = shareLinkWritableStatuses;
-module.exports.activatePreparedShareLinks = activatePreparedShareLinks;
-module.exports.restorePreparedShareLinks = restorePreparedShareLinks;
-module.exports.recordPreparedShareLinkSends = recordPreparedShareLinkSends;

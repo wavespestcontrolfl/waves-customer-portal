@@ -132,8 +132,8 @@ async function derivedOfficeNumber(row, recipientCustomerId, preloadedCustomer =
 
 const immediateOnlyLinkInDraft = (label) => `${label} links cannot go out through draft approval — send them from the composer, where the link is re-checked at delivery.`;
 // Presence only (customer-kind /secure links or a look-alike host, then the
-// other per-row bearers — contract signing, card request, statement pay,
-// expiring prep pages): the composer-links seams do the lookups; a draft
+// other per-row bearers — statement pay, prep pages, appointment pages,
+// service reports): the composer-links seams do the lookups; a draft
 // never sends one at all (draft approve/revise dispatch straight into
 // sendCustomerMessage — no delivery re-check). Returns the refusal
 // message, or null.

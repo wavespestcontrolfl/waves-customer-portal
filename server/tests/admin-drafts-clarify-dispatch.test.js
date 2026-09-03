@@ -387,17 +387,17 @@ describe('Auto Pay setup links never ride draft approval (GH Codex #3812 r3 P1)'
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('revise with a contract signing link → 409 through the same fence (per-row bearers are immediate-send only)', async () => {
+  test('revise with a prep guide link → 409 through the same fence (per-row bearers are immediate-send only)', async () => {
     const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
-    immediateOnlyLinkSendCheck.mockResolvedValueOnce({ present: true, label: 'Contract signing' });
+    immediateOnlyLinkSendCheck.mockResolvedValueOnce({ present: true, label: 'Prep guide' });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/drafts/draft-9/revise`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ revisedResponse: 'Sign here: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY' }),
+        body: JSON.stringify({ revisedResponse: `Checklist: portal.wavespestcontrol.com/prep/${'a'.repeat(32)}` }),
       });
       expect(res.status).toBe(409);
-      expect((await res.json()).error).toMatch(/^Contract signing links cannot go out through draft approval/);
+      expect((await res.json()).error).toMatch(/^Prep guide links cannot go out through draft approval/);
     });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });

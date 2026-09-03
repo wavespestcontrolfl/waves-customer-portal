@@ -80,14 +80,10 @@ jest.mock('../services/composer-customer-links', () => ({
   buildReferralLink: jest.fn(),
   buildAutopaySetupLink: jest.fn(),
   buildAppointmentPageLink: jest.fn(),
-  buildCardRequestLink: jest.fn(),
   buildPrepGuideLink: jest.fn(),
   buildServiceReportLink: jest.fn(),
-  buildContractSigningLink: jest.fn(),
   buildStatementLink: jest.fn(),
 }));
-// The card funnel's own live-status set — the route narrows its visit pick to it.
-jest.mock('../services/appointment-card-request', () => ({ LIVE_VISIT_STATUSES: ['pending', 'confirmed'] }));
 jest.mock('../services/review-request', () => ({
 }));
 
@@ -389,7 +385,7 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test('appointment + card_request: the route picks the soonest live visit and hands the row to the builder', async () => {
+  test('appointment: the route picks the soonest live visit and hands the row to the builder', async () => {
     const visit = { id: 'v1', customer_id: CUSTOMER_UUID, scheduled_date: '2026-09-08', window_start: '09:00', window_end: '11:00', service_type: 'Flea Treatment', status: 'confirmed' };
     wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([visit]) });
     builders.buildAppointmentPageLink.mockResolvedValue({
@@ -407,21 +403,6 @@ describe('POST /admin/communications/customer-link', () => {
       // phone owner rides back so the /sms send carries customerId and the
       // recipient's own consent policy applies (GH Codex #3844 r4 P1).
       expect(body.customerId).toBe(CUSTOMER_UUID);
-    });
-
-    const visits = makeVisitsBuilder([]);
-    wireDb({ customers: soloCustomer(), visits });
-    builders.buildCardRequestLink.mockResolvedValue({ url: null, line: '', reason: 'No upcoming appointment for this customer' });
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'card_request' });
-      expect(res.status).toBe(404);
-      expect(builders.buildCardRequestLink).toHaveBeenCalledWith(null);
-      // Card requests anchor on the phone OWNER's visits only, never a sibling's.
-      expect(db.mock.calls.filter(([t]) => t === 'scheduled_services').length).toBeGreaterThan(0);
-      // …and only on the funnel's own live statuses — a soonest 'rescheduled'
-      // placeholder must not be picked here and rejected there (Codex r1 P1).
-      expect(visits.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed']);
-      expect((await res.json()).error).toMatch(/No upcoming appointment/);
     });
   });
 
@@ -444,25 +425,6 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test('contract: per customer ROW — the phone owner only, with the owner id riding back', async () => {
-    wireDb({ customers: soloCustomer() });
-    builders.buildContractSigningLink.mockResolvedValue({
-      url: 'https://portal.wavespestcontrol.com/contract/tokX',
-      line: 'Please review and sign your Auto Pay Authorization here: https://portal.wavespestcontrol.com/contract/tokX\n\n',
-      contract: { id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true },
-      expiresAt: '2026-10-03T00:00:00.000Z',
-    });
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'contract' });
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(builders.buildContractSigningLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
-      expect(body.customerId).toBe(CUSTOMER_UUID);
-      expect(body.expiresAt).toBe('2026-10-03T00:00:00.000Z');
-      expect(body.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true });
-    });
-  });
-
   test('prep_guide: per customer ROW too — the phone owner\'s visits only (the page shows their name + address; /sms requires them to own it)', async () => {
     wireDb({ customers: soloCustomer() });
     builders.buildPrepGuideLink.mockResolvedValue({
@@ -479,7 +441,7 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test.each(['contract', 'card_request', 'prep_guide'])('%s: 409 when the phone belongs to more than one sibling — same rule as Auto Pay', async (kind) => {
+  test.each(['prep_guide'])('%s: 409 when the phone belongs to more than one sibling — same rule as Auto Pay', async (kind) => {
     const other = 'bbbb2222-0000-4000-8000-000000000002';
     wireDb({
       customers: makeCustomersBuilder({
@@ -495,21 +457,7 @@ describe('POST /admin/communications/customer-link', () => {
       const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind });
       expect(res.status).toBe(409);
       expect((await res.json()).error).toMatch(/more than one customer on this account/);
-      expect(builders.buildContractSigningLink).not.toHaveBeenCalled();
-      expect(builders.buildCardRequestLink).not.toHaveBeenCalled();
       expect(builders.buildPrepGuideLink).not.toHaveBeenCalled();
-    });
-  });
-
-  test('card_request: autoSecured answers 200 like Auto Pay — a success with nothing to insert', async () => {
-    wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([{ id: 'v1', customer_id: CUSTOMER_UUID, scheduled_date: '2026-09-08', status: 'confirmed' }]) });
-    builders.buildCardRequestLink.mockResolvedValue({ url: null, line: '', autoSecured: true });
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'card_request' });
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.autoSecured).toBe(true);
-      expect(body.url).toBeNull();
     });
   });
 });
