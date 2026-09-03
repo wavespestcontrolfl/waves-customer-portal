@@ -65,6 +65,8 @@ const BRIDGE_STATES = Object.freeze(['qualified', 'ready_to_acquire', 'acquiring
 // Judge- or owner-owned history.
 const PARKABLE = 'prospect';
 const PARKED = 'awaiting_owner';
+// §3.1 active intermediates (plus any leased placement): the domain reads `acquiring`
+const ACQUIRING_STATUSES = Object.freeze(['placed', 'contacted', 'negotiating', 'ready_for_credentials', 'ready_for_payment']);
 
 const isOwner = (l) => typeof l === 'string' && l.startsWith('OWNER_');
 const isAuto = (l) => typeof l === 'string' && l.startsWith('AUTO_');
@@ -94,7 +96,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at', 'link_type', 'legal_terms_hash');
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
-  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key');
+  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'updated_at');
   const byDomain = new Map();
   for (const p of placements) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
   const rowsByProspect = new Map();
@@ -110,14 +112,17 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     const onBest = mine.filter((p) => p.path_id === d.best_path_id);
     const expected = expectedLocations(best);
     const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
-    const staleRow = (r) => (r.satisfied_at
-      ? termsChanged(r, best) // a satisfied instance is final — except an acceptance of an agreement the path no longer carries
-      : r.path_id !== d.best_path_id || ts(r.decided_at) < cutoff);
+    // an unsatisfied row is stale when something it depends on moved after it was decided — the policy / domain / path /
+    // waiver (cutoff) or the PLACEMENT itself (a draft arriving, a status the worker or Judge moved); a satisfied one is
+    // final except an acceptance of an agreement the path no longer carries, or an acquisition proven on another path
+    const staleRow = (r, p) => (r.satisfied_at
+      ? termsChanged(r, best) || (r.dimension === 'execution' && r.instance_kind !== 'terms' && r.path_id !== d.best_path_id)
+      : r.path_id !== d.best_path_id || ts(r.decided_at) < cutoff || ts(r.decided_at) < ts(p.updated_at));
     const owned = mine.filter((p) => rowsByProspect.has(p.id));
     let why = null;
     if (forced.has(d.id)) why = 'forced';
     else if (d.agent_state === 'qualified' && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';
-    else if (owned.some((p) => p.path_id !== d.best_path_id || rowsByProspect.get(p.id).some(staleRow))) why = 'stale';
+    else if (owned.some((p) => p.path_id !== d.best_path_id || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
     else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !owned.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
     if (why) picked.push({ id: d.id, domain: d.domain, why, at: ts(d.updated_at) });
   }
@@ -145,6 +150,20 @@ const deferred = (r, outreach) => outreach === true && r.dimension === 'payment'
 // agreement the path no longer carries reopens it (§3.3b — acceptance of an old
 // agreement never satisfies a newly discovered one)
 const termsChanged = (r, path) => r.instance_kind === 'terms' && (r.accepted_terms_hash || null) !== ((path && path.legal_terms_hash) || null);
+// Which open instance outlived its path or agreement (§3.2 supersession rule):
+// an UNSATISFIED instance decided on another path ends `superseded`; a satisfied
+// accept_terms instance ends `terms_changed` when its hash moved (an equal hash
+// carries across); a satisfied ACQUISITION execution instance proves only the
+// path it ran on and ends `superseded` when the placement moved; a satisfied
+// communication or payment instance is path-independent (the pitch went out,
+// the money left) and is carried. Null = keep.
+const rotationOutcome = (r, path) => {
+  if (r.ended_at) return null;
+  if (!r.satisfied_at) return r.path_id !== path.id ? 'superseded' : null;
+  if (r.instance_kind === 'terms') return termsChanged(r, path) ? 'terms_changed' : null;
+  if (r.dimension === 'execution') return r.path_id !== path.id ? 'superseded' : null;
+  return null;
+};
 // placements per lane: one per GBP location for a signup lane, one unscoped row otherwise
 const expectedLocations = (path) => (path && SIGNUP_LINK_TYPES.includes(path.link_type) ? WAVES_LOCATIONS.map((l) => l.id) : ['-']);
 
@@ -227,7 +246,17 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   // (at the lease release) is rotated on the next run all the same.
   const behind = placements.filter((p) => p.path_id !== path.id);
   if (behind.length) {
-    await settleRetiredPlacements(trx, { prospectIds: behind.map((p) => p.id), now });
+    // a superseded predecessor is followed along its chain; a path that is
+    // still live but simply no longer the domain's best (the investigator
+    // re-ranked) hands its unleased placements to the best path directly —
+    // otherwise the domain would consume a batch slot every night without a
+    // placement on the path it is meant to acquire through
+    const behindPaths = await trx('seo_link_acquisition_paths').whereIn('id', [...new Set(behind.map((p) => p.path_id))]).select('id', 'superseded_by');
+    const chained = new Set(behindPaths.filter((x) => x.superseded_by).map((x) => x.id));
+    const viaChain = behind.filter((p) => chained.has(p.path_id));
+    const viaRerank = [...new Set(behind.filter((p) => !chained.has(p.path_id)).map((p) => p.path_id))];
+    if (viaChain.length) await settleRetiredPlacements(trx, { prospectIds: viaChain.map((p) => p.id), now });
+    if (viaRerank.length) await settleRetiredPlacements(trx, { pathIds: viaRerank, successor: path, now });
     const moved = await trx('seo_link_prospects').whereIn('id', behind.map((p) => p.id)).select('*');
     const byId = new Map(moved.map((p) => [p.id, p]));
     placements = placements.map((p) => byId.get(p.id) || p);
@@ -256,14 +285,10 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     // instance_key) keeps history, so a replacement instance takes the next
     // generation (`${kind}:${n+1}`, §3.3b) — never the ended row's key.
     const history = await annotateApprovals(trx, await trx(AUTH).where({ prospect_id: placement.id }).select('*'));
-    // rotation: an unsatisfied instance decided on another path ends
-    // `superseded`; a satisfied accept_terms instance whose accepted hash the
-    // path no longer carries ends `terms_changed` (its approval invalidated,
-    // §3.2) — every other satisfied instance is path-independent and stays.
-    // The next generation of each is decided below.
+    // rotation (rotationOutcome): the ended instance's approval is invalidated
+    // and the next generation is decided below
     for (const r of history) {
-      if (r.ended_at) continue;
-      const outcome = r.satisfied_at ? (termsChanged(r, path) ? 'terms_changed' : null) : (r.path_id !== path.id ? 'superseded' : null);
+      const outcome = rotationOutcome(r, path);
       if (!outcome) continue;
       if (r.approval_id) {
         out.invalidatedApprovals += await trx('seo_link_approvals').where({ id: r.approval_id }).whereNull('invalidated_at').update({ invalidated_at: now, invalidated_reason: outcome === 'terms_changed' ? 'terms_changed' : 'path_superseded', updated_at: now });
@@ -297,7 +322,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       if (existing.satisfied_at) continue; // done — never re-decided
       const inputsMoved = existing.level !== inst.level || existing.decision_inputs_hash !== hash || Number(existing.path_revision) !== Number(pathRevision);
       const changed = inputsMoved || (existing.floor_waiver_id || null) !== floorWaiverId || existing.reason !== inst.reason;
-      if (!changed && ts(existing.decided_at) >= staleAfter) continue;
+      if (!changed && ts(existing.decided_at) >= Math.max(staleAfter, ts(placement.updated_at))) continue;
       const patch = { level: inst.level, reason: inst.reason, decision_inputs_hash: hash, path_revision: pathRevision, floor_waiver_id: floorWaiverId, decided_at: now, updated_at: now };
       if (existing.approval_id && inputsMoved) {
         await trx('seo_link_approvals').where({ id: existing.approval_id }).whereNull('invalidated_at').update({ invalidated_at: now, invalidated_reason: `bridge: ${existing.level} → ${inst.level}, inputs re-decided`, updated_at: now });
@@ -324,29 +349,41 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     if (authority !== placement.authority) patch.authority = authority;
 
     // park / release — only the bridge's own statuses move
-    const noDraft = !placement.outreach_status || placement.outreach_status === 'none';
+    // an owner-gated send is approval-ready only once a DRAFTED message exists
+    // (the draft lease, mode=draft, runs first; the card binds the draft); an
+    // ambiguous send (sending / send_error) stays in the reconciliation
+    // lifecycle, which loads `prospect` rows only — parking it would strand it
+    const draftReady = placement.outreach_status === 'drafted';
     const gates = (r) => {
       if (authorized(r)) return false;
       if (!isOwner(r.level)) return false;
-      // an owner-gated send with no draft yet: the draft lease (mode=draft) must run first; the card binds the draft
-      if (r.dimension === 'communication' && noDraft && (r.level === 'OWNER_OUTREACH' || r.level === 'OWNER_LEGAL')) return false;
+      if (r.dimension === 'communication' && !draftReady && (r.level === 'OWNER_OUTREACH' || r.level === 'OWNER_LEGAL')) return false;
       if (deferred(r, outreachPath)) return false;
       return true;
     };
     const ownerGated = live.some(gates);
+    const leased = Boolean(placement.claimed_at);
     let status = placement.status;
-    if (status === PARKABLE && ownerGated) {
-      Object.assign(patch, { status: PARKED, parked_from_status: PARKABLE });
-      status = PARKED;
-      out.parked += 1;
-      if (!out.parkedDomains.includes(domain.domain)) out.parkedDomains.push(domain.domain);
-    } else if (status === PARKED && !ownerGated && placement.parked_from_status === PARKABLE) {
-      Object.assign(patch, { status: PARKABLE, parked_from_status: null });
-      status = PARKABLE;
-      out.released += 1;
-    }
+    let transition = null;
+    if (status === PARKABLE && ownerGated && !leased) transition = { status: PARKED, parked_from_status: PARKABLE };
+    else if (status === PARKED && !ownerGated && placement.parked_from_status === PARKABLE) transition = { status: PARKABLE, parked_from_status: null };
+    // the display stamp lands unconditionally; a status move is OPTIMISTIC on
+    // the status + lease the decision read — the worker's claim/report and the
+    // outreach save/send lock the row without this domain lock, so a row a
+    // report promoted or a claim leased since the snapshot is not this run's
+    // to move (the next run re-reads it)
     if (Object.keys(patch).length) await trx('seo_link_prospects').where({ id: placement.id }).update({ ...patch, updated_at: now });
-    summaries.push({ id: placement.id, status, authority, rows: live, outreach: outreachPath });
+    if (transition) {
+      const applied = await trx('seo_link_prospects').where({ id: placement.id, status: placement.status }).whereNull('claimed_at').update({ ...transition, updated_at: now });
+      if (applied) {
+        status = transition.status;
+        if (status === PARKED) {
+          out.parked += 1;
+          if (!out.parkedDomains.includes(domain.domain)) out.parkedDomains.push(domain.domain);
+        } else out.released += 1;
+      }
+    }
+    summaries.push({ id: placement.id, status, authority, rows: live, outreach: outreachPath, claimed_at: placement.claimed_at || null });
   }
 
   // informational stamp on the path — that column only, never the revision or updated_at
@@ -357,14 +394,14 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   // now. `rejected` is left only on the owner's explicit "Acquire anyway" (a
   // valid waiver) — the bridge cannot tell its own rejection from the owner's.
   if (BRIDGE_STATES.includes(domain.agent_state) || (domain.agent_state === 'rejected' && waiver)) {
-    const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'path_id');
+    const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'path_id', 'claimed_at');
     const seen = new Map(summaries.map((s) => [s.id, s]));
     const others = all.filter((p) => !seen.has(p.id));
     const otherRows = others.length ? await annotateApprovals(trx, await trx(AUTH).whereIn('prospect_id', others.map((p) => p.id)).whereNull('ended_at').select('*')) : [];
     const otherPathIds = [...new Set(others.map((p) => p.path_id).filter(Boolean))];
     const otherPaths = otherPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', otherPathIds).select('id', 'acquisition_type') : [];
     const outreachById = new Map(otherPaths.map((p) => [p.id, OUTREACH_ACQUISITION_TYPES.includes(p.acquisition_type)]));
-    for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), outreach: outreachById.get(p.path_id) === true });
+    for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), outreach: outreachById.get(p.path_id) === true, claimed_at: p.claimed_at || null });
     const next = aggregateState([...seen.values()]);
     if (next !== domain.agent_state) {
       const moved = await trx('seo_link_domains').where({ id: domain.id, agent_state: domain.agent_state }).update({ agent_state: next, updated_at: now });
@@ -374,8 +411,10 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   return { decided: true, out };
 }
 
-// §3.1 — ready_to_acquire while ANY authorized placement is pending; acquired
-// once live with nothing pending; acquiring for the active intermediates;
+// §3.1 — ready_to_acquire while ANY authorized placement is pending UNLEASED;
+// acquired once live with nothing pending; acquiring for the active
+// intermediates — a leased placement, `placed`, `contacted`/`negotiating`, or
+// parked at a handoff (`ready_for_credentials`/`ready_for_payment`);
 // qualified while the owner (or a deferred owner decision) holds it; back to
 // investigating when EVERY placement is INVALID; rejected ONLY when every
 // placement is DENY (a single DENY beside a pending sibling never rejects).
@@ -385,12 +424,13 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
 function aggregateState(placements) {
   const rows = (p) => p.rows || [];
   const pending = (p) => rows(p).filter((r) => !deferred(r, p.outreach));
-  const authorizedPending = (p) => p.status === PARKABLE && pending(p).length > 0 && pending(p).every(authorized);
+  const leased = (p) => Boolean(p.claimed_at);
+  const authorizedPending = (p) => p.status === PARKABLE && !leased(p) && pending(p).length > 0 && pending(p).every(authorized);
   const ownerPending = (p) => p.status === PARKABLE && pending(p).some((r) => !authorized(r) && isOwner(r.level));
   const every = (level) => placements.length > 0 && placements.every((p) => rows(p).length > 0 && rows(p).every((r) => r.level === level));
   if (placements.some(authorizedPending)) return 'ready_to_acquire';
   if (placements.some((p) => ['live', 'indexed'].includes(p.status))) return 'acquired';
-  if (placements.some((p) => ['placed', 'contacted', 'negotiating'].includes(p.status))) return 'acquiring';
+  if (placements.some((p) => leased(p) || ACQUIRING_STATUSES.includes(p.status))) return 'acquiring';
   if (placements.some((p) => p.status === PARKED || ownerPending(p))) return 'qualified';
   if (every('INVALID')) return 'investigating';
   if (every('DENY')) return 'rejected';

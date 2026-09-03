@@ -228,6 +228,27 @@ describe('outreach-lane paths', () => {
     expect(r2.errors).toEqual([{ domain: 'example.org', skipped: 'outreach conversation in flight on another path (contacted)' }]);
     expect(placements(db)).toHaveLength(1);
   });
+  test('an ambiguous send (send_error / sending) is never parked — it stays in the reconciliation lifecycle; only a DRAFTED message is approval-ready', async () => {
+    for (const outreach_status of ['send_error', 'sending']) {
+      const { db, d, p } = scenario({ make: outreachPath });
+      db._tables.seo_link_prospects.push({ id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: d.id, path_id: p.id, status: 'prospect', outreach_status, link_type: 'resource', updated_at: EARLIER });
+      const r = await run(db);
+      expect([outreach_status, r.parked, placements(db)[0].status]).toEqual([outreach_status, 0, 'prospect']);
+    }
+  });
+  test('a draft arriving on an owner-routed outreach placement re-selects the domain and parks it — and the run after converges', async () => {
+    const { db, d } = scenario({ make: outreachPath });
+    await run(db);
+    expect([placements(db)[0].status, domainState(db)]).toEqual(['prospect', 'qualified']);
+    expect(await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+    // the draft lease reports a draft: only the placement moved
+    Object.assign(placements(db)[0], { outreach_status: 'drafted', outreach_subject: 'Hi', updated_at: new Date(NOW.getTime() + 1000) });
+    expect(await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([{ id: d.id, domain: 'example.org', why: 'stale' }]);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r).toMatchObject({ selected: 1, parked: 1 });
+    expect(placements(db)[0].status).toBe('awaiting_owner');
+    expect(await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+  });
   test('an exact homepage outreach row left UNBOUND by the manual endpoint is adopted, never stuck behind a null path', async () => {
     const { db, d, p } = scenario({ make: outreachPath });
     // created under a signup lane with a stale classification and an unsent draft: the lane, URL, classification and draft follow the outreach path (the registry move patch)
@@ -407,6 +428,46 @@ describe('re-decision', () => {
     expect(rows(db).filter((x) => x.instance_kind === 'terms' && !x.ended_at).map((x) => [x.instance_key, x.level, x.satisfied_at])).toEqual([['terms:2', 'OWNER_LEGAL', undefined]]);
     expect(placements(db)[0].status).toBe('awaiting_owner');
   });
+  test('the investigator re-ranks to a still-LIVE path: the placement follows the best path (no supersession chain) and stops consuming a slot', async () => {
+    const { db, d, p } = scenario();
+    const other = pathRow(d, { submission_url: 'https://example.org/other' }); // live, not superseded, no longer best
+    db._tables.seo_link_acquisition_paths.push(other);
+    const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: other.id, status: 'prospect', link_type: 'directory', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(pl);
+    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: pl.id, path_id: other.id, dimension: 'execution', instance_kind: '-', instance_key: '-:1', level: 'OWNER_FREE', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: null });
+    const r = await run(db);
+    expect(r).toMatchObject({ skippedLeased: 0, ended: 1, errors: [] });
+    expect(placements(db).find((x) => x.id === pl.id)).toMatchObject({ path_id: p.id, target_url: 'https://example.org/add' });
+    expect(rows(db).filter((x) => x.prospect_id === pl.id && !x.ended_at).map((x) => [x.instance_key, x.path_id])).toEqual([['-:2', p.id]]);
+    expect(placements(db)).toHaveLength(WAVES_LOCATIONS.length);
+    expect(await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+  });
+  test('a satisfied ACQUISITION instance proves only the path it ran on: it rotates with the placement; a satisfied payment is carried', async () => {
+    const { db, d, p } = scenario({ make: paidPath });
+    const old = paidPath(d, { superseded_by: p.id });
+    db._tables.seo_link_acquisition_paths.push(old);
+    const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: old.id, status: 'prospect', link_type: 'directory', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(pl);
+    const base = { prospect_id: pl.id, path_id: old.id, instance_kind: '-', instance_key: '-:1', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null };
+    db._tables.seo_link_placement_authorities.push({ id: uid(), ...base, dimension: 'execution', level: 'OWNER_FREE', satisfied_at: EARLIER, satisfied_reason: 'placed' });
+    db._tables.seo_link_placement_authorities.push({ id: uid(), ...base, dimension: 'payment', level: 'OWNER_PAYMENT', satisfied_at: EARLIER, satisfied_reason: 'charged' });
+    db._tables.seo_link_domains[0].agent_state = 'acquiring';
+    expect((await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
+    const r = await run(db);
+    expect(r.ended).toBe(1);
+    const mine = rows(db).filter((x) => x.prospect_id === pl.id);
+    expect(mine.filter((x) => x.ended_at).map((x) => [x.dimension, x.end_outcome])).toEqual([['execution', 'superseded']]);
+    expect(mine.filter((x) => !x.ended_at).map((x) => [x.dimension, x.instance_key, x.path_id, Boolean(x.satisfied_at)]).sort()).toEqual([['execution', '-:2', p.id, false], ['payment', '-:1', old.id, true]]);
+  });
+  test('a LEASED prospect is never parked (the claim holds it) and the domain reads acquiring', async () => {
+    const { db, d, p } = scenario();
+    const pl = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: p.id, status: 'prospect', link_type: 'directory', claimed_at: NOW, updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(pl);
+    const r = await run(db);
+    expect(r.parked).toBe(WAVES_LOCATIONS.length - 1);
+    expect(placements(db).find((x) => x.id === pl.id)).toMatchObject({ status: 'prospect', authority: 'OWNER_FREE' });
+    expect(domainState(db)).toBe('acquiring');
+  });
   test('a placement still LEASED on its old path is left alone this run (the registry mover waits for claimed_at IS NULL)', async () => {
     const { db, d, p } = scenario();
     const old = pathRow(d, { superseded_by: p.id });
@@ -462,6 +523,9 @@ describe('aggregateState (§3.1)', () => {
     ['rejected only when every placement is DENY', [{ status: 'prospect', rows: [A('DENY')] }], 'rejected'],
     ['a DENY beside an INVALID is not a rejection', [{ status: 'prospect', rows: [A('DENY')] }, { status: 'prospect', rows: [A('INVALID')] }], 'qualified'],
     ['a deferred outreach payment does not hold an authorized send back', [{ status: 'prospect', outreach: true, rows: [A('AUTO_OUTREACH'), { ...A('OWNER_PAYMENT'), dimension: 'payment' }] }], 'ready_to_acquire'],
+    ['a leased prospect is acquiring, not pending', [{ status: 'prospect', claimed_at: NOW, rows: [A('AUTO_FREE')] }], 'acquiring'],
+    ['a handoff park is acquiring', [{ status: 'ready_for_payment', rows: [A('OWNER_PAYMENT')] }], 'acquiring'],
+    ['an UNLEASED authorized sibling still wins over a leased one', [{ status: 'prospect', claimed_at: NOW, rows: [A('AUTO_FREE')] }, { status: 'prospect', rows: [A('AUTO_FREE')] }], 'ready_to_acquire'],
     ['the same payment row on a non-outreach placement is pending', [{ status: 'prospect', rows: [A('AUTO_FREE'), { ...A('OWNER_PAYMENT'), dimension: 'payment' }] }], 'qualified'],
     ['no rows ⇒ qualified', [{ status: 'prospect', rows: [] }], 'qualified'],
   ])('%s', (_, placementsIn, expected) => { expect(bridge.aggregateState(placementsIn)).toBe(expected); });
