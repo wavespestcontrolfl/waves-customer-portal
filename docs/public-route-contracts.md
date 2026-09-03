@@ -448,7 +448,27 @@ authority on any money path).
 `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
 instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
 limit. Persists a quote/lead and may text the quote via a Twilio short-link;
-returns pricing only).
+returns pricing only. Request shape: either `services` keyed by the engine
+keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
+`serviceKey` / `service_key` from the `/api/public/services/menu` payload,
+which expands SERVER-SIDE via `quoteServicesForKey` — the posted body can
+only add the site-collected options `mergeKeyedRequestOptions` allows
+(today: the lawn grass `track`, forwarded into `lawn` AND
+`lawnPestControl`). Service-menu phase 2 (2026-09-03) widened the instant
+set by two keys: `oneTimeMosquito` (menu `mosquito_one_time`; priced by
+treatable lot area; station / dunk add-ons are staff-scoped and never
+site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
+(turf-priced on the forwarded track; a lot-only lookup routes it to manual
+review like the lawn programs). Both are additive — no existing key or
+response field changed. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
+`treeShrub`) park as `lot_size_requires_verification` when the lookup
+flagged the lot verify-first; the response is then a manual quote, never a
+price built from the synthetic sqft×4 fallback. `oneTimeMosquito` goes one
+step further: the engine line itself routes to review whenever the route
+passes `lotSizeMeasured:false` (lookup miss, or a direct-API lot posted
+without `lotSizeConfirmed`), the same caller contract commercial mosquito
+already enforces — a one-time mosquito price is only ever built from a
+lookup-measured or customer-confirmed lot).
 `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
 marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on
