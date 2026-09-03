@@ -42,11 +42,12 @@ describe('recordTrace', () => {
   beforeEach(() => {
     jest.resetModules();
     mockInsert.mockReset();
-    mockInsert.mockImplementation(() => Promise.resolve([1]));
+    mockInsert.mockImplementation(() => { const p = Promise.resolve([{ id: 7 }]); p.returning = () => Promise.resolve([{ id: 7 }]); return p; });
     mockDb.mockClear();
     mockRedact.mockClear();
     mockConfidence = 'high';
     process.env = { ...ORIGINAL_ENV, GATE_LLM_CALL_TRACES: 'true' };
+    delete process.env.GATE_LLM_CALL_LEDGER;
   });
   afterAll(() => { process.env = ORIGINAL_ENV; });
 
@@ -122,6 +123,24 @@ describe('recordTrace', () => {
     // the redactor saw the FULL body (the phone number past the cap was still redacted, not truncated in half)
     expect(mockRedact.mock.calls[0][0]).toBe(long);
     expect(row.system_redacted).toBeNull();
+  });
+
+  it('ledgerCall traces a direct-SDK call: request bodies from the caller, the response from the Message text blocks', async () => {
+    process.env.GATE_LLM_CALL_LEDGER = 'true';
+    const { ledgerCall } = load();
+    const message = { id: 'msg_9', model: 'm', content: [{ type: 'thinking', thinking: 'hmm' }, { type: 'text', text: 'answer for 941-555-1234' }], usage: { input_tokens: 1, output_tokens: 1 } };
+    await ledgerCall('anthropic', 'm', () => Promise.resolve(message), { laneId: 'traced_plain', trace: { system: 'sys', prompt: 'ask' } });
+    await flush();
+    expect(traceRows()).toEqual([expect.objectContaining({ lane_id: 'traced_plain', system_redacted: 'sys', prompt_redacted: 'ask', response_redacted: 'answer for [phone]' })]);
+    expect(typeof traceRows()[0].call_id).toBe('number');
+  });
+
+  it('ledgerCall without a trace option records the call only', async () => {
+    process.env.GATE_LLM_CALL_LEDGER = 'true';
+    const { ledgerCall } = load();
+    await ledgerCall('anthropic', 'm', () => Promise.resolve({ id: 'msg_1', content: [{ type: 'text', text: 'x' }] }), { laneId: 'traced_plain' });
+    await flush();
+    expect(traceRows()).toEqual([]);
   });
 
   it('uses the ambient lane and run id when no laneId is passed, and never throws on a DB error', async () => {

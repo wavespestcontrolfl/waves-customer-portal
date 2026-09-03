@@ -355,8 +355,11 @@ async function recordCall({
  * own value — an SDK Message or a parsed JSON body — which is returned
  * UNCHANGED; a throw is recorded as a failed call and rethrown unchanged, so
  * every caller's catch / fallback path sees exactly what it saw before.
+ * `trace: { system, prompt }` hands the request bodies to recordTrace (the
+ * response is read from the resolved Message's text blocks), so a direct-SDK
+ * lane traces exactly like an adapter lane once its policy opts in.
  */
-async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, laneId = null, policyLabel: label = null } = {}) {
+async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, laneId = null, policyLabel: label = null, trace = null } = {}) {
   // Monotonic clock: callers' own budget math uses Date.now (and tests pin it).
   const t0 = performance.now();
   let value;
@@ -375,7 +378,7 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
   // failed call (the model declined; the DEEP helper falls over to OpenAI),
   // billed for its tokens like any other answered request.
   const refused = provider === 'anthropic' && value?.stop_reason === 'refusal';
-  void recordCall({
+  const callId = recordCall({
     provider,
     requestedModel,
     servedModel: value?.model || value?.modelVersion || null,
@@ -388,7 +391,16 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     laneId,
     policyLabel: label,
   });
+  if (trace) recordTrace(callId, { system: trace.system ?? null, prompt: trace.prompt ?? null, response: messageText(value), laneId });
   return value;
+}
+
+// The text an SDK Message answered with (thinking blocks skipped) — the
+// response body a trace keeps. Null when the value carries no text blocks.
+function messageText(value) {
+  const blocks = Array.isArray(value?.content) ? value.content : [];
+  const text = blocks.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('');
+  return text || null;
 }
 
 // One row per session, keyed by the session id in provider_ref (unique
