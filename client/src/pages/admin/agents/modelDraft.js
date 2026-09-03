@@ -185,7 +185,9 @@ function incompatibility(accepts, target) {
   if (!target) return "unknown model";
   if (!accepts) return null;
   if (!accepts.providers.includes(target.provider)) return "different provider";
-  if (target.caps?.length && !target.caps.includes(accepts.cap)) return `no ${accepts.cap} support`;
+  // Empty caps = the server only knows the id (audio / embedding / image
+  // models the registry resolves to), not a model that serves every modality.
+  if (!target.caps?.includes(accepts.cap)) return `no ${accepts.cap} support`;
   if (target.requires === "deep" && !accepts.deep) return "deep-audit only";
   return null;
 }

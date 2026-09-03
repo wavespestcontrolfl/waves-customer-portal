@@ -122,6 +122,15 @@ describe("buildMigrationSet", () => {
     expect(set.eligible.map((e) => e.env)).toEqual(["PIN_REPORT"]);
   });
 
+  it("a target the server only knows by id (empty caps) is blocked, not treated as universal", () => {
+    const data = makeData();
+    const catalog = { ...CATALOG, m8: { label: "gpt-4o-transcribe", provider: "openai", caps: [], status: "current" } };
+    const set = buildMigrationSet({ data, catalog, fromId: "m1", toId: "m8" });
+    expect(set.eligible).toEqual([]);
+    expect(set.blocked.length).toBeGreaterThan(0);
+    expect(set.blocked.find((e) => e.env === "PIN_REPORT").reasons).toContain("no text support");
+  });
+
   it("a judged lane on its own env is a shadow candidate; no source model → empty groups", () => {
     const data = makeData();
     data.lanes[1].inbound = false;

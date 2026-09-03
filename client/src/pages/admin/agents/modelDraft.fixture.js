@@ -3,10 +3,10 @@
 const text = (providers, deep = false) => ({ providers, cap: "text", deep });
 
 export const CATALOG = {
-  m1: { label: "Claude Opus 4.8", provider: "anthropic", caps: [], status: "current" },
-  m2: { label: "Claude Opus 5", provider: "anthropic", caps: [], status: "current" },
-  m3: { label: "GPT-5.6 Terra", provider: "openai", caps: [], status: "current" },
-  m4: { label: "GPT-5.6 Luna", provider: "openai", caps: [], status: "current" },
+  m1: { label: "Claude Opus 4.8", provider: "anthropic", caps: ["text"], status: "current" },
+  m2: { label: "Claude Opus 5", provider: "anthropic", caps: ["text"], status: "current" },
+  m3: { label: "GPT-5.6 Terra", provider: "openai", caps: ["text"], status: "current" },
+  m4: { label: "GPT-5.6 Luna", provider: "openai", caps: ["text"], status: "current" },
 };
 
 export const AREAS = [

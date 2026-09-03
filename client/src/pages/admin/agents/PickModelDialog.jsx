@@ -18,14 +18,16 @@ const UNAVAILABLE_REASON = {
 
 // Which catalog models a leg / selector may take: same provider, the modality
 // it needs, and requires:'deep' (Fable) only where every call site goes
-// through llm/deep.js.
+// through llm/deep.js. Empty caps means the server only knows the id (an
+// audio / embedding / image model the registry resolves to today, not a
+// picker option) — never "fits anything".
 export function optionsFor(catalog, accepts, exclude) {
   return Object.entries(catalog)
     .filter(
       ([id, m]) =>
         id !== exclude &&
         accepts.providers.includes(m.provider) &&
-        (m.caps.length === 0 || m.caps.includes(accepts.cap)) &&
+        m.caps.includes(accepts.cap) &&
         (!m.requires || (m.requires === "deep" && accepts.deep)),
     )
     .map(([id, m]) => ({ id, label: m.label, provider: m.provider, status: m.status, requiresDeep: m.requires === "deep" }));
