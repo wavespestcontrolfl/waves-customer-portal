@@ -7,9 +7,11 @@
  * a re-mine. The per-call transcript is excluded from the hash (it renders
  * empty at hash time).
  *
- * The schema is embedded in the prompt as text (not constrained decoding —
- * same reasoning as the call-extraction pipeline) and enforced afterward
- * with ajv; the miner additionally verifies every quote is verbatim.
+ * The schema is embedded in the prompt as text AND handed to the provider
+ * as PROVIDER_OUTPUT_SCHEMA (constrained decoding via llm/call.js
+ * jsonSchema). ajv still enforces the full contract afterward — the
+ * provider subset cannot carry the length/count bounds — and the miner
+ * additionally verifies every quote is verbatim.
  */
 
 const crypto = require('crypto');
@@ -46,6 +48,25 @@ const MODEL_OUTPUT_SCHEMA = {
     },
   },
 };
+
+// The provider-facing copy of MODEL_OUTPUT_SCHEMA: every object closed with
+// every key required (nullable keys stay nullable), enums typed, and the
+// minLength/maxLength/minItems/maxItems bounds stripped — no provider's
+// structured-output mode accepts them, so ajv keeps enforcing those.
+const STRIPPED_BOUNDS = ['minLength', 'maxLength', 'minItems', 'maxItems'];
+function toProviderSchema(node) {
+  if (Array.isArray(node)) return node.map(toProviderSchema);
+  if (!node || typeof node !== 'object') return node;
+  const out = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (STRIPPED_BOUNDS.includes(key)) continue;
+    out[key] = toProviderSchema(value);
+  }
+  if (out.enum && !out.type) out.type = 'string';
+  if (out.type === 'object' && out.properties) out.required = Object.keys(out.properties);
+  return out;
+}
+const PROVIDER_OUTPUT_SCHEMA = toProviderSchema(MODEL_OUTPUT_SCHEMA);
 
 function buildCallResearchPrompt(transcript) {
   return `You are a market-research analyst for a pest control and lawn care company. Extract VERBATIM research quotes from the call transcript below.
@@ -98,6 +119,7 @@ module.exports = {
   buildCallResearchPrompt,
   validateResearchOutput,
   MODEL_OUTPUT_SCHEMA,
+  PROVIDER_OUTPUT_SCHEMA,
   PROMPT_VERSION,
   PROMPT_HASH,
 };
