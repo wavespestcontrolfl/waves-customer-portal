@@ -24,8 +24,8 @@
  */
 
 const logger = require('./logger');
-const { anthropicCreateWithSamplingRetry } = require('./llm/call');
 const MODELS = require('../config/models');
+const { anthropicText } = require('./llm/call');
 // Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
@@ -347,7 +347,7 @@ function anthropicClient() {
 }
 
 function parseJsonResponse(response) {
-  const text = response?.content?.[0]?.text;
+  const text = anthropicText(response);
   if (!text) return null;
   return JSON.parse(text.replace(/```json|```/g, '').trim());
 }
@@ -418,10 +418,9 @@ async function runDiagnosis(context = {}) {
       type: 'image',
       source: { type: 'base64', media_type: photo.mimeType || 'image/jpeg', data: photo.data },
     }));
-    const response = await anthropicCreateWithSamplingRetry(client, {
+    const response = await client.messages.create({
       model: MODELS.VISION,
       max_tokens: 1600,
-      temperature: 0.2,
       system: DIAGNOSIS_SYSTEM_PROMPT,
       messages: [{
         role: 'user',
@@ -583,7 +582,7 @@ async function runChallenge(perception = {}, context = {}) {
       overall_notes: perception.overall_notes || null,
       ...diagnosisContextObject(context),
     }, null, 2);
-    const response = await anthropicCreateWithSamplingRetry(client, {
+    const response = await client.messages.create({
       model: LAWN_CHALLENGE_MODEL,
       max_tokens: 1800,
       system: CHALLENGE_SYSTEM_PROMPT,
@@ -653,7 +652,7 @@ async function runNarrative(contract = {}, context = {}) {
   if (!client) return { ok: false, reason: 'no_api' };
 
   try {
-    const response = await anthropicCreateWithSamplingRetry(client, {
+    const response = await client.messages.create({
       model: MODELS.FLAGSHIP,
       max_tokens: 600,
       system: NARRATIVE_SYSTEM_PROMPT,

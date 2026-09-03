@@ -53,7 +53,11 @@ recipient is the business's own Zelle contact, never customer data. The
 client re-reads this payload on expand / tab re-focus / 45 s cadence and
 keeps every control disabled until a fresh read succeeds; no pre-filled
 transfer link exists for Zelle, so nothing on the page constructs a
-payment URL from the payload),
+payment URL from the payload. FAQ flag (2026-09-03): with
+GATE_PAY_PAGE_FAQ=true the GET payload carries `payFaq: true` — a display
+flag for the copy-only "Common questions" accordion under the Pay button;
+no other field changes, no customer or invoice data rides it, and gate off
+⇒ key absent, payload byte-identical — unset the gate to kill it),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves

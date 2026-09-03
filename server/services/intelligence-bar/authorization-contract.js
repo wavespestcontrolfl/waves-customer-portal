@@ -150,6 +150,16 @@ function tierFor(toolName) {
   return 'green';
 }
 
+// Operator-facing label for a tool in the activity list (what the bar
+// checked / did on this exchange). Write tools use the curated card label;
+// read tools fall back to the tool name as words. Never the model-facing
+// TOOLS[].description — those are prompts, not labels.
+function activityLabel(toolName) {
+  if (ACTION_LABELS[toolName]) return ACTION_LABELS[toolName];
+  const words = humanKey(toolName);
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 function humanKey(k) {
   // snake_case and camelCase both read as words on the card.
   return String(k).replace(/_/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
@@ -749,6 +759,7 @@ function previewFingerprint(preview) {
 module.exports = {
   CONTRACT_VERSION,
   tierFor,
+  activityLabel,
   buildContract,
   contractHash,
   previewFingerprint,

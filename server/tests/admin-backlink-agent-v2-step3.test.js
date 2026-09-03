@@ -59,11 +59,16 @@ jest.mock('../services/seo/link-path-investigator', () => ({
   LOCK_KEY: 'link-path-investigator',
 }));
 jest.mock('../utils/cron-lock', () => ({ isLocked: jest.fn(async () => false) }));
+jest.mock('../services/seo/link-authority-bridge', () => ({
+  runAuthorityBridge: jest.fn(async (db, opts) => ({ gated: true, selected: 8, decided: 0, ...(opts.dryRun ? { dryRun: true } : {}) })),
+  LOCK_KEY: 'link-authority-bridge',
+}));
 
 const router = require('../routes/admin-backlink-agent-v2');
 const { investigatePaths } = require('../services/seo/link-path-investigator');
 const { isEnabled } = require('../config/feature-gates');
 const { isLocked } = require('../utils/cron-lock');
+const { runAuthorityBridge } = require('../services/seo/link-authority-bridge');
 
 function handler(method, routePath) {
   const layer = router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
@@ -107,6 +112,14 @@ describe('POST /registry/jobs/investigate', () => {
     expect(r.body).toEqual({ job: 'investigate', started: false, skipped: 'probe_failed' });
     expect(investigatePaths).not.toHaveBeenCalled();
     isEnabled.mockReturnValue(false);
+  });
+  test('POST /registry/jobs/authority runs the bridge inline, bounded, dryRun passed through (step 4 PR 2a)', async () => {
+    const post = handler('post', '/registry/jobs/:job');
+    const r = await call(post, { params: { job: 'authority' }, body: { dryRun: true, limit: '20' } });
+    expect(r.body).toEqual({ job: 'authority', gated: true, selected: 8, decided: 0, dryRun: true });
+    expect(runAuthorityBridge).toHaveBeenCalledWith(expect.anything(), { dryRun: true, limit: 20 });
+    await call(post, { params: { job: 'authority' }, body: {} });
+    expect(runAuthorityBridge).toHaveBeenLastCalledWith(expect.anything(), { dryRun: false });
   });
   test('the 404 names investigate among the valid jobs', async () => {
     const r = await call(handler('post', '/registry/jobs/:job'), { params: { job: 'nuke' } });
@@ -191,11 +204,14 @@ describe('PATCH /registry/:id', () => {
     expect(mockState.touchWhereNotNull).toBe(0);
     const rj = await call(patch(), { params: { id: 'd1' }, body: { action: 'reject' } });
     expect(rj.body.agent_state).toBe('rejected');
+    expect(mockState.updates[1].patch.rejected_by).toBe('owner'); // the marker the authority bridge honours: only its OWN rejections lift
+    expect(mockState.updates[0].patch.rejected_by).toBeNull(); // watch clears it
     expect(mockState.updates[1].patch.watch_recheck_at).toBeNull();
     expect(mockState.updates[1].patch.probe_coverage_mask).toBeUndefined(); // reject leaves the mask alone
     expect(mockState.touchUpdates).toHaveLength(1); // reject releases no hint cursor
     const ro = await call(patch(), { params: { id: 'd1' }, body: { action: 'reopen' } });
     expect(ro.body.agent_state).toBe('investigating');
+    expect(mockState.updates[2].patch.rejected_by).toBeNull(); // reopen clears it
     // an explicit Reopen is a fresh mandate: the failure backoff is cleared (Codex PR r1 P2)
     expect(mockState.updates[2].patch.investigate_after).toBeNull();
     expect(mockState.updates[2].patch.investigate_failures).toBe(0);

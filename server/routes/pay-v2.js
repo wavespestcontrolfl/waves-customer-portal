@@ -533,6 +533,9 @@ router.get('/:token', async (req, res, next) => {
       // collectible, when it requires a saved method, or when account credit
       // covers it — see the manualPayOptions comment above.
       ...(manualPayOptions ? { manualPayOptions } : {}),
+      // FAQ accordion under the Pay button (GATE_PAY_PAGE_FAQ). Absent when
+      // the gate is off so the gate-off payload stays byte-identical.
+      ...(require('../config/feature-gates').gates.payPageFaq ? { payFaq: true } : {}),
     });
   } catch (err) {
     next(err);

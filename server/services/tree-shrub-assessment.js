@@ -17,8 +17,8 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { anthropicCreateWithSamplingRetry } = require('./llm/call');
 const MODELS = require('../config/models');
+const { anthropicText } = require('./llm/call');
 
 // Order-independent content hash of a set of photo data URLs (each hashed, then
 // hashed together) so the review signature can be bound to the EXACT photos scored —
@@ -147,10 +147,9 @@ async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropicCreateWithSamplingRetry(anthropic, {
+    const response = await anthropic.messages.create({
       model: MODELS.VISION,
       max_tokens: 500,
-      temperature: 0.2,
       messages: [{
         role: 'user',
         content: [
@@ -159,7 +158,7 @@ async function callClaudeVision(base64Image, mimeType) {
         ],
       }],
     });
-    const text = response.content?.[0]?.text;
+    const text = anthropicText(response);
     if (!text) { logger.warn('[tree-shrub-assessment] Claude returned empty content'); return null; }
     return JSON.parse(text.replace(/```json|```/g, '').trim());
   } catch (err) {

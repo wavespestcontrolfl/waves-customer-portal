@@ -61,12 +61,14 @@
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
+ *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true (season timeline under the lawn price card — four SWFL turf seasons from the current month, one-line focus each, cadence + projected months per frequency from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
+ *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
  *     AND GATE_AUTO_APPLY_ACCOUNT_CREDIT=true are BOTH also set — the prod
@@ -298,6 +300,16 @@ const gates = {
   // environment. Gate off: the pay page and all pay flows are byte-
   // identical to today. Kill switch: unset or any non-'true' value.
   payIncludeBalance: process.env.GATE_PAY_INCLUDE_BALANCE === 'true',
+
+  // Pay-page FAQ (2026-09-03): a short accordion under the Pay button that
+  // restates facts the page already carries — the credit-card surcharge and
+  // how to avoid it, how long a bank (ACH) payment takes, Zelle, and whether
+  // the card is saved. Display-only; no money moves and no new data rides
+  // the public /pay payload beyond a boolean. Customer-facing copy, so
+  // fail-closed ==='true' in EVERY environment. Gate off: the GET payload
+  // and the page are byte-identical to today. Kill switch: unset or any
+  // non-'true' value.
+  payPageFaq: process.env.GATE_PAY_PAGE_FAQ === 'true',
 
   // Visit groups (docs/design/visit-group-scope.md rev 5): parent
   // service_visits rows grouping same-stop scheduled_services. CREATION
@@ -1011,6 +1023,16 @@ const gates = {
   // re-checks this gate before putting anything on the wire. Off → dead
   // ends keep today's operator-bell-only behavior.
   estimateClarifyAsks: process.env.GATE_ESTIMATE_CLARIFY_ASKS === 'true',
+
+  // Clarify unit write-back — when the customer texts back the apartment/
+  // unit the completed-call clarify ask requested, write it into the record:
+  // lead address line 2; the customer's line 2 when their own address IS
+  // that building; otherwise the building + unit as a property row on the
+  // account (owner ruling 2026-09-03). Off → the reply is stamped on the
+  // Triage Inbox card only (the office enters it by hand). Reads
+  // GATE_ESTIMATE_CLARIFY_ASKS' lane; meaningless alone. The call's
+  // estimate is NOT re-drafted by this lane (PR C2 of the #3775 split).
+  clarifyUnitWriteback: process.env.GATE_CLARIFY_UNIT_WRITEBACK === 'true',
 
   // Ads Budget Live Push — allow the 2-hourly capacity-based budget cron
   // (BudgetManager.adjustBudgets) to push its budget changes to the Google
@@ -2147,6 +2169,15 @@ const gates = {
   // { available: false }, /queue is 404, and the tab is not rendered.
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   adminOpsQueue: gateEnvValue('GATE_ADMIN_OPS_QUEUE'),
+  // Intelligence Bar tool activity (2026-09-02): POST /query answers carry a
+  // `toolActivity` list — one operator-facing line per tool call the exchange
+  // ran (label, done / error / proposed, duration, round) — and the ⌘K
+  // palette renders it above the answer so a confirmation card is read next
+  // to what the bar actually checked. Labels only: never tool inputs, never
+  // results, never the model's reasoning. OFF unless set, dev AND prod — off
+  // = the response is byte-identical to today. Kill switch: unset. Read at
+  // CALL time so a flip needs no redeploy.
+  ibToolActivity: gateEnvValue('GATE_IB_TOOL_ACTIVITY'),
   // Audio-synced call transcript (admin call log). When on, calls whose
   // call_log.transcript_structured carries diarized segments render them as
   // a clickable list that follows recording playback; click a line to seek.
