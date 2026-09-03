@@ -125,12 +125,22 @@ function normalizeSku(text) {
   return String(text || '').trim().replace(/^(?:sku|item|product\s*code|part\s*(?:no|number))\s*[:#.]?\s*/i, '').replace(/[\s\u00a0]+/g, '').toUpperCase();
 }
 
+// The ONE currency amount in a total's text: a $-prefixed figure, exactly one
+// of them. Zero or several → null (fail closed): "2 items · Total $105.93"
+// must never cap-check as 200 cents, and a text carrying two amounts (a
+// subtotal beside a total) is not a total the bot can trust (pre-push P0).
 function parseMoney(text) {
-  const m = String(text || '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
-  if (!m) return null;
-  const n = Number(m[1]);
+  const amounts = [...String(text || '').replace(/,/g, '').matchAll(/\$\s*(\d+(?:\.\d{1,2})?)/g)].map((m) => Number(m[1]));
+  if (amounts.length !== 1) return null;
+  const n = amounts[0];
   return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null;
 }
+
+// Digit runs (3+) in a checkout label: "Account # 12345" → ['12345'].
+const digitRuns = (s) => String(s || '').match(/\d{3,}/g) || [];
+// A configured ship-to token must appear as a whole token, not inside a
+// longer run ("34205" does not match "342051").
+const hasToken = (text, token) => new RegExp(`(^|[^a-z0-9])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9])`).test(text);
 
 const defaultLaunch = ({ hostResolverRules } = {}) => chromium.launch({
   headless: true,
@@ -363,13 +373,16 @@ async function place(
     const accountText = accountCount === 1 ? normalizeText(await accountEls.first().textContent().catch(() => '')) : '';
     const wantDigits = String(credentials.accountNumber).replace(/\D/g, '');
     if (!accountText) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('account_unverified', 'could not read the billing account shown at checkout', evidence); }
-    if (!wantDigits || !accountText.replace(/\D/g, '').includes(wantDigits)) { await shot(page, 'checkout', evidence, upload); evidence.checkoutAccount = accountText.slice(0, 60); throw new RefusedError('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`, evidence); }
+    // EXACT match on a whole digit run: 12345 is not 912345, and a label
+    // carrying two account-like numbers is ambiguous, not a match.
+    const accountRuns = digitRuns(accountText);
+    if (!wantDigits || accountRuns.length !== 1 || accountRuns[0] !== wantDigits) { await shot(page, 'checkout', evidence, upload); evidence.checkoutAccount = accountText.slice(0, 60); throw new RefusedError('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`, evidence); }
     const shipToEls = page.locator(SELECTORS.checkoutShipTo);
     const shipToCount = await shipToEls.count().catch(() => 0);
     if (shipToCount > 1) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('ship_to_ambiguous', `${shipToCount} ship-to readings at checkout — cannot tell which the order ships to`, evidence); }
     const shipToText = shipToCount === 1 ? normalizeText(await shipToEls.first().textContent().catch(() => '')) : '';
     if (!shipToText) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('ship_to_unverified', 'could not read the ship-to address shown at checkout', evidence); }
-    const missing = shipToTokens.filter((t) => !shipToText.includes(t));
+    const missing = shipToTokens.filter((t) => !hasToken(shipToText, t));
     if (missing.length) { await shot(page, 'checkout', evidence, upload); evidence.checkoutShipTo = shipToText.slice(0, 120); throw new RefusedError('ship_to_mismatch', `checkout ships to "${shipToText.slice(0, 80)}" — approved ship-to token(s) not found: ${missing.join(', ')}`, evidence); }
     evidence.accountVerified = true;
     evidence.shipToVerified = shipToText.slice(0, 120);

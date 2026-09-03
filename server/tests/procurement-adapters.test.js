@@ -138,6 +138,10 @@ describe('siteone internals', () => {
     expect(parseMoney('$99')).toBe(9900);
     expect(parseMoney('')).toBeNull();
     expect(parseMoney('$0.00')).toBeNull();
+    // exactly ONE $ amount, or nothing (pre-push P0): a count before the total, or two amounts, never cap-check as the wrong figure
+    expect(parseMoney('2 items · Total $105.93')).toBe(10593);
+    expect(parseMoney('2 items · Total 105.93')).toBeNull();
+    expect(parseMoney('Subtotal $99.00 Total $105.93')).toBeNull();
   });
 
   test('missing credentials / account number / sku refuse before any browser work', async () => {
@@ -237,6 +241,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
 
   test.each([
     ['account_mismatch', { accountText: 'Account # 99999' }],
+    ['account_mismatch', { accountText: 'Account # 912345' }], // superstring is not a match
+    ['account_mismatch', { accountText: 'Account # 12345 (was 54321)' }], // two runs = ambiguous
+    ['ship_to_mismatch', { shipToText: 'Ship to: 123 Example Ave, Bradenton FL 342051' }], // zip token must be whole
     ['account_unverified', { accountText: '' }],
     ['ship_to_mismatch', { shipToText: 'Ship to: 9 Other Rd, Venice, FL 34285' }],
     ['ship_to_unverified', { shipToText: null }],
