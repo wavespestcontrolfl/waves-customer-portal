@@ -763,7 +763,11 @@ async function loadEstimateEvidence(conn, items, flag) {
 // after the card (an older message opened later proves nothing about
 // this call's capture), and never bounced/complained.
 async function loadEmailEvidence(conn, items, flag, { lock = false } = {}) {
-  const emailItems = items.filter((i) => i.reason_code === 'email_unverified');
+  // Bound to the CUSTOMER the call is linked to: an address can be
+  // duplicated across customers (or used by a test send), and another
+  // recipient's open answers nothing about this caller's read-back. A card
+  // on an unlinked call has no customer to bind to and gets no evidence.
+  const emailItems = items.filter((i) => i.reason_code === 'email_unverified' && i.call_customer_id);
   const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i)]));
   const allEmails = [...new Set([...emailsByItem.values()].flat())];
   if (!allEmails.length) return;
@@ -772,6 +776,8 @@ async function loadEmailEvidence(conn, items, flag, { lock = false } = {}) {
   // the next sweep sees the bounce, instead of the card closing and the
   // first-touch ledger releasing the hold to a bounced address.
   const q = conn('email_messages')
+    .where('recipient_type', 'customer')
+    .whereIn('recipient_id', [...new Set(emailItems.map((i) => String(i.call_customer_id)))])
     .whereRaw('LOWER(recipient_email_snapshot) IN (' + allEmails.map(() => '?').join(', ') + ')', allEmails)
     .whereNotNull('sent_at')
     .whereNull('bounced_at')
@@ -781,12 +787,13 @@ async function loadEmailEvidence(conn, items, flag, { lock = false } = {}) {
       this.whereNotNull('opened_at').orWhereNotNull('clicked_at');
     })
     .orderBy('id', 'asc')
-    .select('recipient_email_snapshot', 'sent_at', 'opened_at', 'clicked_at');
+    .select('recipient_id', 'recipient_email_snapshot', 'sent_at', 'opened_at', 'clicked_at');
   if (lock) q.forUpdate();
   const rows = await q;
   for (const item of emailItems) {
     const mine = new Set(emailsByItem.get(item.id));
-    const hit = rows.some((r) => mine.has(String(r.recipient_email_snapshot || '').toLowerCase())
+    const hit = rows.some((r) => String(r.recipient_id) === String(item.call_customer_id)
+      && mine.has(String(r.recipient_email_snapshot || '').toLowerCase())
       && strictlyAfter(r.sent_at, item.created_at)
       && (strictlyAfter(r.opened_at, item.created_at) || strictlyAfter(r.clicked_at, item.created_at)));
     if (hit) flag(item.id, 'email_engaged');

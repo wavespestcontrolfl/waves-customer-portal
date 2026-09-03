@@ -15,7 +15,7 @@ const PHONE = '+15555550188';
 maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   let db;
   let sweep;
-  const ids = { customers: [], calls: [], visits: [], estimates: [], properties: [] };
+  const ids = { customers: [], calls: [], visits: [], estimates: [], properties: [], emails: [] };
   const OLD_ENV = { base: process.env.GATE_TRIAGE_AUTO_RESOLVE, ev: process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE };
 
   beforeAll(async () => {
@@ -46,6 +46,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   afterAll(async () => {
     if (ids.visits.length) await db('scheduled_services').whereIn('id', ids.visits).del();
     if (ids.estimates.length) await db('estimates').whereIn('id', ids.estimates).del();
+    if (ids.emails.length) await db('email_messages').whereIn('id', ids.emails).del();
     if (ids.calls.length) await db('triage_items').whereIn('call_log_id', ids.calls).del();
     if (ids.calls.length) await db('call_log').whereIn('id', ids.calls).del();
     if (ids.properties.length) await db('customer_properties').whereIn('id', ids.properties).del();
@@ -108,6 +109,45 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     ids.estimates.push(est.id);
     return { callId: call.id, cardId: card.id };
   }
+
+  // email_unverified: a card carrying its filing-time release target + an
+  // engaged message to that address, sent to `recipientId` after the card.
+  async function seedEmailCall(sid, { recipientOf }) {
+    const { customerId } = await seedCustomer(sid.slice(-2));
+    const target = `release-${sid.slice(-2).toLowerCase()}@example.invalid`;
+    const callAt = new Date(Date.now() - 65 * 60000);
+    const [call] = await db('call_log').insert({
+      twilio_call_sid: sid, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
+      status: 'completed', duration_seconds: 120, processing_status: 'processed',
+      customer_id: customerId, review_status: 'open', created_at: callAt,
+    }).returning('id');
+    ids.calls.push(call.id);
+    const cardAt = new Date(Date.now() - 60 * 60000);
+    const [card] = await db('triage_items').insert({
+      call_log_id: call.id, category: 'contact_ambiguous', severity: 'blocking', reason_code: 'email_unverified',
+      status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
+      payload: JSON.stringify({ flag: 'email_unverified', email_release_target: target }),
+    }).returning('id');
+    const [msg] = await db('email_messages').insert({
+      recipient_type: 'customer', recipient_id: String(recipientOf(customerId)), recipient_email_snapshot: target,
+      status: 'sent', sent_at: new Date(Date.now() - 10 * 60000), opened_at: new Date(Date.now() - 5 * 60000),
+    }).returning('id');
+    ids.emails.push(msg.id);
+    return { cardId: card.id };
+  }
+
+  test('email_unverified resolves on an engaged message sent to THIS customer at the release target — never on another customer\'s message to the same address', async () => {
+    const mine = await seedEmailCall(SID.replace(/e2$/, 'm1'), { recipientOf: (id) => id });
+    const { customerId: stranger } = await seedCustomer('m9');
+    const other = await seedEmailCall(SID.replace(/e2$/, 'm2'), { recipientOf: () => stranger });
+    const result = await sweep.runTriageAutoResolve({ now: new Date() });
+    expect(result.skipped).toBe(false);
+    const closed = await db('triage_items').where({ id: mine.cardId }).first();
+    expect(closed.status).toBe('resolved');
+    expect(closed.resolution_note).toBe(sweep.RULE_NOTES.email_engaged);
+    const open = await db('triage_items').where({ id: other.cardId }).first();
+    expect(open.status).toBe('open');
+  });
 
   test('quote_promised resolves on a call-stamped estimate DELIVERED after the card — not one sent before it, nor a suppressed send', async () => {
     const fresh = await seedQuoteCall(SID.replace(/e2$/, 'q1'), { cardAgeMin: 60, estimateAgeMin: 10 });
