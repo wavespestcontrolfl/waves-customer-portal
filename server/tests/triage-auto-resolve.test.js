@@ -363,6 +363,7 @@ const {
   requestedServiceTokens,
   serviceTypeMatches,
   estimateCoversAsk,
+  deliveredEstimateScope,
   requestedWindow,
   requestedAddressIsOnFile,
   bookingAtRequestedAddress,
@@ -555,8 +556,18 @@ describe('evidence helpers', () => {
     const card = (scope) => item({ ...base, reason_code: 'quote_promised', payload: { quote_scope: { requested_service_categories: ['pest_general', 'lawn_care'], requested_specific_service: 'Flea Treatment', requested_service_intent: 'preventative_one_time', requested_address: none, ...scope } } });
     // The engine's typed lines: a recurring pest program, a one-time flea
     // treatment and a one-time lawn treatment.
-    const est = (over) => ({ id: 'e1', service_interest: null, address: '77 Oak Street, Bradenton, FL 34205', estimate_data: { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }], grandTotal: 40 }, oneTime: { items: [{ service: 'Flea Treatment', price: 150 }, { service: 'One-Time Lawn Treatment', price: 90 }] } } }, ...over });
+    // Every fixture is read as its send delivered it: the stamp the send
+    // route writes beside the pricing bundle (codex r25 P1).
+    const delivered = (row) => ({ ...row, estimate_data: { ...(row.estimate_data || {}), sendSnapshot: { scope: deliveredEstimateScope(row) } } });
+    const est = (over) => delivered({ id: 'e1', service_interest: null, address: '77 Oak Street, Bradenton, FL 34205', estimate_data: { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }], grandTotal: 40 }, oneTime: { items: [{ service: 'Flea Treatment', price: 150 }, { service: 'One-Time Lawn Treatment', price: 90 }] } } }, ...over });
     expect(estimateCoversAsk(card({}), est({}))).toBe(true);
+    // The live row is not the quote: a proposal re-authored in place after
+    // the send (deliveryState kept, no new handoff) can widen its lines
+    // past what went out — coverage reads the delivered stamp, and a row
+    // (or sibling) with no stamp proves nothing (codex r25 P1).
+    const fleaOnlyStamp = deliveredEstimateScope({ address: '77 Oak Street, Bradenton, FL 34205', estimate_data: { result: { oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } } } });
+    expect(estimateCoversAsk(card({}), { ...est({}), estimate_data: { ...est({}).estimate_data, sendSnapshot: { scope: fleaOnlyStamp } } })).toBe(false);
+    expect(estimateCoversAsk(card({}), { ...est({}), estimate_data: { ...est({}).estimate_data, sendSnapshot: {} } })).toBe(false);
     // A generic pest program is not the flea treatment, and the engine's
     // input flag beside typed lines selects a service without pricing it.
     const generic = { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }] }, oneTime: { items: [{ service: 'One-Time Lawn Treatment', price: 90 }] } } };
@@ -575,8 +586,9 @@ describe('evidence helpers', () => {
     // it — at the asked address (codex r18 P1) and at the asked cadence.
     const partial = est({ estimate_data: { result: { oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } } } });
     expect(estimateCoversAsk(card({}), partial)).toBe(false);
-    const lawnSibling = (over) => ({ id: 'e2', service_interest: 'Lawn Care', estimate_data: {}, onetime_total: 90, address: '77 Oak Street, Bradenton, FL 34205', ...over });
+    const lawnSibling = (over) => delivered({ id: 'e2', service_interest: 'Lawn Care', estimate_data: {}, onetime_total: 90, address: '77 Oak Street, Bradenton, FL 34205', ...over });
     expect(estimateCoversAsk(card({}), partial, [lawnSibling({})])).toBe(true);
+    expect(estimateCoversAsk(card({}), partial, [{ ...lawnSibling({}), estimate_data: {} }])).toBe(false);
     expect(estimateCoversAsk(card({}), partial, [lawnSibling({ address: '5 Pine Ave, Sarasota, FL 34236' })])).toBe(false);
     expect(estimateCoversAsk(card({}), partial, [lawnSibling({ address: null })])).toBe(false);
     expect(estimateCoversAsk(card({}), partial, [lawnSibling({ onetime_total: null })])).toBe(false);

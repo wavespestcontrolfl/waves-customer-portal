@@ -35,6 +35,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('../services/email-fallback-gate');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
+const { deliveredEstimateScope } = require('../services/triage-auto-resolve');
 const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
@@ -546,6 +547,22 @@ function assertEstimateManagerApprovalResolved(estimate) {
   }
 }
 
+// The property row an estimate prices, as the property_* columns the
+// sweep's batch fetch also reads; none when the estimate carries no
+// property or the lookup fails (the scope then stands on its address
+// column alone — a street-only column fails the locality rule downstream,
+// which is the fail-closed side).
+async function pricedPropertyAddress(propertyId) {
+  if (!propertyId) return {};
+  try {
+    const p = await db('customer_properties').where({ id: propertyId }).first('address_line1', 'address_line2', 'city', 'zip');
+    return p ? { property_address_line1: p.address_line1, property_address_line2: p.address_line2, property_city: p.city, property_zip: p.zip } : {};
+  } catch (err) {
+    logger.warn(`[admin-estimates] send scope property lookup failed for property ${propertyId}: ${err.message}`);
+    return {};
+  }
+}
+
 async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
   const estimateData = parseEstimateData(estimate.estimate_data) || {};
   const estimateDataForBundle = { ...estimateData };
@@ -555,6 +572,14 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
     ...(estimateData.sendSnapshot || {}),
     renderedAt: snapshotAt,
     tierDiscounts: currentTierDiscounts(),
+    // What THIS send delivers — the priced lines and the address — frozen
+    // beside the pricing bundle. The triage sweep binds a quote_promised
+    // card to the stamp, never to the row's live content: a proposal
+    // re-authored in place keeps its deliveryState, so live lines can grow
+    // past what the customer received without a new handoff (codex r25
+    // P1). Independent of the bundle build below — it is content, not
+    // pricing.
+    scope: deliveredEstimateScope({ ...estimate, estimate_data: estimateDataForBundle, ...(await pricedPropertyAddress(estimate.property_id)) }),
   };
 
   try {

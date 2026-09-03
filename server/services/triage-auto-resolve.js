@@ -1166,7 +1166,6 @@ const entryNames = (entry) => [entry.service, entry.serviceKey, entry.service_ke
 // the shared line reader's text patterns assign them; the same entry
 // persisted under both result roots is one line, not two.
 function lineCollector() {
-  const { serviceKeysFromText, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
   const lines = [];
   const seen = new Set();
   const add = (rawNames, cadence, priced) => {
@@ -1175,10 +1174,20 @@ function lineCollector() {
     const identity = [...names, cadence.recurring].join('|');
     if (seen.has(identity)) return;
     seen.add(identity);
-    const families = serviceKeysFromText(...names).flatMap((k) => (k && k !== 'unknown' ? [k, SERVICE_LINE_LABELS[k]] : []));
-    lines.push({ words: [...names, ...families].join(' '), ...cadence });
+    lines.push({ names, ...cadence });
   };
   return { lines, add };
+}
+
+// A delivered line's matchable words: its names plus the service families
+// the shared reader infers from them — derived at SWEEP time from the
+// frozen names, so the matcher's vocabulary stays current while the
+// content it judges stays what was delivered.
+function lineWords(line) {
+  const { serviceKeysFromText, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
+  const names = Array.isArray(line.names) ? line.names.filter((w) => typeof w === 'string' && w.trim()) : [];
+  const families = serviceKeysFromText(...names).flatMap((k) => (k && k !== 'unknown' ? [k, SERVICE_LINE_LABELS[k]] : []));
+  return [...names, ...families].join(' ');
 }
 
 // An authored proposal's lines from the CANONICAL normalizer (the shape
@@ -1233,7 +1242,7 @@ function legacyLine(row, data) {
     }
   }
   return {
-    words: words.filter((w) => typeof w === 'string').join(' '),
+    names: words.filter((w) => typeof w === 'string' && w.trim()),
     recurring: Number(row.monthly_total) > 0 || Number(row.annual_total) > 0,
     oneTime: Number(row.onetime_total) > 0,
   };
@@ -1247,18 +1256,44 @@ function estimateLines(row) {
   return lines.length ? lines : [legacyLine(row, data)];
 }
 
-// An estimate as the address-bearing record the booking rules understand:
-// its address column through the canonical estimates.address parser (the
-// one property linkage reads — "77 Oak St, Unit 4, Bradenton, FL 34205" is a
-// street, a unit and a locality, never a city called "Unit 4", codex r23
-// P2) or, failing that, the property row it prices. A street with no
-// locality cannot prove WHICH street, exactly as a street-only visit stamp
-// cannot.
-function estimateAsVisit(row) {
-  const { parseEstimateAddress } = require('./estimate-property-linkage');
-  const parsed = parseEstimateAddress(row.address);
+// The scope a send DELIVERS — the lines the estimate prices (names + the
+// cadence they carry) and where (its address column, and the property row
+// it prices when it has one) — read from the row as it is at send time.
+// admin-estimates stamps this beside the pricing bundle on every send
+// (sendSnapshot.scope), and the sweep below judges a quote_promised card
+// against the stamp, never against the row's live content: a commercial
+// proposal re-authored in place keeps its deliveryState (no new handoff),
+// so its live lines can grow to cover an ask the customer never received
+// (codex r25 P1). Same contract as the handoff witness itself —
+// lastDeliveredAt and the snapshot are written by the same send.
+function deliveredEstimateScope(row) {
   const property = row.property_address_line1
-    ? { service_address_line1: row.property_address_line1, service_address_line2: row.property_address_line2 || null, service_address_city: row.property_city || null, service_address_zip: row.property_zip || null }
+    ? { address_line1: row.property_address_line1, address_line2: row.property_address_line2 || null, city: row.property_city || null, zip: row.property_zip || null }
+    : null;
+  return { lines: estimateLines(row), address: typeof row.address === 'string' && row.address.trim() ? row.address : null, property };
+}
+
+// The scope a row's LAST send stamped, or null: a row with no stamp (sent
+// before the stamp existed, or a sibling never in a group send) has no
+// delivered content to judge — fail closed, the card parks for the owner.
+function deliveredScopeOf(row) {
+  const data = require('./estimate-service-lines').parseEstimateData(row.estimate_data) || {};
+  const scope = data.sendSnapshot?.scope;
+  return scope && typeof scope === 'object' && Array.isArray(scope.lines) ? scope : null;
+}
+
+// A delivered scope as the address-bearing record the booking rules
+// understand: its address through the canonical estimates.address parser
+// (the one property linkage reads — "77 Oak St, Unit 4, Bradenton, FL
+// 34205" is a street, a unit and a locality, never a city called "Unit 4",
+// codex r23 P2) or, failing that, the property row it priced. A street with
+// no locality cannot prove WHICH street, exactly as a street-only visit
+// stamp cannot.
+function estimateAsVisit(scope) {
+  const { parseEstimateAddress } = require('./estimate-property-linkage');
+  const parsed = parseEstimateAddress(scope.address);
+  const property = scope.property?.address_line1
+    ? { service_address_line1: scope.property.address_line1, service_address_line2: scope.property.address_line2 || null, service_address_city: scope.property.city || null, service_address_zip: scope.property.zip || null }
     : null;
   // A street-only column (a legacy / manual row: no city, no ZIP) cannot
   // prove WHICH street; the property row the estimate prices can (codex
@@ -1283,7 +1318,9 @@ function estimateAsVisit(row) {
 // requirements need distinct lines, exactly as bookings do — one flea line
 // does not answer a flea treatment AND a separately requested general-pest
 // quote (codex r19 P1). A card with no quote_scope (filed before the
-// snapshot existed) has no ask to cover, so nothing qualifies.
+// snapshot existed) has no ask to cover, so nothing qualifies. Every
+// estimate is read as its last send DELIVERED it (deliveredScopeOf) — the
+// live row is not the quote the customer holds (codex r25 P1).
 function estimateCoversAsk(item, row, siblings = []) {
   const requirements = requestedServiceTokens(item);
   if (!requirements.length) return false;
@@ -1297,15 +1334,16 @@ function estimateCoversAsk(item, row, siblings = []) {
   // two-property ask is judged property by property — every named
   // property served, by the estimate or a delivered sibling at it (codex
   // r24 P2).
-  const cited = estimateAsVisit(row);
+  const citedScope = deliveredScopeOf(row);
+  const cited = citedScope ? estimateAsVisit(citedScope) : null;
   if (!cited || !bookingAtRequestedAddress(item, cited, new Map())) return false;
-  const at = (e, readings) => {
-    const visit = estimateAsVisit(e);
+  const at = (scope, readings) => {
+    const visit = estimateAsVisit(scope);
     return Boolean(visit) && bookingAtReadings(item, visit, new Map(), readings);
   };
-  const group = [row, ...siblings];
+  const group = [citedScope, ...siblings.map(deliveredScopeOf).filter(Boolean)];
   return asked.every((readings) => coveredByDistinct(requirements,
-    group.filter((e) => at(e, readings)).flatMap(estimateLines).filter((l) => intentAnswered(rule, l)), (l) => l.words));
+    group.filter((scope) => at(scope, readings)).flatMap((scope) => scope.lines.map((l) => ({ ...l, words: lineWords(l) }))).filter((l) => intentAnswered(rule, l)), (l) => l.words));
 }
 
 // Bookings and completed visits for the not_confirmed / address arms.
@@ -1552,6 +1590,7 @@ module.exports = {
   requestedServiceTokens,
   serviceTypeMatches,
   estimateCoversAsk,
+  deliveredEstimateScope,
   requestedWindow,
   requestedAddressIsOnFile,
   bookingAtRequestedAddress,

@@ -433,6 +433,17 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     state.row = { ...state.row, estimate_data: JSON.stringify(data), ...extra };
   }
 
+  test('the send snapshot freezes the delivered scope — priced lines at their cadence and the address (codex r25 P1 on #3811)', async () => {
+    // The triage sweep binds a quote_promised card to THIS stamp, never to
+    // the live row a later in-place re-author may have widened.
+    const snapshot = await router.buildEstimateSendSnapshot(estimateRow({ service_interest: 'Pest Control', address: '77 Oak St, Bradenton, FL 34205' }));
+    expect(snapshot.sendSnapshot.scope).toEqual({
+      lines: [{ names: expect.arrayContaining(['Pest Control']), recurring: true, oneTime: false }],
+      address: '77 Oak St, Bradenton, FL 34205',
+      property: null,
+    });
+  });
+
   test('a PENDING invalidation recorded during delivery is COMPLETED by the claim release', async () => {
     const { state, estimateUpdates, leadUpdates } = statefulMock();
     // Mid-delivery, the reconciler defers behind the live claim by writing

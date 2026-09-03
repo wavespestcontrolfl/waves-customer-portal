@@ -119,15 +119,21 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
       payload: JSON.stringify({ flag: 'quote_promised', quote_scope: { requested_service_categories: estimateScope.endsWith('_sibling') ? ['pest_control', 'lawn_care'] : ['pest_control'], requested_specific_service: null, requested_service_intent: 'preventative_one_time', requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 } } }),
     }).returning('id');
     const groupId = estimateScope.endsWith('_sibling') ? require('crypto').randomUUID() : null;
+    // Each sent row carries the scope stamp its send wrote (codex r25 P1).
+    const { deliveredEstimateScope } = require('../services/triage-auto-resolve');
+    const priced = {
+      service_interest: estimateScope === 'other_service' ? 'Lawn Care' : 'Pest Control',
+      onetime_total: 150,
+      address: estimateScope === 'other_address' ? '99 Elsewhere Rd, 34205' : '1234 Fixture Ave, 34205',
+    };
     const [est] = await db('estimates').insert({
       customer_id: ownerId, status: firstSendAccept ? 'accepted' : 'sent',
-      service_interest: estimateScope === 'other_service' ? 'Lawn Care' : 'Pest Control',
-      onetime_total: 150, estimate_group_id: groupId,
-      address: estimateScope === 'other_address' ? '99 Elsewhere Rd, 34205' : '1234 Fixture Ave, 34205',
+      ...priced, estimate_group_id: groupId,
       sent_at: firstSendAccept ? null : new Date(Date.now() - estimateAgeMin * 60000),
       accepted_at: firstSendAccept ? new Date(Date.now() - estimateAgeMin * 60000) : null,
       estimate_data: JSON.stringify({
         estimatorEngine: { callLogId: String(call.id) },
+        sendSnapshot: { scope: deliveredEstimateScope({ ...priced, estimate_data: {} }) },
         ...(deliveredStamp ? { deliveryState: { lastDeliveredAt: deliveredStamp } } : deliveredAgeMin === null ? {} : { deliveryState: { lastDeliveredAt: new Date(Date.now() - deliveredAgeMin * 60000).toISOString() } }),
       }),
     }).returning('id');
@@ -139,7 +145,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
         onetime_total: 90, estimate_group_id: groupId,
         archived_at: estimateScope === 'archived_sibling' ? new Date() : null,
         created_at: late ? new Date() : new Date(Date.now() - (estimateAgeMin + 30) * 60000),
-        estimate_data: JSON.stringify(late ? {} : { groupPublishedByEstimateId: est.id }),
+        estimate_data: JSON.stringify(late ? {} : { groupPublishedByEstimateId: est.id, sendSnapshot: { scope: deliveredEstimateScope({ service_interest: 'Lawn Care', onetime_total: 90, address: '1234 Fixture Ave, 34205', estimate_data: {} }) } }),
       }).returning('id');
       ids.estimates.push(sib.id);
     }
