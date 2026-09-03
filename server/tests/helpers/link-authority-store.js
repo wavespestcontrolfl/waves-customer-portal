@@ -7,6 +7,7 @@
  */
 const { canonicalProspectDomain } = require("../../services/seo/prospect-domain-lock");
 const R = require("../../services/seo/link-registry");
+const { canonicalEmail } = require("../../services/ads/ad-audience-consent");
 
 let idSeq = 0;
 const uid = () => `00000000-0000-4000-8000-${String(++idSeq).padStart(12, '0')}`;
@@ -47,7 +48,9 @@ function makeDb(seed = {}) {
       whereRaw(sql, bindings = []) {
         const lower = (v) => String(v == null ? '' : v).trim().toLowerCase();
         if (/^LOWER\(TRIM\(\?\?\)\) = \?$/.test(sql)) st.preds.push((r) => lower(r[bindings[0]]) === bindings[1]);
-        else if (/^LOWER\(split_part\(TRIM\(\?\?\), '@', 2\)\) = \?$/.test(sql)) st.preds.push((r) => lower(r[bindings[0]]).split('@')[1] === bindings[1]);
+        else if (/^LOWER\(TRIM\(\?\?\)\) = ANY\(\?\)$/.test(sql)) st.preds.push((r) => bindings[1].includes(lower(r[bindings[0]])));
+        else if (/^LOWER\(split_part\(TRIM\(\?\?\), '@', 2\)\) = ANY\(\?\)$/.test(sql)) st.preds.push((r) => bindings[1].includes(lower(r[bindings[0]]).split('@')[1]));
+        else if (/gmail-canonical/.test(sql)) st.preds.push((r) => { const c = canonicalEmail(r[bindings[0]]); return Boolean(c) && bindings[1].includes(c.split('@')[1]) && bindings[3].includes(c.split('@')[0]); });
         else if (/split_part/.test(sql)) st.preds.push((r) => canonicalProspectDomain(r.target_domain) === bindings[0]);
         // the sender's trailing-24h attempt count (link-prospect-outreach dailySendCount): rows attempted since `since`
         else if (/outreach_attempted_at >= \?/.test(sql)) { st.count = true; st.preds.push((r) => r.outreach_attempted_at != null && new Date(r.outreach_attempted_at).getTime() >= new Date(bindings[0]).getTime()); }

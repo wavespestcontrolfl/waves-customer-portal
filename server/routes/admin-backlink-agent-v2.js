@@ -701,9 +701,11 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     const sentToday = await Outreach.dailySendCount();
     // §6.4 / §13 — what the owner sees before Approve & send: the draft review and the recipient match to acknowledge
     const M = require('../services/seo/link-outreach-mandate');
+    let byEmail = null; let reviewError = null;
+    try { byEmail = await M.reviewByEmail(db, items.map((p) => p.outreach_to_email)); } catch (err) { reviewError = err.message; } // one batch for the whole list
     for (const p of items) {
       p.draft_review = M.draftReview(p);
-      try { p.recipient_review = await M.recipientReview(db, p.outreach_to_email); } catch (err) { p.recipient_review = { kind: 'error', recipient: p.outreach_to_email, matched: [], lookup_hash: null, error: err.message }; }
+      p.recipient_review = byEmail ? byEmail.get(p.outreach_to_email) || null : { kind: 'error', recipient: p.outreach_to_email, matched: [], lookup_hash: null, error: reviewError };
     }
     res.json({
       items,

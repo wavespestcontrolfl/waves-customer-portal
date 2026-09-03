@@ -56,15 +56,18 @@ function adminFetch(path, options = {}) {
     if (!r.ok) {
       let message = `${r.status} ${r.statusText}`;
       let code = null;
+      let review = null;
       try {
         const data = await r.clone().json();
         message = data?.error || message;
         code = data?.code || null; // a structured refusal (the outreach send) keeps its code for the message map
+        review = data?.review || null; // …and the recipient review it was computed with (the owner acknowledges THAT hash)
       } catch {
         /* keep default message */
       }
       const err = new Error(message);
       if (code) err.code = code;
+      if (review) err.review = review;
       throw err;
     }
     if (r.status === 204) return null;
@@ -2740,6 +2743,8 @@ const OUTREACH_CODE_MSG = {
   customer_recipient: "The recipient is a customer contact — outreach never goes to a customer. Re-draft to another address.",
   recipient_review_required: "The recipient shares a domain with a customer or lead contact — review the match and acknowledge it before sending.",
   recipient_lookup_failed: "The customer-recipient check failed — not sent. Try again.",
+  inbox_in_flight: "Another placement already has a conversation with this recipient — one conversation per inbox.",
+  recipient_changed: "The draft was re-addressed while you looked at it — reload and send again.",
   path_moved: "The acquisition path changed since the draft — reload and draft again.",
   path_unlinked: "Not linked to an acquisition path yet — the registry catch-up links it within the hour.",
 };
@@ -2811,6 +2816,7 @@ function OutreachApprovals({ canRun, onChange }) {
     const body = acks[id] && p.recipient_review?.lookup_hash ? { reviewed_lookup_hash: p.recipient_review.lookup_hash } : {};
     const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/send`, body);
     setMsg({ ok, text: ok ? "Outreach sent." : (OUTREACH_CODE_MSG[r.code] || r.error || "Send failed.") });
+    if (!ok && r.code === "recipient_review_required") setAcks((prev) => ({ ...prev, [id]: false })); // the reload below shows the current match
     setBusyId(null); refresh();
   };
   const reconcile = async (id, outcome) => {
@@ -3553,6 +3559,12 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       if (onMutated) onMutated(); else await load();
     } catch (e) {
       setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
+      // the match changed under the card (or the lookup now yields one): drop the stale acknowledgement and reload so
+      // the owner reviews the CURRENT match — the server sends only against the hash it just computed
+      if (e?.code === "recipient_review_required" || e?.code === "customer_recipient" || e?.code === "recipient_changed") {
+        setAcks((prev) => ({ ...prev, [row.id]: false }));
+        await load();
+      }
     } finally {
       setBusy(null);
     }

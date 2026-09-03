@@ -147,7 +147,11 @@ const defaultSend = (args) => require('./link-prospect-outreach').sendOutreach(a
 async function autoSendDecided(db, { domainIds, send, now }) {
   const out = { attempted: 0, sent: 0, skipped: [] };
   if (!domainIds.length) return out;
-  const candidates = await db('seo_link_prospects').whereIn('domain_id', domainIds).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').select('id', 'path_id');
+  const all = await db('seo_link_prospects').whereIn('domain_id', domainIds).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').select('id', 'path_id');
+  if (!all.length) return out;
+  // a SUBMIT-FIRST path (execution_after_send=false) sends its pitch only after the acquisition — never from here
+  const sendFirst = new Set((await db('seo_link_acquisition_paths').whereIn('id', [...new Set(all.map((p) => p.path_id).filter(Boolean))]).select('id', 'execution_after_send')).filter((x) => x.execution_after_send !== false).map((x) => x.id));
+  const candidates = all.filter((p) => sendFirst.has(p.path_id));
   if (!candidates.length) return out;
   const rows = await db(AUTH).whereIn('prospect_id', candidates.map((p) => p.id)).where({ dimension: 'communication', instance_kind: '-', level: P.LEVELS.AUTO_OUTREACH }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'path_id');
   const byProspect = new Map(rows.map((r) => [r.prospect_id, r]));

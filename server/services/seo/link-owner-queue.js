@@ -284,10 +284,14 @@ async function listOwnerQueue(db) {
   // §13 — the recipient review the owner sees before a send click; best-effort here (the click re-runs it under the
   // lock and fails closed on an error), computed once per drafted card with a sendable communication row
   const reviewFor = new Map();
-  for (const p of cardsFor) {
-    const sendable = p.outreach_status === 'drafted' && rows.some((r) => r.prospect_id === p.id && r.dimension === 'communication' && r.instance_kind === '-' && !r.satisfied_at && isOwner(r.level));
-    if (!sendable) continue;
-    try { reviewFor.set(p.id, await M.recipientReview(db, p.outreach_to_email)); } catch (err) { reviewFor.set(p.id, { kind: 'error', recipient: p.outreach_to_email, matched: [], lookup_hash: null, error: err.message }); }
+  const sendable = cardsFor.filter((p) => p.outreach_status === 'drafted' && p.outreach_to_email && rows.some((r) => r.prospect_id === p.id && r.dimension === 'communication' && r.instance_kind === '-' && !r.satisfied_at && isOwner(r.level)));
+  if (sendable.length) {
+    try {
+      const byEmail = await M.reviewByEmail(db, sendable.map((p) => p.outreach_to_email)); // one batch, not a query per card
+      for (const p of sendable) reviewFor.set(p.id, byEmail.get(p.outreach_to_email) || null);
+    } catch (err) {
+      for (const p of sendable) reviewFor.set(p.id, { kind: 'error', recipient: p.outreach_to_email, matched: [], lookup_hash: null, error: err.message });
+    }
   }
   const cards = cardsFor.map((p) => {
     const d = domainById.get(p.domain_id);
@@ -597,6 +601,7 @@ const SEND_CODE_STATUS = Object.freeze({
   not_found: 404, gate_off: 403, gmail_not_connected: 503, rate_limited: 429, already_sent: 409, not_actionable: 409,
   not_authorized: 409, customer_recipient: 409, recipient_review_required: 409, recipient_lookup_failed: 503,
   path_moved: 409, path_unlinked: 409, no_draft: 409, incomplete_draft: 409, invalid_recipient: 409, not_outreach: 409,
+  inbox_in_flight: 409, recipient_changed: 409,
   send_failed: 502, finalize_failed: 500,
 });
 async function sendRow(db, { authorityId, actor, reviewedLookupHash = null, send = null }) {

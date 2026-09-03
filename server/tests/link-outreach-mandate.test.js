@@ -118,6 +118,26 @@ describe('recipientReview (§13)', () => {
     expect(one.lookup_hash).toBe(two.lookup_hash);
     expect(one.matched.map((m) => m.id)).toEqual(['c-a', 'c-b']);
   });
+  test('gmail / googlemail: dots and +tags in the local part are the same mailbox (stored or drafted)', async () => {
+    const c = customer({ email: 'First.Last+promo@googlemail.com' });
+    const r = await M.recipientReview(seed({ customers: [c] }), 'firstlast@gmail.com');
+    expect(r).toMatchObject({ kind: 'customer', recipient: 'firstlast@gmail.com', matched: [{ source: 'customers.email', id: c.id }] });
+    const back = await M.recipientReview(seed({ customers: [customer({ email: 'firstlast@gmail.com' })] }), 'f.i.r.s.t.last+x@gmail.com');
+    expect(back.kind).toBe('customer');
+    // an ordinary host keeps its dots: a different address
+    expect((await M.recipientReview(seed({ customers: [customer({ email: 'first.last@bradentonherald.com' })] }), 'firstlast@bradentonherald.com')).kind).toBe('ambiguous');
+  });
+  test('recipientReviews batches a list and agrees with the single review; reviewByEmail keys by the address as given', async () => {
+    const db = seed({ customers: [customer({ email: 'editor@bradentonherald.com' }), customer({ email: 'ads@sarasotamagazine.com' })], leads: [{ id: 'l1', email: 'jane@gulfcoastliving.org' }] });
+    const list = ['Editor@BradentonHerald.com', 'features@sarasotamagazine.com', 'someone@gulfcoastliving.org', 'clear@venicechamber.com'];
+    const batch = await M.recipientReviews(db, list);
+    expect(batch.map((r) => r.kind)).toEqual(['customer', 'ambiguous', 'ambiguous', 'clear']);
+    for (const [i, e] of list.entries()) expect(batch[i]).toEqual(await M.recipientReview(db, e));
+    const map = await M.reviewByEmail(db, list);
+    expect(map.get('Editor@BradentonHerald.com').kind).toBe('customer');
+    expect(map.get('clear@venicechamber.com').kind).toBe('clear');
+    expect(await M.recipientReviews(db, [])).toEqual([]);
+  });
   test('a lookup failure throws — the caller fails closed', async () => {
     const db = seed();
     db._beforeResolve = (table) => { if (table === 'leads') throw new Error('connection reset'); };

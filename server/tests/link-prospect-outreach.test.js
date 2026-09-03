@@ -146,6 +146,7 @@ describe('sendOutreach', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),         // pre-read (fast-fail checks)
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
       chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
       chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)                // [txn] dailySendCount under the lock
@@ -172,6 +173,7 @@ describe('sendOutreach', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
       chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
       chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)
@@ -199,6 +201,7 @@ describe('sendOutreach', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
       chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
       chain({ first: { c: '12' } }), // [txn] already at cap
@@ -213,6 +216,7 @@ describe('sendOutreach', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
       chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
       chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)
@@ -229,6 +233,7 @@ describe('sendOutreach', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),                            // pre-read looks complete
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
       chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
       chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)
@@ -258,6 +263,7 @@ describe('sendOutreach', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
       chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
       chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)               // [txn] count
@@ -289,6 +295,7 @@ describe('sendOutreach', () => {
       seo_link_prospects: [
         chain({ first: draftedProspect() }),
         chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
         chain({ result: [{ id: 'p1', path_id: 'path-old', link_type: 'editorial', outreach_status: 'drafted', outreach_sent_at: null, outreach_send_token: null, leased_path_revision: null }] }), // settlement's row read
         move, // the transition clears the draft
       ],
@@ -314,6 +321,7 @@ describe('sendOutreach', () => {
       seo_link_prospects: [
         chain({ first: draftedProspect() }),
         chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
         chain({ result: [] }),                        // settlement read (nothing moved — e.g. the chain exceeded its hop bound)
         chain({ first: draftedProspect({ path_id: 'path-retired' }) }), // the path the send would run on…
       ],
@@ -328,12 +336,14 @@ describe('sendOutreach', () => {
     outreachGateOn();
     setDbQueues({
       seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
       chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-dead' }) })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-dead', superseded_by: null, confidence: 0, agent_completable: true } })],
     });
     expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
     setDbQueues({
       seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
       chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-human' }) })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-human', superseded_by: null, confidence: 0.8, agent_completable: false } })],
     });
@@ -345,6 +355,7 @@ describe('sendOutreach', () => {
     outreachGateOn();
     setDbQueues({
       seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] inbox guard: no other conversation with this recipient
       chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-unassessed' }) })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-unassessed', superseded_by: null, confidence: null, agent_completable: true } })],
     });
@@ -355,7 +366,7 @@ describe('sendOutreach', () => {
   test('a draft carrying NO revision stamp is not sent → path_moved: the stamp is required, never skipped (Codex #3720 r7 P1)', async () => {
     outreachGateOn();
     setDbQueues({
-      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }), chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: null }) })],
+      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }), chain({ result: [] }), chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: null }) })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })],
     });
     expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
@@ -365,7 +376,7 @@ describe('sendOutreach', () => {
   test('a draft whose path was revised in place after it was written is not sent → path_moved (revision stamp)', async () => {
     outreachGateOn();
     setDbQueues({
-      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }), chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 3 }) })],
+      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }), chain({ result: [] }), chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 3 }) })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 4 } })],
     });
     expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');

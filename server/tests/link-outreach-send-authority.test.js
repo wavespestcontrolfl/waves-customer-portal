@@ -130,7 +130,7 @@ describe('sendOutreach under the contract', () => {
     expect(await Outreach.sendOutreach({ prospectId: zero.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/auto_outreach_daily_cap/) });
     const one = scenario({ policy: { auto_outreach_min_score: 60, auto_outreach_daily_cap: 1 } });
     await nightly(one.db);
-    one.db._tables.seo_link_prospects.push(draftedRow(one.d, one.p, { id: uid(), location_key: 'x', outreach_status: 'sent', outreach_attempted_at: new Date(NOW.getTime() - 3600 * 1000) }));
+    one.db._tables.seo_link_prospects.push(draftedRow(one.d, one.p, { id: uid(), location_key: 'x', outreach_to_email: 'other@elsewhere.org', outreach_status: 'sent', outreach_attempted_at: new Date(NOW.getTime() - 3600 * 1000) }));
     expect(await Outreach.sendOutreach({ prospectId: one.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'rate_limited' });
     expect(gmail.sendMessage).not.toHaveBeenCalled();
     // the owner's click: the policy cap (1, reached) does not apply; the hard cap (12) is not reached
@@ -163,7 +163,7 @@ describe('sendOutreach under the contract', () => {
     process.env.LINK_OUTREACH_DAILY_CAP = '1';
     const s = scenario();
     await nightly(s.db);
-    s.db._tables.seo_link_prospects.push(draftedRow(s.d, s.p, { id: uid(), location_key: 'x', outreach_status: 'sent', outreach_attempted_at: new Date(NOW.getTime() - 3600 * 1000) }));
+    s.db._tables.seo_link_prospects.push(draftedRow(s.d, s.p, { id: uid(), location_key: 'x', outreach_to_email: 'other@elsewhere.org', outreach_status: 'sent', outreach_attempted_at: new Date(NOW.getTime() - 3600 * 1000) }));
     expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'rate_limited' });
     expect(approvals(s.db)).toHaveLength(0);
     delete process.env.LINK_OUTREACH_DAILY_CAP;
@@ -266,6 +266,71 @@ describe('the customer exclusion inside the claim (§13)', () => {
     expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'recipient_lookup_failed' });
     expect(gmail.sendMessage).not.toHaveBeenCalled();
     expect(placement(s.db).outreach_status).toBe('drafted');
+  });
+});
+
+describe('one conversation per inbox (§13)', () => {
+  test('a second placement addressed to a recipient whose conversation is open is refused in every mode; a dormant sibling is not', async () => {
+    const s = scenario({ policy: AUTO_POLICY });
+    await nightly(s.db);
+    const other = { id: uid(), domain_id: null, path_id: null, target_domain: 'other.org', target_page: '/', location_key: '-', status: 'contacted', outreach_status: 'sent', outreach_to_email: 'Editor@Example.org ', outreach_sent_at: EARLIER, link_type: 'editorial', updated_at: EARLIER };
+    s.db._tables.seo_link_prospects.push(other);
+    for (const mode of ['auto', 'owner']) expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode })).toMatchObject({ ok: false, code: 'inbox_in_flight' });
+    // an ambiguous send elsewhere (send_error) and a parked follow-up conversation hold the inbox too
+    Object.assign(other, { status: 'prospect', outreach_status: 'send_error', outreach_sent_at: null });
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).code).toBe('inbox_in_flight');
+    Object.assign(other, { status: 'awaiting_owner', parked_from_status: 'contacted', outreach_status: 'none' });
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).code).toBe('inbox_in_flight');
+    // a dormant row to the same inbox (prospect, no send) does not
+    Object.assign(other, { status: 'prospect', parked_from_status: null, outreach_status: 'none' });
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).ok).toBe(true);
+    expect(s.db._raws.some((r) => /link_outreach_inbox/.test(String(r)))).toBe(false); // the raw records the SQL, not the binding
+    expect(s.db._raws.some((r) => /hashtext/.test(String(r)))).toBe(true);
+  });
+  test('a draft re-addressed under the lock is not sent by a claim that locked another inbox', async () => {
+    const s = scenario();
+    await nightly(s.db);
+    // the pre-read is the first prospects read; the claim's row lock (after the inbox lock) is the second — re-address there
+    let reads = 0;
+    s.db._beforeResolve = (table, db) => { if (table === 'seo_link_prospects' && ++reads === 2) { placement(db).outreach_to_email = 'other@example.org'; db._beforeResolve = null; } };
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'recipient_changed' });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('submit-first outreach paths (execution_after_send=false)', () => {
+  test('nothing sends while the execution instance is open — the nightly skips it and the sender refuses; a satisfied execution releases the pitch', async () => {
+    const s = scenario({ policy: AUTO_POLICY, path: { execution_after_send: false, account_required: true } });
+    const send = jest.fn(async () => ({ ok: true }));
+    const r = await nightly(s.db, { autoSend: true, send });
+    expect(send).not.toHaveBeenCalled();
+    expect(r.autoSend).toEqual({ attempted: 0, sent: 0, skipped: [] });
+    Object.assign(placement(s.db), { status: 'prospect', parked_from_status: null }); // unparked, so both modes reach the ordering check
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/submit-first/) });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/submit-first/) });
+    const exec = s.db._tables.seo_link_placement_authorities.find((x) => x.dimension === 'execution' && !x.ended_at);
+    Object.assign(exec, { satisfied_at: NOW, satisfied_reason: 'placed' });
+    // the placement is still `prospect` here (nothing can promote a submit-first row yet — PR 4); the owner's send is allowed
+    Object.assign(placement(s.db), { status: 'prospect', parked_from_status: null });
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).ok).toBe(true);
+  });
+});
+
+describe('the owner resolving an ambiguous recipient on an AUTO_OUTREACH row', () => {
+  test('the acknowledgement is recorded as an OWNER_OUTREACH approval bound to the draft and the match', async () => {
+    const s = scenario({ policy: AUTO_POLICY, contacts: { customers: [{ id: 'c2', email: 'ads@example.org' }] } });
+    await nightly(s.db);
+    expect(commRow(s.db).level).toBe('AUTO_OUTREACH');
+    const first = await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' });
+    expect(first).toMatchObject({ ok: false, code: 'recipient_review_required' });
+    const r = await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', reviewedLookupHash: first.review.lookup_hash });
+    expect(r.ok).toBe(true);
+    const [a] = approvals(s.db);
+    expect(a).toMatchObject({ authority: 'OWNER_OUTREACH', action: 'outreach_send', approved_by: 'Adam', action_hash: M.draftHash(s.row) });
+    expect(a.terms_snapshot.recipient_review).toMatchObject({ match_kind: 'ambiguous', lookup_hash: first.review.lookup_hash });
+    expect(a.consumed_at).toBeTruthy();
+    expect(r.authority).toEqual({ level: 'AUTO_OUTREACH', approval_id: a.id });
+    expect(commRow(s.db)).toMatchObject({ approval_id: a.id, satisfied_reason: 'sent' });
   });
 });
 

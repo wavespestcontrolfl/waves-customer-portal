@@ -35,6 +35,12 @@ const logger = require('../logger');
 const gmailClient = require('../email/gmail-client');
 const { isEnabled } = require('../../config/feature-gates');
 const { OUTREACH_TYPES, isValidEmail } = require('./link-prospect-worker');
+// one conversation per inbox (plan §13): the states that mean a conversation with this recipient is OPEN — a pitch out
+// (contacted / negotiating, or parked from them for a checkout / follow-up approval), a send in flight, a sent row, or an
+// unreconciled ambiguous send (the message may have been delivered)
+const CONVERSATION_OPEN = (row) => ['contacted', 'negotiating'].includes(row.status)
+  || (row.status === 'awaiting_owner' && ['contacted', 'negotiating'].includes(row.parked_from_status))
+  || ['sending', 'sent', 'send_error'].includes(row.outreach_status) || Boolean(row.outreach_sent_at);
 const P = require('./link-authority-policy');
 const M = require('./link-outreach-mandate');
 const { DEFAULT_OUTREACH_DAILY_CAP: DEFAULT_DAILY_CAP, outreachDailyCeiling } = P;
@@ -264,8 +270,15 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
   const sendToken = randomUUID();
   const claim = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(?)', [OUTREACH_LOCK_KEY]);
+    // the RECIPIENT-level guard (plan §13: one conversation per inbox — the domain lock covers the domain, not the
+    // inbox): serialized on the recipient the pre-read draft names; the locked row must still name it below
+    const inbox = M.normalizeEmail(prospect.outreach_to_email);
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`link_outreach_inbox:${inbox}`]);
     // prospect → path lock order, same as saveDraft (settlement locks the path)
     await trx('seo_link_prospects').where({ id: prospectId }).forUpdate().first('id');
+    const others = await trx('seo_link_prospects').whereRaw('LOWER(TRIM(??)) = ?', ['outreach_to_email', inbox]).where('id', '<>', prospectId).select('id', 'status', 'parked_from_status', 'outreach_status', 'outreach_sent_at');
+    const open = others.find(CONVERSATION_OPEN);
+    if (open) return { ok: false, code: 'inbox_in_flight', error: `another placement already has a conversation with this recipient (${open.status}${open.outreach_status ? ` / ${open.outreach_status}` : ''}) — one conversation per inbox` };
     // the policy row read under the lock: the §6.4 cap below and the §7 authority hash
     const { policy } = await P.loadPolicy(trx);
     // Settle the drafted row BEFORE taking it in flight: its acquisition path
@@ -305,6 +318,8 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
     // approval binds to and what the customer exclusion reviews
     const draft = { outreach_to_email: current.outreach_to_email, outreach_subject: current.outreach_subject, outreach_body: current.outreach_body };
     if (!isValidEmail(draft.outreach_to_email) || !draft.outreach_subject || !draft.outreach_body) return { ok: false, code: 'incomplete_draft' };
+    // the inbox lock above was taken on the pre-read recipient: a draft re-addressed under us is not this claim's to send
+    if (M.normalizeEmail(draft.outreach_to_email) !== inbox) return { ok: false, code: 'recipient_changed', error: 'the draft was re-addressed while you looked at it — reload and send again' };
     // §13 — inside EVERY send claim, auto and owner alike; a lookup failure is fail-closed
     let review;
     try { review = await M.recipientReview(trx, draft.outreach_to_email); } catch (err) {
@@ -435,16 +450,28 @@ async function sendAuthority(trx, { placement, path, policy, mode, draft, review
   const hash = P.decisionInputsHash('communication', ctx);
   const revision = Number(path.revision_communication ?? path.revision ?? 1);
   if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== revision) return { ok: false, code: 'not_authorized', error: 'the send inputs changed since the authority was decided — the nightly bridge re-decides it' };
+  // a SUBMIT-FIRST outreach path (execution_after_send=false, §6.4 / §7): the pitch follows the acquisition — nothing
+  // sends while the execution instance is open. (The LATE SEND itself, on the Judge-owned placed row, arrives with the
+  // acquire claim that can produce that row — PR 4; until then no submit-first placement can reach it.)
+  if (path.execution_after_send === false) {
+    const exec = await trx(AUTH).where({ prospect_id: placement.id, dimension: 'execution', instance_kind: '-' }).whereNull('ended_at').first('id', 'satisfied_at');
+    if (!exec || !exec.satisfied_at) return { ok: false, code: 'not_authorized', error: 'submit-first path: the pitch follows the publisher\'s form / account step, which has not completed' };
+  }
+  // the owner's decision on an ambiguous recipient (§13) is RECORDED even when the level itself needs no approval:
+  // on an AUTO_OUTREACH row the click writes an OWNER_OUTREACH approval carrying the acknowledged match
+  const ownerResolvesMatch = mode === 'owner' && review.kind === 'ambiguous';
   if (row.level === P.LEVELS.AUTO_OUTREACH) {
     // the draft is deliberately outside the decision hash (the approval binds it): a draft edited after the
     // nightly stamped AUTO_OUTREACH is re-reviewed on the LOCKED text in EVERY mode — an unclean one is not
     // this row's to send (no approval can bind it to an AUTO level, §3.6b): the nightly re-decides it OWNER_*
     // and the owner's click then writes the approval for that text
     if (!M.draftReview({ ...placement, ...draft }).clean) return { ok: false, code: 'not_authorized', error: 'the draft changed since the automatic decision and is no longer clean — the nightly bridge re-decides it for the owner' };
-    return { ok: true, rowId: row.id, approvalId: null, level: row.level };
+    if (!ownerResolvesMatch) return { ok: true, rowId: row.id, approvalId: null, level: row.level };
+  } else {
+    if (mode === 'auto') return { ok: false, code: 'not_authorized', error: `${row.level}: the owner's click is the send authority` };
+    if (row.level !== P.LEVELS.OWNER_OUTREACH && row.level !== P.LEVELS.OWNER_LEGAL) return { ok: false, code: 'not_authorized', error: `${row.level} authorizes no send` };
   }
-  if (mode === 'auto') return { ok: false, code: 'not_authorized', error: `${row.level}: the owner's click is the send authority` };
-  if (row.level !== P.LEVELS.OWNER_OUTREACH && row.level !== P.LEVELS.OWNER_LEGAL) return { ok: false, code: 'not_authorized', error: `${row.level} authorizes no send` };
+  const approvalLevel = row.level === P.LEVELS.AUTO_OUTREACH ? P.LEVELS.OWNER_OUTREACH : row.level;
   // a send that itself accepts the publisher's terms needs the accept_terms
   // instance satisfied co-transactionally (plan §3.3b) — not built here
   if (path.terms_accepted_by_send === true) return { ok: false, code: 'not_authorized', error: 'sending this pitch accepts the publisher\'s terms — the co-transactional terms acceptance is not available yet' };
@@ -458,7 +485,7 @@ async function sendAuthority(trx, { placement, path, policy, mode, draft, review
   const snapshot = { ...P.decisionInputs('communication', ctx), draft_hash: actionHash, recipient_review: { recipient: review.recipient, match_kind: review.kind, matched_ids: review.matched, lookup_hash: review.lookup_hash } };
   const [approval] = await trx('seo_link_approvals').insert({
     prospect_id: placement.id, path_id: path.id, path_revision: revision, decision_inputs_hash: hash,
-    money_action: false, decision: 'approved', authority: row.level, approved_amount_cents: null, max_payable_cents: null, terms_snapshot: snapshot,
+    money_action: false, decision: 'approved', authority: approvalLevel, approved_amount_cents: null, max_payable_cents: null, terms_snapshot: snapshot,
     dimension: 'communication', action: 'outreach_send', instance_key: row.instance_key, action_hash: actionHash,
     approved_by: approvedBy, approved_at: now, created_at: now, updated_at: now,
   }).returning('*');

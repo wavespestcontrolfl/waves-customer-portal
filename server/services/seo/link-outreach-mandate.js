@@ -30,6 +30,7 @@
  */
 const crypto = require('crypto');
 const { lintComms } = require('../comms-lint');
+const { canonicalEmail } = require('../ads/ad-audience-consent');
 const { SERVICE_CONTACT_SLOTS } = require('../customer-contact');
 const { isValidEmail } = require('./link-prospect-worker');
 
@@ -79,7 +80,11 @@ function draftReview(placement) {
 }
 
 const sha256 = (o) => crypto.createHash('sha256').update(JSON.stringify(o)).digest('hex');
-const normalizeEmail = (e) => String(e || '').trim().toLowerCase();
+// lower + trim; gmail / googlemail additionally drop dots and the +tag (the same canonical form Customer Match hashes)
+const normalizeEmail = (e) => (canonicalEmail(e) || String(e || '').trim().toLowerCase()).replace(/@googlemail\.com$/, '@gmail.com'); // googlemail IS gmail
+const GOOGLE_HOSTS = Object.freeze(['gmail.com', 'googlemail.com']);
+// the stored column in the recipient's canonical form: gmail hosts compare the dot-less, tag-less local part
+const GMAIL_CANONICAL_SQL = "/* gmail-canonical */ LOWER(split_part(TRIM(??), '@', 2)) = ANY(?) AND REPLACE(split_part(split_part(LOWER(TRIM(??)), '@', 1), '+', 1), '.', '') = ANY(?)";
 const domainOf = (e) => { const s = normalizeEmail(e); const i = s.lastIndexOf('@'); return i === -1 ? '' : s.slice(i + 1); };
 
 /** sha256(recipient, subject, body) — the outreach_send action hash (§3.6b). */
@@ -104,30 +109,53 @@ const CONTACT_SOURCES = Object.freeze([
 ]);
 
 /**
- * { kind: 'clear' | 'customer' | 'ambiguous', recipient, matched: [{ source, id }], lookup_hash }.
- * Throws on any lookup failure — the send claim fails closed on it (§13: a
- * lookup error routes the draft to the owner, never past the check).
+ * One review per recipient — { kind: 'clear' | 'customer' | 'ambiguous', recipient, matched: [{ source, id }],
+ * lookup_hash } — for a whole list in three queries per contact source (exact, shared domain, gmail-canonical),
+ * so a queue of N drafts never issues N × sources round trips. Throws on any lookup failure — the send claim
+ * fails closed on it (§13: a lookup error routes the draft to the owner, never past the check).
  */
-async function recipientReview(q, email) {
-  const recipient = normalizeEmail(email);
-  const domain = domainOf(recipient);
-  const exact = [];
-  const shared = [];
+async function recipientReviews(q, emails) {
+  const recipients = [...new Set((emails || []).map(normalizeEmail).filter(Boolean))];
+  if (!recipients.length) return [];
+  const domains = [...new Set(recipients.map(domainOf).filter((d) => d && !SHARED_MAIL_DOMAINS.has(d)))];
+  const googleLocals = [...new Set(recipients.filter((r) => GOOGLE_HOSTS.includes(domainOf(r))).map((r) => r.slice(0, r.lastIndexOf('@'))))];
+  const exact = new Map(recipients.map((r) => [r, []]));
+  const shared = new Map(recipients.map((r) => [r, []]));
   for (const src of CONTACT_SOURCES) {
     const idCol = src.idColumn || 'id';
-    // stored addresses are normalized the same way as the recipient (case + surrounding whitespace)
-    const hits = await q(src.table).whereRaw(`LOWER(TRIM(??)) = ?`, [src.column, recipient]).select(`${idCol} as id`);
-    for (const h of hits) exact.push({ source: src.source, id: h.id });
-    if (domain && !SHARED_MAIL_DOMAINS.has(domain)) {
-      const byDomain = await q(src.table).whereRaw(`LOWER(split_part(TRIM(??), '@', 2)) = ?`, [src.column, domain]).select(`${idCol} as id`);
-      for (const h of byDomain) if (!exact.some((e) => e.source === src.source && e.id === h.id)) shared.push({ source: src.source, id: h.id });
+    // stored addresses are normalized the same way as the recipient (case + surrounding whitespace); the
+    // stored value comes back so each hit lands on its own recipient
+    const hits = await q(src.table).whereRaw('LOWER(TRIM(??)) = ANY(?)', [src.column, recipients]).select(`${idCol} as id`, `${src.column} as email`);
+    for (const h of hits) { const r = normalizeEmail(h.email); if (exact.has(r)) exact.get(r).push({ source: src.source, id: h.id }); }
+    if (googleLocals.length) {
+      const canon = await q(src.table).whereRaw(GMAIL_CANONICAL_SQL, [src.column, GOOGLE_HOSTS, src.column, googleLocals]).select(`${idCol} as id`, `${src.column} as email`);
+      for (const h of canon) { const r = normalizeEmail(h.email); if (exact.has(r) && !exact.get(r).some((e) => e.source === src.source && e.id === h.id)) exact.get(r).push({ source: src.source, id: h.id }); }
+    }
+    if (domains.length) {
+      const byDomain = await q(src.table).whereRaw("LOWER(split_part(TRIM(??), '@', 2)) = ANY(?)", [src.column, domains]).select(`${idCol} as id`, `${src.column} as email`);
+      for (const h of byDomain) {
+        const d = domainOf(h.email);
+        for (const r of recipients) if (domainOf(r) === d && !exact.get(r).some((e) => e.source === src.source && e.id === h.id)) shared.get(r).push({ source: src.source, id: h.id });
+      }
     }
   }
-  const kind = exact.length ? 'customer' : shared.length ? 'ambiguous' : 'clear';
   // deterministic: the queries carry no ORDER BY, and the hash the owner acknowledges must equal the one the locked send recomputes
   const bySourceId = (a, b) => (a.source < b.source ? -1 : a.source > b.source ? 1 : String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0);
-  const matched = (kind === 'customer' ? exact : shared).slice().sort(bySourceId);
-  return { kind, recipient, matched, lookup_hash: sha256({ recipient, kind, matched }) };
+  return recipients.map((recipient) => {
+    const kind = exact.get(recipient).length ? 'customer' : shared.get(recipient).length ? 'ambiguous' : 'clear';
+    const matched = (kind === 'customer' ? exact.get(recipient) : shared.get(recipient)).slice().sort(bySourceId);
+    return { kind, recipient, matched, lookup_hash: sha256({ recipient, kind, matched }) };
+  });
+}
+async function recipientReview(q, email) {
+  const [r] = await recipientReviews(q, [email]);
+  return r || { kind: 'clear', recipient: normalizeEmail(email), matched: [], lookup_hash: sha256({ recipient: normalizeEmail(email), kind: 'clear', matched: [] }) };
+}
+// reviews keyed by the address as given, for a list of rows (the queue, the pending endpoint)
+async function reviewByEmail(q, emails) {
+  const list = await recipientReviews(q, emails);
+  const byCanonical = new Map(list.map((r) => [r.recipient, r]));
+  return new Map((emails || []).filter(Boolean).map((e) => [e, byCanonical.get(normalizeEmail(e)) || null]));
 }
 
-module.exports = { draftReview, classifyDraft, lintDraft, draftHash, recipientReview, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, LINT_CONTEXT };
+module.exports = { draftReview, classifyDraft, lintDraft, draftHash, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
