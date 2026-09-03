@@ -276,12 +276,31 @@ describe('extractTreeShrubEstimate', () => {
       result: { results: { tsMeta: { eb: 1500, et: 4, bedAreaIsEstimated: false }, ts: [{ tier: 'standard', selected: false }, { tier: 'enhanced', selected: true }] } },
       engineRequest: { profile: { homeSqFt: 2000 }, options: { treeShrubAccess: 'difficult' } },
     })).toEqual({
-      // The raw line AGREES with the mapped measurements (a fresh
-      // server-authoritative save stores both), so its exact bedAreaSource
-      // and onSiteMin are kept; tier/access come from the mapped record.
-      bedSqFt: 1500, bedAreaSource: 'explicit', bedAreaEstimated: false, treeCount: 4,
-      access: 'difficult', tier: 'enhanced', onSiteMin: 25,
+      // The raw line keeps eb/et but its access (and so its onSiteMin) no
+      // longer describes the job — mapped record wins, raw-only fields null.
+      bedSqFt: 1500, bedAreaSource: null, bedAreaEstimated: false, treeCount: 4,
+      access: 'difficult', tier: 'enhanced', onSiteMin: null,
     });
+    // A fresh server-authoritative save stores the raw line NEXT to the
+    // mapped result: everything shared agrees, so the exact bedAreaSource
+    // and onSiteMin are kept while the mapped tier stays authoritative.
+    expect(extractTreeShrubEstimate({
+      engineResult: {
+        lineItems: [{ service: 'tree_shrub', bedArea: 1500, bedAreaSource: 'explicit', treeCount: 4, access: 'moderate', tier: 'standard', onSiteMin: 33 }],
+      },
+      result: { results: { tsMeta: { eb: 1500, et: 4, bedAreaIsEstimated: false }, ts: [{ tier: 'standard', selected: false }, { tier: 'enhanced', selected: true }] } },
+      engineRequest: { profile: { homeSqFt: 2000 }, options: { treeShrubAccess: 'moderate' } },
+    })).toEqual({
+      bedSqFt: 1500, bedAreaSource: 'explicit', bedAreaEstimated: false, treeCount: 4,
+      access: 'moderate', tier: 'enhanced', onSiteMin: 33,
+    });
+    // Bed provenance disagreement (raw lot_based vs mapped operator-typed)
+    // is stale too.
+    expect(extractTreeShrubEstimate({
+      engineResult: { lineItems: [{ service: 'tree_shrub', bedArea: 1500, bedAreaSource: 'lot_based', treeCount: 4, access: 'easy', tier: 'standard', onSiteMin: 25 }] },
+      result: { results: { tsMeta: { eb: 1500, et: 4, bedAreaIsEstimated: false }, ts: [{ tier: 'standard', selected: true }] } },
+      engineRequest: { profile: {}, options: { treeShrubAccess: 'easy' } },
+    })).toMatchObject({ bedAreaSource: null, bedAreaEstimated: false, onSiteMin: null });
     // A revision that changed the measurements left the draft's raw line
     // behind: it DISAGREES with tsMeta, so the mapped record wins and the
     // raw-only fields read null rather than wrong.

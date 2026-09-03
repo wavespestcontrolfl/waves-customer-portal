@@ -139,17 +139,25 @@ function extractTreeShrubEstimate(estimateData) {
   // and onSiteMin the mapped envelope loses — keep them. It is stale only
   // when a revision replaced the mapped result but left an agent draft's
   // original engineResult behind; the tell is DISAGREEMENT with the mapped
-  // measurements (tsMeta eb / et), and then the mapped record wins with the
-  // raw-only fields null rather than wrong (GH #3801 P1 + pre-push r7 P1).
+  // evidence on every field the two share — bed area, tree count, the
+  // bed-provenance boolean and the priced access (a revision that changed
+  // only access keeps eb/et but the raw onSiteMin no longer describes the
+  // job) — and then the mapped record wins with the raw-only fields null
+  // rather than wrong (GH #3801 P1 + pre-push r7/r9 P1s).
   const tsMeta = estimateData.result?.results?.tsMeta;
   const hasMappedTs = !!(tsMeta && typeof tsMeta === 'object');
   const agreesWithMapped = (quote) => {
     if (!hasMappedTs) return true;
     const rawBed = positiveNumber(quote.bedAreaUsed ?? quote.bedArea);
     const rawTrees = nonnegativeCount(quote.treeCount);
-    const mappedBed = positiveNumber(tsMeta.eb);
-    const mappedTrees = nonnegativeCount(tsMeta.et);
-    return (rawBed ?? null) === (mappedBed ?? null) && (rawTrees ?? null) === (mappedTrees ?? null);
+    if ((rawBed ?? null) !== (positiveNumber(tsMeta.eb) ?? null)) return false;
+    if ((rawTrees ?? null) !== (nonnegativeCount(tsMeta.et) ?? null)) return false;
+    const rawSource = normalizedEnum(quote.bedAreaSource);
+    if (rawSource && typeof tsMeta.bedAreaIsEstimated === 'boolean'
+      && (rawSource === 'lot_based' || rawSource === 'fallback') !== tsMeta.bedAreaIsEstimated) return false;
+    const rawAccess = normalizedEnum(quote.access);
+    if (rawAccess && optionAccess && rawAccess !== optionAccess) return false;
+    return true;
   };
 
   const lineItems = estimateData.engineResult?.lineItems;
