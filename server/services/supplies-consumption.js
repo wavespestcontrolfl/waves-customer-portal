@@ -92,6 +92,11 @@ async function consumeCompletionSupplies(db, {
       const outcome = await db.transaction(async (trx) => {
         const locked = await trx('products_catalog').where({ id: product.id }).forUpdate().first();
         if (!locked) return { skipped: 'missing' };
+        // Eligibility is re-derived from the LOCKED row: a retire or a
+        // service-line edit between the scan and the lock must not deduct
+        // (pre-push codex P1).
+        if (locked.active === false) return { skipped: 'retired' };
+        if (!appliesToLine(locked.per_completion_service_lines, serviceLine)) return { skipped: 'service_line_excluded' };
         const usage = Number(locked.per_completion_usage);
         if (!Number.isFinite(usage) || usage <= 0) return { skipped: 'no_usage' };
         if (locked.inventory_on_hand == null || locked.inventory_on_hand === '') return { skipped: 'no_on_hand' };

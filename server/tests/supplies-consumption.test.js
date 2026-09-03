@@ -83,6 +83,20 @@ test('an inspection service completed normally consumes nothing (no application,
   expect(inserts).toHaveLength(0);
 });
 
+test('a product retired between the scan and the lock is not deducted', async () => {
+  const { db, inserts } = fakeDb({ products: [{ ...sign, active: false }] });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(inserts).toHaveLength(0);
+  expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'retired' }]);
+});
+
+test('a service-line scope set between the scan and the lock is honored', async () => {
+  const { db, inserts } = fakeDb({ products: [{ ...sign, per_completion_service_lines: '["lawn"]' }] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' });
+  expect(inserts).toHaveLength(0);
+  expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'service_line_excluded' }]);
+});
+
 test('a treatment service type is not an inspection', async () => {
   const { db, inserts } = fakeDb({ products: [sign] });
   await consumeCompletionSupplies(db, { ...args, serviceType: 'Quarterly Pest Control' });

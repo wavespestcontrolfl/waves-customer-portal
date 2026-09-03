@@ -108,6 +108,7 @@ exports.up = async function up(knex) {
   }
 
   const hasPricing = await knex.schema.hasTable('vendor_pricing');
+  const hasApproval = hasPricing && await knex.schema.hasColumn('vendor_pricing', 'approval_status');
   const hasMovements = await knex.schema.hasTable('product_inventory_movements');
   for (const item of KIT) {
     const existing = await knex('products_catalog').whereRaw('LOWER(name) = ?', [item.name.toLowerCase()]).first();
@@ -131,6 +132,16 @@ exports.up = async function up(knex) {
       if (existing.auto_reorder_vendor_id == null && item.pricing) fill.auto_reorder_vendor_id = gemplers.id;
       if (existing.cost_per_unit == null && item.pricing) { fill.cost_per_unit = Number((item.pricing.price / Number(item.pricing.quantity)).toFixed(4)); fill.cost_unit = 'each'; }
       if (Object.keys(fill).length) await knex('products_catalog').where({ id: existing.id }).update(fill);
+      // A reused row still needs its vendor price (SKU + order link) and,
+      // when THIS run seeded the opening count, the ledger movement that
+      // explains it — both idempotent (pre-push codex P1).
+      if (item.pricing && hasPricing) {
+        const priced = await knex('vendor_pricing').where({ product_id: existing.id, vendor_id: gemplers.id }).first('id');
+        if (!priced) await knex('vendor_pricing').insert(pricingRow(existing.id, item));
+      }
+      if (hasMovements && fill.inventory_on_hand != null && fill.inventory_on_hand > 0) {
+        await knex('product_inventory_movements').insert(openingMovement(existing.id, fill.inventory_on_hand));
+      }
       continue;
     }
     const [product] = await knex('products_catalog').insert({
@@ -153,33 +164,36 @@ exports.up = async function up(knex) {
       customer_visibility: 'internal_only',
     }).returning('*');
 
-    if (item.pricing && hasPricing) {
-      await knex('vendor_pricing').insert({
-        product_id: product.id,
-        vendor_id: gemplers.id,
-        price: item.pricing.price,
-        quantity: item.pricing.quantity,
-        unit: 'each',
-        vendor_sku: item.pricing.vendor_sku,
-        vendor_product_url: item.pricing.vendor_product_url,
-        is_best_price: true,
-        // Owner-supplied manual price: the best-price recalc only accepts
-        // approved / auto_approved rows, and the column defaults to pending
-        // (GH codex r3 P2). Same shape as the 20260710 pre-slab seed.
-        ...(await knex.schema.hasColumn('vendor_pricing', 'approval_status') ? { approval_status: 'approved' } : {}),
-      });
-    }
-    if (hasMovements && item.inventory_on_hand > 0) {
-      await knex('product_inventory_movements').insert({
-        product_id: product.id,
-        movement_type: 'restock',
-        quantity: item.inventory_on_hand,
-        unit: 'each',
-        stock_before: 0,
-        stock_after: item.inventory_on_hand,
-        metadata: { source: 'seed_migration', reason: 'Opening count — Gemplers order #666365 (2026-07-28) less ~10 used, owner ruling 2026-09-03' },
-      });
-    }
+    if (item.pricing && hasPricing) await knex('vendor_pricing').insert(pricingRow(product.id, item));
+    if (hasMovements && item.inventory_on_hand > 0) await knex('product_inventory_movements').insert(openingMovement(product.id, item.inventory_on_hand));
+  }
+
+  function pricingRow(productId, item) {
+    return {
+      product_id: productId,
+      vendor_id: gemplers.id,
+      price: item.pricing.price,
+      quantity: item.pricing.quantity,
+      unit: 'each',
+      vendor_sku: item.pricing.vendor_sku,
+      vendor_product_url: item.pricing.vendor_product_url,
+      is_best_price: true,
+      // Owner-supplied manual price: the best-price recalc only accepts
+      // approved / auto_approved rows, and the column defaults to pending
+      // (GH codex r3 P2). Same shape as the 20260710 pre-slab seed.
+      ...(hasApproval ? { approval_status: 'approved' } : {}),
+    };
+  }
+  function openingMovement(productId, onHand) {
+    return {
+      product_id: productId,
+      movement_type: 'restock',
+      quantity: onHand,
+      unit: 'each',
+      stock_before: 0,
+      stock_after: onHand,
+      metadata: { source: 'seed_migration', reason: 'Opening count — Gemplers order #666365 (2026-07-28) less ~10 used, owner ruling 2026-09-03' },
+    };
   }
 };
 
