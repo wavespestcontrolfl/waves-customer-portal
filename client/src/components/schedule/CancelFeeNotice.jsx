@@ -24,7 +24,10 @@ export function useCancelFeeNotice(serviceId, { enabled = true, scope = 'this_on
   const [state, setState] = useState({ status: 'loading', preview: null });
 
   useEffect(() => {
-    if (!enabled || !serviceId) return undefined;
+    // Disabled (dialog closed) or no visit: drop the cached verdict so a
+    // reopen — possibly for a different visit — never flashes stale
+    // billing copy (Codex #3806 r3 P2).
+    if (!enabled || !serviceId) { setState({ status: 'loading', preview: null }); return undefined; }
     let cancelled = false;
     setState({ status: 'loading', preview: null });
     fetchCardHoldCancelPreview(serviceId).then((preview) => {

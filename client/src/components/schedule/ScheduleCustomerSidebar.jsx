@@ -209,7 +209,7 @@ export default function ScheduleCustomerSidebar({
     setCancelling(true);
     // Card-hold visits inside the late-cancel window: ask whether this is a
     // business-initiated cancel (waive the fee) before committing.
-    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id);
+    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id, { scope: cancelScope });
     if (!proceed) { setCancelling(false); return; }
     try {
       const reasonParts = [];

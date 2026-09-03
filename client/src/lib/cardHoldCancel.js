@@ -54,8 +54,20 @@ export async function fetchCardHoldCancelPreview(serviceId) {
  *
  * @returns {Promise<{proceed: boolean, waiveCardHoldFee: boolean}>}
  */
-export async function confirmCardHoldFeeChoice(serviceId) {
+export async function confirmCardHoldFeeChoice(serviceId, { scope = 'this_only' } = {}) {
   const preview = await fetchCardHoldCancelPreview(serviceId);
+  const isAdmin = () => getAdminUser()?.role === 'admin';
+  // Series cancel (following / all): the server applies ONE waive choice to
+  // every target, and siblings are judged on their own saved cards without
+  // a preview here. When the displayed visit's own verdict would skip the
+  // prompt, the admin still needs a place to waive a sibling's fee — a
+  // Waves-initiated series cancel must not bill the customer for lack of a
+  // prompt (Codex #3806 r3 P1). Undetermined / chargeable verdicts fall
+  // through to their own prompts below, which already carry the waiver.
+  const seriesWide = scope !== 'this_only';
+  const seriesWaiverPrompt = () => window.confirm(
+    'The other appointments in this series are cancelled with this one and are judged on their own saved cards. If any of them draws a late-cancel fee, waive it?\n\nOK = waive — Waves-initiated cancel (rain-out, sick day).\nCancel = charge the customer if it applies — customer-initiated late cancel.',
+  );
 
   // Undetermined verdict: the in-window "will be charged" prompt would lie,
   // so show the rule's own neutral sentence (Codex #3800 r1 P1). The
@@ -68,7 +80,7 @@ export async function confirmCardHoldFeeChoice(serviceId) {
     if (!window.confirm(`${preview.rule.text}\n\nContinue with the cancellation?`)) {
       return { proceed: false, waiveCardHoldFee: false };
     }
-    if (preview.rule.code !== 'unresolved' || getAdminUser()?.role !== 'admin') {
+    if (preview.rule.code !== 'unresolved' || !isAdmin()) {
       return { proceed: true, waiveCardHoldFee: false };
     }
     const waiveIfApplies = window.confirm(
@@ -77,7 +89,10 @@ export async function confirmCardHoldFeeChoice(serviceId) {
     return { proceed: true, waiveCardHoldFee: waiveIfApplies };
   }
 
-  if (!preview?.feeApplies) return { proceed: true, waiveCardHoldFee: false };
+  if (!preview?.feeApplies) {
+    if (seriesWide && isAdmin()) return { proceed: true, waiveCardHoldFee: seriesWaiverPrompt() };
+    return { proceed: true, waiveCardHoldFee: false };
+  }
 
   const fee = fmtFee(preview.feeAmount);
   // Prefer the server's rule sentence (sticky reschedules charge days
@@ -90,7 +105,7 @@ export async function confirmCardHoldFeeChoice(serviceId) {
   if (!window.confirm(`${chargeCopy}\n\nContinue with the cancellation?`)) {
     return { proceed: false, waiveCardHoldFee: false };
   }
-  if (getAdminUser()?.role !== 'admin') return { proceed: true, waiveCardHoldFee: false };
+  if (!isAdmin()) return { proceed: true, waiveCardHoldFee: false };
   const waive = window.confirm(
     `Waive ${fee}?\n\nOK = waive — Waves-initiated cancel (rain-out, sick day).\nCancel = charge the customer — customer-initiated late cancel.`,
   );

@@ -2452,9 +2452,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     setCancelling(true);
     // Card-hold visits inside the late-cancel window: the fee decision comes
     // first — backing out of it aborts the cancel entirely.
-    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(
-      service.id,
-    );
+    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id, { scope: cancelScope });
     if (!proceed) {
       setCancelling(false);
       return;
