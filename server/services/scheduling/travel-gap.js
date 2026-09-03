@@ -37,6 +37,16 @@
  *     never the buffer — the buffer is the turnaround between two customers.
  *   - An overlap (negative gap) is also a violation, so a caller may use this
  *     as its only predicate; the SQL overlap fast paths stay where they are.
+ *   - CUSTOMER-FACING surfaces only (owner ruling 2026-09-03): the estimate
+ *     picker, /book + reschedule + re-service, the voice agent, the rebooker,
+ *     the AI assistant / lead-response booking lane. Staff-side and
+ *     call-driven writers (admin-schedule, admin-leads, call-booking-catalog,
+ *     call-recording-processor's booking flag, annual-prepay renewals,
+ *     visit-group moves, window-rules) keep their overlap-only probes on
+ *     purpose: those are office decisions, ADVISORY by owner ruling
+ *     2026-08-25 (staff saves never block on conflicts), and the drive term
+ *     there belongs to the route optimizer. `travel` is opt-in so every
+ *     legacy probe stays byte-identical.
  */
 const { driveMin } = require('../auto-dispatch/geo');
 const { gateEnvValue } = require('../../config/feature-gates');
