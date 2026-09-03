@@ -1911,6 +1911,30 @@ export function OneTimePriceCard({ oneTimePrice, breakdown }) {
   );
 }
 
+// Service copy pack (server: estimate-one-time-copy.js, delivered as
+// item.copy on the /data contract) — the same outcome + bullet + terms
+// shape the recurring PriceCard rows carry, so a one-time service reads
+// like a plan card (owner 2026-09-03). Shared by the standalone
+// OneTimeBreakdownCard and the rows embedded in a service section.
+function OneTimeRowCopy({ copy }) {
+  if (!copy) return null;
+  return (
+    <>
+      <div style={{ fontSize: 15, color: '#3F4A65', marginTop: 6, lineHeight: 1.5 }}>
+        {copy.outcome}
+      </div>
+      {Array.isArray(copy.includes) && copy.includes.length ? (
+        <RowInclusions items={copy.includes} collapsible />
+      ) : null}
+      {copy.terms ? (
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 10, lineHeight: 1.5 }}>
+          {copy.terms}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 // Stable identity for a one-time breakdown row — the exclusion handshake
 // between the embedded per-service rows and the standalone card below.
 // The identity is the FULL row (service + label + amount + quote state),
@@ -1989,25 +2013,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                     {item.detail}
                   </div>
                 ) : null}
-                {/* Service copy pack (server: estimate-one-time-copy.js) — the
-                    same outcome + bullet + terms shape the recurring
-                    PriceCard rows carry, so a one-time service reads like a
-                    plan card (owner 2026-09-03). */}
-                {item.copy ? (
-                  <>
-                    <div style={{ fontSize: 15, color: '#3F4A65', marginTop: 6, lineHeight: 1.5 }}>
-                      {item.copy.outcome}
-                    </div>
-                    {Array.isArray(item.copy.includes) && item.copy.includes.length ? (
-                      <RowInclusions items={item.copy.includes} collapsible />
-                    ) : null}
-                    {item.copy.terms ? (
-                      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 10, lineHeight: 1.5 }}>
-                        {item.copy.terms}
-                      </div>
-                    ) : null}
-                  </>
-                ) : null}
+                <OneTimeRowCopy copy={item.copy} />
                 {quoteNote ? (
                   <div style={{ fontSize: 12, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     {quoteNote}
@@ -4221,6 +4227,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
                 <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
                   {amount} gets every station in the ground.
                 </div>
+                <OneTimeRowCopy copy={item.copy} />
               </div>
             );
           }
@@ -4231,6 +4238,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
                 {item.detail ? (
                   <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
                 ) : null}
+                <OneTimeRowCopy copy={item.copy} />
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                 {amount}

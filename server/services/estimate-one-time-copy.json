@@ -59,12 +59,12 @@
     }
   },
   "flea": {
-    "outcome": "Fleas out of the house and the yard, with the egg cycle broken so they don't come back — 100% guaranteed.",
+    "outcome": "Fleas out of the house and the yard, with the egg cycle broken so they don’t come back.",
     "includes": [
       "Indoor insect growth regulator (IGR) treatment to break the breeding cycle",
       "Yard treatment focused on shaded harborage where flea larvae develop",
       "Products chosen with pets in mind — treated areas are safe once dry, and your technician confirms the re-entry timing on the day",
-      "Coordination guidance with your pet's vet treatment — the pet is half the job",
+      "Coordination guidance with your pet’s vet treatment — the pet is half the job",
       "A prep email before your visit — what to wash, what to clear, and how to get pets ready"
     ],
     "includesByVisits": {
@@ -75,10 +75,10 @@
         "Single knockdown visit — a follow-up at the 14-day egg-hatch window can be added if activity continues"
       ]
     },
-    "assurance": "If they come back, so do we — 100% guaranteed with the Waves Guarantee",
+    "assurance": "If they come back, so do we — retreat guaranteed with the Waves Guarantee once the prep checklist and pet treatment are done",
     "terms": "Pay on service day. No recurring schedule, no contract.",
     "aiTitle": "Waves AI sized this flea treatment to your home and yard",
-    "aiBody": "Flea treatment covers the interior and the shaded yard areas where larvae develop, so the price reflects the whole cycle — not just the rooms with bites.",
+    "aiBody": "Flea treatment is priced by the areas being treated — interior rooms, and the shaded yard areas where larvae develop when the exterior is included — so the price reflects the scope you chose.",
     "askChips": [
       "Does my pet need to be treated too?",
       "How many visits will it take?",
@@ -89,8 +89,13 @@
     "hero": {
       "eyebrow": "Your flea treatment",
       "h1": "Hello {first}, your flea treatment quote is ready!",
-      "sub": "Interior and yard treatment priced from your home, with the follow-up built in — approve online and pick a day. Licensed & insured, 100% guaranteed."
-    }
+      "sub": "Interior and yard treatment priced from your home, with the follow-up built in — approve online and pick a day. Licensed & insured."
+    },
+    "outcomeInteriorOnly": "Fleas out of the house, with the egg cycle broken so they don’t come back.",
+    "yardBullet": "Yard treatment focused on shaded harborage where flea larvae develop",
+    "assuranceNone": null,
+    "termsNoWarranty": "Pay on service day. Single visit — no retreat warranty; add the follow-up visit for the guarantee.",
+    "heroSubInteriorOnly": "Interior treatment priced from your home — approve online and pick a day. Licensed & insured."
   },
   "wasp": {
     "outcome": "The nest gone and the yard yours again — usually the same day.",
@@ -114,8 +119,11 @@
     "hero": {
       "eyebrow": "Your wasp & hornet service",
       "h1": "Hello {first}, your wasp & hornet quote is ready!",
-      "sub": "Nest treatment and removal priced by species and location — approve online and pick a day. Licensed & insured, 30-day callback included."
-    }
+      "sub": "Nest treatment priced by species and location, physical removal when you add it — approve online and pick a day. Licensed & insured, 30-day callback included."
+    },
+    "outcomeNoRemoval": "The nest knocked out and the yard yours again — usually the same day.",
+    "removalBullet": "Nest treatment and physical removal",
+    "noRemovalBullet": "Nest treatment — physical nest removal is available as an add-on"
   },
   "bed_bug": {
     "outcome": "Sleep in your own bed again. A full treatment cycle sized to the infestation, with a follow-up at the egg-hatch window.",
@@ -140,7 +148,7 @@
         "Heat or chemical treatment cycle, sized to the infestation scope"
       ]
     },
-    "assurance": "Written 30-day guarantee on the treated areas",
+    "assurance": null,
     "terms": "Pay on service day. No contract.",
     "aiTitle": "Waves AI sized this treatment to the rooms with activity",
     "aiBody": "We priced by room count and treatment method so the cycle covers everywhere bed bugs hide — not just the bed.",
@@ -251,7 +259,8 @@
       "eyebrow": "Your termite trenching quote",
       "h1": "Hello {first}, your termite trenching quote is ready!",
       "sub": "A continuous liquid barrier priced from your measured foundation — our team reviews it and confirms scheduling with you. Licensed & insured."
-    }
+    },
+    "outcomeRepellent": "A continuous liquid barrier around your foundation — a treated zone termites will not cross."
   },
   "one_time_mosquito": {
     "outcome": "One barrier treatment where mosquitoes actually rest — for a party, a bad stretch, or to try us out.",

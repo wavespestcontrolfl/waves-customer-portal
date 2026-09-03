@@ -49,15 +49,17 @@ const SERVICE_KEY_TO_COPY = {
   bed_bug_heat: 'bed_bug',
   wasp: 'wasp',
   stinging_insect: 'wasp',
-  trap_only_setup: 'trap_only',
+  stinging_insect_v2: 'wasp',
+  // Only the retainer row carries the monitoring-plan pack — the setup fee
+  // and extra-callback component rows stay bare (codex #3823 r1 P2).
   trap_only_retainer: 'trap_only',
-  trap_only_extra_callback: 'trap_only',
   rodent_trapping: 'rodent_trapping',
   rodent_trapping_followup: 'rodent_trapping',
   rodent_exclusion: 'rodent_exclusion',
   exclusion: 'rodent_exclusion',
-  rodent_plugging: 'rodent_exclusion',
-  rodent_wire_mesh: 'rodent_exclusion',
+  // rodent_plugging / rodent_wire_mesh price a component (N entry points,
+  // measured linear feet) — never the whole-home exclusion pack (codex
+  // #3823 r1 P1); they stay unresolved until they get their own copy.
   termite_foam: 'termite_foam',
   foam_drill: 'termite_foam',
   trenching: 'termite_trenching',
@@ -154,13 +156,36 @@ function resolveOneTimeServiceCopy(item = {}) {
     // Method bullet leads the list (it is the treatment itself).
     includes.unshift(...variant);
   }
-  const assurance = entry.assurance || null;
+  // Sold-scope adjustments (codex #3823 r1): copy must never promise
+  // scope or a guarantee the priced row does not carry.
+  let outcome = entry.outcome;
+  let assurance = entry.assurance || null;
+  let terms = entry.terms || null;
+  let lines = includes;
+  if (key === 'flea') {
+    const exteriorPriced = ['priced', 'requires_confirmation'].includes(String(item.exteriorStatus || ''));
+    if (!exteriorPriced) {
+      lines = lines.filter((line) => line !== entry.yardBullet);
+      outcome = entry.outcomeInteriorOnly || outcome;
+    }
+    if (String(item.warrantyType || '').toLowerCase() === 'none') {
+      assurance = null;
+      terms = entry.termsNoWarranty || terms;
+    }
+  }
+  if (key === 'wasp' && item.nestRemovalSelected !== true) {
+    lines = lines.map((line) => (line === entry.removalBullet ? entry.noRemovalBullet : line));
+    outcome = entry.outcomeNoRemoval || outcome;
+  }
+  if (key === 'termite_trenching' && String(item.chemistryType || '') === 'repellent_pyrethroid') {
+    outcome = entry.outcomeRepellent || outcome;
+  }
   return {
     key,
-    outcome: fillVisits(entry.outcome, visits),
-    includes: includes.map((line) => fillVisits(line, visits)).concat(assurance ? [assurance] : []),
+    outcome: fillVisits(outcome, visits),
+    includes: lines.map((line) => fillVisits(line, visits)).concat(assurance ? [assurance] : []),
     assurance,
-    terms: entry.terms || null,
+    terms,
   };
 }
 
@@ -186,12 +211,14 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
   const entry = key ? PACK[key] : null;
   if (!entry || !entry.hero) return null;
   const visits = Number(rows[0].visits) || (key === 'flea' && String(rows[0].offerKey || '').includes('two_visit') ? 2 : 0);
+  const fleaInteriorOnly = key === 'flea'
+    && !['priced', 'requires_confirmation'].includes(String(rows[0].exteriorStatus || ''));
   return {
     key,
     hero: {
       eyebrow: entry.hero.eyebrow,
       h1: fillVisits(entry.hero.h1, visits),
-      sub: fillVisits(entry.hero.sub, visits),
+      sub: fillVisits(fleaInteriorOnly && entry.heroSubInteriorOnly ? entry.heroSubInteriorOnly : entry.hero.sub, visits),
     },
     ...(entry.aiTitle ? { aiTitle: entry.aiTitle, aiBody: entry.aiBody } : {}),
     askChips: Array.isArray(entry.askChips) ? [...entry.askChips] : [],

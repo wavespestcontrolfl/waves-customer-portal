@@ -34,10 +34,14 @@ describe('oneTimeCopyKeyFor', () => {
     expect(oneTimeCopyKeyFor({ service: 'wasp', label: 'Wasp / Hornet Nest Treatment' })).toBe('wasp');
     expect(oneTimeCopyKeyFor({ service: 'stinging_insect', label: 'Yellowjacket Ground Nest' })).toBe('wasp');
     expect(oneTimeCopyKeyFor({ service: 'rodent_exclusion', label: 'Full Rodent Exclusion' })).toBe('rodent_exclusion');
-    expect(oneTimeCopyKeyFor({ service: 'rodent_plugging', label: 'Rodent Entry-Point Plugging' })).toBe('rodent_exclusion');
-    expect(oneTimeCopyKeyFor({ service: 'rodent_wire_mesh', label: 'Rodent Wire Mesh Exclusion Service' })).toBe('rodent_exclusion');
+    expect(oneTimeCopyKeyFor({ service: 'stinging_insect_v2', label: 'Stinging Insect — Paper wasp' })).toBe('wasp');
+    // Component rodent work (N entry points / measured mesh) is NOT the whole-home exclusion pack.
+    expect(oneTimeCopyKeyFor({ service: 'rodent_plugging', label: 'Rodent Entry-Point Plugging' })).toBeNull();
+    expect(oneTimeCopyKeyFor({ service: 'rodent_wire_mesh', label: 'Rodent Wire Mesh Exclusion Service' })).toBeNull();
     expect(oneTimeCopyKeyFor({ service: 'rodent_trapping', label: 'Rodent Trapping' })).toBe('rodent_trapping');
-    expect(oneTimeCopyKeyFor({ service: 'trap_only_setup', label: 'Trap-Only Setup / Inspection' })).toBe('trap_only');
+    // Only the retainer row carries the monitoring pack; component fees stay bare.
+    expect(oneTimeCopyKeyFor({ service: 'trap_only_setup', label: 'Trap-Only Setup / Inspection' })).toBeNull();
+    expect(oneTimeCopyKeyFor({ service: 'trap_only_extra_callback', label: 'Extra callback' })).toBeNull();
     expect(oneTimeCopyKeyFor({ service: 'trap_only_retainer', label: 'Standard Trap-Only Retainer Service' })).toBe('trap_only');
     expect(oneTimeCopyKeyFor({ service: 'termite_foam', label: 'Termidor Foam Spot Treatment' })).toBe('termite_foam');
     expect(oneTimeCopyKeyFor({ service: 'trenching', label: 'Termite Trenching' })).toBe('termite_trenching');
@@ -97,13 +101,38 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(three.includes).not.toContain('Visit 2 about 10–14 days later — re-fog, re-bait, and confirm zero live activity');
   });
 
-  test('flea: two-visit package gets the follow-up bullet, single knockdown does not; both 100% guaranteed (owner 2026-09-03)', () => {
-    const two = resolveOneTimeServiceCopy({ service: 'flea_package', label: 'Flea Elimination Package', offerKey: 'flea_elimination_two_visit' });
+  test('flea: copy follows the priced row — warranty from warrantyType, yard bullet only when the exterior was priced', () => {
+    const two = resolveOneTimeServiceCopy({ service: 'flea_package', label: 'Flea Elimination Package', offerKey: 'flea_elimination_two_visit', warrantyType: 'conditional_retreat', exteriorStatus: 'priced' });
     expect(two.includes).toContain('Follow-up visit at the 14-day egg-hatch window');
-    expect(two.assurance).toMatch(/100% guaranteed/);
-    const one = resolveOneTimeServiceCopy({ service: 'flea_knockdown_single', label: 'Flea Knockdown', visits: 1 });
+    expect(two.includes).toContain('Yard treatment focused on shaded harborage where flea larvae develop');
+    expect(two.assurance).toMatch(/retreat guaranteed with the Waves Guarantee once the prep checklist and pet treatment are done/);
+    expect(two.outcome).toMatch(/house and the yard/);
+
+    const one = resolveOneTimeServiceCopy({ service: 'flea_knockdown_single', label: 'Flea Knockdown', visits: 1, warrantyType: 'none', exteriorStatus: 'not_included' });
     expect(one.includes.some((line) => line.startsWith('Single knockdown visit'))).toBe(true);
-    expect(one.assurance).toMatch(/100% guaranteed/);
+    expect(one.includes).not.toContain('Yard treatment focused on shaded harborage where flea larvae develop');
+    expect(one.assurance).toBeNull();
+    expect(one.includes.join(' ')).not.toMatch(/guarantee/i);
+    expect(one.outcome).toBe('Fleas out of the house, with the egg cycle broken so they don’t come back.');
+    expect(one.terms).toMatch(/no retreat warranty/);
+    // Hero subline follows the same scope.
+    expect(oneTimeOnlyIntelligenceCopy([{ ...one, service: 'flea_knockdown_single', amount: 200, exteriorStatus: 'not_included' }]).hero.sub).toMatch(/^Interior treatment/);
+  });
+
+  test('wasp: physical removal is promised only when the removal add-on was priced', () => {
+    const treated = resolveOneTimeServiceCopy({ service: 'wasp', label: 'Wasp Nest Treatment', nestRemovalSelected: false });
+    expect(treated.includes[0]).toBe('Nest treatment — physical nest removal is available as an add-on');
+    expect(treated.outcome).toMatch(/^The nest knocked out/);
+    const removed = resolveOneTimeServiceCopy({ service: 'wasp', label: 'Wasp Nest Treatment', nestRemovalSelected: true });
+    expect(removed.includes[0]).toBe('Nest treatment and physical removal');
+    expect(removed.outcome).toMatch(/^The nest gone/);
+  });
+
+  test('trenching: the colony-transfer claim only rides non-repellent chemistry', () => {
+    const fipronil = resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching', chemistryType: 'non_repellent' });
+    expect(fipronil.outcome).toMatch(/carry it back to the colony/);
+    const pyrethroid = resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching', chemistryType: 'repellent_pyrethroid' });
+    expect(pyrethroid.outcome).toBe('A continuous liquid barrier around your foundation — a treated zone termites will not cross.');
   });
 
   test('bed bug: the treatment-method bullet leads and follows the priced method', () => {
@@ -111,10 +140,12 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(heat.includes[0]).toMatch(/Whole-room heat to 120°F\+/);
     const chem = resolveOneTimeServiceCopy({ service: 'bed_bug', label: 'Bed Bug Chemical Treatment — 2 room(s), 2 visit(s)' });
     expect(chem.includes[0]).toMatch(/Liquid and dust treatment/);
-    expect(chem.assurance).toBe('Written 30-day guarantee on the treated areas');
+    // The bed-bug pricer persists warrantyEligible:false — no guarantee line (codex #3823 r1).
+    expect(chem.assurance).toBeNull();
+    expect(chem.includes.join(' ')).not.toMatch(/guarantee/i);
   });
 
-  test('one-time pest keeps the 30-day callback; termite and rodent exclusion/trapping carry NO guarantee line', () => {
+  test('one-time pest keeps the 30-day callback; termite, bed bug, and rodent exclusion/trapping carry NO guarantee line', () => {
     expect(resolveOneTimeServiceCopy({ service: 'one_time_pest', label: 'One-Time Pest Control' }).assurance).toMatch(/^30-day callback/);
     for (const row of [
       { service: 'termite_bait', label: 'Termite Bait Station Installation' },
@@ -122,6 +153,7 @@ describe('resolveOneTimeServiceCopy', () => {
       { service: 'bora_care', label: 'Bora-Care Wood Treatment' },
       { service: 'termite_foam', label: 'Termite Foam Treatment' },
       { service: 'trenching', label: 'Termite Trenching' },
+      { service: 'bed_bug', label: 'Bed Bug Heat Treatment — 2 room(s)' },
       { service: 'rodent_exclusion', label: 'Rodent Exclusion' },
       { service: 'rodent_trapping', label: 'Rodent Trapping' },
     ]) {
@@ -331,7 +363,7 @@ describe('server-rendered page', () => {
     expect(html).toContain('<h1>Hello Test, your estimate is ready!</h1>');
     expect(html).not.toContain('class="hero-sub"');
     expect(html).toContain('Gel bait placed where German roaches actually live');
-    expect(html).toContain('Nest treatment and physical removal');
+    expect(html).toContain('Nest treatment — physical nest removal is available as an add-on');
     expect(html).not.toContain('Waves AI sized this cleanout to your infestation');
   });
 

@@ -17243,6 +17243,11 @@ function normalizeOneTimeBreakdown(estData) {
         prepChecklistRequired: item.prepChecklistRequired === true,
         petSourceAttestationRequired: item.petSourceAttestationRequired === true,
         exteriorStatus: item.exteriorStatus || null,
+        // Sold-scope flags the one-time copy pack keys off (codex #3823 r1):
+        // trenching chemistry (repellent barriers get no colony-transfer
+        // claim) and whether wasp nest removal was actually priced.
+        chemistryType: item.chemistryType || null,
+        nestRemovalSelected: Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal,
       });
     }
   };
