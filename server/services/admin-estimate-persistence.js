@@ -2906,10 +2906,19 @@ async function reviseAdminEstimate({
     // callLogId survives a payload that never carried it.
     const revisedFields = { ...writeFields };
     if (typeof revisedFields.estimate_data === 'string') {
+      // Only the PARSE is guarded (unparseable on either side: fall through
+      // to the predicates). The hold check below is a DB read and runs
+      // OUTSIDE the catch — a swallowed failure there would continue with
+      // the pre-lock blob, dropping a hold stamped between the pre-read and
+      // the row lock (pre-push codex P0 on #3804 r4).
+      let lockedData = null;
+      let pendingData = null;
       try {
-        const lockedData = typeof lockedPrior.estimate_data === 'string'
+        lockedData = typeof lockedPrior.estimate_data === 'string'
           ? JSON.parse(lockedPrior.estimate_data) : (lockedPrior.estimate_data || {});
-        const pendingData = JSON.parse(revisedFields.estimate_data);
+        pendingData = JSON.parse(revisedFields.estimate_data);
+      } catch { lockedData = null; pendingData = null; }
+      {
         if (pendingData && typeof pendingData === 'object' && lockedData && typeof lockedData === 'object') {
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
@@ -2950,7 +2959,7 @@ async function reviseAdminEstimate({
           }
           revisedFields.estimate_data = JSON.stringify(pendingData);
         }
-      } catch { /* unparseable on either side: fall through to the predicates */ }
+      }
     }
     const [row] = await trx('estimates')
       .where({ id: estimate.id })

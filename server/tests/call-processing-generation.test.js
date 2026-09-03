@@ -602,6 +602,12 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     const route = src('../routes/admin-estimates.js');
     expect(route).toContain('delete nextEngine.reprice_pending_at;');
     expect(persistence).toContain('unitHoldSatisfied(trx, lockedEngine.callLogId || null, revisedAddress)');
+    // The hold read runs OUTSIDE the parse catch: a DB failure aborts the revision instead of
+    // continuing with the pre-lock blob that never carried the hold (pre-push codex P0 on #3804 r4).
+    const parseCatchAt = persistence.indexOf('} catch { lockedData = null; pendingData = null; }');
+    expect(parseCatchAt).toBeGreaterThan(-1);
+    expect(persistence.indexOf('unitHoldSatisfied(trx, lockedEngine.callLogId || null, revisedAddress)')).toBeGreaterThan(parseCatchAt);
+    expect(persistence).not.toContain('} catch { /* unparseable on either side: fall through to the predicates */ }');
     // Grouped siblings honor the hold at preflight, at the claim, and at publication — and a hold that
     // zero-rows the publication is a FAILURE (released), never read as a concurrent acceptance.
     expect(route).toContain('if (siblingRepricePending(sibling)) {');
