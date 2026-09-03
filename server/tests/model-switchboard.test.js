@@ -237,6 +237,25 @@ describe('model-switchboard', () => {
     }
   });
 
+  it('the image lane resolves BLOG_IMAGE_PROVIDER as a chain: first valid slug, literal when none is valid', () => {
+    const prev = process.env.BLOG_IMAGE_PROVIDER;
+    try {
+      process.env.BLOG_IMAGE_PROVIDER = 'gemini-image-best, gpt-image-2';
+      jest.resetModules();
+      let lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
+      expect(lane.primary.model).toBe(MODELS.GEMINI_IMAGE_BEST);
+      expect(lane.primary.provider).toBe('gemini');
+      expect(lane.primary.setEnv).toBe('BLOG_IMAGE_PROVIDER');
+
+      process.env.BLOG_IMAGE_PROVIDER = 'not-a-provider';
+      jest.resetModules();
+      lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
+      expect(lane.primary.model).toBe('gpt-image-2');
+    } finally {
+      if (prev === undefined) delete process.env.BLOG_IMAGE_PROVIDER; else process.env.BLOG_IMAGE_PROVIDER = prev;
+    }
+  });
+
   it('locks the lanes a generic picker must not move', () => {
     const { lanes, selectors } = sb.getSwitchboard();
     for (const id of ['call_extraction', 'transcription', 'embeddings', 'image_gen', 'mentions_prober']) {

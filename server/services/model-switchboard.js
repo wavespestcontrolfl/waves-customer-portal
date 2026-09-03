@@ -120,7 +120,11 @@ const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live }
 // D(env | [env, ...aliases], literal): the call site reads the first set var
 // in order (satellite: OPENAI_VISION_MODEL || OPENAI_MODEL || 'gpt-5-mini').
 // The composer writes the FIRST (specific) name; aliases only report.
-const D = (env, literal, opts = {}) => ({ kind: 'env', env, literal, live: !!opts.live, accepts: opts.accepts });
+//   opts.parse(value)  when the env value is not a bare model id (the image
+//                      chain "gpt-image-2,gemini-image-best"): returns the
+//                      model id the call site actually runs first, or null to
+//                      fall back to the literal exactly as the call site does.
+const D = (env, literal, opts = {}) => ({ kind: 'env', env, literal, live: !!opts.live, accepts: opts.accepts, parse: opts.parse || null });
 //   S(providerEnv, legs) provider switch, exactly as call-recording-processor.js
 //                      and call-research-miner.js build their route: primary =
 //                      legs[process.env[providerEnv] || 'openai']; fallback =
@@ -159,6 +163,16 @@ const LOCK = {
   registration: (detail) => ({ kind: 'registration', label: 'Registered agent', detail }),
 };
 const AGENT_LOCK = LOCK.registration('Anthropic Managed Agents · model set at registration; re-register to move it');
+
+// BLOG_IMAGE_PROVIDER is a comma-separated provider chain, not a model id:
+// the first VALID slug is what the generator tries first (an all-invalid
+// value falls back to its default chain, hence null → the literal). Lazy
+// require: image-generator pulls in fetch + logger at load.
+function firstImageChainModel(value) {
+  const { parseChain, MODEL_MAP } = require('./content/image-generator')._internals;
+  const [first] = parseChain(value);
+  return first ? MODEL_MAP[first].model : null;
+}
 
 // Lane extras: `retry` = the leg tried after the fallback leg (the fan-out
 // photo lanes re-run Gemini on GEMINI_VISION_FALLBACK; the sequential caption
@@ -324,7 +338,7 @@ const LANES = [
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
-  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' } }), T('GEMINI_IMAGE_BEST'), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'chain: gpt-image-2 → gpt-image-1.5 → gpt-image-1 → GEMINI_IMAGE_BEST → GEMINI_IMAGE_STABLE' }),
+  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), T('GEMINI_IMAGE_BEST'), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'chain: gpt-image-2 → gpt-image-1.5 → gpt-image-1 → GEMINI_IMAGE_BEST → GEMINI_IMAGE_STABLE' }),
   L('video_gen', 'Reels video generation', 'content/video-generator.js', 'locked', T('GEMINI_VIDEO_FAST'), T('GEMINI_VIDEO_QUALITY'), { lock: LOCK.provider('video chain') }),
   L('mentions_prober', 'LLM mentions prober (Claude, OpenAI, Gemini, Perplexity arms)', 'seo/llm-mention-prober.js', 'locked', E('MODEL_MENTIONS', T('WORKHORSE'), { live: true }), null, { lock: LOCK.measurement('each engine is probed directly; a fallback would falsify the measurement'), note: 'OPENAI_MENTIONS_MODEL gpt-4o-search-preview · GEMINI_MENTIONS_MODEL gemini-2.5-flash · PERPLEXITY_MENTIONS_MODEL sonar' }),
   L('sealed_eval', 'SMS sealed-eval exam legs', 'sms-sealed-eval.js', 'locked', T('SMS_SONNET'), T('OPENAI_REPORT_WRITER'), { lock: LOCK.measurement('frozen exam; Gemini / Luna / Opus / Fable measurement legs too') }),
@@ -687,7 +701,8 @@ function resolveRef(ref) {
       // first name); `afterUnpin` is the next lower-priority alias still set.
       const afterUnpin = setName ? names.slice(names.indexOf(setName) + 1).map((n) => process.env[n]).find(Boolean) || null : null;
       if (ref.literal !== undefined) {
-        const model = (setName && process.env[setName]) || ref.literal;
+        const raw = (setName && process.env[setName]) || null;
+        const model = (raw && (ref.parse ? ref.parse(raw) : raw)) || ref.literal;
         const via = setName ? `${setName}${setName !== primaryName ? ' (alias)' : ''}` : `${primaryName} (code default)`;
         return { model, selector: null, via, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
       }
