@@ -17,7 +17,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { anthropicCreate } = require('./llm/call');
 const MODELS = require('../config/models');
 
 // Order-independent content hash of a set of photo data URLs (each hashed, then
@@ -147,7 +146,7 @@ async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropicCreate(anthropic, {
+    const response = await anthropic.messages.create({
       model: MODELS.VISION,
       max_tokens: 500,
       messages: [{

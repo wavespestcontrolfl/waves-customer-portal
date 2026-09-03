@@ -18,7 +18,6 @@
  */
 
 const logger = require('../logger');
-const { anthropicCreate } = require('../llm/call');
 const MODELS = require('../../config/models');
 
 let Anthropic;
@@ -72,7 +71,7 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropicCreate(anthropic, {
+    const response = await anthropic.messages.create({
       model: MODELS.VISION,
       max_tokens: 300,
       messages: [{

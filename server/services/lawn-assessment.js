@@ -8,7 +8,6 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { anthropicCreate } = require('./llm/call');
 const MODELS = require('../config/models');
 const { normalizeGrassType } = require('./lawn-grass-context');
 
@@ -148,7 +147,7 @@ async function callClaudeVision(base64Image, mimeType, context = {}) {
 
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropicCreate(anthropic, {
+    const response = await anthropic.messages.create({
       model: MODELS.VISION,
       max_tokens: 500,
       messages: [{

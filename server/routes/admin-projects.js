@@ -10,7 +10,6 @@
  */
 
 const express = require('express');
-const { anthropicCreate } = require('../services/llm/call');
 const router = express.Router();
 const crypto = require('crypto');
 const multer = require('multer');
@@ -535,7 +534,7 @@ function normalizeWdoTreatmentPhotoResult(raw) {
 async function extractWdoTreatmentPhoto({ photo, propertyAddress }) {
   const Anthropic = require('@anthropic-ai/sdk');
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const msg = await anthropicCreate(anthropic, {
+  const msg = await anthropic.messages.create({
     model: MODELS.VISION,
     max_tokens: 700,
     messages: [{

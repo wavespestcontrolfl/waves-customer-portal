@@ -385,21 +385,11 @@ function recordDispatchOutcome(policy, outcome) {
   }
 }
 
-// Direct-SDK Anthropic create for the sites that bypass the policy dispatcher
-// (vision scorers, OCR, commitments). Callers never send sampling controls —
-// current Anthropic models reject them — so there is no retry here. Kept as
-// the one seam those sites share so any per-call observability (the in-flight
-// agent-control call ledger) can wrap direct calls in one place.
-async function anthropicCreate(client, request) {
-  return client.messages.create(request);
-}
-
 module.exports = {
   // Exported so a caller reasoning about how long one pass can run reads the
   // dispatcher's REAL budget instead of mirroring the number (see
   // utils/claim-ceiling.js).
   DEFAULT_FALLBACK_BUDGET_MS,
-  anthropicCreate,
   callOpenAI,
   callGemini,
   callAnthropic,
