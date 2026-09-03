@@ -233,3 +233,99 @@ describe('TimeGridDay all-day closeout-owed chip', () => {
     expect(onViewCustomer).not.toHaveBeenCalled();
   });
 });
+
+describe('TimeGridDay visit-group office actions', () => {
+  const SAME_CUSTOMER = [
+    {
+      id: 'svc-lawn', customerId: 'cust-h', customerName: 'Houser Customer', status: 'confirmed',
+      windowStart: '11:00', windowEnd: '12:00', windowDisplay: '11–12', technicianId: 'tech-1', technicianName: 'Alex Tech',
+    },
+    {
+      id: 'svc-pest', customerId: 'cust-h', customerName: 'Houser Pest', status: 'confirmed',
+      windowStart: '14:00', windowEnd: '15:00', windowDisplay: '2–3 PM', technicianId: 'tech-1', technicianName: 'Alex Tech',
+    },
+  ];
+
+  it('offers Combine only for two or more rows of one customer, and posts them to the group route', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ visit: { id: 'v1' }, moved: [{ id: 'svc-pest', start: '12:00', end: '13:00' }] }),
+    });
+    const onChange = vi.fn();
+    render(
+      <TimeGridDay
+        date="2026-09-04"
+        services={[...SERVICES, ...SAME_CUSTOMER]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={onChange}
+        canGroup
+      />,
+    );
+    // Two different customers: no Combine.
+    fireEvent.click(screen.getByTitle(/First Customer/), { shiftKey: true });
+    fireEvent.click(screen.getByTitle(/Second Customer/), { shiftKey: true });
+    expect(screen.queryByRole('button', { name: 'Combine' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+
+    fireEvent.click(screen.getByTitle(/Houser Customer/), { shiftKey: true });
+    expect(screen.queryByRole('button', { name: 'Combine' })).toBeNull();
+    fireEvent.click(screen.getByTitle(/Houser Pest/), { shiftKey: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Combine' }));
+
+    await waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toMatch(/\/admin\/visits\/group$/);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ serviceIds: ['svc-lawn', 'svc-pest'] });
+    expect(window.alert).toHaveBeenCalledWith(expect.stringMatching(/Moved 1 service to follow the earlier one: 12 PM–1 PM\. No text was sent/));
+  });
+
+  it('shows the server refusal sentence, not the JSON envelope', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false, status: 409, statusText: 'Conflict',
+      text: async () => JSON.stringify({ error: 'This customer is on autopay — visits are not grouped until grouped autopay ships.', code: 'visit_group_refused' }),
+    });
+    render(
+      <TimeGridDay date="2026-09-04" services={SAME_CUSTOMER} technicians={[{ id: 'tech-1', name: 'Alex Tech' }]} onChange={vi.fn()} canGroup />,
+    );
+    fireEvent.click(screen.getByTitle(/Houser Customer/), { shiftKey: true });
+    fireEvent.click(screen.getByTitle(/Houser Pest/), { shiftKey: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Combine' }));
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith(
+      'Combine failed: This customer is on autopay — visits are not grouped until grouped autopay ships.',
+    ));
+  });
+
+  it('hides Combine while grouping is off (the day list reports GATE_VISIT_GROUPS); Separate stays', () => {
+    const grouped = SAME_CUSTOMER.map((s) => ({ ...s, visit: { id: 'v1', serviceCount: 2, serviceTypes: ['Lawn', 'Pest'] } }));
+    render(
+      <TimeGridDay date="2026-09-04" services={grouped} technicians={[{ id: 'tech-1', name: 'Alex Tech' }]} onChange={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByTitle(/Houser Customer/), { shiftKey: true });
+    fireEvent.click(screen.getByTitle(/Houser Pest/), { shiftKey: true });
+    expect(screen.queryByRole('button', { name: 'Combine' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    fireEvent.click(screen.getByTitle(/Houser Pest/), { shiftKey: true });
+    expect(screen.getByRole('button', { name: 'Separate' })).toBeTruthy();
+  });
+
+  it('offers Separate for exactly one grouped row and posts to the split route', async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ visit: { id: 'v1' } }) });
+    const onChange = vi.fn();
+    const grouped = SAME_CUSTOMER.map((s) => ({ ...s, visit: { id: 'v1', serviceCount: 2, serviceTypes: ['Lawn', 'Pest'] } }));
+    render(
+      <TimeGridDay date="2026-09-04" services={grouped} technicians={[{ id: 'tech-1', name: 'Alex Tech' }]} onChange={onChange} />,
+    );
+    fireEvent.click(screen.getByTitle(/Houser Pest/), { shiftKey: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    await waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toMatch(/\/admin\/visits\/v1\/split$/);
+    expect(JSON.parse(init.body)).toEqual({ serviceId: 'svc-pest' });
+    // Two grouped rows selected: Combine (already one visit) but no Separate.
+    fireEvent.click(screen.getByTitle(/Houser Customer/), { shiftKey: true });
+    fireEvent.click(screen.getByTitle(/Houser Pest/), { shiftKey: true });
+    expect(screen.queryByRole('button', { name: 'Separate' })).toBeNull();
+  });
+});
