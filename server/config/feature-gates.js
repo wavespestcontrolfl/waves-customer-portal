@@ -32,6 +32,7 @@
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
+ *   GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE=true (portal GET /api/billing/cards stamps holdsAppointment on a card holding a future secured visit, so Remove opens the call-us disclaimer; removal itself is never blocked — off = field absent, payload unchanged)
  *   GATE_PAYMENT_METHOD_CHANGE_EMAILS=true (customer lifecycle emails for Auto Pay turned OFF and saved method REMOVED — portal, and Stripe-dashboard detaches via webhook)
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
@@ -127,6 +128,17 @@ const gates = {
   // remove + best-effort, non-transactional Auto Pay disable). Customer-
   // facing money surface — fail-closed ==='true' in every environment.
   portalMethodRemovalGuard: process.env.GATE_PORTAL_METHOD_REMOVAL_GUARD === 'true',
+
+  // Portal card-removal hold notice (owner ruling 2026-09-03): a saved card
+  // that secures a FUTURE visit (held estimate_card_holds row, or a fee-
+  // agreed appointment_card_requests row) is stamped holdsAppointment on
+  // GET /api/billing/cards, and the portal's Remove opens a disclaimer —
+  // the visit and its agreed late-cancel fee survive removal, call us or
+  // reschedule. Removal is NEVER refused (card-network stored-credential
+  // rules: the customer can always withdraw consent). Off = field absent,
+  // payload byte-identical. Customer-facing money surface — fail-closed
+  // ==='true' in every environment.
+  portalCardRemovalHoldNotice: process.env.GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE === 'true',
 
   // Negative lifecycle emails (payment.autopay_disabled /
   // payment.method_removed) — the positive counterparts have shipped for

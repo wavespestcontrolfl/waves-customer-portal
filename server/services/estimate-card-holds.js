@@ -444,6 +444,60 @@ async function heldCardForScheduledService(scheduledServiceId) {
     .first();
 }
 
+// Live secured visits a saved card is holding (portal card-removal notice,
+// owner ruling 2026-09-03). Read-only, keyed by the customer + Stripe pm
+// the portal is about to detach. "Live" on the hold rail = status 'held',
+// not parked, visit not closed, start still ahead; on the appointment rail
+// = a 'completed' capture that actually agreed fee terms (fee_agreed_at —
+// a 'satisfied' auto-secure never saw the disclosure and never fee-charges)
+// with no fee event yet. Rows the start cannot be composed for are skipped:
+// the notice describes a dated visit, and the charge paths keep their own
+// fail-closed handling of an unresolvable start. Throws on a failed read —
+// the caller decides how to fail. Ordered soonest first.
+const LIVE_VISIT_CLOSED_STATUSES = ['cancelled', 'completed', 'no_show', 'skipped'];
+async function liveHoldsForPaymentMethod({ customerId, stripePaymentMethodId, now = new Date() }) {
+  if (!customerId || !stripePaymentMethodId) return [];
+  const { composeScheduledApptTime } = require('./appointment-reminders');
+  const visitCols = ['ss.id as service_id', 'ss.visit_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.reschedule_token'];
+  const holdRows = await db('estimate_card_holds as h')
+    .join('scheduled_services as ss', 'ss.id', 'h.scheduled_service_id')
+    .where({ 'h.customer_id': customerId, 'h.stripe_payment_method_id': stripePaymentMethodId, 'h.status': 'held' })
+    .whereNull('h.parked_at')
+    .whereNotIn('ss.status', LIVE_VISIT_CLOSED_STATUSES)
+    .select([...visitCols, 'h.no_show_fee_amount']);
+  const apptRows = await db('appointment_card_requests as r')
+    .join('scheduled_services as ss', 'ss.id', 'r.scheduled_service_id')
+    .where({ 'r.customer_id': customerId, 'r.stripe_payment_method_id': stripePaymentMethodId, 'r.status': 'completed' })
+    .whereNotNull('r.fee_agreed_at')
+    .whereNull('r.fee_status')
+    .whereNotIn('ss.status', LIVE_VISIT_CLOSED_STATUSES)
+    .select([...visitCols, 'r.no_show_fee_amount']);
+  const nowMs = now.getTime();
+  const seen = new Set();
+  const live = [];
+  for (const [lane, rows] of [['card_hold', holdRows], ['appointment_card', apptRows]]) {
+    for (const row of rows) {
+      const start = composeScheduledApptTime(row);
+      const startMs = start ? start.getTime() : NaN;
+      if (!Number.isFinite(startMs) || startMs <= nowMs) continue;
+      const serviceId = String(row.service_id);
+      if (seen.has(serviceId)) continue;
+      seen.add(serviceId);
+      live.push({
+        lane,
+        scheduledServiceId: serviceId,
+        // scheduled_services.visit_id = the stop's group id (groupedVisit reads it).
+        groupVisitId: row.visit_id || null,
+        start,
+        serviceType: row.service_type || null,
+        rescheduleToken: row.reschedule_token || null,
+        feeAmount: Number(row.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : cardHoldNoShowFee(),
+      });
+    }
+  }
+  return live.sort((a, b) => a.start - b.start);
+}
+
 // Reschedule-orphan DETECTION (owner lane 2026-08-25, prod incident): an
 // operator reschedule composed as cancel + fresh create — no single code
 // path does cancel+recreate, so no hook can follow it — leaves the hold's
@@ -2296,6 +2350,7 @@ module.exports = {
   handleCardHoldSetupIntentSucceeded,
   heldCardForScheduledService,
   hasHeldCard,
+  liveHoldsForPaymentMethod,
   chargeCardHoldOnCompletion,
   chargeCardHoldForRecapCompletion,
   resolveOrMintRecapCompletionInvoice,

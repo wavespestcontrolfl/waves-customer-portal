@@ -5353,5 +5353,7 @@ AppointmentReminders.buildServiceLabel = buildServiceLabel;
 // destructure got undefined and the cancel previews fell into their
 // fail-closed "fee may apply" branch for every secured visit.
 AppointmentReminders.scheduledServiceApptTime = scheduledServiceApptTime;
+// Same composition for callers that already hold the row (joined reads).
+AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 
 module.exports = AppointmentReminders;

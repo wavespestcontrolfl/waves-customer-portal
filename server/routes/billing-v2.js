@@ -299,6 +299,43 @@ router.get('/cards', async (req, res, next) => {
       .orderBy('is_default', 'desc')
       .orderBy('created_at', 'desc');
 
+    // GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE (owner ruling 2026-09-03): a
+    // card holding a FUTURE secured visit carries the soonest one, so the
+    // portal's Remove opens the call-us disclaimer instead of the plain
+    // confirm. Gate off → field absent → payload byte-identical to today.
+    // Best-effort: a failed lookup omits the field (the customer sees the
+    // legacy confirm; the charge paths keep their own revocation handling)
+    // rather than breaking the wallet.
+    const holdsByCard = new Map();
+    if (isEnabled('portalCardRemovalHoldNotice')) {
+      // Lazy, same as GET /schedule's reschedule-public read: the wallet
+      // route must not pull the card-fee rails into every boot path.
+      const { liveHoldsForPaymentMethod } = require('../services/estimate-card-holds');
+      const { groupedVisit } = require('./reschedule-public');
+      const { normalizeServiceType } = require('../utils/service-normalizer');
+      for (const c of cards) {
+        if (!c.stripe_payment_method_id) continue;
+        try {
+          const [soonest] = await liveHoldsForPaymentMethod({ customerId: req.customerId, stripePaymentMethodId: c.stripe_payment_method_id });
+          if (!soonest) continue;
+          // Same posture as GET /schedule: a grouped (or unknown-membership)
+          // stop is not customer self-reschedulable, so no link.
+          const grouped = soonest.rescheduleToken
+            ? await groupedVisit({ id: soonest.scheduledServiceId, visit_id: soonest.groupVisitId })
+            : true;
+          holdsByCard.set(c.id, {
+            serviceId: soonest.scheduledServiceId,
+            start: soonest.start.toISOString(),
+            serviceType: normalizeServiceType(soonest.serviceType),
+            feeAmount: soonest.feeAmount,
+            rescheduleUrl: grouped ? null : `/reschedule/${soonest.rescheduleToken}`,
+          });
+        } catch (err) {
+          logger.warn(`[billing-v2] card-hold notice lookup failed for method ${c.id}: ${err.message}`);
+        }
+      }
+    }
+
     res.json({
       cards: cards.map(c => ({
         id: c.id,
@@ -313,6 +350,7 @@ router.get('/cards', async (req, res, next) => {
         bankName: c.bank_name || null,
         bankLastFour: c.bank_last_four || null,
         achStatus: c.ach_status || null,
+        ...(holdsByCard.has(c.id) ? { holdsAppointment: holdsByCard.get(c.id) } : {}),
       })),
     });
   } catch (err) {
