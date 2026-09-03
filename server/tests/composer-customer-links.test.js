@@ -1095,6 +1095,29 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     expect(r.error).toMatch(/not on the Waves portal/);
   });
 
+  test('a statement link: payable + active payer AP phone passes; anything else refuses', async () => {
+    const STMT = 'f'.repeat(64);
+    const body = `Pay here: portal.wavespestcontrol.com/pay/statement/${STMT}`;
+    const wireStmt = ({ stmt, payer }) => {
+      mockBuilders = {
+        payer_statements: chainBuilder({ firstRow: stmt }),
+        payers: chainBuilder({ firstRow: payer }),
+      };
+    };
+    wireStmt({ stmt: { id: 31, payer_id: 7, status: 'sent' }, payer: { id: 7, ap_phone: '(941) 555-0100' } });
+    expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
+    expect(mockBuilders.payer_statements.where).toHaveBeenCalledWith({ token: STMT });
+    expect(mockBuilders.payers.where).toHaveBeenCalledWith({ id: 7, active: true });
+    wireStmt({ stmt: { id: 31, payer_id: 7, status: 'sent' }, payer: { id: 7, ap_phone: '(941) 555-0100' } });
+    expect((await bearerLinkSendCheck(body, '5551234567', {})).error).toMatch(/payer's AP phone/);
+    wireStmt({ stmt: { id: 31, payer_id: 7, status: 'paid' }, payer: { id: 7, ap_phone: '(941) 555-0100' } });
+    expect((await bearerLinkSendCheck(body, '9415550100', {})).error).toMatch(/no longer payable/);
+    wireStmt({ stmt: null, payer: null });
+    expect((await bearerLinkSendCheck(body, '9415550100', {})).error).toMatch(/no longer payable/);
+    wireStmt({ stmt: { id: 31, payer_id: 7, status: 'sent' }, payer: null });
+    expect((await bearerLinkSendCheck(body, '9415550100', {})).error).toMatch(/payer's AP phone/);
+  });
+
   test('a visit-lane /secure link: pending + owner passes, a completed row refuses, a customer-kind row is left to the Auto Pay seam', async () => {
     const secure = `Secure your visit: portal.wavespestcontrol.com/secure/${TOKEN}`;
     wire({ card: { id: 'r1', kind: 'visit', status: 'pending', customer_id: 'c1' } });

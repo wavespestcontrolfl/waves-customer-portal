@@ -659,9 +659,12 @@ async function expiringLinkSendCheck(body) {
  *               or expired link matches nothing → refuse).
  *   card      — /secure/<token> visit-lane rows (kind 'visit'; the Auto Pay
  *               seam judges kind 'customer'): status must still be pending.
- * For both, the row's customer must own the recipient number, and — when
- * the route trusts a customer id — be that customer. FAIL CLOSED on any
- * miss. { ok: true } when nothing applies or everything checks out.
+ *   statement — /pay/statement/<token>: a payable payer_statements row whose
+ *               ACTIVE payer's AP phone is the recipient number (a statement
+ *               is the payer's, never a customer's — no customer-id trust).
+ * For contract and card, the row's customer must own the recipient number,
+ * and — when the route trusts a customer id — be that customer. FAIL
+ * CLOSED on any miss. { ok: true } when nothing applies or all checks out.
  */
 async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
   const runs = decodedRuns(body);
@@ -693,6 +696,20 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
     if (dead) return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
     const bad = await owned(row.customer_id, 'contract signing link');
     if (bad) return bad;
+  }
+
+  for (const run of linkRuns(runs, /\/pay\/statement\//i)) {
+    const token = canonicalPortalToken(run, host, /^\/pay\/statement\/([0-9a-f]{64})$/i);
+    if (!token) return refuse('A statement link in this message is not on the Waves portal — remove it before sending.');
+    const { isPayableStatementStatus } = require('./payer-statement-settle');
+    const stmt = await db('payer_statements').where({ token }).first('id', 'payer_id', 'status');
+    if (!stmt || !isPayableStatementStatus(stmt.status)) {
+      return refuse('This statement link is no longer payable — remove it and insert a fresh one.');
+    }
+    const payer = await db('payers').where({ id: stmt.payer_id, active: true }).first('id', 'ap_phone');
+    if (!payer || !last10(payer.ap_phone) || last10(payer.ap_phone) !== String(toLast10 || '')) {
+      return refuse("This statement link only goes to the payer's AP phone on file — remove it before sending.");
+    }
   }
 
   for (const run of secureLinkRuns(runs)) {
