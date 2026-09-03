@@ -4519,6 +4519,12 @@ function priceMosquito(property, options = {}) {
   const manualReviewReasons = uniqueList([
     ...areaResolution.manualReviewReasons,
     ...categoryResolution.manualReviewReasons,
+    // A synthetic/default lot (caller passed lotSizeMeasured:false) is not a
+    // treatable-area measurement — resolveMosquitoTreatableArea grades any
+    // positive lot MEDIUM, so the flag is the only thing that distinguishes
+    // a parcel from a guess (same contract as priceCommercialMosquito and
+    // priceOneTimeMosquito; owner ruling 2026-09-03).
+    options.lotSizeMeasured === false ? 'mosquito_treatable_area_unverified' : null,
     pressureBeforeCap > MOSQUITO.pressureCap ? 'pressure_cap_reached' : null,
     marginFloorOk ? null : 'margin_below_floor',
     stationQty >= 6 ? 'high_station_count' : null,
