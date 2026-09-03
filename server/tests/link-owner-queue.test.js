@@ -635,6 +635,29 @@ describe('decideDomain (Reject / Watch)', () => {
     expect(approvals(db)).toHaveLength(0);
   });
 
+  test('a HELD domain (fee scope changed under a purchase) says the owner regroup is required — never that the nightly re-decides it', async () => {
+    const { db } = await parked({ make: paidPath });
+    const fee = openRows(db, 'payment')[0];
+    await Q.approveRow(db, { authorityId: fee.id, actor: ACTOR, approvedAmountCents: 4500, now: NOW, bridge: inline });
+    // re-investigation moves the fee to account_wide while a purchase (the valid approval) exists: the selection holds the domain
+    storedPath(db).fee_scope = 'account_wide';
+    const cards = (await Q.listOwnerQueue(db)).cards;
+    expect(cards.length).toBeGreaterThan(0);
+    const other = cards.find((c) => c.placement.id !== fee.prospect_id).rows.find((r) => r.action === 'purchase');
+    expect(other).toMatchObject({ approvable: false, why_not: expect.stringMatching(/held for the owner's regroup \(step 5\); the nightly bridge does not select/) });
+    expect(other.why_not).not.toMatch(/nightly bridge re-decides/);
+    await expect(Q.approveRow(db, { authorityId: other.id, actor: ACTOR, approvedAmountCents: 4500, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/held for the owner's regroup/) });
+    // the bridge's own park for this case (OWNER_INPUT_REQUIRED with the regroup reason) reads the same — not as a quote to enter
+    Object.assign(rows(db).find((r) => r.id === other.id), { level: 'OWNER_INPUT_REQUIRED', reason: 'fee scope changed after payment activity: the owner performs the regroup' });
+    const again = (await Q.listOwnerQueue(db)).cards.find((c) => c.placement.id !== fee.prospect_id).rows.find((r) => r.id === other.id);
+    expect(again.why_not).toMatch(/held for the owner's regroup/);
+    // an unheld inputs change still reads as the nightly's to re-decide
+    const fresh = await parked({ make: paidPath });
+    storedPath(fresh.db).estimated_cost_cents = 9900;
+    const card = (await Q.listOwnerQueue(fresh.db)).cards[0].rows.find((r) => r.action === 'purchase');
+    expect(card.why_not).toMatch(/nightly bridge re-decides/);
+  });
+
 describe('acquireAnyway', () => {
   test('DENY: the failing floors are waived at their values, the bridge lifts the rejection and parks cards without a bell', async () => {
     const s = scenario({ domain: { spam_score: 30, score: 40 } });

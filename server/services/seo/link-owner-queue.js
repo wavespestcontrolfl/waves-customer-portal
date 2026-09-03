@@ -38,7 +38,7 @@
 const P = require('./link-authority-policy');
 const R = require('./link-registry');
 const { lockProspectDomain } = require('./prospect-domain-lock');
-const { BRIDGE_STATES } = require('./link-authority-selection');
+const { BRIDGE_STATES, groupMismatch, expectedLocations, paidPlacementIds } = require('./link-authority-selection');
 
 const AUTH = 'seo_link_placement_authorities';
 const PARKED = 'awaiting_owner';
@@ -92,7 +92,9 @@ function whyNotApprovable(row, path = null) {
   if (row.level === P.LEVELS.INVALID) return 'not actionable until re-investigated';
   if (row.dimension === 'communication') return 'approved by the authenticated send from the outreach queue';
   if (row.level === P.LEVELS.OWNER_HUMAN_STEP) return 'a human performs this step; the runner checkpoint records it';
-  if (row.level === P.LEVELS.OWNER_INPUT_REQUIRED) return 'price entry required — re-investigate with a USD quote';
+  // the bridge parks a fee-scope change after payment activity as OWNER_INPUT_REQUIRED with its regroup reason: that is
+  // not a quote to enter — the owner's regroup (step 5) is required, and the nightly does not select the domain until then
+  if (row.level === P.LEVELS.OWNER_INPUT_REQUIRED) return /regroup/.test(String(row.reason)) ? REGROUP_HELD : 'price entry required — re-investigate with a USD quote';
   if (row.level === P.LEVELS.OWNER_MANUAL_PAYMENT) return 'settled outside the system at checkout';
   if (!(APPROVE_HERE[row.level] || []).includes(row.dimension)) return `${row.level} is not approvable from the queue`;
   // an attested path whose agreement the owner cannot open (no terms url in the evidence) authorizes nothing —
@@ -108,10 +110,12 @@ function whyNotApprovable(row, path = null) {
 // per-dimension path revision and the level the policy yields now must all still match, else the row waits
 // for the nightly bridge to re-decide it. A renewal instance (`2027:1`, `annual:1`) is opened by the renewal
 // claim, not by the decision function — it takes the payment dimension's current `-` verdict.
-function stalenessOf(row, ctx, waiver) {
+function stalenessOf(row, ctx, waiver, held = false) {
   const hash = P.decisionInputsHash(row.dimension, { ...ctx, instanceKey: row.instance_key });
   const pathRevision = pathRevisionFor(ctx.path, row.dimension);
-  if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== pathRevision) return { reason: 'inputs changed since the card — the nightly bridge re-decides it; refresh the queue', hash, pathRevision };
+  // a HELD domain (a payment-input change under a purchase — plan §3.3) is suppressed by the nightly selection: the
+  // stale stamp is not re-decided by any nightly run, the owner's regroup / shape review is what moves it
+  if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== pathRevision) return { reason: held ? REGROUP_HELD : 'inputs changed since the card — the nightly bridge re-decides it; refresh the queue', hash, pathRevision };
   const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: false, waiver });
   const renewal = row.dimension === 'payment' && R.RENEWAL_KIND_RE.test(String(row.instance_kind));
   const inst = decided.instances.find((i) => i.dimension === row.dimension && i.instance_kind === (renewal ? '-' : row.instance_kind));
@@ -182,6 +186,16 @@ function investigationOf(path) {
 }
 const legalTermsUrlOf = (path) => { const inv = investigationOf(path); return inv && inv.legal_terms_url ? inv.legal_terms_url : null; };
 
+const REGROUP_HELD = 'fee scope or lane shape changed after payment activity — held for the owner\'s regroup (step 5); the nightly bridge does not select this domain until then';
+// the selection module's HOLD, read the same way it reads it (plan §3.3): a paid placement outside the lane's shape, or
+// a fee_scope the paid group no longer matches — `all` = every placement of the domain, `paid` = paidPlacementIds
+function heldFor(domain, path, all, paid) {
+  if (!domain.best_path_id || !path) return false;
+  const expected = expectedLocations(path);
+  const mine = all.filter((p) => expected.includes(p.location_key));
+  return all.some((p) => paid.has(p.id)) && (all.some((p) => !expected.includes(p.location_key) && paid.has(p.id)) || groupMismatch(path, mine));
+}
+
 function pathRevisionFor(path, dimension) { return Number(path[`revision_${dimension}`] ?? path.revision ?? 1); }
 const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
 
@@ -202,13 +216,17 @@ async function listOwnerQueue(db) {
     .select('id', 'domain', 'agent_state', 'score', 'score_reasons', 'spam_score', 'domain_rating', 'organic_traffic', 'referring_domains', 'competitors_linked', 'best_path_id', 'source', 'discovery_priority');
   const domainById = new Map(domains.map((d) => [d.id, d]));
   const cardsFor = parked.filter((p) => domainById.has(p.domain_id));
+  if (!cardsFor.length) return { cards: [] };
+  // the selection's hold, per domain: EVERY placement of the domain (not only the cards) against its best path
+  const allPlacements = await db('seo_link_prospects').whereIn('domain_id', domains.map((d) => d.id)).select('id', 'domain_id', 'location_key', 'payment_group_id');
+  const paid = await paidPlacementIds(db, allPlacements.map((p) => p.id));
   // a card's path is the placement's OWN (`path_id`) — never the domain's best path standing in for a deleted one
   // (ON DELETE SET NULL): a substituted path would show the replacement's price or terms as the card's, and the click
   // refuses it anyway; the card reads as awaiting the bridge's rotation instead
-  if (!cardsFor.length) return { cards: [] };
   const pathIds = [...new Set([...domains.map((d) => d.best_path_id), ...cardsFor.map((p) => p.path_id)].filter(Boolean))];
   const paths = pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
   const pathById = new Map(paths.map((p) => [p.id, p]));
+  const heldDomain = new Set(domains.filter((d) => heldFor(d, pathById.get(d.best_path_id), allPlacements.filter((p) => p.domain_id === d.id), paid)).map((d) => d.id));
   const cardIds = new Set(cardsFor.map((p) => p.id));
   const rows = await loadApprovals(db, liveRows.filter((r) => cardIds.has(r.prospect_id)));
   const waivers = await db('seo_link_floor_waivers').whereIn('domain_id', domains.map((d) => d.id)).whereNull('invalidated_at').orderBy('approved_at', 'desc')
@@ -234,7 +252,7 @@ async function listOwnerQueue(db) {
     const path = pathById.get(p.path_id) || null;
     if (!path || path.id !== d.best_path_id) return false;
     const ctx = { path, domain: d, policy, score: d.score };
-    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && whyNotApprovable(r, path) === null && whyNotHere(p, r) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null).reason);
+    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && whyNotApprovable(r, path) === null && whyNotHere(p, r) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null, heldDomain.has(d.id)).reason);
   };
   const groupPrimary = new Map();
   const byId = [...cardsFor].sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -265,7 +283,7 @@ async function listOwnerQueue(db) {
       // the same freshness test the click applies — a stale stamp never shows a button that can only 409, and an
       // APPROVED row whose inputs moved since (price, policy, revision) is shown as awaiting the bridge's re-decision
       // rather than as live spending authority (the bridge invalidates it on its next pass)
-      const stale = onBestPath && (whyNot === null || whyNot === 'approved') ? stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null).reason : null;
+      const stale = onBestPath && (whyNot === null || whyNot === 'approved') ? stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null, heldDomain.has(d.id)).reason : null;
       if (!whyNot && stale) whyNot = stale;
       const sharedFee = shared && r.dimension === 'payment';
       const primary = !sharedFee || groupPrimary.get(p.payment_group_id) === p.id;
@@ -351,7 +369,9 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     // the card's frozen inputs must still be the live ones (§3.6b) — "an owner approved THESE numbers, not
     // whatever they became": the ONE test the listing applies before it shows a button
     const { waiver } = await activeWaiver(trx, domain.id, path.id, ctx);
-    const { reason: stale, hash, pathRevision } = stalenessOf(row, ctx, waiver);
+    const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'domain_id', 'location_key', 'payment_group_id');
+    const held = heldFor(domain, path, all, await paidPlacementIds(trx, all.map((p) => p.id)));
+    const { reason: stale, hash, pathRevision } = stalenessOf(row, ctx, waiver, held);
     if (stale) refuse(409, stale);
 
     const money = row.dimension === 'payment';

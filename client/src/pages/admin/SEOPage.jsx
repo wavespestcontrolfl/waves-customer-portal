@@ -3631,7 +3631,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                 <tbody>
                   {c.rows.map((r) => {
                     const rowBusy = busy === r.id;
-                    const approvedBy = r.approval && r.approval.decision === "approved" && !r.approval.invalidated_at ? r.approval : null;
+                    // the service's verdict, not the raw approval: a consumed approval on a still-unsatisfied row is spent — the card asks again
+                    const approvedBy = r.approved && r.approval ? r.approval : null;
                     return (
                       <tr key={r.id}>
                         <td style={{ ...tdStyle, fontFamily: "inherit" }}>
