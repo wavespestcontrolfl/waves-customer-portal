@@ -787,13 +787,14 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     }
     const base = { vendorSku, quantity, quoteCents };
     const placeArgs = adapterKey === 'siteone' ? await siteonePlaceArgs(conn, { base, vendor, ledger, releaseClaim, now, env }) : base;
+    const stopHeartbeat = startClaimHeartbeat(conn, ledger.id);
     try {
       placed = await adapter.place(placeArgs);
     } catch (err) {
       if (err.runLevel) { await releaseClaim(); throw err; }
       if (err.ambiguous) submitted = true;
       return await parkForPlaceError(conn, err, { ctx, vendor, quoteCents });
-    }
+    } finally { stopHeartbeat(); }
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
     const finalCents = placed.amountCents ?? quoteCents ?? null;
@@ -814,10 +815,23 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   return dispatchClaimed(conn, claim, { registry, notify, now, env });
 }
 
-// A `placing` row older than this had its process die mid-dispatch: the
-// vendor call may or may not have gone out. Park it for a human (post-submit
-// wording: never re-order), never retry the vendor call automatically.
+// Ownership lease (pre-push P0): while the vendor call is out, the owning
+// dispatcher touches the claim's updated_at every HEARTBEAT_MS. Stale
+// recovery parks a `placing` row only when its LAST heartbeat is older than
+// STALE_PLACING_MS — a slow but live SiteOne run (still able to click) is
+// never parked out from under itself, so the prior-order exclusion its claim
+// row provides cannot be released (revoked, cancelled) while it can still
+// submit. A dead process stops heartbeating and is parked after 30 minutes
+// of silence, post-submit wording (never re-order), never retried.
 const STALE_PLACING_MS = 30 * 60 * 1000;
+const HEARTBEAT_MS = 60 * 1000;
+
+function startClaimHeartbeat(conn, ledgerId) {
+  const beat = () => conn('vendor_orders').where({ id: ledgerId, status: 'placing' }).update({ updated_at: new Date() }).catch((err) => logger.warn(`[order-dispatch] heartbeat for ledger ${ledgerId} failed: ${err.message}`));
+  const timer = setInterval(beat, HEARTBEAT_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  return () => clearInterval(timer);
+}
 
 async function recoverStalePlacing({ conn = db, notify = null, now = new Date() } = {}) {
   const cutoff = new Date(now.getTime() - STALE_PLACING_MS);
@@ -826,8 +840,8 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .where('vo.status', 'placing')
-    .where('vo.created_at', '<', cutoff)
-    .select('vo.id', 'vo.adapter', 'vo.amount_cents', 'vo.created_at', 'prr.id as request_id', 'pc.name as product_name', 'v.id as vendor_id', 'v.name as vendor_name');
+    .where('vo.updated_at', '<', cutoff) // last heartbeat, not creation time
+    .select('vo.id', 'vo.adapter', 'vo.amount_cents', 'vo.created_at', 'vo.updated_at', 'prr.id as request_id', 'pc.name as product_name', 'v.id as vendor_id', 'v.name as vendor_name');
   const recovered = [];
   const bellPending = [];
   const unrecovered = [];
@@ -835,7 +849,7 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
     try {
       const parked = await park(conn, {
         ledger: { id: row.id }, request: { id: row.request_id }, product: { name: row.product_name || '?' }, vendor: { id: row.vendor_id, name: row.vendor_name || '?' }, adapterKey: row.adapter, notify,
-        reason: 'stale_placing', message: `the dispatcher died mid-order at ${new Date(row.created_at).toISOString()}; the ${row.vendor_name || 'vendor'} call may or may not have gone out.`, amountCents: row.amount_cents,
+        reason: 'stale_placing', message: `the dispatcher died mid-order (claimed ${new Date(row.created_at).toISOString()}, last heartbeat ${new Date(row.updated_at || row.created_at).toISOString()}); the ${row.vendor_name || 'vendor'} call may or may not have gone out.`, amountCents: row.amount_cents,
       });
       if (parked.skipped) continue; // settled by its own dispatcher between the scan and the park
       recovered.push(row.id);
@@ -913,5 +927,5 @@ module.exports = {
   assertManualActionAllowed,
   orderedQuantityFor,
   AUTO_ORDER_GATE: GATE,
-  _internals: { adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS },
+  _internals: { adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },
 };

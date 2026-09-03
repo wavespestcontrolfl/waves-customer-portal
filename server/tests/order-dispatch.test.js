@@ -600,6 +600,23 @@ test('a live manual/forecast request for the same product blocks the claim — s
   expect(a.place).not.toHaveBeenCalled();
 });
 
+test('the claim heartbeat touches only a row still placing, every 60 s, and stops with the vendor call (pre-push P0)', async () => {
+  jest.useFakeTimers();
+  try {
+    const dbFn = require('../models/db');
+    const { startClaimHeartbeat, HEARTBEAT_MS } = dispatch._internals;
+    const stop = startClaimHeartbeat(dbFn, 'ledger-1');
+    expect(HEARTBEAT_MS).toBe(60 * 1000);
+    jest.advanceTimersByTime(HEARTBEAT_MS * 2 + 10);
+    await Promise.resolve();
+    const beats = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.updated_at && Object.keys(u.row).length === 1);
+    expect(beats).toHaveLength(2);
+    stop();
+    jest.advanceTimersByTime(HEARTBEAT_MS * 3);
+    expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && Object.keys(u.row).length === 1)).toHaveLength(2);
+  } finally { jest.useRealTimers(); }
+});
+
 test('a placing row older than 30 minutes is parked needs_review with a do-not-re-order bell, never retried', async () => {
   mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), request_id: 'req-old', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
   const a = mockAdapter();
