@@ -452,13 +452,21 @@ describe('evidence helpers', () => {
     const categories = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_control', 'mosquito_control', 'control'] } } }));
     // One token list per category (a stopword-only category yields none).
     expect(categories).toEqual([['pest'], ['mosquito']]);
-    const tokens = categories.flat();
+    const [pest, mosquito] = categories;
     // The call's rolling extraction is never the source (a reprocess rewrites it).
     expect(requestedServiceTokens(item({ payload: { scheduling_window: {} }, call_extraction: { service_request: { primary_service_category: 'pest_control' } } }))).toEqual([]);
-    expect(serviceTypeMatches('Quarterly Pest Control', tokens)).toBe(true);
-    expect(serviceTypeMatches('Mosquito Treatment', tokens)).toBe(true);
-    expect(serviceTypeMatches('Lawn Care', tokens)).toBe(false);
+    expect(serviceTypeMatches('Quarterly Pest Control', pest)).toBe(true);
+    expect(serviceTypeMatches('Mosquito Treatment', mosquito)).toBe(true);
+    expect(serviceTypeMatches('Lawn Care', pest)).toBe(false);
     expect(serviceTypeMatches('Pest Control', [])).toBe(false);
+    // EVERY token of the category must appear — a related service sharing
+    // one token is not the requested one.
+    const [drywood] = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['drywood_termite'] } } }));
+    expect(serviceTypeMatches('Subterranean Termite Treatment', drywood)).toBe(false);
+    expect(serviceTypeMatches('Drywood Termite Treatment', drywood)).toBe(true);
+    const [exclusion] = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['rodent_exclusion'] } } }));
+    expect(serviceTypeMatches('Rodent Control', exclusion)).toBe(false);
+    expect(serviceTypeMatches('Rodent Control rodent_exclusion', exclusion)).toBe(true);
   });
 
   test('requestedWindow is ET calendar days: confirmed start first, then the requested range, null without either', () => {

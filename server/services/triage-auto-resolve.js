@@ -266,10 +266,15 @@ function requestedServiceTokens(item) {
   return out;
 }
 
-function serviceTypeMatches(serviceType, requestedTokens) {
+// A booking answers a requested category only when EVERY meaningful token
+// of the category appears in the booking's words (its service_type plus the
+// canonical category snapshot admin-schedule stamps): "Subterranean
+// Termite" is not drywood_termite, "Rodent Control" is not
+// rodent_exclusion.
+function serviceTypeMatches(serviceText, requestedTokens) {
   if (!requestedTokens.length) return false;
-  const words = new Set(String(serviceType || '').toLowerCase().split(/[^a-z]+/).filter(Boolean));
-  return requestedTokens.some((t) => words.has(t));
+  const words = new Set(String(serviceText || '').toLowerCase().split(/[^a-z]+/).filter(Boolean));
+  return requestedTokens.every((t) => words.has(t));
 }
 
 // The calendar days (ET, YYYY-MM-DD) the caller asked for, from the card's
@@ -767,7 +772,7 @@ function bookingCoversRequest(item, mine, { multiProperty, places }) {
       }));
     }
   }
-  return categories.every((tokens) => pool.some((v) => serviceTypeMatches(v.service_type, tokens)));
+  return categories.every((tokens) => pool.some((v) => serviceTypeMatches(`${v.service_type || ''} ${v.service_category_snapshot || ''}`, tokens)));
 }
 
 // Bookings and completed visits for the not_confirmed / address arms. With
@@ -800,7 +805,7 @@ async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
     .whereIn('customer_id', customerIds)
     .whereIn('status', [...LIVE_BOOKING_STATUSES])
     .orderBy('id', 'asc')
-    .select('id', 'customer_id', 'source_call_log_id', 'parent_service_id', 'status', 'service_type', 'scheduled_date',
+    .select('id', 'customer_id', 'source_call_log_id', 'parent_service_id', 'status', 'service_type', 'service_category_snapshot', 'scheduled_date',
       'created_at', 'completed_at', 'service_address_line1', 'service_address_city', 'service_address_zip', 'property_id');
   if (lock) q.forUpdate();
   const visits = await q;
