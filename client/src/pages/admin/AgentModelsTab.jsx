@@ -171,11 +171,15 @@ export default function AgentModelsTab() {
         const next = env && draft[env];
         if (!next || byEnv.has(env)) continue;
         const unpin = next === UNPIN;
-        const to = unpin ? effectiveLeg(l, leg) : next;
-        if (to === leg.model) continue;
         const sharing = data.lanes.filter((x) => x.primary.pinEnv === env || x.fallback?.pinEnv === env);
+        // Unpinning a shared env can land its lanes on different models (a
+        // selector-backed leg vs one with its own literal default), so the
+        // destination is the set of distinct results, not the first lane's.
+        const legOf = (x) => (x.primary.pinEnv === env ? x.primary : x.fallback);
+        const destinations = unpin ? [...new Set(sharing.map((x) => effectiveLeg(x, legOf(x))))] : [next];
+        if (destinations.length === 1 && destinations[0] === leg.model) continue;
         const label = sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.fallback ? " · fallback" : ""}`;
-        byEnv.set(env, { env, from: leg.model, to, unpin, label, lanes: sharing.length, restart: sharing.some((x) => x.applies !== "live") });
+        byEnv.set(env, { env, from: leg.model, to: destinations[0], destinations, unpin, label, lanes: sharing.length, restart: sharing.some((x) => x.applies !== "live") });
       }
     }
     return [...byEnv.values()];
@@ -183,7 +187,8 @@ export default function AgentModelsTab() {
 
   // Unpins are deletions: Railway has no "unset" syntax, so the line is an
   // instruction rather than an assignment.
-  const envBlock = changes.map((c) => (c.unpin ? `# delete ${c.env}  (unpin → ${modelLabel(catalog, c.to)})` : `${c.env}=${c.to}`)).join("\n");
+  const destLabel = (c) => (c.destinations || [c.to]).map((id) => modelLabel(catalog, id)).join(" / ");
+  const envBlock = changes.map((c) => (c.unpin ? `# delete ${c.env}  (unpin → ${destLabel(c)})` : `${c.env}=${c.to}`)).join("\n");
   const restartCount = changes.filter((c) => c.restart).length;
   const affectedLanes = data ? data.lanes.filter(laneChanged).length : 0;
 
@@ -517,8 +522,9 @@ export default function AgentModelsTab() {
               return (
                 <li key={c.env} className="flex flex-col gap-0.5 text-13">
                   <span className="text-zinc-900">
-                    <span className="font-medium">{c.label}</span>: {modelLabel(catalog, c.from)} → {modelLabel(catalog, c.to)}
+                    <span className="font-medium">{c.label}</span>: {modelLabel(catalog, c.from)} → {destLabel(c)}
                     {c.unpin ? " · delete the variable" : ""}
+                    {c.destinations?.length > 1 ? " · differs by lane" : ""}
                     {c.lanes > 1 ? ` · ${c.lanes} lanes` : ""}
                     {c.restart ? "" : " · next request"}
                   </span>
