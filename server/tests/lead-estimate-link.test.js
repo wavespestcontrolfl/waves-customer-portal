@@ -230,6 +230,7 @@ describe('lead-estimate link service', () => {
             whereNull: () => { conditional = true; return q; },
             whereNotIn: () => { conditional = true; return q; },
             whereIn: () => { conditional = true; return q; },
+            where: () => { conditional = true; return q; },
             first: async () => (lostRace.has(clause.id) ? opts.raceRows[clause.id] : (stamped.has(clause.id) && opts.afterStamp && opts.afterStamp[clause.id]) || (opts.leadsById || {})[clause.id]) || null,
             update: async (patch) => {
               if (conditional && opts.raceRows && opts.raceRows[clause.id]) { lostRace.add(clause.id); return 0; }
@@ -390,6 +391,12 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-origM', expect.objectContaining({ onlyIfStatusIn: expect.arrayContaining(['new']) }));
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    // The stamp this call made is reverted so the closed original is not
+    // left linked to the accepted repeat estimate (pre-push r12).
+    expect(database._updates).toEqual([
+      { id: 'lead-origM', patch: expect.objectContaining({ estimate_id: 'estimate-2m' }), conditional: true },
+      { id: 'lead-origM', patch: expect.objectContaining({ estimate_id: null }), conditional: true },
+    ]);
   });
 
   test('a live duplicate whose original is soft-deleted resolves to the named row: no conversion of the deleted original, no funnel on it', async () => {

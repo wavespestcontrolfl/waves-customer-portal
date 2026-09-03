@@ -601,10 +601,11 @@ async function markLinkedLeadEstimateAccepted({
   // conversion is never overwritten (codex #3834 r11 P1). The direct path
   // keeps its unconditional stamp and conversion as before.
   const convert = async (lead, { claim = null } = {}) => {
+    let stamped = 0;
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
       if (claim) stamp.whereNull('estimate_id').whereIn('status', claim);
-      const stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
+      stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
       if (claim && !stamped) {
         const current = await database('leads').where({ id: lead.id }).first('estimate_id', 'status');
         // Refresh the caller's row from the re-read so the fallback judges
@@ -623,6 +624,10 @@ async function markLinkedLeadEstimateAccepted({
       ...(claim ? { onlyIfStatusIn: claim } : {}),
     });
     if (claim && !converted) {
+      // The stamp landed but the status claim lost (a closure in between):
+      // a closed original must not stay linked to the accepted repeat
+      // estimate, so the stamp THIS call made is reverted (pre-push P1).
+      if (stamped) await database('leads').where({ id: lead.id }).where({ estimate_id: estimateId }).update({ estimate_id: null, updated_at: new Date() });
       const current = await database('leads').where({ id: lead.id }).first('estimate_id', 'status');
       if (current) Object.assign(lead, current);
       return false;
