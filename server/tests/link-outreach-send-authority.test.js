@@ -287,6 +287,12 @@ describe('one conversation per inbox (§13)', () => {
     expect(s.db._raws.some((r) => /link_outreach_inbox/.test(String(r)))).toBe(false); // the raw records the SQL, not the binding
     expect(s.db._raws.some((r) => /hashtext/.test(String(r)))).toBe(true);
   });
+  test('a gmail alias of an open conversation is the same inbox', async () => {
+    const s = scenario({ policy: AUTO_POLICY, placement: { outreach_to_email: 'editor@gmail.com' } });
+    await nightly(s.db);
+    s.db._tables.seo_link_prospects.push({ id: uid(), target_domain: 'other.org', target_page: '/', location_key: '-', status: 'contacted', outreach_status: 'sent', outreach_to_email: 'Edi.tor+news@googlemail.com', outreach_sent_at: EARLIER, link_type: 'editorial', updated_at: EARLIER });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'inbox_in_flight' });
+  });
   test('a draft re-addressed under the lock is not sent by a claim that locked another inbox', async () => {
     const s = scenario();
     await nightly(s.db);
