@@ -230,12 +230,13 @@ describe('outreach-lane paths', () => {
   });
   test('an exact homepage outreach row left UNBOUND by the manual endpoint is adopted, never stuck behind a null path', async () => {
     const { db, d, p } = scenario({ make: outreachPath });
-    const manual = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: null, path_id: null, status: 'prospect', link_type: null, source: 'manual', updated_at: EARLIER };
+    // created under a signup lane with a stale classification and an unsent draft: the lane, URL, classification and draft follow the outreach path (the registry move patch)
+    const manual = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: null, path_id: null, status: 'prospect', link_type: 'directory', target_url: 'https://example.org/add', automation_policy: 'auto', last_classified_at: EARLIER, outreach_status: 'drafted', outreach_subject: 'old', outreach_send_token: 'tok', source: 'manual', updated_at: EARLIER };
     db._tables.seo_link_prospects.push(manual);
     const r = await run(db);
     expect(r).toMatchObject({ decided: 1, placementsCreated: 0, rowsWritten: 1, skippedLeased: 0, errors: [] });
     expect(placements(db)).toHaveLength(1);
-    expect(placements(db)[0]).toMatchObject({ id: manual.id, domain_id: d.id, path_id: p.id, link_type: 'resource', authority: 'OWNER_OUTREACH' });
+    expect(placements(db)[0]).toMatchObject({ id: manual.id, domain_id: d.id, path_id: p.id, link_type: 'resource', target_url: null, automation_policy: null, last_classified_at: null, outreach_status: 'none', outreach_subject: null, outreach_send_token: null, authority: 'OWNER_OUTREACH' });
     expect(rows(db)[0]).toMatchObject({ prospect_id: manual.id, path_id: p.id, dimension: 'communication' });
   });
   test('an approved send with the fee DEFERRED to checkout reads ready_to_acquire — the deferred payment row holds nothing back', async () => {

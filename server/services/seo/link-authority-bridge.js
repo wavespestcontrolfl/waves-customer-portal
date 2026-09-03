@@ -43,7 +43,7 @@ const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { claimProspectDomain, findPlacementRow, targetPageOf } = require('./prospect-domain-lock');
-const { OUTREACH_ACQUISITION_TYPES, LEVEL_SEVERITY, settleRetiredPlacements } = require('./link-registry');
+const { OUTREACH_ACQUISITION_TYPES, LEVEL_SEVERITY, settleRetiredPlacements, movePatch } = require('./link-registry');
 const { SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
 const P = require('./link-authority-policy');
 
@@ -194,8 +194,14 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     if (row && !row.path_id) {
       // an UNBOUND row — exact homepage match or the in-flight conversation;
       // the manual prospect endpoint assigns no registry ids — is ADOPTED:
-      // bound to the domain and its best path (the mover cannot follow a null path)
-      const adopt = { domain_id: domain.id, path_id: path.id, updated_at: now, ...(row.link_type ? {} : { link_type: path.link_type }) };
+      // bound to the domain and its best path (the mover cannot follow a null
+      // path). Lane, execution URL, classification and an unsent draft follow
+      // the path through the ONE move patch (link-registry movePatch), so a
+      // row created under a signup lane is claimable by the outreach worker
+      // once bound to an outreach path; a locked/sent conversation keeps what
+      // it was sent under (the patch refuses it) and is only bound.
+      const sync = movePatch(row, path, now) || {};
+      const adopt = { ...sync, domain_id: domain.id, path_id: path.id, updated_at: now, ...(row.link_type || sync.link_type ? {} : { link_type: path.link_type }) };
       await trx('seo_link_prospects').where({ id: row.id }).update(adopt);
       Object.assign(row, adopt);
     }
