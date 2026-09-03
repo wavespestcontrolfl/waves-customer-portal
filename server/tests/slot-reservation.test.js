@@ -284,6 +284,38 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('reserveSlot refuses a row under a clarify re-price hold on the LOCKED read — generic not-found, no hold minted (codex r11 P0 on #3804)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const held = JSON.stringify({ estimatorEngine: { callLogId: 'call-1', reprice_pending_at: '2027-05-01T14:59:00Z', reprice_attempt: 'att-1' } });
+      const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', estimate_data: held });
+      const technicianBuilder = makeTechnicianBuilder();
+      const insertBuilder = makeInsertBuilder({ id: 'scheduled-123', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+      const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+        selectedFrequency: 'quarterly',
+      })).rejects.toMatchObject({ code: 'ESTIMATE_NOT_FOUND' });
+      expect(insertBuilder.insert).not.toHaveBeenCalled();
+      // A linkage marker takes the same door (the shared verdict).
+      const invalidated = JSON.stringify({ estimatorEngine: { invalidation_pending_at: '2027-05-01T14:59:00Z' } });
+      const estimateBuilder2 = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', estimate_data: invalidated });
+      const trx2 = makeTrx({ estimateBuilder: estimateBuilder2, technicianBuilder, scheduledBuilders: [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), makeInsertBuilder({ id: 'x' })] });
+      db.transaction = jest.fn(async (callback) => callback(trx2));
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+        selectedFrequency: 'quarterly',
+      })).rejects.toMatchObject({ code: 'ESTIMATE_NOT_FOUND' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('reserveSlot labels a one-time pest accept "Pest Control" and pins is_recurring=false', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));

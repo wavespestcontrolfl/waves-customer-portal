@@ -574,7 +574,9 @@ eligibility read never burns the grant, texts a link the renderer
 refuses, or pages the office with a 201 (the zero-row claim re-reads and
 answers the generic 404); `/bundle-inquiry` judges the locked row with
 the same verdict (409 "no longer active", the route's existing shape for
-an inactive row). A
+an inactive row); the slots `/reserve` write re-judges the LOCKED row
+with the same verdict before minting a hold (generic 404, no
+reservation). A
 group's held siblings are skipped at preflight, claim and publication;
 a held ANCHOR parks as `send_failed`. No enumeration signal: the hold
 is unobservable from outside beyond the accept/decline 409, which a held

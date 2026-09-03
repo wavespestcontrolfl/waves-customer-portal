@@ -672,8 +672,19 @@ async function reserveSlot({
           } catch { return null; }
         })();
         const eng = reservationData?.estimatorEngine;
+        // The ONE off-customer-surface verdict (linkage marker OR clarify
+        // re-price hold) on the LOCKED row, before any hold is minted: a
+        // unit reply that stamped the hold after the route's snapshot must
+        // not still reserve capacity for a quote the renderer refuses
+        // (codex r11 P0 on #3804). Same generic not-found as the
+        // quarantine below.
+        const { callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
+        if (estimateOffCustomerSurface(estimate)) {
+          const err = new Error('estimate is off the customer surface (linkage marker or re-price hold)');
+          err.code = 'ESTIMATE_NOT_FOUND';
+          throw err;
+        }
         if (eng?.callLogId) {
-          const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
           // Lock the call row and HOLD it through the reservation commit
           // (codex P1, PR #3304 — generation-rework GH round), mirroring
           // the deposit-confirm and manual-acceptance paths: with only an
@@ -685,8 +696,7 @@ async function reserveSlot({
           // estimates → call_log; no leads lock is taken in this txn, so
           // no cycle with the processor's leads → call_log writers.
           await trx('call_log').where({ id: eng.callLogId }).forUpdate().first('id');
-          const blocked = estimate.archived_at || eng.linkage_invalidated_at
-            || eng.invalidation_pending_at
+          const blocked = estimate.archived_at
             || await callSideBlockForEstimateData(trx, reservationData);
           if (blocked) {
             const err = new Error('estimate is quarantined by a call-linkage correction');
