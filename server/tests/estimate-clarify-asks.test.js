@@ -1313,6 +1313,16 @@ describe('unit_number ask (call pipeline lane)', () => {
     expect(extractUnitReply("It's Apt 204")).toBe('Apt 204');
     expect(extractUnitReply('Apt 204, 2 bedrooms')).toBe('Apt 204');
     expect(extractUnitReply('Apt 204, apt 204')).toBe('Apt 204');
+    // Every dwelling designator, KEPT (codex r16 P1 on #3804): a park lot/space or an office suite is its own key.
+    expect(extractUnitReply('Lot 12')).toBe('Lot 12');
+    expect(extractUnitReply('Space 7')).toBe('Space 7');
+    expect(extractUnitReply('Spc 7')).toBe('Spc 7');
+    expect(extractUnitReply('Suite 210')).toBe('Suite 210');
+    expect(extractUnitReply('Lot 12, 2 bedrooms')).toBe('Lot 12');
+    expect(extractUnitReply('Lot 12 or lot 13')).toBeNull();
+    expect(extractUnitReply('#204')).toBe('Apt 204');
+    // Structural designators are not a unit answer.
+    expect(extractUnitReply('Bldg 9')).toBeNull();
     expect(extractUnitReply('Yes, Apt 204 please')).toBe('Apt 204');
     expect(extractUnitReply("it's apt. 12B, thanks!")).toBe('Apt 12B');
     expect(extractUnitReply('Unit 7')).toBe('Apt 7');

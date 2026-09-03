@@ -1075,7 +1075,11 @@ function extractAddressReply(body) {
 // the 3rd floor" cannot capture "on" (codex r1 P2: the normalizer's
 // multi-letter and hyphenated forms are accepted).
 const UNIT_VALUE = '(?:[a-z]{0,3}\\d{1,5}(?:-?[a-z0-9]{1,4})?|[a-z]{1,3}-\\d{1,5}(?:-?[a-z0-9]{1,4})?|[a-z])';
-const UNIT_REPLY_RE = new RegExp(`\\b(?:apt|apartment|unit)\\.?\\s*#?\\s*(${UNIT_VALUE})\\b`, 'i');
+// Every DWELLING designator the normalizer knows (address-normalizer
+// DWELLING_DESIGNATORS): a park customer answers "Lot 12" / "Space 7", an
+// office "Suite 210" — the matched designator is KEPT so those stay their
+// own keys (codex r16 P1 on #3804); a bare or hash reply is a plain unit.
+const UNIT_REPLY_RE = new RegExp(`\\b(apt|apartment|unit|ste|suite|lot|spc|space)\\.?\\s*#?\\s*(${UNIT_VALUE})\\b`, 'i');
 const UNIT_HASH_REPLY_RE = new RegExp(`#\\s*(${UNIT_VALUE})\\b`, 'i');
 const BARE_UNIT_REPLY_RE = new RegExp(`^\\s*(?:it'?s\\s+|its\\s+|number\\s+)?(${UNIT_VALUE})\\s*[.!]?\\s*$`, 'i');
 // A reply that names TWO different units ("Not Apt 204, it's Apt 205") or
@@ -1102,9 +1106,9 @@ function unitReplyIsAmbiguous(text, normalizeUnitLine) {
     const u = norm(m[1]); if (u) values.add(u);
   }
   const designated = [
-    ...text.matchAll(new RegExp(UNIT_REPLY_RE.source, 'gi')),
-    ...text.matchAll(new RegExp(UNIT_HASH_REPLY_RE.source, 'gi')),
-  ].map((m) => norm(m[1])).filter(Boolean);
+    ...[...text.matchAll(new RegExp(UNIT_REPLY_RE.source, 'gi'))].map((m) => m[2]),
+    ...[...text.matchAll(new RegExp(UNIT_HASH_REPLY_RE.source, 'gi'))].map((m) => m[1]),
+  ].map(norm).filter(Boolean);
   for (const d of designated) values.add(d);
   return values.size > 1;
 }
@@ -1112,8 +1116,15 @@ function extractUnitReply(body, { bareOk = false } = {}) {
   const text = String(body || '').trim();
   if (!text) return null;
   const { normalizeUnitLine } = require('../utils/address-normalizer');
-  const designated = text.match(UNIT_REPLY_RE) || text.match(UNIT_HASH_REPLY_RE);
-  if (designated) return unitReplyIsAmbiguous(text, normalizeUnitLine) ? null : (normalizeUnitLine(`apt ${designated[1]}`) || null);
+  const worded = text.match(UNIT_REPLY_RE);
+  const hashed = worded ? null : text.match(UNIT_HASH_REPLY_RE);
+  if (worded || hashed) {
+    if (unitReplyIsAmbiguous(text, normalizeUnitLine)) return null;
+    // apt / apartment / unit are one interchangeable key and canonicalize to
+    // Apt (as before); lot / space / suite are their own keys and are kept.
+    const designator = worded ? (/^(?:apt|apartment|unit)$/i.test(worded[1]) ? 'apt' : worded[1]) : 'apt';
+    return normalizeUnitLine(`${designator} ${worded ? worded[2] : hashed[1]}`) || null;
+  }
   if (!bareOk) return null;
   const bare = text.match(BARE_UNIT_REPLY_RE);
   return bare ? normalizeUnitLine(`apt ${bare[1]}`) || null : null;

@@ -393,6 +393,11 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
+    // A sibling under a clarify re-price hold blocks the group at REQUEST
+    // time — schedule and immediate alike — so the operator hears it now,
+    // not from the cron parking the anchor at publication (codex r16 P2 on
+    // #3804). The publish-time claim re-asserts it atomically.
+    if (siblingRepricePending(sibling)) return { sibling, statusCode: 409, code: 'REPRICE_PENDING' };
     const authority = String(sibling.pricing_authority || '').toUpperCase();
     // Automation: the explicit SERVER stamp only. Manual sends: the ONE
     // shared row verdict — SERVER, a genuinely locked accepted price, or an
@@ -411,6 +416,16 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     };
   }
   return null;
+}
+
+// The operator-facing reason a group cannot go out, from the preflight's
+// verdict code — the same words the publish-time claim uses for a hold.
+function blockingSiblingMessage(blockingSibling, beforeWhat) {
+  const id = blockingSibling.sibling.id;
+  if (blockingSibling.code === 'REPRICE_PENDING') {
+    return `Grouped estimate ${id} is held for a re-price (a clarify answer replaces its dollars or address) — re-draft or revise it before ${beforeWhat}.`;
+  }
+  return `Grouped estimate ${id} has no engine-verified price — re-save it from the estimate tool before ${beforeWhat}.`;
 }
 
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } = {}) {
@@ -1060,7 +1075,7 @@ router.post('/:id/send', async (req, res, next) => {
       if (scheduleOutcome.blockingSibling) {
         const { blockingSibling } = scheduleOutcome;
         return res.status(blockingSibling.statusCode).json({
-          error: `Grouped estimate ${blockingSibling.sibling.id} has no engine-verified price — re-save it from the estimate tool before scheduling this group (the scheduled send publishes every property together).`,
+          error: blockingSiblingMessage(blockingSibling, 'scheduling this group (the scheduled send publishes every property together)'),
           code: blockingSibling.code,
           siblingEstimateId: blockingSibling.sibling.id,
         });
@@ -1556,7 +1571,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
     // group lock on the rows the claims below will actually publish beside.
     const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, autoSend });
     if (blockingSibling) {
-      const err = new Error(`Grouped estimate ${blockingSibling.sibling.id} has no engine-verified price — re-save it from the estimate tool before sending this group (the group link shows every property together).`);
+      const err = new Error(blockingSiblingMessage(blockingSibling, 'sending this group (the group link shows every property together)'));
       err.statusCode = blockingSibling.statusCode;
       err.code = blockingSibling.code;
       throw err;
