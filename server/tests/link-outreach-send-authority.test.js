@@ -531,6 +531,14 @@ describe('reconcileSendError', () => {
     expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'requeue', approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_requeueable' });
     expect(placement(s.db)).toMatchObject({ status: 'watching', outreach_status: 'send_error' });
   });
+  test('a lifecycle edit that lands between the reconcile\'s read and its write is never overwritten: the compare-and-swap includes the status observed', async () => {
+    const s = scenario();
+    await nightly(s.db);
+    Object.assign(placement(s.db), { outreach_status: 'send_error', outreach_send_token: null });
+    s.db._beforeUpdate = (table, db) => { if (table === 'seo_link_prospects') { placement(db).status = 'watching'; db._beforeUpdate = null; } }; // the admin moved it on meanwhile
+    expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'sent', approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_reconcilable' });
+    expect(placement(s.db)).toMatchObject({ status: 'watching', outreach_status: 'send_error' });
+  });
   test("'sent' on a row whose lifecycle the admin already advanced by hand keeps that lifecycle (the send stamp settles, the inbox is released); a row still awaiting one opens it (→ contacted)", async () => {
     const s = scenario();
     await nightly(s.db);

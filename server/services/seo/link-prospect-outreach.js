@@ -711,11 +711,13 @@ async function reconcileSendError({ prospectId, outcome, approvedBy = 'admin' })
         notes: prospect.notes ? `${prospect.notes}\n${note}` : note,
         updated_at: now,
       };
-  // Atomic on the EXACT claim we observed — status AND its send token (null for a
-  // send_error). If the row cycled (sending→drafted→a fresh send) between our read and
-  // here, the token won't match and we affect 0 rows instead of clobbering the new claim.
+  // Atomic on the EXACT row we observed — its send state AND its send token (null for a
+  // send_error) AND its lifecycle status: the patch above was decided on that status (a
+  // hand-advanced row keeps it; an awaiting one opens the conversation), so a concurrent
+  // lifecycle edit, like a cycled claim (sending→drafted→a fresh send), matches 0 rows
+  // instead of being overwritten.
   const rows = await db.transaction(async (trx) => {
-    let q = trx('seo_link_prospects').where({ id: prospectId, outreach_status: st });
+    let q = trx('seo_link_prospects').where({ id: prospectId, outreach_status: st, status: prospect.status });
     q = prospect.outreach_send_token
       ? q.where({ outreach_send_token: prospect.outreach_send_token })
       : q.whereNull('outreach_send_token');
