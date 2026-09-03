@@ -315,6 +315,14 @@ async function main() {
   if (MD_OUT) fs.writeFileSync(MD_OUT, text);
   if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify({ generatedAt: new Date().toISOString(), since: SINCE, results }, null, 1));
   console.log(text);
+  // A check whose query failed is recorded in the report AND fails the run:
+  // a partial report must never exit 0 and pass for a completed audit
+  // (codex pre-push P1 on PR #3792).
+  const failed = results.filter((r) => r.error);
+  if (failed.length) {
+    console.error(`${failed.length} check(s) failed: ${failed.map((r) => r.key).join(', ')}`);
+    process.exit(4);
+  }
 }
 
 main().catch((e) => { console.error(e.message); process.exit(1); });
