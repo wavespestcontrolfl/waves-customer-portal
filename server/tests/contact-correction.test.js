@@ -24,9 +24,9 @@ jest.mock('../services/notification-service', () => ({
   notifyAdmin: (...args) => mockNotifyAdmin(...args),
 }));
 
-const mockCallAnthropic = jest.fn();
+const mockDispatch = jest.fn();
 jest.mock('../services/llm/call', () => ({
-  callAnthropic: (...args) => mockCallAnthropic(...args),
+  dispatchWithFallback: (...args) => mockDispatch(...args),
 }));
 
 const mockSyncPrimaryAddress = jest.fn().mockResolvedValue(null);
@@ -250,7 +250,7 @@ describe('detectContactCorrectionIntent', () => {
 
 describe('extractSmsContactCorrections', () => {
   it('keeps only high-confidence, transcript-backed corrections on applyable fields', async () => {
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -271,24 +271,24 @@ describe('extractSmsContactCorrections', () => {
   it('skips the LLM entirely when the prefilter does not match', async () => {
     const out = await extractSmsContactCorrections({ body: 'Thank you' });
     expect(out).toEqual([]);
-    expect(mockCallAnthropic).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   it('surfaces a provider error as null (retryable), never as "no corrections"', async () => {
     // (round-19) The durable queue retries only a distinguishable
     // extraction failure — collapsing a provider outage into [] would
     // permanently mark the job done and drop the customer's correction.
-    mockCallAnthropic.mockRejectedValue(new Error('boom'));
+    mockDispatch.mockRejectedValue(new Error('boom'));
     expect(await extractSmsContactCorrections({ body: 'my email is wrong, it is a@b.co' })).toBeNull();
-    mockCallAnthropic.mockResolvedValue({ ok: false });
+    mockDispatch.mockResolvedValue({ ok: false });
     expect(await extractSmsContactCorrections({ body: 'my email is wrong, it is a@b.co' })).toBeNull();
-    mockCallAnthropic.mockResolvedValue({ ok: true, json: { nope: true } });
+    mockDispatch.mockResolvedValue({ ok: true, json: { nope: true } });
     expect(await extractSmsContactCorrections({ body: 'my email is wrong, it is a@b.co' })).toBeNull();
   });
 
   it('a provider failure reaches the runner as the retryable error shape', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()] });
-    mockCallAnthropic.mockRejectedValue(new Error('boom'));
+    mockDispatch.mockRejectedValue(new Error('boom'));
     const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My email is wrong, it is a@b.co', knex });
     expect(res.reason).toBe('error');
     expect(res.applied).toEqual([]);
@@ -957,7 +957,7 @@ describe('round-7 hardening', () => {
 
   it('binds each SMS name correction to its own component (shared-quote leak)', async () => {
     const body = 'My last name is spelled Rivers, not Riverz';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -972,7 +972,7 @@ describe('round-7 hardening', () => {
 
   it('rejects a stated move that extracts locality fields without a street', async () => {
     const body = 'Hi, we moved to Tampa, zip is 33602';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1108,7 +1108,7 @@ describe('round-8 hardening', () => {
   it('skips a field an admin changed while extraction was in flight (compare-and-set)', async () => {
     const body = 'You spelled my last name wrong, it is Rivers';
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockImplementation(async () => {
+    mockDispatch.mockImplementation(async () => {
       // Admin edit lands DURING the in-flight LLM extraction.
       knex._data.customers[0].last_name = 'Rivera';
       return {
@@ -1124,7 +1124,7 @@ describe('round-8 hardening', () => {
 
   it('drops a routinely mentioned address riding along with a real email correction', async () => {
     const body = 'My email is wrong, it is jordan.rivers@example.com. Service is at 99 Pine Ave, Sarasota 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1141,7 +1141,7 @@ describe('round-8 hardening', () => {
 
   it('a stated move still licenses fragment-quoted address candidates as one group', async () => {
     const body = 'We just moved to 99 Pine Ave, Sarasota. Zip is 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1173,7 +1173,7 @@ describe('round-8 hardening', () => {
 
   it('never renames from an ownership disclaimer over SMS either', async () => {
     const body = 'The account is not in my name, my name is Jane Smith';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1229,7 +1229,7 @@ describe('round-9 hardening', () => {
 
   it('correction language in one clause never licenses a field mentioned in another', async () => {
     const body = 'My email is wrong, use jordan.rivers@example.com. My name is Jane Smith';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1245,7 +1245,7 @@ describe('round-9 hardening', () => {
 
   it('a routine email statement beside an address correction never applies (bare "email is")', async () => {
     const body = 'Fix my address: 99 Pine Ave, Sarasota 34231. My email is jordan.riverz@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1265,7 +1265,7 @@ describe('round-9 hardening', () => {
     // grounded candidates carry only routine language — nothing licenses
     // the group.
     const body = 'My email is wrong, use jordan.rivers@example.com. Service is at 99 Pine Ave, Sarasota 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1356,7 +1356,7 @@ describe('round-10 hardening', () => {
   it('a concurrent phone change stales the whole batch (identity anchor)', async () => {
     const body = 'You spelled my last name wrong, it is Rivers';
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockImplementation(async () => {
+    mockDispatch.mockImplementation(async () => {
       // Admin reassigns the customer's phone DURING the in-flight extraction
       // — the sender is no longer this record's identity anchor.
       knex._data.customers[0].phone = '+15559998888';
@@ -1373,7 +1373,7 @@ describe('round-10 hardening', () => {
 
   it('a fabricated replacement value never applies even under a genuine quote', async () => {
     const body = 'My email is wrong, please fix it';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1389,7 +1389,7 @@ describe('round-10 hardening', () => {
 
   it('moving an OBJECT is not move evidence — destination language required', async () => {
     const body = 'I moved the traps to the garage. Service is at 99 Pine Ave, Sarasota 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1435,7 +1435,7 @@ describe('round-11 hardening', () => {
     // the snapshot would self-compare, but the senderPhone anchor catches it.
     const body = 'You spelled my last name wrong, it is Rivers';
     const knex = makeStubKnex({ customers: [{ ...baseCustomer(), phone: '+15559998888' }], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
     });
@@ -1448,7 +1448,7 @@ describe('round-11 hardening', () => {
   it('a matching sender still applies (positive path with senderPhone)', async () => {
     const body = 'You spelled my last name wrong, it is Rivers';
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
     });
@@ -1472,7 +1472,7 @@ describe('round-11 hardening', () => {
 
   it('comma-joined clauses: correction word binds its NEAREST topic', async () => {
     const body = 'My email is wrong, my name is Jane Smith. Use jordan.rivers@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1488,7 +1488,7 @@ describe('round-11 hardening', () => {
 
   it('comma-joined clauses: an email correction never licenses a trailing address', async () => {
     const body = 'My email is wrong, service address is 99 Pine Ave, Sarasota 34231. Use jordan.rivers@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1505,7 +1505,7 @@ describe('round-11 hardening', () => {
 
   it('an empty unit clear needs explicit removal language', async () => {
     const body = 'My unit is wrong, please fix it';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'address_line2', new_value: '', quote: 'my unit is wrong, please fix it', confidence: 'high' }] },
     });
@@ -1515,7 +1515,7 @@ describe('round-11 hardening', () => {
 
   it('explicit removal language still clears the unit', async () => {
     const body = 'There is no unit, that was our old apartment';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'address_line2', new_value: '', quote: 'no unit, that was our old apartment', confidence: 'high' }] },
     });
@@ -1552,7 +1552,7 @@ describe('round-12 hardening', () => {
   it('concurrent SMS corrections serialize per customer — the newest message wins', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
     let releaseFirst;
-    mockCallAnthropic
+    mockDispatch
       // msg1 (older): extraction hangs until released
       .mockImplementationOnce(() => new Promise((resolve) => {
         releaseFirst = () => resolve({
@@ -1570,7 +1570,7 @@ describe('round-12 hardening', () => {
     // Let msg1 reach its (hung) extraction, then release it — msg2 must not
     // have started; it runs only after msg1 commits.
     await new Promise((r) => { setImmediate(r); });
-    expect(mockCallAnthropic).toHaveBeenCalledTimes(1);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
     releaseFirst();
     const [r1, r2] = await Promise.all([p1, p2]);
     expect(r1.applied.map((a) => a.field)).toEqual(['last_name']);
@@ -1620,7 +1620,7 @@ describe('round-12 hardening', () => {
 describe('round-13 hardening', () => {
   it('SMS replacement values also match on token boundaries ("Lee" vs "please")', async () => {
     const body = 'My last name is wrong, please fix it';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'last_name', new_value: 'Lee', quote: 'my last name is wrong, please fix it', confidence: 'high' }] },
     });
@@ -1657,7 +1657,7 @@ describe('round-13 hardening', () => {
 
   it('an explicit removal message clears the unit end to end', async () => {
     const body = 'Please remove the apartment from my address';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'address_line2', new_value: '', quote: 'remove the apartment from my address', confidence: 'high' }] },
     });
@@ -1698,7 +1698,7 @@ describe('round-14 hardening', () => {
 
   it('a licensed address correction does not cover a second property in another sentence', async () => {
     const body = 'My city is wrong, it should be Sarasota. Service at the rental is 99 Pine Ave, Sarasota 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1746,7 +1746,7 @@ describe('round-14 hardening', () => {
 
   it('an unqualified whole-name quote with only one extracted component never applies', async () => {
     const body = 'You have my name wrong, it is Jane Smith';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'first_name', new_value: 'Jane', quote: 'you have my name wrong, it is Jane Smith', confidence: 'high' }] },
     });
@@ -1756,7 +1756,7 @@ describe('round-14 hardening', () => {
 
   it('an unqualified whole-name quote with BOTH components still applies', async () => {
     const body = 'You have my name wrong, it is Jane Smith';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -1833,7 +1833,7 @@ describe('round-15 hardening', () => {
 
   it('"renew" never licenses an SMS correction (`new` is word-bounded in the correction vocabulary)', async () => {
     const body = 'Time to renew, my email is jordan.rivers@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'jordan.rivers@example.com', quote: 'time to renew, my email is jordan.rivers@example.com', confidence: 'high' }] },
     });
@@ -1873,7 +1873,7 @@ describe('round-15 hardening', () => {
     // the edit and accept the older SMS as a valid overwrite.
     const adminEdited = { ...baseCustomer(), last_name: 'Updated' };
     const knex = makeStubKnex({ customers: [adminEdited], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
     });
@@ -1889,7 +1889,7 @@ describe('round-15 hardening', () => {
 
   it('a PARTIAL matched snapshot is ignored — the runner falls back to its own read', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
     });
@@ -1919,14 +1919,14 @@ describe('round-16 hardening', () => {
 
   it("someone else's grounded contact data never rides a real correction quote (value/intent co-location)", async () => {
     const body = 'My email is wrong; please fix it. Send the receipt to my accountant at bookkeeper@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'my email is wrong; please fix it', confidence: 'high' }] },
     });
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
     // A model that widens the quote to span both statements gains nothing —
     // the intervening clause keeps the value out of the correcting statement.
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: body, confidence: 'high' }] },
     });
@@ -1935,7 +1935,7 @@ describe('round-16 hardening', () => {
 
   it('an adjacent clause with its own unrelated business never donates its value even without filler between', async () => {
     const body = 'My email is wrong. Send the receipt to my accountant at bookkeeper@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: body, confidence: 'high' }] },
     });
@@ -1944,7 +1944,7 @@ describe('round-16 hardening', () => {
 
   it('a bare adjacent value statement still corrects ("My email is wrong. It is …")', async () => {
     const body = 'My email is wrong. It is jordan.rivers@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'jordan.rivers@example.com', quote: body, confidence: 'high' }] },
     });
@@ -1954,7 +1954,7 @@ describe('round-16 hardening', () => {
 
   it('a topic-named adjacent clause still corrects ("My email is wrong. Email is …")', async () => {
     const body = 'My email is wrong. Email is jordan.rivers@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'jordan.rivers@example.com', quote: body, confidence: 'high' }] },
     });
@@ -2062,7 +2062,7 @@ describe('round-19 hardening', () => {
 
   it('a stated move does not license another property mentioned in the next sentence', async () => {
     const body = "We moved to Sarasota. Please service my tenants rental at 99 Pine Ave, Sarasota 34231";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -2078,7 +2078,7 @@ describe('round-19 hardening', () => {
 
   it('a move still licenses the bare address fragment in the adjacent sentence', async () => {
     const body = 'We moved to a new place. It is 12 Oak St, Sarasota 34299';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -2155,7 +2155,7 @@ describe('round-20 hardening', () => {
     // it pass as "essentially bare address"; the closed introduction
     // vocabulary does not.
     const body = 'We moved to Sarasota. Rental: 99 Pine Ave, Sarasota 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -2171,7 +2171,7 @@ describe('round-20 hardening', () => {
 
   it('a lost queue lock rolls the customer write back inside the apply transaction', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
     });
@@ -2189,7 +2189,7 @@ describe('round-20 hardening', () => {
 
   it('the owner fence passes through silently while the lock is held', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
     });
@@ -2221,7 +2221,7 @@ describe('round-21 hardening', () => {
 
   it("a third party's 'new address' never move-licenses the address group", async () => {
     const body = "My email is wrong; use me@example.com. Mail the invoice to my accountants new address: 99 Pine Ave, Sarasota 34231";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -2359,7 +2359,7 @@ describe('round-22 hardening', () => {
 
   it("a third party's email correction never replaces the customer's email", async () => {
     const body = "My accountant's email is wrong; change it to bookkeeper@example.com";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: "my accountant's email is wrong; change it to bookkeeper@example.com", confidence: 'high' }] },
     });
@@ -2368,7 +2368,7 @@ describe('round-22 hardening', () => {
 
   it("a third party's name never renames the account holder", async () => {
     const body = "My wife's name is spelled wrong, it is Janet";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'first_name', new_value: 'Janet', quote: "my wife's name is spelled wrong, it is Janet", confidence: 'high' }] },
     });
@@ -2377,7 +2377,7 @@ describe('round-22 hardening', () => {
 
   it("the customer's own name correction still passes the ownership filter", async () => {
     const body = 'My name is spelled wrong, it is Jordan Rivers';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -2419,7 +2419,7 @@ describe('round-23 hardening', () => {
 
   it('the SMS runner forwards BOTH fence arguments so the queue can seal atomically', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
     });
@@ -2496,7 +2496,7 @@ describe('round-24 hardening', () => {
     // is judged against the containing source clause, which still carries
     // "My accountant's".
     const body = "My accountant's email is wrong; change it to bookkeeper@example.com";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'change it to bookkeeper@example.com', confidence: 'high' }] },
     });
@@ -2525,7 +2525,7 @@ describe('round-24 hardening', () => {
     // in sentence 2 did not ride the move license from sentence 1.
     const body = 'I moved to Sarasota last year. You have my street misspelled; it is 123 Main St, Sarasota 34231';
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -2544,7 +2544,7 @@ describe('round-24 hardening', () => {
   it('a genuine move through the runner still clears the unit', async () => {
     const body = 'We moved to 99 Pine Ave, Sarasota. Zip is 34231';
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -2586,7 +2586,7 @@ describe('round-24 hardening', () => {
 describe('round-25 hardening', () => {
   it('a typographic apostrophe possessive is still third-party (SMS)', async () => {
     const body = 'My wife’s email is wrong; use spouse@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'spouse@example.com', quote: 'email is wrong; use spouse@example.com', confidence: 'high' }] },
     });
@@ -2595,7 +2595,7 @@ describe('round-25 hardening', () => {
 
   it('a state-only correction carries its own field intent end to end', async () => {
     const knex = makeStubKnex({ customers: [{ ...baseCustomer(), zip: '31401' }], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'state', new_value: 'GA', quote: 'my state is wrong; it should be GA', confidence: 'high' }] },
     });
@@ -2682,7 +2682,7 @@ describe('round-26 hardening', () => {
 
   it("a third party's address COMPONENT is rejected, not just 'address'", async () => {
     const body = "My tenant's city is wrong; change it to Tampa";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'city', new_value: 'Tampa', quote: "my tenant's city is wrong; change it to Tampa", confidence: 'high' }] },
     });
@@ -2693,7 +2693,7 @@ describe('round-26 hardening', () => {
 describe('round-27 hardening', () => {
   it('ownership context carries across the sentence boundary', async () => {
     const body = "My accountant's email is wrong. The email should be bookkeeper@example.com";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email should be bookkeeper@example.com', confidence: 'high' }] },
     });
@@ -2702,7 +2702,7 @@ describe('round-27 hardening', () => {
 
   it('multiword modifiers cannot dodge the ownership predicate', async () => {
     const body = "My wife's new work email is wrong; it should be spouse@example.com";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'spouse@example.com', quote: "my wife's new work email is wrong; it should be spouse@example.com", confidence: 'high' }] },
     });
@@ -2740,7 +2740,7 @@ describe('round-28 hardening', () => {
 
   it('ownership holds at EVERY occurrence of a repeated SMS quote', async () => {
     const body = "My email is wrong. My accountant's email is wrong; use bookkeeper@example.com";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'email is wrong', confidence: 'high' }] },
     });
@@ -2769,7 +2769,7 @@ describe('round-28 hardening', () => {
 
   it('non-ASCII possessive owners trip the ownership guard', async () => {
     const body = "My fiancé's email is wrong; use spouse@example.com";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'spouse@example.com', quote: "my fiancé's email is wrong; use spouse@example.com", confidence: 'high' }] },
     });
@@ -2811,7 +2811,7 @@ describe('round-29 hardening', () => {
       customers: [{ ...baseCustomer(), latitude: 27.1, longitude: -82.4 }],
       agent_decisions: [],
     });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'city', new_value: 'Sarasota', quote: 'my city is wrong, it should be Sarasota', confidence: 'high' }] },
     });
@@ -2823,7 +2823,7 @@ describe('round-29 hardening', () => {
 
   it("inverse ownership: 'the email for my accountant' is third-party", async () => {
     const body = 'The email for my accountant is wrong; change it to bookkeeper@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email for my accountant is wrong; change it to bookkeeper@example.com', confidence: 'high' }] },
     });
@@ -2832,7 +2832,7 @@ describe('round-29 hardening', () => {
 
   it("inverse ownership: 'the city for my tenant' is third-party", async () => {
     const body = 'The city for my tenant is wrong; change it to Tampa';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'city', new_value: 'Tampa', quote: 'the city for my tenant is wrong; change it to Tampa', confidence: 'high' }] },
     });
@@ -2841,7 +2841,7 @@ describe('round-29 hardening', () => {
 
   it("owner-verb ownership: 'my accountant has a new email' is third-party", async () => {
     const body = 'My accountant has a new email; use bookkeeper@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'my accountant has a new email; use bookkeeper@example.com', confidence: 'high' }] },
     });
@@ -2852,7 +2852,7 @@ describe('round-29 hardening', () => {
 describe('round-30 hardening', () => {
   it("'the email for my account' stays first-person (no determiner backtrack)", async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'the email for my account is wrong; use me@example.com', confidence: 'high' }] },
     });
@@ -2863,7 +2863,7 @@ describe('round-30 hardening', () => {
 
   it("'the email belongs to my accountant' is third-party", async () => {
     const body = 'The email belongs to my accountant and is wrong; use bookkeeper@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email belongs to my accountant and is wrong; use bookkeeper@example.com', confidence: 'high' }] },
     });
@@ -2872,7 +2872,7 @@ describe('round-30 hardening', () => {
 
   it("'the email for my accountant' is still third-party after the determiner fix", async () => {
     const body = 'The email for my accountant is wrong; change it to bookkeeper@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email for my accountant is wrong; change it to bookkeeper@example.com', confidence: 'high' }] },
     });
@@ -2889,7 +2889,7 @@ describe('round-31 prefilter + self-owner', () => {
 
   it("'my account has the wrong email' stays first-person", async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'my account has the wrong email; change it to me@example.com', confidence: 'high' }] },
     });
@@ -2899,7 +2899,7 @@ describe('round-31 prefilter + self-owner', () => {
 
   it("'my accountant has a new email' still rejects after the self-owner fix", async () => {
     const body = 'My accountant has a new email; use bookkeeper@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'my accountant has a new email; use bookkeeper@example.com', confidence: 'high' }] },
     });
@@ -2910,7 +2910,7 @@ describe('round-31 prefilter + self-owner', () => {
 describe('round-32 ownership', () => {
   it("'the email is for my accountant' is third-party", async () => {
     const body = 'The email is for my accountant and is wrong; change it to bookkeeper@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email is for my accountant and is wrong; change it to bookkeeper@example.com', confidence: 'high' }] },
     });
@@ -2972,7 +2972,7 @@ describe('round-33 hardening', () => {
 describe('round-34 hardening', () => {
   it('an ownership disclaimer in the preceding sentence blocks a narrowed name quote', async () => {
     const body = "The account isn't mine. You have my name wrong; it should be Jane Smith";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3005,7 +3005,7 @@ describe('round-35 hardening', () => {
 
   it('a FOLLOWING ownership clause blocks the correction (SMS)', async () => {
     const body = "The email is wrong; use bookkeeper@example.com. That's my accountant's email.";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'the email is wrong; use bookkeeper@example.com', confidence: 'high' }] },
     });
@@ -3034,7 +3034,7 @@ describe('round-35 hardening', () => {
 
   it("a third party's move never rewrites the customer's address", async () => {
     const body = 'My tenant is moving to a new address: 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3050,7 +3050,7 @@ describe('round-35 hardening', () => {
 
   it("the customer's own move still passes the move-subject guard", async () => {
     const body = 'We are moving to 99 Pine Ave, Sarasota. Zip is 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3068,7 +3068,7 @@ describe('round-35 hardening', () => {
 describe('round-36 hardening', () => {
   it("a third party's PAST-TENSE move never rewrites the customer's address", async () => {
     const body = 'My tenant moved to a new address: 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3084,7 +3084,7 @@ describe('round-36 hardening', () => {
 
   it("the customer's own past-tense move still passes", async () => {
     const body = 'We just moved to 99 Pine Ave, Sarasota. Zip is 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3102,7 +3102,7 @@ describe('round-36 hardening', () => {
 describe('round-37 hardening', () => {
   it("a third party's FUTURE move never rewrites the customer's address", async () => {
     const body = 'My tenant will move to a new address: 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3118,7 +3118,7 @@ describe('round-37 hardening', () => {
 
   it("the customer's own future move HOLDS until it takes effect (contract updated r54)", async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3139,7 +3139,7 @@ describe('round-38 hardening', () => {
   it('a same-message retraction applies the FINAL stated value', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
     const body = 'My email is wrong, use first@example.com, sorry actually use final@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3155,7 +3155,7 @@ describe('round-38 hardening', () => {
 
   it("a third party 'going to move' subject never rewrites the address", async () => {
     const body = 'My tenant is going to move to a new address: 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3171,7 +3171,7 @@ describe('round-38 hardening', () => {
 
   it("the customer's own 'going to move' HOLDS until it takes effect (r54)", async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3191,7 +3191,7 @@ describe('round-38 retraction license boundary', () => {
   it('a bare same-field mention without retraction language licenses nothing', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
     const body = 'My email is wrong; please fix it. For receipts, send to billing@vendor.example';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3209,7 +3209,7 @@ describe('round-39 hardening', () => {
   it('a discourse marker fronting unrelated business is NOT a retraction', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
     const body = 'My email is wrong; use jane@example.com. Actually, send the receipt to billing@vendor.example';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3225,7 +3225,7 @@ describe('round-39 hardening', () => {
 
   it("a third party 'plans to move' subject never rewrites the address", async () => {
     const body = 'My tenant plans to move to a new address: 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3241,7 +3241,7 @@ describe('round-39 hardening', () => {
 
   it("the customer's own 'plan to move' HOLDS until it takes effect (r54)", async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3260,7 +3260,7 @@ describe('round-39 hardening', () => {
 describe('round-40 hardening', () => {
   it("a NAMED third party moving never rewrites the customer's address", async () => {
     const body = 'John is moving to a new address: 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3277,7 +3277,7 @@ describe('round-40 hardening', () => {
   it('a historical move beside a later spelling fix keeps the unit (post-dedupe context)', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
     const body = 'I moved to 99 Pine Ave last year. Your street spelling is wrong; it should be 99 Pine Ave. My city is wrong, it is Sarasota. My zip is wrong, it is 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3296,7 +3296,7 @@ describe('round-40 hardening', () => {
 
   it("the customer's own 'we are moving' still passes the named-subject guard", async () => {
     const body = 'We are moving to 99 Pine Ave, Sarasota. Zip is 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3314,7 +3314,7 @@ describe('round-40 hardening', () => {
 describe('round-41 hardening', () => {
   it("'John moved to a new address' never rewrites the customer's address", async () => {
     const body = 'John moved to a new address: 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3330,7 +3330,7 @@ describe('round-41 hardening', () => {
 
   it("'we have just moved to' still passes the bare-verb guard", async () => {
     const body = 'We have just moved to 99 Pine Ave, Sarasota. Zip is 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3346,7 +3346,7 @@ describe('round-41 hardening', () => {
 
   it("'Jane changed to a new email' never replaces the customer's email", async () => {
     const body = 'Jane changed to a new email: jane@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'jane@example.com', quote: 'jane changed to a new email: jane@example.com', confidence: 'high' }] },
     });
@@ -3355,7 +3355,7 @@ describe('round-41 hardening', () => {
 
   it("'I changed to a new email' still passes the contact-change guard", async () => {
     const body = 'I changed to a new email: me@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'i changed to a new email: me@example.com', confidence: 'high' }] },
     });
@@ -3365,7 +3365,7 @@ describe('round-41 hardening', () => {
 
   it('an explicitly OLD value with no replacement direction never applies', async () => {
     const body = 'For reference, my old email is retired@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'retired@example.com', quote: 'my old email is retired@example.com', confidence: 'high' }] },
     });
@@ -3374,7 +3374,7 @@ describe('round-41 hardening', () => {
 
   it('a replacement-directed OLD mention still corrects', async () => {
     const body = 'My old email is dead — use fresh@example.com instead';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'fresh@example.com', quote: 'my old email is dead — use fresh@example.com instead', confidence: 'high' }] },
     });
@@ -3384,7 +3384,7 @@ describe('round-41 hardening', () => {
 
   it('a purpose-scoped address never rewrites the service address', async () => {
     const body = 'The new address for invoices is 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3402,7 +3402,7 @@ describe('round-41 hardening', () => {
 describe('round-42 hardening', () => {
   it("'do not use my old email' never applies the retired mailbox", async () => {
     const body = 'Do not use my old email old@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'old@example.com', quote: 'do not use my old email old@example.com', confidence: 'high' }] },
     });
@@ -3411,7 +3411,7 @@ describe('round-42 hardening', () => {
 
   it('a purpose address with intervening direction phrases is still rejected', async () => {
     const body = 'The new address to use for invoices is 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3430,7 +3430,7 @@ describe('round-42 hardening', () => {
       customers: [{ ...baseCustomer(), latitude: 27.1, longitude: -82.4 }],
       agent_decisions: [],
     });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'address_line2', new_value: '4B', quote: 'my unit is wrong, it is 4B', confidence: 'high' }] },
     });
@@ -3447,7 +3447,7 @@ describe('round-43 hardening', () => {
       "Please don't ever use my old email old@example.com",
       "I don't want you to use my old email old@example.com",
     ]) {
-      mockCallAnthropic.mockResolvedValue({
+      mockDispatch.mockResolvedValue({
         ok: true,
         json: { corrections: [{ field: 'email', new_value: 'old@example.com', quote: body.toLowerCase(), confidence: 'high' }] },
       });
@@ -3457,7 +3457,7 @@ describe('round-43 hardening', () => {
 
   it("'the address on my invoices should be …' never rewrites the service address", async () => {
     const body = 'The address on my invoices should be 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3473,7 +3473,7 @@ describe('round-43 hardening', () => {
 
   it('a unit-only correction preserves the PRIMARY PROPERTY coordinates', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'address_line2', new_value: '4B', quote: 'my unit is wrong, it is 4B', confidence: 'high' }] },
     });
@@ -3490,7 +3490,7 @@ describe('round-43 hardening', () => {
 describe('round-44 hardening', () => {
   it('an identity disclaimer invalidates every correction in the message', async () => {
     const body = "I'm not John anymore. My email is newholder@example.com — your email is wrong";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is newholder@example.com — your email is wrong', confidence: 'high' }] },
     });
@@ -3499,7 +3499,7 @@ describe('round-44 hardening', () => {
 
   it("'I'm not sure' never trips the identity disclaimer", async () => {
     const body = "I'm not sure you have it right — my email is wrong, it is me@example.com";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'my email is wrong, it is me@example.com', confidence: 'high' }] },
     });
@@ -3512,7 +3512,7 @@ describe('round-44 hardening', () => {
       'You must not use my old email old@example.com',
       "You shouldn't use my old email old@example.com",
     ]) {
-      mockCallAnthropic.mockResolvedValue({
+      mockDispatch.mockResolvedValue({
         ok: true,
         json: { corrections: [{ field: 'email', new_value: 'old@example.com', quote: body.toLowerCase(), confidence: 'high' }] },
       });
@@ -3522,7 +3522,7 @@ describe('round-44 hardening', () => {
 
   it('a purpose phrase PRECEDING the address is still rejected', async () => {
     const body = 'Please send invoices to this new address: 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3552,7 +3552,7 @@ describe('round-45 hardening', () => {
 
   it("'this isn't John anymore' invalidates the message", async () => {
     const body = "This isn't John anymore. My email is newholder@example.com — your email is wrong";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is newholder@example.com — your email is wrong', confidence: 'high' }] },
     });
@@ -3561,7 +3561,7 @@ describe('round-45 hardening', () => {
 
   it('an address-to-purpose construction is rejected', async () => {
     const body = 'Please use this new address to send invoices: 99 Pine Ave, Sarasota, FL 34231';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3612,7 +3612,7 @@ describe('round-46 hardening', () => {
 
   it('an ALL-CAPS disclaimer name still trips the identity veto', async () => {
     const body = "This isn't JOHN anymore. My email is newholder@example.com — your email is wrong";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is newholder@example.com — your email is wrong', confidence: 'high' }] },
     });
@@ -3637,7 +3637,7 @@ describe('round-46 hardening', () => {
 
   it('a NEGATED name statement never renames over SMS', async () => {
     const body = 'My name is not Jane Smith anymore';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3659,7 +3659,7 @@ describe('round-46 hardening', () => {
 describe('round-47 hardening', () => {
   it('a smart-apostrophe identity disclaimer still trips the veto', async () => {
     const body = 'I’m not John anymore. My email is wrong; use newholder@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is wrong; use newholder@example.com', confidence: 'high' }] },
     });
@@ -3668,7 +3668,7 @@ describe('round-47 hardening', () => {
 
   it('a directly NEGATED value never applies', async () => {
     const body = 'My email is not jane@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'jane@example.com', quote: 'my email is not jane@example.com', confidence: 'high' }] },
     });
@@ -3677,7 +3677,7 @@ describe('round-47 hardening', () => {
 
   it('an affirmed value beside a negated one still applies', async () => {
     const body = 'My email is not jane@example.com, it is joan@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'joan@example.com', quote: 'my email is not jane@example.com, it is joan@example.com', confidence: 'high' }] },
     });
@@ -3689,7 +3689,7 @@ describe('round-47 hardening', () => {
 describe('round-48 hardening', () => {
   it('a future-effective change never applies immediately', async () => {
     const body = 'Starting next month, my email will change to future@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'starting next month, my email will change to future@example.com', confidence: 'high' }] },
     });
@@ -3698,7 +3698,7 @@ describe('round-48 hardening', () => {
 
   it('a present-tense changed-to still corrects', async () => {
     const body = 'My email changed to now@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'now@example.com', quote: 'my email changed to now@example.com', confidence: 'high' }] },
     });
@@ -3708,7 +3708,7 @@ describe('round-48 hardening', () => {
 
   it('a named former-holder declaration invalidates the message', async () => {
     const body = 'John no longer has this number. My email is wrong; use newholder@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is wrong; use newholder@example.com', confidence: 'high' }] },
     });
@@ -3717,7 +3717,7 @@ describe('round-48 hardening', () => {
 
   it('an intervening adverb cannot dodge the negated-value guard', async () => {
     const body = 'My email is not actually jane@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'jane@example.com', quote: 'my email is not actually jane@example.com', confidence: 'high' }] },
     });
@@ -3728,7 +3728,7 @@ describe('round-48 hardening', () => {
 describe('round-49 hardening', () => {
   it("'John doesn't use this number anymore' invalidates the message", async () => {
     const body = "John doesn't use this number anymore. My email is wrong; use newholder@example.com";
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is wrong; use newholder@example.com', confidence: 'high' }] },
     });
@@ -3737,7 +3737,7 @@ describe('round-49 hardening', () => {
 
   it("'Starting on September 1, my new email is …' holds for present-tense confirmation", async () => {
     const body = 'Starting on September 1, my new email is future@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'starting on september 1, my new email is future@example.com', confidence: 'high' }] },
     });
@@ -3748,7 +3748,7 @@ describe('round-49 hardening', () => {
 describe('round-50 hardening', () => {
   it('a condition-scoped change never applies', async () => {
     const body = 'If I accept the offer, my new email is future@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'if i accept the offer, my new email is future@example.com', confidence: 'high' }] },
     });
@@ -3757,7 +3757,7 @@ describe('round-50 hardening', () => {
 
   it('a polite when-framing still corrects', async () => {
     const body = 'When you get a chance — my email is wrong, it is me@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'my email is wrong, it is me@example.com', confidence: 'high' }] },
     });
@@ -3772,7 +3772,7 @@ describe('round-51 hardening', () => {
       'If approved, my new email is future@example.com',
       'Unless accepted, my new email is future@example.com',
     ]) {
-      mockCallAnthropic.mockResolvedValue({
+      mockDispatch.mockResolvedValue({
         ok: true,
         json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: body.toLowerCase(), confidence: 'high' }] },
       });
@@ -3784,7 +3784,7 @@ describe('round-51 hardening', () => {
 describe('round-52 hardening', () => {
   it("a 'then'-joined subjectless condition never applies", async () => {
     const body = 'If approved then my new email is future@example.com';
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'if approved then my new email is future@example.com', confidence: 'high' }] },
     });
@@ -3810,7 +3810,7 @@ describe('round-53 hardening', () => {
       'If approved my new email is future@example.com',
       'Unless accepted my new email is future@example.com',
     ]) {
-      mockCallAnthropic.mockResolvedValue({
+      mockDispatch.mockResolvedValue({
         ok: true,
         json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: body.toLowerCase(), confidence: 'high' }] },
       });
@@ -3839,7 +3839,7 @@ describe('round-54 hardening', () => {
   it('a ZIP-only correction contradicting the service-area city fails closed', async () => {
     // Stored Bradenton; 34231 is a Sarasota ZIP in the service-area map.
     const knex = makeStubKnex({ customers: [{ ...baseCustomer(), city: 'Bradenton', zip: '34205' }], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'zip', new_value: '34231', quote: 'my zip is wrong; it should be 34231', confidence: 'high' }] },
     });
@@ -3850,7 +3850,7 @@ describe('round-54 hardening', () => {
 
   it('a coherent city+zip pair from the service area still applies', async () => {
     const knex = makeStubKnex({ customers: [{ ...baseCustomer(), city: 'Bradenton', zip: '34205' }], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3865,7 +3865,7 @@ describe('round-54 hardening', () => {
 
   it('a future move holds while a completed move still applies', async () => {
     const knexHold = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3879,7 +3879,7 @@ describe('round-54 hardening', () => {
     expect(held.applied).toEqual([]);
 
     const knexNow = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3897,7 +3897,7 @@ describe('round-54 hardening', () => {
 describe('round-55 hardening', () => {
   it('a FULL stated address with an incoherent city/ZIP pair fails closed', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3914,7 +3914,7 @@ describe('round-55 hardening', () => {
 
   it('a FULL stated address with a coherent service-area pair still applies (move form)', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3930,7 +3930,7 @@ describe('round-55 hardening', () => {
 
   it('a full address with an out-of-area ZIP keeps the state-only check', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -3959,7 +3959,7 @@ describe('round-56 hardening', () => {
 
   it('a DATED progressive move holds until it occurs', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue(moveCorrections("i'm moving to"));
+    mockDispatch.mockResolvedValue(moveCorrections("i'm moving to"));
     const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: "I'm moving to 99 Pine Ave, Sarasota next Friday. Zip is 34231", knex });
     expect(res.applied).toEqual([]);
     expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
@@ -3967,14 +3967,14 @@ describe('round-56 hardening', () => {
 
   it('a leading-date progressive move holds too', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue(moveCorrections("we are moving to"));
+    mockDispatch.mockResolvedValue(moveCorrections("we are moving to"));
     const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'Next week we are moving to 99 Pine Ave, Sarasota. Zip is 34231', knex });
     expect(res.applied).toEqual([]);
   });
 
   it('an UNDATED progressive move (in progress) still applies', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue(moveCorrections('we are moving to'));
+    mockDispatch.mockResolvedValue(moveCorrections('we are moving to'));
     const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'We are moving to 99 Pine Ave, Sarasota. Zip is 34231', knex });
     expect(res.applied.map((a) => a.field)).toContain('address_line1');
   });
@@ -3983,7 +3983,7 @@ describe('round-56 hardening', () => {
 describe('round-57 hardening', () => {
   it('a trailing effective date defers an email change', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'change my email to future@example.com next month', confidence: 'high' }] },
     });
@@ -3993,7 +3993,7 @@ describe('round-57 hardening', () => {
 
   it('an immediate change with an unrelated dated clause still applies', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'now@example.com', quote: 'my email is wrong, change it to now@example.com', confidence: 'high' }] },
     });
@@ -4003,7 +4003,7 @@ describe('round-57 hardening', () => {
 
   it('a Lakewood Ranch alias city with its real ZIP is accepted', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -4019,7 +4019,7 @@ describe('round-57 hardening', () => {
 
   it('a non-alias wrong city with that ZIP still rejects', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -4038,12 +4038,12 @@ describe('round-57 hardening', () => {
     const filler = 'Thanks for the great service last visit. '.repeat(40);
     const body = `${filler}Also, my email is wrong, it should be tail@example.com`;
     expect(body.length).toBeGreaterThan(1500);
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'tail@example.com', quote: 'my email is wrong, it should be tail@example.com', confidence: 'high' }] },
     });
     const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
-    const sentText = mockCallAnthropic.mock.calls[mockCallAnthropic.mock.calls.length - 1][0].text;
+    const sentText = mockDispatch.mock.calls[mockDispatch.mock.calls.length - 1][1].text;
     expect(sentText).toContain('tail@example.com');
     expect(res.applied.map((a) => a.field)).toContain('email');
   });
@@ -4052,7 +4052,7 @@ describe('round-57 hardening', () => {
 describe('round-58 hardening', () => {
   it('an after-scoped replacement defers until it occurs', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'after i get married, my new email is future@example.com', confidence: 'high' }] },
     });
@@ -4062,7 +4062,7 @@ describe('round-58 hardening', () => {
 
   it('a when-scoped effective condition defers too', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'when we sell the house my new email is future@example.com', confidence: 'high' }] },
     });
@@ -4072,7 +4072,7 @@ describe('round-58 hardening', () => {
 
   it('a past-narrative "when I signed up" correction still applies', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'right@example.com', quote: 'my email was entered wrong, it should be right@example.com', confidence: 'high' }] },
     });
@@ -4082,7 +4082,7 @@ describe('round-58 hardening', () => {
 
   it('a polite "when you get a chance" framing still applies', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'fix@example.com', quote: 'fix my email, it should be fix@example.com', confidence: 'high' }] },
     });
@@ -4092,7 +4092,7 @@ describe('round-58 hardening', () => {
 
   it('a purpose clause after a change request does not defer it', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'now@example.com', quote: 'change my email to now@example.com so i receive the reminder next week', confidence: 'high' }] },
     });
@@ -4102,7 +4102,7 @@ describe('round-58 hardening', () => {
 
   it('a bare trailing effective date still defers (unchanged by the purpose fix)', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'change my email to future@example.com next month', confidence: 'high' }] },
     });
@@ -4113,7 +4113,7 @@ describe('round-58 hardening', () => {
   it('an inline unit too long to persist fails the whole group closed', async () => {
     const knex = makeStubKnex({ customers: [{ ...baseCustomer(), address_line2: 'Unit 4' }], agent_decisions: [] });
     const monsterUnit = `Suite ${'B'.repeat(120)}`;
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -4132,7 +4132,7 @@ describe('round-58 hardening', () => {
 describe('round-59 hardening', () => {
   it('a date-led replacement declaration defers', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'next month, my new email is future@example.com', confidence: 'high' }] },
     });
@@ -4142,7 +4142,7 @@ describe('round-59 hardening', () => {
 
   it('an undated replacement declaration still applies', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'now@example.com', quote: 'my new email is now@example.com', confidence: 'high' }] },
     });
@@ -4160,7 +4160,7 @@ describe('round-59 hardening', () => {
     const geocoder = require('../services/geocoder');
     const spy = jest.spyOn(geocoder, 'regeocodeCustomerAddressGuarded').mockResolvedValue(undefined);
     const knex = makeStubKnex({ customers: [{ ...baseCustomer(), address_line2: 'Unit 4' }], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'address_line2', new_value: 'Unit 7', quote: 'my unit number is wrong, it is Unit 7', confidence: 'high' }] },
     });
@@ -4174,7 +4174,7 @@ describe('round-59 hardening', () => {
     const geocoder = require('../services/geocoder');
     const spy = jest.spyOn(geocoder, 'regeocodeCustomerAddressGuarded').mockResolvedValue(undefined);
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -4213,7 +4213,7 @@ describe('round-60 hardening', () => {
 describe('round-61 hardening', () => {
   it('a lowercase former-holder disclaimer vetoes the batch', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is wrong; use newholder@example.com', confidence: 'high' }] },
     });
@@ -4223,7 +4223,7 @@ describe('round-61 hardening', () => {
 
   it("a lowercase third-person 'doesn't use this number' vetoes too", async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'x@example.com', quote: 'the email should be x@example.com', confidence: 'high' }] },
     });
@@ -4233,7 +4233,7 @@ describe('round-61 hardening', () => {
 
   it("'not home anymore' move phrasing is NOT an identity disclaimer", async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: {
         corrections: [
@@ -4249,7 +4249,7 @@ describe('round-61 hardening', () => {
 
   it('a sender retiring their OWN number is still the customer', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
-    mockCallAnthropic.mockResolvedValue({
+    mockDispatch.mockResolvedValue({
       ok: true,
       json: { corrections: [{ field: 'email', new_value: 'me@example.com', quote: 'my email is wrong, use me@example.com', confidence: 'high' }] },
     });

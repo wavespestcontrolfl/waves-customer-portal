@@ -204,15 +204,15 @@ const LANES = [
   L('footprint_claim', 'Service-footprint claim classifier', 'content/footprint-claim-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('estimator_sms_signal', 'Estimator SMS thread quote signal', 'estimator-engine/sms-thread.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('sms_pathology', 'SMS pathology clustering', 'sms-pathology-ledger.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'summary pass rides DEEP' }),
-  L('contact_correction', 'SMS contact-correction extraction', 'contact-correction.js', 'fastText', T('FAST'), null, { inbound: true }),
-  L('bounce_rescue', 'Email bounce address decode', 'email-bounce-rescue.js', 'fastText', T('FAST'), null, { inbound: true }),
+  L('contact_correction', 'SMS contact-correction extraction', 'contact-correction.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('bounce_rescue', 'Email bounce address decode', 'email-bounce-rescue.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('seo_intent', 'SEO query-intent classification', 'seo/seo-diagnosis-tools.js', 'fastText', T('FAST')),
   L('prospect_score', 'Backlink prospect scoring', 'seo/prospect-scorer.js', 'fastText', T('FAST')),
   L('signup_classifier', 'Backlink signup classifier', 'seo/signup-classifier.js', 'fastText', E('MODEL_SIGNUP_CLASSIFIER', T('FAST'))),
   L('mentions_sentiment', 'LLM-mention sentiment classification', 'seo/llm-mention-prober.js', 'fastText', T('FAST')),
   L('events', 'Community events ingestion', 'event-ingestion.js', 'fastText', T('WORKHORSE')),
   L('events_editorial', 'Community events curation + normalizing', 'event-curation.js, event-normalizer.js', 'fastText', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
-  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', T('FLAGSHIP'), null, { note: 'routine categories on the flagship tier' }),
+  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'routine categories on the flagship tier' }),
 
   // ── Multimodal ──
   L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
