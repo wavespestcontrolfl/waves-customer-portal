@@ -409,6 +409,11 @@ describe('acquireAnyway', () => {
     expect(row).toMatchObject({ level: 'OWNER_FREE', floor_waiver_id: waivers(s.db)[0].id });
     expect(placements(s.db).every((x) => x.status === 'awaiting_owner')).toBe(true);
     expect(approvals(s.db)).toHaveLength(0);
+    // the card shows the waiver while its floors hash holds, and drops it the moment a floor input moves
+    expect((await Q.listOwnerQueue(s.db)).cards[0].waiver).toMatchObject({ id: waivers(s.db)[0].id, approved_by: ACTOR });
+    storedDomain(s.db).spam_score = 31;
+    expect((await Q.listOwnerQueue(s.db)).cards[0].waiver).toBeNull();
+    storedDomain(s.db).spam_score = 30;
     // lifted ⇒ qualified: a re-click is refused until the bridge rejects the domain again (inputs moved, waiver stale)
     await expect(Q.acquireAnyway(s.db, { domainId: s.d.id, actor: ACTOR, now: LATER, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/only a rejected domain/) });
     storedDomain(s.db).agent_state = 'rejected'; storedDomain(s.db).rejected_by = 'bridge';

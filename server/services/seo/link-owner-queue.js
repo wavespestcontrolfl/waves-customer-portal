@@ -140,7 +140,7 @@ async function listOwnerQueue(db) {
   const pathById = new Map(paths.map((p) => [p.id, p]));
   const rows = await loadApprovals(db, await db(AUTH).whereIn('prospect_id', cardsFor.map((p) => p.id)).whereNull('ended_at'));
   const waivers = await db('seo_link_floor_waivers').whereIn('domain_id', domains.map((d) => d.id)).whereNull('invalidated_at').orderBy('approved_at', 'desc')
-    .select('id', 'domain_id', 'path_id', 'overridden_floors', 'note', 'approved_by', 'approved_at');
+    .select('id', 'domain_id', 'path_id', 'overridden_floors', 'decision_inputs_hash', 'note', 'approved_by', 'approved_at');
   const waiverFor = new Map();
   for (const w of waivers) {
     if (typeof w.overridden_floors === 'string') { try { w.overridden_floors = JSON.parse(w.overridden_floors); } catch { /* shown raw */ } }
@@ -194,7 +194,8 @@ async function listOwnerQueue(db) {
       // Reject / Watch apply while the domain is still the owner's to decide; once a sibling is approved or in flight
       // (lane-owned) those buttons would only ever 409 — the card says so instead
       decidable: !R.LANE_OWNED_STATES.includes(d.agent_state),
-      waiver: path ? waiverFor.get(`${d.id}|${path.id}`) || null : null,
+      // shown only while the bridge would still honour it: the same floors-hash test approveRow / activeWaiver apply
+      waiver: path && waiverFor.get(`${d.id}|${path.id}`) && waiverFor.get(`${d.id}|${path.id}`).decision_inputs_hash === P.floorInputsHash({ path, domain: d, policy, score: d.score }) ? waiverFor.get(`${d.id}|${path.id}`) : null,
       d30_confidence: null, // step 7 (D30 loop) — no evidence yet
       price_tolerance_cents: policy.owner_price_tolerance_cents,
       rows: mine,
