@@ -397,7 +397,49 @@ describe('POST /admin/communications/customer-link', () => {
       const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'card_request' });
       expect(res.status).toBe(404);
       expect(builders.buildCardRequestLink).toHaveBeenCalledWith(null);
+      // Card requests anchor on the phone OWNER's visits only, never a sibling's.
+      expect(db.mock.calls.filter(([t]) => t === 'scheduled_services').length).toBeGreaterThan(0);
       expect((await res.json()).error).toMatch(/No upcoming appointment/);
+    });
+  });
+
+  test('contract: per customer ROW — the phone owner only, with the owner id riding back', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildContractSigningLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/contract/tokX',
+      line: 'Please review and sign your Auto Pay Authorization here: https://portal.wavespestcontrol.com/contract/tokX\n\n',
+      contract: { id: 'k1', title: 'Auto Pay Authorization', rotated: false },
+      expiresAt: '2026-10-03T00:00:00.000Z',
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'contract' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildContractSigningLink).toHaveBeenCalledWith([CUSTOMER_UUID], expect.anything());
+      expect(body.customerId).toBe(CUSTOMER_UUID);
+      expect(body.expiresAt).toBe('2026-10-03T00:00:00.000Z');
+      expect(body.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', rotated: false });
+    });
+  });
+
+  test.each(['contract', 'card_request'])('%s: 409 when the phone belongs to more than one sibling — same rule as Auto Pay', async (kind) => {
+    const other = 'bbbb2222-0000-4000-8000-000000000002';
+    wireDb({
+      customers: makeCustomersBuilder({
+        selectResults: [
+          [{ id: CUSTOMER_UUID, account_id: CUSTOMER_UUID }, { id: other, account_id: CUSTOMER_UUID }],
+          [{ id: CUSTOMER_UUID }, { id: other }],
+          [{ first_name: 'PersonA' }, { first_name: 'PersonA' }],
+          [{ id: CUSTOMER_UUID }, { id: other }],
+        ],
+      }),
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/more than one customer on this account/);
+      expect(builders.buildContractSigningLink).not.toHaveBeenCalled();
+      expect(builders.buildCardRequestLink).not.toHaveBeenCalled();
     });
   });
 

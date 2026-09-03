@@ -794,8 +794,10 @@ async function buildServiceReportLink(customerIds) {
 const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
 
 /**
- * Contract signing link — the account's newest contract still awaiting a
- * signature, minted through the share-link route's ONE writer
+ * Contract signing link — the phone-owning customer's newest contract
+ * still awaiting a signature (the route passes that ONE row, never account
+ * siblings — a signable bearer follows the document delivery's own
+ * recipient rule), minted through the share-link route's ONE writer
  * (createShareLink). The raw token is never stored, so this necessarily
  * ROTATES any previously sent link; `contract.rotated` says whether one
  * existed so the composer can say so. The recipient-phone trust the

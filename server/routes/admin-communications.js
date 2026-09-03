@@ -1696,10 +1696,15 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // exclusions — dispatch-owned pendings, elapsed placeholders); the
       // builders take the picked row so the pick stays route-owned.
       appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids)),
-      card_request: async (ids) => builders.buildCardRequestLink(await soonestUpcomingVisit(ids)),
+      // Bearer credentials for a payment-adjacent page (card request) or a
+      // signable document (contract) are per customer ROW — the phone's
+      // owner only, never an account sibling (pre-push Codex P0: the
+      // document delivery's SMS_RECIPIENT_UNTRUSTED bar is the customer's
+      // own phone, not any phone on the account). STRICT_OWNER_KINDS below.
+      card_request: async (ids, primaryId) => builders.buildCardRequestLink(await soonestUpcomingVisit([primaryId])),
       prep_guide: (ids) => builders.buildPrepGuideLink(ids),
       service_report: (ids) => builders.buildServiceReportLink(ids),
-      contract: (ids) => builders.buildContractSigningLink(ids, req),
+      contract: (ids, primaryId) => builders.buildContractSigningLink([primaryId], req),
       // A payer statement covers the bill-to's whole book: the builder only
       // answers when the recipient number IS the payer's AP phone.
       statement: (ids) => builders.buildStatementLink(ids, last10),
@@ -1759,16 +1764,20 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     // sibling the latest message carried — see firstNameForPhone), so the
     // check runs whether or not one was supplied: the phone must belong to
     // exactly ONE row on the account, else 409 to the customer's own
-    // profile card (GH Codex #3812 r1 P1 + pre-push P0).
-    if (!primaryId || kind === 'autopay_setup') {
+    // profile card (GH Codex #3812 r1 P1 + pre-push P0). Card requests and
+    // contract signing links are the same class of bearer (per row, money-
+    // or signature-adjacent) and take the same rule.
+    const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract'];
+    const strictOwner = STRICT_OWNER_KINDS.includes(kind);
+    if (!primaryId || strictOwner) {
       const phoneRows = await db('customers')
         .whereNull('deleted_at')
         .whereIn('id', customerIds)
         .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
         .select('id');
-      if (kind === 'autopay_setup' && phoneRows.length !== 1) {
+      if (strictOwner && phoneRows.length !== 1) {
         return res.status(409).json({
-          error: 'That number is on file for more than one customer on this account — send the Auto Pay setup link from that customer\'s profile instead',
+          error: 'That number is on file for more than one customer on this account — send this link from that customer\'s profile instead',
         });
       }
       if (!primaryId) primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
@@ -1801,7 +1810,7 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // it — the /sms send then carries customerId and the link's owner
       // policy applies (GH Codex #3812 r3 P1). standalone: the line is a
       // complete greeted message, inserted as-is.
-      customerId: kind === 'autopay_setup' ? primaryId : undefined,
+      customerId: strictOwner ? primaryId : undefined,
       standalone: result.standalone || undefined,
     });
   } catch (err) {
