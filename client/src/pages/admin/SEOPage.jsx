@@ -3626,9 +3626,10 @@ function OwnerQueuePanel() {
                         <td style={{ ...tdStyle, fontFamily: "inherit", color: D.muted }}>{r.reason || "—"}</td>
                         <td style={{ ...tdStyle, fontFamily: "inherit" }}>
                           {approvedBy ? (
-                            <span style={{ color: D.green }}>
+                            <span style={{ color: r.approval_stale ? D.amber : D.green }}>
                               {`Approved by ${approvedBy.approved_by} ${formatETDateTime(approvedBy.approved_at)}`}
                               {approvedBy.max_payable_cents != null ? ` · up to ${money(approvedBy.max_payable_cents)}` : ""}
+                              {r.approval_stale ? ` · ${r.approval_stale}` : ""}
                             </span>
                           ) : r.approvable ? (
                             <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>

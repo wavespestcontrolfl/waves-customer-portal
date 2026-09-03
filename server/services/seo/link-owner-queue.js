@@ -187,14 +187,17 @@ async function listOwnerQueue(db) {
     const ctx = onBestPath ? { path, domain: d, policy, score: d.score } : null;
     const mine = rows.filter((r) => r.prospect_id === p.id).map((r) => {
       let whyNot = onBestPath ? whyNotApprovable(r, path) : 'placement is not on the domain\'s current best path — the nightly bridge rotates it';
-      // the same freshness test the click applies — a stale stamp never shows a button that can only 409
-      if (!whyNot) whyNot = stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null).reason;
+      // the same freshness test the click applies — a stale stamp never shows a button that can only 409, and an
+      // APPROVED row whose inputs moved since (price, policy, revision) is shown as awaiting the bridge's re-decision
+      // rather than as live spending authority (the bridge invalidates it on its next pass)
+      const stale = onBestPath && (whyNot === null || whyNot === 'approved') ? stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null).reason : null;
+      if (!whyNot && stale) whyNot = stale;
       const sharedFee = shared && r.dimension === 'payment';
       const primary = !sharedFee || groupPrimary.get(p.payment_group_id) === p.id;
       return {
         id: r.id, dimension: r.dimension, instance_kind: r.instance_kind, instance_key: r.instance_key, level: r.level, reason: r.reason,
         decided_at: r.decided_at, satisfied_at: r.satisfied_at, satisfied_reason: r.satisfied_reason,
-        action: actionFor(r), approved: r.approved, approval: r.approval,
+        action: actionFor(r), approved: r.approved, approval: r.approval, approval_stale: r.approved && stale ? stale : null,
         // the quote THIS row authorizes: a renewal instance is the renewal price, never the initial fee; null fails closed
         quote_cents: r.dimension === 'payment' && path ? (actionFor(r) === 'renewal' ? (Number.isSafeInteger(path.renewal_cost_cents) && path.renewal_cost_cents > 0 ? path.renewal_cost_cents : null) : (Number.isSafeInteger(path.estimated_cost_cents) && path.estimated_cost_cents > 0 ? path.estimated_cost_cents : null)) : null,
         approvable: whyNot === null && primary,
@@ -280,6 +283,9 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
       if (path.currency !== 'USD') refuse(409, `checkout currency is ${path.currency}, not USD — an owner approval cannot change it`);
       // the amount is the OWNER'S statement, never a server default: a stale or direct client that omits it gets 400
       if (approvedAmountCents === null || approvedAmountCents === undefined || approvedAmountCents === '') refuse(400, 'approved_amount_cents is required for a payment approval (the card shows the quote; submit the amount you approve)');
+      // a number or a canonical integer string only — never a coerced boolean / array / decimal (`true` → 1, `[4500]` → 4500)
+      const canonical = typeof approvedAmountCents === 'number' || (typeof approvedAmountCents === 'string' && /^[0-9]{1,15}$/.test(approvedAmountCents));
+      if (!canonical) refuse(400, 'approved_amount_cents must be a whole number of cents');
       const cents = Number(approvedAmountCents);
       if (!Number.isSafeInteger(cents) || cents <= 0) refuse(400, 'approved_amount_cents must be a positive whole number of cents');
       if (cents > P.PG_INT_MAX) refuse(400, 'approved_amount_cents is out of range');

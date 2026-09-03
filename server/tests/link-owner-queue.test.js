@@ -331,6 +331,22 @@ describe('approveRow', () => {
     expect(approvals(db)).toHaveLength(0);
   });
 
+  test('an approved row whose inputs moved since is shown as stale, not as live authority; bad amount types refuse', async () => {
+    const { db } = await parked({ make: paidPath });
+    const card = (await Q.listOwnerQueue(db)).cards[0];
+    const pay = card.rows.find((r) => r.dimension === 'payment');
+    for (const bad of [true, [4500], '4500.00', ' 4500', { cents: 4500 }]) {
+      await expect(Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: bad, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 400 });
+    }
+    expect(approvals(db)).toHaveLength(0);
+    await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: '4500', now: NOW, bridge: inline }); // canonical string is fine
+    let after = (await Q.listOwnerQueue(db)).cards.find((c) => c.placement.id === card.placement.id).rows.find((r) => r.dimension === 'payment');
+    expect(after).toMatchObject({ approved: true, approval_stale: null, why_not: 'approved' });
+    storedPath(db).estimated_cost_cents = 4900; // the quote moved after the approval, before the bridge ran
+    after = (await Q.listOwnerQueue(db)).cards.find((c) => c.placement.id === card.placement.id).rows.find((r) => r.dimension === 'payment');
+    expect(after).toMatchObject({ approved: true, approval_stale: expect.stringMatching(/inputs changed/) });
+  });
+
   test('a card whose stamp went stale shows why instead of a button (the click\'s own test, applied at listing)', async () => {
     const { db } = await parked();
     expect((await Q.listOwnerQueue(db)).cards[0].rows[0]).toMatchObject({ approvable: true, why_not: null });
