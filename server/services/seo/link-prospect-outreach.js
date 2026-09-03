@@ -22,9 +22,9 @@ const logger = require('../logger');
 const gmailClient = require('../email/gmail-client');
 const { isEnabled } = require('../../config/feature-gates');
 const { OUTREACH_TYPES, isValidEmail } = require('./link-prospect-worker');
+const { DEFAULT_OUTREACH_DAILY_CAP: DEFAULT_DAILY_CAP, outreachDailyCeiling } = require('./link-authority-policy');
 
 const OUTREACH_TYPE_SET = new Set(OUTREACH_TYPES);
-const DEFAULT_DAILY_CAP = 12; // within design §9's ≤10–15 cold sends/day
 // Postgres advisory-lock namespace serializing the cap-check + claim so concurrent
 // approvals can't both pass the cap or both flip drafted→sending.
 const OUTREACH_LOCK_KEY = 778932;
@@ -32,10 +32,9 @@ const OUTREACH_LOCK_KEY = 778932;
 // by saveDraft; inside the window it's a live in-flight send and stays locked.
 const STALE_SENDING_MS = 15 * 60 * 1000;
 
-/** Daily cold-send cap, env-overridable; falls back to the default on bad input. */
+/** Daily cold-send cap — the shared parser in link-authority-policy (env-overridable, default on bad input). */
 function dailyCap() {
-  const n = parseInt(process.env.LINK_OUTREACH_DAILY_CAP, 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_DAILY_CAP;
+  return outreachDailyCeiling();
 }
 
 // gmail-client.sendMessage sends Content-Type text/html, so a plain-text draft

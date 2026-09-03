@@ -28,8 +28,9 @@
  */
 
 const {
-  ATTEMPT_PROVIDERS, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES, ACQUISITION_TYPES, CURRENCIES, PATH_LINK_TYPES, FEE_SCOPES,
+  ATTEMPT_PROVIDERS, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES, ACQUISITION_TYPES, CURRENCIES, FEE_SCOPES,
 } = require('./link-registry');
+const { URL_REQUIRED_ACQUISITION_TYPES, OUTREACH_LINK_TYPES, SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
 
 const MEMBERSHIP_TYPES = Object.freeze(['membership', 'association', 'sponsorship']);
 // §3.2: every authority-relevant flag is NOT NULL and must be a literal boolean
@@ -47,7 +48,7 @@ const POLICY_FIELDS = Object.freeze({
   auto_free_acquisition: { type: 'boolean', default: false },
   auto_account_creation: { type: 'boolean', default: false },
   auto_outreach_min_score: { type: 'int', nullable: true, min: 0, max: 100, default: null },
-  auto_outreach_daily_cap: { type: 'int', min: 0, default: 0, env: 'LINK_OUTREACH_DAILY_CAP' },
+  auto_outreach_daily_cap: { type: 'int', min: 0, default: 0, env: 'LINK_OUTREACH_DAILY_CAP', ceiling: outreachDailyCeiling },
   auto_submission_daily_cap: { type: 'int', min: 0, default: 0 },
   owner_price_tolerance_cents: { type: 'int', min: 0, default: 0 },
   presentment_window_days: { type: 'int', min: 0, default: 10, raiseOnly: true },
@@ -66,6 +67,16 @@ const POLICY_FIELDS = Object.freeze({
 const POLICY_FIELD_NAMES = Object.freeze(Object.keys(POLICY_FIELDS));
 
 const configured = (x) => typeof x === 'number' && Number.isFinite(x);
+
+// The sender's hard ceiling on cold sends per day (design §9: ≤10–15). ONE
+// parser: link-prospect-outreach enforces it, applyEnvTightening reports it —
+// unset / non-numeric / non-positive env falls back to the default, so the
+// panel can never show a cap the sender would not honor.
+const DEFAULT_OUTREACH_DAILY_CAP = 12;
+function outreachDailyCeiling(env = process.env) {
+  const n = Number.parseInt(env.LINK_OUTREACH_DAILY_CAP, 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_OUTREACH_DAILY_CAP;
+}
 const PG_INT_MAX = 2147483647; // every `int` policy column is a PostgreSQL integer
 
 // pg returns NUMERIC/DECIMAL as strings — normalize once, here.
@@ -89,11 +100,8 @@ function applyEnvTightening(policy, env = process.env) {
   const overrides = [];
   for (const name of POLICY_FIELD_NAMES) {
     const spec = POLICY_FIELDS[name];
-    if (!spec.env) continue;
-    const raw = env[spec.env];
-    if (raw === undefined || raw === '') continue;
-    const n = Number.parseInt(raw, 10);
-    if (!Number.isFinite(n) || n < 0) continue;
+    if (!spec.ceiling) continue;
+    const n = spec.ceiling(env);
     if (n < effective[name]) {
       overrides.push({ field: name, env: spec.env, row: effective[name], applied: n });
       effective[name] = n;
@@ -125,7 +133,9 @@ function parseField(name, value, current) {
     if (!spec.values.includes(value)) return { error: `${name} must be one of ${spec.values.join(', ')}` };
     return { value };
   }
-  const n = typeof value === 'number' ? value : Number(value);
+  // Only a number or a numeric string: Number(true) === 1 and Number([50]) === 50
+  // would let a mistyped PATCH silently lower a safety floor.
+  const n = typeof value === 'number' ? value : (typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN);
   if (!Number.isFinite(n)) return { error: `${name} must be a number` };
   if (spec.type === 'int' && !Number.isInteger(n)) return { error: `${name} must be an integer` };
   // DECIMAL(3,2) columns store two places: a finer value would be rounded by
@@ -230,12 +240,18 @@ function validityFailure(path, domain, score) {
   if (!Number.isFinite(conf) || conf < 0 || conf > 1) return 'confidence not in [0,1]';
   if (!ACQUISITION_TYPES.includes(path.acquisition_type) || ['not_reproducible', 'unknown'].includes(path.acquisition_type)) return `acquisition_type ${path.acquisition_type}: nothing to execute`;
   if (!path.last_investigated_at) return 'never investigated';
-  if (!PATH_LINK_TYPES.includes(path.link_type)) return `link_type ${path.link_type} is not claimable`; // = the worker's CLAIMABLE_LINK_TYPES
+  // Lane pairing (schema): the worker routes outreach lanes to the outreach worker and
+  // directory/citation/social to the signup runner — a mismatch hands the placement to
+  // the wrong executor. The two lane sets union to the worker's CLAIMABLE_LINK_TYPES.
+  const isOutreach = OUTREACH_ACQUISITION_TYPES.includes(path.acquisition_type);
+  if (!(isOutreach ? OUTREACH_LINK_TYPES : SIGNUP_LINK_TYPES).includes(path.link_type)) return `link_type ${path.link_type} is not a ${isOutreach ? 'outreach' : 'signup'} lane for ${path.acquisition_type}`;
+  if (URL_REQUIRED_ACQUISITION_TYPES.includes(path.acquisition_type) && !(typeof path.submission_url === 'string' && path.submission_url.trim())) return `${path.acquisition_type} without a submission_url`;
   for (const f of BOOLEAN_FLAGS) if (!isLiteralBoolean(path[f])) return `${f} is not a literal boolean`;
   if (PAID_ACQUISITION_TYPES.includes(path.acquisition_type) && !path.payment_required) return `${path.acquisition_type} requires payment_required`;
   if (path.acquisition_type === 'self_service_free' && path.payment_required) return 'self_service_free cannot require payment';
   if (path.execution_after_send === false && path.terms_accepted_by_send === true) return 'deadlock: send-accepted terms with submit-first ordering';
   if (path.terms_accepted_by_send === true && path.legal_attestation !== true) return 'send-accepted terms without legal_attestation'; // schema implication §3.2 — no cross-field CHECK in the DB
+  if (path.terms_accepted_by_send === true && !isOutreach) return 'send-accepted terms on a path that never sends';
   if (path.legal_attestation && !validLegalTermsHash(path.legal_terms_hash)) return 'legal_attestation without a bound agreement hash';
   if (path.superseded_by) return 'path superseded';
   if (path.baseline === true) return 'baseline placeholder is never executable';
@@ -345,6 +361,7 @@ function decideAuthority({ path, domain, policy, score, d30Confidence = null, mo
 
 module.exports = {
   POLICY_FIELDS, POLICY_FIELD_NAMES, LEVELS, PG_INT_MAX, MEMBERSHIP_TYPES, BOOLEAN_FLAGS,
+  DEFAULT_OUTREACH_DAILY_CAP, outreachDailyCeiling,
   normalizePolicyRow, applyEnvTightening, loadPolicy, updatePolicy, parseField,
   requiredInstances, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
 };

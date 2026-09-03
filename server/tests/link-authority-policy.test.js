@@ -66,13 +66,18 @@ describe('env tightening (§3.8)', () => {
     expect(t.overrides).toEqual([{ field: 'auto_outreach_daily_cap', env: 'LINK_OUTREACH_DAILY_CAP', row: 10, applied: 4 }]);
     expect(P.applyEnvTightening(d, { LINK_OUTREACH_DAILY_CAP: 'abc' }).overrides).toEqual([]);
     expect(P.applyEnvTightening(d, { LINK_OUTREACH_DAILY_CAP: '-1' }).overrides).toEqual([]);
+    // the sender's default ceiling (12) governs when the env is unset or unusable
+    const high = { ...defaults(), auto_outreach_daily_cap: 20 };
+    expect(P.applyEnvTightening(high, {})).toEqual({ policy: { ...high, auto_outreach_daily_cap: 12 }, overrides: [{ field: 'auto_outreach_daily_cap', env: 'LINK_OUTREACH_DAILY_CAP', row: 20, applied: 12 }] });
+    expect(P.applyEnvTightening(high, { LINK_OUTREACH_DAILY_CAP: '0' }).policy.auto_outreach_daily_cap).toBe(12);
+    expect(P.outreachDailyCeiling({})).toBe(P.DEFAULT_OUTREACH_DAILY_CAP);
   });
 });
 
 describe('parseField (the Policy panel contract)', () => {
   test.each([
     ['min_score', 101, /≤ 100/], ['min_score', -1, /≥ 0/], ['min_score', 1.5, /integer/], ['min_score', 'x', /number/],
-    ['min_score', null, /cannot be empty/], ['nope', 1, /unknown policy field/], ['constructor', 1, /unknown policy field/], ['__proto__', 1, /unknown policy field/], ['preferred_provider', 'human2', /one of/],
+    ['min_score', null, /cannot be empty/], ['min_score', true, /number/], ['min_score', [50], /number/], ['min_score', '  ', /cannot be empty|number/], ['nope', 1, /unknown policy field/], ['constructor', 1, /unknown policy field/], ['__proto__', 1, /unknown policy field/], ['preferred_provider', 'human2', /one of/],
     ['auto_free_acquisition', 'yes', /boolean/], ['min_path_confidence', 1.2, /≤ 1/],
     ['monthly_paid_budget_cents', 2147483648, /≤ 2147483647/], ['auto_outreach_daily_cap', 1e12, /≤ 2147483647/],
     ['min_path_confidence', 0.655, /at most 2 decimal places/], ['auto_paid_min_d30_confidence', '0.123', /at most 2 decimal places/],
@@ -167,6 +172,11 @@ describe('§6.3 1a validity — INVALID for every dimension, never overrideable'
     ['unknown type', path({ acquisition_type: 'unknown' }), domain()],
     ['never investigated', path({ last_investigated_at: null }), domain()],
     ['unclaimable link_type', path({ link_type: 'sponsored_post' }), domain()],
+    ['outreach type in a signup lane', outreach({ link_type: 'directory' }), domain()],
+    ['signup type in an outreach lane', path({ link_type: 'resource' }), domain()],
+    ['site-executed type without submission_url', path({ submission_url: null }), domain()],
+    ['site-executed type with a blank submission_url', path({ submission_url: '  ' }), domain()],
+    ['send-accepted terms on a signup-only type', paid({ terms_accepted_by_send: true, legal_attestation: true, legal_terms_hash: HASH, execution_after_send: true }), domain()],
     ...P.BOOLEAN_FLAGS.map((f) => [`${f} not a literal boolean`, path({ [f]: 'true' }), domain()]),
     ['paid type without payment_required', path({ acquisition_type: 'paid_listing', payment_required: false }), domain()],
     ['self_service_free with payment', path({ payment_required: true, estimated_cost_cents: 100, currency: 'USD' }), domain()],
