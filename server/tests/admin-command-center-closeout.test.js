@@ -110,7 +110,8 @@ test('money + comms facts render per-visit cards with their labels only behind G
   const cards = (await run()).filter((a) => moneyTypes.includes(a.type));
   expect(cards).toEqual([
     expect.objectContaining({ id: 'svc-1_completion_notice_failed', type: 'completion_notice_failed', label: 'Completion notice failed', severity: 'medium', metadata: expect.objectContaining({ closeoutFact: 'comms', closeoutReason: 'completion_sms_failed' }) }),
-    expect.objectContaining({ id: 'svc-1_invoice_not_minted', type: 'invoice_not_minted', label: 'Invoice owed but not minted', metadata: expect.objectContaining({ closeoutFact: 'invoice' }) }),
+    // Reason-qualified id (GH r1 P1): a later parked-manual exception on a dismissed visit is new work.
+    expect.objectContaining({ id: 'svc-1_invoice_not_minted:expected_invoice_not_minted', type: 'invoice_not_minted', label: 'Invoice owed but not minted', metadata: expect.objectContaining({ closeoutFact: 'invoice' }) }),
   ]);
   closeoutAlertsPrivate.memo.clear();
   getCloseoutStatus.mockResolvedValue(closeout({ facts: { invoiceDelivery: fact('failed', 'receipt_delivery_exhausted') } }));

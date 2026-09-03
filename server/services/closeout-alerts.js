@@ -119,6 +119,17 @@ const ACTIONABLE_INVOICE_PENDING = (reason) => reason === 'parked_manual_refunde
 // invoice_draft_unsent (the stale-drafts alert owns that population at
 // three days) stay silent; opt-out reads not_required upstream.
 const ACTIONABLE_INVOICE_DELIVERY_PENDING = new Set(['paid_receipt_not_sent', 'payer_invoice_unsent']);
+// The receipt failures closeout-status emits today, allowlisted so a future
+// failed reason never maps to a card whose copy does not describe it.
+// NOT completion_sms_failed: that fact reads the shared completion-SMS
+// status and cannot tell whether the body carried a pay link (the
+// report-only choice, includePayLink === false, shares the stamp — GH r1
+// P2), so the comms card owns that failure; resending the notice resends
+// the link when one belongs.
+const ACTIONABLE_INVOICE_DELIVERY_FAILED = new Set(['receipt_no_recipient', 'receipt_delivery_exhausted']);
+// comms emits exactly one failed reason (the provider rejected the
+// completion SMS); the card copy is written for it.
+const ACTIONABLE_COMMS_FAILED = new Set(['completion_sms_failed']);
 // Report-delivery reasons that are in flight or held BY DESIGN — not an
 // operator gap (the queue / payment hold / send window owns them).
 const TRANSIENT_DELIVERY_REASONS = new Set([
@@ -294,7 +305,7 @@ function closeoutIssuesForVisit(status) {
 function moneyCommsIssues(facts) {
   const issues = [];
   const comms = facts.comms;
-  if (comms?.state === 'failed') {
+  if (comms?.state === 'failed' && ACTIONABLE_COMMS_FAILED.has(comms.reason)) {
     issues.push({
       type: CLOSEOUT_ALERT_TYPES.comms,
       fact: 'comms',
@@ -304,27 +315,36 @@ function moneyCommsIssues(facts) {
   }
   const invoice = facts.invoice;
   if (invoice?.state === 'pending' && ACTIONABLE_INVOICE_PENDING(invoice.reason)) {
+    // A refunded row can sit beside a PAID live sibling (closeout-status
+    // parks it either way) — never tell the operator to bill (GH r1 P1).
     const summary = invoice.reason === 'parked_manual_refunded_invoice'
-      ? 'A refunded invoice sits beside this visit — reconcile and bill it by hand.'
+      ? 'A refunded invoice sits beside this visit — reconcile the two invoices and bill only if that review finds an unpaid balance.'
       : invoice.reason === 'parked_manual_canceled_setup_fee'
         ? 'The acceptance invoice carrying the setup fee was canceled — bill the visit and the setup fee by hand.'
         : 'This visit owes an invoice that was never minted — create it before the customer is billed elsewhere.';
-    issues.push({ type: CLOSEOUT_ALERT_TYPES.invoice, fact: 'invoice', reason: invoice.reason, summary });
+    // Reason-qualified identity (GH r1 P1): a dismissed expected-not-minted
+    // card must not swallow a later parked-manual exception on the same
+    // visit — same idiom as the contradiction issues.
+    issues.push({
+      type: CLOSEOUT_ALERT_TYPES.invoice,
+      fact: 'invoice',
+      reason: invoice.reason,
+      identity: `${CLOSEOUT_ALERT_TYPES.invoice}:${invoice.reason}`,
+      summary,
+    });
   }
   const delivery = facts.invoiceDelivery;
   const deliveryOpen = Boolean(delivery)
-    && (delivery.state === 'failed'
+    && ((delivery.state === 'failed' && ACTIONABLE_INVOICE_DELIVERY_FAILED.has(delivery.reason))
       || (delivery.state === 'pending' && ACTIONABLE_INVOICE_DELIVERY_PENDING.has(delivery.reason)));
   if (deliveryOpen) {
     const summary = delivery.reason === 'receipt_no_recipient'
       ? 'Payment receipt could not be sent — no receipt recipient on file; add an email or mobile for this customer.'
       : delivery.reason === 'receipt_delivery_exhausted'
         ? 'Payment receipt delivery failed after retries.'
-        : delivery.reason === 'completion_sms_failed'
-          ? 'Invoice pay-link text failed to send — resend the invoice.'
-          : delivery.reason === 'paid_receipt_not_sent'
-            ? 'Invoice is paid but no receipt was ever sent.'
-            : 'Payer-billed invoice was never sent to the payer.';
+        : delivery.reason === 'paid_receipt_not_sent'
+          ? 'Invoice is paid but no receipt was ever sent.'
+          : 'Payer-billed invoice was never sent to the payer.';
     issues.push({ type: CLOSEOUT_ALERT_TYPES.invoiceDelivery, fact: 'invoiceDelivery', reason: delivery.reason, summary });
   }
   return issues;

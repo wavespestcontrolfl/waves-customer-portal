@@ -361,7 +361,7 @@ describe('Action Inbox generators', () => {
       primeDb({ scheduled_services: [{ id: 'svc-a' }, { id: 'svc-b' }] });
       loadCloseoutStatuses.mockResolvedValueOnce(statuses());
       const item = (await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today');
-      expect(item).toMatchObject({ count: 1, members: ['svc-a:completion_notice_failed', 'svc-a:invoice_not_minted'] });
+      expect(item).toMatchObject({ count: 1, members: ['svc-a:completion_notice_failed', 'svc-a:invoice_not_minted:expected_invoice_not_minted'] });
       expect(item.label).toBe('1 completed visit today not closed out (2 open items)');
       // A comms outage is now an incomplete read: the gap holds (no members) rather than clearing.
       __private.resetCloseoutCarry();

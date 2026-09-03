@@ -120,6 +120,7 @@ describe('money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS)', () => {
       fact('pending', 'deferred_send_window'), fact('pending', 'completion_sms_sending'), fact('pending', 'recap_sms_in_flight'), fact('pending', 'awaiting_completion'),
       fact('not_required', 'completion_sms_blocked_consent'), fact('not_required', 'frozen_posture_manual'), fact('not_required', 'catalog_no_customer_notice'), fact('not_required', 'backfill_completion'),
       fact('unknown', 'no_comms_marker_on_record'), fact('unknown', 'recap_claim_unverified'),
+      fact('failed', 'some_future_failed_reason'), // allowlisted: the card copy describes the SMS rejection only
     ]) expect(closeoutIssuesForVisit(money({ comms: c }))).toEqual([]);
   });
 
@@ -128,9 +129,9 @@ describe('money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS)', () => {
     const reasons = ['parked_manual_refunded_invoice', 'parked_manual_canceled_setup_fee', 'frozen_required_mint_not_minted', 'expected_invoice_not_minted', 'expected_payer_not_minted', 'expected_auto_charge_not_minted'];
     for (const r of reasons) {
       const issues = closeoutIssuesForVisit(money({ invoice: fact('pending', r) }));
-      expect(issues).toEqual([expect.objectContaining({ type: 'invoice_not_minted', fact: 'invoice', reason: r })]);
+      expect(issues).toEqual([expect.objectContaining({ type: 'invoice_not_minted', fact: 'invoice', reason: r, identity: `invoice_not_minted:${r}` })]);
     }
-    expect(closeoutIssuesForVisit(money({ invoice: fact('pending', 'parked_manual_refunded_invoice') }))[0].summary).toMatch(/refunded invoice/);
+    expect(closeoutIssuesForVisit(money({ invoice: fact('pending', 'parked_manual_refunded_invoice') }))[0].summary).toMatch(/reconcile the two invoices and bill only if/);
     expect(closeoutIssuesForVisit(money({ invoice: fact('pending', 'parked_manual_canceled_setup_fee') }))[0].summary).toMatch(/setup fee/);
     expect(closeoutIssuesForVisit(money({ invoice: fact('pending', 'frozen_required_mint_not_minted') }))[0].summary).toMatch(/never minted/);
     for (const f of [fact('pending', 'awaiting_completion'), fact('not_required', 'lane_covered_membership'), fact('not_required', 'disposition_intentionally_free'), fact('unknown', 'invoice_lookup_failed'), fact('done', 'invoice_paid')]) {
@@ -143,7 +144,6 @@ describe('money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS)', () => {
     const cases = [
       ['receipt_no_recipient', 'failed', /no receipt recipient/],
       ['receipt_delivery_exhausted', 'failed', /failed after retries/],
-      ['completion_sms_failed', 'failed', /pay-link text/],
       ['paid_receipt_not_sent', 'pending', /no receipt was ever sent/],
       ['payer_invoice_unsent', 'pending', /never sent to the payer/],
     ];
@@ -156,6 +156,8 @@ describe('money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS)', () => {
       fact('pending', 'receipt_queued'), fact('pending', 'receipt_processing'), fact('pending', 'receipt_pending'), fact('pending', 'deferred_send_window'),
       fact('pending', 'invoice_draft_unsent'), fact('pending', 'no_invoice_yet'), fact('pending', 'awaiting_completion'),
       fact('not_required', 'receipt_opted_out'), fact('not_required', 'lane_covered_annual'), fact('unknown', 'receipt_job_lookup_failed'), fact('done', 'paid_receipt_delivered'),
+      fact('failed', 'some_future_failed_reason'), // allowlisted failed reasons only
+      fact('failed', 'completion_sms_failed'), // the comms card owns the SMS failure; this fact cannot see whether a pay link was in the body
     ]) expect(closeoutIssuesForVisit(money({ invoiceDelivery: f }))).toEqual([]);
   });
 
@@ -167,7 +169,7 @@ describe('money + comms facts (GATE_CLOSEOUT_MONEY_COMMS_ALERTS)', () => {
       invoice: fact('pending', 'expected_invoice_not_minted'),
       invoiceDelivery: fact('pending', 'no_invoice_yet'),
     }));
-    expect(issues.map((i) => i.type)).toEqual(['missing_required_service_report', 'completion_notice_failed', 'invoice_not_minted']);
+    expect(issues.map((i) => i.identity || i.type)).toEqual(['missing_required_service_report', 'completion_notice_failed', 'invoice_not_minted:expected_invoice_not_minted']);
     expect(new Set(issues.map((i) => i.type)).size).toBe(issues.length);
     for (const t of ['completion_notice_failed', 'invoice_not_minted', 'invoice_delivery_incomplete']) expect(CLOSEOUT_ALERT_LABELS[t]).toEqual(expect.any(String));
     const stuck = money({ completion: fact('failed', 'completion_attempt_failed'), comms: fact('failed', 'completion_sms_failed'), invoice: fact('pending', 'expected_invoice_not_minted') });
