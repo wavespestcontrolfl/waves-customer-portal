@@ -15,6 +15,9 @@
 # Disaster restore procedure: same runbook + ops/backup/restore.sh.
 #
 # Design notes (load-bearing):
+#   - The payload is a tar of the custom-format dump PLUS `pg_dumpall
+#     --globals-only` (roles + memberships, no passwords): the analytics role
+#     and its grants are cluster globals a single-database dump never carries.
 #   - pg_dump must be >= the server major (prod is Postgres 18) — the PGDG
 #     apt repo supplies postgresql-client-18; Ubuntu's own package is older.
 #   - The drill restores the object it just DOWNLOADED from R2, not the local
@@ -125,10 +128,17 @@ jobs:
           date -u +%Y%m%dT%H%M%SZ > cutoff.txt
           # Custom format: compressed, restorable table-by-table, parallel-restorable.
           # --no-owner/--no-privileges: the restore target has different roles.
-          pg_dump "$SRC_URL" --format=custom --compress=6 --no-owner --no-privileges \
+          # --no-owner: the restore target has a different owner role. ACLs are
+          # KEPT: the aichart_readonly view grants live in them.
+          pg_dump "$SRC_URL" --format=custom --compress=6 --no-owner \
             --file=waves-portal.dump
-          ls -l waves-portal.dump
-          sha256sum waves-portal.dump | tee dump.sha256
+          # Roles and role memberships are cluster globals a single-database
+          # dump never carries (aichart_readonly + its GRANT TO the app user).
+          pg_dumpall --dbname="$SRC_URL" --globals-only --no-role-passwords > globals.sql
+          grep -cE '^CREATE ROLE' globals.sql
+          tar -cf waves-portal.tar waves-portal.dump globals.sql
+          ls -l waves-portal.tar
+          sha256sum waves-portal.tar | tee dump.sha256
 
       - name: Encrypt and upload
         env:
@@ -137,25 +147,22 @@ jobs:
         run: |
           set -euo pipefail
           stamp=$(cat cutoff.txt)
-          key="waves-portal/${stamp:0:4}/${stamp:4:2}/waves-portal-${stamp}.dump.enc"
+          key="waves-portal/${stamp:0:4}/${stamp:4:2}/waves-portal-${stamp}.tar.enc"
           openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
-            -pass env:BACKUP_ENCRYPTION_KEY -in waves-portal.dump -out waves-portal.dump.enc
-          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors waves-portal.dump.enc "s3://$BUCKET/$key"
+            -pass env:BACKUP_ENCRYPTION_KEY -in waves-portal.tar -out waves-portal.tar.enc
+          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors waves-portal.tar.enc "s3://$BUCKET/$key"
           {
             echo "{"
             echo "  \"key\": \"$key\","
             echo "  \"cutoff\": \"$stamp\","
             echo "  \"plaintext_sha256\": \"$(cut -d' ' -f1 dump.sha256)\","
-            echo "  \"plaintext_bytes\": $(stat -c %s waves-portal.dump),"
-            echo "  \"encrypted_bytes\": $(stat -c %s waves-portal.dump.enc),"
+            echo "  \"plaintext_bytes\": $(stat -c %s waves-portal.tar),"
+            echo "  \"encrypted_bytes\": $(stat -c %s waves-portal.tar.enc),"
             echo "  \"source_counts\": {"
             awk '{printf "    \"%s\": %s,\n", $1, $2}' source-counts.txt | sed '$ s/,$//'
             echo "  }"
             echo "}"
           } > latest.json
-          # Immutable per-object manifest, so an OLDER backup an operator picks
-          # still has its own hash and counts (latest.json only describes the newest).
-          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors latest.json "s3://$BUCKET/${key%.dump.enc}.json"
           echo "$key" > uploaded-key.txt
           echo "Uploaded s3://$BUCKET/$key"
 
@@ -165,11 +172,11 @@ jobs:
           BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
         run: |
           set -euo pipefail
-          rm -f waves-portal.dump waves-portal.dump.enc   # only the offsite copy counts
-          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors "s3://$BUCKET/$(cat uploaded-key.txt)" drill.dump.enc
-          ops/backup/restore.sh drill.dump.enc "$DRILL_URL"
-          # The decrypted bytes must be exactly what was dumped.
-          echo "$(cut -d' ' -f1 dump.sha256)  drill.dump" | sha256sum --check
+          rm -f waves-portal.dump globals.sql waves-portal.tar waves-portal.tar.enc   # only the offsite copy counts
+          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors "s3://$BUCKET/$(cat uploaded-key.txt)" drill.tar.enc
+          # restore.sh verifies the decrypted bytes against this hash before it
+          # touches the target — the same check an operator runs from the manifest.
+          EXPECTED_SHA256="$(cut -d' ' -f1 dump.sha256)" ops/backup/restore.sh drill.tar.enc "$DRILL_URL"
 
       - name: Verify restored counts
         run: |
@@ -177,6 +184,14 @@ jobs:
           fail=0
           psql "$DRILL_URL" -Atqc "SELECT extname||'@'||extversion FROM pg_extension WHERE extname='vector'" | grep -q '^vector@' \
             || { echo "::error::vector extension missing after restore"; fail=1; }
+          # Cluster globals: the analytics role must exist, keep its membership
+          # graph, and be able to read a granted view (the ACLs came with the dump).
+          psql "$DRILL_URL" -Atqc "SELECT 1 FROM pg_roles WHERE rolname='aichart_readonly'" | grep -q 1 \
+            || { echo "::error::role aichart_readonly missing after restore (globals not applied)"; fail=1; }
+          [ "$(psql "$DRILL_URL" -Atqc "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid WHERE r.rolname='aichart_readonly'")" -gt 0 ] \
+            || { echo "::error::aichart_readonly has no members after restore (role memberships not applied)"; fail=1; }
+          [ "$(psql "$DRILL_URL" -Atqc "SET ROLE aichart_readonly; SELECT count(*) FROM ai_customers" | tail -1)" -ge 0 ] 2>/dev/null \
+            || { echo "::error::aichart_readonly cannot read ai_customers after restore (view grants not applied)"; fail=1; }
           {
             echo "## Restore drill"
             echo ""
@@ -200,12 +215,18 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Backup object: \`$(cat uploaded-key.txt)\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish manifest
-        # Only a PROVEN backup may become the disaster-recovery pointer. A failed
-        # drill leaves latest.json at the previous good object.
+      - name: Publish manifests
+        # Only a PROVEN backup gets a manifest. The immutable per-object one
+        # lets an operator pick an OLDER backup with its own hash and counts;
+        # an object with NO sibling .json failed its drill and is ineligible.
+        # latest.json moves last, so a failed drill leaves it on the previous
+        # good object.
         env:
           BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
         run: |
+          set -euo pipefail
+          key=$(cat uploaded-key.txt)
+          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors latest.json "s3://$BUCKET/${key%.tar.enc}.json"
           aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors latest.json "s3://$BUCKET/waves-portal/latest.json"
 
   alert-on-failure:

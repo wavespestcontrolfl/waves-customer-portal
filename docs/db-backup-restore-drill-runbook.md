@@ -61,19 +61,23 @@ failure this lane exists to prevent.
    `payments`, `scheduled_services`, `service_records`, `leads`,
    `knex_migrations`).
 3. Stamps the cutoff, then `pg_dump --format=custom` (compressed,
-   table-selectable), AES-256 encrypts it, uploads
-   `waves-portal/YYYY/MM/waves-portal-<cutoff>.dump.enc` and its immutable
-   manifest `…<cutoff>.json` (key, cutoff, plaintext sha256, sizes, source
-   counts).
+   table-selectable, privileges kept) plus `pg_dumpall --globals-only`
+   (roles and memberships, no passwords — the `aichart_readonly` analytics
+   role is a cluster global a database dump never carries), tars both,
+   AES-256 encrypts, uploads `waves-portal/YYYY/MM/waves-portal-<cutoff>.tar.enc`.
 4. Deletes the local dump, **downloads the uploaded object back**, decrypts,
    verifies the sha256, and `pg_restore`s it into a `pgvector/pgvector:pg18`
    container.
 5. Compares counts. `knex_migrations` must match exactly; the others tolerate
    max(5, 1%) drift because prod keeps writing between the sample and the
-   snapshot. Any table at zero, any drift beyond tolerance, or a missing
-   `vector` extension fails the run.
-6. Only after every check passes, publishes `waves-portal/latest.json`. A
-   failed drill leaves the pointer at the previous proven backup.
+   snapshot. Also checks the `vector` extension, that `aichart_readonly`
+   exists with its membership, and that it can read `ai_customers`. Any
+   miss fails the run.
+6. Only after every check passes, publishes the immutable per-object
+   manifest `…<cutoff>.json` (key, cutoff, plaintext sha256, sizes, source
+   counts) and then `waves-portal/latest.json`. **An object with no sibling
+   `.json` failed its drill — never restore from it.** A failed drill leaves
+   `latest.json` on the previous proven backup.
 
 Expected duration: roughly 10–20 minutes at today's ~1.2 GB.
 
@@ -88,22 +92,28 @@ intend to erase — never the live one. Replace mode drops and recreates the
 1. Railway → the project → **+ New → Database → PostgreSQL**. Railway's
    Postgres image ships pgvector. Copy its `DATABASE_PUBLIC_URL`.
 2. Pick the backup: read `waves-portal/latest.json` in the bucket for the
-   newest key, or list `waves-portal/YYYY/MM/` for an older point in time —
-   every object has its own immutable `<same name>.json` manifest (cutoff,
-   sha256, source counts) beside it.
+   newest key, or list `waves-portal/YYYY/MM/` for an older point in time.
+   Every **proven** object has an immutable `<same name>.json` manifest
+   (cutoff, sha256, source counts) beside it; an object without one failed
+   its drill and must not be used.
    Download it (Cloudflare dashboard, or `aws s3 cp --endpoint-url
    https://<account id>.r2.cloudflarestorage.com s3://<bucket>/<key> .` with
    the R2 token in `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`).
-3. With a local `pg_restore` ≥ 18 (`brew install postgresql@18`):
+3. With a local `pg_restore` ≥ 18 (`brew install postgresql@18`). The
+   script refuses to run without the manifest's hash and verifies the
+   decrypted bytes against it before touching the target:
 
    ```sh
    BACKUP_ENCRYPTION_KEY='<from the password manager>' \
-   ops/backup/restore.sh waves-portal-<stamp>.dump.enc '<new instance DATABASE_PUBLIC_URL>'
+   EXPECTED_SHA256='<plaintext_sha256 from that backup's .json manifest>' \
+   ops/backup/restore.sh waves-portal-<cutoff>.tar.enc '<new instance DATABASE_PUBLIC_URL>'
    ```
 
 4. Spot-check: `psql '<url>' -c 'select count(*) from customers'` against the
    `source_counts` in that backup's manifest; `select max(name) from knex_migrations`
-   against the newest file in `server/models/migrations/`.
+   against the newest file in `server/models/migrations/`; and
+   `psql '<url>' -c 'set role aichart_readonly; select count(*) from ai_customers'`
+   proves the analytics role and its grants came back.
 5. Point **every** database consumer at the new instance's **private** URL
    (`postgres.railway.internal`) and redeploy each: the portal service
    `waves-customer-portal` AND `seo-pipeline-worker` (it imports
@@ -117,8 +127,9 @@ intend to erase — never the live one. Replace mode drops and recreates the
    endpoint, or apply them by hand — payments, refunds, and subscription
    changes included. Twilio inbound messages are not replayed either; read
    the gap from the Twilio message log. Do this before reopening the office.
-7. Delete the decrypted `.dump` from the laptop (the script writes it mode
-   0600, but it is still the entire customer database in plaintext).
+7. Delete the decrypted `.tar` and `.tar.d/` from the laptop (the script
+   writes them mode 0600/0700, but they are still the entire customer
+   database in plaintext).
 
 ## Kill switch / rotation
 
@@ -142,6 +153,10 @@ intend to erase — never the live one. Replace mode drops and recreates the
 - GitHub disables scheduled workflows in a repository with no commits for
   60 days. This repo commits daily; if that ever stops, re-enable the
   workflow by hand (Actions → db-backup-drill → *Enable workflow*).
+- Integrity is the manifest's sha256, verified before any restore. That
+  defeats corruption and a wrong object; it does not defeat an attacker who
+  can write BOTH the object and its manifest in the bucket — the R2 token
+  scope and Cloudflare account security are the control for that.
 - The failure email itself depends on the SendGrid key being valid. A run
   whose alert step also fails is visible only in the Actions tab — the
   second channel above exists for exactly that case.
