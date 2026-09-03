@@ -2,6 +2,36 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
+const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+// A wizard re-run of the same inquiry inside this window lands as a
+// 'duplicate' of the prior open lead instead of a second 'new' one.
+const WIZARD_LEAD_REUSE_DAYS = 30;
+
+// The most recent OPEN quote_wizard lead (inside the reuse window) whose
+// email, phone AND quoted address all equal what this run typed — i.e. the
+// same inquiry submitted again — or null. Used ONLY to label the new row
+// (status 'duplicate' + duplicate_of_lead_id); it never selects a row to
+// update. /calculate is public, and a typed email is not ownership evidence
+// (the token path proves ownership with an unguessable leadId + email), so
+// an existing person's lead must never be mutated from here. A different
+// address is a different inquiry (a second property), never a duplicate.
+async function findPriorOpenWizardLeadId(dbh, { email, phone, address } = {}, now = Date.now()) {
+  const emailLc = String(email || '').trim().toLowerCase();
+  const phoneDigits = String(phone || '').replace(/\D/g, '').slice(-10);
+  const addressLc = String(address || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!emailLc || phoneDigits.length !== 10 || !addressLc) return null;
+  const prior = await dbh('leads')
+    .where({ lead_type: 'quote_wizard' })
+    .whereNull('deleted_at')
+    .whereRaw('LOWER(email) = ?', [emailLc])
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
+    .whereRaw("LOWER(regexp_replace(COALESCE(address, ''), '\\s+', ' ', 'g')) = ?", [addressLc])
+    .whereIn('status', OPEN_LEAD_STATUSES)
+    .where('created_at', '>', new Date(now - WIZARD_LEAD_REUSE_DAYS * 24 * 60 * 60 * 1000))
+    .orderBy('created_at', 'desc')
+    .first('id');
+  return prior ? prior.id : null;
+}
 const { publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
 const logger = require('../services/logger');
 const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
@@ -1632,6 +1662,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     // If the property-lookup step already captured a lead row, update it
     // in place so we don't double-count leads for a single conversion.
+    //
+    // No lead token (a fresh browser session, a second run of the wizard
+    // days later): resolve to the visitor's most recent OPEN quote_wizard
+    // lead by the email they just typed — the same ownership evidence the
+    // token path requires — instead of minting a new lead per run. One
+    // visitor ran the calculator twice in two minutes on 2026-08-31 and got
+    // two identical leads (three with the email lead), so the sweep, the
+    // digest, and the office all counted one prospect three times.
     let lead;
     if (leadId) {
       // OWNERSHIP (atomic): leadId is a client-supplied id on a public,
@@ -1689,6 +1727,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
       }
     }
+    // Same inquiry submitted again without the lead token (a fresh browser
+    // session, a second run minutes later): the row still inserts — this
+    // run's snapshot is what the visitor just saw — but as a 'duplicate' of
+    // the open lead it repeats, so the pipeline, the sweep, and the digest
+    // count one prospect once. Non-destructive by design (hook P0): nothing
+    // on the earlier lead changes. Two concurrent first runs can still both
+    // land 'new' — the office merges those by hand, as before.
+    let duplicateOfLeadId = null;
+    if (!lead) {
+      duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress });
+    }
     if (!lead) {
       const rows = await db('leads').insert({
         first_name: contactFirstName,
@@ -1704,7 +1753,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         first_contact_channel: 'website_quote',
         lead_source_id: sourceMeta.leadSourceId,
         monthly_value: leadMonthlyValue,
-        status: 'new',
+        status: duplicateOfLeadId ? 'duplicate' : 'new',
         gclid,
         wbraid,
         gbraid,
@@ -1712,7 +1761,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         fbc,
         fbp,
         anon_id: anonId,
-        extracted_data: extractedData,
+        extracted_data: duplicateOfLeadId
+          ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
+          : extractedData,
       }).returning(['id']);
       lead = rows[0];
     }
@@ -2359,10 +2410,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? (quoteRequiredReason === 'quote_on_request'
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
             : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
-          : isOneTimeOnly
+          : `${isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
-            : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`,
-        { icon: '\u{1F4B0}', link: '/admin/leads', metadata: { leadId: lead.id } }
+            : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`}${duplicateOfLeadId ? ' · repeat of an open lead (filed as duplicate)' : ''}`,
+        { icon: '\u{1F4B0}', link: '/admin/leads', metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : {}) } }
       );
     } catch (e) {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);
@@ -2897,6 +2948,8 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._internals = {
+  findPriorOpenWizardLeadId,
+  WIZARD_LEAD_REUSE_DAYS,
   isPublicCommercialQuote,
   publicQuotePestLabel,
   perApplicationForLine,
