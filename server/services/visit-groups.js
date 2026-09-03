@@ -1978,6 +1978,72 @@ async function ensureMemberReminderRowInTx(t, memberId) {
 const MOVE_HOLD_TTL_MS = 24 * 60 * 60 * 1000;
 const MOVE_HOLD_TAKEOVER_AFTER_MS = 5 * 60 * 1000;
 
+/**
+ * Claim the durable reminder SEND HOLD for a cohort of rows inside the
+ * caller's transaction (the unit mover's claim, extracted so the office
+ * Combine — which moves ungrouped rows one rebooker commit at a time —
+ * holds its cohort the same way; GH codex #3843 r1 P1). FOR UPDATE +
+ * the live-lease refusal + a held placeholder for every member without a
+ * reminder row; returns the reminder row ids stamped. The caller owns the
+ * stop lock and the expiry/token it passes.
+ */
+async function claimReminderHoldInTx(t, holdMemberIds, { holdUntil, holdToken }) {
+  const holdRows = await t('appointment_reminders')
+    .whereIn('scheduled_service_id', holdMemberIds)
+    .forUpdate()
+    .select('id', 'scheduled_service_id', 'move_hold_until');
+  // Foreign-hold refusal is a LEASE with a takeover grace (codex r30
+  // P1): a stamp inside the grace belongs to a LIVE concurrent mover
+  // (a move completes in seconds) and is refused. An OLDER active
+  // stamp is a RETAINED hold — a partial move / failed retarget kept
+  // it so nobody texts until staff repair the stop — and the repair
+  // move the needsAttention alert asks for IS such a new mover: it
+  // takes the lease over (FOR UPDATE above serializes rival repairs;
+  // the re-stamp below replaces the old stamp, so the finished
+  // repair's fenced release clears it). Without the takeover every
+  // repair 503'd until the 24h expiry. Stamp time is derivable:
+  // every stamp is written as now + MOVE_HOLD_TTL_MS.
+  const foreign = holdRows.find((r) => {
+    if (!r.move_hold_until) return false;
+    const until = new Date(r.move_hold_until).getTime();
+    if (until <= Date.now()) return false; // expired
+    const stampedAt = until - MOVE_HOLD_TTL_MS;
+    return Date.now() - stampedAt < MOVE_HOLD_TAKEOVER_AFTER_MS; // live mover
+  });
+  if (foreign) {
+    throw Object.assign(new Error('another move of this stop is still in progress — try again shortly'), { code: 'VISIT_MOVE_HOLD_ACTIVE' });
+  }
+  // A member with NO reminder row gets a HELD pre-closed placeholder
+  // (codex r29 P1): the lease must exist durably for every member —
+  // a self-heal or inline registration mid-move would otherwise create
+  // an unheld row with no held sibling to inherit from. The placeholder
+  // mechanism is the repo's own (all send legs closed in one INSERT;
+  // the sync trigger re-arms it when a real slot lands — carrying our
+  // stamp, so the re-armed row stays quiet until release/expiry), and
+  // its per-service idempotency means a racing registration finds the
+  // row instead of inserting a rival.
+  const coveredMemberIds = new Set(holdRows.map((r) => String(r.scheduled_service_id)));
+  const stubIds = [];
+  for (const memberId of holdMemberIds.filter((id) => !coveredMemberIds.has(id))) {
+    const rec = await ensureMemberReminderRowInTx(t, memberId);
+    if (rec && rec.id) stubIds.push(rec.id);
+  }
+  const allIds = [...holdRows.map((r) => r.id), ...stubIds];
+  if (!allIds.length) return [];
+  await t('appointment_reminders').whereIn('id', allIds)
+    .update({ move_hold_until: holdUntil, move_hold_token: holdToken });
+  return allIds;
+}
+
+// Release a cohort hold, fenced on its own token (a newer mover's stamp
+// is never cleared). Throws on failure — callers decide (the safe
+// direction is leaving the rows quiet until the stamp expires).
+async function releaseReminderHoldByToken(holdToken) {
+  await db('appointment_reminders')
+    .where({ move_hold_token: holdToken })
+    .update({ move_hold_until: null, move_hold_token: null });
+}
+
 const UNIT_MOVE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
 const UNIT_MOVE_LIVE_STATUSES = new Set(['en_route', 'on_site']);
 
@@ -2492,51 +2558,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // release ran), it is refused — that visit is mid-move elsewhere.
       // Cancelled rows are held too (codex r28): the schedule-change
       // trigger can reactivate one mid-move and it must inherit the quiet.
-      const holdRows = await t('appointment_reminders')
-        .whereIn('scheduled_service_id', holdMemberIds)
-        .forUpdate()
-        .select('id', 'scheduled_service_id', 'move_hold_until');
-      // Foreign-hold refusal is a LEASE with a takeover grace (codex r30
-      // P1): a stamp inside the grace belongs to a LIVE concurrent mover
-      // (a move completes in seconds) and is refused. An OLDER active
-      // stamp is a RETAINED hold — a partial move / failed retarget kept
-      // it so nobody texts until staff repair the stop — and the repair
-      // move the needsAttention alert asks for IS such a new mover: it
-      // takes the lease over (FOR UPDATE above serializes rival repairs;
-      // the re-stamp below replaces the old stamp, so the finished
-      // repair's fenced release clears it). Without the takeover every
-      // repair 503'd until the 24h expiry. Stamp time is derivable:
-      // every stamp is written as now + MOVE_HOLD_TTL_MS.
-      const foreign = holdRows.find((r) => {
-        if (!r.move_hold_until) return false;
-        const until = new Date(r.move_hold_until).getTime();
-        if (until <= Date.now()) return false; // expired
-        const stampedAt = until - MOVE_HOLD_TTL_MS;
-        return Date.now() - stampedAt < MOVE_HOLD_TAKEOVER_AFTER_MS; // live mover
-      });
-      if (foreign) {
-        throw Object.assign(new Error('another move of this stop is still in progress — try again shortly'), { code: 'VISIT_MOVE_HOLD_ACTIVE' });
-      }
-      // A member with NO reminder row gets a HELD pre-closed placeholder
-      // (codex r29 P1): the lease must exist durably for every member —
-      // a self-heal or inline registration mid-move would otherwise create
-      // an unheld row with no held sibling to inherit from. The placeholder
-      // mechanism is the repo's own (all send legs closed in one INSERT;
-      // the sync trigger re-arms it when a real slot lands — carrying our
-      // stamp, so the re-armed row stays quiet until release/expiry), and
-      // its per-service idempotency means a racing registration finds the
-      // row instead of inserting a rival.
-      const coveredMemberIds = new Set(holdRows.map((r) => String(r.scheduled_service_id)));
-      const stubIds = [];
-      for (const memberId of holdMemberIds.filter((id) => !coveredMemberIds.has(id))) {
-        const rec = await ensureMemberReminderRowInTx(t, memberId);
-        if (rec && rec.id) stubIds.push(rec.id);
-      }
-      const allIds = [...holdRows.map((r) => r.id), ...stubIds];
-      if (!allIds.length) return;
-      await t('appointment_reminders').whereIn('id', allIds)
-        .update({ move_hold_until: reminderHoldUntil, move_hold_token: reminderHoldToken });
-      reminderHoldIds = allIds;
+      reminderHoldIds = await claimReminderHoldInTx(t, holdMemberIds, { holdUntil: reminderHoldUntil, holdToken: reminderHoldToken });
     });
   } catch (err) {
     reminderHoldIds = [];
@@ -2563,9 +2585,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // Keyed on the TOKEN ALONE (uncapped r36 P1): the member-id snapshot
       // predates late joins that inherited this token — the crypto-unique
       // token IS the cohort, so every row carrying it releases together.
-      await db('appointment_reminders')
-        .where({ move_hold_token: reminderHoldToken })
-        .update({ move_hold_until: null, move_hold_token: null });
+      await releaseReminderHoldByToken(reminderHoldToken);
     } catch (err) {
       onFailure(err);
     }
@@ -3061,6 +3081,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 }
 
 module.exports = {
+  dateOnly,
+  toMinutes,
   // Pure key builder, exported for the reminder cron's visit-scoped email
   // idempotency key (the undelivered-SMS recovery rebuilds it from the
   // visit row — GH codex #3699 r7 P1).
@@ -3086,6 +3108,9 @@ module.exports = {
   assertRowMovableAlone,
   fanOutLiveTransition,
   moveVisitAsUnit,
+  claimReminderHoldInTx,
+  releaseReminderHoldByToken,
+  MOVE_HOLD_TTL_MS,
   claimVisitNotification,
   notificationLeaseLive,
   renewNotificationLease,

@@ -104,6 +104,14 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
   relies on via read-only SELECTs instead (§3, §5).
 - After merging a PR that ships a migration, verify the deploy actually ran
   it (deploy log or `knex_migrations`) before relying on the new schema.
+- A migration that keeps an ownership record derives its key from its own
+  stamp (`migration.<stamp>.state` in `system_settings`, the
+  `migration:<stamp>` audit tag). Stamps are NOT unique across files, so
+  after merging `origin/main` check no other migration derives the same
+  literal — a shared key means the later `up()` overwrites the earlier
+  file's rollback record and the later `down()` deletes it. Enforced by
+  `server/tests/migration-state-key-uniqueness.test.js` (also fails on a
+  stale stamp after a rename); fix = take a free stamp, never share one.
 - **The 000018 pending-count illusion.**
   `20260415000018_pest_service_cost_truing.js` is a no-op placeholder
   (source lost, recreated empty), and `…000019` deleted its

@@ -98,6 +98,19 @@ describe('handleEstimateView — SSR viewability gate', () => {
     expect(res.body).not.toContain('384.62');
   });
 
+  test('a clarify re-price HOLD on a mid-send row is withheld on both mounts — the legacy renderer never prints the stale quote (codex r4 P1 on #3804)', async () => {
+    const held = JSON.stringify({ estimatorEngine: { reprice_pending_at: '2026-09-03T12:00:00Z', reprice_attempt: 'att-1' } });
+    const api = await runView({ status: 'sending', expires_at: null, use_v2_view: false, estimate_data: held }, API_MOUNT);
+    expect(api.next).not.toHaveBeenCalled();
+    expect(api.res.statusCode).toBe(404);
+    expect(api.res.body).not.toContain(PII.customer_name);
+    expect(api.res.body).not.toContain('742 Leak Lane');
+    expect(api.res.body).not.toContain('384.62');
+    const spa = await runView({ status: 'sending', expires_at: null, use_v2_view: false, estimate_data: held }, ESTIMATE_MOUNT);
+    expect(spa.next).toHaveBeenCalledTimes(1);
+    expect(spa.res.sent).toBe(false);
+  });
+
   test('archived wins even for an accepted row — office-retired parity with /data', async () => {
     const { res, next } = await runView(
       { status: 'accepted', expires_at: PAST, archived_at: PAST },

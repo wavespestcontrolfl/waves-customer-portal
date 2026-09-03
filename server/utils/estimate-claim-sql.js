@@ -27,6 +27,10 @@ const DELIVERY_CLAIM_NOT_LIVE_SQL = `(
 )`;
 
 const LINKAGE_INVALIDATION_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''";
+// The clarify re-price hold (estimate-clarify-asks): a draft whose dollars
+// or address are about to be corrected is not publishable — anchor OR
+// grouped sibling (codex r1 P1 on #3804).
+const REPRICE_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') = ''";
 const INVALIDATION_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''";
 
 // The ONE in-flight verdict for a call's processing state — lives here
@@ -142,13 +146,170 @@ async function callSideBlockForEstimateData(dbc, data) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Call-level UNIT-ANSWER fence (clarify write-back, PR C2 of the #3775
+// split). When the caller texts back the apartment/unit a completed-call
+// clarify ask requested, the reply handler stamps it on the call row —
+// under that row's FOR UPDATE, in one transaction with the CRM writes —
+// and EVERY call-origin draft creator reads it inside its own insert
+// transaction while holding the same row lock (callRejectedForDrafting
+// lockCallRow). A composer that built its context before the answer
+// arrived therefore cannot insert a whole-building draft after the reply
+// committed: it is blocked here and the unit re-run (which carries the
+// answer) composes the replacement. The lock, not the phone dedupe lock,
+// is what closes the window — creators hold the phone lock only around
+// their insert, but the call row is locked by every creator in the same
+// place (codex r5 P1 on #3785).
+//
+// Later composers (a force-reprocess weeks on) do not fight the fence:
+// maybeDraftEstimateForCall ADOPTS a stamped answer into its context.
+const CALL_UNIT_ANSWER_KEY = 'unit_answer';
+
+async function stampCallUnitAnswer(dbc, callLogId, { unit, building = null, askDraftId = null } = {}) {
+  if (!callLogId || !unit) return false;
+  const payload = {
+    unit: String(unit),
+    building: building && building.street_line_1
+      ? { street_line_1: building.street_line_1, city: building.city || null, postal_code: building.postal_code || null }
+      : null,
+    ask_draft_id: askDraftId ? String(askDraftId) : null,
+    at: new Date().toISOString(),
+  };
+  const changed = await dbc('call_log')
+    .where({ id: callLogId })
+    .update({
+      // Atomic JSONB path write: only this one key changes, so the
+      // processor's claim/linkage stamps on the same column are never
+      // overwritten by a stale blob.
+      metadata: dbc.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), ?, ?::jsonb)", [`{${CALL_UNIT_ANSWER_KEY}}`, JSON.stringify(payload)]),
+    });
+  return Number(changed) > 0;
+}
+
+// The human verdict retires the fence: staff dismissing the
+// missing_unit_number card (the whole building IS the service address, or
+// the texted reply was wrong) removes the stamp, so creators stop adopting
+// the rejected unit and the operator's building-level correction can lift
+// a hold (codex r3 P1 on #3804). Same atomic one-key delete shape as the
+// stamp.
+async function clearCallUnitAnswer(dbc, callLogId) {
+  if (!callLogId) return false;
+  const changed = await dbc('call_log')
+    .where({ id: callLogId })
+    .whereRaw("COALESCE(metadata->>?, '') <> ''", [CALL_UNIT_ANSWER_KEY])
+    .update({ metadata: dbc.raw("COALESCE(metadata, '{}'::jsonb) - ?", [CALL_UNIT_ANSWER_KEY]) });
+  return Number(changed) > 0;
+}
+
+async function callUnitAnswer(dbc, callLogId) {
+  if (!callLogId) return null;
+  const row = await dbc('call_log').where({ id: callLogId }).first('metadata');
+  if (!row) return null;
+  let md = row.metadata;
+  if (typeof md === 'string') { try { md = JSON.parse(md); } catch { md = null; } }
+  const fence = md && typeof md === 'object' ? md[CALL_UNIT_ANSWER_KEY] : null;
+  return fence && typeof fence === 'object' && fence.unit ? fence : null;
+}
+
+// The decision, pure, on the draft's FINAL address (what the row will
+// persist — never a context flag, which proves nothing about the address
+// the composer returned; codex r1 P1 on #3796). A draft passes when that
+// address names exactly the fenced unit at the asked building, or is for a
+// DIFFERENT building than the one the ask was about. At the asked
+// building, a whole-building draft AND one naming a different unit (a
+// stale or misheard extraction — exactly what the customer's answer
+// corrects) are blocked; so is a draft with no address at all. A fence
+// with no building applies to every unitless or differing draft.
+// `adopted` = the fence the composer ADOPTED before this locked read (the
+// engine reads it pre-transaction): the locked row must still carry that
+// same answer (unit + stamp time), or the human retired it mid-run —
+// Dismiss/Deny cleared the fence, or a newer reply replaced it — and a
+// draft carrying the rejected unit must not insert (pre-push codex P1 on
+// #3804, r8). 'unit_answer_retracted' exits as quietly as
+// 'unit_answer_pending'; the next reprocess composes without it.
+function adoptedAnswerRetracted(fence, adopted) {
+  if (!adopted || !adopted.unit) return false;
+  if (!fence || !fence.unit) return true;
+  const { unitLineValueKey } = require('./address-normalizer');
+  if (unitLineValueKey(String(fence.unit)) !== unitLineValueKey(String(adopted.unit))) return true;
+  return Boolean(adopted.at) && String(fence.at || '') !== String(adopted.at);
+}
+
+function unitAnswerFenceReason(fence, { address = null, adopted = null } = {}) {
+  const { unitLineValueKey, dwellingUnitOnLine, splitUnitFirstLine } = require('./address-normalizer');
+  if (adoptedAnswerRetracted(fence, adopted)) return 'unit_answer_retracted';
+  if (!fence || !fence.unit) return null;
+  const fencedKey = unitLineValueKey(String(fence.unit));
+  const line = String(address || '').trim();
+  if (!line) return 'unit_answer_pending';
+  const b = fence.building;
+  if (b && b.street_line_1) {
+    const { sameStreetAddress } = require('../services/estimator-engine/address-compare');
+    const buildingLine = [b.street_line_1, b.city, b.postal_code ? `FL ${b.postal_code}` : null].filter(Boolean).join(', ');
+    // Compared on the STREET: a structural unit-first line ("Bldg 9, 123
+    // Main St, …") is not another building (codex r5 P1 on #3796).
+    if (!sameStreetAddress(splitUnitFirstLine(line)?.rest || line, buildingLine)) return null;
+  }
+  // The DWELLING unit in either supported position — the composer may
+  // return the unit-first form the override deliberately preserves (codex
+  // r4 P2); a structural component alone ("Bldg 9") is no answer.
+  const lineUnit = dwellingUnitOnLine(line);
+  if (lineUnit && unitLineValueKey(lineUnit) === fencedKey) return null;
+  return 'unit_answer_pending';
+}
+
+// Read + decide, for the creators' in-lock check. Callers hold the call
+// row lock through their insert (same contract as callPassStillOwned).
+async function callUnitAnswerFence(dbc, callLogId, { address = null, adopted = null } = {}) {
+  const fence = await callUnitAnswer(dbc, callLogId);
+  return unitAnswerFenceReason(fence, { address, adopted });
+}
+
+// Whether an operator edit may LIFT a unit hold: only once the row's
+// address carries the answered unit. A revision that changed pricing or
+// services but kept the whole-building address has not incorporated the
+// answer, and the hold stays (codex r1 P1 on #3804). No call or no fence =
+// an ordinary re-price guard, lifted by the observing edit as before.
+async function unitHoldSatisfied(dbc, callLogId, address) {
+  if (!callLogId) return true;
+  const fence = await callUnitAnswer(dbc, callLogId);
+  return unitAnswerFenceReason(fence, { address }) === null;
+}
+
+// THE "off the customer surface" verdict every public predicate shares — a
+// linkage marker (full or pending) OR a clarify re-price hold. One predicate,
+// one call site per surface (view, SSR, accept-active, ask, extension
+// eligibility, the pinned document render, the add-service request): a
+// surface that checked the linkage markers but not the hold was how the
+// extension request kept auto-granting a held row (codex r7 P0 on #3804),
+// and a service-side predicate that checked neither was how a bundle
+// inquiry kept running on a held row (codex r10 P0). Lives here, not in the
+// route, so services judge a LOCKED row with the same verdict the route
+// judges its pre-read with. The clarify module is required lazily — this
+// file stays dependency-free at load (see the header).
+function estimateOffCustomerSurface(estimate = {}) {
+  let data = estimate?.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  const eng = data && typeof data === 'object' ? data.estimatorEngine : null;
+  if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+  return require('../services/estimate-clarify-asks').repricePendingActive(eng);
+}
+
 module.exports = {
+  estimateOffCustomerSurface,
   ESTIMATE_DELIVERY_CLAIM_TTL_MS,
   CALL_EXTRACTION_RETRY_WINDOW_MS,
   DELIVERY_CLAIM_NOT_LIVE_SQL,
   LINKAGE_INVALIDATION_ABSENT_SQL,
   INVALIDATION_PENDING_ABSENT_SQL,
+  REPRICE_PENDING_ABSENT_SQL,
   callReprocessInFlight,
   callPassStillOwned,
   callSideBlockForEstimateData,
+  stampCallUnitAnswer,
+  clearCallUnitAnswer,
+  callUnitAnswer,
+  unitAnswerFenceReason,
+  callUnitAnswerFence,
+  unitHoldSatisfied,
 };

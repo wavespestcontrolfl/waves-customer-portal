@@ -76,25 +76,27 @@ const MIN_DAY_COVERAGE = 20;
 // classification, fact-check), often many layers below where the harness can
 // pass an option — so replay traffic would otherwise be recorded under the
 // live policy label, diluting its fallback/failure rates and keeping a dead
-// live lane looking active. AsyncLocalStorage (not a module flag) so a replay
-// running concurrently with live traffic cannot mislabel the live calls.
-const { AsyncLocalStorage } = require('async_hooks');
-const replayContext = new AsyncLocalStorage();
+// live lane looking active. Carried by the agent-control context's workload
+// scope (AsyncLocalStorage, not a module flag) so a replay running
+// concurrently with live traffic cannot mislabel the live calls.
+const agentContext = require('./agent-control/context');
 
 /**
- * Run `fn` with every LLM dispatch inside it recorded under a replay lane.
- * Harnesses wrap their whole run; nested live-service calls inherit it.
+ * Run `fn` with every LLM dispatch inside it recorded under the replay
+ * workload. Harnesses wrap their whole run; nested live-service calls inherit
+ * it. `lane` names the switchboard lane being replayed when the harness knows
+ * it (none of the in-repo harnesses pass one today).
  */
-function runAsReplay(fn, lane = 'replay') {
-  return replayContext.run(String(lane), fn);
+function runAsReplay(fn, lane = null) {
+  const replay = () => agentContext.withWorkload('replay', fn);
+  return lane ? agentContext.runInLane(lane, replay) : replay();
 }
 
 // Explicit workload names on the policy itself (smsShadow:<p>:sealed) win —
-// they are more specific than the ambient lane.
+// they are more specific than the ambient workload.
 function applyReplayLane(label) {
-  const lane = replayContext.getStore();
-  if (!lane || EPISODIC_LANE_RE.test(label)) return label;
-  return `${label}:${lane}`;
+  if (agentContext.current().workload !== 'replay' || EPISODIC_LANE_RE.test(label)) return label;
+  return `${label}:replay`;
 }
 
 // Named TEXT_POLICIES entries carry their registry key as `name` (set in

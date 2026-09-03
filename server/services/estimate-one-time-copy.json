@@ -65,19 +65,13 @@
     "includes": [
       "Indoor insect growth regulator (IGR) treatment to break the breeding cycle",
       "Yard treatment focused on shaded harborage where flea larvae develop",
+      "Follow-up visit at the 14-day egg-hatch window — the second half of the package, not an add-on",
       "Products chosen with pets in mind — treated areas are safe once dry, and your technician confirms the re-entry timing on the day",
       "Coordination guidance with your pet’s vet treatment — the pet is half the job",
       "A prep email before your visit — what to wash, what to clear, and how to get pets ready"
     ],
-    "includesByVisits": {
-      "2": [
-        "Follow-up visit at the 14-day egg-hatch window"
-      ],
-      "default": [
-        "Single knockdown visit — a follow-up at the 14-day egg-hatch window can be added if activity continues"
-      ]
-    },
-    "assurance": "If they come back, so do we — retreat guaranteed with the Waves Guarantee once the prep checklist and pet treatment are done",
+    "assurance": "If they come back after the follow-up, so do we — retreat guaranteed with the Waves Guarantee once the prep checklist and pet treatment are done",
+    "assuranceWindow": "If they come back after the follow-up, so do we — {retreats} within {days} days, backed by the Waves Guarantee once the prep checklist and pet treatment are done",
     "terms": "Pay on service day. No recurring schedule, no contract.",
     "aiTitle": "Waves AI sized this flea treatment to your home and yard",
     "aiBody": "Flea treatment is priced by the areas being treated — interior rooms, and the shaded yard areas where larvae develop when the exterior is included — so the price reflects the scope you chose.",
@@ -91,12 +85,10 @@
     "hero": {
       "eyebrow": "Your flea treatment",
       "h1": "Hello {first}, your flea treatment quote is ready!",
-      "sub": "{Scope} treatment priced from your home{FollowUp} — approve online and pick a day. Licensed & insured."
+      "sub": "{Scope} treatment priced from your home, with the follow-up built in — approve online and pick a day. Licensed & insured."
     },
     "outcomeInteriorOnly": "Fleas out of the house, with the egg cycle broken so they don’t come back.",
-    "yardBullet": "Yard treatment focused on shaded harborage where flea larvae develop",
-    "assuranceNone": null,
-    "termsNoWarranty": "Pay on service day. Single visit — no retreat warranty; add the follow-up visit for the guarantee."
+    "yardBullet": "Yard treatment focused on shaded harborage where flea larvae develop"
   },
   "wasp": {
     "outcome": "The nest gone and the yard yours again — usually the same day.",
@@ -406,7 +398,7 @@
     "hero": {
       "eyebrow": "Your lawn plugging",
       "h1": "Hello {first}, your lawn plugging quote is ready!",
-      "sub": "Live plugs matched to your grass, placed on a grid across the measured area — approve online and pick a day. Licensed & insured."
+      "sub": "Live plugs matched to your grass, placed on a grid across your turf area — approve online and pick a day. Licensed & insured."
     }
   },
   "dethatching": {
@@ -422,7 +414,7 @@
     "hero": {
       "eyebrow": "Your lawn dethatching",
       "h1": "Hello {first}, your lawn dethatching quote is ready!",
-      "sub": "A power dethatching pass across the measured turf — approve online and pick a day. Licensed & insured."
+      "sub": "A power dethatching pass across your turf area — approve online and pick a day. Licensed & insured."
     },
     "debrisBullet": "Removal and disposal of thatch debris"
   },
@@ -438,7 +430,7 @@
     "hero": {
       "eyebrow": "Your lawn top dressing",
       "h1": "Hello {first}, your lawn top dressing quote is ready!",
-      "sub": "Sand spread evenly across the measured turf — approve online and pick a day. Licensed & insured."
+      "sub": "Sand spread evenly across your turf area — approve online and pick a day. Licensed & insured."
     }
   },
   "palm_injection": {

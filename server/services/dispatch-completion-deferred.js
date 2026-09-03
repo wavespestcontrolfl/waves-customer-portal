@@ -81,9 +81,14 @@ async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } 
     // whole-column write (structured_notes has concurrent writers).
     try {
       await db('service_records').where({ id: recordId }).update({
+        // The delivered-at stamp is written ONCE: a finalize-only retry re-runs
+        // this merge with a fresh sentAtIso, but the provider accepted the
+        // text on the first pass — overwriting would move the report into a
+        // later send cohort and make real opens between delivery and the
+        // retry look pre-send (codex #3847 P2).
         structured_notes: db.raw(
-          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
-          [JSON.stringify({ completionSmsStatus: 'sent', completionSmsDeferredDeliveredAt: sentAtIso })],
+          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb || CASE WHEN COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'completionSmsDeferredDeliveredAt' IS NULL THEN ?::jsonb ELSE '{}'::jsonb END",
+          [JSON.stringify({ completionSmsStatus: 'sent' }), JSON.stringify({ completionSmsDeferredDeliveredAt: sentAtIso })],
         ),
       });
     } catch (err) {
