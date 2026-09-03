@@ -476,6 +476,10 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
     .whereIn('h.stripe_payment_method_id', ids)
     .whereNull('h.parked_at')
     .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
+    // Newest hold first, so the first-seen dedupe below keeps the row the
+    // charge paths use (heldCardForScheduledService / cardHoldCancelPreview
+    // ordering — Codex #3828 r2 P2).
+    .orderByRaw('h.held_at DESC NULLS LAST, h.created_at DESC')
     .select([...visitCols, 'h.stripe_payment_method_id as pm_id', 'h.no_show_fee_amount']);
   const apptRows = await db('appointment_card_requests as r')
     .join('scheduled_services as ss', 'ss.id', 'r.scheduled_service_id')
@@ -484,6 +488,12 @@ async function liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds, 
     .whereNotNull('r.fee_agreed_at')
     .whereNull('r.fee_status')
     .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
+    // Lane exclusivity, same rule as feeEligibleRequestForVisit (r2 P2): a
+    // hold row in ANY status owns the visit's one fee event, so the
+    // appointment card is not what the rails will charge.
+    .whereNotExists(function laneOwnedByHold() {
+      this.select(db.raw('1')).from('estimate_card_holds as x').whereRaw('x.scheduled_service_id = r.scheduled_service_id');
+    })
     .select([...visitCols, 'r.stripe_payment_method_id as pm_id', 'r.no_show_fee_amount']);
   const nowMs = now.getTime();
   const seen = new Set();

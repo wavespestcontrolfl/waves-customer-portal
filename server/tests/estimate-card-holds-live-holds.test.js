@@ -10,7 +10,7 @@ let mockRows = {};
 let mockCalls = [];
 jest.mock('../models/db', () => {
   const mock = jest.fn((table) => {
-    const call = { table, where: [], whereIn: [], whereNull: [], whereNotNull: [], whereNotIn: [] };
+    const call = { table, where: [], whereIn: [], whereNull: [], whereNotNull: [], whereNotIn: [], orderByRaw: [], whereNotExists: [] };
     mockCalls.push(call);
     const chain = {};
     chain.join = jest.fn(() => chain);
@@ -19,6 +19,14 @@ jest.mock('../models/db', () => {
     chain.whereNull = jest.fn((c) => { call.whereNull.push(c); return chain; });
     chain.whereNotNull = jest.fn((c) => { call.whereNotNull.push(c); return chain; });
     chain.whereNotIn = jest.fn((c, v) => { call.whereNotIn.push([c, v]); return chain; });
+    chain.orderByRaw = jest.fn((sql) => { call.orderByRaw.push(sql); return chain; });
+    chain.whereNotExists = jest.fn((fn) => {
+      // Run the subquery builder against a recording chain so the test can
+      // assert the correlated lane-exclusivity predicate.
+      const sub = { select: jest.fn(() => sub), from: jest.fn((t) => { call.whereNotExists.push({ from: t }); return sub; }), whereRaw: jest.fn((raw) => { call.whereNotExists[call.whereNotExists.length - 1].whereRaw = raw; return sub; }) };
+      fn.call(sub);
+      return chain;
+    });
     chain.select = jest.fn(() => chain);
     chain.then = (resolve, reject) => {
       const rows = mockRows[table.split(' ')[0]];
@@ -27,7 +35,7 @@ jest.mock('../models/db', () => {
     return chain;
   });
   mock.fn = { now: jest.fn() };
-  mock.raw = jest.fn();
+  mock.raw = jest.fn((sql) => ({ __raw: sql }));
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -76,6 +84,18 @@ test('ONE read per rail carrying the live-row predicates and the whole (deduped)
   expect(appts.whereNotNull).toEqual(['r.fee_agreed_at']);
   expect(appts.whereNull).toEqual(['r.fee_status']);
   expect(appts.whereNotIn[0]).toEqual(holds.whereNotIn[0]);
+  // Newest hold first (dedupe keeps the row the charge paths use).
+  expect(holds.orderByRaw).toEqual(['h.held_at DESC NULLS LAST, h.created_at DESC']);
+  // Lane exclusivity: a hold row in ANY status owns the visit.
+  expect(appts.whereNotExists).toEqual([{ from: 'estimate_card_holds as x', whereRaw: 'x.scheduled_service_id = r.scheduled_service_id' }]);
+  expect(holds.whereNotExists).toEqual([]);
+});
+
+test('duplicate held rows for one visit: the first (newest-ordered) row wins, the older card is not flagged', async () => {
+  // Rows arrive in the query's held_at DESC order — the newest hold moved the
+  // visit onto pm_2; the stale pm_1 hold must not warn.
+  mockRows.estimate_card_holds = [visit({ service_id: 'svc-a', pm_id: 'pm_2', no_show_fee_amount: '60.00' }), visit({ service_id: 'svc-a', pm_id: 'pm_1' })];
+  expect(flat(await run())).toEqual([['pm_2', 'card_hold', 'svc-a', 60]]);
 });
 
 test('grouped by pm, soonest first, frozen fee kept, default fee when blank, visit columns for eligibility', async () => {
