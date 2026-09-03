@@ -5863,6 +5863,23 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // The property linkage the acceptance ran (markEstimateManuallyAccepted →
+    // linkAcceptedEstimateProperty) scopes its visit stamp by
+    // source_estimate_id, which the rows above did not carry yet — so it
+    // stamped none of them (GH codex #3837 r2 P1). Now that they are
+    // linked (accept-on-book below, or the attach-only path further down),
+    // run it again for exactly these rows: an estimate for a NEW
+    // address stamps them with that property; the sole-property anchor
+    // deliberately left them alone (propertyOwnedByEstimateLinkage).
+    // Best-effort — never throws.
+    const stampCreatedRowsFromEstimateProperty = async () => {
+      if (!createdAppointments.length) return;
+      await require('../services/estimate-property-linkage').linkAcceptedEstimateProperty({
+        estimateId: linkedEstimateId,
+        customerId,
+        onlyServiceIds: createdAppointments.map((a) => a.id),
+      });
+    };
     // Record the win for a phone-accepted quote — only now that the appointment
     // series is committed, so a booking failure can never strand an accepted
     // estimate with no visit. Reuse the canonical manual-accept flow so funnel
@@ -6054,6 +6071,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // stamp now carries can fire at first completion.
         if (await linkCreatedRowsToEstimate()) {
           await retireRodentSetupStampAfterAcceptance(acceptResult);
+          await stampCreatedRowsFromEstimateProperty();
         } else {
           logger.error(`[schedule] FIX: estimate ${linkedEstimateId} accepted but the appointment link could not be written — setup stamp KEPT as provenance; relink the series and retire the stamp (or it double-bills at first completion)`);
         }
@@ -6113,6 +6131,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         await db('scheduled_services')
           .whereIn('id', createdAppointments.map((a) => a.id))
           .update({ source_estimate_id: linkedEstimateId });
+        await stampCreatedRowsFromEstimateProperty();
       } catch (e) {
         logger.warn(`[schedule] could not link appointment to attached estimate ${linkedEstimateId}: ${e.message}`);
       }

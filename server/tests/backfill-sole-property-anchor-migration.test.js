@@ -19,7 +19,9 @@ function seedDb() {
       { id: 'p-m2', customer_id: 'c-multi', active: true },
     ],
     scheduled_services: [
-      { id: 'v-open', customer_id: 'c-sole', status: 'pending', property_id: null, service_address_line1: null, visit_id: null },
+      { id: 'v-open', customer_id: 'c-sole', status: 'pending', property_id: null, service_address_line1: null, visit_id: null, source_estimate_id: null },
+      // Estimate-backed: the estimate linkage owns it (GH codex #3837 r2 P1).
+      { id: 'v-estimate', customer_id: 'c-sole', status: 'pending', property_id: null, service_address_line1: null, source_estimate_id: 'est-1' },
       { id: 'v-confirmed', customer_id: 'c-sole', status: 'confirmed', property_id: null, service_address_line1: null },
       { id: 'v-nullstatus', customer_id: 'c-sole', status: null, property_id: null, service_address_line1: null },
       { id: 'v-stamped', customer_id: 'c-sole', status: 'pending', property_id: null, service_address_line1: '9 Elsewhere Rd' },
@@ -131,10 +133,12 @@ describe('20260903000050 backfill sole-property anchor', () => {
     expect(state(db).linked).toEqual({ 'v-open': 'p-sole', 'v-confirmed': 'p-sole', 'v-nullstatus': 'p-sole' });
   });
 
-  test('up() leaves stamped, terminal, already-linked, multi-property and property-less rows alone', async () => {
+  test('up() leaves stamped, estimate-backed, terminal, already-linked, multi-property and property-less rows alone', async () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
     expect(visit(db, 'v-stamped').property_id).toBeNull();
+    expect(visit(db, 'v-estimate').property_id).toBeNull();
+    expect(state(db).linked['v-estimate']).toBeUndefined();
     expect(visit(db, 'v-done').property_id).toBeNull();
     expect(visit(db, 'v-cancelled').property_id).toBeNull();
     expect(visit(db, 'v-linked').property_id).toBe('p-retired');

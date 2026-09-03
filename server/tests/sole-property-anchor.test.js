@@ -130,5 +130,12 @@ describe('every spawned-row writer anchors the sole property', () => {
     expect(src).toContain('copyStampedServiceAddressFields(boosterData, svc, cols);\n          if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(boosterData, cols, trx);');
     expect(src).toContain('const propertyOwnedByEstimateLinkage = !!linkedEstimateId && !insertLinkId;');
     expect(src).toContain("if (cols.property_id && insertData.property_id === undefined && !propertyOwnedByEstimateLinkage) {");
+    // …and the rows the anchor left to the linkage DO get stamped: the
+    // acceptance's linkage ran before source_estimate_id existed on them
+    // (GH codex #3837 r2 P1), so both post-commit link writers re-run it
+    // scoped to the created rows.
+    expect(src).toContain('if (await linkCreatedRowsToEstimate()) {\n          await retireRodentSetupStampAfterAcceptance(acceptResult);\n          await stampCreatedRowsFromEstimateProperty();');
+    expect(src).toContain(".update({ source_estimate_id: linkedEstimateId });\n        await stampCreatedRowsFromEstimateProperty();");
+    expect(src).toMatch(/linkAcceptedEstimateProperty\(\{\s*estimateId: linkedEstimateId,\s*customerId,\s*onlyServiceIds: createdAppointments\.map\(\(a\) => a\.id\),/);
   });
 });

@@ -66,6 +66,12 @@ exports.up = async function up(knex) {
 
   const state = { linked: {} };
   const hasStampCol = await knex.schema.hasColumn('scheduled_services', 'service_address_line1');
+  // Estimate-backed rows are the estimate linkage's (GH codex #3837 r2
+  // P1): an accepted quote for a NEW address may still be awaiting its
+  // fail-soft post-accept stamp, and the linker only repairs rows still
+  // NULL — anchoring them here would make the old property permanent.
+  // Same exclusion as the runtime anchor (customer-properties.anchorSoleProperty).
+  const hasEstimateCol = await knex.schema.hasColumn('scheduled_services', 'source_estimate_id');
 
   // Exactly-one rule, computed over ALL active properties (a customer with
   // two shows up twice and drops out).
@@ -86,6 +92,7 @@ exports.up = async function up(knex) {
       .whereNull('property_id')
       .where(openVisitStatus);
     if (hasStampCol) q.whereNull('service_address_line1');
+    if (hasEstimateCol) q.whereNull('source_estimate_id');
     visits.push(...await q.select('id', 'customer_id'));
   }
 
@@ -110,6 +117,7 @@ exports.up = async function up(knex) {
           .whereNot('id', propertyId);
       });
     if (hasStampCol) q.whereNull('service_address_line1');
+    if (hasEstimateCol) q.whereNull('source_estimate_id');
     const n = await q.update({ property_id: propertyId });
     if (n) state.linked[v.id] = propertyId;
   }
