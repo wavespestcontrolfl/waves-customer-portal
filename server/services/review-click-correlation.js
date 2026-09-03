@@ -90,9 +90,10 @@ function describeClickOffset(offsetMs) {
  * query error (suggestions are best-effort and must never break a caller).
  */
 async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _meta = null } = {}) {
-  const reviewAtRaw = review?.review_created_at;
-  const reviewAt = reviewAtRaw ? new Date(reviewAtRaw) : null;
-  if (!reviewAt || Number.isNaN(reviewAt.getTime())) return [];
+  // A missing or unparseable timestamp yields no candidates (`|| NaN`: a
+  // null would otherwise parse as the epoch).
+  const reviewAt = new Date(review?.review_created_at || NaN);
+  if (Number.isNaN(reviewAt.getTime())) return [];
   const surnames = reviewerSurnames(review?.reviewer_name);
 
   try {
@@ -210,8 +211,8 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       // still list both pairs. Latest pair FIRST so a same-timestamp row
       // (the common single-click case) keeps the trusted candidate.
       const pairs = [
-        { ts: row.last_redirected_at, loc: row.last_google_location || null, trusted: Boolean(row.last_google_location) },
-        { ts: row.redirected_at, loc: row.google_location || null, trusted: false },
+        { ts: row.last_redirected_at, loc: row.last_google_location, trusted: Boolean(row.last_google_location) },
+        { ts: row.redirected_at, loc: row.google_location, trusted: false },
       ];
       const seenTs = new Set();
       for (const { ts, loc, trusted } of pairs) {
@@ -233,18 +234,6 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
           byCustomer.set(row.customer_id, candidate);
         }
       }
-    }
-
-    // Distinct clickers BEFORE the linked-customer exclusion below. The
-    // confident auto-link's sole-clicker check must see every competing
-    // click in the window: a customer the suggestion list hides as
-    // already-attributed can still review a DIFFERENT location's profile,
-    // so their click is competing evidence, not noise (pre-push P1).
-    if (_meta) {
-      _meta.distinctClickers = byCustomer.size;
-      // A scan that filled SCAN_LIMIT may have truncated an older click out
-      // of the window — sole-clicker can't be asserted over a partial read.
-      _meta.scanTruncated = clicks.length >= SCAN_LIMIT;
     }
 
     const toCandidate = ({ row, clickedAt, clickOffsetMs, pairLoc, pairTrusted }) => ({
@@ -284,10 +273,18 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         nameMatch: surnames.includes(normalizeName(row.last_name)),
       });
     const all = [...byCustomer.values()].map(toCandidate);
-    // Every clicker in the window, linked ones included — the confident
-    // matcher's proximity rung needs each competing click's offset, not
-    // just the count.
+    // Auto-link metadata, all of it read BEFORE the linked-customer
+    // exclusion below: the confident matcher must see every competing
+    // click in the window — a customer the suggestion list hides as
+    // already-attributed can still review a DIFFERENT location's profile,
+    // so their click is competing evidence, not noise (pre-push P1) — and
+    // its proximity rung needs each competing click's offset, not just the
+    // count.
     if (_meta) {
+      _meta.distinctClickers = byCustomer.size;
+      // A scan that filled SCAN_LIMIT may have truncated an older click out
+      // of the window — sole-clicker can't be asserted over a partial read.
+      _meta.scanTruncated = clicks.length >= SCAN_LIMIT;
       _meta.allCandidates = all;
       // The location filter above drops a clicker whose EVERY pair is
       // stamped for another GBP, and the pair loop skips an elsewhere pair
@@ -300,9 +297,8 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       // other-location rows count too — a second review_requests row
       // stamped elsewhere is the "any pair" conflict the main scan cannot
       // see (pre-push r5 P1). Auto-link path only.
-      _meta.surnameClickerElsewhere = surnames.length > 0 && reviewLocationId
-        ? await surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames })
-        : false;
+      _meta.surnameClickerElsewhere = Boolean(reviewLocationId && surnames.length)
+        && await surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames });
     }
 
     // A customer already linked to a synced review is attributed — excluded
@@ -420,6 +416,11 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     // (a next-nearest click "hours earlier" that was actually after the
     // review; "other names" with no other clicker) would mislead (GH codex
     // r2 P2). The counts below come from the same scan the rung decided on.
+    // A trusted pair: timestamp and location observed together
+    // post-migration AND the location is the review's (null = legacy = not
+    // confident). sole_click and click_near require it; click_name only
+    // reports it, as `locationTrusted`.
+    const trusted = (c) => c.pairTrusted === true && c.locationMatch === true;
     const plural = (n, noun) => `${n} other ${noun}${n === 1 ? '' : 's'}`;
     const decision = (c, rung, evidence) => ({
       customerId: c.customerId,
@@ -428,18 +429,16 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
       clickOffsetLabel: c.clickOffsetLabel,
       rung,
       evidence,
-      locationTrusted: c.pairTrusted === true && c.locationMatch === true,
+      locationTrusted: trusted(c),
     });
 
     // sole_click — the sole-clicker check holds over the RAW window,
     // including clickers the suggestion list hides as already-attributed
-    // (their click may aim at a different location's profile). Location
-    // must be the trusted post-migration pair (null = legacy = not confident).
-    if (candidates.length === 1 && meta.distinctClickers === 1) {
-      const only = candidates[0];
-      if (eligible(only) && only.pairTrusted === true && only.locationMatch === true) {
-        return decision(only, 'sole_click', 'only click in the window, same location');
-      }
+    // (their click may aim at a different location's profile): one distinct
+    // clicker means the one candidate IS that clicker.
+    const only = candidates[0];
+    if (meta.distinctClickers === 1 && eligible(only) && trusted(only)) {
+      return decision(only, 'sole_click', 'only click in the window, same location');
     }
 
     // click_name — exactly one clicker in the RAW window carries the
@@ -454,18 +453,20 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     // location is not — the retained pair may be the untrusted first click
     // while their newer tap went elsewhere (GH codex r1 P1), or a second
     // request row of theirs may be stamped elsewhere (pre-push r5 P1).
-    const all = meta.allCandidates || [];
+    const all = meta.allCandidates;
     const namedAll = all.filter((c) => c.nameMatch === true);
     const named = namedAll.length === 1 && meta.surnameClickerElsewhere !== true
       ? candidates.find((c) => c.customerId === namedAll[0].customerId)
       : null;
     if (named && eligible(named) && named.locationConflict !== true) {
-      // `all` is this location's scan (unstamped clicks included); every
-      // other entry failed the surname test, and the inverse scan found no
-      // same-surname click at any other location.
+      // `all` holds ONE entry per clicker (their best click) from this
+      // location's scan, unstamped clicks included; every other entry
+      // failed the surname test, and the inverse scan found no same-surname
+      // click at any other location. The copy counts clickers, not clicks
+      // (GH codex r3 P2).
       const others = all.length - 1;
       return decision(named, 'click_name', `the reviewer's last name matches this customer's; ${
-        others ? `the ${plural(others, 'click')} at this location in the window had other last names` : 'no other click at this location in the window'}`);
+        others ? `the ${plural(others, 'clicker')} at this location in the window had other last names` : 'no other clicker at this location in the window'}`);
     }
 
     // click_near — the nearest click is minutes before the review and every
@@ -474,20 +475,23 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     // location-matched candidate.
     const before = all.filter((c) => c.clickOffsetMs >= 0).sort((a, b) => a.clickOffsetMs - b.clickOffsetMs);
     const nearest = before[0];
-    if (!nearest || nearest.clickOffsetMs > AUTO_LINK_NEAR_MS) return null;
-    const near = candidates.find((c) => c.customerId === nearest.customerId);
-    if (!near || near.clickOffsetMs !== nearest.clickOffsetMs) return null;
-    if (!eligible(near) || near.pairTrusted !== true || near.locationMatch !== true) return null;
+    // The nearest clicker must itself be an unlinked candidate — the same
+    // object, `candidates` being a filtered view of `all`.
+    const near = nearest && candidates.find((c) => c.customerId === nearest.customerId);
+    if (!near || near.clickOffsetMs > AUTO_LINK_NEAR_MS || !eligible(near) || !trusted(near)) return null;
     const crowded = all.some((c) => c.customerId !== near.customerId
       && c.clickOffsetMs >= 0 && c.clickOffsetMs < AUTO_LINK_FAR_MS);
     if (crowded) return null;
-    // `before` is one entry per customer, nearest first: [1] is the
-    // next-nearest pre-review click (≥6h earlier, or none). Post-review
-    // clicks are not competition but are reported rather than denied.
+    // `before` is one entry per clicker at this location, nearest first:
+    // [1] is the next-nearest clicker's pre-review click (≥6h earlier, or
+    // none). A clicker whose only in-window tap came AFTER the review is
+    // not competition but is reported rather than denied. The copy counts
+    // clickers at this location — the scan measured nothing else (GH codex
+    // r3 P2).
     const after = all.filter((c) => c.clickOffsetMs < 0).length;
-    return decision(near, 'click_near', `the nearest click before the review; ${
-      before[1] ? `the next-nearest was ${before[1].clickOffsetLabel}` : 'no other click before it in the window'}${
-      after ? `; ${plural(after, 'click')} came after it posted` : ''}`);
+    return decision(near, 'click_near', `the nearest click at this location before the review; ${
+      before[1] ? `the next-nearest clicker at this location tapped ${before[1].clickOffsetLabel}` : 'no other clicker at this location tapped before it in the window'}${
+      after ? `; ${plural(after, 'clicker')} at this location tapped only after it posted` : ''}`);
   } catch (err) {
     logger.warn(`[review-click-correlation] confident-match lookup failed: ${err.message}`);
     return null;

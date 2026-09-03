@@ -372,14 +372,14 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect(await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [northgate(), other()] }) })).toMatchObject({ rung: 'click_name', locationTrusted: true });
   });
 
-  test('evidence states only what the rung checked: the real count of other clicks, or that there were none (GH codex r2 P2)', async () => {
+  test('evidence states only what the rung checked: the real count of other clickers at this location, or that there were none (GH codex r2 P2, r3 P2)', async () => {
     const legacy = { last_redirected_at: null, last_google_location: null };
     // One legacy click, no other clicker: sole_click refuses the legacy pair,
     // click_name links — and must not claim "other clicks were other names".
     const alone = await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [northgate(legacy)] }) });
-    expect(alone).toMatchObject({ rung: 'click_name', evidence: "the reviewer's last name matches this customer's; no other click at this location in the window" });
+    expect(alone).toMatchObject({ rung: 'click_name', evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window" });
     const withOther = await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [northgate(legacy), other()] }) });
-    expect(withOther.evidence).toBe("the reviewer's last name matches this customer's; the 1 other click at this location in the window had other last names");
+    expect(withOther.evidence).toBe("the reviewer's last name matches this customer's; the 1 other clicker at this location in the window had other last names");
   });
 
   test('refuses when a same-surname row with a NULL first location carries a newer tap stamped for another location inside the window (GH codex r2 P1)', async () => {
@@ -537,7 +537,7 @@ describe('findConfidentClickMatch — click_near rung (owner ruling 2026-09-03)'
       rung: 'click_near',
       locationTrusted: true,
       // The real next-nearest gap, not a canned "hours earlier" (GH codex r2 P2).
-      evidence: 'the nearest click before the review; the next-nearest was 1d 15h before',
+      evidence: 'the nearest click at this location before the review; the next-nearest clicker at this location tapped 1d 15h before',
     });
   });
 
@@ -558,7 +558,7 @@ describe('findConfidentClickMatch — click_near rung (owner ruling 2026-09-03)'
     const conn = makeConn({ clickRows: [near(), far({ redirected_at: '2026-08-07T18:05:00.000Z' })] });
     const match = await findConfidentClickMatch(REVIEW, { conn });
     expect(match?.rung).toBe('click_near');
-    expect(match.evidence).toBe('the nearest click before the review; no other click before it in the window; 1 other click came after it posted');
+    expect(match.evidence).toBe('the nearest click at this location before the review; no other clicker at this location tapped before it in the window; 1 other clicker at this location tapped only after it posted');
     expect(match.evidence).not.toMatch(/earlier|hours/);
   });
 });

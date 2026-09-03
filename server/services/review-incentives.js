@@ -706,8 +706,9 @@ async function searchAttributionCandidates(options = {}) {
   // r3/r4): a customer with a completed visit in the same 90-day window the
   // service picker uses (recentServiceCandidatesForCustomer) leads, then
   // last name. Owner ruling 2026-09-03.
-  const reviewDateOnly = etBusinessDate(review.review_created_at || review.created_at || new Date());
-  const serviceCutoff = etBusinessDateOffset(review.review_created_at || review.created_at || new Date(), -90);
+  const reviewAt = review.review_created_at || review.created_at || new Date();
+  const reviewDateOnly = etBusinessDate(reviewAt);
+  const serviceCutoff = etBusinessDateOffset(reviewAt, -90);
   let query = conn('customers')
     .where({ active: true })
     .orderByRaw(
@@ -762,34 +763,37 @@ async function searchAttributionCandidates(options = {}) {
   }
 
   const customers = await query;
-  // The row's currently linked customer is ALWAYS a candidate (pre-push P1):
-  // for a click_auto/manual_no_visit row the correlation module's
-  // linked-customer suppression keeps them out of likelyReviewers, and a
-  // handle reviewer name ("SunshineGal88") matches no customer search — so
-  // the confirm queue's own subject would open with no card and no confirm
-  // button, forcing the admin to retype the displayed name. Strict
-  // active === true, matching the search filter — an inactive customer is
-  // never offered for confirmation (GH codex #3483 r5/r8).
-  if (
-    review.customer_id
-    && (review.link_source === 'click_auto' || review.link_source === 'manual_no_visit')
-    && !customers.some((c) => String(c.id) === String(review.customer_id))
-  ) {
-    const current = await conn('customers')
-      .where({ id: review.customer_id, active: true })
-      .first(
-        'id',
-        'first_name',
-        'last_name',
-        'phone',
-        'email',
-        'address_line1',
-        'address_line2',
-        'city',
-        'state',
-        'zip',
-      );
-    if (current) customers.unshift(current);
+  // The row's currently linked customer leads the list: pinned first
+  // wherever the search returned them (pre-push P1 r2), and for a
+  // click_auto/manual_no_visit row ALWAYS present (pre-push P1) — the
+  // correlation module's linked-customer suppression keeps them out of
+  // likelyReviewers, and a handle reviewer name ("SunshineGal88") matches
+  // no customer search, so the confirm queue's own subject would otherwise
+  // open with no card and no confirm button, forcing the admin to retype
+  // the displayed name. Strict active === true, matching the search filter
+  // — an inactive customer is never offered for confirmation (GH codex
+  // #3483 r5/r8).
+  if (review.customer_id) {
+    const linkedId = String(review.customer_id);
+    const at = customers.findIndex((c) => String(c.id) === linkedId);
+    if (at > 0) customers.unshift(...customers.splice(at, 1));
+    else if (at < 0 && (review.link_source === 'click_auto' || review.link_source === 'manual_no_visit')) {
+      const current = await conn('customers')
+        .where({ id: review.customer_id, active: true })
+        .first(
+          'id',
+          'first_name',
+          'last_name',
+          'phone',
+          'email',
+          'address_line1',
+          'address_line2',
+          'city',
+          'state',
+          'zip',
+        );
+      if (current) customers.unshift(current);
+    }
   }
   const candidates = [];
   for (const customer of customers) {
@@ -799,10 +803,6 @@ async function searchAttributionCandidates(options = {}) {
       services,
     });
   }
-  // The review's currently linked customer is pinned first wherever the
-  // search returned them (pre-push P1 r2).
-  const pinned = review.customer_id ? candidates.findIndex((c) => String(c.id) === String(review.customer_id)) : -1;
-  if (pinned > 0) candidates.unshift(...candidates.splice(pinned, 1));
 
   // Click-time correlation: customers whose tracked review-link click landed
   // near this review's timestamp. Rendered as a separate "likely reviewers"

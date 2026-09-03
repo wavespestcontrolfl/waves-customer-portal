@@ -1741,7 +1741,7 @@ describe('Google Business review sync', () => {
           ...CONFIDENT_MATCH,
           rung: 'click_name',
           locationTrusted: false,
-          evidence: "the reviewer's last name matches this customer's; no other click at this location in the window",
+          evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window",
         })),
         findLikelyReviewers: jest.fn(async () => []),
       }));
@@ -1760,7 +1760,7 @@ describe('Google Business review sync', () => {
       expect(notifs).toHaveLength(1);
       // The WHY is the matcher's evidence verbatim — no canned claim about
       // other clicks the rung never checked (GH codex r2 P2).
-      expect(notifs[0].body).toContain("(the reviewer's last name matches this customer's; no other click at this location in the window)");
+      expect(notifs[0].body).toContain("(the reviewer's last name matches this customer's; no other clicker at this location in the window)");
       expect(notifs[0].body).not.toContain('other clicks in the window were other names');
     });
 
@@ -1775,7 +1775,7 @@ describe('Google Business review sync', () => {
         clickOffsetMs: 10 * 60000,
         clickOffsetLabel: '10m before',
         rung: 'click_name',
-        evidence: "the reviewer's last name matches this customer's; no other click at this location in the window",
+        evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window",
         locationTrusted: false,
       };
       jest.doMock('../services/review-click-correlation', () => ({
