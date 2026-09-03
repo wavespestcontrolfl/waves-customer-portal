@@ -317,12 +317,22 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
   }
   // Ledger, request transition (when the order exists) and the critical
   // audit row commit together — the green path's shape; a crash leaves
-  // either all three or none.
-  await conn.transaction(async (trx) => {
-    await trx('vendor_orders').where({ id: ledger.id }).update(patch);
+  // either all three or none. The ledger write is CONDITIONAL on the row
+  // still being 'placing': a park only ever moves a live claim, so a row
+  // another dispatcher or pod already settled (placed, or parked by its own
+  // stale recovery) keeps that outcome — no overwrite, no second audit
+  // (pre-push P1).
+  const transitioned = await conn.transaction(async (trx) => {
+    const n = await trx('vendor_orders').where({ id: ledger.id, status: 'placing' }).update(patch);
+    if (!n) return false;
     if (markRequestOrdered) await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ status: 'ordered', updated_at: new Date() });
     await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: status, amount_cents: amountCents, reason: `${reason}: ${message}`.slice(0, 400), trx });
+    return true;
   });
+  if (!transitioned) {
+    logger.warn(`[order-dispatch] ledger ${ledger.id} already left 'placing' — ${reason} park skipped, the settled outcome stands`);
+    return { requestId: request.id, ledgerId: ledger.id, skipped: 'already_settled' };
+  }
   const bellDelivered = await deliverBell(conn, { notify, ledgerId: ledger.id, requestId: request.id, productName: product.name, vendorName: vendor.name, ...bell });
   return { requestId: request.id, ledgerId: ledger.id, status, reason, ...(bellDelivered ? {} : { bellPending: true }) };
 }
@@ -542,6 +552,7 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
         ledger: { id: row.id }, request: { id: row.request_id }, product: { name: row.product_name || '?' }, vendor: { id: row.vendor_id, name: row.vendor_name || '?' }, adapterKey: row.adapter, notify,
         reason: 'stale_placing', message: `the dispatcher died mid-order at ${new Date(row.created_at).toISOString()}; the ${row.vendor_name || 'vendor'} call may or may not have gone out.`, amountCents: row.amount_cents,
       });
+      if (parked.skipped) continue; // settled by its own dispatcher between the scan and the park
       recovered.push(row.id);
       if (parked.bellPending) bellPending.push(row.id);
     } catch (err) {

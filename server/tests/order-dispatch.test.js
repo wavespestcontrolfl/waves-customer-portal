@@ -30,7 +30,7 @@ jest.mock('../services/vendor-credentials', () => ({ getVendorLoginCredentials: 
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/procurement/auto-reorder', () => ({ vendorPricingFor: jest.fn(async () => mockState.pricing) }));
 
-const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [] };
+const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
@@ -49,7 +49,8 @@ jest.mock('../models/db', () => {
       return null;
     };
     q.sum = () => q;
-    q.update = async (row) => { mockState.updates.push({ table, row }); return 1; };
+    // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
+    q.update = async (row) => { mockState.updates.push({ table, row }); return table === 'vendor_orders' && mockState.ledgerSettled && row.status ? 0 : 1; };
     q.delete = async () => { mockState.deletes.push(table); return 1; };
     let row;
     const returning = async () => {
@@ -83,7 +84,7 @@ function mockAdapter(overrides = {}) {
 
 let notify;
 beforeEach(() => {
-  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [] });
+  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false });
   for (const k of Object.keys(ENV)) process.env[k] = ENV[k];
   notify = jest.fn(async () => ({ id: 'n1' }));
   auditVendorOrder.mockClear();
@@ -490,4 +491,15 @@ test('a placing row older than 30 minutes is parked needs_review with a do-not-r
   expect(row.error).toMatch(/stale_placing/);
   expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
   expect(a.place).not.toHaveBeenCalled();
+});
+
+test('stale recovery that loses the race to the live dispatcher leaves the settled row alone — no overwrite, no audit, no bell (pre-push P1)', async () => {
+  mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), request_id: 'req-old', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
+  mockState.ledgerSettled = true; // the row went 'placed' between the scan and the park
+  const a = mockAdapter();
+  const r = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } });
+  expect(r.recovered).toEqual([]);
+  expect(auditVendorOrder).not.toHaveBeenCalled();
+  expect(notify).not.toHaveBeenCalled();
+  expect(mockState.updates.filter((u) => u.table === 'product_restock_requests')).toHaveLength(0);
 });
