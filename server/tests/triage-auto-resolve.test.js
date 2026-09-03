@@ -327,3 +327,128 @@ describe('runTriageAutoResolve — gate', () => {
     expect(result).toEqual({ skipped: true, reason: 'gated_off' });
   });
 });
+
+// ── Evidence rules (GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE) ──────────────────────
+// ctx.evidence is the per-item proof map loadEvidence() builds; the pure
+// classifier only trusts flags on it, so these pin the rule wiring and the
+// in-classifier guards (phone on a slot now, heard address ↔ on-file match).
+const {
+  heardAddressMatchesOnFile,
+  callerPhoneOnFile,
+  capturedEmails,
+  requestedServiceTokens,
+  serviceTypeMatches,
+  requestedWindow,
+  loadEvidence,
+} = require('../services/triage-auto-resolve');
+
+const evidenceFor = (id, flags) => ({ bookedCallIds: new Set(), evidence: new Map([[id, flags]]) });
+
+describe('evidence rules', () => {
+  test('quote_promised resolves only on a DIRECT delivered estimate', () => {
+    expect(classifyTriageItem(item({ reason_code: 'quote_promised' }), evidenceFor('t1', { estimate_direct: true }), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'quote_fulfilled' });
+    expect(classifyTriageItem(item({ reason_code: 'quote_promised' }), evidenceFor('t1', {}), { now: NOW })).toBeNull();
+    // Evidence keyed to ANOTHER card never leaks across items.
+    expect(classifyTriageItem(item({ reason_code: 'quote_promised' }), evidenceFor('t2', { estimate_direct: true }), { now: NOW })).toBeNull();
+  });
+
+  test('email_unverified resolves on engagement evidence; email_invalid never does', () => {
+    expect(classifyTriageItem(item({ reason_code: 'email_unverified' }), evidenceFor('t1', { email_engaged: true }), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'email_engaged' });
+    expect(classifyTriageItem(item({ reason_code: 'email_invalid' }), evidenceFor('t1', { email_engaged: true }), { now: NOW })).toBeNull();
+  });
+
+  test('caller_not_authorized needs BOTH the human contact event and the number on a slot now', () => {
+    const base = { reason_code: 'caller_not_authorized', call_direction: 'inbound', call_from_phone: '+19415550123' };
+    expect(classifyTriageItem(item({ ...base, customer_service_contact2_phone: '(941) 555-0123' }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'caller_phone_added' });
+    // Event logged but the number is no longer on any slot → stays open.
+    expect(classifyTriageItem(item({ ...base, customer_phone: '+19415559999' }), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
+    // On a slot but no post-card human event (the pass itself may have written it) → stays open.
+    expect(classifyTriageItem(item({ ...base, customer_phone: '+19415550123' }), evidenceFor('t1', {}), { now: NOW })).toBeNull();
+  });
+
+  test('not_confirmed resolves on a booking created after the card', () => {
+    expect(classifyTriageItem(item({ reason_code: 'not_confirmed' }), evidenceFor('t1', { booking_after_card: true }), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'booking_created' });
+    // The legacy source-linked set alone (pre-card provenance) is still not enough.
+    expect(classifyTriageItem(item({ reason_code: 'not_confirmed' }), bookedCtx('call-1'), { now: NOW })).toBeNull();
+  });
+
+  test('address cards resolve on a completed visit only when every heard address matches the on-file street', () => {
+    const heard = {
+      reason_code: 'address_unverifiable',
+      customer_address_line1: '1234 Palm Ave',
+      customer_created_at: CUSTOMER_AFTER, // customer born from the call — address_moot cannot fire
+      payload: { flag: 'address_unverifiable', address_as_heard: '1234 Palm Avenue' },
+      call_extraction: { property: { service_address: { street_line_1: '1234 Palm Ave', raw_text: '1234 palm ave unit 2' } } },
+    };
+    expect(classifyTriageItem(item(heard), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'visit_completed_at_address' });
+    // A different house number anywhere in the heard set fails closed.
+    expect(classifyTriageItem(item({ ...heard, payload: { flag: 'x', address_as_heard: '1236 Palm Ave' } }), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
+    // No heard address at all → nothing to prove (address_moot owns that shape).
+    expect(classifyTriageItem(item({ ...heard, payload: { flag: 'x' }, call_extraction: NO_ADDR_EXTRACTION }), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
+    // Soft-deleted customer never resolves.
+    expect(classifyTriageItem(item({ ...heard, customer_deleted_at: FRESH }), evidenceFor('t1', { visit_completed_at_address: true }), { now: NOW })).toBeNull();
+  });
+
+  test('no evidence map (gate off) → the evidence codes behave exactly as before', () => {
+    for (const code of ['quote_promised', 'email_unverified', 'caller_not_authorized', 'not_confirmed']) {
+      expect(classifyTriageItem(item({ reason_code: code, created_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();
+    }
+  });
+});
+
+describe('evidence helpers', () => {
+  test('heardAddressMatchesOnFile keys on house number + first street word, fails closed on unparseable input', () => {
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', call_extraction_v1: JSON.stringify({ address_line1: '77 oak street, bradenton' }), call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(true);
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: '77 Oak St', call_extraction_v1: 'not-json{', call_extraction: NO_ADDR_EXTRACTION, payload: {} }))).toBe(false);
+    expect(heardAddressMatchesOnFile(item({ customer_address_line1: null, call_extraction_v1: JSON.stringify({ address_line1: '77 Oak St' }), payload: {} }))).toBe(false);
+  });
+
+  test('callerPhoneOnFile matches any of the five slots by digits, outbound uses to_phone', () => {
+    expect(callerPhoneOnFile(item({ call_direction: 'inbound', call_from_phone: '19415550100', customer_secondary_phone: '(941) 555-0100' }))).toBe(true);
+    expect(callerPhoneOnFile(item({ call_direction: 'outbound', call_to_phone: '+19415550100', call_from_phone: '+19415550999', customer_service_contact3_phone: '9415550100' }))).toBe(true);
+    expect(callerPhoneOnFile(item({ call_direction: 'inbound', call_from_phone: '+19415550100', customer_phone: '+19415550101' }))).toBe(false);
+  });
+
+  test('capturedEmails unions V1 email/email_raw and dictation candidates, lowercased', () => {
+    const emails = capturedEmails(item({
+      call_extraction_v1: JSON.stringify({ email: 'Pat@Example.com', email_raw: 'pat@examplecom' }),
+      payload: { email_candidates: [{ value: 'pat@example.com' }, { value: 'PAT.S@example.com' }] },
+    }));
+    expect(emails.sort()).toEqual(['pat.s@example.com', 'pat@example.com', 'pat@examplecom']);
+  });
+
+  test('requested service tokens ignore generic words; service types match on a specific token', () => {
+    const tokens = requestedServiceTokens(item({ call_extraction: { service_request: { primary_service_category: 'pest_control', secondary_categories: ['mosquito_control'] } } }));
+    expect(tokens.sort()).toEqual(['mosquito', 'pest']);
+    expect(serviceTypeMatches('Quarterly Pest Control', tokens)).toBe(true);
+    expect(serviceTypeMatches('Mosquito Treatment', tokens)).toBe(true);
+    expect(serviceTypeMatches('Lawn Care', tokens)).toBe(false);
+    expect(serviceTypeMatches('Pest Control', [])).toBe(false);
+  });
+
+  test('requestedWindow prefers the confirmed start, falls back to the requested range, null without either', () => {
+    expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-04T14:00:00Z' } } })).start.toISOString()).toBe('2026-08-04T14:00:00.000Z');
+    const w = requestedWindow(item({ payload: { scheduling_window: { requested_date_range_start: '2026-08-04', requested_date_range_end: '2026-08-06' } } }));
+    expect(w.end.getTime()).toBeGreaterThan(w.start.getTime());
+    expect(requestedWindow(item({ payload: { scheduling_window: { status: 'requested' } } }))).toBeNull();
+  });
+
+  test('loadEvidence is an empty map with the evidence gate off — no DB access', async () => {
+    const OLD = process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
+    delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
+    try {
+      const conn = jest.fn(() => { throw new Error('must not query'); });
+      const map = await loadEvidence(conn, [item({ reason_code: 'quote_promised' })]);
+      expect(map.size).toBe(0);
+      expect(conn).not.toHaveBeenCalled();
+    } finally {
+      if (OLD === undefined) delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
+      else process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE = OLD;
+    }
+  });
+});

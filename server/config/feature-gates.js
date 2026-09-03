@@ -1230,6 +1230,16 @@ const gates = {
   // Born from the 2026-07 backlog: ~1,800 open vs 32 ever resolved.
   // Off → cron ticks are no-ops.
   triageAutoResolve: process.env.GATE_TRIAGE_AUTO_RESOLVE === 'true',
+  // Evidence rules layered on the sweep above (needs it ON to run at all):
+  // quote_promised closes on an estimate DIRECTLY linked to the call and
+  // delivered after it; email_unverified on the call-captured address
+  // engaging (open/click, not merely delivered) with a later email;
+  // caller_not_authorized on a human adding the caller's number as a
+  // service contact after the call; not_confirmed on a live booking created
+  // after the card; address cards on a completed visit at the address the
+  // call named. Every rule needs evidence that postdates the CARD, never
+  // same-customer coincidence. Off → the four original rules only.
+  triageAutoResolveEvidence: process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate

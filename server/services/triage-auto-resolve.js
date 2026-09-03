@@ -17,9 +17,24 @@
  *   - missing_last_name → a trusted, pre-existing, live customer record has
  *     a surname the call did not itself supply, for a caller whose first
  *     name agrees with that record
- *   (Scheduling-doubt cards get NO booking-based auto-resolution: linkage
- *   timestamps can't distinguish a current routing outcome from a stale
- *   pre-reprocess booking, so those cards wait for human verdicts.)
+ *   (Scheduling-doubt cards get NO booking-based auto-resolution from call
+ *   linkage alone: linkage timestamps can't distinguish a current routing
+ *   outcome from a stale pre-reprocess booking. The evidence rule below
+ *   beats that only by requiring the booking to postdate the CARD.)
+ *
+ *   RESOLVE ON EVIDENCE (GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE, layered on the
+ *   gate above — the owed action was PERFORMED after the card was filed):
+ *   - quote_promised → an estimate DIRECTLY linked to the call (estimator
+ *     stamp / minted-lead FK) delivered after the card
+ *   - email_unverified → the call-captured address opened/clicked a later
+ *     message (delivery alone proves only that a mailbox exists)
+ *   - caller_not_authorized → a human added the caller's number as a
+ *     service contact after the card, and it is on a slot now
+ *   - not_confirmed → a live booking created after the card: this call's
+ *     own (source_call_log_id), or a same-customer one inside the requested
+ *     window for the requested service on a single-property account
+ *   - address flags → a visit COMPLETED after the card for a single-property
+ *     customer whose on-file street matches every address the call named
  *
  *   DISMISS (informational card aged out unactioned):
  *   - spam_or_wrong_number after SPAM_AGE_DAYS
@@ -118,9 +133,144 @@ const ADVISORY_AGE_CODES = new Set([
 const RULE_NOTES = {
   address_moot: 'Auto-resolved: customer record now has a service address on file (street + zip); address flag is moot.',
   name_moot: 'Auto-resolved: customer record now has a last name; flag is moot.',
+  // Evidence rules (GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE) — each proves the
+  // owed action was PERFORMED after the card was filed.
+  quote_fulfilled: 'Auto-resolved: an estimate linked to this call was delivered after the call; the promised quote went out.',
+  email_engaged: 'Auto-resolved: the email captured on this call opened or clicked a later message; the read-back is moot.',
+  caller_phone_added: "Auto-resolved: the caller's number was added as a service contact on the account after this call.",
+  booking_created: 'Auto-resolved: a live appointment matching the requested window was booked after this card was filed.',
+  visit_completed_at_address: 'Auto-resolved: a visit was completed at the address this call named; the address is proven.',
   spam_aged: `Auto-dismissed: spam/wrong-number advisory unactioned after ${SPAM_AGE_DAYS} days.`,
   advisory_aged: `Auto-dismissed: informational flag unactioned after ${ADVISORY_AGE_DAYS} days.`,
 };
+
+// Evidence window for the association booking arm (mirrors
+// call-commitments' ASSOCIATION_WINDOW_DAYS).
+const BOOKING_WINDOW_DAYS = 14;
+// Category words too generic to prove a visit is for the requested service.
+const SERVICE_STOPWORDS = new Set(['control', 'care', 'service', 'services', 'treatment', 'general', 'and', 'the', 'of']);
+
+function parseMaybeJson(raw) {
+  if (raw == null) return null;
+  if (typeof raw !== 'string') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined; // unparseable — callers fail closed
+  }
+}
+
+function toDate(value) {
+  const d = value ? new Date(value) : null;
+  return d && !Number.isNaN(d.getTime()) ? d : null;
+}
+
+function strictlyAfter(value, boundary) {
+  const a = toDate(value);
+  const b = toDate(boundary);
+  return Boolean(a && b && a > b);
+}
+
+// House number + first street word — the minimum two tokens that make two
+// address strings the SAME street address. "1234 Palm Ave" vs
+// "1234 Palm Avenue Unit 2" agree; "1234 Palm" vs "1236 Palm" do not.
+function addressKey(text) {
+  const m = String(text || '').trim().toLowerCase().match(/^(\d+[a-z]?)\s+([a-z0-9]+)/);
+  return m ? `${m[1]} ${m[2]}` : null;
+}
+
+// Every address the CALL supplied (payload as-heard, V2 street/raw, V1
+// street) must agree with the on-file street address. Fail closed: no heard
+// address (nothing to prove), an unparseable extraction, or any heard
+// address that keys differently keeps the card.
+function heardAddressMatchesOnFile(item) {
+  const onFile = addressKey(item.customer_address_line1);
+  if (!onFile) return false;
+  const heard = [];
+  const payload = parseMaybeJson(item.payload);
+  if (payload === undefined) return false;
+  if (payload?.address_as_heard) heard.push(payload.address_as_heard);
+  const v2 = parseMaybeJson(item.call_extraction);
+  if (v2 === undefined) return false;
+  const addr = v2?.property?.service_address || {};
+  if (addr.street_line_1) heard.push(addr.street_line_1);
+  if (addr.raw_text) heard.push(addr.raw_text);
+  const v1 = parseMaybeJson(item.call_extraction_v1);
+  if (v1 === undefined) return false;
+  if (v1?.address_line1) heard.push(v1.address_line1);
+  const keys = heard.map(addressKey).filter(Boolean);
+  if (!keys.length) return false;
+  return keys.every((k) => k === onFile);
+}
+
+// The V2 extraction's requested service categories, as match tokens.
+function requestedServiceTokens(item) {
+  const v2 = parseMaybeJson(item.call_extraction);
+  if (!v2) return [];
+  const sr = v2.service_request || {};
+  const cats = [sr.primary_service_category, ...(Array.isArray(sr.secondary_categories) ? sr.secondary_categories : [])];
+  const tokens = new Set();
+  for (const c of cats) {
+    for (const t of String(c || '').toLowerCase().split(/[^a-z]+/)) {
+      if (t && !SERVICE_STOPWORDS.has(t)) tokens.add(t);
+    }
+  }
+  return [...tokens];
+}
+
+function serviceTypeMatches(serviceType, requestedTokens) {
+  if (!requestedTokens.length) return false;
+  const words = new Set(String(serviceType || '').toLowerCase().split(/[^a-z]+/).filter(Boolean));
+  return requestedTokens.some((t) => words.has(t));
+}
+
+// The date the caller asked for, from the card's scheduling payload.
+function requestedWindow(item) {
+  const payload = parseMaybeJson(item.payload);
+  const w = payload?.scheduling_window || {};
+  const start = toDate(w.confirmed_start_at) || toDate(w.requested_date_range_start);
+  if (!start) return null;
+  const end = toDate(w.requested_date_range_end) || start;
+  return { start, end };
+}
+
+function phoneDigits(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+}
+
+function callerPhone(item) {
+  return String(item.call_direction || '').startsWith('outbound') ? item.call_to_phone : item.call_from_phone;
+}
+
+// Is the caller's number on one of the account's five phone slots now?
+// Mirror of the processor's caller_phone_not_on_file identity check.
+function callerPhoneOnFile(item) {
+  const ani = phoneDigits(callerPhone(item));
+  if (!ani) return false;
+  return [
+    item.customer_phone, item.customer_service_contact_phone,
+    item.customer_service_contact2_phone, item.customer_service_contact3_phone,
+    item.customer_secondary_phone,
+  ].some((slot) => phoneDigits(slot) === ani);
+}
+
+// Every email THIS call captured — the V1 extraction's email/email_raw and
+// the dictation candidates on the card.
+function capturedEmails(item) {
+  const out = new Set();
+  const v1 = parseMaybeJson(item.call_extraction_v1);
+  for (const v of [v1?.email, v1?.email_raw]) {
+    const e = String(v || '').trim().toLowerCase();
+    if (e) out.add(e);
+  }
+  const payload = parseMaybeJson(item.payload);
+  for (const c of (Array.isArray(payload?.email_candidates) ? payload.email_candidates : [])) {
+    const e = String(c?.value || '').trim().toLowerCase();
+    if (e) out.add(e);
+  }
+  return [...out];
+}
 
 function ageDays(createdAt, now) {
   const created = createdAt ? new Date(createdAt) : null;
@@ -331,6 +481,31 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
       && String(item.customer_last_name || '').trim() !== '') {
     return { action: 'resolve', rule: 'name_moot' };
   }
+  // Evidence rules: ctx.evidence is the per-item proof map loadEvidence()
+  // built (empty when GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE is off, so none of
+  // these can fire). Each flag is true only when the proof postdates the
+  // CARD — see loadEvidence for the exact predicates.
+  const ev = ctx.evidence instanceof Map ? ctx.evidence.get(item.id) : null;
+  if (ev) {
+    if (code === 'quote_promised' && ev.estimate_direct) {
+      return { action: 'resolve', rule: 'quote_fulfilled' };
+    }
+    if (code === 'email_unverified' && ev.email_engaged) {
+      return { action: 'resolve', rule: 'email_engaged' };
+    }
+    if (code === 'caller_not_authorized' && ev.caller_phone_added && callerPhoneOnFile(item)) {
+      return { action: 'resolve', rule: 'caller_phone_added' };
+    }
+    if (code === 'not_confirmed' && ev.booking_after_card) {
+      return { action: 'resolve', rule: 'booking_created' };
+    }
+    if (ADDRESS_MOOT_CODES.has(code)
+        && !item.customer_deleted_at
+        && ev.visit_completed_at_address
+        && heardAddressMatchesOnFile(item)) {
+      return { action: 'resolve', rule: 'visit_completed_at_address' };
+    }
+  }
   if (code === 'spam_or_wrong_number'
       && ageDays(item.created_at, now) >= SPAM_AGE_DAYS) {
     return { action: 'dismiss', rule: 'spam_aged' };
@@ -367,6 +542,17 @@ function loadCandidateItems(conn, itemIds = null) {
       'cl.created_at as call_created_at',
       'cl.ai_extraction_enriched as call_extraction',
       'cl.ai_extraction as call_extraction_v1',
+      // Evidence-rule inputs: the call's identity for the estimate linkage
+      // (call-commitments' resolveFulfillment reads these) and the caller's
+      // number for the phone-slot check.
+      'cl.customer_id as call_customer_id',
+      'cl.direction as call_direction',
+      'cl.from_phone as call_from_phone',
+      'cl.to_phone as call_to_phone',
+      'cl.duration_seconds as call_duration_seconds',
+      'cl.bridged_at as call_bridged_at',
+      'cl.twilio_call_sid as call_twilio_call_sid',
+      'cl.metadata as call_metadata',
       'c.created_at as customer_created_at',
       'c.deleted_at as customer_deleted_at',
       'c.pipeline_stage as customer_pipeline_stage',
@@ -374,9 +560,170 @@ function loadCandidateItems(conn, itemIds = null) {
       'c.zip as customer_zip',
       'c.first_name as customer_first_name',
       'c.last_name as customer_last_name',
+      'c.phone as customer_phone',
+      'c.service_contact_phone as customer_service_contact_phone',
+      'c.service_contact2_phone as customer_service_contact2_phone',
+      'c.service_contact3_phone as customer_service_contact3_phone',
+      'c.secondary_phone as customer_secondary_phone',
     );
   if (itemIds) q.whereIn('t.id', itemIds);
   return q;
+}
+
+const EVIDENCE_CODES = new Set([
+  'quote_promised', 'email_unverified', 'caller_not_authorized', 'not_confirmed',
+  ...ADDRESS_MOOT_CODES,
+]);
+
+// Per-item proof map for the evidence rules. Every predicate compares
+// against the CARD's created_at (strict >): evidence that predates the card
+// — including anything the filing pass itself wrote — never counts. Empty
+// when the evidence gate is off. With `lock`, the scheduled_services rows
+// that prove a booking/visit are held FOR UPDATE until commit, the same
+// contract loadBookedCallIds applies.
+async function loadEvidence(conn, items, { lock = false } = {}) {
+  const evidence = new Map();
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('triageAutoResolveEvidence')) return evidence;
+  const candidates = items.filter((i) => EVIDENCE_CODES.has(i.reason_code) && i.status === 'open');
+  if (!candidates.length) return evidence;
+  const flag = (id, key) => {
+    const cur = evidence.get(id) || {};
+    cur[key] = true;
+    evidence.set(id, cur);
+  };
+
+  // quote_promised → an estimate DIRECTLY linked to this call, delivered
+  // after it (call-commitments' send_estimate resolver; association-strength
+  // matches — same customer, unlinked — are ignored on purpose).
+  const { resolveFulfillment } = require('./call-commitments');
+  for (const item of candidates.filter((i) => i.reason_code === 'quote_promised')) {
+    try {
+      const proof = await resolveFulfillment(conn, { kind: 'send_estimate' }, {
+        id: item.call_log_id,
+        created_at: item.call_created_at,
+        duration_seconds: item.call_duration_seconds,
+        bridged_at: item.call_bridged_at,
+        direction: item.call_direction,
+        customer_id: item.call_customer_id,
+        twilio_call_sid: item.call_twilio_call_sid,
+        metadata: item.call_metadata,
+        from_phone: item.call_from_phone,
+        to_phone: item.call_to_phone,
+      });
+      if (proof?.strength === 'direct' && strictlyAfter(proof.matched_at, item.created_at)) {
+        flag(item.id, 'estimate_direct');
+      }
+    } catch (err) {
+      logger.warn(`[triage-sweep] estimate evidence lookup failed for item ${item.id}: ${err.message}`);
+    }
+  }
+
+  // email_unverified → the captured address ENGAGED (opened/clicked — a
+  // delivery alone only proves some mailbox exists) with a message sent
+  // after the card, and never bounced/complained.
+  const emailItems = candidates.filter((i) => i.reason_code === 'email_unverified');
+  const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i)]));
+  const allEmails = [...new Set([...emailsByItem.values()].flat())];
+  if (allEmails.length) {
+    const rows = await conn('email_messages')
+      .whereRaw('LOWER(recipient_email_snapshot) IN (' + allEmails.map(() => '?').join(', ') + ')', allEmails)
+      .whereNull('bounced_at')
+      .whereNull('complained_at')
+      .whereNotIn('status', ['bounced', 'failed', 'complained', 'dropped'])
+      .where(function engaged() {
+        this.whereNotNull('opened_at').orWhereNotNull('clicked_at');
+      })
+      .select('recipient_email_snapshot', 'opened_at', 'clicked_at');
+    for (const item of emailItems) {
+      const mine = new Set(emailsByItem.get(item.id));
+      const hit = rows.some((r) => mine.has(String(r.recipient_email_snapshot || '').toLowerCase())
+        && (strictlyAfter(r.opened_at, item.created_at) || strictlyAfter(r.clicked_at, item.created_at)));
+      if (hit) flag(item.id, 'email_engaged');
+    }
+  }
+
+  // caller_not_authorized → a HUMAN added/updated a service contact whose
+  // number ends in the caller's last four after the card (service-contact-
+  // events writes the masked number to activity_log.metadata.phone). The
+  // classifier additionally requires the number to be on a slot NOW.
+  const authItems = candidates.filter((i) => i.reason_code === 'caller_not_authorized' && i.call_customer_id);
+  if (authItems.length) {
+    const rows = await conn('activity_log')
+      .whereIn('customer_id', [...new Set(authItems.map((i) => i.call_customer_id))])
+      .whereIn('action', ['service_contact_added', 'service_contact_updated'])
+      .select('customer_id', 'created_at', 'metadata');
+    for (const item of authItems) {
+      const last4 = phoneDigits(callerPhone(item)).slice(-4);
+      if (last4.length !== 4) continue;
+      const hit = rows.some((r) => {
+        if (String(r.customer_id) !== String(item.call_customer_id)) return false;
+        if (!strictlyAfter(r.created_at, item.created_at)) return false;
+        const meta = parseMaybeJson(r.metadata);
+        return String(meta?.phone || '').slice(-4) === last4;
+      });
+      if (hit) flag(item.id, 'caller_phone_added');
+    }
+  }
+
+  // Bookings and visits for the not_confirmed / address arms.
+  const visitItems = candidates.filter((i) => (i.reason_code === 'not_confirmed' || ADDRESS_MOOT_CODES.has(i.reason_code)) && i.call_customer_id);
+  if (visitItems.length) {
+    const customerIds = [...new Set(visitItems.map((i) => i.call_customer_id))];
+    const propertyCounts = new Map();
+    const countRows = await conn('customer_properties')
+      .whereIn('customer_id', customerIds)
+      .groupBy('customer_id')
+      .select('customer_id')
+      .count({ n: '*' });
+    for (const r of countRows) propertyCounts.set(String(r.customer_id), Number(r.n || 0));
+    const multiProperty = (customerId) => (propertyCounts.get(String(customerId)) || 0) > 1;
+
+    const q = conn('scheduled_services')
+      .whereIn('customer_id', customerIds)
+      .whereNull('parent_service_id')
+      .whereNotIn('status', ['cancelled', 'rescheduled'])
+      .orderBy('id', 'asc')
+      .select('id', 'customer_id', 'source_call_log_id', 'status', 'service_type', 'scheduled_date', 'created_at', 'completed_at');
+    if (lock) q.forUpdate();
+    const visits = await q;
+
+    for (const item of visitItems) {
+      const mine = visits.filter((v) => String(v.customer_id) === String(item.call_customer_id));
+      if (item.reason_code === 'not_confirmed') {
+        // Direct: a live booking THIS call minted, created after the card
+        // (a booking that predates the card belongs to an earlier pass of
+        // the same call and is exactly the stale-provenance case the header
+        // refuses to trust).
+        const direct = mine.some((v) => String(v.source_call_log_id) === String(item.call_log_id)
+          && strictlyAfter(v.created_at, item.created_at));
+        if (direct) {
+          flag(item.id, 'booking_after_card');
+          continue;
+        }
+        // Association: single-property customer, booking created after the
+        // card, inside the requested window, for the requested service.
+        if (multiProperty(item.call_customer_id)) continue;
+        const window = requestedWindow(item);
+        if (!window) continue;
+        const tokens = requestedServiceTokens(item);
+        const lo = new Date(window.start.getTime() - BOOKING_WINDOW_DAYS * 86400000);
+        const hi = new Date(window.end.getTime() + BOOKING_WINDOW_DAYS * 86400000);
+        const assoc = mine.some((v) => strictlyAfter(v.created_at, item.created_at)
+          && toDate(v.scheduled_date) && toDate(v.scheduled_date) >= lo && toDate(v.scheduled_date) <= hi
+          && serviceTypeMatches(v.service_type, tokens));
+        if (assoc) flag(item.id, 'booking_after_card');
+      } else {
+        // Address cards: a visit COMPLETED after the card for a
+        // single-property customer. The classifier adds the heard-address
+        // ↔ on-file street match.
+        if (multiProperty(item.call_customer_id)) continue;
+        const done = mine.some((v) => v.status === 'completed' && strictlyAfter(v.completed_at, item.created_at));
+        if (done) flag(item.id, 'visit_completed_at_address');
+      }
+    }
+  }
+  return evidence;
 }
 
 async function sweep({ now = new Date() } = {}) {
@@ -404,10 +751,11 @@ async function sweep({ now = new Date() } = {}) {
   };
   const allItemCallIds = [...new Set(items.map((i) => i.call_log_id))];
   const bookedCallIds = await loadBookedCallIds(db, allItemCallIds);
+  const evidence = await loadEvidence(db, items);
 
   const decisions = [];
   for (const item of items) {
-    const decision = classifyTriageItem(item, { bookedCallIds }, { now });
+    const decision = classifyTriageItem(item, { bookedCallIds, evidence }, { now });
     if (decision) decisions.push({ item, ...decision });
   }
   const applied = decisions.slice(0, MAX_TRANSITIONS_PER_RUN);
@@ -454,10 +802,11 @@ async function sweep({ now = new Date() } = {}) {
     const freshRows = await loadCandidateItems(trx, applied.map((d) => d.item.id));
     const freshById = new Map(freshRows.map((r) => [r.id, r]));
     const freshBookedCallIds = await loadBookedCallIds(trx, allCallIds, { lock: true });
+    const freshEvidence = await loadEvidence(trx, freshRows, { lock: true });
     const reverified = applied.filter((d) => {
       const fresh = freshById.get(d.item.id);
       if (!fresh) return false; // no longer open — lost the race
-      const again = classifyTriageItem(fresh, { bookedCallIds: freshBookedCallIds }, { now });
+      const again = classifyTriageItem(fresh, { bookedCallIds: freshBookedCallIds, evidence: freshEvidence }, { now });
       return again && again.rule === d.rule && again.action === d.action;
     });
     const touchedCalls = new Map(); // call_log_id -> status we applied last
@@ -472,6 +821,7 @@ async function sweep({ now = new Date() } = {}) {
         .update({
           status,
           resolution_note: RULE_NOTES[rule],
+          resolution_source: 'auto',
           resolved_at: now,
           updated_at: now,
         })
@@ -517,6 +867,14 @@ module.exports = {
   customerPredatesCall,
   callConfirmedUnbooked,
   surnameCameFromCall,
+  heardAddressMatchesOnFile,
+  callerPhoneOnFile,
+  capturedEmails,
+  requestedServiceTokens,
+  serviceTypeMatches,
+  requestedWindow,
+  loadEvidence,
+  EVIDENCE_CODES,
   ADDRESS_MOOT_CODES,
   ADVISORY_AGE_CODES,
   RULE_NOTES,

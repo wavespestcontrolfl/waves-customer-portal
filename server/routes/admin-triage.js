@@ -77,6 +77,9 @@ router.get('/', async (req, res) => {
       return res.status(400).json({ error: 'customer_id must be a UUID' });
     }
     const customerId = rawCustomerId || null;
+    // ?source=auto narrows terminal tabs to cards the nightly sweep closed
+    // (resolution_source stamped 'auto') so its decisions can be audited.
+    const source = req.query.source === 'auto' ? 'auto' : null;
 
     const items = await db('triage_items')
       .leftJoin('call_log', 'triage_items.call_log_id', 'call_log.id')
@@ -84,6 +87,7 @@ router.get('/', async (req, res) => {
       .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
       .whereIn('triage_items.status', status)
       .modify((q) => { if (customerId) q.where('call_log.customer_id', customerId); })
+      .modify((q) => { if (source) q.where('triage_items.resolution_source', source); })
       // property_role_confirm payloads embed the customer's OTHER property
       // addresses — the same data admin-customers gates behind requireAdmin —
       // and only an admin can apply them; hide the cards from tech users.
@@ -103,6 +107,7 @@ router.get('/', async (req, res) => {
         'triage_items.payload',
         'triage_items.assigned_to',
         'triage_items.resolution_note',
+        'triage_items.resolution_source',
         'triage_items.resolved_at',
         'triage_items.created_at',
         'triage_items.updated_at',
@@ -205,6 +210,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       .update({
         status: nextStatus,
         resolution_note: note,
+        resolution_source: 'human',
         assigned_to: assignedTo,
         resolved_at: new Date(),
         updated_at: new Date(),
@@ -460,6 +466,7 @@ router.post('/:id/apply-property-roles', async (req, res) => {
         .update({
           status: 'resolved',
           resolution_note: `Property roles applied (${outcome.applied} applied, ${outcome.skipped} skipped)`,
+          resolution_source: 'human',
           assigned_to: req.technicianId,
           resolved_at: new Date(),
           updated_at: new Date(),
@@ -485,6 +492,7 @@ router.post('/:id/apply-property-roles', async (req, res) => {
           .update({
             status: 'resolved',
             resolution_note: 'Superseded — property roles reviewed and applied from the property_role_confirm card.',
+            resolution_source: 'human',
             resolved_at: new Date(),
             updated_at: new Date(),
           });
@@ -603,6 +611,7 @@ router.post('/:id/verdict', async (req, res) => {
         .update({
           status: 'resolved',
           resolution_note: note,
+          resolution_source: 'human',
           assigned_to: req.technicianId,
           resolved_at: new Date(),
           updated_at: new Date(),
