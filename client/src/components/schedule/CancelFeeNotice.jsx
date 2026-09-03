@@ -11,7 +11,10 @@ import { fetchCardHoldCancelPreview } from '../../lib/cardHoldCancel';
 // Display-only: the fee-choice prompt at confirm time fetches its own fresh
 // preview (a copy taken when the card opened can go stale).
 
-const SERIES_CAVEAT = 'This verdict covers this appointment only. Cancelling the series evaluates each remaining appointment\'s saved card on its own when it is cancelled.';
+// Series cancels fan out server-side: every target visit is judged on its
+// own saved card, and the ONE waive choice from the next prompt is applied
+// to all of them — the operator must hear both (Codex #3800 pre-push P1).
+const SERIES_CAVEAT = 'This verdict covers this appointment only. The other appointments being cancelled are judged on their own saved cards — any of them inside its own late-cancel window may be charged without a preview here — and if you waive the fee at the next prompt, that waiver applies to all of them.';
 
 // The verdict as label + sentence, shared by the Tailwind notice below and
 // the inline-styled EditServiceModal cancel dialog (SchedulePage.jsx —
