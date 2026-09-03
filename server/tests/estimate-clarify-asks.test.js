@@ -1224,7 +1224,7 @@ describe('unit_number ask (call pipeline lane)', () => {
     expect(flags).toEqual(expect.objectContaining({
       missing: ['unit_number'], toPhone: '+17735550142', lead_id: 'lead-1',
       unit_call_log_id: 'call-1', unit_lead_id: 'lead-1', unit_customer_id: 'cust-1',
-      unit_ask_building: BUILDING, channel_provenance: 'voice',
+      unit_ask_building: BUILDING, channel_provenance: 'voice', call_log_id: 'call-1',
     }));
   });
 
@@ -1253,6 +1253,10 @@ describe('unit_number ask (call pipeline lane)', () => {
     expect(extractUnitReply('Unit PH1')).toBe('Apt PH1');
     expect(extractUnitReply('apt TH12 please')).toBe('Apt TH12');
     expect(extractUnitReply('Unit A-204')).toBe('Apt A-204');
+    expect(extractUnitReply('Unit ABC12')).toBe('Apt ABC12');
+    // The normalizer's canonical casing for a hyphenated identifier.
+    expect(extractUnitReply('Unit PH-1')).toBe('Apt Ph-1');
+    expect(extractUnitReply('unit the')).toBeNull();
     expect(extractUnitReply('apt on the 3rd floor')).toBeNull();
     expect(extractUnitReply('204')).toBeNull();
     expect(extractUnitReply('204', { bareOk: true })).toBe('Apt 204');
@@ -1275,7 +1279,19 @@ describe('unit_number ask (call pipeline lane)', () => {
     });
     const LEAD = { id: 'lead-1', address: '1048 Example Lakes Cir, Sarasota, FL 34232' };
     beforeEach(() => {
-      mockSmsThreadDraftsEnabled.mockReturnValue(false);
+      mockSmsThreadDraftsEnabled.mockReturnValue(true);
+      mockStartSmsThreadDraft.mockResolvedValue({ started: true });
+      mockMaybeDraftEstimateForCall.mockResolvedValue({ lane: 'green', created: true, estimateId: 'est-9' });
+    });
+
+    test('a call-origin ask resumes drafting from the CALL context, never the SMS thread', async () => {
+      const callOrigin = AWAITING({ flags: JSON.stringify({ missing: ['unit_number'], lead_id: 'lead-1', call_log_id: 'call-1', unit_call_log_id: 'call-1', unit_lead_id: 'lead-1', unit_ask_building: BUILDING }) });
+      mockState.firstQueue = [callOrigin, callOrigin, LEAD];
+      const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+      expect(result.handled).toBe(true);
+      await result.repricePromise;
+      expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({ callLogId: 'call-1', quotePromised: true });
+      expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
     });
 
     test('"Apt 204" goes in as line 2 of the lead address, onto the customer\'s line 2 (same building, fill-only), and onto the open card — never resolving it', async () => {
@@ -1336,6 +1352,16 @@ describe('unit_number ask (call pipeline lane)', () => {
       const verdict = await claimClarifyDispatch({ draft: DRAFT });
       expect(verdict.outcome).toBe('send');
       expect(verdict.body).toBe('Unit?');
+    });
+
+    test('a member\'s HOME unit on line 2 is not evidence for a second property\'s unit', async () => {
+      mockState.firstQueue = [
+        freshRow({ unit_customer_id: 'cust-1' }, { customer_id: 'cust-1' }),
+        { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Anna' },
+        { id: 'cust-1', first_name: 'Anna', address_line1: '9 Home St', address_line2: 'Apt 3' },
+      ];
+      const verdict = await claimClarifyDispatch({ draft: DRAFT });
+      expect(verdict.outcome).toBe('send');
     });
 
     test('a unit that reached the lead line or the customer\'s line 2 retires the ask', async () => {

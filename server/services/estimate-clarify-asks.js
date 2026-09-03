@@ -112,6 +112,19 @@ function withClarifyLock(digits, callback) {
   });
 }
 
+// A customer row "is" the asked building when its own street matches the
+// building the ask named — the ONLY case a unit may be written to, or
+// read from, that customer's line 2 (an existing member asking about a
+// second property keeps their home address untouched, codex r1/r2 P1).
+function customerAtAskedBuilding(customerRow, unitAskBuilding) {
+  const street = String(customerRow?.address_line1 || '').trim();
+  const asked = String(unitAskBuilding?.street_line_1 || '').trim();
+  if (!street || !asked) return false;
+  const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
+  const key = (line) => normalizeStreetLine(splitStreetLineUnit(line).street).toLowerCase().replace(/[^a-z0-9]/g, '');
+  return key(street) === key(asked);
+}
+
 // Item-specific linkage for the unit ask: the call whose card it serves,
 // the lead/customer the answer belongs to, and the building it names.
 function unitAskFlags({ callLogId, leadId, customerId, unitAskBuilding }) {
@@ -153,6 +166,9 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
         missing: merged,
         lead_id: linkage.leadId || null,
         estimate_id: linkage.estimateId || null,
+        // Call origin (both call lanes): the reply resumes drafting from
+        // the CALL context, not the short SMS exchange (codex r2 P1).
+        ...(linkage.callLogId ? { call_log_id: String(linkage.callLogId) } : {}),
         ...unitLinkage,
         // The bedroom item binds to ITS unit draft, independent of the
         // generic linkage a later merged ask may re-point.
@@ -322,6 +338,7 @@ async function parkClarifyAsk({
           toPhone: `+1${digits}`,
           lead_id: leadId || null,
           estimate_id: estimateId || null,
+          ...(callLogId ? { call_log_id: String(callLogId) } : {}),
           ...(askable.includes('unit_number') ? unitAskFlags({ callLogId, leadId, customerId, unitAskBuilding }) : {}),
           // Item-specific target for the bedroom re-price (see mergePendingClarify).
           ...(askable.includes('bedroom_count') && estimateId ? { bedroom_estimate_id: String(estimateId) } : {}),
@@ -574,7 +591,7 @@ function extractAddressReply(body) {
 // "204-B") or is a single letter ("B") — never a bare word, so "apt on
 // the 3rd floor" cannot capture "on" (codex r1 P2: the normalizer's
 // multi-letter and hyphenated forms are accepted).
-const UNIT_VALUE = '(?:[a-z]{0,2}\\d{1,5}(?:-?[a-z0-9]{1,4})?|[a-z](?:-\\d{1,5})?)';
+const UNIT_VALUE = '(?:[a-z]{0,3}\\d{1,5}(?:-?[a-z0-9]{1,4})?|[a-z]{1,3}-\\d{1,5}(?:-?[a-z0-9]{1,4})?|[a-z])';
 const UNIT_REPLY_RE = new RegExp(`\\b(?:apt|apartment|unit)\\.?\\s*#?\\s*(${UNIT_VALUE})\\b`, 'i');
 const UNIT_HASH_REPLY_RE = new RegExp(`#\\s*(${UNIT_VALUE})\\b`, 'i');
 const BARE_UNIT_REPLY_RE = new RegExp(`^\\s*(?:it'?s\\s+|its\\s+|number\\s+)?(${UNIT_VALUE})\\s*[.!]?\\s*$`, 'i');
@@ -757,9 +774,7 @@ async function handleClarifyReply({ phone, body }) {
           .update({ service_interest: serviceText });
       }
       if (recorded.includes('unit_number')) {
-        const { splitStreetLineUnit, normalizeLeadAddress, normalizeStreetLine } = require('../utils/address-normalizer');
-        const streetKey = (line) => normalizeStreetLine(splitStreetLineUnit(String(line || '')).street)
-          .toLowerCase().replace(/[^a-z0-9]/g, '');
+        const { splitStreetLineUnit, normalizeLeadAddress } = require('../utils/address-normalizer');
         const building = freshFlags.unit_ask_building || null;
         // The unit binds to the ask's OWN lead/customer/call (unit_* flags),
         // never the generic linkage a later merged ask may have re-pointed.
@@ -783,8 +798,7 @@ async function handleClarifyReply({ phone, body }) {
         // stamped onto their home address (codex r1 P1).
         if (unitCustomerId && building?.street_line_1) {
           const customerRow = await trx('customers').where({ id: unitCustomerId }).first();
-          const customerStreet = String(customerRow?.address_line1 || '').trim();
-          if (customerStreet && streetKey(customerStreet) === streetKey(building.street_line_1)) {
+          if (customerAtAskedBuilding(customerRow, building)) {
             await trx('customers').where({ id: unitCustomerId })
               .where((q) => q.whereNull('address_line2').orWhere('address_line2', ''))
               .update({ address_line2: unitLine });
@@ -861,7 +875,10 @@ async function handleClarifyReply({ phone, body }) {
       // The LOCKED row's linkage is authoritative — a concurrent
       // mergePendingClarify may have re-pointed estimate_id since the
       // unlocked read above.
-      return { recorded, estimateId: lockedEstimateId, repriceGuarded, repriceAttempt };
+      return {
+        recorded, estimateId: lockedEstimateId, repriceGuarded, repriceAttempt,
+        callLogId: freshFlags.call_log_id ? String(freshFlags.call_log_id) : null,
+      };
     });
     if (!locked.recorded.length) return { handled: false };
     const recorded = locked.recorded;
@@ -905,8 +922,21 @@ async function handleClarifyReply({ phone, body }) {
         // SMS-origin draft re-drafts from the thread. Address/service
         // answers have no linked draft (red-path asks) and resume as before.
         const supersedeEstimateId = repriceTarget;
-        const voiceCallLogId = supersedeEstimateId ? await voiceOriginCallLogId(supersedeEstimateId) : null;
-        if (voiceCallLogId) {
+        // A CALL-origin ask (the completed-call unit/street lanes) resumes
+        // from the call context — V2 extraction + raw transcript carry the
+        // requested service and the quote evidence; the SMS thread holds
+        // only the short clarification exchange (codex r2 P1). The
+        // engine's own dedupe guards make the re-entry safe.
+        const callOriginId = !supersedeEstimateId ? locked.callLogId : null;
+        const voiceCallLogId = supersedeEstimateId ? await voiceOriginCallLogId(supersedeEstimateId) : callOriginId;
+        if (voiceCallLogId && !supersedeEstimateId) {
+          const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
+          if (estimatorEngineEnabled()) {
+            repriceOutcome = await maybeDraftEstimateForCall({ callLogId: voiceCallLogId, quotePromised: true });
+          } else {
+            logger.warn('[estimate-clarify] call-origin answer recorded but the estimator engine is gated off — draft from the call manually', { draftId: awaiting.id, callLogId: voiceCallLogId });
+          }
+        } else if (voiceCallLogId) {
           const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
           if (estimatorEngineEnabled()) {
             repriceOutcome = await maybeDraftEstimateForCall({
@@ -1196,7 +1226,11 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
       const unitCustomer = flags.unit_customer_id && String(flags.unit_customer_id) !== String(fresh.customer_id || '')
         ? await trx('customers').where({ id: flags.unit_customer_id }).whereNull('deleted_at').first()
         : customer;
-      const hasUnitNow = !!String(unitCustomer?.address_line2 || '').trim()
+      // The customer's line 2 is evidence only when that customer row IS
+      // the asked building (codex r2 P1 — a member's home unit is not the
+      // second property's unit).
+      const hasUnitNow = (!!String(unitCustomer?.address_line2 || '').trim()
+          && customerAtAskedBuilding(unitCustomer, flags.unit_ask_building))
         || [unitLead?.address, estimate?.address].some((value) => value && splitStreetLineUnit(String(value)).unit);
       const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
         || (item === 'specific_service' && !hasServiceNow)
