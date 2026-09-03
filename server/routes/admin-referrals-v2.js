@@ -173,16 +173,21 @@ router.post('/submit', async (req, res, next) => {
     if (!name || !phone) return res.status(400).json({ error: 'Name and phone required' });
 
     let pid = promoterId;
+    let referrerName = null;
 
     // If customerId provided instead of promoterId, find/create promoter
+    // (a household sibling shares the household promoter; the friend still
+    // hears from the named customer).
     if (!pid && customerId) {
       const result = await engine.resolvePromoter(customerId);
       pid = result.promoter.id;
+      const self = await db('customers').where({ id: customerId }).first('first_name').catch(() => null);
+      referrerName = self?.first_name || null;
     }
 
     if (!pid) return res.status(400).json({ error: 'promoterId or customerId required' });
 
-    const referral = await engine.submitReferral(pid, { name, phone, email, address, notes, source: 'admin' });
+    const referral = await engine.submitReferral(pid, { name, phone, email, address, notes, source: 'admin', referrerName });
     res.json({ referral });
   } catch (err) {
     if (err.message.includes('limit') || err.message.includes('already') || err.message.includes('Cannot') || err.message.includes('already a Waves')) {

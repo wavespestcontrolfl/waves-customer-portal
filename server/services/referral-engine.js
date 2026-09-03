@@ -356,7 +356,11 @@ async function findHouseholdPromoter(customerId, dbx = db) {
 // ---------------------------------------------------------------------------
 // 2. submitReferral
 // ---------------------------------------------------------------------------
-async function submitReferral(promoterId, { name, phone, email, address, notes, source = 'portal' }) {
+// referrerName: the person who actually submitted — a multi-property sibling
+// shares the household promoter (resolvePromoter) but the friend should hear
+// from the sibling, not the promoter's owner (GH codex #3850 r3 P2).
+// Attribution (promoter, code, link) stays the promoter's.
+async function submitReferral(promoterId, { name, phone, email, address, notes, source = 'portal', referrerName = null }) {
   if (!name || !phone) throw new Error('Name and phone are required');
 
   // Strip control chars + HTML angle brackets so referral data can never carry
@@ -367,6 +371,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   email = email ? sanitize(email, 254) : null;
   address = address ? sanitize(address, 300) : null;
   notes = notes ? sanitize(notes, 500) : null;
+  referrerName = referrerName ? sanitize(referrerName, 100) : null;
 
   if (!name) throw new Error('Name is required');
 
@@ -491,7 +496,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   // --- Send invite SMS ---
   const smsBody = await renderReferralSms('referral_invite', {
     referee_name: firstName,
-    referrer_name: promoter.first_name || 'your neighbor',
+    referrer_name: referrerName || promoter.first_name || 'your neighbor',
     referral_link: referralLink,
   }, settings.invite_sms_template, {
     workflow: 'referral_invite',

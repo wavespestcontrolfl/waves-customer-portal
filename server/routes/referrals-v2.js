@@ -185,11 +185,15 @@ router.post('/', submitLimiter, async (req, res, next) => {
     if (error) return res.status(400).json({ error: error.details[0].message });
     const { name, phone, email, address, notes } = value;
 
-    // Ensure enrolled
+    // Ensure enrolled (a household sibling shares the household promoter)
     const { promoter } = await engine.resolvePromoter(req.customerId);
+    // The friend hears from the person who submitted, not the household
+    // promoter's owner (GH codex #3850 r3 P2).
+    const self = await db('customers').where({ id: req.customerId }).first('first_name').catch(() => null);
 
     const referral = await engine.submitReferral(promoter.id, {
       name, phone, email, address, notes, source: 'portal',
+      referrerName: self?.first_name || null,
     });
 
     res.status(201).json({

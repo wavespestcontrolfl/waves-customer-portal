@@ -335,4 +335,12 @@ describe('household sibling on the Refer tab (GH codex #3850 r2)', () => {
       referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-J4KM',
     }), expect.objectContaining({ entity_id: 'promo-h' }));
   });
+  test('POST / submits under the household promoter but names the acting sibling to the friend', async () => {
+    installDb({ firstResults: { customers: { id: 'cust-1', first_name: 'Sam', email: 'sam@example.com' } } });
+    referralEngine.resolvePromoter.mockResolvedValueOnce({ promoter: household, household: true });
+    referralEngine.submitReferral.mockResolvedValueOnce({ id: 'ref-1', referee_name: 'Jo', status: 'contacted', sms_sent: true, referee_phone: '+19415550123', created_at: '2026-09-03' });
+    const res = await post('/api/referrals', { name: 'Jo', phone: '(941) 555-0123' });
+    expect(res.status).toBe(201);
+    expect(referralEngine.submitReferral).toHaveBeenCalledWith('promo-h', expect.objectContaining({ referrerName: 'Sam', source: 'portal' }));
+  });
 });
