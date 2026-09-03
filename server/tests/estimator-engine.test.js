@@ -772,6 +772,10 @@ describe('review fixes', () => {
     const leadOnly = { extraction: null, lead: { address: '5 Other Rd', city: 'Venice', zip: '34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
     expect(idxPriv.addressFromContext(leadOnly)).toBe('5 Other Rd Apt 204, Venice, 34285');
     expect(idxPriv.addressFromContext({ ...leadOnly, unitLineOverride: null })).toBe('5 Other Rd, Venice, 34285');
+    // A lead line the write-back already formatted carries the unit as its
+    // own comma segment — never doubled.
+    const commaForm = { extraction: null, lead: { address: '5 Other Rd, Apt 204, Venice, FL 34285' }, leadIsForThisCall: true, unitLineOverride: 'Apt 204' };
+    expect(idxPriv.addressFromContext(commaForm)).toBe('5 Other Rd, Apt 204, Venice, FL 34285');
   });
 
   test('existing-customer address beats a stale phone-matched lead', () => {

@@ -337,8 +337,10 @@ function withUnitOverride(line, context) {
   const unit = String(context?.unitLineOverride || '').trim();
   if (!unit || !line) return line;
   const { splitStreetLineUnit } = require('../../utils/address-normalizer');
+  // The WHOLE line: a lead line the write-back already formatted carries
+  // the unit as its own comma segment ("street, Apt 204, city").
+  if (splitStreetLineUnit(String(line)).unit) return line;
   const parts = String(line).split(',');
-  if (splitStreetLineUnit(parts[0]).unit) return line;
   parts[0] = `${parts[0].trim()} ${unit}`;
   return parts.map((p, i) => (i === 0 ? p : ` ${p.trim()}`)).join(',');
 }
@@ -1254,6 +1256,11 @@ async function maybeDraftEstimateForCall({
   // call ("Apt 204"), composed into the service address and stamped on the
   // extraction's street_line_2 so the unit-scope model sees the subpremise.
   unitLineOverride = null,
+  // …and the BUILDING the ask was about ({ street_line_1, city,
+  // postal_code }): a reprocessed call's rolling extraction may name a
+  // different building than the surviving card, so the item-bound building
+  // wins over the call row's latest extraction.
+  serviceAddressOverride = null,
 }) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
@@ -1275,10 +1282,22 @@ async function maybeDraftEstimateForCall({
       context.supersedeAttempt = supersedeAttempt || null;
     }
     if (context && !context.error && bedroomCountOverride != null) context.bedroomCountOverride = bedroomCountOverride;
-    if (context && !context.error && unitLineOverride) {
-      context.unitLineOverride = String(unitLineOverride);
-      const sa = context.extraction?.property?.service_address;
-      if (sa && typeof sa === 'object' && !String(sa.street_line_2 || '').trim()) sa.street_line_2 = String(unitLineOverride);
+    if (context && !context.error && (unitLineOverride || serviceAddressOverride?.street_line_1)) {
+      if (unitLineOverride) context.unitLineOverride = String(unitLineOverride);
+      if (context.extraction && typeof context.extraction === 'object') {
+        context.extraction.property = context.extraction.property && typeof context.extraction.property === 'object'
+          ? context.extraction.property : {};
+        const prop = context.extraction.property;
+        prop.service_address = prop.service_address && typeof prop.service_address === 'object' ? prop.service_address : {};
+        const sa = prop.service_address;
+        if (serviceAddressOverride?.street_line_1) {
+          sa.street_line_1 = String(serviceAddressOverride.street_line_1);
+          sa.city = serviceAddressOverride.city || null;
+          sa.postal_code = serviceAddressOverride.postal_code || null;
+          sa.state = 'FL';
+        }
+        if (unitLineOverride && !String(sa.street_line_2 || '').trim()) sa.street_line_2 = String(unitLineOverride);
+      }
     }
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.
     if (!dryRun && context && !context.error) {

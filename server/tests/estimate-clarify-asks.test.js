@@ -22,6 +22,7 @@ jest.mock('../models/db', () => {
       orderBy() { return builder; },
       orderByRaw() { return builder; },
       whereRaw(sql, params) { mockState.raws.push({ sql: String(sql), params }); return builder; },
+      forUpdate() { return builder; },
       first: async () => (mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft),
       select: async () => (mockState.selectQueue && mockState.selectQueue.length ? mockState.selectQueue.shift() : []),
       update: async (payload) => {
@@ -1386,8 +1387,10 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
   });
   const reply = async (leadRow, customerRow, draftRow, flags = {}) => {
     const a = AWAITING(flags);
-    // first() order in the locked phase: fresh draft, lead, customer, unsent draft.
-    mockState.firstQueue = [a, a, leadRow, customerRow, draftRow];
+    // first() order in the locked phase: fresh draft, customer (locked first), lead, unsent draft;
+    // later flag stamps re-read the draft row (existingDraft) once the queue drains.
+    mockState.existingDraft = a;
+    mockState.firstQueue = [a, a, customerRow, leadRow, draftRow];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
     await result.repricePromise;
     return result;
@@ -1408,7 +1411,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
       customerId: 'cust-1', address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 204', city: 'Sarasota', zip: '34232', source: 'clarify_unit_reply',
     }));
     expect(mockSyncPrimaryAddress).not.toHaveBeenCalled();
-    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({ callLogId: 'call-1', quotePromised: false, unitLineOverride: 'Apt 204' });
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ callLogId: 'call-1', quotePromised: false, unitLineOverride: 'Apt 204', serviceAddressOverride: BUILDING }));
     expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
     const flags = JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags);
     expect(flags.unit_writeback).toEqual(expect.objectContaining({ lead: 'filled', customer: 'primary_property', propertyId: 'prop-1' }));
@@ -1477,7 +1480,7 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     // After the re-run: unsentDraftForCall finds the draft the original composer just inserted.
     mockState.firstQueue = [];
     const a = AWAITING();
-    mockState.firstQueue = [a, a, { id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }, null, { id: 'est-race' }];
+    mockState.firstQueue = [a, a, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, null, { id: 'est-race', status: 'draft' }];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
     await result.repricePromise;
     expect(mockState.updates.some((u) => u.table === 'estimates')).toBe(true);
@@ -1507,38 +1510,65 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ callLogId: 'call-1', unitLineOverride: 'Apt 204' }));
   });
 
-  test('legacy in-flight ask (no unit_* targets, call-origin): the generic lead and the row customer stand in', async () => {
-    const a = AWAITING({ unit_lead_id: undefined, unit_customer_id: undefined, unit_quote_promised: undefined, unit_quote_requested: undefined });
-    mockState.firstQueue = [a, a, { id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }];
+  test('legacy in-flight ask (no unit_* targets, call-origin): targets and quote signals come from the unit\'s OWN call row, never the merged generic linkage', async () => {
+    const a = AWAITING({ lead_id: 'lead-B', unit_lead_id: undefined, unit_customer_id: undefined, unit_quote_promised: undefined, unit_quote_requested: undefined }, { customer_id: 'cust-B' });
+    // first() order: fresh, call_log (A), lead by A's sid, customer (locked), lead, unsent draft.
+    mockState.firstQueue = [a, a,
+      { id: 'call-1', customer_id: 'cust-A', twilio_call_sid: 'CA-A', ai_extraction: { quote_requested: true }, ai_extraction_enriched: null },
+      { id: 'lead-A' },
+      { id: 'cust-A', address_line1: null },
+      { id: 'lead-A', address: null },
+      null,
+    ];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
     await result.repricePromise;
     expect(mockState.updates.find((u) => u.table === 'leads').payload.address).toMatch(/Apt 204/);
-    expect(mockRecordCallProperty).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
-    // No quote signals on a legacy row → no re-draft (the card still holds the reply).
-    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+    expect(mockRecordCallProperty).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-A' }));
+    expect(mockRecordCallProperty).not.toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-B' }));
+    // The call requested a quote → re-draft from the call context.
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ callLogId: 'call-1', quotePromised: false, unitLineOverride: 'Apt 204' }));
   });
 
   test('unit + bedroom answered in one text: one call re-run carries BOTH overrides against the shared target', async () => {
     const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-1' });
-    mockState.firstQueue = [a, a, { id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }, { id: 'est-1' }];
+    mockState.firstQueue = [a, a, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, { id: 'est-1' }];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204, 2 bedrooms' });
     expect(result.handled).toBe(true);
     await result.repricePromise;
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledTimes(1);
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({
       callLogId: 'call-1', unitLineOverride: 'Apt 204', bedroomCountOverride: 2, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_unit_reply',
+      serviceAddressOverride: BUILDING,
     }));
   });
 
   test('unit + bedroom with DISTINCT targets: the unit re-run supersedes its draft; the bedroom draft is guarded and handed to the operator', async () => {
     const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-bed' });
-    mockState.firstQueue = [a, a, { id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }, { id: 'est-call' }];
+    mockState.firstQueue = [a, a, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, { id: 'est-call' }];
     const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204, 2 bedrooms' });
     await result.repricePromise;
-    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-call', bedroomCountOverride: 2 }));
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-call' }));
+    // Another property's bedroom count never reaches this call's re-draft.
+    expect(mockMaybeDraftEstimateForCall.mock.calls[0][0].bedroomCountOverride).toBeUndefined();
     // Both targets were guarded in the locked phase (two estimates updates), and the bedroom one got the operator bell.
     expect(mockState.updates.filter((u) => u.table === 'estimates').length).toBeGreaterThanOrEqual(2);
     expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', 'Bedroom count received — re-price the unit draft', expect.stringMatching(/different estimate/), expect.anything());
+  });
+
+  test('unit answered first on a combined ask: the still-open bedroom item re-points to the replacement draft', async () => {
+    const a = AWAITING({ missing: ['unit_number', 'bedroom_count'], bedroom_estimate_id: 'est-1' });
+    mockState.existingDraft = a;
+    mockState.firstQueue = [a, a, { id: 'cust-1', address_line1: null }, { id: 'lead-1', address: null }, { id: 'est-1' }];
+    const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+    await result.repricePromise;
+    const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => { try { return JSON.parse(u.payload.flags); } catch { return {}; } });
+    expect(stamps.some((f) => f.repriced_estimate_id === 'est-new' && f.bedroom_estimate_id === 'est-new')).toBe(true);
+  });
+
+  test('a SENDING row is still a guard target (the send path re-checks the marker before the provider call)', async () => {
+    await reply({ id: 'lead-1', address: null }, { id: 'cust-1', address_line1: null }, { id: 'est-sending', status: 'sending' });
+    expect(mockState.updates.some((u) => u.table === 'estimates')).toBe(true);
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-sending' }));
   });
 
   test('no quote asked for on the call: the record is updated but nothing drafts', async () => {
@@ -1572,7 +1602,19 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
       const lead = { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232', first_name: 'Anna' };
       const cust = { id: 'cust-1', first_name: 'Anna', address_line1: '9 Home St', address_line2: null };
       mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, lead, cust];
+      mockState.selectQueue = [[]];
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('retired');
+    });
+
+    test('SEVERAL units on file at the building (a property manager) do not answer WHICH one — the ask stands', async () => {
+      const lead = { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Pat' };
+      const cust = { id: 'cust-1', first_name: 'Pat', address_line1: '9 Home St', address_line2: null };
+      mockState.firstQueue = [freshRow(), lead, cust, { id: 'card-1' }, lead, cust];
+      mockState.selectQueue = [[
+        { address_line1: '1048 Example Lakes Cir', address_line2: 'Apt 101', city: 'Sarasota', zip: '34232' },
+        { address_line1: '1048 Example Lakes Cir Apt 202', address_line2: null, city: 'Sarasota', zip: '34232' },
+      ]];
+      expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
     });
     test('a unit on a DIFFERENT building, or the customer\'s home unit, is not evidence; a property row at the building is', async () => {
       const lead = { id: 'lead-1', status: 'new', address: '5 Other Rd, Apt 3, Venice, FL 34285', first_name: 'Anna' };
@@ -1591,5 +1633,20 @@ describe('unit write-back (GATE_CLARIFY_UNIT_WRITEBACK)', () => {
       mockState.firstQueue = [freshRow(), lead, { id: 'cust-1', first_name: 'Anna' }, { id: 'card-1' }];
       expect((await claimClarifyDispatch({ draft: DRAFT })).outcome).toBe('send');
     });
+  });
+});
+
+describe('clarifyPreDispatchCheck — write-back evidence (gate ON)', () => {
+  test('a unit recorded at the building while validators ran aborts the send', async () => {
+    mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks' || key === 'clarifyUnitWriteback');
+    const BUILDING = { street_line_1: '1048 Example Lakes Cir', city: 'Sarasota', postal_code: '34232' };
+    const row = { id: 'draft-1', status: 'approved', sent_at: null, customer_id: 'cust-1',
+      flags: JSON.stringify({ missing: ['unit_number'], unit_call_log_id: 'call-1', unit_ask_building: BUILDING, unit_lead_id: 'lead-1', unit_customer_id: 'cust-1' }) };
+    // first(): fresh, card (open), lead, customer; select(): properties.
+    mockState.firstQueue = [row, { id: 'card-1' }, { id: 'lead-1', address: '1048 Example Lakes Cir, Apt 204, Sarasota, FL 34232' }, { id: 'cust-1', address_line1: '9 Home St' }];
+    mockState.selectQueue = [[]];
+    const verdict = await clarifyPreDispatchCheck({ draftId: 'draft-1', sourceRef: 'clarify:7735550142', dispatchedMissing: ['unit_number'] })();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toMatch(/unit was recorded/);
   });
 });
