@@ -6016,7 +6016,10 @@ export default function EstimateToolViewV2({
                     setEnrichedProfile(null);
                     setExistingCustomerMatch(null);
                     setAddressMatches([]);
-                    preLinkContactRef.current = null;
+                    // The customer linkage survives Clear All (customerId is
+                    // kept above), so the pre-link snapshot must survive with
+                    // it — a later Unlink still restores what was typed
+                    // (codex #3768 r4).
                     setSatelliteStatus({ type: "", msg: "" });
                     setSatelliteData(null);
                     setEstimate(null);
@@ -6208,7 +6211,14 @@ export default function EstimateToolViewV2({
                               {name}
                             </div>
                             <div className="text-14 text-ink-secondary truncate">
-                              {[c.phone, c.email, matchHasActivePlan(c) ? c.tier : null]
+                              {[
+                                // Street line incl. unit, so two units of one
+                                // building are distinguishable before linking.
+                                c.address ? c.address.split(",")[0].trim() : null,
+                                c.phone,
+                                c.email,
+                                matchHasActivePlan(c) ? c.tier : null,
+                              ]
                                 .filter(Boolean)
                                 .join(" · ") || "no contact on file"}
                             </div>
