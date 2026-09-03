@@ -33,7 +33,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const MODELS = require('../config/models');
 const { hasAgentCallerLabels } = require('./sms-voice-corpus-miner');
 const { RESEARCH_SCHEMA_VERSION } = require('./call-research-taxonomy');
-const { buildCallResearchPrompt, validateResearchOutput, PROMPT_HASH } = require('./prompts/call-research-v1');
+const { buildCallResearchPrompt, validateResearchOutput, PROVIDER_OUTPUT_SCHEMA, PROMPT_HASH } = require('./prompts/call-research-v1');
 
 // Route locked by the 7-arm bake-off (2026-07-18, 20 fixed prod calls, all
 // arms through the identical validate → verbatim-guard → redact pipeline):
@@ -248,6 +248,7 @@ async function extractResearchChunks(call, customer, { route = CALL_RESEARCH_ROU
   const res = await dispatchWithFallback(route, {
     text: buildCallResearchPrompt(transcript),
     jsonMode: true,
+    jsonSchema: PROVIDER_OUTPUT_SCHEMA,
     maxTokens: 8192,
     temperature: 0, // closed-enum structured extraction — greedy decode
   }, {

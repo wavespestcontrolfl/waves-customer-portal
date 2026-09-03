@@ -58,6 +58,11 @@ jest.mock('../services/seo/link-path-investigator', () => ({
   investigatePaths: jest.fn(async () => ({ gated: true, selected: 7, investigated: 0 })),
   LOCK_KEY: 'link-path-investigator',
 }));
+jest.mock('../services/seo/link-owner-queue', () => ({
+  ...jest.requireActual('../services/seo/link-owner-queue'),
+  // Reject / Watch are the audited Owner-queue decision — its writes are covered by link-owner-queue.test.js
+  decideDomain: jest.fn(async (db, { domainId, decision }) => ({ domainId, domain: 'a.com', agent_state: decision === 'watch' ? 'watching' : 'rejected', watch_recheck_at: decision === 'watch' ? new Date(Date.now() + 30 * 86400000) : null, audited: 0, invalidated: 0, waivers_invalidated: 0 })),
+}));
 jest.mock('../utils/cron-lock', () => ({ isLocked: jest.fn(async () => false) }));
 jest.mock('../services/seo/link-authority-bridge', () => ({
   runAuthorityBridge: jest.fn(async (db, opts) => ({ gated: true, selected: 8, decided: 0, ...(opts.dryRun ? { dryRun: true } : {}) })),
@@ -149,6 +154,22 @@ describe('GET /registry', () => {
     expect(r.body.items[0].best_path).toMatchObject({ id: 'p1', acquisition_type: 'paid_listing' });
     expect(r.body.items[1].best_path).toBeNull();
   });
+  test('a rejected row says whether Acquire anyway has a floor to waive; other rows carry no flag', async () => {
+    const path = (id, domainId) => ({
+      id, domain_id: domainId, acquisition_type: 'self_service_free', link_type: 'directory', submission_url: 'https://example.org/add',
+      account_required: false, email_verification: false, payment_required: false, legal_attestation: false, legal_terms_hash: null,
+      agent_completable: true, terms_accepted_by_send: false, execution_after_send: true, baseline: false, confidence: '0.80', currency: 'unknown',
+      expected_rel: 'dofollow', last_investigated_at: new Date('2026-09-01T00:00:00Z'), superseded_by: null,
+    });
+    mockState.domains = [
+      { id: 'd1', domain: 'low.com', agent_state: 'rejected', best_path_id: 'p1', score: 40, spam_score: 2 },
+      { id: 'd2', domain: 'fine.com', agent_state: 'rejected', best_path_id: 'p2', score: 75, spam_score: 2 },
+      { id: 'd3', domain: 'q.com', agent_state: 'qualified', best_path_id: 'p3', score: 40, spam_score: 2 },
+    ];
+    mockState.paths = [path('p1', 'd1'), path('p2', 'd2'), path('p3', 'd3')];
+    const r = await call(handler('get', '/registry'), {});
+    expect(r.body.items.map((d) => d.waivable)).toEqual([true, false, undefined]);
+  });
   test('no best paths at all ⇒ no path query, rows unchanged', async () => {
     mockState.domains = [{ id: 'd2', domain: 'b.com', best_path_id: null }];
     const r = await call(handler('get', '/registry'), {});
@@ -169,6 +190,7 @@ describe('GET /registry/:id', () => {
     const r = await call(handler('get', '/registry/:id'), { params: { id: 'd1' } });
     expect(r.body).toEqual({
       domain: mockState.firstDomain, paths: mockState.paths, touches: mockState.touches, placements: mockState.placements, attempts: mockState.attempts || [],
+      waiver: null, // the owner's active "Acquire anyway" waiver (step 4 PR 2b)
     });
   });
 });
@@ -184,41 +206,31 @@ describe('PATCH /registry/:id', () => {
     const r = await call(patch(), { params: { id: 'nope' }, body: { action: 'watch' } });
     expect(r.status).toBe(404);
   });
-  test.each([['ready_to_acquire'], ['acquiring'], ['acquired']])('lane-owned state %s is refused with 409', async (agentState) => {
+  test.each([['ready_to_acquire'], ['acquiring'], ['acquired']])('lane-owned state %s is refused with 409 by the plain action (reject / watch: the service refuses the same way)', async (agentState) => {
     mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: agentState };
-    const r = await call(patch(), { params: { id: 'd1' }, body: { action: 'reject' } });
+    const r = await call(patch(), { params: { id: 'd1' }, body: { action: 'reopen' } });
     expect(r.status).toBe(409);
     expect(mockState.updates).toHaveLength(0);
   });
-  test('watch sets watching + a recheck date; reject/reopen clear it', async () => {
-    mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: 'qualified' };
+  test('watch / reject are the audited Owner-queue decision in every state; reopen stays the plain action and clears the markers', async () => {
+    const ownerQueue = require('../services/seo/link-owner-queue');
+    mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: 'investigating' };
     const w = await call(patch(), { params: { id: 'd1' }, body: { action: 'watch' } });
     expect(w.body.agent_state).toBe('watching');
-    expect(mockState.updates[0].patch.agent_state).toBe('watching');
-    expect(mockState.updates[0].patch.watch_recheck_at).toBeInstanceOf(Date);
-    expect(mockState.updates[0].patch.probe_coverage_mask).toBe(0); // a manual Watch starts a long-term generation — coverage re-earned after the park (Codex PR r26 P1)
-    expect(mockState.touchUpdates).toHaveLength(1); // …and the provenance-hint coverage is released with it (r29)
-    // BOTH halves, on every touch — the stamp and the per-URL accrual — so a
-    // partially covered touch cannot lend its old URLs to the fresh generation (#3760 r1 P1)
-    expect(mockState.touchUpdates[0].patch).toEqual({ covered_at: null, covered_urls: null });
-    expect(mockState.touchWhereNotNull).toBe(0);
+    expect(w.body.watch_recheck_at).toBeInstanceOf(Date);
+    expect(ownerQueue.decideDomain).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ domainId: 'd1', decision: 'watch' }));
     const rj = await call(patch(), { params: { id: 'd1' }, body: { action: 'reject' } });
     expect(rj.body.agent_state).toBe('rejected');
-    expect(mockState.updates[1].patch.rejected_by).toBe('owner'); // the marker the authority bridge honours: only its OWN rejections lift
-    expect(mockState.updates[0].patch.rejected_by).toBeNull(); // watch clears it
-    expect(mockState.updates[1].patch.watch_recheck_at).toBeNull();
-    expect(mockState.updates[1].patch.probe_coverage_mask).toBeUndefined(); // reject leaves the mask alone
-    expect(mockState.touchUpdates).toHaveLength(1); // reject releases no hint cursor
+    expect(ownerQueue.decideDomain).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ decision: 'rejected' }));
+    expect(mockState.updates).toHaveLength(0); // the service wrote them (link-owner-queue.test.js), not the state-only path
     const ro = await call(patch(), { params: { id: 'd1' }, body: { action: 'reopen' } });
     expect(ro.body.agent_state).toBe('investigating');
-    expect(mockState.updates[2].patch.rejected_by).toBeNull(); // reopen clears it
+    expect(mockState.updates[0].patch.rejected_by).toBeNull(); // reopen clears it
     // an explicit Reopen is a fresh mandate: the failure backoff is cleared (Codex PR r1 P2)
-    expect(mockState.updates[2].patch.investigate_after).toBeNull();
-    expect(mockState.updates[2].patch.investigate_failures).toBe(0);
+    expect(mockState.updates[0].patch.investigate_after).toBeNull();
+    expect(mockState.updates[0].patch.investigate_failures).toBe(0);
     // …and the claim generation: a run claimed before the reopen no longer matches (Codex PR r16 P1)
-    expect(mockState.updates[2].patch.investigate_claim_token).toBeNull();
-    expect(mockState.updates[0].patch.investigate_after).toBeUndefined(); // watch/reject leave the backoff alone
-    expect(mockState.updates[0].patch.investigate_claim_token).toBeUndefined();
+    expect(mockState.updates[0].patch.investigate_claim_token).toBeNull();
   });
   test('reopen clears the probe-tail deferral marker — a fresh mandate gets its own tail pass (Codex PR r8 P2)', async () => {
     mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: 'watching', score_reasons: 'DR 40 · downgraded: terminal verdict deferred: unfetched candidate URLs remain' };

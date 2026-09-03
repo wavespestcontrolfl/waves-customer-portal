@@ -9,6 +9,8 @@ const linkIntake = require('../services/seo/link-registry-intake');
 const { etDateString } = require('../utils/datetime-et');
 const { SIGNUP_TYPES } = require('../services/seo/link-prospect-worker');
 const linkPolicy = require('../services/seo/link-authority-policy');
+const { REGISTRY_ACTIONS, applyRegistryAction } = require('../services/seo/link-registry');
+const ownerQueue = require('../services/seo/link-owner-queue');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -346,6 +348,15 @@ router.get('/registry', async (req, res, next) => {
       const byId = new Map(paths.map((p) => [p.id, p]));
       for (const d of items) d.best_path = byId.get(d.best_path_id) || null;
     }
+    // Acquire anyway applies only to a rejected domain whose best path fails a quality floor NOW — the row says so
+    // (`waivable`) so the button never offers a click the service refuses with 409
+    const rejected = items.filter((d) => d.agent_state === 'rejected' && d.best_path_id);
+    if (rejected.length) {
+      const { policy } = await linkPolicy.loadPolicy(db);
+      const full = await db('seo_link_acquisition_paths').whereIn('id', rejected.map((d) => d.best_path_id));
+      const fullById = new Map(full.map((p) => [p.id, p]));
+      for (const d of rejected) d.waivable = ownerQueue.waivableFloors(fullById.get(d.best_path_id) || null, d, policy).length > 0;
+    }
     res.json({ items });
   } catch (err) { next(err); }
 });
@@ -375,7 +386,20 @@ router.get('/registry/:id', async (req, res, next) => {
         .orderBy('created_at', 'desc').limit(50)
         .select('id', 'path_id', 'prospect_id', 'provider', 'action', 'outcome', 'cost_cents', 'sandbox', 'evidence_url', 'created_at')
       : [];
-    res.json({ domain, paths, touches, placements, attempts });
+    // the owner's active "Acquire anyway" waiver on the best path (step 4 PR 2b) — shown only while the bridge
+    // would still honour it: its floors hash must equal the CURRENT floors (a moved score / spam / confidence /
+    // policy floor makes it stale until the next run invalidates it)
+    let waiver = null;
+    const bestPath = domain.best_path_id ? paths.find((p) => p.id === domain.best_path_id) : null;
+    if (bestPath) {
+      const w = await db('seo_link_floor_waivers').where({ domain_id: domain.id, path_id: bestPath.id }).whereNull('invalidated_at').orderBy('approved_at', 'desc')
+        .first('id', 'overridden_floors', 'decision_inputs_hash', 'note', 'approved_by', 'approved_at');
+      if (w) {
+        const { policy } = await linkPolicy.loadPolicy(db);
+        if (w.decision_inputs_hash === linkPolicy.floorInputsHash({ path: bestPath, domain, policy, score: domain.score })) waiver = w;
+      }
+    }
+    res.json({ domain, paths, touches, placements, attempts, waiver });
   } catch (err) { next(err); }
 });
 
@@ -383,71 +407,77 @@ router.get('/registry/:id', async (req, res, next) => {
 // Watch / Reject / Reopen). acquiring/acquired are lane-owned aggregates the
 // investigator/bridge recompute — never hand-set; "Acquire anyway" is step 4
 // (it needs a stamped authority, not a state flip).
-const REGISTRY_ACTIONS = Object.freeze({ watch: 'watching', reject: 'rejected', reopen: 'investigating' });
+const actorOf = (req) => (req.technician ? (req.technician.name || String(req.technician.id)) : null);
 router.patch('/registry/:id', async (req, res, next) => {
   try {
-    const { action } = req.body || {};
+    const { action, note = null } = req.body || {};
     const nextState = REGISTRY_ACTIONS[action];
     if (!nextState) return res.status(400).json({ error: `invalid action; must be one of ${Object.keys(REGISTRY_ACTIONS).join(', ')}` });
     const domain = await db('seo_link_domains').where({ id: req.params.id }).first('id', 'domain', 'agent_state', 'score_reasons');
     if (!domain) return res.status(404).json({ error: 'not found' });
-    const now = new Date();
-    const patch = { agent_state: nextState, updated_at: now };
-    // who rejected: the authority bridge lifts only its OWN rejections once the
-    // inputs improve; the owner's stands until Reopen / Watch clears the marker
-    patch.rejected_by = action === 'reject' ? 'owner' : null;
-    patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
-    // A manual Watch starts a LONG-TERM watch generation exactly like the
-    // investigator's own parks: the probe-coverage mask resets, so the
-    // resumed pass a month later re-earns coverage instead of closing on
-    // routes credited before the park.
-    if (action === 'watch') patch.probe_coverage_mask = 0;
-    // An explicit Reopen is a fresh mandate: clear the failure backoff so the
-    // very next sweep picks the domain up instead of honoring a stale defer —
-    // and the probe-tail deferral marker with it, so the reopened
-    // investigation gets its own rotated tail pass before a terminal close.
-    if (action === 'reopen') {
-      patch.investigate_after = null;
-      patch.investigate_failures = 0;
-      patch.probe_coverage_mask = 0; // the reopened investigation re-earns probe coverage
-      // …and a run claimed BEFORE this reopen must not finish on top of it:
-      // its claim token no longer matches, so its write phase aborts stale
-      patch.investigate_claim_token = null;
-      const cleared = String(domain.score_reasons || '').replace(/\s*·?\s*downgraded: terminal verdict deferred: unfetched candidate URLs remain/, '').trim();
-      if (cleared !== String(domain.score_reasons || '').trim()) patch.score_reasons = cleared || null;
-    }
-    // Guard is IN the update: a lane can move the row to a lane-owned
-    // aggregate (ready_to_acquire = a placement holds stamped pending
-    // authority; acquiring/acquired) between read and write, so the
-    // condition rides the UPDATE and a zero count means the race (or a
-    // delete) was lost — never overwrite it: a domain-only flip would
-    // contradict the placements and authority behind it.
-    // A new generation (Watch park, Reopen) is ONE atomic write: the domain
-    // state/mask and the provenance-hint coverage — BOTH halves, the stamp
-    // (covered_at) and the per-URL accrual (covered_urls), on every touch —
-    // reset together, exactly like the investigator's own generation resets.
-    // A partially covered touch carries no stamp but does carry covered_urls,
-    // and the resumed pass would credit those URLs as observed without
-    // re-fetching them; so a failure can never leave a reset mask beside
-    // stale hint coverage, and a fresh generation never inherits any.
-    const n = await db.transaction(async (trx) => {
-      const updated = await trx('seo_link_domains')
-        .where({ id: domain.id }).whereNotIn('agent_state', ['ready_to_acquire', 'acquiring', 'acquired'])
-        .update(patch);
-      if (updated && patch.probe_coverage_mask === 0) {
-        await trx('seo_link_domain_sources').where({ domain_id: domain.id }).update({ covered_at: null, covered_urls: null });
+    // Reject / Watch is the SAME decision the Owner-queue buttons make, whatever the state: ONE audited, attributed path
+    // (decideDomain writes the per-row decision records, invalidates approvals and waivers, then the registry action) —
+    // never a state-only sibling. A domain that left the queue (Reopen → investigating) can still carry approved rows.
+    // Lane-owned states are refused by the service with the same 409. Reopen stays the plain action below.
+    if (action === 'reject' || action === 'watch') {
+      let r;
+      try {
+        r = await ownerQueue.decideDomain(db, { domainId: domain.id, decision: action === 'reject' ? 'rejected' : 'watch', actor: actorOf(req), note });
+      } catch (err) {
+        if (err instanceof ownerQueue.OwnerQueueError) return res.status(err.status).json({ error: err.message });
+        throw err;
       }
-      return updated;
-    });
+      logger.info(`[backlink-registry] ${actorOf(req)} ${action}: ${domain.domain} (${domain.agent_state} -> ${r.agent_state}; ${r.audited} row(s) audited)`);
+      return res.json({ id: domain.id, domain: domain.domain, agent_state: r.agent_state, watch_recheck_at: r.watch_recheck_at, audited: r.audited });
+    }
+    // the ONE registry-action writer (link-registry.applyRegistryAction): the
+    // patch, the lane-owned guard IN the update and the coverage reset are
+    // shared with the Owner-queue cards
+    const { updated: n, watchRecheckAt } = await db.transaction((trx) => applyRegistryAction(trx, domain, action, new Date()));
     if (!n) {
       const current = await db('seo_link_domains').where({ id: domain.id }).first('agent_state');
       if (!current) return res.status(404).json({ error: 'not found' });
       return res.status(409).json({ error: `agent_state '${current.agent_state}' is lane-owned; registry actions apply to pre-acquisition states only` });
     }
     logger.info(`[backlink-registry] admin ${action}: ${domain.domain} (${domain.agent_state} -> ${nextState})`);
-    res.json({ id: domain.id, domain: domain.domain, agent_state: nextState, watch_recheck_at: patch.watch_recheck_at });
+    res.json({ id: domain.id, domain: domain.domain, agent_state: nextState, watch_recheck_at: watchRecheckAt });
   } catch (err) { next(err); }
 });
+
+// ---------------------------------------------------------------------------
+// §11 items 2–3 / §3.6b / §6.3 1b — the Owner queue (step 4 PR 2b). The
+// service is the only writer of seo_link_approvals / seo_link_floor_waivers;
+// every click is attributed to the signed-in admin. Errors the service raises
+// carry an HTTP status (400 / 404 / 409); anything else is a real failure.
+// ---------------------------------------------------------------------------
+const ownerQueueCall = (res, next, fn) => fn().then((r) => res.json(r)).catch((err) => {
+  if (err instanceof ownerQueue.OwnerQueueError) return res.status(err.status).json({ error: err.message });
+  return next(err);
+});
+// GET /api/admin/backlink-agent/owner-queue — one card per parked placement
+router.get('/owner-queue', (req, res, next) => ownerQueueCall(res, next, async () => ({ ...(await ownerQueue.listOwnerQueue(db)), gateOn: isEnabled('linkAuthority') })));
+// POST /api/admin/backlink-agent/owner-queue/rows/:id/approve — { approved_amount_cents?, note? }
+router.post('/owner-queue/rows/:id/approve', (req, res, next) => ownerQueueCall(res, next, async () => {
+  const { approved_amount_cents: cents = null, note = null } = req.body || {};
+  const r = await ownerQueue.approveRow(db, { authorityId: req.params.id, actor: actorOf(req), approvedAmountCents: cents, note });
+  logger.info(`[backlink-owner-queue] ${actorOf(req)} approved ${r.approval.dimension}/${r.approval.action} ${r.approval.instance_key} on ${r.attached.length} row(s); bridge ${r.bridge.gated ? 'gated' : r.bridge.skipped || `released ${r.bridge.released}`}`);
+  return r;
+}));
+// POST …/owner-queue/domains/:id/reject | /watch — { note? }. Literal paths: the public-route scanner
+// (tests/route-surface) must be able to prove what every mount exposes.
+const decideDomainHandler = (decision) => (req, res, next) => ownerQueueCall(res, next, async () => {
+  const r = await ownerQueue.decideDomain(db, { domainId: req.params.id, decision, actor: actorOf(req), note: (req.body || {}).note || null });
+  logger.info(`[backlink-owner-queue] ${actorOf(req)} ${decision}: ${r.domain} → ${r.agent_state} (${r.audited} row(s) audited)`);
+  return r;
+});
+router.post('/owner-queue/domains/:id/reject', decideDomainHandler('rejected'));
+router.post('/owner-queue/domains/:id/watch', decideDomainHandler('watch'));
+// POST /api/admin/backlink-agent/registry/:id/acquire-anyway — { note? } (a floor waiver, never an approval)
+router.post('/registry/:id/acquire-anyway', (req, res, next) => ownerQueueCall(res, next, async () => {
+  const r = await ownerQueue.acquireAnyway(db, { domainId: req.params.id, actor: actorOf(req), note: (req.body || {}).note || null });
+  logger.info(`[backlink-owner-queue] ${actorOf(req)} acquire anyway: ${r.domain} waived ${r.floors.map((x) => x.floor).join(', ')}; bridge ${r.bridge.gated ? 'gated' : r.bridge.skipped || `parked ${r.bridge.parked}`}; ${r.awaiting} awaiting`);
+  return r;
+}));
 
 // ---------------------------------------------------------------------------
 // §3.8 / §6.2 / §11 item 4 — acquisition-authority policy (step 4a). The DB row

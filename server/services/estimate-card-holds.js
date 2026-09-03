@@ -1354,12 +1354,22 @@ const CANCEL_FEE_RULE_BUILDERS = {
   // terminal at cancel time; a finished one honors waiveFee), so the
   // client offers it like the retryable unresolved code.
   capture_in_flight: ({ fee }) => [null, `The customer is saving a card for this visit right now. If that finishes with fee consent before you confirm, the late-cancel rule applies and ${fee} may be charged; if it doesn't, nothing will be charged. Waive it now if this is a Waves-initiated cancel.`],
+  // Two live card agreements on one visit (an estimate hold beside a
+  // /secure appointment-card row): chargeNoShowFee refuses to pick a winner
+  // and bells the office, so the preview promises neither outcome.
+  competing_consent: () => [null, 'This visit carries two card agreements (an estimate card hold and a saved appointment card). The charge path refuses to pick one, so nothing is charged automatically — the office is notified to decide which applies and bill the fee by hand.'],
   // Genuinely indeterminate (Codex #3800 r4 P1): the check runs AGAIN at
   // confirm time and a recovered lookup may charge, so never promise
-  // "nothing will be charged" here.
-  unresolved: ({ detail, onFailure }) => [null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. The check runs again when you confirm and may charge the fee, release the card free, or park it for review — ${onFailure === 'release'
-    ? 'if it still can\'t verify then, the hold is released free; check the visit\'s billing afterwards.'
-    : 'if it still can\'t verify then, the cancel is parked for billing review.'}`],
+  // "nothing will be charged" here. onFailure names the rail's real
+  // repeat-failure outcome: 'review' (appointment rail parks), 'release'
+  // (estimate-hold rail releases free), or 'unknown' when the failure
+  // happened before rail ownership was established.
+  unresolved: ({ detail, onFailure }) => [null, `Couldn't verify the fee terms right now${detail ? ` (${detail})` : ''}. The check runs again when you confirm and may charge the fee, release the card free, or park it for review — ${UNRESOLVED_TAIL[onFailure] || UNRESOLVED_TAIL.unknown}`],
+};
+const UNRESOLVED_TAIL = {
+  release: 'if it still can\'t verify then, the hold is released free; check the visit\'s billing afterwards.',
+  review: 'if it still can\'t verify then, the cancel is parked for billing review.',
+  unknown: 'check the visit\'s billing after cancelling.',
 };
 function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now = new Date(), anchorAt = null, sticky = null, detail = null, onFailure = 'review' }) {
   if (CANCEL_FEE_RULE_TEXT[code]) return { code, willCharge: false, text: CANCEL_FEE_RULE_TEXT[code] };
@@ -1844,14 +1854,112 @@ async function cardHoldReminderLine(scheduledServiceId) {
 // be noise). Mirrors handleCardHoldCancellation's decision inputs exactly;
 // feeApplies is false when the feature flag is off because chargeNoShowFee
 // would no-op anyway.
-async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
+// Verdict for the newest NON-held hold row on a visit, by status. 'pending'
+// = SetupIntent minted, card never saved; charging / charge_review = a
+// PaymentIntent running or parked; released / charged_* = the fee event
+// closed. Unlisted states are undetermined.
+const CLOSED_HOLD_RULE = {
+  pending: 'not_secured',
+  charging: 'charge_in_flight',
+  charge_review: 'charge_in_flight',
+  released: 'fee_settled',
+  charged_no_show: 'fee_settled',
+  charged_completion: 'fee_settled',
+};
+// Verdict for a /secure appointment-card row found beside a HELD hold, by the
+// row's fee_status; anything unlisted is a live competing consent.
+const COMPETING_LANE_RULE = { charging: 'charge_in_flight', charge_review: 'charge_in_flight', charged: 'fee_settled' };
+async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { retried = false } = {}) {
   const hold = await heldCardForScheduledService(scheduledServiceId);
-  if (!hold) return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
+  if (!hold) {
+    // No HELD row — but a hold in 'charging' / 'charge_review' is a
+    // PaymentIntent that is running or may already have landed, and a
+    // released/charged row is a settled fee event. Neither may read as
+    // "no card saved" (Codex #3800 r1 P1). One extra read, only here.
+    let latest = null;
+    try {
+      // NULLS LAST (pre-push P1): a never-held 'pending' row has no held_at
+      // and would otherwise outrank the real closed hold on this visit.
+      latest = await db('estimate_card_holds')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .orderByRaw('held_at DESC NULLS LAST, created_at DESC')
+        .first();
+    } catch (err) {
+      logger.warn('[estimate-card-holds] hold-state lookup for cancel preview failed — reporting undetermined', { error: err.message });
+      // Rail ownership is unknown here (the appointment rail may own this
+      // visit and park review), so promise neither outcome (pre-push P1).
+      // Exposure-compatible shape (held + feeApplies + unresolved, amount
+      // unknown): admin-cancellation's previewVisitFees keeps only held,
+      // fee-applying results, so a held:false verdict here would silently
+      // drop the unresolved hold from the plan-cancel preview (pre-push P1
+      // on the r7 fix) — same posture as the in-flight branch below.
+      return { held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'card hold lookup failed' }) };
+    }
+    if (!latest) return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'no_card' }) };
+    const state = String(latest.status || '');
+    if (state === 'held') {
+      // A hold committed between the two reads (concurrent estimate
+      // acceptance): it is LIVE, not settled — run the held preview once
+      // (Codex #3800 r5 P2). A second miss is left undetermined.
+      if (!retried) return cardHoldCancelPreview(scheduledServiceId, now, { retried: true });
+      return { held: true, feeApplies: true, feeAmount: Number(latest.no_show_fee_amount) > 0 ? Number(latest.no_show_fee_amount) : cardHoldNoShowFee(), unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'hold state changed during the check' }) };
+    }
+    const latestFee = Number(latest.no_show_fee_amount) > 0 ? Number(latest.no_show_fee_amount) : cardHoldNoShowFee();
+    // Explicit by state (pre-push P1): a never-held 'pending' row settled
+    // nothing and holds nothing; an unknown state is undetermined, never
+    // "settled".
+    const code = CLOSED_HOLD_RULE[state] || 'unresolved';
+    if (code === 'charge_in_flight') {
+      // Legacy shape stays fee-may-apply (held + feeApplies + unresolved):
+      // admin-cancellation's previewVisitFees counts fee exposure from these
+      // fields, and a PaymentIntent that may still land IS exposure (Codex
+      // #3800 r2 P1). The rule's willCharge:null keeps the UI neutral.
+      return { held: true, feeApplies: true, feeAmount: latestFee, unresolved: true, rule: describeCancelFeeRule({ code, feeAmount: latestFee }) };
+    }
+    if (code === 'unresolved') return { held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: describeCancelFeeRule({ code, onFailure: 'unknown', detail: `hold state ${state || 'blank'}` }) };
+    return { held: false, feeApplies: false, rule: describeCancelFeeRule({ code, feeAmount: latestFee, detail: state.replace(/_/g, ' ') }) };
+  }
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
   const windowHours = Number(hold.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
   // Every exit carries the operator-facing rule (code + sentence) so the
   // cancel card can say whether the card WILL be charged and why.
   const describe = (code, extra = {}) => describeCancelFeeRule({ code, feeAmount, windowHours, now, anchorAt: hold.held_at, onFailure: 'release', ...extra });
+  // Competing consents (a /secure appointment-card row beside the hold) —
+  // classified BEFORE any verdict, chargeable, free or parked (Codex #3800
+  // r2 → r6; pre-push P1 on r7): a competing row already in charging /
+  // charge_review is a PaymentIntent that can still land, and a 'charged'
+  // one already did — so even an outside-window / booking-age / parked "no
+  // fee" verdict would lie. A LIVE competing consent (no fee event on the
+  // row) makes chargeNoShowFee refuse to pick a winner and bell the office
+  // — unless the hold is parked, where neither rail charges (the
+  // appointment rail defers to the hold lane; the parked hold follows the
+  // rebooked visit). Fail toward undetermined on an unreadable table, same
+  // as the charge path.
+  let laneCode = null;
+  let laneFee = null;
+  try {
+    const laneRow = await db('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('id', 'fee_status', 'no_show_fee_amount');
+    if (laneRow) {
+      laneCode = COMPETING_LANE_RULE[laneRow.fee_status] || 'competing_consent';
+      laneFee = Number(laneRow.no_show_fee_amount) > 0 ? Number(laneRow.no_show_fee_amount) : null;
+    }
+  } catch (err) {
+    logger.warn('[estimate-card-holds] competing-consent lookup for cancel preview failed — reporting undetermined', { error: err.message });
+    return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'card consent lookup failed', onFailure: 'unknown' }) };
+  }
+  if (laneCode === 'fee_settled') {
+    // The competing row's fee already LANDED (Codex #3800 r7 P1): a settled
+    // fee, not a consent still to be picked — "bill by hand" copy there
+    // invites a double charge.
+    return { held: true, feeApplies: false, feeAmount, rule: describe('fee_settled', { detail: 'charged on the appointment card' }) };
+  }
+  // Indeterminate competing verdicts never carry the HOLD's amount (Codex
+  // #3800 r8 P1): previewVisitFees totals feeAmount into a definite "will
+  // be charged" figure. An in-flight appointment charge draws that row's
+  // own frozen fee; a live competing consent auto-charges nothing.
+  if (laneCode === 'charge_in_flight') return { held: true, feeApplies: true, feeAmount: laneFee, unresolved: true, rule: describe('charge_in_flight', { feeAmount: laneFee }) };
   // A parked hold (status still 'held', parked_at set) follows the rebooked
   // visit: handleCardHoldCancellation returns already_parked without
   // charging, so the preview must not run the window math and promise a
@@ -1862,8 +1970,13 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   // no fee can be collected, so nothing below may report one — including
   // the fee-may-apply posture of a FAILED time lookup, which would make the
   // cancel card warn of, fingerprint, and invite a waiver for a charge the
-  // disabled rail never makes (codex GH r31 P2).
+  // disabled rail never makes (codex GH r31 P2) — and including a LIVE
+  // competing consent (pre-push P1): chargeNoShowFee returns
+  // feature_disabled before its lane check, and the appointment rail defers
+  // to the hold row, so neither rail can charge. Fee events already
+  // running or landed are reported above regardless of the switch.
   if (!isCardHoldEnabled()) return { held: true, feeApplies: false, feeAmount, rule: describe('rail_off') };
+  if (laneCode) return { held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: describe('competing_consent') };
   let start = null;
   try {
     const { scheduledServiceApptTime } = require('./appointment-reminders');
