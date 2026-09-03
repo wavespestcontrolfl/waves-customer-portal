@@ -781,7 +781,7 @@ async function searchAttributionCandidates(options = {}) {
   // (proximity to service — owner ruling 2026-09-03); the linked-customer
   // pin above stays first. Stable sort keeps the name order within tiers.
   const pinned = review.customer_id ? candidates.findIndex((c) => String(c.id) === String(review.customer_id)) : -1;
-  const head = pinned === 0 ? candidates.splice(0, 1) : [];
+  const head = pinned >= 0 ? candidates.splice(pinned, 1) : [];
   candidates.sort((a, b) => Number(b.services.length > 0) - Number(a.services.length > 0));
   candidates.unshift(...head);
 

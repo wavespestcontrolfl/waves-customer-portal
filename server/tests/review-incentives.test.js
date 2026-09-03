@@ -810,6 +810,13 @@ describe('review incentives', () => {
       ['customer-blake', false],
     ]);
     expect(result.likelyReviewers).toEqual([]);
+    // The review's currently linked click_auto customer stays pinned first even
+    // when the name search returns them mid-list and the service sort would
+    // demote them (pre-push P1 r2).
+    conn.__state.rows.google_reviews[0].customer_id = 'customer-blake';
+    conn.__state.rows.google_reviews[0].link_source = 'click_auto';
+    const pinned = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(pinned.candidates.map((c) => c.id)).toEqual(['customer-blake', 'customer-john']);
   });
 
   test('candidate search and manual attribution reject removed reviews', async () => {
