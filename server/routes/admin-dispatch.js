@@ -13603,6 +13603,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`[dispatch] Job form save failed (non-blocking): ${e.message}`); }
     }
 
+    // Yard-sign kit consumption (sign card + stake + sticker per completed
+    // visit). Runs on the resume path too — the partial unique index on
+    // product_inventory_movements makes it at-most-once per (product, visit).
+    // Skipped for an incomplete visit and for inspection_only /
+    // customer_declined closeouts (no sign is left). Never throws. Runs
+    // BEFORE job costing so the initial cost calc sees the kit movements
+    // (pre-push codex P1).
+    try {
+      const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+      await consumeCompletionSupplies(db, {
+        scheduledServiceId: svc.id,
+        serviceRecordId: record?.id || null,
+        customerId: svc.customer_id || null,
+        technicianId: svc.technician_id || null,
+        isIncompleteVisit,
+        visitPerformed,
+        serviceLine: reportServiceLine,
+      });
+    } catch (e) { logger.error(`[dispatch] completion supplies consumption failed: ${e.message}`); }
+
     // Job costing (non-blocking, fire-and-forget). Runs on FIRST RUN and on
     // RESUME (Codex P2, PR #2897 fix round 13): the required-mint throw can
     // 503 out of the mint try AFTER the record committed but BEFORE this
@@ -13638,23 +13658,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       );
     } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
 
-    // Yard-sign kit consumption (sign card + stake + sticker per completed
-    // visit). Runs on the resume path too — the partial unique index on
-    // product_inventory_movements makes it at-most-once per (product, visit).
-    // Skipped for an incomplete visit and for inspection_only /
-    // customer_declined closeouts (no sign is left). Never throws.
-    try {
-      const { consumeCompletionSupplies } = require('../services/supplies-consumption');
-      await consumeCompletionSupplies(db, {
-        scheduledServiceId: svc.id,
-        serviceRecordId: record?.id || null,
-        customerId: svc.customer_id || null,
-        technicianId: svc.technician_id || null,
-        isIncompleteVisit,
-        visitPerformed,
-        serviceLine: reportServiceLine,
-      });
-    } catch (e) { logger.error(`[dispatch] completion supplies consumption failed: ${e.message}`); }
 
     // Follow-up suggestion for the RESPONSE (success-overlay CTA). On the
     // normal path this is the pre-transaction verdict whose alert already
