@@ -4663,17 +4663,32 @@ function duplicateSeriesConflictBody(existingSeries) {
 // legacy soft-join: visits completed before migration 20260427000007 have
 // service_records rows with a NULL scheduled_service_id, matched the way
 // job-costing's resolveServiceRecord does — (customer_id, service_date,
-// service_type). Without the fallback every pre-migration completion would
-// read as a status-only completion and be offered a "Closeout owed" resume
-// that re-runs /complete (Codex #3799 r2 P0). Shared by the day and week
-// feeds so both surfaces agree.
+// service_type) — including its ambiguity rule: the legacy match only
+// counts when exactly ONE unlinked record and exactly ONE completed visit
+// share the tuple, otherwise two same-day visits would both read as closed
+// off a single record and one owed closeout would hide (pre-push P0).
+// Ambiguous tuples fall through to "no record", i.e. still owed — the
+// fail-closed direction. Without the fallback every pre-migration
+// completion would read as status-only and be offered a "Closeout owed"
+// resume that re-runs /complete (Codex #3799 r2 P0). Shared by the day and
+// week feeds so both surfaces agree.
 const HAS_SERVICE_RECORD_SQL = `EXISTS (
   SELECT 1 FROM service_records sr
   WHERE sr.scheduled_service_id = scheduled_services.id
      OR (sr.scheduled_service_id IS NULL
          AND sr.customer_id = scheduled_services.customer_id
          AND sr.service_date = scheduled_services.scheduled_date
-         AND sr.service_type = scheduled_services.service_type)
+         AND sr.service_type = scheduled_services.service_type
+         AND (SELECT count(*) FROM service_records sr2
+               WHERE sr2.scheduled_service_id IS NULL
+                 AND sr2.customer_id = scheduled_services.customer_id
+                 AND sr2.service_date = scheduled_services.scheduled_date
+                 AND sr2.service_type = scheduled_services.service_type) = 1
+         AND (SELECT count(*) FROM scheduled_services ss2
+               WHERE ss2.customer_id = scheduled_services.customer_id
+                 AND ss2.scheduled_date = scheduled_services.scheduled_date
+                 AND ss2.service_type = scheduled_services.service_type
+                 AND ss2.status = 'completed') = 1)
 ) as has_service_record`;
 
 // POST /api/admin/schedule — create new service
