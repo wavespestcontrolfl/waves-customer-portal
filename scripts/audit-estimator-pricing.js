@@ -39,6 +39,11 @@ const ROOT = path.resolve(__dirname, '..');
 const ENGINE_DIR = path.join(ROOT, 'server', 'services', 'pricing-engine');
 const constants = require(path.join(ENGINE_DIR, 'constants'));
 const { generateEstimate } = require(path.join(ENGINE_DIR, 'estimate-engine'));
+const converter = require(path.join(ROOT, 'server', 'services', 'estimate-converter'));
+const { computeChargeAmount } = require(path.join(ROOT, 'server', 'services', 'stripe-pricing'));
+const PREPAY_PCT = Number(converter.ANNUAL_PREPAY_DISCOUNT_PCT ?? constants.ANNUAL_PREPAY_DISCOUNT_PCT ?? 0.05);
+// Stripe's fixed per-transaction component; not surchargeable (stripe-pricing.js header).
+const CARD_FIXED_FEE = 0.30;
 
 const args = process.argv.slice(2);
 const argValue = (flag) => {
@@ -437,14 +442,26 @@ function unitEconomics({ revenuePerVisit, visits, onSiteMinutes, driveMinutes = 
   const grossProfit = revenueAnnual - directAnnual;
   const grossMargin = revenueAnnual > 0 ? grossProfit / revenueAnnual : null;
   const markup = directAnnual > 0 ? grossProfit / directAnnual : null;
-  const cardFee = revenueAnnual * cardFeeRate;
-  const contributionMargin = revenueAnnual > 0 ? (revenueAnnual - cardFee - directAnnual) / revenueAnnual : null;
+  // Card proceeds per funding path (codex r5 P2): confirmed credit collects a
+  // separately rounded surcharge (computeChargeAmount) that offsets the %
+  // cost; debit / prepaid / unknown collect none. Stripe's fixed $0.30 per
+  // transaction applies to both. contributionMargin reports the debit path
+  // (the worse of the two); contributionMarginCredit is beside it.
+  const perVisitNet = revenuePerVisit * (1 - discountPct);
+  const credit = computeChargeAmount(perVisitNet, 'card', { funding: 'credit' });
+  const creditCostPerVisit = credit.total * cardFeeRate + CARD_FIXED_FEE;
+  const creditProceedsAnnual = (credit.total - creditCostPerVisit) * visits;
+  const debitCostPerVisit = perVisitNet * cardFeeRate + CARD_FIXED_FEE;
+  const debitProceedsAnnual = (perVisitNet - debitCostPerVisit) * visits;
+  const cardFee = debitCostPerVisit * visits;
+  const contributionMargin = revenueAnnual > 0 ? (debitProceedsAnnual - directAnnual) / revenueAnnual : null;
+  const contributionMarginCredit = revenueAnnual > 0 ? (creditProceedsAnnual - directAnnual) / revenueAnnual : null;
   const targetPriceAnnual35 = directAnnual / (1 - 0.35);
   return {
     laborPerVisit: round2(labor), materialPerVisit: round2(materialPerVisit), expectedCallbackPerVisit: round2(expectedCallback),
     directPerVisit: round2(directPerVisit), directAnnual: round2(directAnnual), revenueAnnual: round2(revenueAnnual),
     grossProfit: round2(grossProfit), grossMargin: grossMargin === null ? null : Math.round(grossMargin * 1000) / 1000,
-    markup: markup === null ? null : Math.round(markup * 1000) / 1000, contributionMargin: contributionMargin === null ? null : Math.round(contributionMargin * 1000) / 1000,
+    markup: markup === null ? null : Math.round(markup * 1000) / 1000, contributionMargin: contributionMargin === null ? null : Math.round(contributionMargin * 1000) / 1000, contributionMarginCredit: contributionMarginCredit === null ? null : Math.round(contributionMarginCredit * 1000) / 1000, surchargePerVisit: credit.surcharge,
     targetPriceAnnualAt35: round2(targetPriceAnnual35), targetPerVisitAt35: round2(targetPriceAnnual35 / visits),
   };
 }
@@ -900,8 +917,23 @@ function runPrepayAndCadence() {
     const identity = round2(perApp * visits);
     record(section, `${c.key} perApp × visits = annual (${c.visits})`, {}, identity, li.annual, { tolerance: visits * 0.005 + 0.01 });
     record(section, `${c.key} monthly × 12 = annual (${c.visits})`, {}, round2(li.monthly * 12), li.annual, { tolerance: 0.06 });
-    const prepay = round2(li.monthly * 12); // converter: monthly_total × 12 rounded to cents (README §3)
-    scenarios.push({ section, name: `${c.key} annual prepay base (monthly×12) vs annual`, expected: li.annual, actual: prepay, status: Math.abs(prepay - li.annual) <= 0.06 ? 'match' : 'MISMATCH', extra: { note: 'prepay discount 5% only on no-setup-fee mixes; pest/mosquito keep the $99 setup waiver' } });
+    // Annual prepay through the converter's own resolver (codex r5 P1), with an
+    // independent expectation: a membership-fee mix (pest / mosquito) earns no
+    // prepay % — its incentive is the waived setup fee — everything else earns
+    // ANNUAL_PREPAY_DISCOUNT_PCT on the discountable base. estimateData is empty
+    // here, so the lawn program's protected floor is not exercised (that needs a
+    // stored estimate shape; noted, not claimed).
+    const feeMix = ['pest_control', 'mosquito'].includes(c.key);
+    const prepayRate = feeMix ? 0 : PREPAY_PCT;
+    const svc = { service: c.key, service_key: c.key, serviceKey: c.key, name: li.name || c.key, frequency: li.frequency || null, visits_per_year: visits, visitsPerYear: visits, annual: li.annual, perApp };
+    let resolved = null; let resolveErr = null;
+    try { resolved = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual: li.annual, recurringServices: [svc], estimateData: {} }); } catch (e) { resolveErr = e.message; }
+    record(section, `${c.key} annual prepay total (converter resolver, ${feeMix ? 'fee mix: 0%' : `${PREPAY_PCT * 100}%`})`, { key: c.key }, round2(li.annual * (1 - prepayRate)), resolved ? resolved.amount : null, { extra: { rate: resolved ? resolved.rate : null, discount: resolved ? resolved.discount : null, error: resolveErr, note: 'protected lawn floor not exercised (empty estimateData)' } });
+    let coverage = null; let coverageErr = null;
+    try { coverage = converter.annualPrepayCoverageCadence(svc, li.frequency || null); } catch (e) { coverageErr = e.message; }
+    scenarios.push({ section, name: `${c.key} (${visits}/yr) annual-prepay coverage cadence`, expected: null, actual: coverage, status: 'engine_only', extra: { coverageCadence: coverage, error: coverageErr } });
+    flagIf(c.key === 'mosquito' && visits === 9 && coverage !== 'seasonal_feb_oct', 'P2', section, `${c.key} seasonal-9 coverage cadence`, `expected seasonal_feb_oct, got ${coverage} ${coverageErr ? `(${coverageErr})` : ''}`);
+    flagIf(!coverageErr && coverage === null, 'P2', section, `${c.key} (${visits}/yr) coverage cadence`, 'annualPrepayCoverageCadence returned null — the prepay term would record no coverage cadence for this plan');
   }
 }
 
@@ -917,13 +949,17 @@ async function maybeSyncFromDb() {
     return { synced: false, reason: `knex not installed: ${e.message}` };
   }
   const db = knex({ client: 'pg', connection: { connectionString: url, ssl: /railway|proxy|rlwy/.test(url) ? { rejectUnauthorized: false } : undefined }, pool: { min: 0, max: 1, afterCreate: (conn, done) => conn.query('SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY', (err) => done(err, conn)) } });
-  const before = JSON.parse(JSON.stringify({ PEST: { base: constants.PEST.base, floor: constants.PEST.floor }, GLOBAL: constants.GLOBAL, WAVEGUARD: { qualifyingServices: constants.WAVEGUARD.qualifyingServices, excluded: Object.keys(constants.WAVEGUARD.excludedFromPercentDiscount) }, TS: { marginTarget: constants.TREE_SHRUB.marginTarget, tiers: constants.TREE_SHRUB.tiers }, MOSQ: constants.MOSQUITO.basePrices, RODENT: constants.RODENT.baitBrackets }));
+  // Snapshot EVERY constant family the bridge can overlay (codex r5 P2) and report the changed paths.
+  const snap = () => JSON.parse(JSON.stringify(constants, (k, v) => (typeof v === 'function' ? undefined : v)));
+  const before = snap();
   try {
     const bridge = require(path.join(ENGINE_DIR, 'db-bridge'));
     const ok = await bridge.syncConstantsFromDB(db);
-    const after = JSON.parse(JSON.stringify({ PEST: { base: constants.PEST.base, floor: constants.PEST.floor }, GLOBAL: constants.GLOBAL, WAVEGUARD: { qualifyingServices: constants.WAVEGUARD.qualifyingServices, excluded: Object.keys(constants.WAVEGUARD.excludedFromPercentDiscount) }, TS: { marginTarget: constants.TREE_SHRUB.marginTarget, tiers: constants.TREE_SHRUB.tiers }, MOSQ: constants.MOSQUITO.basePrices, RODENT: constants.RODENT.baitBrackets }));
+    const after = snap();
+    const changedPaths = [];
+    (function walk(x, y, p) { const keys = new Set([...Object.keys(x || {}), ...Object.keys(y || {})]); for (const k of keys) { const a = x ? x[k] : undefined; const b = y ? y[k] : undefined; if (JSON.stringify(a) === JSON.stringify(b)) continue; if (a && b && typeof a === 'object' && typeof b === 'object' && !Array.isArray(a) && p.split('.').length < 3) walk(a, b, p ? `${p}.${k}` : k); else changedPaths.push(p ? `${p}.${k}` : k); } })(before, after, '');
     await db.destroy();
-    return { synced: !!ok, before, after, changed: JSON.stringify(before) !== JSON.stringify(after) };
+    return { synced: !!ok, changed: changedPaths.length > 0, changedPaths };
   } catch (e) {
     await db.destroy().catch(() => {});
     return { synced: false, reason: e.message };
@@ -1007,10 +1043,10 @@ async function main() {
   md.push('');
   md.push('Recorded span = check-in → check-out, which often includes driving to the next stop — NOT on-site time (owner 2026-09-02, MON-004). Span columns are fed with no extra drive minutes and carry no pricing recommendation; the engine model columns are the ones the audit prices from.');
   md.push('');
-  md.push('| service | tier | list/visit | renewal revenue | year-1 revenue | modeled min | gross margin (modeled) | markup (modeled) | recorded span median min (n) | gross margin at recorded median span | gross margin at recorded p75 span | contribution at recorded span (all-card) |');
+  md.push('| service | tier | list/visit | renewal revenue | year-1 revenue | modeled min | gross margin (modeled) | markup (modeled) | recorded span median min (n) | gross margin at recorded median span | gross margin at recorded p75 span | contribution at recorded span (card: debit / credit+surcharge) |');
   md.push('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
   for (const e of economics.rows) {
-    md.push(`| ${e.service} | ${e.tier} | ${money(e.perVisitList)} | ${money(e.renewalRevenue)} | ${money(e.firstYearRevenue)} | ${e.modeledMinutes} | ${pct(e.modeled.grossMargin)} | ${pct(e.modeled.markup)} | ${e.observedMinutes ?? '—'}${e.observedN ? ` (${e.observedN})` : ''} | ${e.observed ? pct(e.observed.grossMargin) : '—'} | ${e.observedP75 ? pct(e.observedP75.grossMargin) : '—'} | ${e.observed ? pct(e.observed.contributionMargin) : '—'} |`);
+    md.push(`| ${e.service} | ${e.tier} | ${money(e.perVisitList)} | ${money(e.renewalRevenue)} | ${money(e.firstYearRevenue)} | ${e.modeledMinutes} | ${pct(e.modeled.grossMargin)} | ${pct(e.modeled.markup)} | ${e.observedMinutes ?? '—'}${e.observedN ? ` (${e.observedN})` : ''} | ${e.observed ? pct(e.observed.grossMargin) : '—'} | ${e.observedP75 ? pct(e.observedP75.grossMargin) : '—'} | ${e.observed ? `${pct(e.observed.contributionMargin)} / ${pct(e.observed.contributionMarginCredit)}` : '—'} |`);
   }
   md.push('');
   md.push('## Markup vs margin sites');

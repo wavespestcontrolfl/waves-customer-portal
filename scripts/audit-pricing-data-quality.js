@@ -43,6 +43,11 @@ const AUTOPAY_ACTIVE_SQL = autopayActivePredicate(new Date()).sql.replace('?', '
 const ENGINE_TIER_SQL = `coalesce(${['serviceOptOut,engineTier','result,recurring,waveGuardTier','result,recurring,tier','recurring,waveGuardTier','recurring,tier','engineResult,recurring,waveGuardTier','engineResult,recurring,tier','engineResult,waveGuard,tier','result,waveGuard,tier','waveGuard,tier'].map((p) => { const k = p.split(','); return `nullif(trim(estimate_data${k.slice(0, -1).map((x) => `->'${x}'`).join('')}->>'${k[k.length - 1]}'), '')`; }).join(', ')})`;
 // Same exclusion as the workbench (admin-billing-recovery.js INTERNAL_NAME_SQL + INTERNAL_TEST_CUSTOMERS) — codex r4 P1; empty list ⇒ no-op
 const INTERNAL_TEST_SQL = INTERNAL_TEST_CUSTOMERS.length ? `and lower(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) not in (${INTERNAL_TEST_CUSTOMERS.map((n) => `'${String(n).toLowerCase().replace(/'/g, "''")}'`).join(',')})` : '';
+// Cadence vocabulary is the shared prepay-cadence map, never a local CASE (codex r5 P2); unmapped labels ⇒ NULL ⇒ surfaced.
+const { visitsPerYearForCadence } = require(path.join(__dirname, '..', 'server', 'services', 'prepay-cadence'));
+const CADENCE_LABELS = ['monthly', 'monthly_nth_weekday', 'every_6_weeks', 'seasonal_feb_oct', 'bimonthly', 'bi_monthly', 'quarterly', 'triannual', 'every_4_months', 'semiannual', 'biannual', 'annual', 'yearly'];
+const CADENCE_CASE_SQL = `(case lower(trim(frequency)) ${CADENCE_LABELS.map((l) => `when '${l}' then ${visitsPerYearForCadence(l)}`).join(' ')} else null end)`;
+const HAS_ENGINE_KEY_SQL = "(jsonb_typeof(engine_keys) = 'array' and jsonb_array_length(engine_keys) > 0)";
 const EFFECTIVE_PRICE_SQL = "coalesce(nullif(ss.estimated_price, 0), case when c.billing_mode = 'per_application' then c.per_application_fee end, 0)";
 // CLI-only validation (a library require under another argv must not exit):
 // unknown flags are rejected, and the window is validated as YYYY-MM-DD and
@@ -67,8 +72,9 @@ const CHECKS = [
     key: 'catalog_overview',
     title: 'Service catalog overview',
     sql: `select count(*) as services, count(*) filter (where is_active and not is_archived) as active,
-                 count(*) filter (where is_active and not is_archived and engine_keys is not null) as active_with_engine_key,
-                 count(*) filter (where is_active and not is_archived and engine_keys is null) as active_without_engine_key,
+                 -- a key means a NON-EMPTY jsonb array; null, [] and malformed values are gaps (codex r5 P2)
+                 count(*) filter (where is_active and not is_archived and ${HAS_ENGINE_KEY_SQL}) as active_with_engine_key,
+                 count(*) filter (where is_active and not is_archived and not ${HAS_ENGINE_KEY_SQL}) as active_without_engine_key,
                  count(*) filter (where is_active and not is_archived and public_quote_selectable) as quote_selectable,
                  count(*) filter (where is_active and not is_archived and billing_type='recurring' and (frequency is null or visits_per_year is null)) as recurring_missing_cadence,
                  count(*) filter (where is_active and not is_archived and base_price is not null) as with_base_price
@@ -76,22 +82,18 @@ const CHECKS = [
   },
   {
     key: 'catalog_cadence_drift',
-    title: 'Catalog rows whose frequency label disagrees with visits_per_year',
-    sql: `select service_key, name, frequency, visits_per_year
-          from services
-          where is_active and not is_archived and billing_type='recurring'
+    title: 'Catalog rows whose frequency label disagrees with visits_per_year (shared cadence vocabulary; unmapped labels surface with expected NULL)',
+    sql: `select service_key, name, frequency, visits_per_year, ${CADENCE_CASE_SQL} as expected_visits
+          from services where is_active and not is_archived and billing_type='recurring'
             and frequency is not null and visits_per_year is not null
-            and visits_per_year <> case frequency
-              when 'monthly' then 12 when 'every_6_weeks' then 9 when 'seasonal_feb_oct' then 9
-              when 'bimonthly' then 6 when 'quarterly' then 4 when 'triannual' then 3
-              when 'semiannual' then 2 when 'annual' then 1 else visits_per_year end
+            and visits_per_year is distinct from ${CADENCE_CASE_SQL}
           order by service_key`,
   },
   {
     key: 'catalog_engine_gaps',
     title: 'Active, quote-selectable catalog rows with no engine key (priced by name matching only)',
     sql: `select service_key, name, category, billing_type, frequency, visits_per_year, pricing_model_key
-          from services where is_active and not is_archived and engine_keys is null and public_quote_selectable
+          from services where is_active and not is_archived and not ${HAS_ENGINE_KEY_SQL} and public_quote_selectable
           order by category, service_key`,
   },
   {
@@ -280,8 +282,8 @@ const CHECKS = [
               ${INTERNAL_TEST_SQL}
               and (not ${AUTOPAY_ACTIVE_SQL} or c.billing_mode in ('per_application','per_visit','one_time')))
           select coalesce(billing_mode,'NULL') as lane, count(*) as uninvoiced,
-                 count(*) filter (where not exists (select 1 from invoices i where i.customer_id = u.customer_id and i.archived_at is null and i.service_date between u.scheduled_date - 3 and u.scheduled_date + 3)) as no_invoice_within_3_days,
-                 round(coalesce(sum(effective_price) filter (where not exists (select 1 from invoices i where i.customer_id = u.customer_id and i.archived_at is null and i.service_date between u.scheduled_date - 3 and u.scheduled_date + 3)),0)::numeric,2) as est_price_at_risk
+                 count(*) filter (where not exists (select 1 from invoices i where i.customer_id = u.customer_id and i.archived_at is null and coalesce(i.status,'') <> 'void' and i.service_date between u.scheduled_date - 3 and u.scheduled_date + 3)) as no_invoice_within_3_days,
+                 round(coalesce(sum(effective_price) filter (where not exists (select 1 from invoices i where i.customer_id = u.customer_id and i.archived_at is null and coalesce(i.status,'') <> 'void' and i.service_date between u.scheduled_date - 3 and u.scheduled_date + 3)),0)::numeric,2) as est_price_at_risk
           from u group by 1 order by 2 desc`,
   },
   {
@@ -302,7 +304,8 @@ const CHECKS = [
                  round((percentile_cont(0.75) within group (order by mins))::numeric) as p75_min,
                  round((percentile_cont(0.9) within group (order by mins))::numeric) as p90_min,
                  round(avg(price)::numeric,2) as price_avg,
-                 round(avg(price / nullif(mins, 0) * 60) filter (where mins between 1 and 600 and price > 0)::numeric, 2) as realized_per_hour_over_recorded_span
+                 -- time-weighted: total revenue ÷ total recorded time over the same eligible rows (codex r5 P2)
+                 round((sum(price) filter (where mins between 1 and 600 and price > 0) / nullif(sum(mins) filter (where mins between 1 and 600 and price > 0), 0) * 60)::numeric, 2) as realized_per_hour_over_recorded_span
           from v where mins between 1 and 600 group by 1 having count(*) >= 3 order by n desc`,
   },
   {

@@ -1,7 +1,7 @@
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-03T11:02:53.018Z. Constants source: **constants.js (in-code defaults)**.
-Scenarios: 1247 · independent-vs-engine matches: 1204 · mismatches: 0 · expected a price but the engine returned none: 0 · engine-only observations: 43 (1204 + 0 + 0 + 43 = 1247) · commercial engine errors: 0
+Generated 2026-09-03T11:56:17.324Z. Constants source: **constants.js (in-code defaults)**.
+Scenarios: 1259 · independent-vs-engine matches: 1204 · mismatches: 0 · expected a price but the engine returned none: 0 · engine-only observations: 55 (1204 + 0 + 0 + 55 = 1259) · commercial engine errors: 0
 
 ## Findings raised by this run
 
@@ -28,16 +28,16 @@ Scenarios: 1247 · independent-vs-engine matches: 1204 · mismatches: 0 · expec
 
 Recorded span = check-in → check-out, which often includes driving to the next stop — NOT on-site time (owner 2026-09-02, MON-004). Span columns are fed with no extra drive minutes and carry no pricing recommendation; the engine model columns are the ones the audit prices from.
 
-| service | tier | list/visit | renewal revenue | year-1 revenue | modeled min | gross margin (modeled) | markup (modeled) | recorded span median min (n) | gross margin at recorded median span | gross margin at recorded p75 span | contribution at recorded span (all-card) |
+| service | tier | list/visit | renewal revenue | year-1 revenue | modeled min | gross margin (modeled) | markup (modeled) | recorded span median min (n) | gross margin at recorded median span | gross margin at recorded p75 span | contribution at recorded span (card: debit / credit+surcharge) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| pest_control quarterly (2,000 sf) | bronze | $112.00 | $448.00 | $547.00 | 25 | 58.6% | 141.4% | 44 (98) | 59.4% | 49.5% | 56.5% |
-| pest_control quarterly (2,000 sf) | silver | $112.00 | $403.20 | $502.20 | 25 | 54.0% | 117.2% | 44 (98) | 54.8% | 43.9% | 51.9% |
-| pest_control quarterly (2,000 sf) | gold | $112.00 | $380.80 | $479.80 | 25 | 51.3% | 105.2% | 44 (98) | 52.2% | 40.6% | 49.3% |
-| pest_control quarterly (2,000 sf) | platinum | $112.00 | $358.40 | $457.40 | 25 | 48.2% | 93.1% | 44 (98) | 49.2% | 36.8% | 46.3% |
-| lawn_care 9x st_augustine (4,500 sf) | bronze | $64.00 | $576.00 | $576.00 | 23.25 | 30.7% | 44.3% | 44 (17) | 16.3% | 10.9% | 13.4% |
-| lawn_care 9x st_augustine (4,500 sf) | silver | $64.00 | $518.40 | $518.40 | 23.25 | 23.0% | 29.8% | 44 (17) | 7.0% | 0.9% | 4.1% |
-| lawn_care 9x st_augustine (4,500 sf) | gold | $64.00 | $489.60 | $489.60 | 23.25 | 18.4% | 22.6% | 44 (17) | 1.6% | -4.9% | -1.3% |
-| lawn_care 9x st_augustine (4,500 sf) | platinum | $64.00 | $460.80 | $460.80 | 23.25 | 13.3% | 15.4% | 44 (17) | -4.6% | -11.4% | -7.5% |
+| pest_control quarterly (2,000 sf) | bronze | $112.00 | $448.00 | $547.00 | 25 | 58.6% | 141.4% | 44 (98) | 59.4% | 49.5% | 56.2% / 59.0% |
+| pest_control quarterly (2,000 sf) | silver | $112.00 | $403.20 | $502.20 | 25 | 54.0% | 117.2% | 44 (98) | 54.8% | 43.9% | 51.7% / 54.5% |
+| pest_control quarterly (2,000 sf) | gold | $112.00 | $380.80 | $479.80 | 25 | 51.3% | 105.2% | 44 (98) | 52.2% | 40.6% | 49.0% / 51.8% |
+| pest_control quarterly (2,000 sf) | platinum | $112.00 | $358.40 | $457.40 | 25 | 48.2% | 93.1% | 44 (98) | 49.2% | 36.8% | 46.0% / 48.8% |
+| lawn_care 9x st_augustine (4,500 sf) | bronze | $64.00 | $576.00 | $576.00 | 23.25 | 30.7% | 44.3% | 44 (17) | 16.3% | 10.9% | 13.0% / 15.8% |
+| lawn_care 9x st_augustine (4,500 sf) | silver | $64.00 | $518.40 | $518.40 | 23.25 | 23.0% | 29.8% | 44 (17) | 7.0% | 0.9% | 3.6% / 6.4% |
+| lawn_care 9x st_augustine (4,500 sf) | gold | $64.00 | $489.60 | $489.60 | 23.25 | 18.4% | 22.6% | 44 (17) | 1.6% | -4.9% | -1.9% / 0.9% |
+| lawn_care 9x st_augustine (4,500 sf) | platinum | $64.00 | $460.80 | $460.80 | 23.25 | 13.3% | 15.4% | 44 (17) | -4.6% | -11.4% | -8.1% / -5.3% |
 | mosquito seasonal9 (8,000 sf lot) | bronze | $77.00 | $693.00 | $693.00 | 30 | 49.2% | 96.9% | — | — | — | — |
 | mosquito seasonal9 (8,000 sf lot) | silver | $77.00 | $623.70 | $623.70 | 30 | 43.6% | 77.2% | — | — | — | — |
 | mosquito seasonal9 (8,000 sf lot) | gold | $77.00 | $589.05 | $589.05 | 30 | 40.3% | 67.4% | — | — | — | — |
@@ -108,3 +108,15 @@ Recorded span = check-in → check-out, which often includes driving to the next
 - [commercial] commercial rodent bait: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_rodent_bait","annual":476,"price":null,"perApp":119,"visits":4,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":null,"review":false},{"service":"rodent_bait_setup","annual":null,"price":99,"perApp":null,"visits":null,"manualQuote":false,"taxable":null,"taxCategory":null,"margin":null,"review":null}]}
 - [commercial] commercial termite bait: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_termite_bait","annual":813.27,"price":null,"perApp":203.32,"visits":4,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}
 - [commercial] commercial tree & shrub: {"engineError":null,"tier":"bronze","lines":[{"service":"commercial_tree_shrub","annual":2670.91,"price":null,"perApp":445.15,"visits":6,"manualQuote":false,"taxable":false,"taxCategory":"lawn_spraying_or_treatment","margin":0.45,"review":false}]}
+- [cadence_identities] pest_control (4/yr) annual-prepay coverage cadence: {"coverageCadence":"quarterly","error":null}
+- [cadence_identities] pest_control (6/yr) annual-prepay coverage cadence: {"coverageCadence":"bimonthly","error":null}
+- [cadence_identities] pest_control (12/yr) annual-prepay coverage cadence: {"coverageCadence":"monthly","error":null}
+- [cadence_identities] lawn_care (6/yr) annual-prepay coverage cadence: {"coverageCadence":"bimonthly","error":null}
+- [cadence_identities] lawn_care (9/yr) annual-prepay coverage cadence: {"coverageCadence":"every_6_weeks","error":null}
+- [cadence_identities] lawn_care (12/yr) annual-prepay coverage cadence: {"coverageCadence":"monthly","error":null}
+- [cadence_identities] mosquito (9/yr) annual-prepay coverage cadence: {"coverageCadence":"seasonal_feb_oct","error":null}
+- [cadence_identities] mosquito (12/yr) annual-prepay coverage cadence: {"coverageCadence":"monthly","error":null}
+- [cadence_identities] tree_shrub (4/yr) annual-prepay coverage cadence: {"coverageCadence":"quarterly","error":null}
+- [cadence_identities] tree_shrub (6/yr) annual-prepay coverage cadence: {"coverageCadence":"bimonthly","error":null}
+- [cadence_identities] tree_shrub (9/yr) annual-prepay coverage cadence: {"coverageCadence":"bimonthly","error":null}
+- [cadence_identities] rodent_bait (4/yr) annual-prepay coverage cadence: {"coverageCadence":"quarterly","error":null}
