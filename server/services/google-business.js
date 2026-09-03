@@ -1502,7 +1502,6 @@ class GoogleBusinessService {
             sources[loc.id] = 'gbp';
             usedGbp = true;
             logger.info(`[gbp] Synced ${feed.stored} of ${reviews.length} reviews for ${loc.name} via GBP Reviews API`);
-            if (feed.cause) await this._notifyDegradedSync(loc, `review upsert failed: ${feed.cause}`);
             // Authoritative full pull succeeded → anything we synced before
             // that Google no longer returns has been removed/filtered. Rows
             // that failed to store this run never advanced synced_at, so
@@ -1513,10 +1512,14 @@ class GoogleBusinessService {
             // degraded-sync alert (24h-deduped) — without falling back to
             // Places (the pull itself was fine).
             const reconcile = await this._reconcileMissingReviews(loc, locSyncStart, { excludeReviewNames: feed.failedReviewNames });
-            if (reconcile && reconcile.ok === false) {
+            const reconcileFailed = !!(reconcile && reconcile.ok === false);
+            if (reconcileFailed) {
               errors.push({ location: loc.name, error: reconcile.error, source: 'reconcile' });
               await this._notifyDegradedSync(loc, `removal reconcile failed: ${reconcile.error}`);
             }
+            // After the reconcile so the alert can say truthfully whether
+            // the rest of the location reconciled (pre-push audit r7).
+            if (feed.cause) await this._notifyDegradedSync(loc, `review upsert failed: ${feed.cause}`, { reconcileFailed });
           } catch (gbpErr) {
             gbpFailure = gbpErr.message;
             gbpFailures[loc.id] = gbpErr.message;
@@ -2073,7 +2076,7 @@ class GoogleBusinessService {
    * most once per 24h per location (dedupe on the notification title).
    * Best-effort — never throws into the sync loop.
    */
-  async _notifyDegradedSync(loc, cause) {
+  async _notifyDegradedSync(loc, cause, { reconcileFailed = false } = {}) {
     try {
       // The title is the 24h dedupe key, so distinct failure classes need
       // distinct titles: a pull-failure alert this morning must not
@@ -2116,7 +2119,7 @@ class GoogleBusinessService {
         const body = reconcileFailure
           ? `Review sync for ${loc.name} pulled the GBP feed, but the ${cause}. New reviews are still syncing; REMOVALS will not be detected until the reconcile succeeds.`
           : upsertFailure
-            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored\)/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; the failed rows were excluded from this run's removal reconcile so they are not misreported as removed (the rest of the location reconciled normally). This is a database write error, not a credentials problem — read the error and the code.`
+            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored\)/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; the failed rows were excluded from this run's removal reconcile so they are not misreported as removed${reconcileFailed ? ' (and that reconcile FAILED — see its own alert)' : ' (the rest of the location reconciled normally)'}. This is a database write error, not a credentials problem — read the error and the code.`
             : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
         await NotificationService.notifyAdmin(
           'review',

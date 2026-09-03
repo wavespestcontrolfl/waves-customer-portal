@@ -359,7 +359,9 @@ describe('Google Business review sync', () => {
     // The failed row never advanced synced_at — reconcile runs for the rest of the location with that row excluded.
     expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.any(Date), { excludeReviewNames: ['accounts/1/locations/2/reviews/rev-bad'] });
     expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringContaining('1 of 2 review row(s) failed to store') })]);
-    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^review upsert failed: 1 of 2 .*duplicate key value/));
+    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^review upsert failed: 1 of 2 .*duplicate key value/), { reconcileFailed: false });
+    // Alerted AFTER the reconcile, so the body can state its outcome truthfully.
+    expect(reconcile.mock.invocationCallOrder[0]).toBeLessThan(degraded.mock.invocationCallOrder[0]);
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
   });
 
