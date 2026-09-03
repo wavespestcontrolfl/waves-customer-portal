@@ -625,4 +625,4 @@ async function sendRow(db, { authorityId, actor, reviewedLookupHash = null, send
   return { sent: true, prospectId: placement.id, message_id: r.message_id, thread_id: r.thread_id, authority: r.authority };
 }
 
-module.exports = { listOwnerQueue, approveRow, sendRow, decideDomain, acquireAnyway, waivableFloors, whyNotApprovable, actionFor, OwnerQueueError, APPROVE_HERE, SEND_CODE_STATUS };
+module.exports = { listOwnerQueue, approveRow, sendRow, decideDomain, acquireAnyway, waivableFloors, whyNotApprovable, actionFor, legalTermsUrlOf, OwnerQueueError, APPROVE_HERE, SEND_CODE_STATUS };

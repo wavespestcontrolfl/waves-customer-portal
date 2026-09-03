@@ -260,6 +260,67 @@ describe('sendOutreach under the contract', () => {
     expect(placement(s.db).outreach_status).toBe('drafted');
     expect(approvals(s.db)).toHaveLength(0);
   });
+  test('an AUTO_OUTREACH stamp is honoured only while the CURRENT policy grants it: a raised score floor (outside the hash) refuses the send until the nightly re-decides', async () => {
+    const s = scenario({ policy: AUTO_POLICY });
+    await nightly(s.db);
+    expect(commRow(s.db).level).toBe('AUTO_OUTREACH');
+    // the owner tightens the mandate; the domain (score 75) no longer clears it, the decision hash (floors only) is unchanged
+    s.db._tables.seo_link_policy[0].auto_outreach_min_score = 90;
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/policy moved/) });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/policy moved/) });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    expect(placement(s.db).outreach_status).toBe('drafted');
+    expect(approvals(s.db)).toHaveLength(0);
+    // loosened again: the stamp stands
+    s.db._tables.seo_link_policy[0].auto_outreach_min_score = 60;
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).ok).toBe(true);
+  });
+  test('another open owner decision on the placement holds the send (the park would clear with it undecided); a payment deferred past the send does not', async () => {
+    // a price the owner must ENTER parks at once (OWNER_INPUT_REQUIRED is not deferrable) — the pitch waits for it
+    const held = scenario({ path: { payment_required: true, fee_scope: 'per_location', estimated_cost_cents: null, currency: 'unknown' } });
+    await nightly(held.db);
+    expect(placement(held.db).status).toBe('awaiting_owner');
+    expect(await Outreach.sendOutreach({ prospectId: held.row.id, approvedBy: 'Adam', mode: 'owner' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/payment: OWNER_INPUT_REQUIRED/) });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    expect(placement(held.db)).toMatchObject({ status: 'awaiting_owner', outreach_status: 'drafted' });
+    expect(approvals(held.db)).toHaveLength(0);
+    // a checkout the owner settles AFTER the pitch (OWNER_MANUAL_PAYMENT, deferred) is no hold
+    const deferred = scenario({ path: { payment_required: true, fee_scope: 'per_location', estimated_cost_cents: 4500, currency: 'USD', merchant_binding: null } });
+    await nightly(deferred.db);
+    expect((await Outreach.sendOutreach({ prospectId: deferred.row.id, approvedBy: 'Adam', mode: 'owner' })).ok).toBe(true);
+    expect(placement(deferred.db).status).toBe('contacted');
+  });
+  test('an OWNER_LEGAL send: held until the agreement is accepted; its approval then carries the agreement URL the owner read (as the queue\'s Approve records it)', async () => {
+    const s = scenario({ path: { legal_attestation: true, legal_terms_hash: 'a'.repeat(64), investigation: { legal_terms_url: 'https://example.org/terms' } } });
+    await nightly(s.db);
+    expect(commRow(s.db).level).toBe('OWNER_LEGAL');
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/execution: OWNER_LEGAL/) });
+    // the terms instance accepted (the queue's accept_terms approval satisfies it) — nothing else holds the placement
+    const terms = s.db._tables.seo_link_placement_authorities.find((r) => r.dimension === 'execution' && r.instance_kind === 'terms' && !r.ended_at);
+    Object.assign(terms, { satisfied_at: NOW, satisfied_reason: 'accepted' });
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner' })).ok).toBe(true);
+    expect(approvals(s.db)[0]).toMatchObject({ authority: 'OWNER_LEGAL', action: 'outreach_send', terms_snapshot: expect.objectContaining({ legal_terms_url: 'https://example.org/terms', draft_hash: M.draftHash(s.row) }) });
+  });
+  test('the cap window is the ET calendar day: last night\'s attempts (inside a trailing 24h) do not hold this night\'s run; today\'s do', async () => {
+    const s = scenario({ policy: { auto_outreach_min_score: 60, auto_outreach_daily_cap: 1 } });
+    await nightly(s.db);
+    // an attempt 23h before this 3:35 ET run — yesterday's calendar day
+    const yesterday = new Date(NOW.getTime() - 23 * 3600 * 1000);
+    s.db._tables.seo_link_prospects.push({ id: uid(), target_domain: 'old.org', status: 'contacted', outreach_status: 'sent', outreach_to_email: 'x@old.org', outreach_attempted_at: yesterday, outreach_sent_at: yesterday });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', now: NOW })).toMatchObject({ ok: true });
+    // one stamped after this ET midnight counts: cap 1 is reached
+    const t = scenario({ policy: { auto_outreach_min_score: 60, auto_outreach_daily_cap: 1 } });
+    await nightly(t.db);
+    const today = new Date(NOW.getTime() - 3 * 3600 * 1000); // 00:35 ET
+    t.db._tables.seo_link_prospects.push({ id: uid(), target_domain: 'old.org', status: 'contacted', outreach_status: 'sent', outreach_to_email: 'x@old.org', outreach_attempted_at: today, outreach_sent_at: today });
+    expect(await Outreach.sendOutreach({ prospectId: t.row.id, mode: 'auto', now: NOW })).toMatchObject({ ok: false, code: 'rate_limited' });
+  });
+  test('a reopened row still carrying its closure stamp: the claim drops it, so the in-flight conversation holds its inbox', async () => {
+    const s = scenario({ policy: AUTO_POLICY, placement: { conversation_closed_at: EARLIER } });
+    await nightly(s.db);
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).ok).toBe(true);
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', conversation_closed_at: null });
+  });
   test('GATE_LINK_AUTHORITY off: the shipped owner click stands alone (no rows, no approval); an automatic send is refused', async () => {
     isEnabled.mockImplementation((g) => g !== 'linkAuthority');
     const s = scenario();
@@ -516,6 +577,24 @@ describe('the nightly auto-send (§6.4)', () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ prospectId: sendFirst.id, mode: 'auto' }));
     expect(r).toEqual({ attempted: 1, sent: 1, skipped: [] });
+  });
+  test('rows the claim refuses without touching (a customer recipient, a held inbox) do not starve the valid drafts behind them: the batch bounds sends, not attempts', async () => {
+    const db = makeDb({ seo_link_domains: [], seo_link_acquisition_paths: [], seo_link_prospects: [], seo_link_placement_authorities: [], seo_link_policy: [policyRow()] });
+    const seedDraft = (i) => {
+      const d = domainRow({ domain: `d${i}.org` }); const p = outreachPath(d); d.best_path_id = p.id;
+      const row = draftedRow(d, p, { target_domain: d.domain, outreach_to_email: `editor@${d.domain}`, updated_at: new Date(EARLIER.getTime() + i * 1000) });
+      db._tables.seo_link_domains.push(d); db._tables.seo_link_acquisition_paths.push(p); db._tables.seo_link_prospects.push(row);
+      db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: row.id, path_id: p.id, dimension: 'communication', instance_kind: '-', instance_key: '-', level: 'AUTO_OUTREACH', ended_at: null, satisfied_at: null, approval_id: null });
+      return row;
+    };
+    const refused = []; for (let i = 0; i < 120; i += 1) refused.push(seedDraft(i)); // 120 older drafts the claim refuses every night (customer recipients)
+    const valid = seedDraft(120);
+    const send = jest.fn(async ({ prospectId }) => (prospectId === valid.id ? { ok: true } : { ok: false, code: 'customer_recipient' }));
+    const r = await bridge.autoSendDecided(db, { send, now: NOW });
+    expect(send).toHaveBeenCalledTimes(121);
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ prospectId: valid.id, mode: 'auto' }));
+    expect(r).toMatchObject({ attempted: 121, sent: 1 });
+    expect(r.skipped).toHaveLength(120);
   });
   test('the real sender over the store: the run sends, the placement reads contacted and the instance is satisfied', async () => {
     const s = scenario({ policy: AUTO_POLICY });

@@ -62,6 +62,10 @@ describe('rolling-deploy compatibility of the board unique key', () => {
     }
     expect(hits.length).toBeGreaterThanOrEqual(5);
   });
+  test('a status edit that reopens the outreach lifecycle drops the conversation closure stamp (the §13 inbox guard reads it)', () => {
+    const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
+    expect(s).toContain('if (ACTIVE_OUTREACH_STATUSES.includes(patch.status)) patch.conversation_closed_at = null;');
+  });
   test('the PATCH page-move probe is scoped to the row\'s OWN location_key (step 2 dropped the legacy 2-column key: identity is (domain, page, location))', () => {
     const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
     expect(s).toMatch(/findPlacementRow\(trx, current\.target_domain, patch\.target_page, \{ excludeId: current\.id, location: current\.location_key \}\)/);

@@ -146,7 +146,13 @@ const defaultSend = (args) => require('./link-prospect-outreach').sendOutreach(a
 // re-selected) gets its attempt when the window reopens. Read AFTER the domain
 // transactions committed (never inside one: the sender takes its own advisory
 // lock and the Gmail call is network). Each send is its own claim; the sender's
-// cap decision under the lock ends the batch.
+// cap decision under the lock ends the batch. The batch bounds SENDS, not
+// attempts: a refusal the claim returns without touching the row (a customer
+// recipient, an inbox another placement holds, a policy that moved) leaves that
+// row at the head of the ordering every night, so a limit applied before the
+// claim would hand the same refused rows to the sender each run and starve every
+// newer valid draft behind them. Candidates are the decided rows themselves — a
+// bounded set — walked oldest-first until the batch is sent or the cap ends it.
 const AUTO_SEND_BATCH = 100;
 async function autoSendDecided(db, { send, now }) {
   const out = { attempted: 0, sent: 0, skipped: [] };
@@ -158,8 +164,9 @@ async function autoSendDecided(db, { send, now }) {
   const sendFirst = new Set((await db('seo_link_acquisition_paths').whereIn('id', [...new Set(rows.map((r) => r.path_id).filter(Boolean))]).select('id', 'execution_after_send')).filter((x) => x.execution_after_send !== false).map((x) => x.id));
   const decidedPath = new Map(rows.filter((r) => sendFirst.has(r.path_id)).map((r) => [r.prospect_id, r.path_id]));
   if (!decidedPath.size) return out;
-  const batch = await db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...sendFirst]).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').orderBy('updated_at', 'asc').limit(AUTO_SEND_BATCH).select('id', 'path_id');
+  const batch = await db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...sendFirst]).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').orderBy('updated_at', 'asc').select('id', 'path_id');
   for (const p of batch) {
+    if (out.sent >= AUTO_SEND_BATCH) break;
     if (decidedPath.get(p.id) !== p.path_id) continue; // the row left the path its instance was decided on — the bridge rotates it
     out.attempted += 1;
     let res;
@@ -169,6 +176,15 @@ async function autoSendDecided(db, { send, now }) {
     if (res && res.code === 'rate_limited') break; // the cap is reached for the window — nothing else sends today
   }
   return out;
+}
+
+// The OTHER owner decisions that hold a placement in its park — the park predicate (`gates` in bridgeDomain) minus
+// the row being acted on: an unauthorized OWNER_* row not deferred past the send. The sender refuses while one
+// stands: satisfying only its communication instance would clear the park with that decision still open.
+async function openOwnerHold(trx, { placement, path, exceptRowId }) {
+  const rows = await annotateApprovals(trx, (await trx(AUTH).where({ prospect_id: placement.id }).whereNull('ended_at')).filter((r) => r.id !== exceptRowId));
+  const lane = { outreach: true, sendFirst: path.execution_after_send !== false };
+  return rows.find((r) => !authorized(r) && isOwner(r.level) && !deferred(r, lane)) || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -665,4 +681,4 @@ async function runAuthorityBridge(db, {
   return out;
 }
 
-module.exports = { runAuthorityBridge, aggregateState, annotateApprovals, invalidateApprovals, autoSendDecided, LOCK_KEY, HOMEPAGE, RUN_LIMIT_MAX, DEFAULT_LIMIT };
+module.exports = { runAuthorityBridge, aggregateState, annotateApprovals, invalidateApprovals, autoSendDecided, openOwnerHold, LOCK_KEY, HOMEPAGE, RUN_LIMIT_MAX, DEFAULT_LIMIT };

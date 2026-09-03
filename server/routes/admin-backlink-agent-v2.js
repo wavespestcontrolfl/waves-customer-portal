@@ -622,6 +622,11 @@ router.patch('/prospects/:id', async (req, res, next) => {
         const { inFlight } = await claimProspectDomain(trx, current.target_domain);
         if (inFlight && inFlight.id !== current.id) return { inFlight };
       }
+      // a status edit INTO the active outreach lifecycle (prospect / contacted / negotiating / awaiting_owner) — a reopen
+      // from lost / rejected above all — drops the closure stamp with it: conversationClosed (the §13 inbox guard) would
+      // otherwise keep reading the live row as closed and free its inbox to a second conversation; lost-link recovery
+      // clears it the same way. An active row never carries the stamp, so clearing it on every active edit is exact.
+      if (ACTIVE_OUTREACH_STATUSES.includes(patch.status)) patch.conversation_closed_at = null;
       // recording a conversation by hand (→ contacted / negotiating) OPENS one for the recipient: the same
       // recipient-level lock + predicate the send claim takes (plan §13), so no two writers open the same inbox
       const opensConversation = 'status' in patch && ['contacted', 'negotiating'].includes(patch.status) && !['contacted', 'negotiating'].includes(current.status);

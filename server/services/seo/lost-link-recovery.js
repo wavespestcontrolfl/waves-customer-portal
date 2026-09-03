@@ -208,7 +208,7 @@ async function queueOne(loss, out, scoreMod) {
           // The prior attempt is APPENDED to quality_signals.prior_outreach_attempts
           // (an append-only ledger dailySendCount also counts): a resend of this
           // reopened row stamps its own outreach_attempted_at, so every attempt
-          // inside one trailing-24h window counts against the cap — however many
+          // inside one ET calendar day counts against the cap — however many
           // times the row is recovered, lost and reopened.
           outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null, outreach_attempted_at: null,
           // the reopened conversation re-enters the one-conversation-per-inbox guard (plan §13): its closure stamp goes

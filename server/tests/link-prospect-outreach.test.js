@@ -542,8 +542,10 @@ describe('dailySendCount', () => {
       first: jest.fn(async () => ({ c: '3' })),
       raw: jest.fn((sql, bind) => { raws.push([sql, bind]); return { sql, bind }; }),
     });
-    expect(await Outreach.dailySendCount(q)).toBe(3);
+    expect(await Outreach.dailySendCount(q, new Date('2026-09-03T07:35:00Z'))).toBe(3); // 03:35 ET
     const [sql, bind] = raws[0];
+    // the window opens at ET midnight of the run's day (a trailing 24h from a 3:35 nightly still held the previous night's attempts)
+    expect(bind).toEqual([new Date('2026-09-03T04:00:00Z'), new Date('2026-09-03T04:00:00Z')]);
     expect(sql).toMatch(/SUM\(COALESCE\(\(outreach_attempted_at >= \?\)::int, 0\) \+ \(SELECT count\(\*\) FROM jsonb_array_elements_text\(.*'prior_outreach_attempts'.*\) AS a WHERE a::timestamptz >= \?\)\)/);
     // both raws compile through knex with exactly two bindings each (since, since) — no stray '?'
     const knex = require('knex')({ client: 'pg' });

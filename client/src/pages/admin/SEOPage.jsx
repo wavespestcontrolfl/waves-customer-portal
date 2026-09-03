@@ -2845,7 +2845,7 @@ function OutreachApprovals({ canRun, onChange }) {
           color: data.gateOn ? D.green : D.amber }}>
           {data.gateOn ? "Outreach lane: ON" : "Outreach lane: OFF — sends disabled (GATE_LINK_OUTREACH)"}
         </span>
-        {cap != null && <span style={{ fontSize: 12, color: D.muted }}>Sent (24h): {sentToday}/{cap}</span>}
+        {cap != null && <span style={{ fontSize: 12, color: D.muted }}>Sent today (ET): {sentToday}/{cap}</span>}
       </div>
 
       {msg && (
