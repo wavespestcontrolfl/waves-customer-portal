@@ -255,6 +255,23 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
       if (!customerId && call.twilio_call_sid) {
         leadsUnlinked = await trx('leads').where({ twilio_call_sid: call.twilio_call_sid }).update({ twilio_call_sid: null, updated_at: new Date() });
       }
+      // A relink that MOVES the call between two customers repoints the
+      // call-created lead to the new owner in the same transaction (Codex
+      // #3764 r5 P1): the lead is keyed by this call's twilio_call_sid and,
+      // left under the previous customer, findReusableCallLead rejects it on
+      // a later reprocess (a lead another customer owns is ineligible —
+      // applySameCallLeadEligibility) and mints and NOTIFIES a second lead
+      // for the same call. Only a lead still owned by the PREVIOUS customer
+      // moves; an unclaimed (NULL) lead is already eligible for the new owner
+      // and is left alone, and both the SID and stamp arms reuse the
+      // repointed row afterward. converted_at / status are untouched — this
+      // re-attributes an already-owned lead, never a new conversion.
+      let leadsReconciled = 0;
+      if (customerId && call.twilio_call_sid && call.customer_id && call.customer_id !== customerId) {
+        leadsReconciled = await trx('leads')
+          .where({ twilio_call_sid: call.twilio_call_sid, customer_id: call.customer_id })
+          .update({ customer_id: customerId, updated_at: new Date() });
+      }
       const timeline = trx('customer_interactions')
         .where({ interaction_type: 'call' })
         .whereRaw("metadata ->> 'call_log_id' = ?", [String(call.id)]);
@@ -298,7 +315,7 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
           .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
           .update({ review_status: null });
       }
-      return { timelineRows: rows, timelineCreated: created, repaired, leadsUnlinked };
+      return { timelineRows: rows, timelineCreated: created, repaired, leadsUnlinked, leadsReconciled };
     });
     if (moved?.notFound) return res.status(404).json({ error: 'Customer not found' });
     if (!moved) {
@@ -327,7 +344,7 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
       }
     }
     logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'}; timeline rows moved: ${timelineMoved})`);
-    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, warnings });
+    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, leads_reconciled: moved.leadsReconciled, warnings });
   } catch (err) { next(err); }
 });
 

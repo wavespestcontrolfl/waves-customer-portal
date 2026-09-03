@@ -216,6 +216,25 @@ describe('PUT /calls/:id/customer', () => {
     expect(updates.find((u) => u.table === 'leads')).toBeUndefined();
   });
 
+  test('a relink that MOVES the call between two customers repoints the call-created lead to the new owner (codex #3764 r5 P1)', async () => {
+    const updates = mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(200);
+      expect((await res.json()).leads_reconciled).toBe(1);
+    });
+    const lead = updates.find((u) => u.table === 'leads');
+    // The lead MOVES to the new owner (not severed): findReusableCallLead then
+    // reuses it on reprocess instead of minting a duplicate. Scoped to the
+    // PREVIOUS owner's lead for this call's SID; the SID claim and the call's
+    // lead stamp are kept (the repointed row stays valid under both arms).
+    expect(lead.patch.customer_id).toBe(CUSTOMER_ID);
+    expect(lead.patch.twilio_call_sid).toBeUndefined();
+    expect(JSON.stringify(lead.wheres)).toContain(SID);
+    expect(JSON.stringify(lead.wheres)).toContain('old-customer');
+    expect(updates.find((u) => u.table === 'call_log').patch.metadata.sql).not.toContain("- 'lead_id'");
+  });
+
   test('a timeline move that fails rolls the relink back and surfaces as an error, never a half-applied success', async () => {
     mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
     const inner = db.getMockImplementation();
