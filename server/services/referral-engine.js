@@ -288,6 +288,51 @@ async function enrollPromoter(customerId, { conn = null, settings: presetSetting
   return runEnroll();
 }
 
+/**
+ * Enroll — or resolve — the promoter a customer profile shares from. The
+ * ONE path for every caller that needs a promoter for a customerId
+ * (portal Refer tab, report/estimate share taps, composer links).
+ *
+ * enrollPromoter stays strictly per-customer (codex #3379 r5). Multi-
+ * property siblings share a phone while referral_promoters.customer_phone
+ * stays unique, so a sibling profile's first enroll loses the insert to
+ * that constraint (23505) — resolve the HOUSEHOLD promoter read-only
+ * instead, scoped to the same account_id (phone alone is not identity:
+ * recycled/shared numbers cross unrelated customers, and handing over a
+ * foreign code would credit rewards to the wrong account). No account-
+ * scoped match = a genuine cross-account collision → rethrow for manual
+ * resolution, never a guessed attribution. Callers log err.code only — PG
+ * constraint violations quote the conflicting phone number.
+ *
+ * conn: an outer transaction. The enroll runs in a SAVEPOINT on it (knex
+ * nests transactions as savepoints) so a 23505 rolls back only the
+ * savepoint and the fallback can still read the outer transaction — a
+ * unique violation otherwise aborts the whole Postgres transaction (25P02).
+ * settings: live settings the caller already read on that connection.
+ */
+async function resolvePromoter(customerId, { conn = null, settings = null, database = db } = {}) {
+  const dbx = conn || database;
+  try {
+    return await (conn
+      ? conn.transaction((sp) => enrollPromoter(customerId, { conn: sp, settings }))
+      : enrollPromoter(customerId));
+  } catch (err) {
+    if (err?.code !== '23505') throw err;
+    const profile = await dbx('customers')
+      .where({ id: customerId })
+      .first('id', 'phone', 'account_id');
+    const promoter = profile?.phone && profile?.account_id
+      ? await dbx('referral_promoters as rp')
+        .join('customers as c', 'rp.customer_id', 'c.id')
+        .where('rp.customer_phone', profile.phone)
+        .where('c.account_id', profile.account_id)
+        .first('rp.*')
+      : null;
+    if (!promoter) throw err;
+    return { promoter, alreadyEnrolled: true, household: true };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 2. submitReferral
 // ---------------------------------------------------------------------------
@@ -1368,6 +1413,7 @@ async function getProgramAnalytics(startDate, endDate) {
 
 module.exports = {
   enrollPromoter,
+  resolvePromoter,
   submitReferral,
   convertReferral,
   updateReferralStatus,

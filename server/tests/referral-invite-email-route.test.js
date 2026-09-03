@@ -11,7 +11,7 @@ jest.mock('../middleware/auth', () => ({
 jest.mock('../models/db', () => jest.fn());
 
 jest.mock('../services/referral-engine', () => ({
-  enrollPromoter: jest.fn(async () => ({ promoter: { id: 'promoter-1', first_name: 'Taylor', customer_email: 'taylor@waves.test' } })),
+  resolvePromoter: jest.fn(async () => ({ promoter: { id: 'promoter-1', first_name: 'Taylor', customer_email: 'taylor@waves.test' } })),
   submitReferral: jest.fn(),
   getSettings: jest.fn(async () => ({ referee_discount_cents: 2500 })),
   getPromoterReferralLink: jest.fn(() => 'https://portal.wavespestcontrol.com/r/WAVES-J4KM'),
@@ -102,7 +102,7 @@ describe('referral phone validation', () => {
 
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'Enter a valid phone number' });
-    expect(referralEngine.enrollPromoter).not.toHaveBeenCalled();
+    expect(referralEngine.resolvePromoter).not.toHaveBeenCalled();
     expect(referralEngine.submitReferral).not.toHaveBeenCalled();
   });
 
@@ -111,7 +111,7 @@ describe('referral phone validation', () => {
 
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'Enter a valid phone number' });
-    expect(referralEngine.enrollPromoter).not.toHaveBeenCalled();
+    expect(referralEngine.resolvePromoter).not.toHaveBeenCalled();
   });
 });
 

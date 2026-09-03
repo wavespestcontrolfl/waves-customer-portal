@@ -66,7 +66,7 @@ const inviteEmailSchema = Joi.object({
 router.get('/', async (req, res, next) => {
   try {
     // Auto-enroll as promoter if not already
-    const { promoter } = await engine.enrollPromoter(req.customerId);
+    const { promoter } = await engine.resolvePromoter(req.customerId);
 
     const referrals = await db('referrals')
       .where(function () {
@@ -177,7 +177,7 @@ router.post('/', submitLimiter, async (req, res, next) => {
     const { name, phone, email, address, notes } = value;
 
     // Ensure enrolled
-    const { promoter } = await engine.enrollPromoter(req.customerId);
+    const { promoter } = await engine.resolvePromoter(req.customerId);
 
     const referral = await engine.submitReferral(promoter.id, {
       name, phone, email, address, notes, source: 'portal',
@@ -211,7 +211,7 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
     if (error) return res.status(400).json({ error: error.details[0].message });
     const { phone, friendName } = value;
 
-    const { promoter } = await engine.enrollPromoter(req.customerId);
+    const { promoter } = await engine.resolvePromoter(req.customerId);
     const settings = await engine.getSettings();
     const referralLink = engine.getPromoterReferralLink(promoter, settings);
 
@@ -301,7 +301,7 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
     const { email, friendName } = value;
     const cleanEmail = email.trim().toLowerCase();
 
-    const { promoter } = await engine.enrollPromoter(req.customerId);
+    const { promoter } = await engine.resolvePromoter(req.customerId);
     const settings = await engine.getSettings();
     const referralLink = engine.getPromoterReferralLink(promoter, settings);
 
