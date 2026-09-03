@@ -2,11 +2,17 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/email/gmail-client', () => ({ sendMessage: jest.fn(), isConnected: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
+// the §13 recipient lookup is exercised in its own suite; here it is clear unless a test says otherwise
+jest.mock('../services/seo/link-outreach-mandate', () => ({ ...jest.requireActual('../services/seo/link-outreach-mandate'), recipientReview: jest.fn() }));
 
 const db = require('../models/db');
 const gmail = require('../services/email/gmail-client');
 const { isEnabled } = require('../config/feature-gates');
+const M = require('../services/seo/link-outreach-mandate');
 const Outreach = require('../services/seo/link-prospect-outreach');
+// the shipped lane: the outreach gate on, the authority contract (GATE_LINK_AUTHORITY) off — no rows decided
+const outreachGateOn = () => isEnabled.mockImplementation((g) => g === 'linkProspectOutreach');
+const clearReview = (to = 'editor@bradentonherald.com') => ({ kind: 'clear', recipient: to, matched: [], lookup_hash: 'h-clear' });
 
 // Minimal chainable knex mock. `result` is what awaiting the builder resolves to
 // (used by .update() compare-and-swaps that read the affected-row count); `first`
@@ -29,6 +35,8 @@ function chain({ result = [], first, returning } = {}) {
 function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
+    // the policy read under the lock (§6.4 cap): defaults unless a test queues a row
+    if (table === 'seo_link_policy' && !tableQueues.has(table)) return chain({ first: undefined });
     const q = tableQueues.get(table);
     if (!q || q.length === 0) throw new Error(`unexpected db('${table}') call (queue empty)`);
     return q.shift();
@@ -56,6 +64,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.LINK_OUTREACH_DAILY_CAP;
   gmail.isConnected.mockResolvedValue(true); // connected by default; the not-connected test overrides
+  M.recipientReview.mockResolvedValue(clearReview());
 });
 
 describe('isValidEmail', () => {
@@ -131,15 +140,15 @@ describe('checkSendPreconditions (pure)', () => {
 
 describe('sendOutreach', () => {
   test('happy path: sends the CLAIMED draft, marks contacted/sent, records thread ref', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     gmail.sendMessage.mockResolvedValue({ id: 'msg1', threadId: 'thr1' });
     const finalRow = draftedProspect({ status: 'contacted', outreach_status: 'sent' });
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),         // pre-read (fast-fail checks)
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
-      chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: 'path-ok', leased_path_revision: 1 } }),    // [txn] the path it will send on…                // [txn] dailySendCount under the lock
+      chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
+      chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)                // [txn] dailySendCount under the lock
       chain({ returning: [draftedProspect()] }),   // [txn] CAS claim → returns the locked row
       chain({ returning: [finalRow] }),            // finalize → sent (token-gated)
     ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] }); // …is live and standing
@@ -148,7 +157,7 @@ describe('sendOutreach', () => {
     expect(res.ok).toBe(true);
     expect(res.message_id).toBe('msg1');
     expect(res.thread_id).toBe('thr1');
-    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.transaction).toHaveBeenCalledTimes(2); // the claim, then the finalize (with the instance satisfaction)
     expect(db.raw).toHaveBeenCalled(); // advisory lock acquired
     expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
     const [to, subject, htmlBody] = gmail.sendMessage.mock.calls[0];
@@ -158,14 +167,14 @@ describe('sendOutreach', () => {
   });
 
   test('finalize matches no row after a real send → finalize_failed (surfaced, not silent ok)', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     gmail.sendMessage.mockResolvedValue({ id: 'msg9', threadId: 'thr9' });
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
-      chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: 'path-ok', leased_path_revision: 1 } }),    // [txn] the path it will send on…
+      chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
+      chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)
       chain({ returning: [draftedProspect()] }), // CAS claim
       chain({ returning: [] }),                  // finalize matched 0 rows
     ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
@@ -186,25 +195,27 @@ describe('sendOutreach', () => {
   });
 
   test('at the daily cap (checked atomically in the txn) → rate_limited, never sends', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
+      chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
+      chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
       chain({ first: { c: '12' } }), // [txn] already at cap
-    ] });
+    ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
     expect(res.code).toBe('rate_limited');
     expect(gmail.sendMessage).not.toHaveBeenCalled();
   });
 
   test('lost the CAS race (claim returns 0 rows) → already_sent, never sends', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
-      chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: 'path-ok', leased_path_revision: 1 } }),    // [txn] the path it will send on…
+      chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
+      chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)
       chain({ returning: [] }), // another click already flipped drafted→sending
     ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
@@ -213,14 +224,14 @@ describe('sendOutreach', () => {
   });
 
   test('claimed draft is incomplete (raced revision) → incomplete_draft, releases claim, no send', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     const release = chain({ result: 1 });
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),                            // pre-read looks complete
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
-      chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: 'path-ok', leased_path_revision: 1 } }),    // [txn] the path it will send on…
+      chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
+      chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)
       chain({ returning: [draftedProspect({ outreach_body: '' })] }), // but the claimed row is incomplete
       release,                                                        // release our claim
     ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
@@ -231,7 +242,7 @@ describe('sendOutreach', () => {
   });
 
   test('not connected → gmail_not_connected, no claim, draft untouched', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     gmail.isConnected.mockResolvedValue(false);
     setDbQueues({ seo_link_prospects: [chain({ first: draftedProspect() })] });
     const res = await Outreach.sendOutreach({ prospectId: 'p1' });
@@ -241,15 +252,15 @@ describe('sendOutreach', () => {
   });
 
   test('ambiguous Gmail failure → send_failed, parks in non-sendable send_error (not drafted)', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     gmail.sendMessage.mockRejectedValue(new Error('socket timeout'));
     const errMark = chain({ result: 1 });
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect() }),
       chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
-      chain({ first: { c: '0' } }),
       chain({ result: [] }),                       // [txn] pre-send settlement's row read → path unchanged
-      chain({ first: { path_id: 'path-ok', leased_path_revision: 1 } }),    // [txn] the path it will send on…               // [txn] count
+      chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 1 }) }),    // [txn] the path it will send on…
+      chain({ first: { c: '0' } }),                // [txn] dailySendCount under the lock (after the authority check)               // [txn] count
       chain({ returning: [draftedProspect()] }),  // [txn] CAS claims → returns row
       errMark,                                     // mark sending→send_error (token-gated)
     ], seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })] });
@@ -261,7 +272,7 @@ describe('sendOutreach', () => {
   });
 
   test('prospect already sent (precondition) → already_sent, no txn', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect({ outreach_sent_at: new Date(), outreach_status: 'sent' }) }),
     ] });
@@ -272,13 +283,12 @@ describe('sendOutreach', () => {
   });
 
   test('a draft whose acquisition path moved since it was saved is NOT sent → path_moved (settled inside the send transaction, before the CAS)', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     const move = chain({ result: 1 });
     setDbQueues({
       seo_link_prospects: [
         chain({ first: draftedProspect() }),
         chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
-      chain({ first: { c: '0' } }),
         chain({ result: [{ id: 'p1', path_id: 'path-old', link_type: 'editorial', outreach_status: 'drafted', outreach_sent_at: null, outreach_send_token: null, leased_path_revision: null }] }), // settlement's row read
         move, // the transition clears the draft
       ],
@@ -299,14 +309,13 @@ describe('sendOutreach', () => {
   });
 
   test('a settlement that cannot resolve the chain is not "unchanged": the send fails closed when the row is still on a superseded path', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     setDbQueues({
       seo_link_prospects: [
         chain({ first: draftedProspect() }),
         chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
-      chain({ first: { c: '0' } }),
         chain({ result: [] }),                        // settlement read (nothing moved — e.g. the chain exceeded its hop bound)
-        chain({ first: { path_id: 'path-retired' } }), // the path the send would run on…
+        chain({ first: draftedProspect({ path_id: 'path-retired' }) }), // the path the send would run on…
       ],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-retired', superseded_by: 'path-x' } })], // …is retired
     });
@@ -316,16 +325,16 @@ describe('sendOutreach', () => {
   });
 
   test('a draft on a path disproven (or ruled human-only) since it was saved is not sent → path_moved', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     setDbQueues({
       seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
-      chain({ first: { c: '0' } }), chain({ result: [] }), chain({ first: { path_id: 'path-dead' } })],
+      chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-dead' }) })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-dead', superseded_by: null, confidence: 0, agent_completable: true } })],
     });
     expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
     setDbQueues({
       seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
-      chain({ first: { c: '0' } }), chain({ result: [] }), chain({ first: { path_id: 'path-human' } })],
+      chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-human' }) })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-human', superseded_by: null, confidence: 0.8, agent_completable: false } })],
     });
     expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
@@ -333,10 +342,10 @@ describe('sendOutreach', () => {
   });
 
   test('NULL confidence (never assessed) is not standing → path_moved (Codex #3720 r6 P1)', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     setDbQueues({
       seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }),                 // [txn] prospect row lock (prospect → path order)
-      chain({ first: { c: '0' } }), chain({ result: [] }), chain({ first: { path_id: 'path-unassessed' } })],
+      chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-unassessed' }) })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-unassessed', superseded_by: null, confidence: null, agent_completable: true } })],
     });
     expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
@@ -344,9 +353,9 @@ describe('sendOutreach', () => {
   });
 
   test('a draft carrying NO revision stamp is not sent → path_moved: the stamp is required, never skipped (Codex #3720 r7 P1)', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     setDbQueues({
-      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }), chain({ first: { c: '0' } }), chain({ result: [] }), chain({ first: { path_id: 'path-ok', leased_path_revision: null } })],
+      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }), chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: null }) })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 1 } })],
     });
     expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
@@ -354,9 +363,9 @@ describe('sendOutreach', () => {
   });
 
   test('a draft whose path was revised in place after it was written is not sent → path_moved (revision stamp)', async () => {
-    isEnabled.mockReturnValue(true);
+    outreachGateOn();
     setDbQueues({
-      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }), chain({ first: { c: '0' } }), chain({ result: [] }), chain({ first: { path_id: 'path-ok', leased_path_revision: 3 } })],
+      seo_link_prospects: [chain({ first: draftedProspect() }), chain({ first: { id: 'p1' } }), chain({ result: [] }), chain({ first: draftedProspect({ path_id: 'path-ok', leased_path_revision: 3 }) })],
       seo_link_acquisition_paths: [chain({ first: { id: 'path-ok', superseded_by: null, confidence: 0.7, agent_completable: true, revision: 4 } })],
     });
     expect((await Outreach.sendOutreach({ prospectId: 'p1' })).code).toBe('path_moved');
@@ -497,7 +506,7 @@ describe('reconcileSendError', () => {
     setDbQueues({ seo_link_prospects: [
       chain({ first: draftedProspect({ outreach_status: 'send_error' }) }),
       upd,
-    ] });
+    ], seo_link_placement_authorities: [chain({ result: [] })] }); // the Sent folder proved the send: its open instance (none here) is satisfied
     const res = await Outreach.reconcileSendError({ prospectId: 'p1', outcome: 'sent', approvedBy: 'Adam' });
     expect(res.ok).toBe(true);
     expect(upd.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'contacted', outreach_status: 'sent' }));

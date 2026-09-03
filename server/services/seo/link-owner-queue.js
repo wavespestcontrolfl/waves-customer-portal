@@ -39,6 +39,7 @@ const P = require('./link-authority-policy');
 const R = require('./link-registry');
 const { lockProspectDomain } = require('./prospect-domain-lock');
 const { BRIDGE_STATES, groupMismatch, expectedLocations, paidPlacementIds } = require('./link-authority-selection');
+const M = require('./link-outreach-mandate');
 
 const AUTH = 'seo_link_placement_authorities';
 const PARKED = 'awaiting_owner';
@@ -61,8 +62,9 @@ const refuse = (status, message) => { throw new OwnerQueueError(status, message)
 // APPROVABLE_LEVELS is deliberately excluded — see whyNotApprovable).
 const APPROVE_HERE = Object.freeze({
   OWNER_FREE: ['execution'], OWNER_ACCOUNT: ['execution'], OWNER_MEMBERSHIP: ['execution'],
-  OWNER_LEGAL: ['execution'], // the accept_terms instance; the OWNER_LEGAL SEND is the outreach click (PR 3)
+  OWNER_LEGAL: ['execution', 'communication'], // the accept_terms instance, and the send (the click IS the approval, §6.3 2c)
   OWNER_PAYMENT: ['payment'],
+  OWNER_OUTREACH: ['communication'],
 });
 
 // §3.6b action per (dimension, instance kind)
@@ -92,7 +94,9 @@ function whyNotApprovable(row, path = null) {
   if (row.level.startsWith('AUTO_')) return 'automatic under the current policy — no approval needed';
   if (row.level === P.LEVELS.DENY) return 'fails a quality floor — use Acquire anyway on the registry row';
   if (row.level === P.LEVELS.INVALID) return 'not actionable until re-investigated';
-  if (row.dimension === 'communication') return 'approved by the authenticated send from the outreach queue';
+  // a send is approved by SENDING it (the sender writes the approval bound to the draft hash) — only the initial
+  // instance from the queue; a follow-up is its own lane (§6.4, not built yet)
+  if (row.dimension === 'communication' && row.instance_kind !== '-') return 'the follow-up send is not available from the queue yet';
   if (row.level === P.LEVELS.OWNER_HUMAN_STEP) return 'a human performs this step; the runner checkpoint records it';
   // the bridge parks a fee-scope change after payment activity as OWNER_INPUT_REQUIRED with its regroup reason: that is
   // not a quote to enter — the owner's regroup (step 5) is required, and the nightly does not select the domain until then
@@ -105,6 +109,8 @@ function whyNotApprovable(row, path = null) {
   // a renewal instance is approvable only against a verified renewal quote: with none on the path the owner would be
   // authorizing a charge the investigator never priced — price entry (re-investigation with the renewal quote) comes first
   if (path && row.dimension === 'payment' && actionFor(row) === 'renewal' && !(Number.isSafeInteger(path.renewal_cost_cents) && path.renewal_cost_cents > 0)) return 'renewal price not verified — re-investigate with the renewal quote before approving';
+  // sending the pitch would itself accept the publisher's terms: the co-transactional acceptance is not built (§3.3b)
+  if (path && row.dimension === 'communication' && path.terms_accepted_by_send === true) return 'sending this pitch accepts the publisher\'s terms — not available until the terms acceptance ships';
   return null;
 }
 
@@ -118,7 +124,7 @@ function stalenessOf(row, ctx, waiver, held = false) {
   // a HELD domain (a payment-input change under a purchase — plan §3.3) is suppressed by the nightly selection: the
   // stale stamp is not re-decided by any nightly run, the owner's regroup / shape review is what moves it
   if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== pathRevision) return { reason: held ? REGROUP_HELD : 'inputs changed since the card — the nightly bridge re-decides it; refresh the queue', hash, pathRevision };
-  const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: false, waiver });
+  const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: ctx.draftClean === true, waiver });
   const renewal = row.dimension === 'payment' && R.RENEWAL_KIND_RE.test(String(row.instance_kind));
   const inst = decided.instances.find((i) => i.dimension === row.dimension && i.instance_kind === (renewal ? '-' : row.instance_kind));
   if (!inst || inst.level !== row.level) return { reason: `the policy now yields ${inst ? inst.level : 'no instance'} for this step, not ${row.level} — the nightly bridge re-decides it`, hash, pathRevision };
@@ -207,7 +213,7 @@ const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v))
 async function listOwnerQueue(db) {
   const { policy } = await P.loadPolicy(db);
   const candidates = await db('seo_link_prospects').whereIn('status', [...CARD_STATUSES]).whereNotNull('domain_id')
-    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'claimed_at', 'updated_at');
+    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'claimed_at', 'updated_at');
   const liveRows = candidates.length ? await db(AUTH).whereIn('prospect_id', candidates.map((p) => p.id)).whereNull('ended_at') : [];
   // a parked prospect is a card outright; a checkout / placed placement only while an OPEN owner-level row it decides
   // here exists — otherwise every placed link would be a card with nothing to click
@@ -254,7 +260,7 @@ async function listOwnerQueue(db) {
     const path = pathById.get(p.path_id) || null;
     // a LEASED card cannot be the primary: its click is the lease 409 and every unleased sibling would defer to it
     if (p.claimed_at || !path || path.id !== d.best_path_id) return false;
-    const ctx = { path, domain: d, policy, score: d.score };
+    const ctx = { path, domain: d, policy, score: d.score, draftClean: M.draftReview(p).clean };
     return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && r.path_id === path.id && whyNotApprovable(r, path) === null && whyNotHere(p, r) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null, heldDomain.has(d.id)).reason);
   };
   const groupPrimary = new Map();
@@ -275,12 +281,21 @@ async function listOwnerQueue(db) {
     coveredByGroup.set(groupId, lead ? cardsFor.filter((s) => s.id === p.id || attachable(s)).length : 1);
   }
 
+  // §13 — the recipient review the owner sees before a send click; best-effort here (the click re-runs it under the
+  // lock and fails closed on an error), computed once per drafted card with a sendable communication row
+  const reviewFor = new Map();
+  for (const p of cardsFor) {
+    const sendable = p.outreach_status === 'drafted' && rows.some((r) => r.prospect_id === p.id && r.dimension === 'communication' && r.instance_kind === '-' && !r.satisfied_at && isOwner(r.level));
+    if (!sendable) continue;
+    try { reviewFor.set(p.id, await M.recipientReview(db, p.outreach_to_email)); } catch (err) { reviewFor.set(p.id, { kind: 'error', recipient: p.outreach_to_email, matched: [], lookup_hash: null, error: err.message }); }
+  }
   const cards = cardsFor.map((p) => {
     const d = domainById.get(p.domain_id);
     const path = pathById.get(p.path_id) || null;
     const onBestPath = Boolean(path && path.id === d.best_path_id);
     const shared = Boolean(path && path.fee_scope === 'account_wide' && p.payment_group_id);
-    const ctx = onBestPath ? { path, domain: d, policy, score: d.score } : null;
+    const draftReview = M.draftReview(p);
+    const ctx = onBestPath ? { path, domain: d, policy, score: d.score, draftClean: draftReview.clean } : null;
     const mine = rows.filter((r) => r.prospect_id === p.id).map((r) => {
       // the lease is the click's first refusal — a leased card never shows a button that can only 409
       // a row decided on a PRIOR path (the placement moved to the best path, its instances not yet rotated) is judged
@@ -288,6 +303,9 @@ async function listOwnerQueue(db) {
       let whyNot = !onBestPath ? 'placement is not on the domain\'s current best path — the nightly bridge rotates it'
         : r.path_id !== path.id ? 'the step was decided on a prior path — the nightly bridge rotates it'
           : (whyNotApprovable(r, path) || whyNotHere(p, r) || (p.claimed_at ? 'leased to a worker — refresh after it reports' : null));
+      // a send needs a draft to send (the bridge parks the row only once one exists; a re-draft in flight clears it)
+      if (!whyNot && r.dimension === 'communication' && p.outreach_status !== 'drafted') whyNot = 'no draft to send — draft the pitch on the Link Building board first';
+      if (!whyNot && r.dimension === 'communication' && (reviewFor.get(p.id) || {}).kind === 'customer') whyNot = 'the recipient is a customer contact — outreach never goes to a customer; re-draft to another address';
       // the same freshness test the click applies — a stale stamp never shows a button that can only 409, and an
       // APPROVED row whose inputs moved since (price, policy, revision) is shown as awaiting the bridge's re-decision
       // rather than as live spending authority (the bridge invalidates it on its next pass)
@@ -304,6 +322,8 @@ async function listOwnerQueue(db) {
         approvable: whyNot === null && primary,
         why_not: whyNot || (primary ? null : `one approval covers the ${coveredByGroup.get(p.payment_group_id)} locations sharing this fee — approve it on the first card`),
         shared_fee: sharedFee ? { group_id: p.payment_group_id, placements: coveredByGroup.get(p.payment_group_id) } : null,
+        // the send click's inputs (§6.4 / §13): the draft the click sends, its review, the recipient match to acknowledge
+        draft: r.dimension === 'communication' ? { to: p.outreach_to_email || null, subject: p.outreach_subject || null, body: p.outreach_body || null, review: draftReview, recipient_review: reviewFor.get(p.id) || null } : undefined,
       };
     });
     return {
@@ -365,6 +385,8 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     await loadApprovals(trx, [row]);
     const whyNotLevel = whyNotApprovable(row);
     if (whyNotLevel) refuse(409, `not approvable: ${whyNotLevel}`);
+    // a communication row is approved by SENDING (sendRow) — the sender writes the approval bound to the draft hash
+    if (row.dimension === 'communication') refuse(409, 'a send is approved by sending it — use the Send action');
     // the row AND the placement itself must sit on the domain's best path — a placement whose path was deleted (path_id
     // SET NULL) is nobody's to approve until the bridge rotates it, whatever its rows still name
     if (!domain.best_path_id || row.path_id !== domain.best_path_id || placementNow.path_id !== domain.best_path_id) refuse(409, 'the placement is no longer on the domain\'s best path — the nightly bridge rotates it; refresh the queue');
@@ -373,7 +395,7 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     const whyNotPath = whyNotApprovable(row, path);
     if (whyNotPath) refuse(409, `not approvable: ${whyNotPath}`);
     const { policy } = await P.loadPolicy(trx);
-    const ctx = { path, domain, policy, score: domain.score, instanceKey: row.instance_key };
+    const ctx = { path, domain, policy, score: domain.score, instanceKey: row.instance_key, draftClean: M.draftReview(placementNow).clean };
     // the card's frozen inputs must still be the live ones (§3.6b) — "an owner approved THESE numbers, not
     // whatever they became": the ONE test the listing applies before it shows a button
     const { waiver } = await activeWaiver(trx, domain.id, path.id, ctx);
@@ -434,7 +456,7 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     return { approval, attached, domainId: domain.id, prospectIds };
   });
   const run = bridge || require('./link-authority-bridge').runAuthorityBridge;
-  const ran = await bestEffortBridge(run, db, { domainIds: [result.domainId], notify: noop, now });
+  const ran = await bestEffortBridge(run, db, { domainIds: [result.domainId], notify: noop, autoSend: false, now });
   return { ...result, bridge: ran };
 }
 
@@ -544,7 +566,7 @@ async function acquireAnyway(db, { domainId, actor, note = null, now = new Date(
     return { waiver, replaced, domainId: domain.id, domain: domain.domain, floors: failing };
   });
   const run = bridge || require('./link-authority-bridge').runAuthorityBridge;
-  const ran = await bestEffortBridge(run, db, { domainIds: [result.domainId], notify: noop, now });
+  const ran = await bestEffortBridge(run, db, { domainIds: [result.domainId], notify: noop, autoSend: false, now });
   // what now awaits the owner on this domain (parked siblings park nothing new, so `parked` alone undercounts). These
   // reads run after the commit and are best-effort like the bridge: the waiver is recorded whatever they do, so a read
   // failure reports an unavailable summary — never a failed click that invites a retry (which would only write an
@@ -564,4 +586,38 @@ async function acquireAnyway(db, { domainId, actor, note = null, now = new Date(
   }
 }
 
-module.exports = { listOwnerQueue, approveRow, decideDomain, acquireAnyway, waivableFloors, whyNotApprovable, actionFor, OwnerQueueError, APPROVE_HERE };
+// ---------------------------------------------------------------------------
+// Send — the owner's click on a communication row IS its approval (§6.3 2c):
+// the sender writes the approval under its own claim lock, bound to the draft
+// hash and the recipient review the owner acknowledged, and sends. Every
+// refusal the sender returns is a 4xx here; the placement / row / path checks
+// mirror the sender's (it re-validates all of them under the lock).
+// ---------------------------------------------------------------------------
+const SEND_CODE_STATUS = Object.freeze({
+  not_found: 404, gate_off: 403, gmail_not_connected: 503, rate_limited: 429, already_sent: 409, not_actionable: 409,
+  not_authorized: 409, customer_recipient: 409, recipient_review_required: 409, recipient_lookup_failed: 503,
+  path_moved: 409, path_unlinked: 409, no_draft: 409, incomplete_draft: 409, invalid_recipient: 409, not_outreach: 409,
+  send_failed: 502, finalize_failed: 500,
+});
+async function sendRow(db, { authorityId, actor, reviewedLookupHash = null, send = null }) {
+  if (!actor) refuse(400, 'a sending admin identity is required');
+  const row = await db(AUTH).where({ id: authorityId }).first('id', 'prospect_id', 'dimension', 'instance_kind', 'ended_at', 'satisfied_at');
+  if (!row) refuse(404, 'authority row not found');
+  if (row.dimension !== 'communication' || row.instance_kind !== '-') refuse(409, 'only the initial send is sent from the queue');
+  if (row.ended_at || row.satisfied_at) refuse(409, 'the send instance is no longer open — refresh the queue');
+  const placement = await db('seo_link_prospects').where({ id: row.prospect_id }).first('id', 'status', 'parked_from_status', 'claimed_at');
+  if (!placement) refuse(404, 'placement not found');
+  const notHere = placement.claimed_at ? `leased at ${placement.status}` : whyNotHere(placement, row);
+  if (notHere) refuse(409, `the placement is no longer awaiting your decision (${notHere}) — refresh the queue`);
+  const sendOutreach = send || require('./link-prospect-outreach').sendOutreach;
+  const r = await sendOutreach({ prospectId: placement.id, approvedBy: actor, mode: 'owner', reviewedLookupHash });
+  if (!r.ok) {
+    const err = new OwnerQueueError(SEND_CODE_STATUS[r.code] || 400, r.error || `send refused: ${r.code}`);
+    err.code = r.code;
+    err.review = r.review || null;
+    throw err;
+  }
+  return { sent: true, prospectId: placement.id, message_id: r.message_id, thread_id: r.thread_id, authority: r.authority };
+}
+
+module.exports = { listOwnerQueue, approveRow, sendRow, decideDomain, acquireAnyway, waivableFloors, whyNotApprovable, actionFor, OwnerQueueError, APPROVE_HERE, SEND_CODE_STATUS };

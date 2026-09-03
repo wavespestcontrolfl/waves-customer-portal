@@ -451,7 +451,7 @@ router.patch('/registry/:id', async (req, res, next) => {
 // carry an HTTP status (400 / 404 / 409); anything else is a real failure.
 // ---------------------------------------------------------------------------
 const ownerQueueCall = (res, next, fn) => fn().then((r) => res.json(r)).catch((err) => {
-  if (err instanceof ownerQueue.OwnerQueueError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof ownerQueue.OwnerQueueError) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.review ? { review: err.review } : {}) });
   return next(err);
 });
 // GET /api/admin/backlink-agent/owner-queue — one card per parked placement
@@ -470,6 +470,14 @@ const decideDomainHandler = (decision) => (req, res, next) => ownerQueueCall(res
   logger.info(`[backlink-owner-queue] ${actorOf(req)} ${decision}: ${r.domain} → ${r.agent_state} (${r.audited} row(s) audited)`);
   return r;
 });
+// POST /api/admin/backlink-agent/owner-queue/rows/:id/send — { reviewed_lookup_hash? }. The click IS the send approval
+// (§6.3 2c); requireAdmin like the board's send: it mails from the primary inbox.
+router.post('/owner-queue/rows/:id/send', requireAdmin, (req, res, next) => ownerQueueCall(res, next, async () => {
+  const hash = (req.body || {}).reviewed_lookup_hash;
+  const r = await ownerQueue.sendRow(db, { authorityId: req.params.id, actor: actorOf(req), reviewedLookupHash: typeof hash === 'string' ? hash : null });
+  logger.info(`[backlink-owner-queue] ${actorOf(req)} sent the pitch for ${r.prospectId} (${r.authority ? r.authority.level : 'no authority row'})`);
+  return r;
+}));
 router.post('/owner-queue/domains/:id/reject', decideDomainHandler('rejected'));
 router.post('/owner-queue/domains/:id/watch', decideDomainHandler('watch'));
 // POST /api/admin/backlink-agent/registry/:id/acquire-anyway — { note? } (a floor waiver, never an approval)
@@ -676,8 +684,9 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
       .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
       .orderBy('updated_at', 'desc');
     const Outreach = require('../services/seo/link-prospect-outreach');
+    // an open draft, or one the nightly bridge parked for the owner's send (awaiting_owner, PR 3a)
     const items = await orderByPriority(
-      db('seo_link_prospects').where({ outreach_status: 'drafted', status: 'prospect' })
+      db('seo_link_prospects').where({ outreach_status: 'drafted' }).whereIn('status', [...Outreach.SENDABLE_STATUSES])
     );
     // Reconcilable = ambiguous sends: a send_error, OR a 'sending' stuck past the
     // stale window (a crashed mid-send) — both resolvable via reconcileSendError.
@@ -690,6 +699,12 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
           .orWhere((s) => s.where('outreach_status', 'sending').andWhere('updated_at', '<', staleCutoff)))
     );
     const sentToday = await Outreach.dailySendCount();
+    // §6.4 / §13 — what the owner sees before Approve & send: the draft review and the recipient match to acknowledge
+    const M = require('../services/seo/link-outreach-mandate');
+    for (const p of items) {
+      p.draft_review = M.draftReview(p);
+      try { p.recipient_review = await M.recipientReview(db, p.outreach_to_email); } catch (err) { p.recipient_review = { kind: 'error', recipient: p.outreach_to_email, matched: [], lookup_hash: null, error: err.message }; }
+    }
     res.json({
       items,
       needsReconcile,
@@ -723,14 +738,12 @@ router.post('/prospects/:id/outreach/draft', async (req, res, next) => {
 router.post('/prospects/:id/outreach/send', requireAdmin, async (req, res, next) => {
   try {
     const Outreach = require('../services/seo/link-prospect-outreach');
+    const hash = req.body?.reviewed_lookup_hash;
     const result = await Outreach.sendOutreach({
-      prospectId: req.params.id, approvedBy: req.technician?.name || 'admin',
+      prospectId: req.params.id, approvedBy: req.technician?.name || 'admin', mode: 'owner', reviewedLookupHash: typeof hash === 'string' ? hash : null,
     });
     if (!result.ok) {
-      const status = {
-        not_found: 404, gate_off: 403, gmail_not_connected: 503, rate_limited: 429,
-        already_sent: 409, not_actionable: 409, send_failed: 502, finalize_failed: 500,
-      }[result.code] || 400;
+      const status = ownerQueue.SEND_CODE_STATUS[result.code] || 400;
       return res.status(status).json(result);
     }
     res.json(result);

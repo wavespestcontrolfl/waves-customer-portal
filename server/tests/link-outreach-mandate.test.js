@@ -1,0 +1,118 @@
+/**
+ * Backlink Manager v2 step 4 (PR 3a) — the bounded outreach mandate inputs
+ * (plan §6.4 / §13): the deterministic draft classifier, the lint pass for a
+ * business email, the §3.6b draft hash, and the fail-closed customer-recipient
+ * exclusion built from SERVICE_CONTACT_SLOTS (every slot covered, slot 3
+ * included, without a hand-written column list).
+ */
+const M = require('../services/seo/link-outreach-mandate');
+const { SERVICE_CONTACT_SLOTS } = require('../services/customer-contact');
+const { makeDb } = require('./helpers/link-authority-store');
+
+const CLEAN_BODY = 'Hi Dana,\n\nWe publish a seasonal pest-pressure calendar for the Gulf Coast that your readers in Bradenton may find useful. Happy to share the data behind it.\n\nAdam, Waves Pest Control';
+const drafted = (over = {}) => ({ outreach_status: 'drafted', outreach_to_email: 'editor@bradentonherald.com', outreach_subject: 'Local pest-pressure data for your readers', outreach_body: CLEAN_BODY, ...over });
+
+describe('classifyDraft', () => {
+  test.each([
+    ['a reciprocal promise', "we'll link back to your guide from our resources page", ['reciprocal_promise']],
+    ['a link swap', 'happy to do a link exchange', ['reciprocal_promise']],
+    ['payment', 'we can pay a $150 placement fee', ['payment']],
+    ['sponsorship', 'open to a sponsored post', ['payment']],
+    ['a discount', 'your readers get 20% off their first treatment', ['discount']],
+    ['a free service', 'a free inspection for your staff', ['discount']],
+    ['a guarantee', 'we guarantee results', ['guarantee']],
+    ['an unusual commitment', 'an exclusive partnership deal', ['commitment']],
+  ])('flags %s', (_label, text, flags) => {
+    for (const f of flags) expect(M.classifyDraft(text)).toContain(f);
+  });
+  test('a plain editorial pitch carries no flag', () => {
+    expect(M.classifyDraft(CLEAN_BODY)).toEqual([]);
+    expect(M.classifyDraft('')).toEqual([]);
+    expect(M.classifyDraft(null)).toEqual([]);
+  });
+});
+
+describe('draftReview', () => {
+  test('a complete, addressed, lint-clean, commitment-free draft is clean', () => {
+    expect(M.draftReview(drafted())).toMatchObject({ clean: true, flags: [], lint: [], reason: null });
+  });
+  test('no draft / an ambiguous send / a sent row / a bad recipient / an incomplete draft are never clean', () => {
+    expect(M.draftReview(drafted({ outreach_status: 'none' }))).toMatchObject({ clean: false, reason: 'no draft' });
+    expect(M.draftReview(drafted({ outreach_status: 'send_error' }))).toMatchObject({ clean: false, reason: 'no draft' });
+    expect(M.draftReview(drafted({ outreach_status: 'sent' }))).toMatchObject({ clean: false });
+    expect(M.draftReview(drafted({ outreach_to_email: 'not-an-address' }))).toMatchObject({ clean: false, reason: 'invalid recipient' });
+    expect(M.draftReview(drafted({ outreach_body: '' }))).toMatchObject({ clean: false, reason: 'incomplete draft' });
+    expect(M.draftReview(null)).toMatchObject({ clean: false });
+  });
+  test('a classifier hit in the subject or body routes to the owner', () => {
+    expect(M.draftReview(drafted({ outreach_subject: 'A link exchange for your resources page' }))).toMatchObject({ clean: false, flags: ['reciprocal_promise'] });
+    expect(M.draftReview(drafted({ outreach_body: `${CLEAN_BODY}\nWe can pay a fee.` }))).toMatchObject({ clean: false, flags: ['payment'] });
+  });
+  test('a comms-lint failure (the company name, a URL shortener) routes to the owner', () => {
+    const r = M.draftReview(drafted({ outreach_body: 'Hi — Waves Lawn & Pest here, see bit.ly/abc' }));
+    expect(r.clean).toBe(false);
+    expect(r.lint.map((l) => l.rule).sort()).toEqual(['company-name', 'no-url-shortener']);
+    expect(r.reason).toMatch(/lint:company-name/);
+  });
+});
+
+describe('draftHash', () => {
+  test('binds recipient (case / whitespace normalized), subject and body; any edit changes it', () => {
+    const a = M.draftHash(drafted());
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(M.draftHash(drafted({ outreach_to_email: '  Editor@BradentonHerald.com ' }))).toBe(a);
+    expect(M.draftHash(drafted({ outreach_body: `${CLEAN_BODY} ` }))).not.toBe(a);
+    expect(M.draftHash(drafted({ outreach_subject: 'x' }))).not.toBe(a);
+    expect(M.draftHash(drafted({ outreach_to_email: 'other@bradentonherald.com' }))).not.toBe(a);
+  });
+});
+
+describe('recipientReview (§13)', () => {
+  const customer = (over = {}) => ({ id: `c-${Math.random()}`, email: null, service_contact_email: null, service_contact2_email: null, service_contact3_email: null, ...over });
+  const seed = (over = {}) => makeDb({ customers: [], notification_prefs: [], leads: [], ...over });
+
+  test('a clear recipient', async () => {
+    const r = await M.recipientReview(seed({ customers: [customer({ email: 'someone@else.com' })] }), 'editor@bradentonherald.com');
+    expect(r).toMatchObject({ kind: 'clear', recipient: 'editor@bradentonherald.com', matched: [] });
+    expect(r.lookup_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+  test('customers.email — an exact match (case-insensitive) is a customer', async () => {
+    const c = customer({ email: 'Editor@BradentonHerald.com' });
+    const r = await M.recipientReview(seed({ customers: [c] }), 'editor@bradentonherald.com');
+    expect(r).toMatchObject({ kind: 'customer', matched: [{ source: 'customers.email', id: c.id }] });
+  });
+  test.each(SERVICE_CONTACT_SLOTS.map((s) => [s.email]))('%s — every service-contact slot is a contact source (built from the export)', async (col) => {
+    const c = customer({ [col]: 'editor@bradentonherald.com' });
+    const r = await M.recipientReview(seed({ customers: [c] }), 'editor@bradentonherald.com');
+    expect(r).toMatchObject({ kind: 'customer', matched: [{ source: `customers.${col}`, id: c.id }] });
+  });
+  test('notification_prefs.billing_email and leads.email are contact sources', async () => {
+    const billing = await M.recipientReview(seed({ notification_prefs: [{ customer_id: 'cust-9', billing_email: 'editor@bradentonherald.com' }] }), 'editor@bradentonherald.com');
+    expect(billing).toMatchObject({ kind: 'customer', matched: [{ source: 'notification_prefs.billing_email', id: 'cust-9' }] });
+    const lead = await M.recipientReview(seed({ leads: [{ id: 'lead-3', email: 'editor@bradentonherald.com' }] }), 'editor@bradentonherald.com');
+    expect(lead).toMatchObject({ kind: 'customer', matched: [{ source: 'leads.email', id: 'lead-3' }] });
+  });
+  test('a shared BUSINESS domain is ambiguous (the owner reviews it); a shared consumer-mail domain is not', async () => {
+    const c = customer({ email: 'accounts@bradentonherald.com' });
+    const amb = await M.recipientReview(seed({ customers: [c] }), 'editor@bradentonherald.com');
+    expect(amb).toMatchObject({ kind: 'ambiguous', matched: [{ source: 'customers.email', id: c.id }] });
+    const gmail = await M.recipientReview(seed({ customers: [customer({ email: 'someone@gmail.com' })] }), 'editor@gmail.com');
+    expect(gmail.kind).toBe('clear');
+  });
+  test('an exact match outranks a domain match, and the lookup hash follows the verdict', async () => {
+    const exact = customer({ email: 'editor@bradentonherald.com' });
+    const shared = customer({ email: 'ads@bradentonherald.com' });
+    const r = await M.recipientReview(seed({ customers: [exact, shared] }), 'editor@bradentonherald.com');
+    expect(r.kind).toBe('customer');
+    expect(r.matched).toEqual([{ source: 'customers.email', id: exact.id }]);
+    const again = await M.recipientReview(seed({ customers: [exact, shared] }), 'editor@bradentonherald.com');
+    expect(again.lookup_hash).toBe(r.lookup_hash);
+    const other = await M.recipientReview(seed({ customers: [shared] }), 'editor@bradentonherald.com');
+    expect(other.lookup_hash).not.toBe(r.lookup_hash);
+  });
+  test('a lookup failure throws — the caller fails closed', async () => {
+    const db = seed();
+    db._beforeResolve = (table) => { if (table === 'leads') throw new Error('connection reset'); };
+    await expect(M.recipientReview(db, 'editor@bradentonherald.com')).rejects.toThrow('connection reset');
+  });
+});

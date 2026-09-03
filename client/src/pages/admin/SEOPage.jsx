@@ -55,13 +55,17 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       let message = `${r.status} ${r.statusText}`;
+      let code = null;
       try {
         const data = await r.clone().json();
         message = data?.error || message;
+        code = data?.code || null; // a structured refusal (the outreach send) keeps its code for the message map
       } catch {
         /* keep default message */
       }
-      throw new Error(message);
+      const err = new Error(message);
+      if (code) err.code = code;
+      throw err;
     }
     if (r.status === 204) return null;
     return r.json();
@@ -2732,7 +2736,35 @@ const OUTREACH_CODE_MSG = {
   send_in_flight: "A send is currently in flight.",
   not_found: "Prospect not found.",
   bad_outcome: "Invalid reconcile outcome.",
+  not_authorized: "Not authorized to send yet — the nightly authority bridge decides it, or the inputs changed since.",
+  customer_recipient: "The recipient is a customer contact — outreach never goes to a customer. Re-draft to another address.",
+  recipient_review_required: "The recipient shares a domain with a customer or lead contact — review the match and acknowledge it before sending.",
+  recipient_lookup_failed: "The customer-recipient check failed — not sent. Try again.",
+  path_moved: "The acquisition path changed since the draft — reload and draft again.",
+  path_unlinked: "Not linked to an acquisition path yet — the registry catch-up links it within the hour.",
 };
+
+// §6.4 / §13 — what the owner sees before a send: the draft review (why it is
+// the owner's to send, not the policy's) and the recipient match to acknowledge.
+function RecipientReview({ review, acked, onAck, disabled }) {
+  if (!review) return null;
+  if (review.kind === "clear") return <div style={{ fontSize: 12, color: D.muted }}>Recipient: not a customer or lead contact.</div>;
+  if (review.kind === "customer") return <div style={{ fontSize: 12, color: D.amber }}>Recipient is a customer contact ({review.matched.map((m) => m.source).join(", ")}) — outreach never goes to a customer.</div>;
+  if (review.kind === "ambiguous") {
+    return (
+      <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12, color: D.amber, cursor: disabled ? "default" : "pointer" }}>
+        <input type="checkbox" checked={Boolean(acked)} disabled={disabled} onChange={(e) => onAck(e.target.checked)} style={{ marginTop: 2 }} />
+        <span>{`Shares a domain with ${review.matched.length} customer / lead contact${review.matched.length === 1 ? "" : "s"} (${[...new Set(review.matched.map((m) => m.source))].join(", ")}). I reviewed the match — this is a business inbox, not a customer.`}</span>
+      </label>
+    );
+  }
+  return <div style={{ fontSize: 12, color: D.amber }}>Recipient check unavailable ({review.error || "lookup failed"}) — the send re-runs it and fails closed.</div>;
+}
+function DraftReviewLine({ review }) {
+  if (!review || review.clean) return null;
+  const parts = [...(review.flags || []), ...(review.lint || []).map((l) => `lint: ${l.rule}`)];
+  return <div style={{ fontSize: 12, color: D.muted }}>{`Owner review: ${parts.join(", ") || review.reason}`}</div>;
+}
 
 // Raw POST that returns the parsed body even on non-2xx, so we can read the
 // structured {code}. (adminFetch throws on non-2xx and loses the code.)
@@ -2762,6 +2794,7 @@ function OutreachApprovals({ canRun, onChange }) {
   const [busyId, setBusyId] = useState(null);
   const [msg, setMsg] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [acks, setAcks] = useState({}); // prospect id → the owner acknowledged the recipient match
 
   const load = () => {
     adminFetch("/admin/backlink-agent/prospects/outreach/pending")
@@ -2771,9 +2804,12 @@ function OutreachApprovals({ canRun, onChange }) {
   useEffect(load, []);
   const refresh = () => { load(); if (onChange) onChange(); };
 
-  const send = async (id) => {
+  const send = async (p) => {
+    const id = p.id;
     setBusyId(id); setMsg(null);
-    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/send`);
+    // the acknowledged match travels with the click (§13): the server sends only when the lookup still yields it
+    const body = acks[id] && p.recipient_review?.lookup_hash ? { reviewed_lookup_hash: p.recipient_review.lookup_hash } : {};
+    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/send`, body);
     setMsg({ ok, text: ok ? "Outreach sent." : (OUTREACH_CODE_MSG[r.code] || r.error || "Send failed.") });
     setBusyId(null); refresh();
   };
@@ -2829,9 +2865,13 @@ function OutreachApprovals({ canRun, onChange }) {
                 <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email}</div>
                 <div style={{ fontSize: 12, color: D.text, marginTop: 4 }}><b>{p.outreach_subject}</b></div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 4, whiteSpace: "pre-wrap", maxHeight: 84, overflow: "hidden" }}>{p.outreach_body}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+                  <DraftReviewLine review={p.draft_review} />
+                  <RecipientReview review={p.recipient_review} acked={acks[p.id]} disabled={busyId === p.id} onAck={(v) => setAcks({ ...acks, [p.id]: v })} />
+                </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-                <button onClick={() => send(p.id)} disabled={!canRun || busyId === p.id} style={outreachBtn(D.teal, true, busyId === p.id)}>
+                <button onClick={() => send(p)} disabled={!canRun || busyId === p.id || p.recipient_review?.kind === "customer" || (p.recipient_review?.kind === "ambiguous" && !acks[p.id])} style={outreachBtn(D.teal, true, busyId === p.id || p.recipient_review?.kind === "customer" || (p.recipient_review?.kind === "ambiguous" && !acks[p.id]))}>
                   {busyId === p.id ? "Sending…" : "Approve & send"}
                 </button>
                 <button onClick={() => setEditing(p)} disabled={busyId === p.id} style={outreachBtn(D.teal, false)}>Edit</button>
@@ -3409,9 +3449,11 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
 // Owner queue (plan v2 §11 item 3 / §3.6b / §6.3 1b — step 4 PR 2b): the
 // placements the nightly authority bridge parked awaiting the owner. Approve
 // is per dimension row and freezes exactly what is on the card; Reject and
-// Watch are domain decisions (the same writer as the Registry buttons). The
-// send approval for an outreach row is the authenticated send on the Link
-// Building board, never a button here.
+// Watch are domain decisions (the same writer as the Registry buttons). A
+// communication row's approval IS its send (step 4 PR 3a, §6.3 2c): the Send
+// button here and the board's Approve & send are the same authenticated click
+// — the sender writes the approval bound to the draft hash and the recipient
+// review the owner acknowledged, then sends.
 const DIMENSION_LABELS = { execution: "Execution", payment: "Payment", communication: "Message" };
 const ACTION_LABELS = {
   acquire: "create the account / submit the listing",
@@ -3437,6 +3479,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   const [busy, setBusy] = useState(null);
   const [amounts, setAmounts] = useState({});
   const [notes, setNotes] = useState({});
+  const [acks, setAcks] = useState({}); // row id → the owner acknowledged the recipient match (§13)
   const [result, setResult] = useState(null);
   const loadGen = useRef(0);
 
@@ -3498,6 +3541,23 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     }
   };
 
+  // the send click IS the approval of a communication row (§6.3 2c)
+  const send = async (card, row) => {
+    setBusy(row.id);
+    setError(null);
+    setResult(null);
+    const body = acks[row.id] && row.draft?.recipient_review?.lookup_hash ? { reviewed_lookup_hash: row.draft.recipient_review.lookup_hash } : {};
+    try {
+      const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/send`, { method: "POST", body });
+      setResult({ tone: D.green, text: `Sent the pitch to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}` });
+      if (onMutated) onMutated(); else await load();
+    } catch (e) {
+      setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const decide = async (card, action) => {
     setBusy(card.domain.id);
     setError(null);
@@ -3552,8 +3612,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       </div>
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
         Placements the nightly bridge parked for your decision. Approve freezes exactly the terms shown here; a changed price, agreement or policy
-        invalidates it and the card comes back. Reject and Watch apply to the whole domain. Nothing here sends, signs or pays — the runner does that
-        later, against the approval.
+        invalidates it and the card comes back. Reject and Watch apply to the whole domain. Send the pitch mails the draft shown on the card from
+        contact@ — that click is its approval. Nothing else here signs or pays — the runner does that later, against the approval.
       </div>
       {error && <div style={{ marginBottom: 8, fontSize: 12, color: D.red }}>{error}</div>}
       {result && <div style={{ marginBottom: 8, fontSize: 12, color: result.tone }}>{result.text}</div>}
@@ -3652,6 +3712,21 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                               {approvedBy.max_payable_cents != null ? ` · up to ${money(approvedBy.max_payable_cents)}` : ""}
                               {r.approval_stale ? ` · ${r.approval_stale}` : ""}
                             </span>
+                          ) : r.approvable && r.dimension === "communication" ? (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 260 }}>
+                              <div style={{ fontSize: 12, color: D.text }}>
+                                <span style={{ color: D.muted }}>To </span>{r.draft?.to || "—"}
+                                <div><b>{r.draft?.subject || "—"}</b></div>
+                                <div style={{ color: D.muted, whiteSpace: "pre-wrap", maxHeight: 84, overflow: "hidden" }}>{r.draft?.body || ""}</div>
+                              </div>
+                              <DraftReviewLine review={r.draft?.review} />
+                              <RecipientReview review={r.draft?.recipient_review} acked={acks[r.id]} disabled={rowBusy} onAck={(v) => setAcks({ ...acks, [r.id]: v })} />
+                              <span>
+                                <button onClick={() => send(c, r)} disabled={rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[r.id])} style={btn(rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[r.id]), D.green)}>
+                                  {rowBusy ? "Sending…" : "Send the pitch"}
+                                </button>
+                              </span>
+                            </div>
                           ) : r.approvable ? (
                             <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                               {r.dimension === "payment" && (

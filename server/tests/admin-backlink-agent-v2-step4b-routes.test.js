@@ -46,6 +46,8 @@ jest.mock('../services/seo/link-owner-queue', () => {
     OwnerQueueError,
     listOwnerQueue: jest.fn(async () => ({ cards: [{ placement: { id: 'p1' } }] })),
     approveRow: jest.fn(async () => ({ approval: { dimension: 'execution', action: 'acquire', instance_key: '-:1' }, attached: ['a1'], bridge: { gated: false, released: 1 } })),
+    sendRow: jest.fn(async () => ({ sent: true, prospectId: 'p1', message_id: 'm1', thread_id: 't1', authority: { level: 'OWNER_OUTREACH', approval_id: 'ap1' } })),
+    SEND_CODE_STATUS: { recipient_review_required: 409 },
     decideDomain: jest.fn(async () => ({ domain: 'example.org', agent_state: 'rejected', audited: 1 })),
     acquireAnyway: jest.fn(async () => ({ domain: 'example.org', floors: [{ floor: 'score' }], bridge: { gated: false, parked: 1 }, awaiting: 1 })),
   };
@@ -84,6 +86,25 @@ describe('GET /owner-queue', () => {
     const r = await run('get', '/owner-queue', {});
     expect(r.statusCode).toBe(200);
     expect(r.body).toEqual({ cards: [{ placement: { id: 'p1' } }], gateOn: true });
+  });
+});
+
+describe('the send click (PR 3a)', () => {
+  test('POST /owner-queue/rows/:id/send passes the row, the admin and the acknowledged lookup hash; a non-string hash is dropped', async () => {
+    const r = await run('post', '/owner-queue/rows/:id/send', { params: { id: 'a1' }, body: { reviewed_lookup_hash: 'h1' } });
+    expect(r.statusCode).toBe(200);
+    expect(Q.sendRow).toHaveBeenCalledWith(expect.anything(), { authorityId: 'a1', actor: 'Adam', reviewedLookupHash: 'h1' });
+    expect(r.body).toMatchObject({ sent: true, message_id: 'm1' });
+    await run('post', '/owner-queue/rows/:id/send', { params: { id: 'a1' }, body: { reviewed_lookup_hash: 42 } });
+    expect(Q.sendRow).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ reviewedLookupHash: null }));
+  });
+  test('a sender refusal surfaces its code and the recipient review for the owner to acknowledge', async () => {
+    const err = new Q.OwnerQueueError(409, 'review the match');
+    err.code = 'recipient_review_required'; err.review = { kind: 'ambiguous', lookup_hash: 'h9' };
+    Q.sendRow.mockRejectedValueOnce(err);
+    const r = await run('post', '/owner-queue/rows/:id/send', { params: { id: 'a1' } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body).toEqual({ error: 'review the match', code: 'recipient_review_required', review: { kind: 'ambiguous', lookup_hash: 'h9' } });
   });
 });
 

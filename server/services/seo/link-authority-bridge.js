@@ -36,8 +36,16 @@
  *
  * Inputs the later steps supply are pinned to their fail-closed values here:
  * monthSpendCents = 0 and d30Confidence = null (no purchases / D30 loop yet —
- * AUTO_PAID_WITHIN_POLICY cannot be granted), draftClean = false (the §6.4
- * classifier is PR 3 — AUTO_OUTREACH cannot be granted).
+ * AUTO_PAID_WITHIN_POLICY cannot be granted). draftClean is the §6.4 review of
+ * the placement's parked draft (link-outreach-mandate): AUTO_OUTREACH is
+ * granted only on a lint-clean, commitment-free draft, per placement.
+ *
+ * Auto-send (§6.4, step 4 PR 3a): after a NIGHTLY run commits, every placement
+ * it decided whose open communication instance reads AUTO_OUTREACH on a
+ * drafted, unleased `prospect` row is handed to the sender in 'auto' mode —
+ * the sender re-validates everything under its own lock (gate, policy cap,
+ * customer exclusion, the authority row) and stops the batch at the cap. An
+ * inline run (an owner's click) never sends: autoSend is false there.
  */
 
 const { isEnabled } = require('../../config/feature-gates');
@@ -46,6 +54,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { claimProspectDomain, findPlacementRow, targetPageOf } = require('./prospect-domain-lock');
 const { OUTREACH_ACQUISITION_TYPES, LEVEL_SEVERITY, settleRetiredPlacements, movePatch, isOutreachLocked } = require('./link-registry');
 const P = require('./link-authority-policy');
+const M = require('./link-outreach-mandate');
 const { selectDomains, paidPlacementIds, groupMismatch, expectedLocations, rotationOutcome, ts, BRIDGE_STATES, LIVE_STATUSES, ACQUIRING_STATUSES, PARKABLE } = require('./link-authority-selection');
 
 const LOCK_KEY = 'link-authority-bridge';
@@ -127,6 +136,32 @@ const deferred = (r, p) => p.outreach === true && (
   || (p.sendFirst === true && r.dimension === 'execution' && r.instance_kind === '-'));
 
 const freshCounters = () => ({ placementsCreated: 0, rowsWritten: 0, redecided: 0, ended: 0, parked: 0, released: 0, invalidatedApprovals: 0, invalidatedWaivers: 0, aggregateChanges: 0, skippedLeased: 0, pinned: 0, parkedDomains: [] });
+const defaultSend = (args) => require('./link-prospect-outreach').sendOutreach(args);
+
+// §6.4 auto-send: the decided placements whose communication instance the run
+// left AUTO_OUTREACH and unsatisfied, on a drafted unleased `prospect` row.
+// Read AFTER the domain transactions committed (never inside one: the sender
+// takes its own advisory lock and the Gmail call is network). Each send is
+// its own claim; the sender's cap decision under the lock ends the batch.
+async function autoSendDecided(db, { domainIds, send, now }) {
+  const out = { attempted: 0, sent: 0, skipped: [] };
+  if (!domainIds.length) return out;
+  const candidates = await db('seo_link_prospects').whereIn('domain_id', domainIds).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').select('id', 'path_id');
+  if (!candidates.length) return out;
+  const rows = await db(AUTH).whereIn('prospect_id', candidates.map((p) => p.id)).where({ dimension: 'communication', instance_kind: '-', level: P.LEVELS.AUTO_OUTREACH }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'path_id');
+  const byProspect = new Map(rows.map((r) => [r.prospect_id, r]));
+  for (const p of candidates) {
+    const r = byProspect.get(p.id);
+    if (!r || r.path_id !== p.path_id) continue;
+    out.attempted += 1;
+    let res;
+    try { res = await send({ prospectId: p.id, approvedBy: 'auto-outreach', mode: 'auto', now }); } catch (err) { res = { ok: false, code: 'error', error: err.message }; }
+    if (res && res.ok) { out.sent += 1; continue; }
+    out.skipped.push({ id: p.id, code: (res && res.code) || 'error' });
+    if (res && res.code === 'rate_limited') break; // the cap is reached for the window — nothing else sends today
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // One domain, one transaction. Counters are LOCAL to the transaction and
@@ -349,13 +384,17 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       }
     }
   }
-  const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: false, waiver });
-  const decision = regroupHeld
-    ? { ...decided, instances: decided.instances.map((i) => (i.dimension === 'payment' ? { ...i, level: P.LEVELS.OWNER_INPUT_REQUIRED, reason: 'fee scope changed after payment activity: the owner performs the regroup' } : i)) }
-    : decided;
+  // the communication verdict depends on the PLACEMENT's draft (§6.3 2c), so the decision is per placement
+  const decisionFor = (placement) => {
+    const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: lane.outreach ? M.draftReview(placement).clean : false, waiver });
+    return regroupHeld
+      ? { ...decided, instances: decided.instances.map((i) => (i.dimension === 'payment' ? { ...i, level: P.LEVELS.OWNER_INPUT_REQUIRED, reason: 'fee scope changed after payment activity: the owner performs the regroup' } : i)) }
+      : decided;
+  };
 
   const summaries = [];
   for (const placement of placements) {
+    const decision = decisionFor(placement);
     // ALL rows, ended ones included: the full UNIQUE (prospect, dimension,
     // instance_key) keeps history, so a replacement instance takes the next
     // generation (`${kind}:${n+1}`, §3.3b) — never the ended row's key.
@@ -563,7 +602,7 @@ function aggregateState(placements) {
  */
 async function runAuthorityBridge(db, {
   limit = DEFAULT_LIMIT, dryRun = false, domainIds = null, now: fixedNow = null,
-  exclusive = defaultExclusive, notify = defaultNotify,
+  exclusive = defaultExclusive, notify = defaultNotify, autoSend = true, send = defaultSend,
 } = {}) {
   const now = fixedNow || new Date();
   const gated = !isEnabled('linkAuthority');
@@ -575,10 +614,12 @@ async function runAuthorityBridge(db, {
   if (gated || dryRun || !targets.length) return out;
 
   const parkedDomains = [];
+  const decidedIds = [];
   const ran = await exclusive(LOCK_KEY, async () => {
     for (const t of targets) {
       try {
         const r = await db.transaction((trx) => bridgeDomain(trx, { domainId: t.id, policy, policyUpdatedAt, now }));
+        if (r.decided) decidedIds.push(t.id);
         // merge only what COMMITTED
         for (const [k, v] of Object.entries(r.out)) {
           if (k === 'parkedDomains') { for (const d of v) if (!parkedDomains.includes(d)) parkedDomains.push(d); } else out[k] += v;
@@ -594,6 +635,17 @@ async function runAuthorityBridge(db, {
   });
   if (ran && ran.skipped) { out.skipped = ran.reason || 'lease_held'; return out; }
 
+  // §6.4 — the sends the run just authorized; the outreach gate is the sender's own first check
+  if (autoSend && decidedIds.length && isEnabled('linkProspectOutreach')) {
+    try {
+      out.autoSend = await autoSendDecided(db, { domainIds: decidedIds, send, now });
+      if (out.autoSend.attempted) logger.info(`[link-authority] auto-outreach: ${out.autoSend.sent}/${out.autoSend.attempted} sent${out.autoSend.skipped.length ? ` (${out.autoSend.skipped.map((s) => s.code).join(', ')})` : ''}`);
+    } catch (err) {
+      logger.error(`[link-authority] auto-outreach failed: ${err.message}`);
+      out.errors.push({ autoSend: err.message });
+    }
+  }
+
   // ONE bell per run that parked something (never per card); keyed by ET day so a re-run refreshes it
   if (out.parked > 0) {
     try {
@@ -606,4 +658,4 @@ async function runAuthorityBridge(db, {
   return out;
 }
 
-module.exports = { runAuthorityBridge, aggregateState, annotateApprovals, invalidateApprovals, LOCK_KEY, HOMEPAGE, RUN_LIMIT_MAX, DEFAULT_LIMIT };
+module.exports = { runAuthorityBridge, aggregateState, annotateApprovals, invalidateApprovals, autoSendDecided, LOCK_KEY, HOMEPAGE, RUN_LIMIT_MAX, DEFAULT_LIMIT };
