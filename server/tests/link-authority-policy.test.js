@@ -72,7 +72,7 @@ describe('env tightening (§3.8)', () => {
 describe('parseField (the Policy panel contract)', () => {
   test.each([
     ['min_score', 101, /≤ 100/], ['min_score', -1, /≥ 0/], ['min_score', 1.5, /integer/], ['min_score', 'x', /number/],
-    ['min_score', null, /cannot be empty/], ['nope', 1, /unknown policy field/], ['preferred_provider', 'human2', /one of/],
+    ['min_score', null, /cannot be empty/], ['nope', 1, /unknown policy field/], ['constructor', 1, /unknown policy field/], ['__proto__', 1, /unknown policy field/], ['preferred_provider', 'human2', /one of/],
     ['auto_free_acquisition', 'yes', /boolean/], ['min_path_confidence', 1.2, /≤ 1/],
     ['monthly_paid_budget_cents', 2147483648, /≤ 2147483647/], ['auto_outreach_daily_cap', 1e12, /≤ 2147483647/],
     ['min_path_confidence', 0.655, /at most 2 decimal places/], ['auto_paid_min_d30_confidence', '0.123', /at most 2 decimal places/],
@@ -173,6 +173,7 @@ describe('§6.3 1a validity — INVALID for every dimension, never overrideable'
     ['paid path without fee_scope', paid({ fee_scope: null }), domain()],
     ['paid path with an unknown fee_scope', paid({ fee_scope: 'global' }), domain()],
     ['send-accepted terms + submit-first deadlock', outreach({ execution_after_send: false, terms_accepted_by_send: true }), domain()],
+    ['send-accepted terms without legal_attestation', outreach({ terms_accepted_by_send: true, legal_attestation: false, execution_after_send: true }), domain()],
     ['legal_attestation without hash', path({ legal_attestation: true, legal_terms_hash: null }), domain()],
     ['legal_attestation with malformed hash', path({ legal_attestation: true, legal_terms_hash: 'ABC' }), domain()],
     ['superseded path', path({ superseded_by: 'x' }), domain()],

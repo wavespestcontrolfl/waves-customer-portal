@@ -1,7 +1,7 @@
 import { Fragment, useState, useEffect, useRef, lazy, Suspense } from "react";
 import { createPortal } from "react-dom";
 import useIsMobile from "../../hooks/useIsMobile";
-import { formatETDate } from "../../lib/timezone";
+import { formatETDate, formatETDateTime } from "../../lib/timezone";
 import {
   Activity,
   BarChart3,
@@ -3463,6 +3463,7 @@ function LinkPolicyPanel() {
           <input
             type="checkbox"
             checked={value === true}
+            disabled={saving}
             onChange={(e) => setDraft({ ...draft, [name]: e.target.checked })}
             style={{ width: 18, height: 18 }}
           />
@@ -3473,7 +3474,7 @@ function LinkPolicyPanel() {
       return (
         <div key={name}>
           {label}
-          <select value={value ?? ""} onChange={(e) => setDraft({ ...draft, [name]: e.target.value })} style={inputStyle}>
+          <select value={value ?? ""} disabled={saving} onChange={(e) => setDraft({ ...draft, [name]: e.target.value })} style={inputStyle}>
             {spec.values.map((v) => (
               <option key={v} value={v}>
                 {v}
@@ -3493,6 +3494,7 @@ function LinkPolicyPanel() {
           max={spec.max}
           value={value === null || value === undefined ? "" : value}
           placeholder={spec.nullable ? "blank = off" : ""}
+          disabled={saving}
           onChange={(e) => setDraft({ ...draft, [name]: e.target.value === "" ? null : e.target.value })}
           style={inputStyle}
         />
@@ -3564,7 +3566,7 @@ function LinkPolicyPanel() {
                   <tbody>
                     {data.audit.map((a) => (
                       <tr key={a.id}>
-                        <td style={tdStyle}>{formatETDate(a.changed_at)}</td>
+                        <td style={tdStyle}>{formatETDateTime(a.changed_at)}</td>
                         <td style={{ ...tdStyle, fontFamily: "inherit" }}>{a.changed_by || "—"}</td>
                         <td style={tdStyle}>{a.field}</td>
                         <td style={tdStyle}>{a.old_value ?? "null"}</td>

@@ -110,7 +110,7 @@ async function loadPolicy(db, { env = process.env } = {}) {
 }
 
 function parseField(name, value, current) {
-  const spec = POLICY_FIELDS[name];
+  const spec = Object.prototype.hasOwnProperty.call(POLICY_FIELDS, name) ? POLICY_FIELDS[name] : null; // own-property: 'constructor' is not a column
   if (!spec) return { error: `unknown policy field '${name}'` };
   if (value === null || value === undefined || value === '') {
     if (spec.nullable) return { value: null };
@@ -235,6 +235,7 @@ function validityFailure(path, domain, score) {
   if (PAID_ACQUISITION_TYPES.includes(path.acquisition_type) && !path.payment_required) return `${path.acquisition_type} requires payment_required`;
   if (path.acquisition_type === 'self_service_free' && path.payment_required) return 'self_service_free cannot require payment';
   if (path.execution_after_send === false && path.terms_accepted_by_send === true) return 'deadlock: send-accepted terms with submit-first ordering';
+  if (path.terms_accepted_by_send === true && path.legal_attestation !== true) return 'send-accepted terms without legal_attestation'; // schema implication §3.2 — no cross-field CHECK in the DB
   if (path.legal_attestation && !validLegalTermsHash(path.legal_terms_hash)) return 'legal_attestation without a bound agreement hash';
   if (path.superseded_by) return 'path superseded';
   if (path.baseline === true) return 'baseline placeholder is never executable';
