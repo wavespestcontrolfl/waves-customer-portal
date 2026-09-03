@@ -43,6 +43,11 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
     expect(classify({ source: 'concurrent_skip', rowCount: 0 })).toBeNull();
   });
 
+  test('feed_down carries the GBP failure cause when the caller has one', () => {
+    expect(classify({ source: 'none', gbpFailure: 'stored-token lookup failed: Knex: Timeout' }).detail).toContain('stored-token lookup failed: Knex: Timeout');
+    expect(classify({ source: 'none' }).detail).toMatch(/the GBP pull failed and no Places sample landed/);
+  });
+
   test('nothing synced at all → feed_down FIX', () => {
     expect(classify({ source: 'none' })).toMatchObject({ cls: 'feed_down', severity: 'FIX' });
   });

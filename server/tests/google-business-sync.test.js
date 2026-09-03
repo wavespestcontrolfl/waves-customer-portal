@@ -356,8 +356,8 @@ describe('Google Business review sync', () => {
     ]));
     // No Places fallback: the pull itself succeeded.
     expect(places).not.toHaveBeenCalled();
-    // The failed row never advanced synced_at — reconcile must not stamp it missing.
-    expect(reconcile).not.toHaveBeenCalled();
+    // The failed row never advanced synced_at — reconcile runs for the rest of the location with that row excluded.
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.any(Date), { excludeReviewNames: ['accounts/1/locations/2/reviews/rev-bad'] });
     expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringContaining('1 of 2 review row(s) failed to store') })]);
     expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^review upsert failed: 1 of 2 .*duplicate key value/));
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
@@ -396,7 +396,33 @@ describe('Google Business review sync', () => {
     mark.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); enrollReviewThankYou.mockRestore();
   });
 
-  test('three consecutive row failures trip the breaker: the location aborts to the Places fallback with the row error, not a row-by-row crawl', async () => {
+  test('three consecutive row-specific failures do NOT trip the breaker: every row is still visited and reconcile excludes the failed ones', async () => {
+    const reviews = Array.from({ length: 5 }, (_, i) => ({
+      name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
+    }));
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews });
+    });
+    const dup = Object.assign(new Error('duplicate key value violates unique constraint "google_reviews_google_review_id_unique"'), { code: '23505' });
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockRejectedValue(dup);
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation');
+
+    const result = await service.syncAllReviews();
+
+    expect(upsert).toHaveBeenCalledTimes(5);
+    expect(result.sources).toEqual({ bradenton: 'gbp' });
+    expect(places).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledWith(expect.anything(), expect.any(Date), { excludeReviewNames: reviews.map((r) => r.name) });
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringContaining('5 of 5 review row(s) failed to store (0 stored)') })]);
+    upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
+  test('three consecutive CONNECTION-class failures trip the breaker: the location aborts to the Places fallback with the error, not a row-by-row crawl', async () => {
     const reviews = Array.from({ length: 6 }, (_, i) => ({
       name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
     }));
@@ -415,7 +441,7 @@ describe('Google Business review sync', () => {
 
     expect(upsert).toHaveBeenCalledTimes(3);
     expect(reconcile).not.toHaveBeenCalled();
-    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp', error: expect.stringMatching(/3 consecutive review rows failed to store.*Timeout acquiring/) })]);
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp', error: expect.stringMatching(/3 consecutive review rows failed on connection-class errors.*Timeout acquiring/) })]);
     expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/3 consecutive review rows failed/));
     expect(places).toHaveBeenCalledTimes(1);
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
