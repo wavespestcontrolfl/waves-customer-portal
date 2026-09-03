@@ -14,6 +14,7 @@ const { WAVES_LOCATIONS } = require('../../config/locations');
 const { SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
 const { isOutreachLocked } = require('./link-registry');
 const { requiredInstances } = require('./link-authority-policy');
+const { followUpPending } = require('./link-outreach-mandate');
 
 const AUTH = 'seo_link_placement_authorities';
 // The aggregate states the bridge OWNS. `new`/`investigating`/`watching`/
@@ -120,7 +121,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id).filter(Boolean))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'fee_scope', 'revision_payment', 'revision', 'baseline');
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
-  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'payment_group_id', 'updated_at', 'outreach_status', 'outreach_sent_at');
+  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'payment_group_id', 'updated_at', 'outreach_status', 'outreach_sent_at', 'follow_up_status');
   const paid = await paidPlacementIds(db, placements.map((p) => p.id));
   const byDomain = new Map();
   for (const p of placements) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
@@ -167,9 +168,11 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     // re-investigation that adds a fee or legal terms needs a new row even when every existing row is satisfied;
     // an UNSATISFIED instance the path no longer requires must be ended (the bridge keeps a satisfied surplus row —
     // it is history — so it is never a reason to re-select)
-    const required = best ? new Set(requiredInstances(best).map((i) => `${i.dimension}|${i.instance_kind}`)) : null;
+    // (the communication/followup instance is required per PLACEMENT — while its follow-up is drafted / in flight, §6.4)
+    const requiredFor = (p) => new Set(requiredInstances(best, { followUp: followUpPending(p) }).map((i) => `${i.dimension}|${i.instance_kind}`));
     const instanceSetMoved = (p) => {
-      if (!required) return false;
+      if (!best) return false;
+      const required = requiredFor(p);
       const open = rowsByProspect.get(p.id) || [];
       const openKeys = new Set(open.map((r) => `${r.dimension}|${r.instance_kind}`));
       const unsatisfiedKeys = open.filter((r) => !r.satisfied_at).map((r) => `${r.dimension}|${r.instance_kind}`);

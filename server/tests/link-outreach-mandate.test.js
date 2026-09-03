@@ -178,3 +178,37 @@ describe('recipientReview (§13)', () => {
     await expect(M.recipientReview(db, 'editor@bradentonherald.com')).rejects.toThrow('connection reset');
   });
 });
+
+describe('the follow-up (§6.4)', () => {
+  const sent = { outreach_status: 'sent', outreach_to_email: 'Editor@Example.org', outreach_subject: 'A resource', outreach_body: 'Hi', follow_up_status: 'drafted', follow_up_subject: 'Re: A resource', follow_up_body: 'A quick nudge — happy to send anything that helps.' };
+  test('followUpReview judges the follow-up draft on the thread\'s recipient; only a drafted follow-up can be clean', () => {
+    expect(M.followUpReview(sent).clean).toBe(true);
+    expect(M.followUpReview({ ...sent, follow_up_status: 'none' })).toMatchObject({ clean: false, reason: 'no follow-up draft' });
+    expect(M.followUpReview({ ...sent, follow_up_body: 'We can pay a fee.' })).toMatchObject({ clean: false, flags: ['payment'] });
+    expect(M.followUpReview({ ...sent, outreach_to_email: 'nope' })).toMatchObject({ clean: false, reason: 'invalid recipient' });
+    expect(M.draftReview(sent).clean).toBe(false); // the pitch is sent — not a draft
+  });
+  test('followUpHash binds the recipient, the follow-up subject and body — never the pitch\'s text', () => {
+    expect(M.followUpHash(sent)).toBe(M.draftHash({ outreach_to_email: 'editor@example.org', outreach_subject: 'Re: A resource', outreach_body: sent.follow_up_body }));
+    expect(M.followUpHash(sent)).not.toBe(M.draftHash(sent));
+    expect(M.followUpHash({ ...sent, follow_up_body: 'x' })).not.toBe(M.followUpHash(sent));
+  });
+  test('draftOf picks the send\'s columns in the sender\'s shape', () => {
+    expect(M.draftOf(sent, true)).toEqual({ outreach_to_email: 'Editor@Example.org', outreach_subject: 'Re: A resource', outreach_body: sent.follow_up_body });
+    expect(M.draftOf(sent)).toEqual({ outreach_to_email: 'Editor@Example.org', outreach_subject: 'A resource', outreach_body: 'Hi' });
+  });
+  test('FOLLOW_UP_STATUSES: contacted, plus the Judge-owned statuses on a submit-first path only', () => {
+    expect([...M.FOLLOW_UP_STATUSES({ execution_after_send: true })]).toEqual(['contacted']);
+    expect([...M.FOLLOW_UP_STATUSES(null)]).toEqual(['contacted']);
+    expect([...M.FOLLOW_UP_STATUSES({ execution_after_send: false })]).toEqual(['contacted', 'placed', 'live', 'indexed']);
+  });
+  test('followUpDueAt is ten days after the send; followUpPending = sent pitch with a drafted / in-flight / errored follow-up', () => {
+    expect(M.followUpDueAt('2026-09-03T00:00:00Z').toISOString()).toBe('2026-09-13T00:00:00.000Z');
+    expect(M.followUpPending(sent)).toBe(true);
+    expect(M.followUpPending({ ...sent, follow_up_status: 'sending' })).toBe(true);
+    expect(M.followUpPending({ ...sent, follow_up_status: 'send_error' })).toBe(true);
+    for (const st of ['none', 'due', 'sent', 'skipped']) expect(M.followUpPending({ ...sent, follow_up_status: st })).toBe(false);
+    expect(M.followUpPending({ ...sent, outreach_status: 'drafted' })).toBe(false);
+    expect(M.followUpPending(null)).toBe(false);
+  });
+});

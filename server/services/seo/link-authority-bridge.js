@@ -155,29 +155,42 @@ const defaultSend = (args) => require('./link-prospect-outreach').sendOutreach(a
 const AUTO_SEND_BATCH = 100;
 async function autoSendDecided(db, { send, now }) {
   const out = { attempted: 0, sent: 0, skipped: [] };
-  const rows = await db(AUTH).where({ dimension: 'communication', instance_kind: '-', level: P.LEVELS.AUTO_OUTREACH }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'path_id');
-  if (!rows.length) return out;
+  // the initial pitches, then the follow-ups (§6.4) — one cap decision under the sender's lock ends both
+  const capped = await dispatchBatch(db, out, { send, now, followUp: false });
+  if (!capped) await dispatchBatch(db, out, { send, now, followUp: true });
+  return out;
+}
+// one lane's batch: the AUTO_OUTREACH rows of its instance kind on drafted, unleased rows. Returns true when the cap ended it.
+async function dispatchBatch(db, out, { send, now, followUp }) {
+  const kind = followUp ? 'followup' : '-';
+  const rows = await db(AUTH).where({ dimension: 'communication', instance_kind: kind, level: P.LEVELS.AUTO_OUTREACH }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'path_id');
+  if (!rows.length) return false;
+  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(rows.map((r) => r.path_id).filter(Boolean))]).select('id', 'acquisition_type', 'account_required', 'execution_after_send');
   // a SUBMIT-FIRST path (execution_after_send=false) sends its pitch only after the acquisition — never from here.
   // Its drafts are excluded BEFORE the batch limit: a backlog of them at the head of the ordering would otherwise
-  // fill every batch and starve the send-first drafts behind it on every nightly run.
-  const sendFirst = new Set((await db('seo_link_acquisition_paths').whereIn('id', [...new Set(rows.map((r) => r.path_id).filter(Boolean))]).select('id', 'acquisition_type', 'account_required', 'execution_after_send')).filter((x) => !P.submitFirst(x)).map((x) => x.id));
-  const decidedPath = new Map(rows.filter((r) => sendFirst.has(r.path_id)).map((r) => [r.prospect_id, r.path_id]));
-  if (!decidedPath.size) return out;
-  const batch = await db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...sendFirst]).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').orderBy('updated_at', 'asc').limit(AUTO_SEND_BATCH).select('id', 'path_id', 'updated_at');
+  // fill every batch and starve the send-first drafts behind it on every nightly run. (A follow-up presupposes the
+  // pitch went out, so every path qualifies there; the sender narrows the lifecycle against the path.)
+  const eligible = new Set(paths.filter((x) => followUp || !P.submitFirst(x)).map((x) => x.id));
+  const decidedPath = new Map(rows.filter((r) => eligible.has(r.path_id)).map((r) => [r.prospect_id, r.path_id]));
+  if (!decidedPath.size) return false;
+  const statusCol = followUp ? 'follow_up_status' : 'outreach_status';
+  let q = db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...eligible]).where({ [statusCol]: 'drafted' }).whereNull('claimed_at');
+  q = followUp ? q.where({ outreach_status: 'sent' }).whereIn('status', [...M.FOLLOW_UP_STATUSES({ execution_after_send: false })]) : q.where({ status: PARKABLE }).whereNull('outreach_sent_at');
+  const batch = await q.orderBy('updated_at', 'asc').limit(AUTO_SEND_BATCH).select('id', 'path_id', 'updated_at');
   for (const p of batch) {
     if (decidedPath.get(p.id) !== p.path_id) continue; // the row left the path its instance was decided on — the bridge rotates it
     out.attempted += 1;
     let res;
-    try { res = await send({ prospectId: p.id, approvedBy: 'auto-outreach', mode: 'auto', now }); } catch (err) { res = { ok: false, code: 'error', error: err.message }; }
+    try { res = await send({ prospectId: p.id, approvedBy: 'auto-outreach', mode: 'auto', followUp, now }); } catch (err) { res = { ok: false, code: 'error', error: err.message }; }
     if (res && res.ok) { out.sent += 1; continue; }
-    out.skipped.push({ id: p.id, code: (res && res.code) || 'error' });
-    if (res && res.code === 'rate_limited') break; // the cap is reached for the window — nothing else sends today
+    out.skipped.push({ id: p.id, code: (res && res.code) || 'error', ...(followUp ? { follow_up: true } : {}) });
+    if (res && res.code === 'rate_limited') return true; // the cap is reached for the window — nothing else sends today
     // the refused row goes behind every draft that existed before this run (still drafted: the claim never took it) —
     // unless an edit landed since the run began: a later timestamp is what marks that draft stale for the next
     // selection and is never moved backward
-    await db('seo_link_prospects').where({ id: p.id, outreach_status: 'drafted' }).where('updated_at', '<=', now).update({ updated_at: now });
+    await db('seo_link_prospects').where({ id: p.id, [statusCol]: 'drafted' }).where('updated_at', '<=', now).update({ updated_at: now });
   }
-  return out;
+  return false;
 }
 
 // The OTHER owner decisions that hold a placement in its park — the park predicate (`gates` in bridgeDomain) minus
@@ -410,9 +423,13 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       }
     }
   }
-  // the communication verdict depends on the PLACEMENT's draft (§6.3 2c), so the decision is per placement
+  // the communication verdict depends on the PLACEMENT's draft (§6.3 2c), so the decision is per placement — and
+  // once the pitch went out and its ONE follow-up is drafted (§6.4, followUpPending), the communication/followup
+  // instance is required and decided by the same rule on the FOLLOW-UP's text (the satisfied initial is never re-decided)
   const decisionFor = (placement) => {
-    const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: lane.outreach ? M.draftReview(placement).clean : false, waiver });
+    const followUp = lane.outreach && M.followUpPending(placement);
+    const draftClean = !lane.outreach ? false : followUp ? M.followUpReview(placement).clean : M.draftReview(placement).clean;
+    const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean, followUp, waiver });
     return regroupHeld
       ? { ...decided, instances: decided.instances.map((i) => (i.dimension === 'payment' ? { ...i, level: P.LEVELS.OWNER_INPUT_REQUIRED, reason: 'fee scope changed after payment activity: the owner performs the regroup' } : i)) }
       : decided;
@@ -475,7 +492,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       // is PINNED at the authority the claim was granted under: the draft is no longer `drafted` (so a re-review here
       // would read it unclean and rewrite AUTO → OWNER on a row `finalizeSend` then satisfies by id, no owner click
       // taken) — the reconcile settles it, not a concurrent bridge run
-      if (inst.dimension === 'communication' && M.AMBIGUOUS_SEND_STATUSES.includes(placement.outreach_status)) continue;
+      if (inst.dimension === 'communication' && M.AMBIGUOUS_SEND_STATUSES.includes(inst.instance_kind === 'followup' ? placement.follow_up_status : placement.outreach_status)) continue;
       const inputsMoved = existing.level !== inst.level || existing.decision_inputs_hash !== hash || Number(existing.path_revision) !== Number(pathRevision);
       const changed = inputsMoved || (existing.floor_waiver_id || null) !== floorWaiverId || existing.reason !== inst.reason;
       if (!changed && ts(existing.decided_at) >= Math.max(staleAfter, ts(placement.updated_at))) continue;
@@ -510,11 +527,11 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     // (the draft lease, mode=draft, runs first; the card binds the draft); an
     // ambiguous send (sending / send_error) stays in the reconciliation
     // lifecycle, which loads `prospect` rows only — parking it would strand it
-    const draftReady = placement.outreach_status === 'drafted';
+    const draftReady = (r) => (r.instance_kind === 'followup' ? placement.follow_up_status : placement.outreach_status) === 'drafted';
     const gates = (r) => {
       if (authorized(r)) return false;
       if (!isOwner(r.level)) return false;
-      if (r.dimension === 'communication' && !draftReady && (r.level === 'OWNER_OUTREACH' || r.level === 'OWNER_LEGAL')) return false;
+      if (r.dimension === 'communication' && !draftReady(r) && (r.level === 'OWNER_OUTREACH' || r.level === 'OWNER_LEGAL')) return false;
       if (deferred(r, lane)) return false;
       return true;
     };

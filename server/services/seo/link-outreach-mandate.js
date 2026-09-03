@@ -73,10 +73,20 @@ function lintDraft({ subject, body }) {
 function draftReview(placement) {
   const p = placement || {};
   if (p.outreach_status !== 'drafted') return { clean: false, flags: [], lint: [], reason: 'no draft' };
-  if (!isValidEmail(p.outreach_to_email)) return { clean: false, flags: [], lint: [], reason: 'invalid recipient' };
-  if (!p.outreach_subject || !p.outreach_body) return { clean: false, flags: [], lint: [], reason: 'incomplete draft' };
-  const flags = [...new Set([...classifyDraft(p.outreach_subject), ...classifyDraft(p.outreach_body)])];
-  const lint = lintDraft({ subject: p.outreach_subject, body: p.outreach_body });
+  return reviewDraft({ to: p.outreach_to_email, subject: p.outreach_subject, body: p.outreach_body });
+}
+/** The same verdict for the FOLLOW-UP draft (§6.4): drafted, addressed to the thread's recipient, lint-clean, no flag. */
+function followUpReview(placement) {
+  const p = placement || {};
+  if (p.follow_up_status !== 'drafted') return { clean: false, flags: [], lint: [], reason: 'no follow-up draft' };
+  return reviewDraft({ to: p.outreach_to_email, subject: p.follow_up_subject, body: p.follow_up_body });
+}
+/** The mandate verdict over a bare draft — the sender re-reviews the LOCKED text of either send with it. */
+function reviewDraft({ to, subject, body }) {
+  if (!isValidEmail(to)) return { clean: false, flags: [], lint: [], reason: 'invalid recipient' };
+  if (!subject || !body) return { clean: false, flags: [], lint: [], reason: 'incomplete draft' };
+  const flags = [...new Set([...classifyDraft(subject), ...classifyDraft(body)])];
+  const lint = lintDraft({ subject, body });
   const clean = flags.length === 0 && lint.length === 0;
   return { clean, flags, lint, reason: clean ? null : [...flags, ...lint.map((l) => `lint:${l.rule}`)].join(', ') };
 }
@@ -103,6 +113,27 @@ const consumerMail = (host) => SHARED_MAIL_DOMAINS.has(host) || SHARED_MAIL_DOMA
 function draftHash({ outreach_to_email: to, outreach_subject: subject, outreach_body: body } = {}) {
   return sha256([normalizeEmail(to), String(subject || ''), String(body || '')]);
 }
+/** The outreach_followup action hash: the same shape over the follow-up draft (its recipient is the thread's). */
+function followUpHash({ outreach_to_email: to, follow_up_subject: subject, follow_up_body: body } = {}) {
+  return draftHash({ outreach_to_email: to, outreach_subject: subject, outreach_body: body });
+}
+/** Which draft a send acts on — the initial pitch or the follow-up — as the sender's `draft` shape. */
+const draftOf = (placement, followUp = false) => (followUp
+  ? { outreach_to_email: placement.outreach_to_email, outreach_subject: placement.follow_up_subject, outreach_body: placement.follow_up_body }
+  : { outreach_to_email: placement.outreach_to_email, outreach_subject: placement.outreach_subject, outreach_body: placement.outreach_body });
+
+// §6.4 — the follow-up: ONE per placement, +10 days after the initial pitch, only if no reply
+const FOLLOW_UP_DELAY_MS = 10 * 24 * 60 * 60 * 1000;
+const followUpDueAt = (sentAt) => new Date(new Date(sentAt).getTime() + FOLLOW_UP_DELAY_MS);
+// the lifecycle statuses a follow-up may act on: `contacted` (the initial send left the row there), plus the
+// Judge-owned statuses on a SUBMIT-FIRST path (execution_after_send=false), where the acquisition moved the row on
+// before the pitch — a follow-up there is claimable and never demotes the row (the follow-up writes its own columns)
+const FOLLOW_UP_JUDGE_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
+const FOLLOW_UP_STATUSES = (path) => Object.freeze(['contacted', ...(path && path.execution_after_send === false ? FOLLOW_UP_JUDGE_STATUSES : [])]);
+// a follow-up the bridge must DECIDE (the communication/followup instance exists for it): drafted, or in flight /
+// ambiguous after the claim (the instance stays pinned until the reconcile settles it)
+const followUpPending = (placement) => Boolean(placement) && placement.outreach_status === 'sent'
+  && ['drafted', 'sending', 'send_error'].includes(placement.follow_up_status);
 
 // Consumer mail providers: a shared domain there says nothing about identity, so
 // only an EXACT address match can be a customer at these hosts.
@@ -191,4 +222,4 @@ async function reviewByEmail(q, emails) {
 // have delivered the pitch, so the inbox stays held and the authority it was claimed under stays pinned until then
 const AMBIGUOUS_SEND_STATUSES = Object.freeze(['sending', 'send_error']);
 
-module.exports = { AMBIGUOUS_SEND_STATUSES, draftReview, classifyDraft, lintDraft, draftHash, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { AMBIGUOUS_SEND_STATUSES, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_MS, FOLLOW_UP_STATUSES, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };

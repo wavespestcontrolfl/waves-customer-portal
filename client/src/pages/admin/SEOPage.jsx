@@ -2842,9 +2842,10 @@ function OutreachApprovals({ canRun, onChange }) {
     if (!ok && r.code === "recipient_review_required") setAcks((prev) => ({ ...prev, [ackKey]: false })); // the reload below shows the current match
     setBusyId(null); refresh();
   };
-  const reconcile = async (id, outcome) => {
+  const reconcile = async (p, outcome) => {
+    const id = p.id;
     setBusyId(id); setMsg(null);
-    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/reconcile`, { outcome });
+    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/reconcile`, { outcome, ...(p.follow_up ? { follow_up: true } : {}) });
     setMsg({ ok, text: ok ? (outcome === "sent" ? "Marked as sent." : "Returned to drafts.") : (OUTREACH_CODE_MSG[r.code] || r.error || "Reconcile failed.") });
     setBusyId(null); refresh();
   };
@@ -2923,12 +2924,12 @@ function OutreachApprovals({ canRun, onChange }) {
             <div key={p.id} style={{ background: D.card, border: `1px solid ${D.amber}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>{p.target_domain}</div>
+                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>{p.target_domain}{p.follow_up ? " · follow-up" : ""}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email} · <b>{p.outreach_subject}</b></div>
                 </div>
                 <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                  <button onClick={() => reconcile(p.id, "sent")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.green, false, busyId === p.id)}>It sent</button>
-                  <button onClick={() => reconcile(p.id, "requeue")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.amber, false, busyId === p.id)}>Re-queue</button>
+                  <button onClick={() => reconcile(p, "sent")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.green, false, busyId === p.id)}>It sent</button>
+                  <button onClick={() => reconcile(p, "requeue")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.amber, false, busyId === p.id)}>Re-queue</button>
                 </div>
               </div>
             </div>
@@ -3764,7 +3765,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                               <RecipientReview review={r.draft?.recipient_review} acked={acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]} disabled={rowBusy} onAck={(v) => setAcks({ ...acks, [`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]: v })} />
                               <span>
                                 <button onClick={() => send(c, r)} disabled={rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`])} style={btn(rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]), D.green)}>
-                                  {rowBusy ? "Sending…" : "Send the pitch"}
+                                  {rowBusy ? "Sending…" : r.action === "outreach_followup" ? "Send the follow-up" : "Send the pitch"}
                                 </button>
                               </span>
                             </div>

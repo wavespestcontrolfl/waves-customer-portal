@@ -733,6 +733,14 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
           .where('outreach_status', 'send_error')
           .orWhere((s) => s.where('outreach_status', 'sending').andWhere('updated_at', '<', staleCutoff)))
     );
+    // …and a FOLLOW-UP send in the same ambiguous states (§6.4) — settled by the same decision over its own columns
+    const followUpReconcile = await orderByPriority(
+      db('seo_link_prospects')
+        .where((b) => b
+          .where('follow_up_status', 'send_error')
+          .orWhere((s) => s.where('follow_up_status', 'sending').andWhere('updated_at', '<', staleCutoff)))
+    );
+    for (const p of followUpReconcile) needsReconcile.push({ ...p, follow_up: true, outreach_subject: p.follow_up_subject });
     const sentToday = await Outreach.dailySendCount();
     // §6.4 / §13 — what the owner sees before Approve & send: the draft review and the recipient match to acknowledge
     let byEmail = null; let reviewError = null;
@@ -808,7 +816,7 @@ router.post('/prospects/:id/outreach/reconcile', requireAdmin, async (req, res, 
   try {
     const Outreach = require('../services/seo/link-prospect-outreach');
     const result = await Outreach.reconcileSendError({
-      prospectId: req.params.id, outcome: req.body?.outcome, approvedBy: req.technician?.name || 'admin',
+      prospectId: req.params.id, outcome: req.body?.outcome, approvedBy: req.technician?.name || 'admin', followUp: req.body?.follow_up === true,
     });
     if (!result.ok) {
       const status = { not_found: 404, not_reconcilable: 409, not_requeueable: 409, send_in_flight: 409 }[result.code] || 400;

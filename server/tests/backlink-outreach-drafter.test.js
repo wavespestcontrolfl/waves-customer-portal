@@ -32,7 +32,9 @@ const prospect = (o = {}) => ({
   contact_email: 'michael@directinspections.com', lease_token: '2026-06-22T00:00:00.000Z', ...o,
 });
 
-beforeEach(() => { worker.claim.mockReset(); worker.report.mockReset(); worker.report.mockResolvedValue({ ok: true }); });
+// the claim mock answers per lane: the follow-up pass (followUp: true) runs first and finds nothing unless a test says so
+const claims = (pitches = [], followUps = []) => worker.claim.mockImplementation(async (o) => (o && o.followUp ? followUps : pitches));
+beforeEach(() => { worker.claim.mockReset(); worker.report.mockReset(); worker.report.mockResolvedValue({ ok: true }); claims(); });
 
 describe('parseDraft', () => {
   test('extracts subject/body from fenced + plain JSON, null on garbage', () => {
@@ -62,7 +64,7 @@ describe('SYSTEM_PROMPT playbook', () => {
 
 describe('run', () => {
   test('drafts a claimed prospect and parks it with the STORED contact_email (never the model’s)', async () => {
-    worker.claim.mockResolvedValue([prospect()]);
+    claims([prospect()]);
     // Even if the model emits a different email, we must not use it.
     const a = fakeAnthropic('{"subject":"Add Waves to your vendor resources?","body":"Hi Michael,\\n...\\n— The Waves Pest Control Team","recipient":"evil@attacker.com"}');
     const r = await drafter.run({ anthropic: a, fetchPageFn: noFetch });
@@ -75,14 +77,37 @@ describe('run', () => {
     expect(call.lease_token).toBe('2026-06-22T00:00:00.000Z');
   });
 
-  test('claims outreach prospects requiring a contact email', async () => {
-    worker.claim.mockResolvedValue([]);
+  test('claims outreach prospects requiring a contact email — after the follow-up lease', async () => {
     await drafter.run({ anthropic: fakeAnthropic('{}'), fetchPageFn: noFetch });
     expect(worker.claim).toHaveBeenCalledWith({ n: 10, type: 'outreach', requireContactEmail: true });
+    expect(worker.claim).toHaveBeenCalledWith({ n: 10, type: 'outreach', followUp: true });
+  });
+
+  test('a due follow-up is drafted in the pitch\'s thread and reported on the follow-up lane (subject Re:, no recipient, the lease token)', async () => {
+    const sent = prospect({ id: 'p2', outreach_to_email: 'michael@directinspections.com', outreach_subject: 'Add Waves to your vendor resources?', outreach_body: 'Hi Michael, …', outreach_status: 'sent', follow_up_status: 'due', lease_token: '2026-07-02T00:00:00.000Z' });
+    claims([], [sent]);
+    const a = { messages: { create: jest.fn(async ({ system, messages }) => {
+      expect(system).toMatch(/follow-up/i);
+      expect(messages[0].content).toMatch(/Add Waves to your vendor resources\?/);
+      return { content: [{ type: 'text', text: '{"subject":"Re: Add Waves to your vendor resources?","body":"Hi Michael, a quick nudge.\\n— The Waves Pest Control Team","recipient":"evil@attacker.com"}' }] };
+    }) } };
+    const r = await drafter.run({ anthropic: a, fetchPageFn: noFetch });
+    expect(r.followUps).toEqual({ claimed: 1, drafted: 1, failed: 0 });
+    expect(worker.report).toHaveBeenCalledTimes(1);
+    const call = worker.report.mock.calls[0][0];
+    expect(call).toMatchObject({ prospect_id: 'p2', outcome: 'drafted', lease_token: '2026-07-02T00:00:00.000Z', outreach_subject: 'Re: Add Waves to your vendor resources?' });
+    expect(call.outreach_to_email).toBeUndefined(); // the recipient is the thread's — never the model's
+  });
+
+  test('an unusable follow-up draft reports failed on the lease (the row returns to due)', async () => {
+    claims([], [prospect({ id: 'p2', outreach_status: 'sent', follow_up_status: 'due' })]);
+    const r = await drafter.run({ anthropic: fakeAnthropic('no json'), fetchPageFn: noFetch });
+    expect(r.followUps).toEqual({ claimed: 1, drafted: 0, failed: 1 });
+    expect(worker.report.mock.calls[0][0]).toMatchObject({ prospect_id: 'p2', outcome: 'failed' });
   });
 
   test('dry-run writes nothing', async () => {
-    worker.claim.mockResolvedValue([prospect()]);
+    claims([prospect()]);
     const r = await drafter.run({ anthropic: fakeAnthropic('{"subject":"S","body":"B\\n— The Waves Pest Control Team"}'), fetchPageFn: noFetch, dryRun: true });
     expect(r.drafted).toBe(1);
     expect(worker.report).not.toHaveBeenCalled();
@@ -95,7 +120,7 @@ describe('run', () => {
   });
 
   test('unparseable model output → reports failed (not drafted)', async () => {
-    worker.claim.mockResolvedValue([prospect()]);
+    claims([prospect()]);
     const r = await drafter.run({ anthropic: fakeAnthropic('sorry, I cannot'), fetchPageFn: noFetch });
     expect(r).toMatchObject({ drafted: 0, failed: 1 });
     expect(worker.report.mock.calls[0][0].outcome).toBe('failed');
