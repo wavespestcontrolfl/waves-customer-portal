@@ -2782,7 +2782,11 @@ async function unresolvedEligibilityPreview(scheduledServiceId, skipReason) {
       .first('no_show_fee_amount');
     feeAmount = Number(row?.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : null;
   } catch (err) { /* best-effort */ }
-  return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', feeAmount, detail: String(skipReason || 'lookup failed').replace(/_/g, ' ') }) };
+  // charge_review = fee_status charging / charge_review: a fee event is
+  // already running, not a retryable lookup failure — distinct code so the
+  // client offers no waiver (Codex #3806 r4 P1).
+  const code = skipReason === 'charge_review' ? 'charge_in_flight' : 'unresolved';
+  return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code, feeAmount, detail: String(skipReason || 'lookup failed').replace(/_/g, ' ') }) };
 }
 
 // Card removal is revocation on the charge path (Codex #3342 r5 P2; #3800

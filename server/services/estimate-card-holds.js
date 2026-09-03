@@ -1340,6 +1340,11 @@ const CANCEL_FEE_RULE_BUILDERS = {
   outside_window: ({ hours, start }) => [false, `A card is saved. The visit starts ${fmtETWhen(start)}, outside the ${hours}-hour late-cancel window, so this is a free cancel and nothing will be charged.`],
   in_window: ({ hours, start, fee }) => [true, `A card is saved and the visit starts ${fmtETWhen(start)}, within the ${hours}-hour late-cancel window. ${fee} will be charged — rule: cancellations within ${hours} hours of the visit.`],
   sticky: ({ hours, sticky, fee }) => [true, `A card is saved. The customer rescheduled on ${fmtETWhen(sticky?.rescheduledAt)} while inside the ${hours}-hour window of the earlier slot (${fmtETWhen(sticky?.originalStart)}), so the window carried over to this visit. ${fee} will be charged — rule: a reschedule made inside the window doesn't reset it.`],
+  // A fee event already running or parked for review (fee_status
+  // charging / charge_review): a PaymentIntent may still land, the cancel
+  // handler exits before its waiver branch, so no waiver can help — the
+  // client withholds it for this code (Codex #3806 r4 P1).
+  charge_in_flight: () => [null, 'A fee charge for this visit is already in progress or under billing review. This cancel starts no new charge and cannot waive that one — check the visit\'s billing before promising the customer either way.'],
   // Genuinely indeterminate (Codex #3800 r4 P1): the check runs AGAIN at
   // confirm time and a recovered lookup may charge, so never promise
   // "nothing will be charged" here.

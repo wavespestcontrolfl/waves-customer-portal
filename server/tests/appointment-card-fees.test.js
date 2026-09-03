@@ -1044,6 +1044,13 @@ describe('appointmentCardCancelPreview', () => {
     expect(res).toMatchObject({ secured: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window', willCharge: false } });
     expect(res.rule.text).toMatch(/outside the 24-hour late-cancel window, so this is a free cancel and nothing will be charged\.$/);
   });
+  test('fee already charging → charge_in_flight (not the retryable unresolved code): no waiver offer, no "nothing charged" promise', async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'charging' } });
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    expect(res.rule.text).toMatch(/already in progress or under billing review/);
+    expect(res.rule.text).not.toMatch(/Nothing will be charged/);
+  });
   test('unresolved (thrown time lookup) → willCharge null and the rule says the cancel parks for review', async () => {
     mockApptTime = null;
     require('../services/appointment-reminders').scheduledServiceApptTime.mockRejectedValueOnce(new Error('db blip'));
