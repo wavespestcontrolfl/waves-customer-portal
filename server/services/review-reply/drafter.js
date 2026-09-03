@@ -344,14 +344,28 @@ const LEGACY_BRAND_RE = /\bwaves\s+lawn(?:\s*(?:&|and|\+|\/|-)\s*pest)?\b/i;
 // Lowercase-name backstop (codex r66): common first names that are not also
 // ordinary English words. Any occurrence, in any case, needs provenance.
 const COMMON_FIRST_NAMES = new Set(('kevin marcus james john robert michael william david richard joseph thomas charles christopher daniel matthew anthony donald steven paul andrew joshua kenneth brian george edward ronald timothy jason jeffrey ryan jacob gary nicholas eric jonathan stephen larry justin scott brandon benjamin samuel gregory alexander patrick raymond jack dennis jerry tyler aaron jose adam nathan henry douglas zachary peter kyle ethan walter noah jeremy christian keith roger terry austin sean gerald carl harold dylan arthur jordan jesse bryan billy bruce gabriel joe logan alan juan albert willie elijah wayne randy vincent ralph eugene russell bobby mason philip louis mary patricia jennifer linda elizabeth barbara susan jessica sarah karen lisa nancy betty sandra margaret ashley kimberly emily donna michelle carol amanda melissa deborah stephanie rebecca sharon laura cynthia kathleen amy angela shirley anna brenda pamela emma nicole helen samantha katherine christine debra rachel carolyn janet catherine maria heather diane olivia julie joyce victoria kelly christina lauren joan evelyn judith megan andrea cheryl hannah jacqueline martha gloria teresa ann sara madison frances kathryn janice jean abigail alice judy sophia julia denise amber danielle marilyn beverly charlotte natalie theresa diana brittany doris kayla alexis lori tiffany carlos luis miguel jorge ricardo eduardo fernando javier sergio roberto manuel pedro raul mario alejandro francisco antonio diego tony mike dave jim bob steve chris matt dan andy josh ben sam greg alex pat nick jon jeff tim jake tyler cody travis trevor shane chad derek dustin brett corey casey tanner colton hunter cole blake wyatt caleb connor evan garrett owen liam lucas oliver isaac levi carter jaxon grayson lincoln easton landon nolan hudson brooks brayden dominic jace jaden tristan kaden bryce marcos rafael ruben santiago hector oscar omar victor ivan cesar jesus angel gilbert lorenzo dean guy earl leo max sid ray ken don ron rick rich bill tom ed al lou pete art ted fred frank stan marty vince ernie chuck kim sue jan pam deb kate liz beth jen jess amy meg kay jo bea tina gina lena nina rosa ana luz ines elena sofia isabella mia ava ella chloe zoe lily grace layla nora aria ellie riley zoey hazel violet aurora savannah audrey bella claire skylar lucy paisley everly anna caroline nova genesis emilia kennedy maya willow kinsley naomi aaliyah elena sarah ariana allison gabriella alice madelyn cora ruby eva serenity autumn adeline hailey gianna valentina isla eliana quinn nevaeh ivy sadie piper lydia alexa josephine emery julia delilah arianna vivian kaylee sophie brielle madeline peyton rylee clara hadley melanie mackenzie reagan adalynn liliana aubrey jade katherine isabelle natalia raelynn maria athena ximena arya leilani taylor faith rose kylie alexandra mary margaret lyla ashley amaya eliza brianna bailey andrea khloe jocelyn angela cecilia leah').split(' '));
-// Common first names that are also ordinary English words. They are prose
-// only in a prose context — right after a determiner, quantifier, adjective
-// or intensifier ("the right guy", "no surprise bill", "to be frank", "in
-// good faith"). Possessives and prepositions are name slots ("our pat",
-// "with pat on the job"), so "bill did a great job" and "our pat" stay names.
-const DUAL_USE_FIRST_NAMES = new Set('guy art max grace faith rose hunter bill pat frank chuck jack rich summer joy'.split(' '));
-const PROSE_CONTEXT_RE = /(?:^|\s)(?:the|a|an|no|any|some|this|that|each|every|another|one|surprise|extra|final|first|last|next|right|good|nice|great|solid|be|too|so|very|really|pretty|quite)\s+$/i;
-function inProseContext(body, idx) { return PROSE_CONTEXT_RE.test(body.slice(Math.max(0, idx - 24), idx)); }
+// Common first names that are also ordinary English words, each paired with
+// the contexts in which it is that ordinary word: "the right guy", "no
+// surprise bill", "to be frank", "in good faith". Anything else — "bill did
+// a great job", "our pat", "the pat handled" — is a name.
+const DETERMINER_CONTEXT = 'the|a|an|no|any|some|this|that|each|every|another|one|surprise|extra|final|first|last|next|right|good|nice|great|solid|whole|long|hot';
+const DUAL_USE_CONTEXTS = {
+  guy: DETERMINER_CONTEXT,
+  bill: DETERMINER_CONTEXT,
+  jack: DETERMINER_CONTEXT,
+  art: DETERMINER_CONTEXT,
+  max: DETERMINER_CONTEXT,
+  summer: DETERMINER_CONTEXT,
+  frank: 'be|too|so|very|really|pretty|quite',
+  faith: 'good|great|real|pure|much|such',
+  grace: 'good|great|real|pure|much|such',
+  joy: 'good|great|real|pure|much|such',
+};
+const DUAL_USE_FIRST_NAMES = new Set(Object.keys(DUAL_USE_CONTEXTS));
+function inProseContext(body, idx, word) {
+  const ctx = DUAL_USE_CONTEXTS[word];
+  return !!ctx && new RegExp(`(?:^|\\s)(?:${ctx})\\s+$`, 'i').test(body.slice(Math.max(0, idx - 24), idx));
+}
 
 // Relationship / tenure wording an account's derived facts license. Shared by
 // the verifier and the prompt so the model is told the same rule it is
@@ -566,7 +580,7 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     // A prior reviewer greeted as "Bill" is a leak only as a name: lowercase
     // "no surprise bill" is prose (span capture found this on a real review);
     // "bill did a great job" is not.
-    if (DUAL_USE_FIRST_NAMES.has(name) && hit[0] === hit[0].toLowerCase() && inProseContext(body, hit.index)) continue;
+    if (DUAL_USE_FIRST_NAMES.has(name) && hit[0] === hit[0].toLowerCase() && inProseContext(body, hit.index, name)) continue;
     return reject('forbidden_name', name);
   }
   // Allowlist provenance for ANY introduced proper noun: a capitalized word
@@ -622,7 +636,7 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     const w = bw[1];
     if (!COMMON_FIRST_NAMES.has(w)) continue;
     if (allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || cityWords.has(w)) continue;
-    if (DUAL_USE_FIRST_NAMES.has(w) && inProseContext(body, bw.index + bw[0].length - w.length)) continue;
+    if (DUAL_USE_FIRST_NAMES.has(w) && inProseContext(body, bw.index + bw[0].length - w.length, w)) continue;
     return reject('unlisted_name', w);
   }
   // Title-case words AND all-caps words ("KEVIN") both need provenance.
@@ -887,9 +901,10 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
 }
 
 // Rejection codes whose span is a person or a contact detail (a name, a phone
-// number, an email, an address, a link): the retry prompt sees the words, the
-// row and the audit log keep the code only.
-const REDACTED_SPAN_CODES = new Set(['email', 'url', 'phone', 'address', 'forbidden_name', 'unlisted_name']);
+// number, an email, an address, a link — and the opening, which starts with
+// the greeting name): the retry prompt sees the words, the row and the audit
+// log keep the code only.
+const REDACTED_SPAN_CODES = new Set(['email', 'url', 'phone', 'address', 'forbidden_name', 'unlisted_name', 'repetitive_opening']);
 
 const FEEDBACK_FOR = {
   too_long: 'too many words',
@@ -1018,7 +1033,10 @@ const stored = (details) => details.map(({ attempt, code, span }) => ({ attempt,
 function safeCopyReply(grounding, mode, recentReplies = []) {
   const r = grounding.review;
   if (mode === 'low_rating' || !(Number(r.rating) >= 4)) return null;
-  const greeting = r.firstName ? `Hi ${r.firstName},` : 'Hello there,';
+  // A first name the verifier itself cannot pass ("April" reads as a date,
+  // "O'Neil" / "Mary-Jane" as an unsourced proper noun) falls back to the
+  // generic greeting rather than to no reply at all.
+  const greetings = r.firstName ? [`Hi ${r.firstName},`, 'Hello there,'] : ['Hello there,'];
   const noun = r.hasText ? 'the review' : (Number(r.rating) === 5 ? 'the five stars' : 'the rating');
   // No technician name: a 4-star review can name a tech in a complaint, and
   // nothing deterministic reads sentiment. The plain variant is safe for all.
@@ -1029,17 +1047,16 @@ function safeCopyReply(grounding, mode, recentReplies = []) {
     `We appreciate ${noun}. Glad you chose us.`,
     `Much appreciated. Thanks for choosing us.`,
   ];
-  const texts = variants.map((body) => `${greeting}\n\n${body}\n\n${signOffFor(grounding.locationName)}`);
+  const texts = greetings.flatMap((greeting) => variants.map((body) => `${greeting}\n\n${body}\n\n${signOffFor(grounding.locationName)}`));
   // Prefer a variant the location has not used lately …
   for (const text of texts) {
     if (!verifyReplyDetailed(text, grounding, { recentReplies, mode })) return text;
   }
   // … but the non-repetition rule exists to keep model replies varied, not
-  // to starve the last rung: once every variant is recent, the first one is
-  // re-used. It still passes every other rule (no recent greeting name can be
-  // in it — it carries only this reviewer's first name).
-  if (!verifyReplyDetailed(texts[0], grounding, { recentReplies: [], mode })) return texts[0];
-  return null;
+  // to starve the last rung: once every variant is recent, the first passing
+  // one is re-used. It still passes every other rule (no recent greeting name
+  // can be in it — it carries only this reviewer's first name).
+  return texts.find((text) => !verifyReplyDetailed(text, grounding, { recentReplies: [], mode })) || null;
 }
 
 module.exports = {

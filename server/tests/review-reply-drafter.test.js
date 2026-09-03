@@ -690,6 +690,13 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(r.attempts).toBe(4);
     expect(r.rejectionDetails).toHaveLength(4);
     expect(r.rejectionDetails[0]).toEqual({ attempt: 1, code: 'forbidden_name', span: null });
+    // The opening span starts with the greeting name: redacted from stored details (GitHub r2 P1).
+    const rep = Drafter.verifyReplyDetailed(CLEAN, grounding(), { recentReplies: [good('Hi Dana, glad Marcus got out quickly and the ants are staying out of your kitchen. Thanks.')] });
+    expect(rep.code).toBe('repetitive_opening');
+    mockDispatch.mockReset();
+    mockDispatch.mockResolvedValue({ ok: true, text: CLEAN });
+    const r2 = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [good('Hi Dana, glad Marcus got out quickly and the ants are staying out of your kitchen. Thanks.')] });
+    expect(r2.rejectionDetails.every((d) => d.code === 'repetitive_opening' && d.span === null)).toBe(true);
   });
   test('safe copy never names a technician, and its variants dodge the non-repetition rule', () => {
     const g = grounding({ mentionedTechNames: [], topics: [] });
@@ -712,6 +719,12 @@ describe('draftReviewReply — fallback ladder', () => {
     const noText = grounding({ firstName: '', text: '', mentionedTechNames: [], topics: [], account: null });
     expect(Drafter.safeCopyReply(noText, 'no_text', [])).toBe(good('Hello there,\n\nThanks for the five stars. Glad to be your pest and lawn team.'));
     expect(Drafter.safeCopyReply(grounding({ rating: 2 }), 'low_rating', [])).toBeNull();
+    // A first name the verifier cannot pass falls back to the generic greeting (GitHub r2).
+    for (const firstName of ['April', "O'Neil", 'Mary-Jane', 'McDonald']) {
+      const gn = grounding({ firstName, mentionedTechNames: [], topics: [] });
+      gn.allow.names = [firstName];
+      expect(Drafter.safeCopyReply(gn, 'service_quality', [])).toBe(good('Hello there,\n\nThanks for the review. Glad to be your pest and lawn team.'));
+    }
     // A 4-star review can name a tech in a complaint; safe copy never names one.
     const mixed = grounding({ rating: 4, text: 'Marcus was rude, but the ants are gone and the yard looks good.' });
     expect(Drafter.safeCopyReply(mixed, 'tech_praise', [])).toBe(good('Hi Dana,\n\nThanks for the review. Glad to be your pest and lawn team.'));
@@ -750,6 +763,10 @@ describe('draftReviewReply — fallback ladder', () => {
     const gp = grounding({ forbiddenNames: ['Pat'] });
     expect(Drafter.verifyReplyText(good('Hi Dana, our pat made sure the ants are gone from your kitchen with Marcus.'), gp)).toBe('forbidden_name');
     expect(Drafter.verifyReplyText(good('Hi Dana, with pat on the job the ants are gone from your kitchen. Marcus says thanks.'), gp)).toBe('forbidden_name');
+    // Contexts are per word (GitHub r2): "the pat" is not prose, "the bill" is; "good frank" is not, "be frank" is.
+    expect(Drafter.verifyReplyText(good('Hi Dana, the pat handled the ants with Marcus and they are gone from your kitchen.'), gp)).toBe('forbidden_name');
+    const gf = grounding({ forbiddenNames: ['Frank'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana, the good frank got the ants with Marcus and they are gone from your kitchen.'), gf)).toBe('forbidden_name');
   });
   test('dual-use first names in prose are not treated as introduced names', () => {
     const g = grounding({ text: 'Adam was on time and helpful with my ant problems.', mentionedTechNames: ['Adam'], topics: ['technician'] });
