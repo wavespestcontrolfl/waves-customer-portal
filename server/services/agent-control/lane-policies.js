@@ -65,7 +65,9 @@ const LANE_RUNTIME = {
   response_drafter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   estimate_followup: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  contact_correction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3' },
+  // offline: one bounded Anthropic call; a miss returns null so the durable
+  // queue retries later — no cross-provider chain, no deterministic answer.
+  contact_correction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M3' },
   sms_pathology: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_cadence: 'daily', ...LONG_BATCH },
   sms_verifier: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check' },
   // offline, not measurement: the nightly judge goes through createDeepMessage,
@@ -142,7 +144,9 @@ const LANE_RUNTIME = {
   project_report: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   completion_recap: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   lawn_visit_narratives: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
-  previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', expected_cadence: 'hourly' },
+  // event: the half-hourly sweep returns cached briefs unchanged, so a stable
+  // route (or a day with no eligible visits) makes no model call.
+  previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa' },
   invoice_summary: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
   wdo_appt_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: null },
 
@@ -191,8 +195,10 @@ const LANE_RUNTIME = {
   ib_tools: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy' },
   chart_builder_image: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   chart_builder_sql: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'sql_tool' },
-  knowledge_qa: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
-  wiki_qa: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
+  // internal_write: knowledge_qa's only caller writes lawn_assessments
+  // ai_summary / recommendations; every WikiQA query logs to knowledge_queries.
+  knowledge_qa: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
+  wiki_qa: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa' },
   kb_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_cadence: 'daily', ...LONG_BATCH },
   wiki_compiler: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', expected_cadence: 'hourly', ...LONG_BATCH },
   embeddings: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'embedding', fallback_class: 'offline', eval_family: null },
