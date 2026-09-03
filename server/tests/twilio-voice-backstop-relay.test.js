@@ -327,3 +327,63 @@ describe('relay-protocol auth/PII helpers', () => {
     expect(maskPhone(null)).toBe('***');
   });
 });
+
+describe('buildRelayTwiML — relay profile tuning attrs (relay-profiles is the only chooser)', () => {
+  let saved;
+  beforeEach(() => { saved = process.env.VOICE_RELAY_WS_SECRET; delete process.env.VOICE_RELAY_WS_SECRET; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.VOICE_RELAY_WS_SECRET;
+    else process.env.VOICE_RELAY_WS_SECRET = saved;
+  });
+
+  test('no attrs (every existing caller) ⇒ byte-identical to before', () => {
+    const base = buildRelayTwiML({ wsUrl: RELAY_URL, callSid: 'CA-p-0' });
+    expect(buildRelayTwiML({ wsUrl: RELAY_URL, callSid: 'CA-p-0', relayAttrs: null, relayProfileId: null })).toBe(base);
+    expect(buildRelayTwiML({ wsUrl: RELAY_URL, callSid: 'CA-p-0', relayAttrs: {} })).toBe(base);
+    expect(base).toMatch(/<ConversationRelay [^>]*\/><\/Connect>/);
+  });
+
+  test('attrs render after the fixed ones, XML-escaped, with the profile + voice on <Parameter>s', () => {
+    const xml = buildRelayTwiML({
+      wsUrl: RELAY_URL, callSid: 'CA-p-1',
+      relayAttrs: { speechModel: 'flux', eotThreshold: '0.8', hints: 'WaveGuard,North Port', events: 'speaker-events tokens-played' },
+      relayProfileId: 'flux_balanced_v1',
+    });
+    expect(xml).toContain('speechModel="flux"');
+    expect(xml).toContain('eotThreshold="0.8"');
+    expect(xml).toContain('hints="WaveGuard,North Port"');
+    expect(xml).toContain('events="speaker-events tokens-played"');
+    expect(xml.indexOf('language=')).toBeLessThan(xml.indexOf('speechModel='));
+    expect(xml).toContain('<Parameter name="relay_profile" value="flux_balanced_v1" />');
+    expect(xml).toContain('<Parameter name="tts_voice" value="21m00Tcm4TlvDq8ikWAM" />');
+    expect(xml).toContain('</ConversationRelay>');
+  });
+
+  test('a caller-supplied parameter map merges with (and wins over) the telemetry parameters', () => {
+    const xml = buildRelayTwiML({
+      wsUrl: RELAY_URL, callSid: 'CA-p-2', relayAttrs: { speechModel: 'flux' }, relayProfileId: 'flux_balanced_v1',
+      parameters: { lang: 'es', relay_profile: 'override' },
+    });
+    expect(xml).toContain('<Parameter name="lang" value="es" />');
+    expect(xml).toContain('<Parameter name="relay_profile" value="override" />');
+    expect(xml).toContain('<Parameter name="tts_voice" value="21m00Tcm4TlvDq8ikWAM" />');
+  });
+
+  test('a profile can never re-point or re-voice the relay, and odd keys are dropped', () => {
+    const xml = buildRelayTwiML({
+      wsUrl: RELAY_URL, callSid: 'CA-p-3',
+      relayAttrs: { url: 'wss://evil.example/ws', voice: 'other', welcomeGreeting: 'I am human', 'on click': 'x', speechModel: 'flux', empty: '' },
+    });
+    expect(xml).not.toContain('evil.example');
+    expect(xml).not.toContain('I am human');
+    expect(xml).not.toContain('on click');
+    expect(xml).not.toContain('empty=');
+    expect(xml.match(/voice="/g)).toHaveLength(1);
+    expect(xml).toContain('speechModel="flux"');
+  });
+
+  test('attribute values are escaped, never raw', () => {
+    const xml = buildRelayTwiML({ wsUrl: RELAY_URL, callSid: 'CA-p-4', relayAttrs: { hints: 'a&b"c' } });
+    expect(xml).toContain('hints="a&amp;b&quot;c"');
+  });
+});

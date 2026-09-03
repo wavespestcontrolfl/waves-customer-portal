@@ -290,10 +290,12 @@ function attachVoiceRelay(httpServer) {
     sessionTimer.unref?.();
     bumpIdle();
 
-    const send = (text) => {
+    // `last` defaults to true — one utterance per frame, as every caller sends
+    // today. A streaming renderer passes false for the non-final chunks.
+    const send = (text, last = true) => {
       if (ws.readyState === ws.OPEN) {
         try {
-          ws.send(textFrame(text, true));
+          ws.send(textFrame(text, last));
         } catch (e) {
           logger.error(`[voice-relay] ws send failed: ${e.message}`);
         }
@@ -383,6 +385,10 @@ function attachVoiceRelay(httpServer) {
             from: msg.from || p.from || null,
             to: msg.to || p.to || null,
             language: msg.lang || p.lang || null,
+            // Telemetry labels only (the TwiML that rendered this call put
+            // them on the <Parameter>s); nothing acts on them.
+            relayProfileId: typeof p.relay_profile === 'string' ? p.relay_profile : null,
+            ttsVoice: typeof p.tts_voice === 'string' ? p.tts_voice : null,
             send,
             endSession,
           });
@@ -393,14 +399,28 @@ function attachVoiceRelay(httpServer) {
           if (!convo) return;
           // Ignore interim/partial STT frames — only act on the FINAL prompt, so
           // the agent never responds to (or runs tools on) a half-spoken phrase
-          // and then re-processes the completed utterance.
-          if (msg.last === false) break;
+          // and then re-processes the completed utterance. Counted, so a
+          // profile that enables Flux partials can be measured without ever
+          // being acted on.
+          if (msg.last === false) {
+            if (typeof convo.notePartialPrompt === 'function') convo.notePartialPrompt();
+            break;
+          }
           const text = parsePrompt(msg);
           if (text) convo.handlePrompt(text);
           break;
         }
         case 'interrupt': {
-          if (convo) convo.interrupt();
+          // The frame's fields are what the caller heard before barging in —
+          // our own agent text, plus the played duration. Sessions that take a
+          // detail record them; passing an object marks a real barge-in (a
+          // bare interrupt() is end()'s own abort).
+          if (convo) {
+            convo.interrupt({
+              utteranceUntilInterrupt: typeof msg.utteranceUntilInterrupt === 'string' ? msg.utteranceUntilInterrupt : '',
+              durationUntilInterruptMs: msg.durationUntilInterruptMs,
+            });
+          }
           break;
         }
         case 'error': {
@@ -420,9 +440,19 @@ function attachVoiceRelay(httpServer) {
           }
           break;
         }
-        // others: ignored in Phase 0
-        default:
+        default: {
+          // The `events` attribute (relay-profiles) adds speaker / tokens-played
+          // notifications whose payload Twilio does not document. Sessions that
+          // define handleRelayEvent classify them; everything else stays
+          // ignored — byte-identical to Phase 0 when no profile is set. A
+          // classifier fault must never take the call down.
+          if (convo && typeof convo.handleRelayEvent === 'function') {
+            try { convo.handleRelayEvent(msg); } catch (e) {
+              logger.warn(`[voice-relay] relay event handling failed callSid=${convo.callSid}: ${e.message}`);
+            }
+          }
           break;
+        }
       }
     });
 

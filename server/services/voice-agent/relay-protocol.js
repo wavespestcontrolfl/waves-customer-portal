@@ -18,9 +18,13 @@
  * Inbound (Twilio → us):
  *   { type: 'setup',     callSid, sessionId, from, to, ...customParameters }
  *   { type: 'prompt',    voicePrompt: '<caller speech>', lang, last }
- *   { type: 'interrupt', ... }
+ *   { type: 'interrupt', utteranceUntilInterrupt, durationUntilInterruptMs }
  *   { type: 'dtmf',      digit }
  *   { type: 'error',     description }
+ *   + the notifications the `events` attribute adds (speaker-events /
+ *     tokens-played). Twilio documents the attribute, not the payload, so
+ *     classifyRelayEvent() below reads them tolerantly and reports the shape
+ *     (key names only) for the first sandbox call to pin.
  *
  * Outbound (us → Twilio):
  *   { type: 'text', token: '<to speak>', last: <bool> }
@@ -28,6 +32,16 @@
  */
 
 const RELAY_WS_PATH = '/ws/voice-agent';
+
+// call_log.source for calls the sandbox route answers (the dead GA# number the
+// audio runner and manual test calls dial). Every reader that lists or syncs
+// calls filters on it — a sandbox call must never reach the Communications
+// inbox or the calls tab as a customer call.
+const VOICE_RELAY_SANDBOX_SOURCE = 'voice_relay_sandbox';
+
+// The frame types the relay loop handles by name; anything else is an event
+// notification (or a future frame) and goes through classifyRelayEvent.
+const KNOWN_FRAME_TYPES = new Set(['setup', 'prompt', 'dtmf', 'interrupt', 'error']);
 
 /**
  * Is the ConversationRelay WebSocket server enabled? Single source of truth for
@@ -294,6 +308,63 @@ function endFrame(handoffData) {
   });
 }
 
+// Speaker-event vocabulary. Matched against key names and string values one
+// level deep; direction words decide start vs end. A bare speaker mention
+// with no direction reads as a start (the conservative side for latency: it
+// can only make first-audio look EARLIER, never invent a late one).
+const AGENT_SPEAKER_RE = /agent[\s_-]?speak/i;
+const CALLER_SPEAKER_RE = /(?:client|caller|user)[\s_-]?speak/i;
+const START_RE = /\b(?:start|started|starting|begin|began|speaking|true)\b/i;
+const END_RE = /\b(?:stop|stopped|end|ended|finish|finished|silent|silence|false)\b/i;
+const PLAYED_KEY_RE = /^(?:[a-z]+\.)?(?:token|tokens|text|played|playedText|tokensPlayed|playedTokens)$/i;
+
+/**
+ * Classify a frame produced by the `events` attribute. Returns
+ * `{ kind, shape, text }` where kind ∈ agent_speaking_start |
+ * agent_speaking_end | caller_speaking_start | caller_speaking_end |
+ * tokens_played | unknown, `shape` is `type:sortedKeys` (names only — safe to
+ * log), and `text` is the played text for tokens_played (our own agent
+ * speech, never caller-authored). Never throws, never inspects deeper than
+ * one nested object.
+ */
+function classifyRelayEvent(frame) {
+  if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return { kind: 'unknown', shape: '', text: null };
+  const shape = `${typeof frame.type === 'string' ? frame.type : '?'}:${Object.keys(frame).sort().join(',')}`;
+  const fields = [];
+  for (const [k, v] of Object.entries(frame)) {
+    if (typeof v === 'string' || typeof v === 'boolean') fields.push([k, String(v)]);
+    else if (v && typeof v === 'object' && !Array.isArray(v)) {
+      for (const [k2, v2] of Object.entries(v)) {
+        if (typeof v2 === 'string' || typeof v2 === 'boolean') fields.push([`${k}.${k2}`, String(v2)]);
+      }
+    }
+  }
+  const haystack = fields.map(([k, v]) => `${k} ${v}`).join(' ');
+  const agent = AGENT_SPEAKER_RE.test(haystack);
+  const caller = !agent && CALLER_SPEAKER_RE.test(haystack);
+  if (agent || caller) {
+    // Direction is decided on VALUES only (a key like `speaking: false` must
+    // not vote "start"), camelCase split, with the speaker label itself
+    // removed so "agentSpeakingStopped" reads as "stopped" and a bare
+    // "agentSpeaking" reads as nothing.
+    const directional = fields
+      .map(([, v]) => v.replace(/([a-z])([A-Z])/g, '$1 $2').replace(AGENT_SPEAKER_RE, ' ').replace(CALLER_SPEAKER_RE, ' '))
+      .join(' ');
+    const ended = END_RE.test(directional) && !START_RE.test(directional);
+    return { kind: `${agent ? 'agent' : 'caller'}_speaking_${ended ? 'end' : 'start'}`, shape, text: null };
+  }
+  if (/token|played/i.test(shape)) {
+    const played = fields.filter(([k]) => PLAYED_KEY_RE.test(k)).map(([, v]) => v).filter((v) => v.trim());
+    if (played.length) {
+      return { kind: 'tokens_played', shape, text: played.sort((a, b) => b.length - a.length)[0] };
+    }
+  }
+  return { kind: 'unknown', shape, text: null };
+}
+
+// A relay profile may tune the relay, never re-point or re-voice it.
+const RESERVED_RELAY_ATTRS = new Set(['url', 'welcomeGreeting', 'welcomeGreetingInterruptible', 'ttsProvider', 'language', 'voice']);
+
 function escapeXmlAttr(value) {
   return String(value == null ? '' : value)
     .replace(/&/g, '&amp;')
@@ -327,6 +398,13 @@ function buildRelayTwiML({
   // unverified input, so the session mode is re-proven server-side against
   // the call_log row for the AUTHENTICATED CallSid before anything acts on it.
   parameters = null,
+  // Tuning attributes from a relay profile (relay-profiles.js is the only
+  // chooser and has already validated them). ABSENT ⇒ byte-identical TwiML.
+  // The profile id rides a <Parameter> so the session can stamp it into the
+  // call's version record; the rendered voice rides alongside for the same
+  // reason (the Spanish leg's voice differs from the env default).
+  relayAttrs = null,
+  relayProfileId = null,
 } = {}) {
   if (!wsUrl) throw new Error('buildRelayTwiML: wsUrl is required');
   // Authenticate the upgrade with a token minted for THIS CallSid — validated
@@ -346,13 +424,21 @@ function buildRelayTwiML({
     `language="${escapeXmlAttr(language)}"`,
   ];
   if (voice) attrs.push(`voice="${escapeXmlAttr(voice)}"`);
+  // Defense in depth on the tuning attrs: only attribute-shaped names, never
+  // one of the fixed attributes above.
+  const tuning = relayAttrs && typeof relayAttrs === 'object' && !Array.isArray(relayAttrs)
+    ? Object.entries(relayAttrs).filter(([k, v]) => /^[a-zA-Z][a-zA-Z0-9]{0,40}$/.test(k) && !RESERVED_RELAY_ATTRS.has(k) && v != null && String(v) !== '')
+    : [];
+  for (const [k, v] of tuning) attrs.push(`${k}="${escapeXmlAttr(v)}"`);
   // <Connect action> lets Twilio hit a fallback URL when the relay session ends
   // or fails (e.g. a rejected upgrade or transient WS error) instead of
   // stranding the call — the live backstop points it at /relay-complete.
   const connectAttrs = action ? ` action="${escapeXmlAttr(action)}" method="POST"` : '';
-  const paramEntries = parameters && typeof parameters === 'object'
-    ? Object.entries(parameters).filter(([k, v]) => k && v != null)
-    : [];
+  const telemetryParams = relayProfileId
+    ? { relay_profile: String(relayProfileId), tts_voice: voice || '' }
+    : {};
+  const mergedParams = { ...telemetryParams, ...(parameters && typeof parameters === 'object' ? parameters : {}) };
+  const paramEntries = Object.entries(mergedParams).filter(([k, v]) => k && v != null);
   const relayElement = paramEntries.length
     ? `<ConversationRelay ${attrs.join(' ')}>`
       + paramEntries
@@ -370,6 +456,9 @@ function buildRelayTwiML({
 
 module.exports = {
   RELAY_WS_PATH,
+  VOICE_RELAY_SANDBOX_SOURCE,
+  KNOWN_FRAME_TYPES,
+  classifyRelayEvent,
   DEFAULT_WELCOME_GREETING,
   defaultWelcomeGreeting,
   greetingDayPart,

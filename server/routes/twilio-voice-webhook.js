@@ -722,6 +722,12 @@ function queueVoiceMessageSync(callSid) {
 
 const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
 const RELAY_COMPLETE_ACTION = '/api/webhooks/twilio/relay-complete';
+// The production relay profile (STT / turn-taking tuning attributes + the
+// telemetry <Parameter>s). relay-profiles is the only chooser; every relay
+// leg spreads this in. Unset ⇒ {} ⇒ byte-identical TwiML.
+function activeRelayTwiMLOptions() {
+  return require('../services/voice-agent/relay-profiles').activeRelayTwiMLOptions();
+}
 
 // ── Spanish language vestibule (GATE_VOICE_SPANISH_MENU) ───────────────────
 // ONE implementation of the language-selection TwiML, used by every inbound
@@ -805,6 +811,7 @@ function buildSpanishRelayTwiML({ vestibule, callSid }) {
     language: SPANISH_LANGUAGE,
     voice: vestibule.voice || null,
     welcomeGreeting: spanishWelcomeGreeting(),
+    ...activeRelayTwiMLOptions(),
     parameters: { lang: 'es' },
   });
 }
@@ -1237,6 +1244,7 @@ router.post('/voice', async (req, res) => {
             // credential.
             const relayXml = buildRelayTwiML({
               wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
+              ...activeRelayTwiMLOptions(),
             });
             const inner = vestibuleInnerXml({ greetingUrl, vestibule });
             return res.type('text/xml').send(inner ? relayXml.replace('<Response>', `<Response>${inner}`) : relayXml);
@@ -1392,6 +1400,7 @@ router.post('/call-complete', async (req, res) => {
               // CallSid binds the upgrade token to THIS call (relay-protocol).
               return res.type('text/xml').send(buildRelayTwiML({
                 wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
+                ...activeRelayTwiMLOptions(),
               }));
             }
             if (handoffKind === 'dial') {
@@ -1453,6 +1462,24 @@ router.post('/relay-complete', async (req, res) => {
   const sessionStatus = String(req.body?.SessionStatus || req.body?.sessionStatus || '').toLowerCase();
   const failed = !!errorCode || ['failed', 'error', 'disconnected'].includes(sessionStatus);
   const twiml = new VoiceResponse();
+  // A sandbox call (the signed ?sandbox=1 the sandbox route itself rendered)
+  // never falls to voicemail: a recording on a test call would enter the
+  // voicemail pipeline as a customer message. It ends with the failure
+  // noted on its own row.
+  if (failed && req.query && req.query.sandbox === '1') {
+    logger.warn(`[relay-complete] sandbox relay session failed (${errorCode || sessionStatus || 'unknown'}) for ${maskSid(callSid)} — hanging up (no voicemail on the sandbox)`);
+    if (callSid) {
+      await db('call_log').where('twilio_call_sid', callSid)
+        .update({
+          status: 'failed',
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_sandbox_failed: String(errorCode || sessionStatus || 'unknown').slice(0, 64) })]),
+          updated_at: new Date(),
+        })
+        .catch((err) => logger.warn(`[relay-complete] sandbox call_log stamp failed for ${maskSid(callSid)}: ${err.message}`));
+    }
+    twiml.hangup();
+    return res.type('text/xml').send(twiml.toString());
+  }
   if (failed) {
     logger.warn(`[relay-complete] relay session failed (${errorCode || sessionStatus || 'unknown'}) for ${maskSid(callSid)} — falling back to voicemail`);
     // Undo the ai_agent/ai_handled stamp the relay handoff applied: this call
@@ -1471,6 +1498,117 @@ router.post('/relay-complete', async (req, res) => {
     appendVoicemailRecording(twiml, { language });
   }
   res.type('text/xml').send(twiml.toString());
+});
+
+// =========================================================================
+// POST /api/webhooks/twilio/relay-sandbox — the ONLY test path for Sandy.
+//
+// The dead GA# sandbox number's voice URL points here (it used to point at a
+// Twilio Function holding a copy of the WS secret; the secret now lives on
+// the server only). Every sandbox call gets a call_log row with
+// source='voice_relay_sandbox', so the relay session's transcript, latency
+// summary and version stamps land through the SAME end() reconcile a
+// production call uses — and every call reader (calls tab, unified inbox,
+// self-audits) excludes the source. The lead/booking writes the relay makes
+// are the sandbox's Phase 0 behaviour and are unchanged.
+//
+// Cell selection: a two-digit DTMF code inside the first three seconds picks
+// a relay profile (relay-profiles SANDBOX_CELLS; '99' = raw
+// VOICE_RELAY_SANDBOX_ATTRS) — the audio runner sends it with `sendDigits`. A
+// human caller who waits gets the production profile, i.e. exactly what a
+// customer would hear. Fail closed: not the sandbox number ⇒ 403; relay not
+// attached ⇒ a spoken notice and hangup, never a stranded call.
+// Signature validation is the mount's (index.js), same as /voice.
+// =========================================================================
+const RELAY_SANDBOX_CELL_ACTION = '/api/webhooks/twilio/relay-sandbox/cell';
+const RELAY_COMPLETE_ACTION_SANDBOX = `${RELAY_COMPLETE_ACTION}?sandbox=1`;
+const SANDBOX_CELL_GATHER_TIMEOUT_SEC = 3;
+
+function sandboxNumber() {
+  return toE164(process.env.VOICE_RELAY_SANDBOX_NUMBER || '') || null;
+}
+
+function isSandboxCall(req) {
+  const target = sandboxNumber();
+  return !!target && toE164(req.body?.To || '') === target;
+}
+
+function sandboxRelayXml({ callSid, cell }) {
+  const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
+  const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
+  return buildRelayTwiML({
+    wsUrl: `wss://${domain}${RELAY_WS_PATH}`,
+    callSid,
+    action: RELAY_COMPLETE_ACTION_SANDBOX,
+    ...(cell || activeRelayTwiMLOptions()),
+  });
+}
+
+function refuseSandbox(req, res, why) {
+  logger.warn(`[relay-sandbox] refused: ${why} (To=${maskPhone(req.body?.To)} ${maskSid(req.body?.CallSid)})`);
+  return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+}
+
+router.post('/relay-sandbox', async (req, res) => {
+  try {
+    if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
+    const { CallSid, From, To, CallStatus } = req.body || {};
+    if (!CallSid) return refuseSandbox(req, res, 'no CallSid');
+    const twiml = new VoiceResponse();
+    if (!isRelayAttached()) {
+      logger.warn(`[relay-sandbox] relay not attached — hanging up ${maskSid(CallSid)}`);
+      twiml.say({ voice: SAY_VOICE }, 'The voice relay is not attached on this deploy. Goodbye.');
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
+    const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+    // Retry-safe on the CallSid unique index: a Twilio redelivery re-renders
+    // the same TwiML without a second row.
+    await db('call_log')
+      .insert({
+        direction: 'inbound',
+        from_phone: toE164(From) || null,
+        to_phone: toE164(To) || null,
+        twilio_call_sid: CallSid,
+        status: CallStatus || 'ringing',
+        source: VOICE_RELAY_SANDBOX_SOURCE,
+        metadata: JSON.stringify({ relay_sandbox: true }),
+      })
+      .onConflict('twilio_call_sid')
+      .ignore();
+    // <Gather> for the cell code, then the default relay in the SAME document:
+    // no digits ⇒ Twilio falls through to the <Connect> after the timeout.
+    twiml.gather({
+      input: 'dtmf',
+      numDigits: 2,
+      timeout: SANDBOX_CELL_GATHER_TIMEOUT_SEC,
+      action: RELAY_SANDBOX_CELL_ACTION,
+      method: 'POST',
+    });
+    const gatherInner = twiml.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
+    const relayXml = sandboxRelayXml({ callSid: CallSid });
+    logger.info(`[relay-sandbox] answering ${maskSid(CallSid)} from=${maskPhone(From)}`);
+    return res.type('text/xml').send(relayXml.replace('<Response>', `<Response>${gatherInner}`));
+  } catch (err) {
+    logger.error(`[relay-sandbox] error: ${err.message}`);
+    return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+  }
+});
+
+router.post('/relay-sandbox/cell', async (req, res) => {
+  try {
+    if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
+    const { CallSid } = req.body || {};
+    if (!CallSid) return refuseSandbox(req, res, 'no CallSid');
+    const digits = String(req.body?.Digits || '').trim();
+    const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
+    const cell = resolveSandboxCell(digits);
+    logger.info(`[relay-sandbox] cell "${digits}" → ${cell ? cell.relayProfileId : 'production profile'} ${maskSid(CallSid)}`);
+    return res.type('text/xml').send(sandboxRelayXml({ callSid: CallSid, cell }));
+  } catch (err) {
+    logger.error(`[relay-sandbox] cell error: ${err.message}`);
+    return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+  }
 });
 
 // =========================================================================
@@ -2529,6 +2667,11 @@ router._test = {
   sanitizeVoiceProviderError,
   shouldAlertInboundDialFailure,
   wasForwardAccepted,
+  activeRelayTwiMLOptions,
+  isSandboxCall,
+  sandboxRelayXml,
+  RELAY_COMPLETE_ACTION_SANDBOX,
+  RELAY_SANDBOX_CELL_ACTION,
 };
 
 module.exports = router;

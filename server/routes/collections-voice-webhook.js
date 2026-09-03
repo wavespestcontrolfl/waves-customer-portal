@@ -329,6 +329,9 @@ router.post('/collections-vestibule-key', async (req, res) => {
         callSid: call.callSid,
         welcomeGreeting: script.relayGreeting({ firstName: call.customer.first_name }),
         action: `${RELAY_COMPLETE_ACTION}?callLogId=${encodeURIComponent(call.row.id)}`,
+        // The production relay profile (STT / turn-taking tuning) applies to
+        // every relay leg; absent ⇒ byte-identical to before.
+        ...require('../services/voice-agent/relay-profiles').activeRelayTwiMLOptions(),
         parameters: { session_mode: 'collections' },
       });
       return sendTwiml(res, xml);

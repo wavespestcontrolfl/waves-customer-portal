@@ -266,14 +266,11 @@ Street names in addresses are real words or proper names — prefer a plausible 
 When a caller spells something letter-by-letter or with phonetic markers like "B as in boy", write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
 // Literal keyword hints for the gpt-transcribe family (the gpt-4o-transcribe
-// generation rejects the parameter, hence the model guard below). These are
-// the proper nouns prod transcripts have actually misheard — service-area
-// place names ("Englewood" → "Inglewood") and product/brand terms.
-const DEFAULT_TRANSCRIPTION_KEYWORDS = [
-  'Waves Pest Control', 'WaveGuard', 'Sentricon', 'Termidor', 'WDO',
-  'Bradenton', 'Sarasota', 'Venice', 'Parrish', 'Palmetto', 'Ellenton',
-  'Englewood', 'North Port', 'Port Charlotte', 'Lakewood Ranch', 'Myakka',
-];
+// generation rejects the parameter, hence the model guard below). The list
+// itself lives in config/transcription-vocabulary — shared with the live
+// ConversationRelay `hints` attribute so both recognizers learn the same
+// proper nouns.
+const DEFAULT_TRANSCRIPTION_KEYWORDS = require('../config/transcription-vocabulary').STT_HINTS;
 const ENV_TRANSCRIPTION_KEYWORDS = String(process.env.OPENAI_TRANSCRIPTION_KEYWORDS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);
 

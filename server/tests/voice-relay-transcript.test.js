@@ -352,7 +352,9 @@ describe('what the session records', () => {
     convo.say('Thanks for calling Waves.');
     convo.say('   '); // empty → neither spoken nor recorded
     expect(send).toHaveBeenCalledTimes(1);
-    expect(convo._transcript).toEqual([{ role: 'agent', text: 'Thanks for calling Waves.' }]);
+    // Agent entries carry `planned` (the full model text) beside `text` (what
+    // the caller heard — rewritten on a barge-in / played-tokens event).
+    expect(convo._transcript).toEqual([{ role: 'agent', text: 'Thanks for calling Waves.', planned: 'Thanks for calling Waves.' }]);
   });
 
   test('caller turns are recorded in the serialized chain, so ordering matches the call', async () => {
