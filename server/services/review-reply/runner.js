@@ -811,7 +811,12 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
         auto_reply_grounding: JSON.stringify(snapshot),
         auto_reply_claimed_until: null,
       },
-      auditMeta: { version: draft.version, mode: draft.mode, intent, reviewOnly: !!draft.reviewOnly, safeCopy: !!draft.safeCopy },
+      auditMeta: {
+        version: draft.version, mode: draft.mode, intent, reviewOnly: !!draft.reviewOnly, safeCopy: !!draft.safeCopy,
+        // A posted reply that needed retries keeps its rejection history on
+        // the audit row (the review row's error field is cleared on success).
+        ...(draft.rejectionDetails?.length ? { attempts: draft.attempts, rejections: draft.rejectionDetails } : {}),
+      },
       guard: claimGuard(row, { accountFingerprint: snapshot?.accountFingerprint || null }),
       // Both cron and Post-now report "posted" = live on Google; a local-only
       // save (no GBP creds) must surface as an error, never as posted.
