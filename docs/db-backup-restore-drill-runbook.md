@@ -84,7 +84,7 @@ Expected duration: roughly 10–20 minutes at today's ~1.2 GB.
 ## Real disaster: restoring to Railway
 
 **Never restore over the live instance.** The script connects first and
-refuses any target that already holds tables; only an empty database is
+refuses any target that already holds any user object (tables, sequences, functions, types — extension-owned ones excepted); only an empty database is
 accepted. `RESTORE_REPLACE_EXISTING=yes` overrides that for a database you
 intend to erase — never the live one. Replace mode drops and recreates the
 `public` schema first, so nothing added after the backup survives.
