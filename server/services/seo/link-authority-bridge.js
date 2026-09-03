@@ -46,7 +46,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { claimProspectDomain, findPlacementRow, targetPageOf } = require('./prospect-domain-lock');
 const { OUTREACH_ACQUISITION_TYPES, LEVEL_SEVERITY, settleRetiredPlacements, movePatch, isOutreachLocked } = require('./link-registry');
 const P = require('./link-authority-policy');
-const { selectDomains, expectedLocations, rotationOutcome, ts, BRIDGE_STATES } = require('./link-authority-selection');
+const { selectDomains, expectedLocations, rotationOutcome, ts, BRIDGE_STATES, LIVE_STATUSES, ACQUIRING_STATUSES } = require('./link-authority-selection');
 
 const LOCK_KEY = 'link-authority-bridge';
 const RUN_LIMIT_MAX = 500;
@@ -62,8 +62,6 @@ const HOMEPAGE = targetPageOf('/');
 // Judge- or owner-owned history.
 const PARKABLE = 'prospect';
 const PARKED = 'awaiting_owner';
-// §3.1 active intermediates (plus any leased placement): the domain reads `acquiring`
-const ACQUIRING_STATUSES = Object.freeze(['placed', 'contacted', 'negotiating', 'ready_for_credentials', 'ready_for_payment']);
 // Statuses a placement reaches only AFTER its conversation happened: durable
 // evidence of a send even without the outreach markers (the admin route lets
 // a manual row be advanced to contacted/negotiating by hand)
@@ -108,15 +106,30 @@ const freshCounters = () => ({ placementsCreated: 0, rowsWritten: 0, redecided: 
 // ---------------------------------------------------------------------------
 async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   const out = freshCounters();
+  // the shared board guard: the per-domain ADVISORY lock + "one conversation per
+  // inbox" — an outreach-lane placement is never opened beside an active outreach
+  // row. Taken BEFORE the domain row lock: every per-domain writer (lost-link
+  // recovery, the worker) orders advisory lock → row locks, and the Sunday scan
+  // can still be queuing recoveries when the bridge starts
+  const named = await trx('seo_link_domains').where({ id: domainId }).first('id', 'domain');
+  if (!named) return { skipped: 'no best path', out };
+  const { inFlight } = await claimProspectDomain(trx, named.domain);
   const domain = await trx('seo_link_domains').where({ id: domainId }).forUpdate().first();
   if (!domain || !domain.best_path_id) return { skipped: 'no best path', out };
-  // the shared board guard: the per-domain lock + "one conversation per inbox" —
-  // an outreach-lane placement is never opened beside an active outreach row
-  const { inFlight } = await claimProspectDomain(trx, domain.domain);
   const path = await trx('seo_link_acquisition_paths').where({ id: domain.best_path_id }).first();
   if (!path || path.superseded_by) return { skipped: 'best path superseded', out };
   if (path.baseline === true) return { skipped: 'baseline placeholder (not an executable path)', out };
   const ctx = { path, domain, policy, score: domain.score };
+  // a `rejected` the bridge wrote itself (§3.1: every blocking row DENY) is the
+  // one it may lift once the inputs improve; the owner's registry Reject on a
+  // domain whose rows were NOT all DENY carries no such signature and stands.
+  // Read before this run re-decides anything.
+  let bridgeRejected = false;
+  if (domain.agent_state === 'rejected') {
+    const ids = (await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id')).map((p) => p.id);
+    const blocking = ids.length ? await trx(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at').select('level') : [];
+    bridgeRejected = blocking.length > 0 && blocking.every((r) => r.level === 'DENY');
+  }
 
   // §6.3 1b — the latest waiver, honoured only for the exact floors the owner looked at
   let waiver = null;
@@ -363,9 +376,11 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   if (pathLevel && pathLevel !== path.authority_last_decided) await trx('seo_link_acquisition_paths').where({ id: path.id }).update({ authority_last_decided: pathLevel });
 
   // §3.1 aggregate over ALL the domain's placements, not only the ones bridged
-  // now. `rejected` is left only on the owner's explicit "Acquire anyway" (a
-  // valid waiver) — the bridge cannot tell its own rejection from the owner's.
-  if (BRIDGE_STATES.includes(domain.agent_state) || (domain.agent_state === 'rejected' && waiver)) {
+  // now. A `rejected` domain is re-aggregated on the owner's explicit "Acquire
+  // anyway" (a valid waiver) or when the rejection was the bridge's own
+  // (bridgeRejected) — the worker excludes `rejected` domains, so a lifted
+  // DENY that never reached the aggregate would strand the domain for good.
+  if (BRIDGE_STATES.includes(domain.agent_state) || (domain.agent_state === 'rejected' && (waiver || bridgeRejected))) {
     const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'path_id', 'claimed_at', 'location_key');
     // the bridged placements' status + lease come from THIS read, not the
     // pre-decision snapshot: a claim or report that landed meanwhile (the
@@ -417,7 +432,7 @@ function aggregateState(placements) {
   const active = (p) => live(p) && (leased(p) || ACQUIRING_STATUSES.includes(p.status));
   const held = (p) => live(p) && (p.status === PARKED || ownerPending(p));
   if (placements.some((p) => live(p) && authorizedPending(p))) return 'ready_to_acquire';
-  if (placements.some((p) => ['live', 'indexed'].includes(p.status)) && !placements.some(active) && !placements.some(held)) return 'acquired';
+  if (placements.some((p) => LIVE_STATUSES.includes(p.status)) && !placements.some(active) && !placements.some(held)) return 'acquired';
   if (placements.some(active)) return 'acquiring';
   if (placements.some(held)) return 'qualified';
   if (every('INVALID')) return 'investigating';

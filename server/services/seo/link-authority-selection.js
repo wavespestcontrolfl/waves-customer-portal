@@ -20,8 +20,19 @@ const AUTH = 'seo_link_placement_authorities';
 // `not_reproducible`/`rejected` are set by intake, the investigator or the
 // owner — the bridge re-decides their rows for honesty but never moves them.
 const BRIDGE_STATES = Object.freeze(['qualified', 'ready_to_acquire', 'acquiring', 'acquired']);
-// the placement statuses that make a domain `acquired` (§3.1)
+// §3.1 status classes the aggregate is built from (shared with the bridge)
 const LIVE_STATUSES = Object.freeze(['live', 'indexed']);
+const ACQUIRING_STATUSES = Object.freeze(['placed', 'contacted', 'negotiating', 'ready_for_credentials', 'ready_for_payment']);
+// The Judge, the worker's reports and the verifier move PLACEMENT statuses in place (placed → live, live → lost,
+// contacted → rejected) and never touch the domain; a satisfied row is never re-decided, so no timestamp carries
+// those moves either — and the verifier bumps updated_at on every live check. The aggregate is therefore re-run
+// exactly when the STORED state contradicts what the statuses imply: `acquired` needs a live link (off-shape links
+// count — they win the aggregate too); `acquiring` needs an in-shape placement that is leased or in an active
+// intermediate. Anything else the aggregate would say is held / pending — states the rows already re-select on.
+const CONTRADICTED = Object.freeze({
+  acquired: ({ all }) => !all.some((p) => LIVE_STATUSES.includes(p.status)),
+  acquiring: ({ mine }) => !mine.some((p) => p.claimed_at || ACQUIRING_STATUSES.includes(p.status)),
+});
 
 const ts = (v) => (v ? new Date(v).getTime() : 0);
 // placements per lane: one per GBP location for a signup lane, one unscoped row otherwise
@@ -77,7 +88,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'revision_payment', 'revision', 'baseline');
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
-  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'updated_at', 'outreach_status', 'outreach_sent_at');
+  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'updated_at', 'outreach_status', 'outreach_sent_at');
   const byDomain = new Map();
   for (const p of placements) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
   const rowsByProspect = new Map();
@@ -120,16 +131,14 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
       const unsatisfiedKeys = open.filter((r) => !r.satisfied_at).map((r) => `${r.dimension}|${r.instance_kind}`);
       return [...required].some((k) => !openKeys.has(k)) || unsatisfiedKeys.some((k) => !required.has(k));
     };
-    // the verifier demotes a lost link IN PLACE (status → lost; its rows stay satisfied, and a satisfied row is never
-    // re-decided), so a timestamp cannot carry the loss: a domain still aggregated `acquired` with no live/indexed
-    // placement left (off-shape links count — they win the aggregate too) is stale ONCE; the bridge re-aggregates
-    // and the next selection sees a non-acquired state. A verifier touch on a link that is still live selects nothing.
-    const lostLink = d.agent_state === 'acquired' && !all.some((p) => LIVE_STATUSES.includes(p.status));
+    // a stored aggregate the placement statuses contradict (CONTRADICTED) is stale ONCE: the bridge re-aggregates and
+    // the next selection sees a state the statuses support
+    const contradicted = Boolean(CONTRADICTED[d.agent_state]) && CONTRADICTED[d.agent_state]({ all, mine });
     const withRows = mine.filter((p) => rowsByProspect.has(p.id) && !frozen(p));
     let why = null;
     if (forced.has(d.id)) why = 'forced';
     else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';
-    else if (lostLink || offShapeOpen || withRows.some((p) => p.path_id !== d.best_path_id || instanceSetMoved(p) || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
+    else if (contradicted || offShapeOpen || withRows.some((p) => p.path_id !== d.best_path_id || instanceSetMoved(p) || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
     else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !withRows.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
     if (why) picked.push({ id: d.id, domain: d.domain, why, at: ts(d.updated_at) });
   }
@@ -137,4 +146,4 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   return picked.slice(0, limit).map(({ id, domain, why }) => ({ id, domain, why }));
 }
 
-module.exports = { selectDomains, expectedLocations, termsChanged, rotationOutcome, ts, BRIDGE_STATES };
+module.exports = { selectDomains, expectedLocations, termsChanged, rotationOutcome, ts, BRIDGE_STATES, LIVE_STATUSES, ACQUIRING_STATUSES };

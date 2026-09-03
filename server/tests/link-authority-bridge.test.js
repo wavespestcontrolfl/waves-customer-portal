@@ -62,7 +62,7 @@ function makeDb(seed = {}) {
       orderBy(col, dir = 'asc') { st.order = { col, dir }; return q; },
       limit(n) { st.limit = n; return q; },
       select(...cols) { st.cols = cols.length ? cols : null; return q; },
-      forUpdate() { return q; },
+      forUpdate() { raws.push(`FOR UPDATE ${table}`); return q; },
       async first(...cols) { if (cols.length) st.cols = cols; return resolve()[0]; },
       async update(patch) { if (db._failUpdate === table) throw new Error(`injected failure on ${table}`); if (db._beforeUpdate) db._beforeUpdate(table, db); const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit.length; },
       insert(row) {
@@ -343,6 +343,25 @@ describe('floors and waivers', () => {
     expect(domainState(db)).toBe('rejected');
     expect(notify).not.toHaveBeenCalled();
   });
+  test('a rejection the bridge wrote itself lifts once the inputs improve — the owner\'s Reject on non-DENY rows stands', async () => {
+    const { db } = scenario({ domain: { spam_score: 30 } });
+    await run(db);
+    expect(domainState(db)).toBe('rejected');
+    // the enrichment improves (a re-scan): the DENY rows are stale and re-decided, and the aggregate follows
+    Object.assign(db._tables.seo_link_domains[0], { spam_score: 2, updated_at: new Date(NOW.getTime() + 1000) });
+    expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r).toMatchObject({ redecided: WAVES_LOCATIONS.length, parked: WAVES_LOCATIONS.length, aggregateChanges: 1, errors: [] });
+    expect(rows(db).every((x) => x.level === 'OWNER_FREE')).toBe(true);
+    expect(domainState(db)).toBe('qualified');
+    // the owner's registry Reject on a domain the bridge holds at qualified (OWNER_* rows, not DENY) carries no bridge signature
+    Object.assign(db._tables.seo_link_domains[0], { agent_state: 'rejected', updated_at: new Date(NOW.getTime() + 120000) });
+    Object.assign(db._tables.seo_link_policy[0], { auto_free_acquisition: true, updated_at: new Date(NOW.getTime() + 130000) });
+    const r2 = await run(db, { now: new Date(NOW.getTime() + 180000) });
+    expect(r2.redecided).toBe(WAVES_LOCATIONS.length);
+    expect(rows(db).every((x) => x.level === 'AUTO_FREE')).toBe(true);
+    expect(domainState(db)).toBe('rejected'); // the owner's ruling stands until Acquire anyway (a waiver)
+  });
   test('INVALID (unenriched) stamps and sends the domain back to investigating', async () => {
     const { db } = scenario({ domain: { spam_score: null } });
     await run(db);
@@ -436,6 +455,32 @@ describe('re-decision', () => {
     expect(r).toMatchObject({ selected: 1, aggregateChanges: 1, redecided: 0, ended: 0, errors: [] }); // the satisfied history stands
     expect(domainState(db)).toBe('qualified'); // no link, nothing active, nothing owner-held
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // converged
+  });
+  test('the verifier promoting placed → live re-selects the acquiring domain once and converges to acquired; a touch alone does not', async () => {
+    const { db, d } = scenario();
+    await run(db);
+    const [pl, ...others] = placements(db);
+    Object.assign(pl, { status: 'placed' });
+    for (const r of rows(db)) Object.assign(r, { satisfied_at: NOW, satisfied_reason: 'placed' });
+    for (const x of others) Object.assign(x, { status: 'rejected' });
+    await run(db, { domainIds: [d.id], now: new Date(NOW.getTime() + 60000) });
+    expect(domainState(db)).toBe('acquiring'); // placed is an active intermediate
+    Object.assign(pl, { updated_at: new Date(NOW.getTime() + 120000) }); // a touch while still placed
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+    Object.assign(pl, { status: 'live', updated_at: new Date(NOW.getTime() + 180000) }); // link-prospect-verifier markLive: status only
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([{ id: d.id, domain: 'example.org', why: 'stale' }]);
+    const r = await run(db, { now: new Date(NOW.getTime() + 240000) });
+    expect(r).toMatchObject({ selected: 1, aggregateChanges: 1, redecided: 0, ended: 0, errors: [] });
+    expect(domainState(db)).toBe('acquired');
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // converged
+  });
+  test('the advisory domain lock is taken BEFORE the domain row lock (one lock order with lost-link recovery)', async () => {
+    const { db } = scenario();
+    await run(db);
+    const advisory = db._raws.findIndex((x) => /pg_advisory_xact_lock/.test(x));
+    const rowLock = db._raws.findIndex((x) => x === 'FOR UPDATE seo_link_domains');
+    expect(advisory).toBeGreaterThanOrEqual(0);
+    expect(rowLock).toBeGreaterThan(advisory);
   });
   test('a superseded best path is skipped with a reason and writes nothing', async () => {
     const { db } = scenario({ path: { superseded_by: 'x' } });
