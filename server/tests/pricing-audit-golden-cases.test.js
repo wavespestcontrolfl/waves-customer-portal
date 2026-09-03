@@ -309,12 +309,22 @@ describe('pricing audit — margin vs markup and unit economics', () => {
     expect(e.targetPriceAnnualAt35).toBe(Math.round((180 / 0.65) * 100) / 100);
   });
 
-  test('pest cost model: a 2,000 sf quarterly plan reports the engine margin at 25 on-site minutes; observed 44 minutes lowers it', () => {
+  test('pest cost model: a 2,000 sf quarterly plan reports the engine margin at 25 on-site + 20 drive minutes; a 44-minute RECORDED span (includes drive, MON-004) fed with no extra drive lands beside it, and re-adding drive is the double count', () => {
     const li = line(generateEstimate({ ...BASE, services: { pest: { frequency: 'quarterly' } } }), 'pest_control');
     const modeled = audit.unitEconomics({ revenuePerVisit: li.perApp, visits: 4, onSiteMinutes: 25, materialPerVisit: li.costs.materialPerVisit });
-    const observed = audit.unitEconomics({ revenuePerVisit: li.perApp, visits: 4, onSiteMinutes: audit.OBSERVED_ONSITE_MINUTES.pest_control_quarterly.median, materialPerVisit: li.costs.materialPerVisit });
+    // Recorded spans are not on-site time (check-out often happens while
+    // driving): the span already contains the drive, so it replaces
+    // on-site + drive and driveMinutes is 0. No target price is derived from
+    // it — the assertion only pins the honest relationship.
+    const span = audit.RECORDED_VISIT_SPAN_MINUTES.pest_control_quarterly.median;
+    const recordedSpan = audit.unitEconomics({ revenuePerVisit: li.perApp, visits: 4, onSiteMinutes: span, driveMinutes: 0, materialPerVisit: li.costs.materialPerVisit });
+    const doubleCounted = audit.unitEconomics({ revenuePerVisit: li.perApp, visits: 4, onSiteMinutes: span, materialPerVisit: li.costs.materialPerVisit });
     expect(Math.abs(modeled.grossMargin - li.margin)).toBeLessThan(0.01);
-    expect(observed.grossMargin).toBeLessThan(modeled.grossMargin);
+    // 44 recorded minutes vs the engine's 25 + 20: within a few points.
+    expect(Math.abs(recordedSpan.grossMargin - modeled.grossMargin)).toBeLessThan(0.03);
+    // Re-adding the 20-minute drive on top of a span that contains it
+    // understates the margin by ~10 points — the trap the relabel closes.
+    expect(doubleCounted.grossMargin).toBeLessThan(recordedSpan.grossMargin - 0.05);
   });
 
   test('every markup site is catalogued with its margin equivalent', () => {

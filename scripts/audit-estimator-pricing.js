@@ -9,8 +9,11 @@
  *      pricer functions, then calls `generateEstimate()` and diffs the two.
  *   2. Builds an independent cost stack (labor, materials, drive, admin,
  *      callback reserve, card processing) under (a) the engine's own labor
- *      assumptions and (b) production-observed on-site minutes, and reports
- *      gross margin, markup and contribution margin at every WaveGuard tier.
+ *      assumptions and (b) production RECORDED visit spans (check-in →
+ *      check-out, which often includes driving to the next stop — NOT on-site
+ *      time; owner 2026-09-02, MON-004), and reports gross margin, markup and
+ *      contribution margin at every WaveGuard tier. The recorded-span columns
+ *      are context only: no target price is derived from them.
  *   3. Runs a scenario matrix: smallest / typical / large / maximum scope,
  *      every bracket boundary (-1 / exact / +1), blank / zero / negative /
  *      decimal / huge inputs, residential vs commercial, stand-alone vs bundled,
@@ -51,11 +54,14 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const pct =(n) => (Number.isFinite(n) ? `${(n * 100).toFixed(1)}%` : 'n/a');
 const money = (n) => (Number.isFinite(Number(n)) ? `$${Number(n).toFixed(2)}` : 'n/a');
 
-// ── Production-observed on-site minutes (aggregate, read-only, 2026-06-01..2026-09-02) ──
-// Source: scheduled_services.status='completed', on-site = time_on_site_adjusted_minutes
+// ── Production RECORDED visit spans (aggregate, read-only, 2026-06-01..2026-09-02) ──
+// Source: scheduled_services.status='completed', span = time_on_site_adjusted_minutes
 // ?? actual_duration_minutes ?? (check_out - check_in). Medians; n = sample size.
-// These are the "actual labor" inputs the engine does not have.
-const OBSERVED_ONSITE_MINUTES = {
+// NOT on-site time: check-out is often stamped while driving to the next stop
+// (owner 2026-09-02, MON-004), so a span already contains drive. They are fed to
+// unitEconomics with driveMinutes 0 (never re-added) and reported for context —
+// no target price or repricing recommendation is derived from them.
+const RECORDED_VISIT_SPAN_MINUTES = {
   pest_control_quarterly: { median: 44, p75: 63, p90: 79, n: 98 },
   pest_control_monthly: { median: 36, p75: 51, p90: 61, n: 6 },
   one_time_pest: { median: 36, p75: 38, p90: 40, n: 3 },
@@ -746,21 +752,21 @@ function runBundleAndDiscountMatrix() {
 }
 
 function runAnnualEconomics() {
-  // First-year vs renewal-year economics per recurring service at every tier, with engine-modeled AND observed labor.
+  // First-year vs renewal-year economics per recurring service at every tier, with engine-modeled labor AND,
+  // for context only, the recorded visit spans (not on-site — MON-004; drive never re-added).
   const section = 'annual_economics';
   const out = [];
   const pestQ = expectPest({ homeSqFt: 2000, frequency: 'quarterly' });
   const lawn9 = expectLawn({ track: 'st_augustine', lawnSqFt: 4500, tier: 'enhanced' });
   const lawnCostModeled = lawnCostStack({ track: 'st_augustine', lawnSqFt: 4500, visits: 9 });
-  const lawnCostObserved = lawnCostStack({ track: 'st_augustine', lawnSqFt: 4500, visits: 9, onSiteMinutesOverride: OBSERVED_ONSITE_MINUTES.lawn_care_9x.median, routeDensity: 'NORMAL' });
   const mosq = expectMosquito({ homeSqFt: 2000, lotSqFt: 8000, program: 'seasonal9' });
   const rod = expectRodentBait({ homeSqFt: 2000 });
   const ts = expectTreeShrub({ bedArea: 1440, treeCount: 6, tier: 'standard' });
   const term = expectTermiteBait({ homeSqFt: 2000 });
   const pestMaterial = 6.67; // engine's chemCost talak 1.30 + taurus 4.87 + surfactant 0.50 (service-pricing.js pestVisitCostModel)
   const rows = [
-    { service: 'pest_control quarterly (2,000 sf)', revenuePerVisit: pestQ.perApp, visits: 4, modeledMinutes: 25, observed: OBSERVED_ONSITE_MINUTES.pest_control_quarterly, materialPerVisit: pestMaterial, callbackRate: OBSERVED_PEST_CALLBACK_RATE, callbackMinutes: OBSERVED_ONSITE_MINUTES.pest_re_service.median, setupFee: constants.PEST.initialFee },
-    { service: 'lawn_care 9x st_augustine (4,500 sf)', revenuePerVisit: lawn9.perApp, visits: 9, modeledMinutes: lawnCostModeled.modeledMinutes, driveMinutes: lawnCostModeled.driveMinutes, observed: OBSERVED_ONSITE_MINUTES.lawn_care_9x, observedDrive: lawnCostObserved.driveMinutes, materialPerVisit: lawnCostModeled.materialPerVisit, callbackReservePerVisit: 2 },
+    { service: 'pest_control quarterly (2,000 sf)', revenuePerVisit: pestQ.perApp, visits: 4, modeledMinutes: 25, observed: RECORDED_VISIT_SPAN_MINUTES.pest_control_quarterly, materialPerVisit: pestMaterial, callbackRate: OBSERVED_PEST_CALLBACK_RATE, callbackMinutes: RECORDED_VISIT_SPAN_MINUTES.pest_re_service.median, setupFee: constants.PEST.initialFee },
+    { service: 'lawn_care 9x st_augustine (4,500 sf)', revenuePerVisit: lawn9.perApp, visits: 9, modeledMinutes: lawnCostModeled.modeledMinutes, driveMinutes: lawnCostModeled.driveMinutes, observed: RECORDED_VISIT_SPAN_MINUTES.lawn_care_9x, materialPerVisit: lawnCostModeled.materialPerVisit, callbackReservePerVisit: 2 },
     { service: 'mosquito seasonal9 (8,000 sf lot)', revenuePerVisit: mosq.perVisit, visits: 9, modeledMinutes: 30, observed: null, materialPerVisit: mosq.materialPerVisit },
     { service: 'rodent_bait (2,000 sf)', revenuePerVisit: rod.perVisit, visits: 4, modeledMinutes: rod.stations * 5, observed: null, materialPerVisit: rod.stations * 1.5, extraAnnual: rod.stations * 7.5, setupFee: rod.setupFee },
     { service: 'tree_shrub 6x (1,440 sf beds, 6 trees)', revenuePerVisit: ts.perApp, visits: 6, modeledMinutes: ts.onSiteMin + 10, driveMinutes: 0, observed: null, materialPerVisit: round2(ts.materialCost / 6) },
@@ -770,8 +776,8 @@ function runAnnualEconomics() {
     for (const tier of ['bronze', 'silver', 'gold', 'platinum']) {
       const discount = constants.WAVEGUARD.tiers[tier].discount;
       const modeled = unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.modeledMinutes, driveMinutes: row.driveMinutes ?? constants.GLOBAL.DRIVE_TIME, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount });
-      const observed = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.median, driveMinutes: row.observedDrive ?? constants.GLOBAL.DRIVE_TIME, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount }) : null;
-      const observedP75 = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.p75, driveMinutes: row.observedDrive ?? constants.GLOBAL.DRIVE_TIME, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount }) : null;
+      const observed = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.median, driveMinutes: 0 /* recorded span already contains drive — never re-added (MON-004) */, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount }) : null;
+      const observedP75 = row.observed ? unitEconomics({ revenuePerVisit: row.revenuePerVisit, visits: row.visits, onSiteMinutes: row.observed.p75, driveMinutes: 0 /* recorded span already contains drive — never re-added (MON-004) */, materialPerVisit: row.materialPerVisit, consumablesPerVisit: row.callbackReservePerVisit || 0, adminAnnual: constants.GLOBAL.ADMIN_ANNUAL + (row.extraAnnual || 0), callbackRate: row.callbackRate || 0, callbackMinutes: row.callbackMinutes || 0, discountPct: discount }) : null;
       const firstYearRevenue = round2(modeled.revenueAnnual + (row.setupFee && !row.setupIsInstall ? row.setupFee : 0));
       out.push({ service: row.service, tier, discount, perVisitList: row.revenuePerVisit, visits: row.visits, renewalRevenue: modeled.revenueAnnual, firstYearRevenue, setupFee: row.setupFee || 0, modeledMinutes: row.modeledMinutes, observedMinutes: row.observed ? row.observed.median : null, observedN: row.observed ? row.observed.n : null, modeled, observed, observedP75 });
     }
@@ -918,12 +924,14 @@ async function main() {
   md.push('|---|---|---:|---:|---:|');
   for (const s of scenarios.filter((x) => x.status === 'MISMATCH')) md.push(`| ${s.section} | ${s.name} | ${s.expected} | ${s.actual} | ${s.diff} |`);
   md.push('');
-  md.push('## Annual economics per recurring service (engine labor model vs production-observed on-site minutes)');
+  md.push('## Annual economics per recurring service (engine labor model; recorded visit spans shown for context only)');
   md.push('');
-  md.push('| service | tier | list/visit | renewal revenue | year-1 revenue | modeled min | gross margin (modeled) | markup (modeled) | observed min (n) | gross margin (observed median) | gross margin (observed p75) | contribution (observed, all-card) | price/visit needed for 35% at observed |');
-  md.push('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
+  md.push('Recorded span = check-in → check-out, which often includes driving to the next stop — NOT on-site time (owner 2026-09-02, MON-004). Span columns are fed with no extra drive minutes and carry no pricing recommendation; the engine model columns are the ones the audit prices from.');
+  md.push('');
+  md.push('| service | tier | list/visit | renewal revenue | year-1 revenue | modeled min | gross margin (modeled) | markup (modeled) | recorded span median min (n) | gross margin at recorded median span | gross margin at recorded p75 span | contribution at recorded span (all-card) |');
+  md.push('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
   for (const e of economics.rows) {
-    md.push(`| ${e.service} | ${e.tier} | ${money(e.perVisitList)} | ${money(e.renewalRevenue)} | ${money(e.firstYearRevenue)} | ${e.modeledMinutes} | ${pct(e.modeled.grossMargin)} | ${pct(e.modeled.markup)} | ${e.observedMinutes ?? '—'}${e.observedN ? ` (${e.observedN})` : ''} | ${e.observed ? pct(e.observed.grossMargin) : '—'} | ${e.observedP75 ? pct(e.observedP75.grossMargin) : '—'} | ${e.observed ? pct(e.observed.contributionMargin) : '—'} | ${e.observed ? money(e.observed.targetPerVisitAt35) : '—'} |`);
+    md.push(`| ${e.service} | ${e.tier} | ${money(e.perVisitList)} | ${money(e.renewalRevenue)} | ${money(e.firstYearRevenue)} | ${e.modeledMinutes} | ${pct(e.modeled.grossMargin)} | ${pct(e.modeled.markup)} | ${e.observedMinutes ?? '—'}${e.observedN ? ` (${e.observedN})` : ''} | ${e.observed ? pct(e.observed.grossMargin) : '—'} | ${e.observedP75 ? pct(e.observedP75.grossMargin) : '—'} | ${e.observed ? pct(e.observed.contributionMargin) : '—'} |`);
   }
   md.push('');
   md.push('## Markup vs margin sites');
@@ -945,4 +953,4 @@ if (require.main === module) {
   main().catch((e) => { console.error(e); process.exit(1); });
 }
 
-module.exports = { expectPest, expectLawn, expectMosquito, expectRodentBait, expectTermiteBait, expectOneTimePest, expectTreeShrub, expectWdo, expectGermanRoach, expectFoamDrill, expectTopDressing, expectPlugging, expectPalm, expectTier, unitEconomics, lawnCostStack, OBSERVED_ONSITE_MINUTES, OBSERVED_PEST_CALLBACK_RATE, hardCodedRateInventory, markupVsMarginAudit };
+module.exports = { expectPest, expectLawn, expectMosquito, expectRodentBait, expectTermiteBait, expectOneTimePest, expectTreeShrub, expectWdo, expectGermanRoach, expectFoamDrill, expectTopDressing, expectPlugging, expectPalm, expectTier, unitEconomics, lawnCostStack, RECORDED_VISIT_SPAN_MINUTES, OBSERVED_PEST_CALLBACK_RATE, hardCodedRateInventory, markupVsMarginAudit };

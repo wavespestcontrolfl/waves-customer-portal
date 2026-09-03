@@ -1,7 +1,6 @@
-<!-- Generated 2026-09-02 by scripts/audit-estimator-pricing.js on in-code constants (origin/main 66ecc95dc). Re-run with --db to overlay pricing_config. -->
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-02T22:41:21.377Z. Constants source: **constants.js (in-code defaults)**.
+Generated 2026-09-03T05:35:40.961Z. Constants source: **constants.js (in-code defaults)**.
 Scenarios: 1199 · independent-vs-engine matches: 1156 · mismatches: 0 · engine-only observations: 41.
 
 ## Findings raised by this run
@@ -25,34 +24,36 @@ Scenarios: 1199 · independent-vs-engine matches: 1156 · mismatches: 0 · engin
 | section | scenario | independent | engine | diff |
 |---|---|---:|---:|---:|
 
-## Annual economics per recurring service (engine labor model vs production-observed on-site minutes)
+## Annual economics per recurring service (engine labor model; recorded visit spans shown for context only)
 
-| service | tier | list/visit | renewal revenue | year-1 revenue | modeled min | gross margin (modeled) | markup (modeled) | observed min (n) | gross margin (observed median) | gross margin (observed p75) | contribution (observed, all-card) | price/visit needed for 35% at observed |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| pest_control quarterly (2,000 sf) | bronze | $112.00 | $448.00 | $547.00 | 25 | 58.6% | 141.4% | 44 (98) | 48.7% | 38.8% | 45.8% | $88.44 |
-| pest_control quarterly (2,000 sf) | silver | $112.00 | $403.20 | $502.20 | 25 | 54.0% | 117.2% | 44 (98) | 43.0% | 32.0% | 40.1% | $88.44 |
-| pest_control quarterly (2,000 sf) | gold | $112.00 | $380.80 | $479.80 | 25 | 51.3% | 105.2% | 44 (98) | 39.6% | 28.0% | 36.7% | $88.44 |
-| pest_control quarterly (2,000 sf) | platinum | $112.00 | $358.40 | $457.40 | 25 | 48.2% | 93.1% | 44 (98) | 35.8% | 23.5% | 32.9% | $88.44 |
-| lawn_care 9x st_augustine (4,500 sf) | bronze | $64.00 | $576.00 | $576.00 | 23.25 | 30.7% | 44.3% | 44 (17) | 7.2% | 1.7% | 4.3% | $91.36 |
-| lawn_care 9x st_augustine (4,500 sf) | silver | $64.00 | $518.40 | $518.40 | 23.25 | 23.0% | 29.8% | 44 (17) | -3.1% | -9.2% | -6.0% | $91.36 |
-| lawn_care 9x st_augustine (4,500 sf) | gold | $64.00 | $489.60 | $489.60 | 23.25 | 18.4% | 22.6% | 44 (17) | -9.2% | -15.6% | -12.1% | $91.36 |
-| lawn_care 9x st_augustine (4,500 sf) | platinum | $64.00 | $460.80 | $460.80 | 23.25 | 13.3% | 15.4% | 44 (17) | -16.0% | -22.8% | -18.9% | $91.36 |
-| mosquito seasonal9 (8,000 sf lot) | bronze | $77.00 | $693.00 | $693.00 | 30 | 49.2% | 96.9% | — | — | — | — | — |
-| mosquito seasonal9 (8,000 sf lot) | silver | $77.00 | $623.70 | $623.70 | 30 | 43.6% | 77.2% | — | — | — | — | — |
-| mosquito seasonal9 (8,000 sf lot) | gold | $77.00 | $589.05 | $589.05 | 30 | 40.3% | 67.4% | — | — | — | — | — |
-| mosquito seasonal9 (8,000 sf lot) | platinum | $77.00 | $554.40 | $554.40 | 30 | 36.5% | 57.5% | — | — | — | — | — |
-| rodent_bait (2,000 sf) | bronze | $89.00 | $356.00 | $455.00 | 25 | 37.2% | 59.3% | — | — | — | — | — |
-| rodent_bait (2,000 sf) | silver | $89.00 | $320.40 | $419.40 | 25 | 30.2% | 43.4% | — | — | — | — | — |
-| rodent_bait (2,000 sf) | gold | $89.00 | $302.60 | $401.60 | 25 | 26.1% | 35.4% | — | — | — | — | — |
-| rodent_bait (2,000 sf) | platinum | $89.00 | $284.80 | $383.80 | 25 | 21.5% | 27.4% | — | — | — | — | — |
-| tree_shrub 6x (1,440 sf beds, 6 trees) | bronze | $95.83 | $574.98 | $574.98 | 42 | 45.0% | 81.8% | — | — | — | — | — |
-| tree_shrub 6x (1,440 sf beds, 6 trees) | silver | $95.83 | $517.48 | $517.48 | 42 | 38.9% | 63.7% | — | — | — | — | — |
-| tree_shrub 6x (1,440 sf beds, 6 trees) | gold | $95.83 | $488.73 | $488.73 | 42 | 35.3% | 54.6% | — | — | — | — | — |
-| tree_shrub 6x (1,440 sf beds, 6 trees) | platinum | $95.83 | $459.98 | $459.98 | 42 | 31.3% | 45.5% | — | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | bronze | $72.00 | $288.00 | $288.00 | 75 | -65.0% | -39.4% | — | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | silver | $72.00 | $259.20 | $259.20 | 75 | -83.3% | -45.5% | — | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | gold | $72.00 | $244.80 | $244.80 | 75 | -94.1% | -48.5% | — | — | — | — | — |
-| termite_bait monitoring (2,000 sf) | platinum | $72.00 | $230.40 | $230.40 | 75 | -106.2% | -51.5% | — | — | — | — | — |
+Recorded span = check-in → check-out, which often includes driving to the next stop — NOT on-site time (owner 2026-09-02, MON-004). Span columns are fed with no extra drive minutes and carry no pricing recommendation; the engine model columns are the ones the audit prices from.
+
+| service | tier | list/visit | renewal revenue | year-1 revenue | modeled min | gross margin (modeled) | markup (modeled) | recorded span median min (n) | gross margin at recorded median span | gross margin at recorded p75 span | contribution at recorded span (all-card) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| pest_control quarterly (2,000 sf) | bronze | $112.00 | $448.00 | $547.00 | 25 | 58.6% | 141.4% | 44 (98) | 59.4% | 49.5% | 56.5% |
+| pest_control quarterly (2,000 sf) | silver | $112.00 | $403.20 | $502.20 | 25 | 54.0% | 117.2% | 44 (98) | 54.8% | 43.9% | 51.9% |
+| pest_control quarterly (2,000 sf) | gold | $112.00 | $380.80 | $479.80 | 25 | 51.3% | 105.2% | 44 (98) | 52.2% | 40.6% | 49.3% |
+| pest_control quarterly (2,000 sf) | platinum | $112.00 | $358.40 | $457.40 | 25 | 48.2% | 93.1% | 44 (98) | 49.2% | 36.8% | 46.3% |
+| lawn_care 9x st_augustine (4,500 sf) | bronze | $64.00 | $576.00 | $576.00 | 23.25 | 30.7% | 44.3% | 44 (17) | 16.3% | 10.9% | 13.4% |
+| lawn_care 9x st_augustine (4,500 sf) | silver | $64.00 | $518.40 | $518.40 | 23.25 | 23.0% | 29.8% | 44 (17) | 7.0% | 0.9% | 4.1% |
+| lawn_care 9x st_augustine (4,500 sf) | gold | $64.00 | $489.60 | $489.60 | 23.25 | 18.4% | 22.6% | 44 (17) | 1.6% | -4.9% | -1.3% |
+| lawn_care 9x st_augustine (4,500 sf) | platinum | $64.00 | $460.80 | $460.80 | 23.25 | 13.3% | 15.4% | 44 (17) | -4.6% | -11.4% | -7.5% |
+| mosquito seasonal9 (8,000 sf lot) | bronze | $77.00 | $693.00 | $693.00 | 30 | 49.2% | 96.9% | — | — | — | — |
+| mosquito seasonal9 (8,000 sf lot) | silver | $77.00 | $623.70 | $623.70 | 30 | 43.6% | 77.2% | — | — | — | — |
+| mosquito seasonal9 (8,000 sf lot) | gold | $77.00 | $589.05 | $589.05 | 30 | 40.3% | 67.4% | — | — | — | — |
+| mosquito seasonal9 (8,000 sf lot) | platinum | $77.00 | $554.40 | $554.40 | 30 | 36.5% | 57.5% | — | — | — | — |
+| rodent_bait (2,000 sf) | bronze | $89.00 | $356.00 | $455.00 | 25 | 37.2% | 59.3% | — | — | — | — |
+| rodent_bait (2,000 sf) | silver | $89.00 | $320.40 | $419.40 | 25 | 30.2% | 43.4% | — | — | — | — |
+| rodent_bait (2,000 sf) | gold | $89.00 | $302.60 | $401.60 | 25 | 26.1% | 35.4% | — | — | — | — |
+| rodent_bait (2,000 sf) | platinum | $89.00 | $284.80 | $383.80 | 25 | 21.5% | 27.4% | — | — | — | — |
+| tree_shrub 6x (1,440 sf beds, 6 trees) | bronze | $95.83 | $574.98 | $574.98 | 42 | 45.0% | 81.8% | — | — | — | — |
+| tree_shrub 6x (1,440 sf beds, 6 trees) | silver | $95.83 | $517.48 | $517.48 | 42 | 38.9% | 63.7% | — | — | — | — |
+| tree_shrub 6x (1,440 sf beds, 6 trees) | gold | $95.83 | $488.73 | $488.73 | 42 | 35.3% | 54.6% | — | — | — | — |
+| tree_shrub 6x (1,440 sf beds, 6 trees) | platinum | $95.83 | $459.98 | $459.98 | 42 | 31.3% | 45.5% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | bronze | $72.00 | $288.00 | $288.00 | 75 | -65.0% | -39.4% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | silver | $72.00 | $259.20 | $259.20 | 75 | -83.3% | -45.5% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | gold | $72.00 | $244.80 | $244.80 | 75 | -94.1% | -48.5% | — | — | — | — |
+| termite_bait monitoring (2,000 sf) | platinum | $72.00 | $230.40 | $230.40 | 75 | -106.2% | -51.5% | — | — | — | — |
 
 ## Markup vs margin sites
 

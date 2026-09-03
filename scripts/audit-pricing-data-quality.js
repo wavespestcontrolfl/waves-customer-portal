@@ -28,6 +28,12 @@ const argValue = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[
 const JSON_OUT = argValue('--json');
 const MD_OUT = argValue('--md');
 const SINCE = argValue('--since') || '2026-06-01';
+// The window is a CLI value: validate the shape here and bind it as a query
+// parameter below (never interpolated into SQL — codex P1 on PR #3792).
+if (!/^\d{4}-\d{2}-\d{2}$/.test(SINCE)) {
+  console.error(`--since must be YYYY-MM-DD (got ${JSON.stringify(SINCE)})`);
+  process.exit(2);
+}
 
 const CHECKS = [
   {
@@ -191,10 +197,13 @@ const CHECKS = [
   },
   {
     key: 'accepted_cost_snapshots',
-    title: 'Accepted estimates with a frozen cost/margin snapshot',
+    title: 'Accepted estimates with a frozen cost/margin snapshot (plus the all-snapshot missing-cost count, scoped separately)',
     sql: `select (select count(*) from estimates where status='accepted') as accepted,
                  (select count(distinct s.estimate_id) from estimate_pricing_audit_snapshots s join estimates e on e.id=s.estimate_id where e.status='accepted') as with_snapshot,
-                 (select count(*) from estimate_pricing_audit_snapshots where estimated_cost is null or estimated_cost = 0) as snapshots_without_cost`,
+                 (select count(distinct s.estimate_id) from estimate_pricing_audit_snapshots s join estimates e on e.id=s.estimate_id
+                    where e.status='accepted' and (s.estimated_cost is null or s.estimated_cost = 0)) as accepted_without_cost,
+                 (select count(*) from estimate_pricing_audit_snapshots) as all_snapshots,
+                 (select count(*) from estimate_pricing_audit_snapshots where estimated_cost is null or estimated_cost = 0) as all_snapshots_without_cost`,
   },
   {
     key: 'customers_billing_lanes',
@@ -209,10 +218,11 @@ const CHECKS = [
   {
     key: 'visits_uninvoiced',
     title: `Completed billable visits since ${SINCE} with no invoice (by lane)`,
+    params: [SINCE],
     sql: `with u as (
             select ss.id, ss.customer_id, ss.scheduled_date, ss.estimated_price, c.billing_mode
             from scheduled_services ss join customers c on c.id = ss.customer_id
-            where ss.status='completed' and ss.scheduled_date >= date '${SINCE}'
+            where ss.status='completed' and ss.scheduled_date >= $1::date
               and not coalesce(ss.is_callback,false)
               and not (coalesce(ss.prepaid_amount,0) > 0 or ss.annual_prepay_term_id is not null)
               and not exists (select 1 from invoices i where (i.scheduled_service_id = ss.id or (i.service_record_id is not null and i.service_record_id in (select id from service_records sr where sr.scheduled_service_id = ss.id))) and i.archived_at is null))
@@ -223,12 +233,15 @@ const CHECKS = [
   },
   {
     key: 'visit_actual_minutes',
-    title: `Completed-visit on-site minutes by service type since ${SINCE} (n ≥ 3)`,
+    // Recorded check-in→check-out spans, NOT on-site time: check-out is often
+    // stamped while driving to the next stop (owner 2026-09-02, MON-004).
+    title: `Completed-visit RECORDED span minutes (check-in→check-out, often includes drive — not on-site time) by service type since ${SINCE} (n ≥ 3)`,
+    params: [SINCE],
     sql: `with v as (
             select service_type, coalesce(time_on_site_adjusted_minutes, actual_duration_minutes, (extract(epoch from (check_out_time - check_in_time))/60)::int) as mins,
                    estimated_duration_minutes as est, estimated_price as price
             from scheduled_services
-            where status='completed' and scheduled_date >= date '${SINCE}'
+            where status='completed' and scheduled_date >= $1::date
               and (time_on_site_adjusted_minutes is not null or actual_duration_minutes is not null or (check_in_time is not null and check_out_time is not null)))
           select service_type, count(*) as n, round(avg(est)) as scheduled_est_avg,
                  round((percentile_cont(0.5) within group (order by mins))::numeric) as median_min,
@@ -270,7 +283,7 @@ async function main() {
   const md = ['# Pricing data-quality audit (read-only)', '', `Generated ${new Date().toISOString()} · database host ${u.hostname.replace(/[A-Za-z0-9]{4,}/g, (m) => m.slice(0, 2) + '…')} · window since ${SINCE}`, ''];
   for (const check of CHECKS) {
     let rows; let error = null;
-    try { rows = (await client.query(check.sql)).rows; } catch (e) { rows = []; error = e.message; }
+    try { rows = (await client.query(check.sql, check.params || [])).rows; } catch (e) { rows = []; error = e.message; }
     results.push({ key: check.key, title: check.title, rows, error });
     md.push(`## ${check.title}`, '');
     if (error) { md.push(`_query failed: ${error}_`, ''); continue; }

@@ -1,7 +1,6 @@
-<!-- Generated 2026-09-02 by scripts/audit-pricing-data-quality.js against the production database in a READ ONLY session (aggregates + catalog/config rows only; no customer PII). -->
 # Pricing data-quality audit (read-only)
 
-Generated 2026-09-02T22:42:59.641Z · database host ma….pr….rl….net · window since 2026-06-01
+Generated 2026-09-03T05:35:47.131Z · database host ma….pr….rl….net · window since 2026-06-01
 
 ## Service catalog overview
 
@@ -144,7 +143,7 @@ _(0 rows)_
 | authority | status | count |
 |---|---|---|
 | SERVER | expired | 383 |
-| NULL | draft | 253 |
+| NULL | draft | 254 |
 | NULL | expired | 113 |
 | LOCKED | accepted | 99 |
 | SERVER | viewed | 25 |
@@ -155,21 +154,21 @@ _(0 rows)_
 
 | measurements_defaulted | measurements_defaulted_delivered | turf_lot_fallback | turf_lot_fallback_delivered | fixed_discount_not_replayable |
 |---|---|---|---|---|
-| 182 | 0 | 8 | 7 | 0 |
+| 183 | 0 | 8 | 7 | 0 |
 
 ## Live estimates whose stored WaveGuard tier differs from the engine tier
 
 | waveguard_tier | n | differs_from_engine |
 |---|---|---|
-| NULL | 235 | 0 |
+| NULL | 236 | 0 |
 | Bronze | 149 | 0 |
 | Silver | 10 | 0 |
 
-## Accepted estimates with a frozen cost/margin snapshot
+## Accepted estimates with a frozen cost/margin snapshot (plus the all-snapshot missing-cost count, scoped separately)
 
-| accepted | with_snapshot | snapshots_without_cost |
-|---|---|---|
-| 100 | 99 | 114 |
+| accepted | with_snapshot | accepted_without_cost | all_snapshots | all_snapshots_without_cost |
+|---|---|---|---|---|
+| 100 | 99 | 34 | 324 | 114 |
 
 ## Real customers by billing lane and fee coverage
 
@@ -191,7 +190,7 @@ _(0 rows)_
 | monthly_membership | 2 | 2 | 196.60 |
 | annual_prepay | 1 | 0 | 0.00 |
 
-## Completed-visit on-site minutes by service type since 2026-06-01 (n ≥ 3)
+## Completed-visit RECORDED span minutes (check-in→check-out, often includes drive — not on-site time) by service type since 2026-06-01 (n ≥ 3)
 
 | service_type | n | scheduled_est_avg | median_min | avg_min | p75_min | p90_min | price_avg | realized_per_hour_incl_20min_drive |
 |---|---|---|---|---|---|---|---|---|
