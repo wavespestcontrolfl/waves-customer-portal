@@ -6298,10 +6298,22 @@ const CallRecordingProcessor = {
     // time into the SLA analytics. The retry states (extraction_failed,
     // no_transcription) are unfinished work and keep the real wait.
     const COMPLETED_STATUSES = new Set(['processed', 'voicemail', 'spam']);
-    // …or the caller says so: an operator adoption swaps the recording and
-    // puts processing_status back to NULL (so the sweep owns the row) before
-    // this pass, and passes the row's pre-swap completed state along.
-    const wasAlreadyProcessed = COMPLETED_STATUSES.has(call.processing_status) || opts.reprocessOfProcessed === true;
+    // …or the ROW says so: an operator adoption swaps the recording and puts
+    // processing_status back to NULL (so the sweep owns the row) and stamps
+    // the pre-swap state on metadata.adopted_recording — read here by EVERY
+    // pass over the adopted recording, the immediate one and the sweep's
+    // retries alike (Codex #3764 r2 + r4 P2), so an adoption on an old call
+    // never backdates a new lead's first contact to the original call.
+    const adoptedStamp = (() => {
+      try {
+        const m = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+        return m?.adopted_recording && typeof m.adopted_recording === 'object' ? m.adopted_recording : null;
+      } catch { return null; }
+    })();
+    const adoptedOverCompleted = !!adoptedStamp
+      && adoptedStamp.recording_sid === (call.recording_sid || null)
+      && COMPLETED_STATUSES.has(adoptedStamp.previous_processing_status);
+    const wasAlreadyProcessed = COMPLETED_STATUSES.has(call.processing_status) || adoptedOverCompleted;
 
     // Dedup guard — skip if already fully processed (prevents duplicate
     // SMS on webhook retries). opts.force=true bypasses the guard so the

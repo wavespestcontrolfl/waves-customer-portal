@@ -395,9 +395,11 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     if (panQuarantined) {
       return quarantinedResponse(res, await quarantineParked(), 'This call is PAN-quarantined; recordings are never re-attached.');
     }
-    // The recording being replaced stays in the parked list as evidence.
-    const replaced = call.recording_sid ? [{
-      recording_sid: call.recording_sid,
+    // The recording being replaced stays in the parked list as evidence —
+    // a legacy URL-only row (no SID) included (Codex r4 P1): the callback
+    // path treats a non-empty URL as an existing recording, and so does this.
+    const replaced = (call.recording_sid || call.recording_url) ? [{
+      recording_sid: call.recording_sid || null,
       recording_url: call.recording_url,
       recording_duration_seconds: call.recording_duration_seconds ?? null,
       received_at: null,
@@ -481,17 +483,23 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
           "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{additional_recordings}',"
           + " (SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata -> 'additional_recordings', '[]'::jsonb)) e WHERE e ->> 'recording_sid' <> ?) || ?::jsonb, true),"
           + " '{adopted_recording}', ?::jsonb, true)",
-          [chosen.recording_sid, JSON.stringify(replaced), JSON.stringify({ recording_sid: chosen.recording_sid, by: req.technicianId || null, at: new Date().toISOString(), previous_recording_sid: call.recording_sid || null })],
+          // previous_processing_status: the pre-swap completed state, read
+          // by every pass over the adopted recording (the immediate one and
+          // the sweep's retries) for the lead first-contact clamp — the
+          // swap itself puts processing_status back to NULL (Codex r2 + r4 P2).
+          [chosen.recording_sid, JSON.stringify(replaced), JSON.stringify({ recording_sid: chosen.recording_sid, by: req.technicianId || null, at: new Date().toISOString(), previous_recording_sid: call.recording_sid || null, previous_processing_status: call.processing_status || null })],
         ),
         updated_at: new Date(),
       });
-      // A missing_unit_number card stays: it is an owed dispatch-blocking
-      // question that closes only on a human verdict (AGENTS.md), never
-      // because the audio changed (Codex r3 P1).
+      // The cards in SUPERSEDE_KEPT_REASON_CODES stay (the unit question and
+      // the email-review cards close only on a human verdict — never because
+      // the audio changed; Codex r3 + r4 P1). Same list as the webhook's
+      // replace path.
       if (n > 0) {
+        const { SUPERSEDE_KEPT_REASON_CODES } = require('../services/call-routing-gates');
         await trx('triage_items')
           .where({ call_log_id: call.id })
-          .whereNotIn('reason_code', ['additional_recording', 'missing_unit_number'])
+          .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
           .whereIn('status', ['open', 'in_progress'])
           .update({ status: 'resolved', resolved_at: new Date(), resolution_note: supersededNote });
       }
@@ -521,17 +529,7 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
     // while the pass processed a newer one (Codex #3736 r6 P1).
     let result;
     try {
-      // The swap put processing_status back to NULL so the sweep owns the
-      // row; the pass must still know this call had COMPLETED before (Codex
-      // #3764 r2 P2) — its lead first-contact clamp keys on that, and an
-      // adoption on an old call would otherwise backdate first_contact_at
-      // to the original call time.
-      result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, {
-        force: true,
-        operator: true,
-        expectedRecordingSid: chosen.recording_sid,
-        reprocessOfProcessed: ['processed', 'voicemail', 'spam'].includes(call.processing_status),
-      });
+      result = await CallRecordingProcessor.processRecording(call.twilio_call_sid, { force: true, operator: true, expectedRecordingSid: chosen.recording_sid });
     } catch (passErr) {
       // The swap is committed and the row is back in the sweep
       // (processing_status NULL). A pass that throws — a provider or DB

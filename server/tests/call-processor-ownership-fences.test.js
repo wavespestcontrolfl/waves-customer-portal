@@ -295,8 +295,11 @@ describe('an explicit unlink gates lead creation', () => {
     expect(body.indexOf('const customerLinkOverride = (() => {')).toBeLessThan(at);
   });
 
-  test('an adoption carries the pre-swap completed state into the lead first-contact clamp (codex #3764 gh-r2 P2)', () => {
-    expect(body).toContain("const wasAlreadyProcessed = COMPLETED_STATUSES.has(call.processing_status) || opts.reprocessOfProcessed === true;");
+  test('an adoption carries the pre-swap completed state into the lead first-contact clamp through the row stamp, so the sweep\'s retries see it too (codex #3764 gh-r2 + gh-r4 P2)', () => {
+    expect(body).toContain("COMPLETED_STATUSES.has(adoptedStamp.previous_processing_status)");
+    expect(body).toContain("adoptedStamp.recording_sid === (call.recording_sid || null)");
+    expect(body).toContain("const wasAlreadyProcessed = COMPLETED_STATUSES.has(call.processing_status) || adoptedOverCompleted;");
+    expect(body).not.toContain('opts.reprocessOfProcessed');
   });
 
   test('workableUnnamedLead consults explicitUnlink', () => {

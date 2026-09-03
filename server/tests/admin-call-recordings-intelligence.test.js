@@ -318,19 +318,35 @@ describe('POST /calls/:id/adopt-recording', () => {
     const retired = cardWrites.find((u) => JSON.stringify(u.wheres).includes('notin'));
     expect(retired.patch).toMatchObject({ status: 'resolved', resolution_note: expect.stringContaining(PARKED) });
     expect(retired.patch.resolution_note).toContain(CURRENT);
-    // The owed dispatch-blocking question survives the swap (codex r3 P1).
-    expect(retired.wheres).toContainEqual(['notin', 'reason_code', ['additional_recording', 'missing_unit_number']]);
+    // The owed dispatch-blocking question and the email-review cards survive the swap (codex r3 + r4 P1) — the shared kept list.
+    expect(retired.wheres).toContainEqual(['notin', 'reason_code', require('../services/call-routing-gates').SUPERSEDE_KEPT_REASON_CODES]);
+    expect(require('../services/call-routing-gates').SUPERSEDE_KEPT_REASON_CODES).toEqual(expect.arrayContaining(['additional_recording', 'missing_unit_number', 'email_unverified', 'email_invalid', 'email_bounce_reverify']));
     expect(db.transaction).toHaveBeenCalled();
     // The pass is fenced to the chosen recording: a callback that replaces
     // it before the claim makes the pass refuse instead of processing audio
     // the operator never chose.
-    // …and carries the completed-state signal the swap erased from the row
-    // (processing_status NULL), so the lead first-contact clamp still applies.
-    expect(processor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true, expectedRecordingSid: PARKED, reprocessOfProcessed: true });
+    expect(processor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true, expectedRecordingSid: PARKED });
+    // The pre-swap completed state rides on the adopted_recording stamp, so
+    // EVERY pass over the adopted audio (immediate or the sweep's retry)
+    // applies the lead first-contact clamp (codex r2 + r4 P2).
+    expect(JSON.parse(swap.patch.metadata.bindings[2])).toMatchObject({ recording_sid: PARKED, previous_recording_sid: CURRENT, previous_processing_status: 'processed' });
     // The call's review flag follows its cards: the last card settled with
     // nothing else open clears review_status (codex #3764 gh-r1 P2).
     const flag = updates.find((u) => u.table === 'call_log' && u.patch.review_status === null);
     expect(flag).toBeDefined();
+  });
+
+  test('a legacy URL-only current recording (no SID) is kept as the replaced entry, never dropped (codex r4 P1)', async () => {
+    const row = call();
+    row.recording_sid = null;
+    const updates = mockDb([row]);
+    processor.processRecording.mockResolvedValue({ success: true, callSid: SID });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/adopt-recording`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recording_sid: PARKED }) });
+      expect(res.status).toBe(200);
+    });
+    const swap = updates.find((u) => u.table === 'call_log');
+    expect(JSON.parse(swap.patch.metadata.bindings[1])).toEqual([expect.objectContaining({ recording_sid: null, recording_url: 'https://api.twilio.com/x/RE1.mp3', parked_because: 'replaced_by_operator' })]);
   });
 
   test('a pass that throws after the committed swap reports adopted-and-queued, never a 500 (codex #3764 gh-r1 P2)', async () => {
