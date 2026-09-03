@@ -72,6 +72,20 @@ describe('ConfirmEvidence — unit-number ask', () => {
     expect(row).not.toHaveTextContent(',');
   });
 
+  it('shows the unit the customer texted back, beside the ask', () => {
+    render(<ConfirmEvidence payload={{
+      flag: 'missing_unit_number',
+      unit_ask_building: { street_line_1: '100 Example Condo Ct', city: 'Bradenton', postal_code: '34212' },
+      customer_reply_unit: 'Apt 204',
+      customer_reply_at: '2026-09-03T14:05:00.000Z',
+    }} />);
+    const row = screen.getByText('Customer replied:').parentElement;
+    expect(row).toHaveTextContent('Apt 204');
+    expect(row).toHaveTextContent('by text');
+    expect(row).toHaveTextContent('ET');
+    expect(screen.getByText('Unit needed for:').parentElement).toHaveTextContent('100 Example Condo Ct');
+  });
+
   it('renders nothing when the stamp carries no street', () => {
     const { container } = render(<ConfirmEvidence payload={{
       flag: 'missing_unit_number',

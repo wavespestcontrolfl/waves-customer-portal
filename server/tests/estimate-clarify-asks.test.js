@@ -678,6 +678,16 @@ describe('clarifyPreDispatchCheck', () => {
     expect(await clarifyPreDispatchCheck(PARAMS)()).toEqual({ ok: true });
   });
 
+  test('a unit-number card closed while validators ran aborts the send; an open one lets it through', async () => {
+    const unitParams = { ...PARAMS, dispatchedMissing: ['unit_number'] };
+    mockState.firstQueue = [claimedRow({ missing: ['unit_number'], unit_call_log_id: 'call-1' }), null];
+    const verdict = await clarifyPreDispatchCheck(unitParams)();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toMatch(/card was closed/);
+    mockState.firstQueue = [claimedRow({ missing: ['unit_number'], unit_call_log_id: 'call-1' }), { id: 'card-1' }];
+    expect(await clarifyPreDispatchCheck(unitParams)()).toEqual({ ok: true });
+  });
+
   test('an answer recorded while validators ran aborts the send', async () => {
     mockState.firstQueue = [claimedRow({ missing: [], answered_at: '2026-07-19T00:00:00Z' })];
     const verdict = await clarifyPreDispatchCheck(PARAMS)();
@@ -1195,5 +1205,142 @@ describe('bedroom_count ask (unit-band lane)', () => {
     const verdict = await claimClarifyDispatch({ draft: { id: 'draft-1', source_ref: 'clarify:9415550142' } });
     expect(verdict.outcome).toBe('send');
     expect(verdict.flags.missing).toEqual(['bedroom_count']);
+  });
+});
+
+describe('unit_number ask (call pipeline lane)', () => {
+  const BUILDING = { street_line_1: '1048 Example Lakes Cir', city: 'Sarasota', postal_code: '34232' };
+
+  test('copy: the one-question unit ask names the building; combined asks append it', () => {
+    const solo = _private.composeClarifyBody({ missing: ['unit_number'], firstName: 'Anna', unitAskBuilding: BUILDING });
+    expect(solo).toBe("Hi Anna, it's Waves Pest Control — one quick thing to finish your quote: what's the apartment or unit number at 1048 Example Lakes Cir?");
+    const noBuilding = _private.composeClarifyBody({ missing: ['unit_number'], firstName: null });
+    expect(noBuilding).toMatch(/what's the apartment or unit number\?$/);
+    const combined = _private.composeClarifyBody({ missing: ['specific_service', 'unit_number'], firstName: null, unitAskBuilding: BUILDING });
+    expect(combined).toMatch(/^Hi, it's Waves Pest Control — glad to get you a quote\. Which service/);
+    expect(combined).toMatch(/ Also, what's the apartment or unit number at 1048 Example Lakes Cir\?$/);
+  });
+
+  test('parks the unit ask bound to its call card and building, marked call-origin', async () => {
+    const result = await parkClarifyAsk({
+      missing: ['unit_number'], phone: '+17735550142', firstName: 'Anna', customerId: 'cust-1', leadId: 'lead-1',
+      callLogId: 'call-1', source: 'call_missing_unit_number', channelProvenance: 'voice', unitAskBuilding: BUILDING,
+    });
+    expect(result).toEqual({ parked: true, draftId: 'draft-1', covers: ['unit_number'] });
+    const row = mockState.inserts[0];
+    expect(row.intent).toBe('estimate_clarify');
+    expect(row.draft_response).toMatch(/unit number at 1048 Example Lakes Cir\?$/);
+    const flags = JSON.parse(row.flags);
+    expect(flags).toEqual(expect.objectContaining({
+      missing: ['unit_number'], toPhone: '+17735550142', lead_id: 'lead-1', call_origin: true,
+      unit_call_log_id: 'call-1', unit_ask_building: BUILDING, channel_provenance: 'voice',
+    }));
+    expect(flags.unit_lead_id).toBeUndefined();
+    expect(flags.unit_customer_id).toBeUndefined();
+  });
+
+  test('a later merged ask for ANOTHER lead on the same phone keeps the unit item bound to its card; a non-call producer clears call origin', async () => {
+    mockState.existingDraft = {
+      id: 'draft-1', status: 'pending', sent_at: null,
+      flags: JSON.stringify({ missing: ['unit_number'], lead_id: 'lead-A', call_origin: true, unit_call_log_id: 'call-A', unit_ask_building: BUILDING }),
+    };
+    const result = await parkClarifyAsk({ missing: ['specific_service'], phone: '+17735550142', leadId: 'lead-B', source: 'lead_intake' });
+    expect(result.skipped).toBe('merged_into_open_clarify');
+    const merged = mockState.updates.find((u) => u.table === 'message_drafts');
+    const flags = JSON.parse(merged.payload.flags);
+    expect(flags.missing).toEqual(['unit_number', 'specific_service']);
+    expect(flags.lead_id).toBe('lead-B');
+    expect(flags.unit_call_log_id).toBe('call-A');
+    expect(flags.call_origin).toBe(false);
+    expect(merged.payload.draft_response).toMatch(/unit number at 1048 Example Lakes Cir\?$/);
+  });
+
+  test('extractUnitReply: designated forms always (incl. PH1 / TH12 / A-204 / ABC12 / PH-1); a bare token only when allowed; never a bare word', () => {
+    const { extractUnitReply } = _private;
+    expect(extractUnitReply('Apt 204')).toBe('Apt 204');
+    expect(extractUnitReply("it's apt. 12B, thanks!")).toBe('Apt 12B');
+    expect(extractUnitReply('Unit 7')).toBe('Apt 7');
+    expect(extractUnitReply('#7')).toBe('Apt 7');
+    expect(extractUnitReply('Unit PH1')).toBe('Apt PH1');
+    expect(extractUnitReply('apt TH12 please')).toBe('Apt TH12');
+    expect(extractUnitReply('Unit A-204')).toBe('Apt A-204');
+    expect(extractUnitReply('Unit ABC12')).toBe('Apt ABC12');
+    expect(extractUnitReply('Unit PH-1')).toBe('Apt Ph-1');
+    expect(extractUnitReply('apt on the 3rd floor')).toBeNull();
+    expect(extractUnitReply('unit the')).toBeNull();
+    expect(extractUnitReply('204')).toBeNull();
+    expect(extractUnitReply('204', { bareOk: true })).toBe('Apt 204');
+    expect(extractUnitReply('its 12B.', { bareOk: true })).toBe('Apt 12B');
+    expect(extractUnitReply('ok thanks', { bareOk: true })).toBeNull();
+    expect(extractUnitReply('2 dogs and a cat', { bareOk: true })).toBeNull();
+  });
+
+  describe('reply', () => {
+    const AWAITING = (overrides = {}) => ({
+      id: 'sent-1',
+      customer_id: 'cust-1',
+      status: 'approved',
+      sent_at: '2026-09-03T12:00:00Z',
+      flags: JSON.stringify({ missing: ['unit_number'], lead_id: 'lead-1', call_origin: true, unit_call_log_id: 'call-1', unit_ask_building: BUILDING }),
+      ...overrides,
+    });
+    beforeEach(() => {
+      mockSmsThreadDraftsEnabled.mockReturnValue(true);
+      mockStartSmsThreadDraft.mockResolvedValue({ started: true });
+    });
+
+    test('"Apt 204" is stamped on the open card (never resolving it) and consumed on the draft — no CRM address writes, no automatic re-draft', async () => {
+      const result = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' });
+      expect(result.handled).toBe(true);
+      await result.repricePromise;
+      const cardUpdate = mockState.updates.find((u) => u.table === 'triage_items');
+      expect(cardUpdate.payload.payload.__raw).toMatch(/customer_reply_unit/);
+      expect(cardUpdate.payload.payload.params[0]).toBe('Apt 204');
+      expect(cardUpdate.payload.status).toBeUndefined();
+      expect(mockState.updates.find((u) => u.table === 'leads')).toBeUndefined();
+      expect(mockState.updates.find((u) => u.table === 'customers')).toBeUndefined();
+      const bookkeeping = mockState.updates.find((u) => u.table === 'message_drafts');
+      const flags = JSON.parse(bookkeeping.payload.flags);
+      expect(flags.answer_recorded).toEqual(['unit_number']);
+      expect(flags.unit_number_answer).toBe('Apt 204');
+      expect(flags.answered_at).toBeTruthy();
+      expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+      expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
+    });
+
+    test('a bare "204" answers a DELIVERED one-question ask, never an unsent one', async () => {
+      mockState.existingDraft = AWAITING();
+      expect((await handleClarifyReply({ phone: '+17735550142', body: '204' })).handled).toBe(true);
+      mockState.updates = [];
+      mockState.existingDraft = AWAITING({ status: 'pending', sent_at: null });
+      expect((await handleClarifyReply({ phone: '+17735550142', body: '204' })).handled).toBe(false);
+      expect(mockState.updates).toHaveLength(0);
+    });
+
+    beforeEach(() => { mockState.existingDraft = AWAITING(); });
+  });
+
+  describe('dispatch', () => {
+    const DRAFT = { id: 'draft-1', source_ref: 'clarify:7735550142' };
+    const freshRow = (flags = {}, overrides = {}) => ({
+      id: 'draft-1', source_ref: 'clarify:7735550142', customer_id: null, status: 'approved', sent_at: null,
+      draft_response: 'Unit?', final_response: null,
+      flags: JSON.stringify({ missing: ['unit_number'], toPhone: '+17735550142', lead_id: 'lead-1', call_origin: true, unit_call_log_id: 'call-1', unit_ask_building: BUILDING, ...flags }),
+      ...overrides,
+    });
+
+    test('a lead with a street but no unit still needs the ask while its card is open (the street-address rule must not retire it)', async () => {
+      mockState.firstQueue = [freshRow(), { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir, Apt 9, Sarasota, FL 34232', first_name: 'Anna' }, { id: 'card-1' }];
+      const verdict = await claimClarifyDispatch({ draft: DRAFT });
+      expect(verdict.outcome).toBe('send');
+      expect(verdict.body).toBe('Unit?');
+    });
+
+    test('the closed triage card is the human verdict: a resolved/dismissed missing_unit_number card retires the ask', async () => {
+      mockState.firstQueue = [freshRow(), { id: 'lead-1', status: 'new', address: '1048 Example Lakes Cir', first_name: 'Anna' }, null];
+      const verdict = await claimClarifyDispatch({ draft: DRAFT });
+      expect(verdict.outcome).toBe('retired');
+      expect(verdict.message).toContain('already provided');
+    });
   });
 });
