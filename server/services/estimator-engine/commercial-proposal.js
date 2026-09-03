@@ -117,17 +117,6 @@ function briefPrompt({ intent, propertyFacts, facts, context, reasons }) {
     '- Internal document: factual, terse, no marketing language.',
     '- Only use facts present below; unknowns stay null — never invent.',
     '',
-    'Respond with ONLY a JSON object, exactly this shape:',
-    '{',
-    '  "summary": "2-4 sentence prospect overview",',
-    '  "propertyProfile": { "propertyType": string, "footprintSqft": number|null, "units": number|null, "buildings": number|null, "landUse": string|null },',
-    '  "riskFactors": [string],',
-    '  "servicePrograms": [ { "name": string, "cadence": "monthly"|"bimonthly"|"quarterly"|"annual"|"one_time", "scope": string } ],',
-    '  "buildings": [ { "name": string, "note": string|null } ],',
-    '  "walkthroughChecklist": [string],',
-    '  "openQuestions": [string]',
-    '}',
-    '',
     'servicePrograms = the service lanes worth proposing (scope in words, no',
     'prices). buildings = how to split the proposal (towers, clubhouse,',
     'common areas) — one entry when there is no basis to split.',
@@ -147,6 +136,58 @@ function briefPrompt({ intent, propertyFacts, facts, context, reasons }) {
     transcriptExcerpt || '(none available)',
   ].join('\n');
 }
+
+// Structured-output contract (llm/call.js jsonSchema): the provider constrains
+// the reply to this shape. validateBrief still runs — the dollar-figure ban
+// and the non-empty summary are semantic rules a schema cannot express.
+const BRIEF_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'propertyProfile', 'riskFactors', 'servicePrograms', 'buildings', 'walkthroughChecklist', 'openQuestions'],
+  properties: {
+    summary: { type: 'string', description: '2-4 sentence prospect overview' },
+    propertyProfile: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['propertyType', 'footprintSqft', 'units', 'buildings', 'landUse'],
+      properties: {
+        propertyType: { type: ['string', 'null'], description: 'null when the facts do not establish it' },
+        footprintSqft: { type: ['number', 'null'] },
+        units: { type: ['number', 'null'] },
+        buildings: { type: ['number', 'null'] },
+        landUse: { type: ['string', 'null'] },
+      },
+    },
+    riskFactors: { type: 'array', items: { type: 'string' } },
+    servicePrograms: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'cadence', 'scope'],
+        properties: {
+          name: { type: 'string' },
+          cadence: { type: 'string', enum: ['monthly', 'bimonthly', 'quarterly', 'annual', 'one_time'] },
+          scope: { type: 'string', description: 'Scope in words, no prices' },
+        },
+      },
+    },
+    buildings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'note'],
+        properties: {
+          name: { type: 'string' },
+          note: { type: ['string', 'null'] },
+        },
+      },
+    },
+    walkthroughChecklist: { type: 'array', items: { type: 'string' } },
+    openQuestions: { type: 'array', items: { type: 'string' } },
+  },
+};
 
 function validateBrief(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return 'not_object';
@@ -199,6 +240,7 @@ async function composeProspectBrief({ intent, propertyFacts, facts, context, rea
     const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
       text: briefPrompt({ intent, propertyFacts, facts, context, reasons }),
       jsonMode: true,
+      jsonSchema: BRIEF_SCHEMA,
       maxTokens: 2000,
       // Bounded: this runs inline in the (already detached) engine pipeline.
       timeoutMs: 90000,

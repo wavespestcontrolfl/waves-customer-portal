@@ -62,9 +62,20 @@ function systemPrompt() {
     'Answer whether a typical reader would understand the text as claiming, offering, or implying that Waves provides service in that city.',
     'NOT service claims (false): honest disclaimers ("Naples is outside our service area"), negations ("we do not serve Tampa"), factual/educational/editorial mentions (pest research, weather, geography, travel, news), directions or distance references, competitor or third-party mentions.',
     'Service claims (true): "we serve/treat/cover/inspect …", CTA framing ("call us for a quote in Cape Coral"), availability claims, and SEO-style service packaging with no explicit verb ("Naples pest control guide", "Need mosquito control in Cape Coral?").',
-    'Reply with JSON only: {"is_service_claim": true|false, "reason": "<one short sentence>"}',
   ].filter(Boolean).join('\n');
 }
+
+// Structured-output contract (llm/call.js jsonSchema): the provider constrains
+// the reply to this shape; the validate hook below still requires the boolean.
+const VERDICT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['is_service_claim', 'reason'],
+  properties: {
+    is_service_claim: { type: 'boolean' },
+    reason: { type: 'string', description: 'One short sentence' },
+  },
+};
 
 /**
  * Classify one (city, clause) pair. Returns { is_service_claim, reason }
@@ -82,6 +93,7 @@ async function classifyFootprintEvidence({ city, clause } = {}) {
     {
       maxTokens: 200,
       jsonMode: true,
+      jsonSchema: VERDICT_SCHEMA,
       timeoutMs: CALL_TIMEOUT_MS,
       system: systemPrompt(),
       text: `CITY: ${c}\nRENDERED COPY: ${text}\n\nDoes this copy claim Waves provides service in ${c}?`,
