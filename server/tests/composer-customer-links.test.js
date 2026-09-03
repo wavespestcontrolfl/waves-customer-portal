@@ -858,6 +858,29 @@ describe('buildPrepGuideLink', () => {
     expect(r.expiresAt).toBeNull();
   });
 
+  test('a visit whose stored guide differs from the keyword match is labeled with the STORED guide (what the page renders)', async () => {
+    nextUpcomingVisit.mockImplementation(async (_ids, keyword) => (
+      keyword === 'flea'
+        ? { id: 'v-mixed', customer_id: 'c1', scheduled_date: '2026-09-10', service_type: 'Flea + Bed Bug', prep_template_key: 'prep.bed_bug', prep_expires_at: null }
+        : null
+    ));
+    const r = await buildPrepGuideLink(['c1']);
+    expect(ensureServicePrepToken).toHaveBeenCalledWith('v-mixed', 'prep.bed_bug');
+    expect(r.line).toContain('Bed Bug Treatment Service');
+    expect(r.line).not.toContain('Flea Treatment');
+    expect(r.prep.pestType).toBe('bed_bug');
+  });
+
+  test('a stored guide key the composer cannot name refuses', async () => {
+    nextUpcomingVisit.mockImplementation(async (_ids, keyword) => (
+      keyword === 'flea' ? { id: 'v1', customer_id: 'c1', scheduled_date: '2026-09-10', prep_template_key: 'prep.termite', prep_expires_at: null } : null
+    ));
+    const r = await buildPrepGuideLink(['c1']);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/cannot name/);
+    expect(ensureServicePrepToken).not.toHaveBeenCalled();
+  });
+
   test('an expired prep token refuses rather than inserting a dead page', async () => {
     nextUpcomingVisit.mockImplementation(async (_ids, keyword) => (
       keyword === 'flea' ? { id: 'v-flea', customer_id: 'c1', scheduled_date: '2026-09-20', prep_expires_at: '2020-01-01T00:00:00Z' } : null

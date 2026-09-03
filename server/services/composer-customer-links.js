@@ -729,7 +729,20 @@ async function buildPrepGuideLink(customerIds) {
   if (!pick) {
     return { url: null, line: '', reason: 'No upcoming flea, bed bug, or cockroach visit on this account' };
   }
-  const { visit, config, pestType } = pick;
+  let { config, pestType } = pick;
+  const { visit } = pick;
+  // ensureServicePrepToken deliberately keeps an existing token's stored
+  // prep_template_key (it is what the last DELIVERED guide rendered), so
+  // the page shows the STORED guide, not the keyword-inferred one. Label
+  // the text with the guide the link will actually open, or refuse when
+  // the stored key is one the composer cannot name (pre-push Codex P1).
+  if (visit.prep_template_key && visit.prep_template_key !== config.emailTemplateKey) {
+    const stored = Object.entries(PREP_CONFIG).find(([, c]) => c.emailTemplateKey === visit.prep_template_key);
+    if (!stored) {
+      return { url: null, line: '', reason: 'This appointment\'s prep page is set to a guide the composer cannot name — send it from Send prep guide instead' };
+    }
+    [pestType, config] = stored;
+  }
   // The page 404s past prep_expires_at and the mint would hand back the
   // same expired token — refuse rather than insert a dead link.
   if (visit.prep_expires_at && new Date(visit.prep_expires_at).getTime() <= Date.now()) {
