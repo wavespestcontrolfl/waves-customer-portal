@@ -148,19 +148,24 @@ export default function AgentModelsTab() {
     [effectiveLeg],
   );
 
-  // One change per env var. Several lanes can read the same pin env (the
-  // photo lanes share GEMINI_VISION_MODEL), so pins aggregate by env and
-  // count every lane whose primary or fallback follows that env.
+  // One change per env var, computed from the COMPLETE draft: a leg pinned
+  // in the draft stops following its selector, an unpinned one starts again,
+  // and a pin is dropped as redundant only against the post-draft selector
+  // value (pinning today's model while the selector moves is a real change).
+  // Several lanes can read the same pin env (the photo lanes share
+  // GEMINI_VISION_MODEL), so pins aggregate by env and count every lane.
   const changes = useMemo(() => {
     if (!data) return [];
+    const pinnedAfterDraft = (leg) => (leg.pinEnv && draft[leg.pinEnv] ? draft[leg.pinEnv] !== UNPIN : !!leg.pinned);
+    const baseAfterDraft = (leg) => {
+      const selEnv = leg.selector && selectorByKey[leg.selector]?.env;
+      return (selEnv && draft[selEnv]) || leg.unpinnedModel || leg.model;
+    };
     const byEnv = new Map();
     for (const s of data.selectors) {
       const next = draft[s.env];
       if (next && next !== s.current) {
-        // Blast radius = every lane a leg of which follows the selector and is
-        // not pinned away from it — fallback legs included (a FLAGSHIP change
-        // moves the report policy's backup too).
-        const follows = (leg) => leg && leg.selector === s.key && !leg.pinned;
+        const follows = (leg) => leg && leg.selector === s.key && !pinnedAfterDraft(leg);
         const lanes = data.lanes.filter((l) => follows(l.primary) || follows(l.fallback)).length;
         byEnv.set(s.env, { env: s.env, from: s.current, to: next, label: `${s.key} selector`, lanes, restart: true });
       }
@@ -172,18 +177,18 @@ export default function AgentModelsTab() {
         if (!next || byEnv.has(env)) continue;
         const unpin = next === UNPIN;
         const sharing = data.lanes.filter((x) => x.primary.pinEnv === env || x.fallback?.pinEnv === env);
-        // Unpinning a shared env can land its lanes on different models (a
-        // selector-backed leg vs one with its own literal default), so the
-        // destination is the set of distinct results, not the first lane's.
         const legOf = (x) => (x.primary.pinEnv === env ? x.primary : x.fallback);
-        const destinations = unpin ? [...new Set(sharing.map((x) => effectiveLeg(x, legOf(x))))] : [next];
-        if (destinations.length === 1 && destinations[0] === leg.model) continue;
+        // Unpinning a shared env can land its lanes on different models (a
+        // selector-backed leg vs one with its own literal default).
+        const destinations = unpin ? [...new Set(sharing.map((x) => baseAfterDraft(legOf(x))))] : [next];
+        if (unpin && destinations.length === 1 && destinations[0] === leg.model) continue;
+        if (!unpin && sharing.every((x) => next === baseAfterDraft(legOf(x)) && !legOf(x).pinned)) continue;
         const label = sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.fallback ? " · fallback" : ""}`;
         byEnv.set(env, { env, from: leg.model, to: destinations[0], destinations, unpin, label, lanes: sharing.length, restart: sharing.some((x) => x.applies !== "live") });
       }
     }
     return [...byEnv.values()];
-  }, [data, draft, effectiveLeg]);
+  }, [data, draft, selectorByKey]);
 
   // Unpins are deletions: Railway has no "unset" syntax, so the line is an
   // instruction rather than an assignment.
