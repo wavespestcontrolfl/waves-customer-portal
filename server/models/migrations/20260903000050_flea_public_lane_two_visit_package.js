@@ -48,6 +48,9 @@ const DOWN_REASON = 'Rollback: restore the single-visit flea knockdown offer (20
 const SERVICE_KEY = 'flea_tick';
 const OLD_ENGINE_KEYS = [SINGLE_OFFER_KEY];
 const NEW_ENGINE_KEYS = ['flea_package'];
+// Exported so the accept-path contract test composes the LIVE seeded view
+// (20260810000002 + 20260825000011 seeds, with this remap applied).
+const REMAP = { service_key: SERVICE_KEY, from: OLD_ENGINE_KEYS, to: NEW_ENGINE_KEYS };
 const OLD_DESCRIPTION = 'Full yard broadcast for flea control. Interior treatment available as an add-on.';
 const NEW_DESCRIPTION = 'Two-visit flea elimination package: interior treatment plus a follow-up at the egg-hatch window. Yard treatment available as an add-on.';
 const FOLLOWUP_POLICY = 'alert';
@@ -207,3 +210,5 @@ exports.down = async function down(knex) {
     await knex('system_settings').where({ key: STATE_KEY }).del();
   }
 };
+
+exports.REMAP = REMAP;
