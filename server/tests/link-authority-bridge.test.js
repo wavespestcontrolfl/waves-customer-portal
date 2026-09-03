@@ -249,6 +249,32 @@ describe('outreach-lane paths', () => {
     expect(placements(db)[0].status).toBe('awaiting_owner');
     expect(await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
   });
+  test('a price the owner must enter (OWNER_INPUT_REQUIRED) on an outreach path is NOT deferred: it parks at once', async () => {
+    const { db } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: null, currency: 'unknown', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
+    const r = await run(db);
+    expect(rows(db).find((x) => x.dimension === 'payment').level).toBe('OWNER_INPUT_REQUIRED');
+    expect([r.parked, placements(db)[0].status]).toEqual([1, 'awaiting_owner']);
+  });
+  test('an exact homepage row beside an ACTIVE conversation on another page is not adopted — one conversation per inbox', async () => {
+    const { db } = scenario({ make: outreachPath });
+    const conversation = { id: uid(), target_domain: 'example.org', target_page: 'https://www.wavespestcontrol.com/pest-control/', location_key: '-', domain_id: null, path_id: null, status: 'contacted', link_type: 'resource', outreach_status: 'sent', source: 'manual', updated_at: EARLIER };
+    const homepage = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: null, path_id: null, status: 'prospect', link_type: 'directory', source: 'manual', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(conversation, homepage);
+    const r = await run(db);
+    expect(r.errors).toEqual([{ domain: 'example.org', skipped: 'outreach conversation in flight on another page (contacted)' }]);
+    expect(placements(db).map((x) => [x.path_id || null, x.link_type])).toEqual([[null, 'resource'], [null, 'directory']]);
+    expect(rows(db)).toHaveLength(0);
+  });
+  test('the display stamp never overwrites a placement timestamp written under it (a draft reported mid-run stays visible to selection)', async () => {
+    const { db, d, p } = scenario({ make: outreachPath });
+    const reportedAt = new Date(NOW.getTime() + 5000); // the draft lease reported AFTER this run's `now`
+    db._tables.seo_link_prospects.push({ id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: d.id, path_id: p.id, status: 'prospect', outreach_status: 'none', link_type: 'resource', updated_at: reportedAt });
+    await run(db);
+    expect(placements(db)[0]).toMatchObject({ authority: 'OWNER_OUTREACH', updated_at: reportedAt });
+    // …so the next night sees the row as stale and parks the (now drafted) placement
+    Object.assign(placements(db)[0], { outreach_status: 'drafted' });
+    expect((await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
+  });
   test('an exact homepage outreach row left UNBOUND by the manual endpoint is adopted, never stuck behind a null path', async () => {
     const { db, d, p } = scenario({ make: outreachPath });
     // created under a signup lane with a stale classification and an unsent draft: the lane, URL, classification and draft follow the outreach path (the registry move patch)
@@ -453,6 +479,17 @@ describe('re-decision', () => {
     db._tables.seo_link_placement_authorities.push({ id: uid(), ...base, dimension: 'payment', level: 'OWNER_PAYMENT', satisfied_at: EARLIER, satisfied_reason: 'charged' });
     db._tables.seo_link_domains[0].agent_state = 'acquiring';
     expect((await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
+    // the placement already moved (a release-time move): the satisfied acquisition row alone must still select the domain
+    const already = { ...pl, id: uid(), location_key: WAVES_LOCATIONS[1].id, path_id: p.id };
+    db._tables.seo_link_prospects.push(already);
+    db._tables.seo_link_placement_authorities.push({ id: uid(), ...base, prospect_id: already.id, dimension: 'execution', level: 'OWNER_FREE', satisfied_at: EARLIER, satisfied_reason: 'placed' });
+    Object.assign(pl, { path_id: p.id });
+    for (const x of rows(db).filter((y) => y.prospect_id === pl.id)) x.path_id = p.id;
+    expect((await bridge.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
+    Object.assign(pl, { path_id: old.id });
+    for (const x of rows(db).filter((y) => y.prospect_id === pl.id)) x.path_id = old.id;
+    db._tables.seo_link_prospects.pop();
+    db._tables.seo_link_placement_authorities.pop();
     const r = await run(db);
     expect(r.ended).toBe(1);
     const mine = rows(db).filter((x) => x.prospect_id === pl.id);
@@ -524,6 +561,10 @@ describe('aggregateState (§3.1)', () => {
     ['a DENY beside an INVALID is not a rejection', [{ status: 'prospect', rows: [A('DENY')] }, { status: 'prospect', rows: [A('INVALID')] }], 'qualified'],
     ['a deferred outreach payment does not hold an authorized send back', [{ status: 'prospect', outreach: true, rows: [A('AUTO_OUTREACH'), { ...A('OWNER_PAYMENT'), dimension: 'payment' }] }], 'ready_to_acquire'],
     ['a leased prospect is acquiring, not pending', [{ status: 'prospect', claimed_at: NOW, rows: [A('AUTO_FREE')] }], 'acquiring'],
+    ['live beside a leased sibling is still acquiring', [{ status: 'live', rows: [A('OWNER_FREE', true)] }, { status: 'prospect', claimed_at: NOW, rows: [A('AUTO_FREE')] }], 'acquiring'],
+    ['live beside an owner-held sibling is qualified, not acquired', [{ status: 'live', rows: [A('OWNER_FREE', true)] }, { status: 'awaiting_owner', rows: [A('OWNER_FREE')] }], 'qualified'],
+    ['a carried satisfied payment never masks INVALID', [{ status: 'prospect', rows: [A('OWNER_PAYMENT', true), A('INVALID')] }], 'investigating'],
+    ['a carried satisfied communication never masks DENY', [{ status: 'prospect', outreach: true, rows: [A('OWNER_OUTREACH', true), A('DENY')] }], 'rejected'],
     ['a handoff park is acquiring', [{ status: 'ready_for_payment', rows: [A('OWNER_PAYMENT')] }], 'acquiring'],
     ['an UNLEASED authorized sibling still wins over a leased one', [{ status: 'prospect', claimed_at: NOW, rows: [A('AUTO_FREE')] }, { status: 'prospect', rows: [A('AUTO_FREE')] }], 'ready_to_acquire'],
     ['the same payment row on a non-outreach placement is pending', [{ status: 'prospect', rows: [A('AUTO_FREE'), { ...A('OWNER_PAYMENT'), dimension: 'payment' }] }], 'qualified'],

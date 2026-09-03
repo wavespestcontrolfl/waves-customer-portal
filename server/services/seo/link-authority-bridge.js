@@ -86,7 +86,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const forced = new Set(domainIds || []);
   // candidates: qualified, or owning an open row (satisfied or not), or carrying an active waiver, or explicitly requested
   const qualified = await db('seo_link_domains').where({ agent_state: 'qualified' }).whereNotNull('best_path_id').orderBy('updated_at', 'asc').select('id');
-  const open = await db(AUTH).whereNull('ended_at').select('prospect_id', 'path_id', 'decided_at', 'satisfied_at', 'instance_kind', 'accepted_terms_hash');
+  const open = await db(AUTH).whereNull('ended_at').select('prospect_id', 'path_id', 'dimension', 'instance_kind', 'decided_at', 'satisfied_at', 'accepted_terms_hash');
   const owners = open.length ? await db('seo_link_prospects').whereIn('id', [...new Set(open.map((r) => r.prospect_id))]).whereNotNull('domain_id').select('id', 'domain_id') : [];
   const waivers = await db('seo_link_floor_waivers').whereNull('invalidated_at').select('domain_id', 'path_id', 'approved_at');
   const candidateIds = [...new Set([...qualified.map((d) => d.id), ...owners.map((p) => p.domain_id), ...waivers.map((w) => w.domain_id), ...forced])]
@@ -144,8 +144,12 @@ const authorized = (r) => Boolean(r.satisfied_at) || isAuto(r.level) || (isOwner
 // payment on an outreach path is DEFERRED until the publisher exposes a checkout
 // (ready_for_payment, §3.3b): it neither parks the placement nor holds the
 // domain back from ready_to_acquire — the initial send claims on communication
-// authority alone (the claim predicate, plan §6.4, accepts nothing below ready_to_acquire).
-const deferred = (r, outreach) => outreach === true && r.dimension === 'payment';
+// authority alone (the claim predicate, plan §6.4, accepts nothing below
+// ready_to_acquire). ONLY the levels that intentionally wait for checkout
+// defer: a price the owner must enter (OWNER_INPUT_REQUIRED) or settle by hand
+// (OWNER_MANUAL_PAYMENT) parks immediately like any other owner decision.
+const DEFERRABLE_PAYMENT_LEVELS = Object.freeze(['OWNER_PAYMENT', 'AUTO_PAID_WITHIN_POLICY']);
+const deferred = (r, outreach) => outreach === true && r.dimension === 'payment' && DEFERRABLE_PAYMENT_LEVELS.includes(r.level);
 // a SATISFIED accept_terms instance is bound to the hash it accepted: an
 // agreement the path no longer carries reopens it (§3.3b — acceptance of an old
 // agreement never satisfies a newly discovered one)
@@ -202,6 +206,10 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   let placements = [];
   for (const location of expectedLocations(path)) {
     let row = await findPlacementRow(trx, domain.domain, HOMEPAGE, { location, columns: ['*'] });
+    // one conversation per inbox: an active outreach row on ANOTHER page beside
+    // the homepage row means the homepage row is not this domain's conversation —
+    // adopting or moving it would open a second one
+    if (row && location === '-' && inFlight && inFlight.id !== row.id) return { skipped: `outreach conversation in flight on another page (${inFlight.status})`, out };
     if (!row && location === '-' && inFlight) {
       // an outreach conversation already exists for this inbox (a manual or
       // strategy-agent row on another page): that row IS the placement rather
@@ -367,12 +375,14 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     let transition = null;
     if (status === PARKABLE && ownerGated && !leased) transition = { status: PARKED, parked_from_status: PARKABLE };
     else if (status === PARKED && !ownerGated && placement.parked_from_status === PARKABLE) transition = { status: PARKABLE, parked_from_status: null };
-    // the display stamp lands unconditionally; a status move is OPTIMISTIC on
-    // the status + lease the decision read — the worker's claim/report and the
-    // outreach save/send lock the row without this domain lock, so a row a
-    // report promoted or a claim leased since the snapshot is not this run's
-    // to move (the next run re-reads it)
-    if (Object.keys(patch).length) await trx('seo_link_prospects').where({ id: placement.id }).update({ ...patch, updated_at: now });
+    // the display stamp lands unconditionally but WITHOUT touching updated_at
+    // (a draft reported between the snapshot and this write keeps its later
+    // timestamp, so the next selection still sees it); a status move is
+    // OPTIMISTIC on the status + lease the decision read — the worker's
+    // claim/report and the outreach save/send lock the row without this domain
+    // lock, so a row a report promoted or a claim leased since the snapshot is
+    // not this run's to move (the next run re-reads it)
+    if (Object.keys(patch).length) await trx('seo_link_prospects').where({ id: placement.id }).update(patch);
     if (transition) {
       const applied = await trx('seo_link_prospects').where({ id: placement.id, status: placement.status }).whereNull('claimed_at').update({ ...transition, updated_at: now });
       if (applied) {
@@ -412,12 +422,15 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
 }
 
 // §3.1 — ready_to_acquire while ANY authorized placement is pending UNLEASED;
-// acquired once live with nothing pending; acquiring for the active
-// intermediates — a leased placement, `placed`, `contacted`/`negotiating`, or
-// parked at a handoff (`ready_for_credentials`/`ready_for_payment`);
-// qualified while the owner (or a deferred owner decision) holds it; back to
-// investigating when EVERY placement is INVALID; rejected ONLY when every
-// placement is DENY (a single DENY beside a pending sibling never rejects).
+// acquired once live with NOTHING pending (no active intermediate, no
+// owner-held sibling); acquiring for the active intermediates — a leased
+// placement, `placed`, `contacted`/`negotiating`, or parked at a handoff
+// (`ready_for_credentials`/`ready_for_payment`); qualified while the owner
+// (or a deferred owner decision) holds it; back to investigating when EVERY
+// placement's current BLOCKING decision is INVALID; rejected ONLY when every
+// one is DENY (a single DENY beside a pending sibling never rejects; a carried
+// satisfied instance — the pitch went out, the money left — is history, not a
+// decision, and never masks a terminal level).
 // "authorized" = satisfied, AUTO_*, or OWNER_* with a valid approval; a
 // DEFERRED row (payment on an outreach placement, `outreach: true`) is not
 // pending — it is settled at checkout, after the send.
@@ -427,11 +440,14 @@ function aggregateState(placements) {
   const leased = (p) => Boolean(p.claimed_at);
   const authorizedPending = (p) => p.status === PARKABLE && !leased(p) && pending(p).length > 0 && pending(p).every(authorized);
   const ownerPending = (p) => p.status === PARKABLE && pending(p).some((r) => !authorized(r) && isOwner(r.level));
-  const every = (level) => placements.length > 0 && placements.every((p) => rows(p).length > 0 && rows(p).every((r) => r.level === level));
+  const blocking = (p) => rows(p).filter((r) => !r.satisfied_at);
+  const every = (level) => placements.length > 0 && placements.every((p) => blocking(p).length > 0 && blocking(p).every((r) => r.level === level));
+  const active = (p) => leased(p) || ACQUIRING_STATUSES.includes(p.status);
+  const held = (p) => p.status === PARKED || ownerPending(p);
   if (placements.some(authorizedPending)) return 'ready_to_acquire';
-  if (placements.some((p) => ['live', 'indexed'].includes(p.status))) return 'acquired';
-  if (placements.some((p) => leased(p) || ACQUIRING_STATUSES.includes(p.status))) return 'acquiring';
-  if (placements.some((p) => p.status === PARKED || ownerPending(p))) return 'qualified';
+  if (placements.some((p) => ['live', 'indexed'].includes(p.status)) && !placements.some(active) && !placements.some(held)) return 'acquired';
+  if (placements.some(active)) return 'acquiring';
+  if (placements.some(held)) return 'qualified';
   if (every('INVALID')) return 'investigating';
   if (every('DENY')) return 'rejected';
   return 'qualified';
