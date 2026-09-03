@@ -320,8 +320,8 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
     // human checks the Sent folder and re-drafts only if it truly didn't go out.
     await markSendError(prospectId, sendToken);
     // Log a code/name only — a raw Gmail error message can echo the recipient (PII).
-    logger.error(`[link-outreach] send failed (ambiguous) for ${prospectId} (code=${err.code || err.name || 'unknown'}) — needs reconciliation`);
-    return { ok: false, code: 'send_failed', error: err.message };
+    logger.error(`[link-outreach] send failed (ambiguous) for ${prospectId} (code=${(err && (err.code || err.name)) || 'unknown'}) — needs reconciliation`);
+    return { ok: false, code: 'send_failed', error: err && err.message };
   }
   const ids = { message_id: sent.id || null, thread_id: sent.threadId || null };
   const threadRef = ids.thread_id || ids.message_id;
