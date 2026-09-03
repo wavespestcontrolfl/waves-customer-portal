@@ -1364,6 +1364,11 @@ function generateEstimate(input) {
       stationCount: services.oneTimeMosquito.stationCount,
       dunkCount: services.oneTimeMosquito.dunkCount,
       isRecurringCustomer,
+      // Same caller contract as commercial mosquito: a synthesized lot
+      // (public wizard sqft×4, lead automation default) arrives as
+      // lotSizeMeasured:false and routes the line to review rather than
+      // pricing a fabricated treatable area. Undefined = admin / measured.
+      lotSizeMeasured: input.lotSizeMeasured,
     });
     lineItems.push(result);
   }

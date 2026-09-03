@@ -113,7 +113,7 @@ describe('instant-quote set stays in step with the public quote engine', () => {
     expect(PUBLIC_QUOTE_REQUESTS.pest_general_bimonthly.pest.frequency).toBe('bimonthly');
   });
   test('products with no complete public engine request are never advertised as instant', () => {
-    for (const k of ['mosquito_one_time', 'wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid',
+    for (const k of ['cockroach_control', 'wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid',
       'palm_injection', 'bed_bug_treatment', 'dethatching', 'termite_trenching', 'termite_slab_pretreat',
       'lawn_care_one_time', 'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy', 'bee_wasp_removal',
       'plugging', 'top_dressing', 'rodent_exclusion_only']) {
@@ -133,6 +133,20 @@ describe('instant-quote set stays in step with the public quote engine', () => {
         && Number(l.price ?? l.total ?? l.monthly ?? l.annual ?? 0) > 0);
       expect({ key, priced: priced.length > 0 }).toEqual({ key, priced: true });
     }
+  });
+  test('phase 2: one-time mosquito and lawn pest knockdown price from the lookup alone', () => {
+    const mosq = generateEstimate({ ...BASE, services: quoteServicesForKey('mosquito_one_time') });
+    expect(mosq.lineItems.map((l) => l.service)).toEqual(['one_time_mosquito']);
+    expect(mosq.lineItems[0].price).toBeGreaterThan(0);
+    const lawnPest = generateEstimate({ ...BASE, estimatedTurfSf: 4500, services: quoteServicesForKey('lawn_pest_knockdown') });
+    expect(lawnPest.lineItems.map((l) => l.name)).toEqual(['Lawn Pest Knockdown Service']);
+    expect(lawnPest.lineItems[0].track).toBe('st_augustine');
+  });
+  test('the site-collected grass track reaches the lawn pest knockdown request, nothing else does', () => {
+    const merged = mergeKeyedRequestOptions(quoteServicesForKey('lawn_pest_knockdown'), { lawn: { track: 'bahia', tier: 'premium' }, lawnPestControl: { urgency: 'EMERGENCY' } });
+    expect(merged).toEqual({ lawnPestControl: { track: 'bahia' } });
+    expect(mergeKeyedRequestOptions(quoteServicesForKey('lawn_pest_knockdown'), { lawn: { track: 'paspalum' } })).toEqual({ lawnPestControl: {} });
+    expect(mergeKeyedRequestOptions(quoteServicesForKey('mosquito_one_time'), { lawn: { track: 'bahia' }, oneTimeMosquito: { stationCount: 9 } })).toEqual({ oneTimeMosquito: {} });
   });
   test('flea_tick prices the SINGLE-visit knockdown, not the two-visit package', () => {
     const estimate = generateEstimate({ ...BASE, services: quoteServicesForKey('flea_tick') });
