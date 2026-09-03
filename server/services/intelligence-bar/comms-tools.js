@@ -96,6 +96,21 @@ Use for: "what calls came in this morning?", "show me today's calls", "any misse
     },
   },
   {
+    name: 'get_open_commitments',
+    description: `The Owed queue: open promises from calls — what Waves told callers it would do (send an estimate, call back, send a confirmation, book a visit…) and what callers agreed to do — with what is overdue. Read-only; rows exist only while GATE_CALL_COMMITMENTS has been on.
+Use for: "what do we owe callers?", "any overdue promises?", "what did we promise this customer?", "what is the customer supposed to send us?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        party: { type: 'string', enum: ['waves', 'customer', 'all'], description: 'Default waves (what Waves owes)' },
+        overdue_only: { type: 'boolean', description: 'Only promises past their due time (or open too long with none)' },
+        customer_id: { type: 'string', format: 'uuid' },
+        customer_name: { type: 'string', description: 'Resolve the customer by name instead of id' },
+        limit: { type: 'number', description: 'Default 25, max 100' },
+      },
+    },
+  },
+  {
     name: 'list_call_partners',
     description: `Aggregate the B2B ARRANGERS who call to book service for other people — realtors/buyer's agents, lenders and title/closing coordinators, property managers — from the AI call extractions (caller relationship real_estate_agent/lender/property_manager, or an organization name on the call). Returns per-partner: name, organization, relationship, total calls, first/last call, WDO-related call count, latest call summary.
 Use for: "who are my top realtor partners?", "which lenders keep calling us?", "show repeat WDO arrangers", "partner channel overview"`,
@@ -185,6 +200,7 @@ const COMMS_READ_TOOL_NAMES = new Set([
   'get_todays_activity',
   'list_call_partners',
   'get_partner_call_history',
+  'get_open_commitments',
 ]);
 const COMMS_READ_TOOLS = COMMS_TOOLS.filter(t => COMMS_READ_TOOL_NAMES.has(t.name));
 
@@ -200,6 +216,7 @@ async function executeCommsTool(toolName, input) {
       case 'get_sms_stats': return await getSmsStats(input.days || 30);
       case 'get_call_log': return await getCallLog(input);
       case 'list_call_partners': return await listCallPartners(input);
+      case 'get_open_commitments': return await getOpenCommitments(input);
       case 'get_partner_call_history': return await getPartnerCallHistory(input);
       case 'send_sms': return await sendSms(input);
       case 'draft_sms_reply': return await draftSmsReply(input);
@@ -448,6 +465,64 @@ async function getSmsStats(days) {
   };
 }
 
+
+// The Owed queue, read-only: listOpenCommitments is the same read the
+// Communications → Owed tab and the overdue watchdog use, so the answer
+// here is exactly what the office sees there.
+async function getOpenCommitments(input) {
+  const { listOpenCommitments, selectOverdue, implicitDueAt, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../call-commitments');
+  const { isEnabled } = require('../../config/feature-gates');
+  const party = input.party === 'customer' ? 'customer' : input.party === 'all' ? null : 'waves';
+  let customerId = input.customer_id || null;
+  let customerLabel = null;
+  if (!customerId && input.customer_name) {
+    const customer = await resolveCustomer({ customer_name: input.customer_name });
+    if (customer && customer.ambiguous) return customer;
+    if (!customer) return { commitments: [], note: `No customer matched "${input.customer_name}".` };
+    customerId = customer.id;
+    customerLabel = [customer.first_name, customer.last_name].filter(Boolean).join(' ');
+  }
+  const limit = Math.min(Math.max(Number(input.limit) || 25, 1), 100);
+  const rows = await listOpenCommitments(db, { party, customerId, limit, includeHints: true });
+  const chosen = input.overdue_only ? selectOverdue(rows) : rows;
+  return {
+    enabled: isEnabled('callCommitments'),
+    party: party || 'all',
+    customer: customerLabel,
+    // The implicit-deadline rules the queue applies when no time was stated
+    // (Codex #3733 P2): an estimate is due 24 h after the call, a callback by
+    // the end of the call's ET day, other prompts after OVERDUE_IMPLICIT_DAYS.
+    // Each row also carries its own effective_due_at below.
+    implicit_due_rules: {
+      send_estimate: `${OVERDUE_IMPLICIT_ESTIMATE_HOURS} hours after the call`,
+      callback: "the end of the call's day (Eastern)",
+      other_prompts: `${OVERDUE_IMPLICIT_DAYS} days after the call`,
+    },
+    total_open: rows.length,
+    overdue: selectOverdue(rows).length,
+    commitments: chosen.map((r) => ({
+      id: r.id,
+      party: r.party,
+      kind: r.kind,
+      description: r.description,
+      due_at: r.due_at ? etDateString(new Date(r.due_at)) + ' ' + new Date(r.due_at).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET' : null,
+      // The deadline the queue actually judges: the stated time, else the
+      // kind's implicit one (null for kinds that wait for the office).
+      effective_due_at: (() => {
+        const eff = r.due_at ? new Date(r.due_at) : implicitDueAt(r);
+        return eff ? etDateString(eff) + ' ' + eff.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET' : null;
+      })(),
+      overdue: !!r.overdue,
+      call_at: r.call_started_at ? new Date(r.call_started_at).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET' : null,
+      customer: [r.customer_first_name, r.customer_last_name].filter(Boolean).join(' ') || null,
+      customer_id: r.customer_id || null,
+      call_log_id: r.call_log_id,
+      source: r.source === 'human' ? 'office' : (r.extractor_version === 'relay-v1' ? 'AI phone assistant' : 'AI'),
+      possibly_kept: r.fulfillment ? { kind: r.fulfillment.kind, basis: r.fulfillment.basis } : null,
+    })),
+    link: '/admin/communications#tab=owed',
+  };
+}
 
 async function getCallLog(input) {
   const { direction, has_recording, has_transcript, customer_name, days_back = 7, limit: rawLimit } = input;

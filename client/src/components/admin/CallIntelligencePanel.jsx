@@ -87,7 +87,7 @@ export function commitmentStatusTone(c) {
 // different processing state (a Reprocess, the sweep finishing): an OPEN
 // panel reloads with it, so its summary, commitments and next action never
 // lag the transcript beside them (Codex r9 P1).
-export default function CallIntelligencePanel({ callId, onJumpToQuote, onCallChanged, refreshKey = null, defaultOpen = false }) {
+export default function CallIntelligencePanel({ callId, onJumpToQuote, onPlayAt, onCallChanged, refreshKey = null, defaultOpen = false }) {
   const [open, setOpen] = useState(defaultOpen);
   // A deep link that lands on an already-mounted list (the hash changed to
   // another call) must still open this panel; useState only reads the prop
@@ -433,6 +433,11 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote, onCallCha
                             {e.matched !== false && onJumpToQuote && (
                               <button type="button" className="not-italic text-12 md:text-11 underline u-focus-ring" onClick={() => onJumpToQuote(e.quote)}>
                                 Jump
+                              </button>
+                            )}
+                            {e.start_ms != null && onPlayAt && (
+                              <button type="button" className="not-italic text-12 md:text-11 underline u-focus-ring" onClick={() => onPlayAt(e.start_ms)}>
+                                Play
                               </button>
                             )}
                           </li>

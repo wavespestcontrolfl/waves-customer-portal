@@ -16110,7 +16110,10 @@ const CallRecordingProcessor = {
         + " AND (NULLIF(btrim(recording_url), '') IS NOT NULL OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL))"
         + " AND (COALESCE(recording_duration_seconds, duration_seconds, 0) > 10 OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')) as retrying"),
       db.raw("COUNT(*) FILTER (WHERE review_status IN ('open', 'in_progress')) as review_open"),
-      db.raw("COUNT(*) FILTER (WHERE metadata -> 'additional_recordings' IS NOT NULL) as parked_recordings"),
+      // Live parked audio only: an entry still carrying a URL, or one whose
+      // Twilio delete is owed — never an empty list or a quarantined
+      // tombstone.
+      db.raw("COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(metadata -> 'additional_recordings') = 'array' THEN metadata -> 'additional_recordings' ELSE '[]'::jsonb END) e WHERE (e ->> 'recording_url') IS NOT NULL OR (e ->> 'delete_pending') = 'true')) as parked_recordings"),
       // Age of the oldest recorded call that has not reached a terminal
       // state — the number the stall watchdog alerts on, readable here.
       // The stall watchdog's eligibility, mirrored (Codex #3736 r18 P2): a
