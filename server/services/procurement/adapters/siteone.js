@@ -86,8 +86,11 @@ const SELECTORS = Object.freeze({
   checkoutTotal: '.checkout-totals .total, .order-summary .grand-total, [data-test="order-total"], .order-total .value, .grand-total .price',
   billToAccount: 'input[type="radio"][value*="account"], input[type="radio"][value*="ACCOUNT"], label:has-text("Bill to account")',
   billToAccountSelected: 'input[type="radio"][value*="account"]:checked, input[type="radio"][value*="ACCOUNT"]:checked, input[type="radio"][value*="Account"]:checked',
-  checkoutAccount: '[data-test="account-number"], .account-number, .billing-account, .bill-to-account .account, :has-text("Account #"), :has-text("Account Number")',
-  checkoutShipTo: '[data-test="ship-to"], .ship-to, .shipping-address, .delivery-address, .checkout-shipping address, address',
+  // Identity readings are SCOPED to the checkout's own billing / shipping
+  // sections — never a header account menu, a footer address, or an
+  // ancestor's text — and place() requires exactly ONE match (pre-push P0).
+  checkoutAccount: '.checkout [data-test="account-number"], .checkout-billing .account-number, .checkout .billing-account .account-number, .payment-method.selected .account-number, [data-test="bill-to-account"] .account-number',
+  checkoutShipTo: '.checkout [data-test="ship-to"], .checkout-shipping .shipping-address, .checkout .ship-to address, .checkout .delivery-address address, [data-test="shipping-address"]',
   placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
   orderNumber: '.order-number, [data-test="order-number"], .confirmation-number, :has-text("Order #")',
 });
@@ -351,11 +354,20 @@ async function place(
     // WHICH account, and WHERE to: the displayed values, compared to what the
     // owner configured — a saved default that drifted (another branch
     // account, an old address) is exactly the unattended order this refuses.
-    const accountText = normalizeText(await page.locator(SELECTORS.checkoutAccount).first().textContent().catch(() => ''));
+    // Exactly one billing-account reading and one ship-to reading, inside the
+    // checkout sections: zero is unreadable, more than one is ambiguous — the
+    // text the bot would compare might not be the order's.
+    const accountEls = page.locator(SELECTORS.checkoutAccount);
+    const accountCount = await accountEls.count().catch(() => 0);
+    if (accountCount > 1) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('account_ambiguous', `${accountCount} billing-account readings at checkout — cannot tell which the order bills`, evidence); }
+    const accountText = accountCount === 1 ? normalizeText(await accountEls.first().textContent().catch(() => '')) : '';
     const wantDigits = String(credentials.accountNumber).replace(/\D/g, '');
     if (!accountText) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('account_unverified', 'could not read the billing account shown at checkout', evidence); }
     if (!wantDigits || !accountText.replace(/\D/g, '').includes(wantDigits)) { await shot(page, 'checkout', evidence, upload); evidence.checkoutAccount = accountText.slice(0, 60); throw new RefusedError('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`, evidence); }
-    const shipToText = normalizeText(await page.locator(SELECTORS.checkoutShipTo).first().textContent().catch(() => ''));
+    const shipToEls = page.locator(SELECTORS.checkoutShipTo);
+    const shipToCount = await shipToEls.count().catch(() => 0);
+    if (shipToCount > 1) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('ship_to_ambiguous', `${shipToCount} ship-to readings at checkout — cannot tell which the order ships to`, evidence); }
+    const shipToText = shipToCount === 1 ? normalizeText(await shipToEls.first().textContent().catch(() => '')) : '';
     if (!shipToText) { await shot(page, 'checkout', evidence, upload); throw new RefusedError('ship_to_unverified', 'could not read the ship-to address shown at checkout', evidence); }
     const missing = shipToTokens.filter((t) => !shipToText.includes(t));
     if (missing.length) { await shot(page, 'checkout', evidence, upload); evidence.checkoutShipTo = shipToText.slice(0, 120); throw new RefusedError('ship_to_mismatch', `checkout ships to "${shipToText.slice(0, 80)}" — approved ship-to token(s) not found: ${missing.join(', ')}`, evidence); }
