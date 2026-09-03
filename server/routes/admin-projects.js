@@ -382,6 +382,33 @@ function normalizeWdoConstructionSelection(value, propertyProfile = null) {
   return '';
 }
 
+// Structured-output contract for /wdo-intelligence (llm/call.js jsonSchema).
+// Blank = "not supported by the facts"; normalizeWdoIntelligenceResult still
+// re-checks every value (address fallback, dropdown match, photo grounding).
+const WDO_INTELLIGENCE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['suggestedFindings', 'propertySummary', 'confidence', 'reviewNotes'],
+  properties: {
+    suggestedFindings: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['property_address', 'structures_inspected', 'structure_type', 'inspection_scope', 'previous_treatment_evidence', 'previous_treatment_notes'],
+      properties: {
+        property_address: { type: 'string', description: 'The selected property address, or blank' },
+        structures_inspected: { type: 'string', description: 'Structure list text, or blank' },
+        structure_type: { type: 'string', enum: [...WDO_CONSTRUCTION_OPTIONS, ''], description: 'A dropdown value, or blank when the facts do not support one' },
+        inspection_scope: { type: 'string', description: 'Short field text, or blank' },
+        previous_treatment_evidence: { type: 'string', enum: ['Yes', 'No', ''] },
+        previous_treatment_notes: { type: 'string', description: 'Short field text, or blank' },
+      },
+    },
+    propertySummary: { type: 'string', description: 'One sentence about the home facts used, or blank' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    reviewNotes: { type: 'array', items: { type: 'string' }, description: 'Operator review notes' },
+  },
+};
+
 function buildWdoIntelligencePrompt({ customer, propertyAddress, currentFindings, propertyProfile, hasPreviousTreatmentPhoto }) {
   const customerName = [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || '[not provided]';
   const existingLines = Object.entries(currentFindings || {})
@@ -391,7 +418,7 @@ function buildWdoIntelligencePrompt({ customer, propertyAddress, currentFindings
 
   return `You are helping a Florida pest-control operator prefill structured fields for an FDACS-13645 WDO inspection project.
 
-Return JSON only. Do not write report prose. Be conservative and do not invent a detached structure, crawlspace, prior treatment, organism, damage, or inaccessible area unless the input supports it.
+Do not write report prose. Be conservative and do not invent a detached structure, crawlspace, prior treatment, organism, damage, or inaccessible area unless the input supports it.
 
 Prefill only these fields:
 - property_address
@@ -421,20 +448,7 @@ ${existingLines}
 
 Prior-treatment photo attached: ${hasPreviousTreatmentPhoto ? 'yes' : 'no'}
 
-Respond with exactly this JSON shape:
-{
-  "suggestedFindings": {
-    "property_address": "<address or blank>",
-    "structures_inspected": "<structure list text or blank>",
-    "structure_type": "${WDO_CONSTRUCTION_OPTIONS.join('|')}|",
-    "inspection_scope": "<short field text or blank>",
-    "previous_treatment_evidence": "Yes|No|",
-    "previous_treatment_notes": "<short field text or blank>"
-  },
-  "propertySummary": "<one sentence about the home facts used, or blank>",
-  "confidence": "high|medium|low",
-  "reviewNotes": ["<operator review note>", "..."]
-}`;
+Also give a one-sentence propertySummary of the home facts you used (or blank), your confidence, and any operator review notes.`;
 }
 
 async function analyzeWdoProjectIntelligence({ customer, propertyAddress, currentFindings = {}, previousTreatmentPhoto = null }) {
@@ -467,6 +481,7 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
     images,
     maxTokens: 900,
     jsonMode: true,
+    jsonSchema: WDO_INTELLIGENCE_SCHEMA,
   });
 
   if (!msg.ok || !msg.json) {

@@ -44,6 +44,16 @@ invoked by a human or an agent session, on purpose, from the repo root.
 | `archive-catalog-service.js` | MUTATES (dry-run default) | Archives ONE owner-approved Service Library row (`--key` must be in the script's APPROVED_KEYS map, currently `rodent_monitoring`) through `service-library.deactivateService` — the admin Archive button's exact guard (open visits by id and by live label, add-ons, package items, discount rules) and `service_catalog.archive` audit row. Dry run prints the row + references and whether archive would be refused; refused runs exit 1 with the reference list. |
 | `skill-doctor.js` | READ-ONLY | Evidence half of the `/skill-doctor` loop: pulls every Codex review finding on PRs merged/closed in the last `--days` (via the operator's own `gh` session — no PAT, no DB, no LLM), resolves cited AGENTS.md rules against the file AT THE PR HEAD (cached per SHA), and clusters what recurs across ≥2 PRs: broken cited rules, uncited finding phrases (a missing rule), and hot files (a missing contract test), each with a `lesson.md`-style candidate home. `--json` for the full set; `--repo` for the astro repo. |
 | `pricing-funnel-report.js` | READ-ONLY | Pricing funnel standing instrument: close rates DEDUPED BY CUSTOMER for pest (solo), lawn, and pest+lawn bundles, banded by size and price ($/visit; $/1k-sqft/app), with accepted-vs-expired price medians. `--since=YYYY-MM-DD` for era cuts, `--lane=pest\|lawn`. Feeds pricing decisions (owner directive 2026-08-04) and the /weekly-marketing sweep. |
+| `reset-out-of-area-coords.js` | MUTATES (dry-run default) | Clears customer coordinates that lie OUTSIDE the service-area box (`server/services/service-area.js`) so the hourly geocoder backstop sweep re-geocodes them through the PR #3802 guard (coarse / partial / out-of-area Google answers now stay null). Per customer, one transaction: guarded `customers` reset (exact prior coordinates), the primary `customer_properties` mirror row, any open `scheduled_services` stamps copied from it (routing prefers the visit stamp), and an `audit_log` `customer.geocode.reset` row carrying the previous coordinates + reset ids (reversible). Exit 1 when any row was skipped. Pins inside the box are never touched. First run 2026-09-03: 16 rows. |
+
+## Sibling: `ops/backup/`
+
+Not an agent script. `ops/backup/restore.sh` is the decrypt + `pg_restore`
+half of the nightly backup drill (`.github/workflows/db-backup-drill.yml`),
+kept in the repo so a human can run the same code in a real disaster. Setup,
+what the drill proves, and the disaster procedure are in
+`docs/db-backup-restore-drill-runbook.md`. It MUTATES its target and refuses
+any database that already holds tables unless `RESTORE_REPLACE_EXISTING=yes`.
 
 ## Prod read-only access recipe
 

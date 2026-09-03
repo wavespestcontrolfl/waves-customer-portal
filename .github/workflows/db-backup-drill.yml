@@ -1,0 +1,258 @@
+# Nightly prod Postgres backup + restore drill.
+#
+# Why this exists: Stripe is the processor, not a system of record — the
+# Railway Postgres instance IS the business. Railway keeps its own volume
+# backups, but a backup nobody has restored is a hope, not a backup. This
+# workflow makes an independent, encrypted, offsite copy every night AND
+# proves that copy restores by loading it into a throwaway Postgres and
+# comparing row counts against the source. A failed drill fails the run AND
+# emails contact@ through SendGrid from a SEPARATE job, so a timeout or a
+# dead service container still alerts (rule 14: exceptions surface —
+# GitHub's own run-failure emails depend on per-user notification settings,
+# so they are a second channel, not the guarantee).
+#
+# Setup (one-time, owner): docs/db-backup-restore-drill-runbook.md.
+# Disaster restore procedure: same runbook + ops/backup/restore.sh.
+#
+# Design notes (load-bearing):
+#   - The payload is a tar of the custom-format dump PLUS `pg_dumpall
+#     --globals-only` (roles + memberships, no passwords): the analytics role
+#     and its grants are cluster globals a single-database dump never carries.
+#   - pg_dump must be >= the server major (prod is Postgres 18) — the PGDG
+#     apt repo supplies postgresql-client-18; Ubuntu's own package is older.
+#   - The drill restores the object it just DOWNLOADED from R2, not the local
+#     file, so the whole round trip (encrypt → upload → download → decrypt →
+#     restore) is what gets proven.
+#   - latest.json (the disaster-recovery pointer) is published LAST, only
+#     after the drill passes, so it never points at an unproven object.
+#   - Row counts are sampled immediately BEFORE the dump. Prod keeps writing,
+#     so the comparison allows a small tolerance; knex_migrations is exact.
+#   - Missing secrets FAIL the run rather than skipping it. A silently
+#     skipped backup is the exact failure this workflow exists to prevent.
+name: db-backup-drill
+
+on:
+  schedule:
+    # 07:30 UTC = 03:30 EDT / 02:30 EST — the quietest hour for a SWFL service business.
+    - cron: '30 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: db-backup-drill
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Sentinel tables the drill compares. Additions are cheap; keep the list to
+  # tables whose loss would be unrecoverable from any other system.
+  SENTINEL_TABLES: customers invoices payments scheduled_services service_records leads knex_migrations
+  R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+  AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+  AWS_DEFAULT_REGION: auto
+  # R2 does not accept the CRC-based checksums newer aws-cli builds send by default.
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+
+jobs:
+  backup-and-drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      # Same image family the tests workflow uses, pinned to prod's major.
+      # pgvector is required: the dump carries vector-typed columns.
+      restore-target:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: drill
+          POSTGRES_PASSWORD: drill
+          POSTGRES_DB: drill
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DRILL_URL: postgresql://drill:drill@localhost:5432/drill
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require secrets
+        env:
+          HAVE_DB: ${{ secrets.BACKUP_DATABASE_URL != '' }}
+          HAVE_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY != '' }}
+          HAVE_R2: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' && secrets.R2_BACKUP_BUCKET != '' }}
+          HAVE_SG: ${{ secrets.SENDGRID_API_KEY != '' }}
+        run: |
+          missing=0
+          [ "$HAVE_SG" = "true" ]  || { echo "::error::SENDGRID_API_KEY secret is not set — failures could not be emailed"; missing=1; }
+          [ "$HAVE_DB" = "true" ]  || { echo "::error::BACKUP_DATABASE_URL secret is not set"; missing=1; }
+          [ "$HAVE_KEY" = "true" ] || { echo "::error::BACKUP_ENCRYPTION_KEY secret is not set"; missing=1; }
+          [ "$HAVE_R2" = "true" ]  || { echo "::error::R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BACKUP_BUCKET secrets are not all set"; missing=1; }
+          if [ "$missing" = 1 ]; then
+            echo "::error::Backups are NOT running. See docs/db-backup-restore-drill-runbook.md for setup."
+            exit 1
+          fi
+
+      - name: Install postgresql-client-18
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends postgresql-client-18
+          pg_dump --version
+          pg_restore --version
+
+      - name: Sample source row counts
+        env:
+          SRC_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          : > source-counts.txt
+          for t in $SENTINEL_TABLES; do
+            n=$(psql "$SRC_URL" -Atqc "SELECT count(*) FROM \"$t\"")
+            echo "$t $n" >> source-counts.txt
+          done
+          echo "Source counts:"; cat source-counts.txt
+
+      - name: Dump
+        env:
+          SRC_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          # The cutoff is stamped BEFORE pg_dump starts: rows committed during
+          # the dump may be absent from the snapshot, so recovery reconciles
+          # from this conservative time, not from when the dump finished.
+          date -u +%Y%m%dT%H%M%SZ > cutoff.txt
+          # Custom format: compressed, restorable table-by-table, parallel-restorable.
+          # --no-owner/--no-privileges: the restore target has different roles.
+          # --no-owner: the restore target has a different owner role. ACLs are
+          # KEPT: the aichart_readonly view grants live in them.
+          pg_dump "$SRC_URL" --format=custom --compress=6 --no-owner \
+            --file=waves-portal.dump
+          # Roles and role memberships are cluster globals a single-database
+          # dump never carries (aichart_readonly + its GRANT TO the app user).
+          pg_dumpall --dbname="$SRC_URL" --globals-only --no-role-passwords > globals.sql
+          grep -cE '^CREATE ROLE' globals.sql
+          tar -cf waves-portal.tar waves-portal.dump globals.sql
+          ls -l waves-portal.tar
+          sha256sum waves-portal.tar | tee dump.sha256
+
+      - name: Encrypt and upload
+        env:
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+          BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
+        run: |
+          set -euo pipefail
+          stamp=$(cat cutoff.txt)
+          key="waves-portal/${stamp:0:4}/${stamp:4:2}/waves-portal-${stamp}.tar.enc"
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -pass env:BACKUP_ENCRYPTION_KEY -in waves-portal.tar -out waves-portal.tar.enc
+          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors waves-portal.tar.enc "s3://$BUCKET/$key"
+          {
+            echo "{"
+            echo "  \"key\": \"$key\","
+            echo "  \"cutoff\": \"$stamp\","
+            echo "  \"plaintext_sha256\": \"$(cut -d' ' -f1 dump.sha256)\","
+            echo "  \"plaintext_bytes\": $(stat -c %s waves-portal.tar),"
+            echo "  \"encrypted_bytes\": $(stat -c %s waves-portal.tar.enc),"
+            echo "  \"source_counts\": {"
+            awk '{printf "    \"%s\": %s,\n", $1, $2}' source-counts.txt | sed '$ s/,$//'
+            echo "  }"
+            echo "}"
+          } > latest.json
+          echo "$key" > uploaded-key.txt
+          echo "Uploaded s3://$BUCKET/$key"
+
+      - name: Restore drill (download → decrypt → pg_restore)
+        env:
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+          BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
+        run: |
+          set -euo pipefail
+          rm -f waves-portal.dump globals.sql waves-portal.tar waves-portal.tar.enc   # only the offsite copy counts
+          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors "s3://$BUCKET/$(cat uploaded-key.txt)" drill.tar.enc
+          # restore.sh verifies the decrypted bytes against this hash before it
+          # touches the target — the same check an operator runs from the manifest.
+          EXPECTED_SHA256="$(cut -d' ' -f1 dump.sha256)" ops/backup/restore.sh drill.tar.enc "$DRILL_URL"
+
+      - name: Verify restored counts
+        run: |
+          set -euo pipefail
+          fail=0
+          psql "$DRILL_URL" -Atqc "SELECT extname||'@'||extversion FROM pg_extension WHERE extname='vector'" | grep -q '^vector@' \
+            || { echo "::error::vector extension missing after restore"; fail=1; }
+          # Cluster globals: the analytics role must exist, keep its membership
+          # graph, and be able to read a granted view (the ACLs came with the dump).
+          psql "$DRILL_URL" -Atqc "SELECT 1 FROM pg_roles WHERE rolname='aichart_readonly'" | grep -q 1 \
+            || { echo "::error::role aichart_readonly missing after restore (globals not applied)"; fail=1; }
+          [ "$(psql "$DRILL_URL" -Atqc "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid WHERE r.rolname='aichart_readonly'")" -gt 0 ] \
+            || { echo "::error::aichart_readonly has no members after restore (role memberships not applied)"; fail=1; }
+          [ "$(psql "$DRILL_URL" -Atqc "SET ROLE aichart_readonly; SELECT count(*) FROM ai_customers" | tail -1)" -ge 0 ] 2>/dev/null \
+            || { echo "::error::aichart_readonly cannot read ai_customers after restore (view grants not applied)"; fail=1; }
+          {
+            echo "## Restore drill"
+            echo ""
+            echo "| table | source | restored | verdict |"
+            echo "|---|---:|---:|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          while read -r t src; do
+            got=$(psql "$DRILL_URL" -Atqc "SELECT count(*) FROM \"$t\"" < /dev/null)
+            if [ "$t" = knex_migrations ]; then
+              tol=0
+            else
+              # Prod keeps writing between the count and the dump snapshot.
+              tol=$(( src / 100 )); [ "$tol" -lt 5 ] && tol=5
+            fi
+            diff=$(( got - src )); [ "$diff" -lt 0 ] && diff=$(( -diff ))
+            if [ "$got" -gt 0 ] && [ "$diff" -le "$tol" ]; then verdict=ok; else verdict=FAIL; fail=1; fi
+            echo "| $t | $src | $got | $verdict |" >> "$GITHUB_STEP_SUMMARY"
+            echo "$t source=$src restored=$got tol=$tol $verdict"
+          done < source-counts.txt
+          [ "$fail" = 0 ] || { echo "::error::Restore drill FAILED — the nightly backup is not proven restorable"; exit 1; }
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Backup object: \`$(cat uploaded-key.txt)\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish manifests
+        # Only a PROVEN backup gets a manifest. The immutable per-object one
+        # lets an operator pick an OLDER backup with its own hash and counts;
+        # an object with NO sibling .json failed its drill and is ineligible.
+        # latest.json moves last, so a failed drill leaves it on the previous
+        # good object.
+        env:
+          BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
+        run: |
+          set -euo pipefail
+          key=$(cat uploaded-key.txt)
+          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors latest.json "s3://$BUCKET/${key%.tar.enc}.json"
+          aws s3 cp --endpoint-url "$R2_ENDPOINT" --only-show-errors latest.json "s3://$BUCKET/waves-portal/latest.json"
+
+  alert-on-failure:
+    # A separate job: an inline `if: failure()` step never runs when the
+    # drill job hits its timeout or its service container dies before the
+    # steps start — precisely the hung-dump cases that matter most.
+    needs: backup-and-drill
+    if: ${{ always() && needs.backup-and-drill.result != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Email the owner
+        env:
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          RESULT: ${{ needs.backup-and-drill.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$SENDGRID_API_KEY" ] || { echo "::error::no SENDGRID_API_KEY — cannot email the failure"; exit 1; }
+          body=$(printf 'The nightly Postgres backup + restore drill did NOT succeed (result: %s) at %s.\n\nUntil a run is green the business has no proven offsite backup.\n\nRun: %s\nRunbook: docs/db-backup-restore-drill-runbook.md\n' "$RESULT" "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_URL")
+          payload=$(jq -n --arg body "$body" '{
+            personalizations: [{ to: [{ email: "contact@wavespestcontrol.com" }] }],
+            from: { email: "contact@wavespestcontrol.com", name: "Waves Portal backup drill" },
+            subject: "DB backup drill FAILED — no proven backup tonight",
+            content: [{ type: "text/plain", value: $body }]
+          }')
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST https://api.sendgrid.com/v3/mail/send \
+            -H "Authorization: Bearer $SENDGRID_API_KEY" -H 'Content-Type: application/json' --data "$payload")
+          echo "SendGrid HTTP $code"
+          [ "$code" = 202 ] || { echo "::error::failure email was NOT sent (HTTP $code)"; exit 1; }

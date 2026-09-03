@@ -171,6 +171,16 @@ then resolves NONDETERMINISTICALLY. Fetch up to two and resolve only on exactly
 one match (fail closed); a CI/contract test catches existing drift but cannot
 prevent the runtime write (#3328 r3 P1).
 
+## 5d. A JS array into a jsonb column must be JSON.stringify'd
+
+pg serialises a JS ARRAY as a Postgres ARRAY literal (`{...}`), not JSON — so
+`insert({ overridden_floors: [{...}] })` into a jsonb column fails with
+`invalid input syntax for type json` in prod while an in-memory test store
+accepts it happily. A plain object is fine (pg JSON-encodes objects); an array
+needs `JSON.stringify(arr)`. Read side: pg hands jsonb back parsed, so a reader
+that must also work over a fake store parses strings defensively. Caught only
+by the real-DB ui-verify walkthrough (the step 4 PR 2b "Acquire anyway" 500).
+
 ## 6. Schema truth traps (wrong-answer generators)
 
 - `customers.active` is TRUE for leads. A "real customer" =

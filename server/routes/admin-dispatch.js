@@ -3445,18 +3445,47 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
 // (/secure) rail — merged so the client confirm prompts work unchanged;
 // the lanes are mutually exclusive per visit (the appointment rail skips
 // any visit with a hold row).
+// Merge the two fee-rail previews into the one verdict the cancel UIs read.
+//   - A HELD hold answers outright — unless its own verdict is undetermined
+//     (state lookup failed, raced, or timeless): then the appointment rail is
+//     asked and wins ONLY with a stronger verdict — a fee event or its own
+//     undetermined answer (willCharge true / null). A "nothing will be
+//     charged" appointment verdict can't outrank an unknown hold state
+//     (pre-push P1s on #3800 r7).
+//   - A CLOSED hold (released / charged) must NOT short-circuit: the
+//     appointment rail may still carry an in-flight charge or a live
+//     consent for the same visit (pre-push P0 on #3800 r3). Its closed-
+//     state verdict stands only when the appointment rail has nothing of
+//     its own to say — no row, deferred to the hold lane, or DARK (no
+//     lookup at all — Codex #3800 r7 P1; the gates are independent).
+// `askAppointmentRail` is invoked lazily so an authoritative hold verdict
+// makes no second lookup.
+const APPT_RAIL_SILENT_CODES = new Set(['no_card', 'card_hold_lane', 'rail_dark']);
+async function mergeCardHoldPreviews(holdPreview, askAppointmentRail) {
+  const holdUnresolved = holdPreview.rule?.code === 'unresolved';
+  if (holdPreview.held && !holdUnresolved) return holdPreview;
+  const apptPreview = await askAppointmentRail();
+  if (holdUnresolved) return apptPreview.rule?.willCharge === false ? holdPreview : apptShape(apptPreview);
+  if (holdPreview.rule?.code !== 'no_card' && APPT_RAIL_SILENT_CODES.has(apptPreview.rule?.code)) return holdPreview;
+  return apptShape(apptPreview);
+}
+function apptShape(apptPreview) {
+  return {
+    held: apptPreview.secured === true,
+    feeApplies: apptPreview.feeApplies === true,
+    ...(apptPreview.feeAmount != null ? { feeAmount: apptPreview.feeAmount } : {}),
+    ...(apptPreview.unresolved ? { unresolved: true } : {}),
+    // Operator-facing rule (code + sentence): will the card be charged, and
+    // which rule decides it — rendered at the foot of the cancel card.
+    rule: apptPreview.rule,
+  };
+}
 router.get('/:serviceId/card-hold', async (req, res, next) => {
   try {
     const CardHolds = require('../services/estimate-card-holds');
     const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
-    if (holdPreview.held) return res.json(holdPreview);
     const ApptCardRequests = require('../services/appointment-card-request');
-    const apptPreview = await ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId);
-    res.json({
-      held: apptPreview.secured === true,
-      feeApplies: apptPreview.feeApplies === true,
-      ...(apptPreview.feeAmount != null ? { feeAmount: apptPreview.feeAmount } : {}),
-    });
+    res.json(await mergeCardHoldPreviews(holdPreview, () => ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId)));
   } catch (err) { next(err); }
 });
 
@@ -17199,6 +17228,7 @@ module.exports = router;
 // its failed-send compensation is the same guarded re-arm this route uses
 // (never a diverging local copy).
 module.exports.captureReminderGuards = captureReminderGuards;
+module.exports.mergeCardHoldPreviews = mergeCardHoldPreviews;
 module.exports.applySeriesMoveEffects = applySeriesMoveEffects;
 module.exports.reconcileSeriesMoveEffects = reconcileSeriesMoveEffects;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;

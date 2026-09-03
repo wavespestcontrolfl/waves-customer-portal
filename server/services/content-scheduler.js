@@ -172,9 +172,29 @@ async function generateNewsletterSocialContent(send) {
     .map((l) => `  "${l.id}": ${l.name} (${l.area})`)
     .join('\n');
 
+  // Structured-output contract (llm/call.js jsonSchema): one gbp caption per
+  // location id; normalizeGbpByLocation still backfills an empty value.
+  const jsonSchema = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['facebook', 'instagram', 'linkedin', 'gbp'],
+    properties: {
+      facebook: { type: 'string' },
+      instagram: { type: 'string' },
+      linkedin: { type: 'string' },
+      gbp: {
+        type: 'object',
+        additionalProperties: false,
+        required: WAVES_LOCATIONS.map((l) => l.id),
+        properties: Object.fromEntries(WAVES_LOCATIONS.map((l) => [l.id, { type: 'string', description: `GBP post for ${l.name} (${l.area})` }])),
+      },
+    },
+  };
+
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
     maxTokens: 800,
     jsonMode: true,
+    jsonSchema,
     text: `Generate social media captions for Waves Pest Control's weekly local events guide "Waves Newsletter."
 This is NOT a pest control post — it's a punchy, upbeat local events roundup for SW Florida (North Port to Tampa).
 Tone: fun, local-guide energy. Light FOMO is good ("just dropped", "here's what's happening this week") but don't be spammy or clickbaity.
@@ -185,11 +205,11 @@ Newsletter preview: ${safePreview}
 Waves has these Google Business Profile locations. Each GBP post must feel local to THAT area — name or nod to the area so the four profiles don't all post the same blast:
 ${locationList}
 
-Return ONLY valid JSON with these keys:
+Write these captions:
 - facebook: 150-250 chars, conversational, 1-2 emojis, do NOT include any URL
 - instagram: 150-300 chars before hashtags, end with 3-5 hashtags (#WavesNewsletter #SWFL #SWFLevents etc), do NOT include any URL
 - linkedin: 100-200 chars, professional but fun community tone, do NOT include any URL
-- gbp: an OBJECT keyed by the location ids above. Each value is 80-150 chars, community-oriented, names/nods to THAT specific area, no hashtags, no URL. Example: {"bradenton": "...", "parrish": "...", "sarasota": "...", "venice": "..."}`,
+- gbp: one caption per location id above. Each is 80-150 chars, community-oriented, names/nods to THAT specific area, no hashtags, no URL.`,
   });
   if (!response.ok || !response.json) return null;
   const parsed = response.json;
