@@ -2,7 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions } = require('../services/public-services-menu');
+const { publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
 const logger = require('../services/logger');
 const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
@@ -747,6 +747,7 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.plugging ? 'Lawn Plugging Service' : null,
     services.topDressing ? 'Lawn Top Dressing Service' : null,
     services.lawnPestControl ? 'Lawn Pest Control' : null,
+    services.oneTimeMosquito ? 'One-Time Mosquito Treatment' : null,
     services.bedBug ? 'Bed Bug Treatment Service' : null,
     services.rodentInspection ? 'Rodent Inspection Service' : null,
   ].filter(Boolean).join(' + ');
@@ -809,6 +810,7 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
     services.plugging ? 'Plugging' : null,
     services.topDressing ? 'Top Dressing' : null,
     services.lawnPestControl ? 'Lawn Pest' : null,
+    services.oneTimeMosquito ? 'One-Time Mosquito' : null,
     services.bedBug ? 'Bed Bug' : null,
     services.rodentInspection ? 'Rodent Inspection' : null,
   ]);
@@ -871,6 +873,9 @@ const PUBLIC_QUOTE_SERVICE_KEYS = [
   // Rodent Inspection: flat $75, instant on the website (owner ruling
   // 2026-08-29, quote-to-estimate alignment C2).
   'rodentInspection',
+  // One-time mosquito: priced by treatable lot area from the lookup
+  // (service-menu phase 2, 2026-09-03).
+  'oneTimeMosquito',
 ];
 
 const quoteLimiter = rateLimit({
@@ -1396,7 +1401,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
     }
     if (services.lawnPestControl) {
-      engineInput.services.lawnPestControl = {};
+      // Track only — the pest knockdown is priced on the grass track's
+      // bracket table, and the site collects it (keyed: lawn.track merged by
+      // mergeKeyedRequestOptions; legacy chips: lawnPestControl.track).
+      // Urgency / after-hours stay staff-set, same as oneTimePest above.
+      const track = String(services.lawnPestControl.track || services.lawn?.track || '').toLowerCase();
+      engineInput.services.lawnPestControl = LAWN_TRACKS.has(track) ? { track } : {};
+    }
+    if (services.oneTimeMosquito) {
+      // Station / dunk add-ons are staff-scoped on the estimate, never
+      // self-selected from an unauthenticated body (they move the price).
+      engineInput.services.oneTimeMosquito = {};
     }
     if (services.bedBug) {
       engineInput.services.bedBug = publicQuoteBedBugInput(services.bedBug);

@@ -75,12 +75,23 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
   // gate off the engine silently prices purchase, which is the wrong number.
   termite_bait: { termite: { ownership: 'rent' } },
   rodent_inspection: { rodentInspection: {} },
+  // Service-menu phase 2 (2026-09-03): one-time products the engine already
+  // prices from the lookup alone. Mosquito prices by treatable lot area;
+  // station / dunk add-ons are staff-scoped, never site-selected. Lawn pest
+  // knockdown is the engine's lawnPestControl line (turf-priced, so a
+  // lot-only lookup routes it to review like the lawn programs); the
+  // site-collected grass track rides along (mergeKeyedRequestOptions).
+  mosquito_one_time: { oneTimeMosquito: {} },
+  lawn_pest_knockdown: { lawnPestControl: {} },
 });
 // Selectable but NOT instant (quote-on-request), because the public engine
 // needs inputs the website does not collect or returns a manual line:
 //   palm_injection (palm count) · bed_bug_treatment (method) ·
 //   dethatching / termite_trenching / termite_slab_pretreat (quote-required
-//   lines) · lawn_care_quarterly · mosquito_one_time ·
+//   lines) · lawn_care_quarterly ·
+//   cockroach_control (the catalog row is a two-treatment package with a
+//   required follow-up; the only standalone roach pricer is the single-visit
+//   knockdown — owner ruling pending before it can be instant) ·
 //   lawn_care_one_time (manually scoped: fert / weed / insect — the keyed
 //   request carries no treatment type) · rodent_sanitation_light/standard/heavy
 //   (one engine key covers three rows, so acceptance could stamp no service_id).
@@ -138,14 +149,19 @@ function requestMatchesCatalogRow(serviceKey, row) {
 }
 
 // Site-supplied options a keyed request may carry — ONLY those the engine
-// needs and the website actually collects (grass type for lawn). Everything
-// else is fixed by the canonical request.
+// needs and the website actually collects (grass type for the lawn family:
+// the recurring program and the one-time pest knockdown are both priced on
+// the track's bracket table). Everything else is fixed by the canonical
+// request.
 const LAWN_TRACKS = new Set(['st_augustine', 'bahia', 'bermuda', 'zoysia']);
 function mergeKeyedRequestOptions(request, bodyServices) {
   if (!request) return null;
   const out = JSON.parse(JSON.stringify(request));
   const track = String(bodyServices?.lawn?.track || '').toLowerCase();
-  if (out.lawn && LAWN_TRACKS.has(track)) out.lawn.track = track;
+  if (LAWN_TRACKS.has(track)) {
+    if (out.lawn) out.lawn.track = track;
+    if (out.lawnPestControl) out.lawnPestControl.track = track;
+  }
   return out;
 }
 function termiteRentalGateOn() {
@@ -236,4 +252,4 @@ async function isPublicSelectableServiceKey(serviceKey, conn = db) {
   return !!(await publicSelectableService(serviceKey, conn));
 }
 
-module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS };
+module.exports = { LAWN_TRACKS, loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS };
