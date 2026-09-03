@@ -646,9 +646,11 @@ router.patch('/prospects/:id', async (req, res, next) => {
         if (recipient) {
           const open = await Outreach.inboxConflict(trx, { recipient, excludeId: current.id });
           if (open) return { inbox: open };
-          const locked = await trx('seo_link_prospects').where({ id: current.id }).forUpdate().first('outreach_to_email');
-          if (!locked || M.normalizeEmail(locked.outreach_to_email) !== M.normalizeEmail(recipient)) return { readdressed: true };
         }
+        // the row lock + re-read for EVERY conversation-opening edit, an empty recipient included: a draft saved between
+        // the read and the update would open the conversation with an address no inbox lock covers
+        const locked = await trx('seo_link_prospects').where({ id: current.id }).forUpdate().first('outreach_to_email');
+        if (!locked || M.normalizeEmail(locked.outreach_to_email) !== M.normalizeEmail(recipient)) return { readdressed: true };
       }
       // A target_page edit is a placement move: under the same domain lock,
       // refuse if another row already represents (domain, page) under ANY
