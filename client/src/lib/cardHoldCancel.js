@@ -57,16 +57,24 @@ export async function fetchCardHoldCancelPreview(serviceId) {
 export async function confirmCardHoldFeeChoice(serviceId) {
   const preview = await fetchCardHoldCancelPreview(serviceId);
 
-  // Undetermined verdict (lookup failed, or a charge already in flight):
-  // the in-window "will be charged" prompt and the waiver would both lie —
-  // the estimate rail releases free on a repeated failure, the appointment
-  // rail may already have a payment landing (Codex #3800 r1 P1). Show the
-  // rule's own neutral sentence and never offer a waiver.
+  // Undetermined verdict: the in-window "will be charged" prompt would lie,
+  // so show the rule's own neutral sentence (Codex #3800 r1 P1). The
+  // waiver is still offered for a RETRYABLE failure (code 'unresolved'):
+  // the confirm-time check may recover and charge, and both handlers honor
+  // waiveCardHoldFee before that check (Codex #3806 r2 P1). A verdict that
+  // says a charge is already in flight gets no waiver — nothing left to
+  // waive.
   if (preview?.rule && preview.rule.willCharge === null) {
     if (!window.confirm(`${preview.rule.text}\n\nContinue with the cancellation?`)) {
       return { proceed: false, waiveCardHoldFee: false };
     }
-    return { proceed: true, waiveCardHoldFee: false };
+    if (preview.rule.code !== 'unresolved' || getAdminUser()?.role !== 'admin') {
+      return { proceed: true, waiveCardHoldFee: false };
+    }
+    const waiveIfApplies = window.confirm(
+      `If the fee turns out to apply when you confirm, waive it?\n\nOK = waive — Waves-initiated cancel (rain-out, sick day).\nCancel = charge the customer if it applies — customer-initiated late cancel.`,
+    );
+    return { proceed: true, waiveCardHoldFee: waiveIfApplies };
   }
 
   if (!preview?.feeApplies) return { proceed: true, waiveCardHoldFee: false };
