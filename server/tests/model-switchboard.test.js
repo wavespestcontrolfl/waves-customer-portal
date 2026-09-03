@@ -195,6 +195,12 @@ describe('model-switchboard', () => {
     expect(sat.also.map((a) => a.pinEnv)).toEqual(['OPENAI_VISION_MODEL']);
     expect(sat.also[0].provider).toBe('openai');
     expect(lanes.find((l) => l.id === 'property_trio').also[0].pinEnv).toBe('OPENAI_PROPERTY_MODEL');
+    // The caption read is a sequential ladder in execution order, not a fan-out.
+    const cap = lanes.find((l) => l.id === 'tech_caption_vision');
+    expect(cap.fanout).toBe(false);
+    expect(cap.primary.provider).toBe('gemini');
+    expect(cap.fallback.selector).toBe('GEMINI_VISION_FALLBACK');
+    expect(cap.retry.selector).toBe('VISION');
   });
 
   it('an uncatalogued Fable id configured through env keeps the deep-only restriction', () => {

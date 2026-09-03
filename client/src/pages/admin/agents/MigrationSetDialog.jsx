@@ -26,17 +26,29 @@ export default function MigrationSetDialog({ data, catalog, onClose, onDraft }) 
   const inUse = useMemo(() => modelsInUse(data), [data]);
   // A target found through live search is not in the catalog yet; without an
   // entry every env would be "blocked: unknown model".
-  const withTarget = useMemo(() => (target && !catalog[target.id] ? { ...catalog, [target.id]: discoveredEntry(target, null, target.cap) } : catalog), [catalog, target]);
+  const withTarget = useMemo(() => (target && !catalog[target.id] ? { ...catalog, [target.id]: discoveredEntry(target, null, target.caps) } : catalog), [catalog, target]);
   const set = useMemo(() => buildMigrationSet({ data, catalog: withTarget, fromId, toId: target?.id || null }), [data, withTarget, fromId, target]);
 
   // The target search spans every provider / modality the source's envs can
-  // take; per-env compatibility then lands in the "Cannot move" group.
+  // take, and the picker offers a model that fits ANY of the envs' distinct
+  // requirements (`any`); per-env compatibility then sorts the rest into the
+  // "Cannot move" group. `deep` is true when any env may take a deep-only
+  // model (its ordinary siblings stay blocked); `cap` drives the live search
+  // (vision when any env needs images) and `caps` is what a fresh find is
+  // recorded as able to do — every vision model in the catalog also reads text.
   const accepts = useMemo(() => {
     if (!fromId) return null;
     const all = [...set.eligible, ...set.shadow, ...set.approval, ...set.blocked].map((e) => e.accepts).filter(Boolean);
     const providers = [...new Set(all.flatMap((a) => a.providers))];
-    const caps = new Set(all.map((a) => a.cap));
-    return { providers: providers.length ? providers : [catalog[fromId]?.provider].filter(Boolean), cap: caps.has("vision") ? "vision" : [...caps][0] || "text", deep: all.length > 0 && all.every((a) => a.deep) };
+    const caps = [...new Set(all.map((a) => a.cap))];
+    const any = [...new Map(all.map((a) => [JSON.stringify([a.providers, a.cap, !!a.deep]), a])).values()];
+    return {
+      providers: providers.length ? providers : [catalog[fromId]?.provider].filter(Boolean),
+      cap: caps.includes("vision") ? "vision" : caps[0] || "text",
+      caps: caps.length ? caps : ["text"],
+      deep: all.some((a) => a.deep),
+      ...(any.length > 1 ? { any } : {}),
+    };
   }, [fromId, set, catalog]);
 
   if (picking && accepts) {
@@ -46,7 +58,7 @@ export default function MigrationSetDialog({ data, catalog, onClose, onDraft }) 
         catalog={catalog}
         onClose={() => setPicking(false)}
         onPick={(model) => {
-          setTarget({ ...model, cap: accepts.cap });
+          setTarget({ ...model, caps: accepts.caps });
           setPicking(false);
         }}
       />

@@ -23,13 +23,14 @@ export const movesOnEnv = (lane) => lane.lock?.kind !== "registration";
 
 // Catalog entry for a model picked through live search / the newest list.
 // Keeps whatever the catalog already knew (caps, deep-only); a fresh find is
-// offered only for the modality it was found for.
+// offered only for the modality (or, for a migration set, the modalities) it
+// was found for.
 export function discoveredEntry(model, prior, cap) {
   return {
     ...(prior || {}),
     label: model.label || model.id,
     provider: model.provider,
-    caps: prior?.caps?.length ? prior.caps : [cap || "text"],
+    caps: prior?.caps?.length ? prior.caps : [].concat(cap || "text"),
     status: "current",
     discovered: !prior || !!prior.discovered,
     ...(model.requiresDeep || prior?.requires === "deep" ? { requires: "deep" } : {}),

@@ -148,6 +148,8 @@ describe("buildMigrationSet", () => {
     expect(blind.blocked.every((e) => e.reasons.includes("unknown model"))).toBe(true);
     const catalog = { ...CATALOG, m9: discoveredEntry(found, null, "text") };
     expect(catalog.m9).toMatchObject({ label: "Claude Next", provider: "anthropic", caps: ["text"], discovered: true });
+    // A migration-set find is recorded for every modality its envs need.
+    expect(discoveredEntry(found, null, ["vision", "text"]).caps).toEqual(["vision", "text"]);
     const set = buildMigrationSet({ data, catalog, fromId: "m1", toId: "m9" });
     expect(set.eligible.map((e) => e.env)).toEqual(["PIN_REPORT"]);
     expect(set.blocked).toEqual([]);

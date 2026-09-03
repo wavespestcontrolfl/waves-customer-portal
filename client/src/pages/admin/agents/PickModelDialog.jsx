@@ -20,16 +20,14 @@ const UNAVAILABLE_REASON = {
 // it needs, and requires:'deep' (Fable) only where every call site goes
 // through llm/deep.js. Empty caps means the server only knows the id (an
 // audio / embedding / image model the registry resolves to today, not a
-// picker option) — never "fits anything".
+// picker option) — never "fits anything". `accepts.any` lists the distinct
+// requirements of a migration set's envs: a model that fits ANY of them is
+// offered, and the per-env check decides which envs can move.
+export const fits = (m, a) => a.providers.includes(m.provider) && m.caps.includes(a.cap) && (!m.requires || (m.requires === "deep" && !!a.deep));
 export function optionsFor(catalog, accepts, exclude) {
+  const alternatives = accepts.any || [accepts];
   return Object.entries(catalog)
-    .filter(
-      ([id, m]) =>
-        id !== exclude &&
-        accepts.providers.includes(m.provider) &&
-        m.caps.includes(accepts.cap) &&
-        (!m.requires || (m.requires === "deep" && accepts.deep)),
-    )
+    .filter(([id, m]) => id !== exclude && alternatives.some((a) => fits(m, a)))
     .map(([id, m]) => ({ id, label: m.label, provider: m.provider, status: m.status, requiresDeep: m.requires === "deep" }));
 }
 

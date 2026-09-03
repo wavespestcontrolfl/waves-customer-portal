@@ -160,10 +160,12 @@ const LOCK = {
 };
 const AGENT_LOCK = LOCK.registration('Anthropic Managed Agents · model set at registration; re-register to move it');
 
-// Lane extras: `retry` = the availability retry of the fallback leg (the photo
-// lanes re-run Gemini on GEMINI_VISION_FALLBACK); `also` = further legs that
-// run IN PARALLEL with the primary (the fan-outs' OpenAI arm). Both resolve
-// like any ref and count in the Models-in-use view and the change preview.
+// Lane extras: `retry` = the leg tried after the fallback leg (the fan-out
+// photo lanes re-run Gemini on GEMINI_VISION_FALLBACK; the sequential caption
+// ladder reaches Claude only after both Gemini rungs); `also` = further legs
+// that run IN PARALLEL with the primary (the fan-outs' OpenAI arm). Both
+// resolve like any ref and count in the Models-in-use view and the change
+// preview. Without `fanout`, primary → fallback → retry IS the execution order.
 const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by six photo lanes';
 // `inbound: true` = the lane's prompt carries customer or third-party content
 // (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
@@ -202,7 +204,9 @@ const LANES = [
   L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
   L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
   L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: SHARED_GEMINI_PIN }),
+  // Sequential ladder, not a fan-out: analyzePhoto tries Gemini, then the
+  // prior Gemini, and reaches Claude VISION only when both miss.
+  L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { retry: T('VISION'), note: SHARED_GEMINI_PIN }),
   L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'three legs in parallel · owner ruling 2026-09-02: one Gemini model — not yet coded' }),
   L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), D('GEMINI_PROPERTY_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
   L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), D('GEMINI_VISION_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })] }),
