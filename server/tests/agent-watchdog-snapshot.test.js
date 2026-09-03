@@ -24,7 +24,6 @@ jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn
 jest.mock('../config', () => ({ nodeEnv: 'test' }));
 jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => true) }));
 jest.mock('../utils/db-health', () => ({ isDatabaseReady: jest.fn(async () => true) }));
-jest.mock('../utils/cron-lock', () => ({ sanitizeJobError: jest.fn((m) => `sanitized(${String(m).length})`) }));
 jest.mock('../services/intelligence-bar/job-health-tools', () => ({ getScheduledJobHealth: jest.fn() }));
 jest.mock('../services/ops-queue', () => ({ getOpsQueue: jest.fn() }));
 
@@ -126,15 +125,16 @@ describe('buildWatchdogSnapshot', () => {
 
   test('a throwing sub-read degrades to available:false WITHOUT its message and the rest still judges', async () => {
     getScheduledJobHealth.mockRejectedValue(new Error('relation "job_health" does not exist'));
-    dbTables.seo_link_worker_requests = () => { throw new Error('boom: +1 941 555 0100'); };
+    dbTables.seo_link_worker_requests = () => { const e = new Error('boom: jane@example.com +1 941 555 0100'); e.code = '42P01'; throw e; };
     const snap = await buildWatchdogSnapshot();
     expect(snap.jobs).toEqual({ available: false, total: 0, unhealthy: 0, items: [] });
-    // the log line is sanitized too — the raw message never reaches the logger
+    // the message never reaches the logger either — only the label and the error code
     const logged = logger.warn.mock.calls.map((c) => c[0]).join('\n');
-    expect(logged).not.toContain('555 0100');
-    expect(logged).toContain('sanitized(');
+    expect(logged).not.toMatch(/jane@example|555 0100|job_health/);
+    expect(logged).toContain('link_worker read failed (42P01)');
+    expect(logged).toContain('jobs read failed (Error)');
     expect(snap.link_worker.available).toBe(false);
-    expect(JSON.stringify(snap)).not.toMatch(/job_health|555 0100|sanitized/);
+    expect(JSON.stringify(snap)).not.toMatch(/job_health|555 0100|jane@example|42P01/);
     expect(snap.reasons).toEqual(['jobs:unavailable', 'link_worker:unavailable']);
     expect(snap.verdict).toBe('attention');
     expect(snap.database.ok).toBe(true);

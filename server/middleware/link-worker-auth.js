@@ -225,15 +225,22 @@ function linkWorkerAuth(endpoint) {
   };
 }
 
-/** Handler-side finalization of the pre-inserted audit row. Never throws. */
+/**
+ * Handler-side finalization of the pre-inserted audit row. Never throws;
+ * resolves true when the row was updated and false otherwise, so a caller for
+ * whom the row IS the payload (the watchdog heartbeat) can refuse to claim
+ * success — every existing caller ignores the value and stays best-effort.
+ */
 async function finalizeWorkerRequest(req, result, extra = {}) {
-  if (!req.linkWorkerRequestId) return;
+  if (!req.linkWorkerRequestId) return false;
   try {
-    await db('seo_link_worker_requests')
+    const updated = await db('seo_link_worker_requests')
       .where({ id: req.linkWorkerRequestId })
       .update({ result, ...extra });
+    return updated > 0;
   } catch (err) {
     logger.error('link-worker-auth audit finalize failed', { error: err.message, result });
+    return false;
   }
 }
 

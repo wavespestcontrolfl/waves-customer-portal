@@ -258,8 +258,13 @@ describe('audit finalization', () => {
     expect(auditRows.some((r) => r.finalized === req.linkWorkerRequestId && r.result === 'empty_claim')).toBe(true);
   });
 
-  test('finalize without an audit row is a no-op, and update failures never throw', async () => {
-    await expect(finalizeWorkerRequest({}, 'leased')).resolves.toBeUndefined();
+  test('finalize without an audit row is a no-op (false), a persisted update resolves true, and update failures resolve false — never throw', async () => {
+    await expect(finalizeWorkerRequest({}, 'leased')).resolves.toBe(false);
+    const req = makeReq({ headers: { authorization: 'Bearer legacy-bearer' } });
+    await drive(req);
+    await expect(finalizeWorkerRequest(req, 'empty_claim')).resolves.toBe(true);
+    mockDb.mockImplementationOnce(() => ({ where: () => ({ update: async () => { throw new Error('db down'); } }) }));
+    await expect(finalizeWorkerRequest(req, 'empty_claim')).resolves.toBe(false);
   });
 });
 

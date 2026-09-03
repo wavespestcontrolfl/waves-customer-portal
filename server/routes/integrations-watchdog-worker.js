@@ -26,8 +26,11 @@ router.get('/status', async (req, res, next) => {
       return res.status(404).json({ error: 'watchdog lane disabled' });
     }
     const snapshot = await buildWatchdogSnapshot();
-    await finalizeWorkerRequest(req, 'observed');
+    // The finalized row IS the heartbeat the liveness cron reads: if it did not
+    // persist, this poll must not look successful to Hermes.
+    const recorded = await finalizeWorkerRequest(req, 'observed');
     res.set('Cache-Control', 'no-store');
+    if (!recorded) return res.status(503).json({ error: 'heartbeat not recorded' });
     res.json(snapshot);
   } catch (err) { next(err); }
 });

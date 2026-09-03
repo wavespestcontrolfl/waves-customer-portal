@@ -6,7 +6,7 @@
 const finalized = [];
 jest.mock('../middleware/link-worker-auth', () => ({
   linkWorkerAuth: jest.fn(() => (req, res, next) => { req.linkWorkerRequestId = 'req-1'; next(); }),
-  finalizeWorkerRequest: jest.fn(async (req, result) => { finalized.push(result); }),
+  finalizeWorkerRequest: jest.fn(async (req, result) => { finalized.push(result); return true; }),
 }));
 jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false) }));
 jest.mock('../services/agent-watchdog-snapshot', () => ({
@@ -52,4 +52,13 @@ test('gate on → 200 snapshot, no-store, audit finalized observed', async () =>
   expect(res.body).toEqual({ verdict: 'healthy', reasons: [] });
   expect(res.headers['Cache-Control']).toBe('no-store');
   expect(finalized).toEqual(['observed']);
+});
+
+test('gate on but the heartbeat row did not persist → 503, never a false success', async () => {
+  gateEnvValue.mockReturnValue(true);
+  require('../middleware/link-worker-auth').finalizeWorkerRequest.mockResolvedValueOnce(false);
+  const res = makeRes();
+  await statusHandler()({ linkWorkerRequestId: 'req-1' }, res, jest.fn());
+  expect(res.statusCode).toBe(503);
+  expect(res.body).toEqual({ error: 'heartbeat not recorded' });
 });

@@ -33,7 +33,6 @@ const config = require('../config');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const { isDatabaseReady } = require('../utils/db-health');
-const { sanitizeJobError } = require('../utils/cron-lock');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
 const { getOpsQueue } = require('./ops-queue');
 
@@ -44,12 +43,14 @@ const STALE_LEASE_HOURS = 2;
 
 const ATTENTION_JOB_STATES = new Set(['failing', 'stuck', 'stale']);
 
-// A failed read reports ONLY that it is unavailable. The message never leaves
-// the process, and even the log line goes through the cron-lock sanitizer
-// (SQL/provider errors can echo bound customer data — phone numbers above all).
+// A failed read reports ONLY that it is unavailable. The message is not
+// logged either — SQL/provider errors echo bound customer data (names, emails,
+// phone numbers), and the underlying reader logs its own failure. Only the
+// read label and the error's code/class survive.
 function contain(label, fn, fallback) {
   return fn().catch((err) => {
-    logger.warn(`[agent-watchdog] ${label} read failed: ${sanitizeJobError(err.message)}`);
+    const kind = (err && (err.code || err.name)) || 'Error';
+    logger.warn(`[agent-watchdog] ${label} read failed (${String(kind).slice(0, 40)})`);
     return { ...fallback, available: false };
   });
 }
