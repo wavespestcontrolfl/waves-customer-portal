@@ -988,7 +988,26 @@ async function sweep({ now = new Date() } = {}) {
     // and booking provenance (rows held FOR UPDATE until commit, so
     // scheduling writers serialize behind us) are reloaded inside the
     // transaction.
-    const freshRows = await loadCandidateItems(trx, applied.map((d) => d.item.id));
+    // The joined CUSTOMER rows are held too: the contact arm's phone-slot
+    // check and the address/surname guards read them, and contact saves
+    // never take the triage advisory lock — a removal committing between
+    // the read and the write would otherwise close caller_not_authorized
+    // on a number no longer on file. Held FOR UPDATE, the removal blocks
+    // behind us and re-arms the card on its own path. The call→customer
+    // link itself can move in the gap, so lock, re-read, and repeat until
+    // the fresh rows name no unlocked customer; a row still naming one
+    // after the bounded passes is dropped (fails closed to the next sweep).
+    const lockedCustomers = new Set();
+    let freshRows = [];
+    for (let pass = 0; pass < 4; pass += 1) {
+      freshRows = await loadCandidateItems(trx, applied.map((d) => d.item.id));
+      const unlocked = [...new Set(freshRows.map((r) => r.call_customer_id).filter(Boolean).map(String))]
+        .filter((id) => !lockedCustomers.has(id)).sort();
+      if (!unlocked.length) break;
+      await trx('customers').whereIn('id', unlocked).orderBy('id', 'asc').forUpdate().select('id');
+      for (const id of unlocked) lockedCustomers.add(id);
+    }
+    freshRows = freshRows.filter((r) => !r.call_customer_id || lockedCustomers.has(String(r.call_customer_id)));
     const freshById = new Map(freshRows.map((r) => [r.id, r]));
     const freshBookedCallIds = await loadBookedCallIds(trx, allCallIds, { lock: true });
     const freshEvidence = await loadEvidence(trx, freshRows, { lock: true });

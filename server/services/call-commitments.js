@@ -778,17 +778,35 @@ function callEndedAt(call) {
 // resend that estimate" to an existing customer is kept by a send of an
 // estimate created long before the call — the promised-estimate watcher
 // this lane stands in for accepts exactly that send.
-// The send_estimate DIRECT routes for MANY calls in three queries — the
-// triage evidence sweep's batch form of resolveFulfillment's direct branch
-// below (same two routes: the estimator's own callLogId stamp, and an
-// estimate on a lead THIS call minted — carrying its SID — by the lead FK or
-// the estimate_data.lead_id mirror). The delivery witness is STRICTER than
-// the single-call path: deliveryState.lastDeliveredAt after the boundary
-// for EVERY source, because sendEstimateNow advances sent_at on a
+
+// The ONE handoff witness every send_estimate proof applies — the single-
+// call path, the batch path, direct and association alike. sent_at alone
+// is not delivery (#3725 r13 P1 class): sendEstimateNow advances it on a
 // suppression-only attempt (SMS gate or template off — sent:true,
-// real:false) while lastDeliveredAt moves only on a real handoff. Never
-// association-strength matches. Keep the routes in step with the branch
-// below.
+// real:false) and report/plan-restart mints stamp it at publish, so the
+// witness is deliveryState.lastDeliveredAt — advanced only on a real
+// handoff — after the boundary, OR acceptance after the boundary (a
+// manual accept stamps sent_at with no delivery record, and an accepted
+// estimate was certainly handed off). A group-send sibling never carries
+// its own deliveryState (only the anchor does), so it inherits the
+// anchor's witness through estimate_data.groupPublishedByEstimateId.
+const HANDED_OFF_AT_SQL = `COALESCE(
+  estimates.estimate_data #>> '{deliveryState,lastDeliveredAt}',
+  (SELECT a.estimate_data #>> '{deliveryState,lastDeliveredAt}' FROM estimates a
+     WHERE a.id::text = estimates.estimate_data ->> 'groupPublishedByEstimateId'))`;
+const handedOffAfter = (qb, after) => qb.where(function handoffWitness() {
+  this.whereRaw(`(COALESCE(${HANDED_OFF_AT_SQL}, '') <> '' AND (${HANDED_OFF_AT_SQL})::timestamptz > ?)`, [after])
+    .orWhere("accepted_at", ">", after);
+});
+const handedOffRowAfter = (row, after) => (Boolean(row.handed_off_at) && new Date(row.handed_off_at) > after)
+  || (Boolean(row.accepted_at) && new Date(row.accepted_at) > after);
+
+// The send_estimate DIRECT routes — the estimator's own callLogId stamp,
+// and an estimate on a lead THIS call minted (carrying its SID) by the
+// lead FK or the estimate_data.lead_id mirror — for MANY calls in three
+// queries. resolveFulfillment's direct branch and the triage evidence
+// sweep both consume this; there is no second implementation. Never
+// association-strength matches.
 //
 // probes: [{ key, callId, twilioCallSid, after }] — one per card, with its
 // own boundary. Returns Map key → the EARLIEST qualifying direct proof.
@@ -803,16 +821,15 @@ async function directEstimatesSentAfter(conn, probes) {
   }
   const minAfter = new Date(Math.min(...probes.map((p) => new Date(p.after).getTime())));
   const cols = [
-    "id", "sent_at", "source",
-    conn.raw("estimate_data #>> '{deliveryState,lastDeliveredAt}' as delivered_at"),
+    "id", "sent_at", "source", "accepted_at",
+    conn.raw(`${HANDED_OFF_AT_SQL} as handed_off_at`),
     conn.raw("estimate_data #>> '{estimatorEngine,callLogId}' as stamped_call_id"),
     conn.raw("estimate_data ->> 'lead_id' as mirror_lead_id"),
   ];
-  const delivered = (row, after) => Boolean(row.delivered_at) && new Date(row.delivered_at) > after;
   const consider = (callId, row, basis) => {
     for (const p of probesByCall.get(String(callId)) || []) {
       const after = new Date(p.after);
-      if (!(new Date(row.sent_at) > after) || !delivered(row, after)) continue;
+      if (!(new Date(row.sent_at) > after) || !handedOffRowAfter(row, after)) continue;
       const cur = out.get(p.key);
       if (!cur || new Date(row.sent_at) < new Date(cur.matched_at)) {
         out.set(p.key, { kind: "estimate_sent", record_type: "estimate", record_id: row.id, matched_at: row.sent_at, strength: "direct", basis });
@@ -864,73 +881,35 @@ async function resolveFulfillment(conn, commitment, call) {
 
   switch (commitment.kind) {
     case "send_estimate": {
-      // Direct: an estimate LINKED to this call by any exact route the
-      // promised-estimate watcher honours — the lead FK (leads.estimate_id)
-      // on the lead this call minted, was stamped with, or that carries its
-      // SID; the estimator's own provenance stamp
-      // (estimate_data.estimatorEngine.callLogId); or the public-quote
-      // mirror (estimate_data.lead_id) on a standalone estimate that never
-      // got the lead FK. Association: any later estimate sent to the call's
-      // customer inside the window.
-      // sent_at alone is not delivery (#3725 r13 P1 class): report
-      // click-to-estimate and plan_restart mints stamp sent_at for the
-      // publish-without-delivery shape. For those sources the witness is
-      // deliveryState.lastDeliveredAt — advanced only on a real handoff —
-      // and it must fall after the call, the same rule the promised-
-      // estimate watcher applies.
-      const reallyDelivered = (qb) => qb.where(function deliveredWitness() {
-        this.whereRaw("COALESCE(source, '') NOT IN ('service_report_cta', 'plan_restart')")
-          .orWhereRaw("(COALESCE(estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> '' AND (estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz > ?)", [after]);
-      });
-      // The estimator's own provenance stamp is explicit call provenance:
-      // direct, whatever lead it sits on.
-      const stamped = await reallyDelivered(conn("estimates")
-        .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
-        .whereNotNull("sent_at")
-        .where("sent_at", ">", after))
-        .orderBy("sent_at", "asc")
-        .first("id", "sent_at", "status")
-        .catch(() => null);
-      if (stamped) return { kind: "estimate_sent", record_type: "estimate", record_id: stamped.id, matched_at: stamped.sent_at, strength: "direct", basis: "estimate_stamped_with_this_call" };
-      // Same guard as buildCallOutcomes: no lead key, no lead lookup.
-      const leads = (leadIds.length || call.twilio_call_sid) ? await conn("leads")
-        .where(function scope() {
-          if (leadIds.length) this.orWhereIn("id", leadIds);
-          if (call.twilio_call_sid) this.orWhere("twilio_call_sid", call.twilio_call_sid);
-        })
-        // No local catch: a failed lead lookup reaches refreshFulfillment's
-        // failed accounting (r13 P2) instead of reading as "no leads".
-        .select("id", "estimate_id", "twilio_call_sid") : [];
-      // A lead that carries THIS call's SID was minted by this call (the
-      // processor and the relay both stamp the SID at INSERT and never on
-      // reuse). A lead reached only through the lead_id / relay_lead_id
-      // stamp is a REUSED earlier call's lead: an estimate later sent on it
-      // is not necessarily this call's, so it is a hint, never direct proof
-      // (Codex #3738 r13 P1). Either way the estimate must have been SENT
-      // (delivered) after THIS call ended; when it was created does not
-      // matter (r14).
+      // Direct: the shared primitive above (estimator stamp; lead FK or
+      // public-quote mirror on a lead this call minted).
+      const direct = (await directEstimatesSentAfter(conn, [{ key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, after }])).get("call");
+      if (direct) return direct;
+      // A lead reached only through the lead_id / relay_lead_id stamp that
+      // does NOT carry this call's SID is a REUSED earlier call's lead: an
+      // estimate later sent on it is not necessarily this call's, so it is
+      // a hint, never direct proof (Codex #3738 r13 P1). Same guard as
+      // buildCallOutcomes: no lead key, no lead lookup. No local catch: a
+      // failed lead lookup reaches refreshFulfillment's failed accounting
+      // (r13 P2) instead of reading as "no leads".
+      const stampedLeads = leadIds.length ? await conn("leads").whereIn("id", leadIds).select("id", "estimate_id", "twilio_call_sid") : [];
       const mintedHere = (lead) => Boolean(lead.twilio_call_sid) && lead.twilio_call_sid === call.twilio_call_sid;
-      const minted = leads.filter(mintedHere);
-      const reused = leads.filter((l) => !mintedHere(l));
-      const mintedLeadIds = minted.map((l) => String(l.id));
-      const reusedLeadIds = [...new Set([...leadIds.filter((id) => !mintedLeadIds.includes(id)), ...reused.map((l) => String(l.id))])];
-      const estimateOnLeads = (leadRows, leadIdList) => {
-        const estimateIds = leadRows.map((l) => l.estimate_id).filter(Boolean);
-        if (!estimateIds.length && !leadIdList.length) return null;
-        return reallyDelivered(conn("estimates")
+      const mintedIds = new Set(stampedLeads.filter(mintedHere).map((l) => String(l.id)));
+      const reused = stampedLeads.filter((l) => !mintedHere(l));
+      const reusedLeadIds = leadIds.filter((id) => !mintedIds.has(id));
+      const reusedEstimateIds = reused.map((l) => l.estimate_id).filter(Boolean);
+      if (reusedEstimateIds.length || reusedLeadIds.length) {
+        const onReused = await handedOffAfter(conn("estimates")
           .where(function linkedToLeads() {
-            if (estimateIds.length) this.orWhereIn("id", estimateIds);
-            if (leadIdList.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${leadIdList.map(() => "?").join(", ")})`, leadIdList);
+            if (reusedEstimateIds.length) this.orWhereIn("id", reusedEstimateIds);
+            if (reusedLeadIds.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${reusedLeadIds.map(() => "?").join(", ")})`, reusedLeadIds);
           })
           .whereNotNull("sent_at")
-          .where("sent_at", ">", after)
+          .where("sent_at", ">", after), after)
           .orderBy("sent_at", "asc")
-          .first("id", "sent_at", "status"));
-      };
-      const linked = await estimateOnLeads(minted, mintedLeadIds);
-      if (linked) return { kind: "estimate_sent", record_type: "estimate", record_id: linked.id, matched_at: linked.sent_at, strength: "direct", basis: "estimate_linked_to_this_call_sent" };
-      const onReused = await estimateOnLeads(reused, reusedLeadIds);
-      if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: onReused.sent_at, strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
+          .first("id", "sent_at", "status");
+        if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: onReused.sent_at, strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
+      }
       // An estimate linked only through estimates.customer_phone still keeps
       // the promise (commercial proposals store the phone with a NULL
       // customer_id, so a same-customer lookup misses them). Mirror the
@@ -939,10 +918,10 @@ async function resolveFulfillment(conn, commitment, call) {
       // by an UNLINKED estimate whose phone matches the caller — a shared
       // household number never lets one customer's estimate clear another's
       // promise.
-      const estQ = reallyDelivered(conn("estimates")
+      const estQ = handedOffAfter(conn("estimates")
         .whereNotNull("sent_at")
         .where("sent_at", ">", after)
-        .where("sent_at", "<=", until));
+        .where("sent_at", "<=", until), after);
       if (customerId) {
         estQ.where("customer_id", customerId);
       } else if (phone) {
