@@ -186,7 +186,17 @@ async function claimSideEffectsRun(row, requestHash, knex = db) {
   }).returning('*');
 
   if (!claimed) return sideEffectsRunningPayload();
-  return { action: 'resume', attempt: claimed, serviceRecordId: claimed.service_record_id };
+  return {
+    action: 'resume',
+    attempt: claimed,
+    serviceRecordId: claimed.service_record_id,
+    // The earlier run ENDED and handed the attempt back (side_effects_pending)
+    // — as opposed to a stale side_effects_running row reclaimed after the
+    // window, whose original request may still be mid-flight. Route-side
+    // in-flight guards (the completion SMS 'sending' marker) are stale by
+    // definition on a released resume.
+    releasedForResume: row.status === 'side_effects_pending',
+  };
 }
 
 // True when committed evidence exists for the service — a succeeded or

@@ -5581,6 +5581,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
+    // The prior run released the attempt itself (the SMS / token-mint /
+    // mint-failure 503s) rather than dying mid-flight: none of its lanes is
+    // still running, so a 'sending' marker it failed to clear is stale.
+    const resumingReleasedCompletion = resumingCommittedCompletion && claim.releasedForResume === true;
 
     // Visit-group membership re-check, now that the durable claim is
     // committed (codex r2 P0). Stamping (visit-groups.js) locks the row
@@ -12067,9 +12071,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const completionSmsAttemptedAt = recordStructuredNotes.completionSmsAttemptedAt
       ? new Date(recordStructuredNotes.completionSmsAttemptedAt).getTime()
       : 0;
+    // A released resume ignores a fresh 'sending' marker: the run that set
+    // it ended (it released the attempt) and its failed-status writes both
+    // threw, so honoring it would skip the text and finalize without sending
+    // (GitHub Codex r3 P1 on the split PR). A stale-window reclaim keeps the
+    // guard — that run may still be mid-send.
     const completionSmsSendingFresh = recordStructuredNotes.completionSmsStatus === 'sending'
       && completionSmsAttemptedAt
-      && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000;
+      && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000
+      && !resumingReleasedCompletion;
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
       // 'deferred' = a send-window hold requeued the text on the
@@ -12537,7 +12547,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // invoice (a pre-minted invoice already `sent`/`viewed`, or a request where
       // invoiceAlreadySent suppressed the homeowner link). Re-sending would
       // duplicate the AP billing email. Fresh completion invoices are `draft`.
+      // email_sent_at is sendInvoiceEmail's own durable stamp: an accepted AP
+      // email whose markDeliverySent then failed leaves status 'draft' with
+      // the stamp set, and a resumed attempt must not mail it again (GitHub
+      // Codex r3 P2 on the split PR).
       const payerInvoiceAlreadyDelivered = !!invoiceAlreadySent
+        || !!invoice?.email_sent_at
         || ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
           .includes(String(invoice?.status || '').toLowerCase());
       // Backfill closeouts skip the automatic payer AP send too — the invoice
