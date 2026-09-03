@@ -202,6 +202,9 @@ async function listOwnerQueue(db) {
     .select('id', 'domain', 'agent_state', 'score', 'score_reasons', 'spam_score', 'domain_rating', 'organic_traffic', 'referring_domains', 'competitors_linked', 'best_path_id', 'source', 'discovery_priority');
   const domainById = new Map(domains.map((d) => [d.id, d]));
   const cardsFor = parked.filter((p) => domainById.has(p.domain_id));
+  // a card's path is the placement's OWN (`path_id`) — never the domain's best path standing in for a deleted one
+  // (ON DELETE SET NULL): a substituted path would show the replacement's price or terms as the card's, and the click
+  // refuses it anyway; the card reads as awaiting the bridge's rotation instead
   if (!cardsFor.length) return { cards: [] };
   const pathIds = [...new Set([...domains.map((d) => d.best_path_id), ...cardsFor.map((p) => p.path_id)].filter(Boolean))];
   const paths = pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
@@ -228,7 +231,7 @@ async function listOwnerQueue(db) {
   // id, so the "approve it on the first card" pointer still names one card.
   const freshPayment = (p) => {
     const d = domainById.get(p.domain_id);
-    const path = pathById.get(p.path_id) || pathById.get(d.best_path_id) || null;
+    const path = pathById.get(p.path_id) || null;
     if (!path || path.id !== d.best_path_id) return false;
     const ctx = { path, domain: d, policy, score: d.score };
     return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && whyNotApprovable(r, path) === null && whyNotHere(p, r) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null).reason);
@@ -244,7 +247,7 @@ async function listOwnerQueue(db) {
   for (const [groupId, primaryId] of groupPrimary) {
     const p = cardsFor.find((x) => x.id === primaryId);
     const d = domainById.get(p.domain_id);
-    const path = pathById.get(p.path_id) || pathById.get(d.best_path_id) || null;
+    const path = pathById.get(p.path_id) || null;
     const lead = path ? rows.find((r) => r.prospect_id === p.id && r.dimension === 'payment' && !r.satisfied_at) : null;
     const attachable = (s) => s.payment_group_id === groupId && s.path_id === path.id && !s.claimed_at
       && rows.some((r) => r.prospect_id === s.id && r.dimension === 'payment' && r.instance_key === lead.instance_key && r.level === lead.level && r.decision_inputs_hash === lead.decision_inputs_hash && Number(r.path_revision) === Number(lead.path_revision) && !r.satisfied_at && !r.approved);
@@ -253,7 +256,7 @@ async function listOwnerQueue(db) {
 
   const cards = cardsFor.map((p) => {
     const d = domainById.get(p.domain_id);
-    const path = pathById.get(p.path_id) || pathById.get(d.best_path_id) || null;
+    const path = pathById.get(p.path_id) || null;
     const onBestPath = Boolean(path && path.id === d.best_path_id);
     const shared = Boolean(path && path.fee_scope === 'account_wide' && p.payment_group_id);
     const ctx = onBestPath ? { path, domain: d, policy, score: d.score } : null;
@@ -336,7 +339,9 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     await loadApprovals(trx, [row]);
     const whyNotLevel = whyNotApprovable(row);
     if (whyNotLevel) refuse(409, `not approvable: ${whyNotLevel}`);
-    if (!domain.best_path_id || row.path_id !== domain.best_path_id) refuse(409, 'the placement is no longer on the domain\'s best path — the nightly bridge rotates it; refresh the queue');
+    // the row AND the placement itself must sit on the domain's best path — a placement whose path was deleted (path_id
+    // SET NULL) is nobody's to approve until the bridge rotates it, whatever its rows still name
+    if (!domain.best_path_id || row.path_id !== domain.best_path_id || placementNow.path_id !== domain.best_path_id) refuse(409, 'the placement is no longer on the domain\'s best path — the nightly bridge rotates it; refresh the queue');
     const path = await trx('seo_link_acquisition_paths').where({ id: domain.best_path_id }).first();
     if (!path || path.superseded_by || path.baseline === true) refuse(409, 'the path was superseded since the card — refresh the queue');
     const whyNotPath = whyNotApprovable(row, path);
@@ -430,7 +435,10 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     // fresh click. The bridge's own invalidation is the ONE writer of invalidated_at on approvals.
     const ownerRows = open.filter((r) => R.APPROVABLE_LEVELS.includes(r.level));
     const word = decision === 'watch' ? 'watches' : 'rejected';
-    const invalidated = await require('./link-authority-bridge').invalidateApprovals(trx, ownerRows.filter((r) => r.approved), `owner ${word} the domain`, now);
+    // EVERY approval still attached to an open row is invalidated — not only the ones the queue labels approved: a
+    // consumed approval on an unsatisfied row reads as spent here, but the bridge's own predicate still counts it, so
+    // left valid a later Reopen would release the placement under the authorization the owner just declined
+    const invalidated = await require('./link-authority-bridge').invalidateApprovals(trx, open, `owner ${word} the domain`, now);
     // an orphaned row (its path deleted — path_id SET NULL) has no path to audit against and the approvals table
     // requires one: its approval is invalidated above and the bridge ends the row on its next pass; it must never
     // roll the owner's decision back

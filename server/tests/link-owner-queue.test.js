@@ -608,6 +608,33 @@ describe('decideDomain (Reject / Watch)', () => {
   });
 });
 
+  test('reject invalidates a CONSUMED approval too: a Reopen must never release the placement under the authorization the owner declined', async () => {
+    const { db, d } = await parked();
+    const gated = async () => ({ gated: true, skipped: 'gated', selected: 0, decided: 0, parked: 0, released: 0, aggregateChanges: 0, errors: [] });
+    const row = openRows(db)[0];
+    const a = await Q.approveRow(db, { authorityId: row.id, actor: ACTOR, now: NOW, bridge: gated });
+    approvals(db).find((x) => x.id === a.approval.id).consumed_at = LATER; // spent by a failed execution, the row still unsatisfied
+    const r = await Q.decideDomain(db, { domainId: d.id, decision: 'rejected', actor: ACTOR, now: LATER });
+    expect(r).toMatchObject({ agent_state: 'rejected', invalidated: 1 });
+    expect(approvals(db).find((x) => x.id === a.approval.id)).toMatchObject({ invalidated_at: LATER, invalidated_reason: expect.stringMatching(/owner rejected/) });
+    storedDomain(db).agent_state = 'qualified';
+    storedDomain(db).rejected_by = null;
+    const n = await nightly(db, { now: LATER2 });
+    expect(n.released).toBe(0);
+    expect(placements(db).every((p) => p.status === 'awaiting_owner')).toBe(true);
+  });
+
+  test('a placement whose path was deleted shows no substituted path: the card awaits the bridge\'s rotation, nothing approvable', async () => {
+    const { db } = await parked();
+    const row = openRows(db)[0];
+    placementOf(db, row).path_id = null; // ON DELETE SET NULL; the domain still names a best path
+    const card = (await Q.listOwnerQueue(db)).cards.find((c) => c.placement.id === row.prospect_id);
+    expect(card.path).toBeNull();
+    expect(card.rows.every((x) => x.approvable === false && /not on the domain's current best path/.test(x.why_not))).toBe(true);
+    await expect(Q.approveRow(db, { authorityId: row.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409 });
+    expect(approvals(db)).toHaveLength(0);
+  });
+
 describe('acquireAnyway', () => {
   test('DENY: the failing floors are waived at their values, the bridge lifts the rejection and parks cards without a bell', async () => {
     const s = scenario({ domain: { spam_score: 30, score: 40 } });
