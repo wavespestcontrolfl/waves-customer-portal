@@ -494,12 +494,10 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   const anthropic = client || ((Anthropic && process.env.ANTHROPIC_API_KEY) ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null);
   if (!anthropic) return { items: [], skipped: 'no_provider' };
   const startedAt = Date.now();
-  // FLAGSHIP (Opus 4.8+) rejects sampling controls with a 400; the shared
-  // strip-and-retry in llm/call.js is the one mechanism every direct SDK
-  // caller uses (Codex #3738 r13 P1). The client shim keeps this pass's
-  // budget on both attempts: maxRetries 0 because the pipeline has its own
-  // retry lanes — a claim-holding pass must not sit through the SDK's
-  // per-attempt timeouts.
+  // No sampling controls on the request (current Anthropic models 400 on
+  // them). The client shim bounds this pass's budget: maxRetries 0 because
+  // the pipeline has its own retry lanes — a claim-holding pass must not sit
+  // through the SDK's per-attempt timeouts.
   const budgeted = { messages: { create: (request) => anthropic.messages.create(request, { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 }) } };
   const response = await anthropicCreate(budgeted, {
     model: MODELS.FLAGSHIP,
