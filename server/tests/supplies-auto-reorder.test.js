@@ -88,6 +88,7 @@ test('low product with no open request → one auto_reorder row + one deduped be
   expect(body).toContain('gemplers.com');
   expect(opts.dedupeKey).toBe(`auto-reorder:${row.id}`);
   expect(opts.link).toBe('/admin/inventory?tab=restock');
+  expect(opts.bell).toBe(true); // bell-policy opt-in: a suppressed restock alert is an unworked reorder
 });
 
 test('an existing open request of ANY source dedupes — no row, no bell', async () => {

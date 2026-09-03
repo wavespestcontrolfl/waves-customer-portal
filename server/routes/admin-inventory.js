@@ -584,6 +584,7 @@ function mapProduct(product, vendorPricing = []) {
     autoReorderVendorId: product.auto_reorder_vendor_id || null,
     reorderQuantity: numberOrNull(product.reorder_quantity),
     perCompletionUsage: numberOrNull(product.per_completion_usage),
+    perCompletionServiceLines: Array.isArray(product.per_completion_service_lines) ? product.per_completion_service_lines : null,
     vendorPricing: enrichedPricing,
     unitPrices,
     // Product Registry fields
@@ -3710,6 +3711,18 @@ router.put('/:id', async (req, res, next) => {
     };
     if (req.body.reorderQuantity !== undefined) upd.reorder_quantity = nonNegativeOrNull(req.body.reorderQuantity, 'Reorder quantity');
     if (req.body.perCompletionUsage !== undefined) upd.per_completion_usage = nonNegativeOrNull(req.body.perCompletionUsage, 'Per-visit usage');
+    if (req.body.perCompletionServiceLines !== undefined) {
+      const raw = req.body.perCompletionServiceLines;
+      if (raw == null) {
+        upd.per_completion_service_lines = null; // every line
+      } else {
+        const { SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
+        if (!Array.isArray(raw) || raw.some((l) => !SERVICE_LINE_IDS.includes(l))) {
+          return res.status(400).json({ error: `Service lines must be a list of: ${SERVICE_LINE_IDS.join(', ')}` });
+        }
+        upd.per_completion_service_lines = JSON.stringify([...new Set(raw)]);
+      }
+    }
     if (req.body.autoReorderVendorId !== undefined) {
       const vendorId = req.body.autoReorderVendorId || null;
       if (vendorId) {

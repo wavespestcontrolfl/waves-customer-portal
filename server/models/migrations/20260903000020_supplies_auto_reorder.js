@@ -25,6 +25,10 @@
  */
 const GEMPLERS = { name: 'Gemplers', code: 24, type: 'online', website: 'https://gemplers.com', notes: 'Pesticide application signs + stakes (yard-sign kit). Shopify store, no reorder API.', scraping_priority: 'skip' };
 
+// Owner ruling 2026-09-03: a yard sign is left on pest (recurring + one-time),
+// mosquito, lawn and tree & shrub visits — not termite, rodent or palm.
+const KIT_SERVICE_LINES = ['pest', 'mosquito', 'lawn', 'tree_shrub'];
+
 const KIT = [
   {
     name: 'Pesticide application sign 4x5 (yard sign card)',
@@ -61,6 +65,9 @@ exports.up = async function up(knex) {
     if (!cols.auto_reorder_vendor_id) t.uuid('auto_reorder_vendor_id').references('id').inTable('vendors').onDelete('SET NULL');
     if (!cols.auto_reorder_enabled) t.boolean('auto_reorder_enabled').notNullable().defaultTo(false);
     if (!cols.per_completion_usage) t.decimal('per_completion_usage', 12, 4);
+    // null = every service line; else an array of detectServiceLine ids
+    // (pest|lawn|mosquito|termite|rodent|tree_shrub|palm).
+    if (!cols.per_completion_service_lines) t.jsonb('per_completion_service_lines');
   });
 
   if (await knex.schema.hasTable('product_inventory_movements')) {
@@ -103,6 +110,7 @@ exports.up = async function up(knex) {
       const fill = {};
       if (existing.reorder_quantity == null) { fill.reorder_quantity = item.reorder_quantity; fill.auto_reorder_enabled = true; }
       if (existing.per_completion_usage == null) fill.per_completion_usage = 1;
+      if (existing.per_completion_service_lines == null) fill.per_completion_service_lines = JSON.stringify(KIT_SERVICE_LINES);
       if (existing.auto_reorder_vendor_id == null && item.pricing) fill.auto_reorder_vendor_id = gemplers.id;
       if (Object.keys(fill).length) await knex('products_catalog').where({ id: existing.id }).update(fill);
       continue;
@@ -115,6 +123,7 @@ exports.up = async function up(knex) {
       low_stock_threshold: item.low_stock_threshold,
       reorder_quantity: item.reorder_quantity,
       per_completion_usage: 1,
+      per_completion_service_lines: JSON.stringify(KIT_SERVICE_LINES),
       auto_reorder_enabled: true,
       auto_reorder_vendor_id: item.pricing ? gemplers.id : null,
       needs_pricing: false,
@@ -159,6 +168,7 @@ exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
   const cols = await knex('products_catalog').columnInfo();
   await knex.schema.alterTable('products_catalog', (t) => {
+    if (cols.per_completion_service_lines) t.dropColumn('per_completion_service_lines');
     if (cols.per_completion_usage) t.dropColumn('per_completion_usage');
     if (cols.auto_reorder_enabled) t.dropColumn('auto_reorder_enabled');
     if (cols.auto_reorder_vendor_id) t.dropColumn('auto_reorder_vendor_id');

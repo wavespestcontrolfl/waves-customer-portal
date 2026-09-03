@@ -39,6 +39,7 @@ async function findLowStockCandidates(conn = db) {
   return conn('products_catalog as pc')
     .leftJoin('vendors as v', 'v.id', 'pc.auto_reorder_vendor_id')
     .where('pc.auto_reorder_enabled', true)
+    .where('pc.active', true)
     .whereNotNull('pc.inventory_on_hand')
     .whereNotNull('pc.low_stock_threshold')
     .whereRaw('pc.inventory_on_hand <= pc.low_stock_threshold')
@@ -71,6 +72,10 @@ async function ringRestockBell({ notify, product, request, pricing, onHand, reor
     `Restock: ${product.name} is low (${onHand} ${product.inventory_unit})`,
     `Reorder ${reorderQty} ${product.inventory_unit}${where} — order manually, then mark the restock request ordered.${link}`,
     {
+      // bell: true — required handoff: under GATE_ADMIN_BELL_POLICY a bare
+      // 'system' category is suppressed, and a suppressed restock alert is
+      // a silently unworked reorder (Codex r1 P1).
+      bell: true,
       link: '/admin/inventory?tab=restock',
       dedupeKey: `auto-reorder:${request.id}`,
       metadata: { restockRequestId: request.id, productId: product.id, vendorId: product.auto_reorder_vendor_id || null, vendorSku: pricing?.vendor_sku || null, vendorProductUrl: pricing?.vendor_product_url || null },

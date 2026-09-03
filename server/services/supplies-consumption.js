@@ -11,7 +11,14 @@
  *     product_inventory_movements_completion_consumable_uniq (metadata.source
  *     = 'completion_consumable') makes the insert at-most-once; the stock
  *     decrement only runs when the insert actually happened.
- *   - skipped entirely for an incomplete visit (no sign is left).
+ *   - skipped entirely for an incomplete visit, and for a closeout where no
+ *     visit was performed (inspection_only / customer_declined) — no sign
+ *     is left either way.
+ *   - retired products (active = false) are never consumed.
+ *   - a product with per_completion_service_lines set is consumed only when
+ *     the visit's service line (detectServiceLine id) is in that list;
+ *     null = every line. A visit with no resolvable line consumes nothing
+ *     from a line-scoped product.
  *   - a product with no inventory_on_hand is skipped (same posture as
  *     deductProductInventory: no count → nothing to deduct).
  *   - negative stock is allowed (advisory, matches the chemical policy).
@@ -21,23 +28,40 @@ const logger = require('./logger');
 
 const SOURCE = 'completion_consumable';
 
+function parseLines(raw) {
+  if (raw == null) return null;
+  const arr = typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : raw;
+  return Array.isArray(arr) ? arr.map((x) => String(x)) : null;
+}
+
+// null/unparseable = every line. A scoped list needs a resolvable line.
+function appliesToLine(rawLines, serviceLine) {
+  const lines = parseLines(rawLines);
+  if (!lines) return true;
+  return !!serviceLine && lines.includes(String(serviceLine));
+}
+
 async function consumeCompletionSupplies(db, {
   scheduledServiceId,
   serviceRecordId = null,
   customerId = null,
   technicianId = null,
   isIncompleteVisit = false,
+  visitPerformed = true,
+  serviceLine = null,
 } = {}) {
   const result = { consumed: [], skipped: [], errors: [] };
   if (!scheduledServiceId) { result.skipped.push({ reason: 'no_scheduled_service_id' }); return result; }
   if (isIncompleteVisit) { result.skipped.push({ reason: 'incomplete_visit' }); return result; }
+  if (visitPerformed === false) { result.skipped.push({ reason: 'visit_not_performed' }); return result; }
 
   let products;
   try {
     products = await db('products_catalog')
+      .where('active', true)
       .whereNotNull('per_completion_usage')
       .where('per_completion_usage', '>', 0)
-      .select('id', 'name', 'per_completion_usage', 'inventory_on_hand', 'inventory_unit');
+      .select('id', 'name', 'per_completion_usage', 'per_completion_service_lines', 'inventory_on_hand', 'inventory_unit');
   } catch (err) {
     logger.warn(`[supplies-consumption] product lookup failed (non-blocking): ${err.message}`);
     result.errors.push({ reason: 'lookup_failed', message: err.message });
@@ -45,6 +69,10 @@ async function consumeCompletionSupplies(db, {
   }
 
   for (const product of products) {
+    if (!appliesToLine(product.per_completion_service_lines, serviceLine)) {
+      result.skipped.push({ productId: product.id, reason: 'service_line_excluded' });
+      continue;
+    }
     try {
       const outcome = await db.transaction(async (trx) => {
         const locked = await trx('products_catalog').where({ id: product.id }).forUpdate().first();
@@ -89,4 +117,4 @@ async function consumeCompletionSupplies(db, {
   return result;
 }
 
-module.exports = { consumeCompletionSupplies, COMPLETION_CONSUMABLE_SOURCE: SOURCE };
+module.exports = { consumeCompletionSupplies, appliesToLine, COMPLETION_CONSUMABLE_SOURCE: SOURCE };

@@ -6,6 +6,8 @@
  *   - a consumable with a count → one usage movement + decrement
  *   - a duplicate (movement insert ignored by the partial unique index) →
  *     NO decrement (resume-path idempotency)
+ *   - a line-scoped product is consumed only on a listed service line;
+ *     null = every line; no resolvable line → not consumed
  *   - no inventory_on_hand → skipped, no movement
  *   - a thrown error is contained (never rejects)
  *
@@ -16,7 +18,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+const { consumeCompletionSupplies, appliesToLine } = require('../services/supplies-consumption');
 
 function fakeDb({ products, duplicate = false, throwOnInsert = false }) {
   const updates = [];
@@ -57,9 +59,17 @@ const args = { scheduledServiceId: 'svc-1', serviceRecordId: 'rec-1', customerId
 
 test('incomplete visit → skipped before any read', async () => {
   const selectSpy = jest.fn();
-  const db = () => ({ whereNotNull: () => ({ where: () => ({ select: selectSpy }) }) });
+  const db = () => ({ where: () => ({ whereNotNull: () => ({ where: () => ({ select: selectSpy }) }) }) });
   const res = await consumeCompletionSupplies(db, { ...args, isIncompleteVisit: true });
   expect(res.skipped).toEqual([{ reason: 'incomplete_visit' }]);
+  expect(selectSpy).not.toHaveBeenCalled();
+});
+
+test('inspection_only / customer_declined closeout (visitPerformed=false) → skipped before any read', async () => {
+  const selectSpy = jest.fn();
+  const db = () => ({ where: () => ({ whereNotNull: () => ({ where: () => ({ select: selectSpy }) }) }) });
+  const res = await consumeCompletionSupplies(db, { ...args, visitPerformed: false });
+  expect(res.skipped).toEqual([{ reason: 'visit_not_performed' }]);
   expect(selectSpy).not.toHaveBeenCalled();
 });
 
@@ -78,6 +88,41 @@ test('duplicate (index ignored the insert) → no decrement', async () => {
   expect(res.consumed).toHaveLength(0);
   expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'already_consumed' }]);
   expect(updates).toHaveLength(0);
+});
+
+describe('service-line scope', () => {
+  const scoped = { ...sign, per_completion_service_lines: ['pest', 'mosquito', 'lawn', 'tree_shrub'] };
+
+  test('appliesToLine: null = every line; jsonb string or array both parse; unknown line excluded', () => {
+    expect(appliesToLine(null, 'termite')).toBe(true);
+    expect(appliesToLine(['pest'], 'pest')).toBe(true);
+    expect(appliesToLine(JSON.stringify(['pest']), 'pest')).toBe(true);
+    expect(appliesToLine(['pest'], 'termite')).toBe(false);
+    expect(appliesToLine(['pest'], null)).toBe(false);
+    expect(appliesToLine('not json', 'termite')).toBe(true);
+  });
+
+  test('a pest visit consumes the kit item', async () => {
+    const { db, inserts } = fakeDb({ products: [scoped] });
+    const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' });
+    expect(res.consumed).toHaveLength(1);
+    expect(inserts).toHaveLength(1);
+  });
+
+  test('a termite visit does not consume a pest/mosquito/lawn/tree_shrub item — no movement, no decrement', async () => {
+    const { db, inserts, updates } = fakeDb({ products: [scoped] });
+    const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'termite' });
+    expect(res.consumed).toHaveLength(0);
+    expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'service_line_excluded' }]);
+    expect(inserts).toHaveLength(0);
+    expect(updates).toHaveLength(0);
+  });
+
+  test('an unscoped product is consumed on any line', async () => {
+    const { db } = fakeDb({ products: [{ ...sign, per_completion_service_lines: null }] });
+    const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'rodent' });
+    expect(res.consumed).toHaveLength(1);
+  });
 });
 
 test('no inventory_on_hand → skipped, no movement', async () => {
@@ -105,7 +150,9 @@ describeOrSkip('supplies auto-reorder schema (DB-backed)', () => {
 
   test('products_catalog gains the auto-reorder columns', async () => {
     const cols = await knex('products_catalog').columnInfo();
-    ['reorder_quantity', 'auto_reorder_vendor_id', 'auto_reorder_enabled', 'per_completion_usage'].forEach((c) => expect(cols).toHaveProperty(c));
+    ['reorder_quantity', 'auto_reorder_vendor_id', 'auto_reorder_enabled', 'per_completion_usage', 'per_completion_service_lines'].forEach((c) => expect(cols).toHaveProperty(c));
+    const seeded = await knex('products_catalog').where('name', 'like', 'Pesticide application sign 4x5%').first();
+    if (seeded) expect([...seeded.per_completion_service_lines].sort()).toEqual(['lawn', 'mosquito', 'pest', 'tree_shrub']);
     expect(cols.auto_reorder_enabled.nullable).toBe(false);
   });
 

@@ -2689,6 +2689,7 @@ function ProductsTab({
                       <ExpandedProduct
                         product={p}
                         vendors={vendors}
+                        canAuthor={canAuthor}
                         onSave={savePrice}
                         onInventoryChanged={load}
                         showToast={showToast}
@@ -2959,9 +2960,21 @@ function RestockRequestsTab({ showToast, onUpdate }) {
   );
 }
 
+// detectServiceLine ids (server/services/service-report/service-line-configs.js)
+const COMPLETION_SERVICE_LINES = [
+  { id: "pest", label: "Pest" },
+  { id: "lawn", label: "Lawn" },
+  { id: "mosquito", label: "Mosquito" },
+  { id: "tree_shrub", label: "Tree & shrub" },
+  { id: "termite", label: "Termite" },
+  { id: "rodent", label: "Rodent" },
+  { id: "palm", label: "Palm" },
+];
+
 function ExpandedProduct({
   product,
   vendors,
+  canAuthor = false,
   onSave,
   onInventoryChanged,
   showToast,
@@ -2976,6 +2989,8 @@ function ExpandedProduct({
     autoReorderVendorId: product.autoReorderVendorId || "",
     reorderQuantity: product.reorderQuantity ?? "",
     perCompletionUsage: product.perCompletionUsage ?? "",
+    // null = every service line; array = only those lines consume this item
+    perCompletionServiceLines: Array.isArray(product.perCompletionServiceLines) ? product.perCompletionServiceLines : null,
   });
   const [autoSaving, setAutoSaving] = useState(false);
   const [adjustForm, setAdjustForm] = useState({
@@ -3048,6 +3063,7 @@ function ExpandedProduct({
           autoReorderVendorId: autoForm.autoReorderVendorId || null,
           reorderQuantity: autoForm.reorderQuantity === "" ? null : Number(autoForm.reorderQuantity),
           perCompletionUsage: autoForm.perCompletionUsage === "" ? null : Number(autoForm.perCompletionUsage),
+          perCompletionServiceLines: autoForm.perCompletionServiceLines,
         }),
       });
       showToast?.("Auto-reorder settings saved");
@@ -3120,6 +3136,9 @@ function ExpandedProduct({
           </span>
         )}
       </div>
+      {/* Authoring only: PUT /admin/inventory/:id is requireAdmin, so a
+          technician would only ever see a 403 here. */}
+      {canAuthor && (
       <div style={{ marginBottom: 12 }}>
         <div
           style={{
@@ -3183,7 +3202,40 @@ function ExpandedProduct({
             {autoSaving ? "Saving…" : "Save"}
           </button>
         </div>
+        <div
+          style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12, marginTop: 6 }}
+          title="Which completed visits consume this item. All = every service line."
+        >
+          <span style={{ color: D.muted }}>Used on:</span>
+          <label style={{ color: D.text, display: "flex", alignItems: "center", gap: 4 }}>
+            <input
+              type="checkbox"
+              checked={autoForm.perCompletionServiceLines == null}
+              onChange={(e) => setAutoForm((f) => ({ ...f, perCompletionServiceLines: e.target.checked ? null : [] }))}
+            />
+            All
+          </label>
+          {COMPLETION_SERVICE_LINES.map((line) => {
+            const scoped = Array.isArray(autoForm.perCompletionServiceLines);
+            const on = scoped && autoForm.perCompletionServiceLines.includes(line.id);
+            return (
+              <label key={line.id} style={{ color: scoped ? D.text : D.muted, display: "flex", alignItems: "center", gap: 4 }}>
+                <input
+                  type="checkbox"
+                  disabled={!scoped}
+                  checked={on}
+                  onChange={(e) => setAutoForm((f) => {
+                    const cur = Array.isArray(f.perCompletionServiceLines) ? f.perCompletionServiceLines : [];
+                    return { ...f, perCompletionServiceLines: e.target.checked ? [...new Set([...cur, line.id])] : cur.filter((x) => x !== line.id) };
+                  })}
+                />
+                {line.label}
+              </label>
+            );
+          })}
+        </div>
       </div>
+      )}
       {product.vendorPricing.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           {" "}

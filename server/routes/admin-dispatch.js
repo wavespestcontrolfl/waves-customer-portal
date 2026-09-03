@@ -13641,7 +13641,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Yard-sign kit consumption (sign card + stake + sticker per completed
     // visit). Runs on the resume path too — the partial unique index on
     // product_inventory_movements makes it at-most-once per (product, visit).
-    // Skipped for an incomplete visit (no sign is left). Never throws.
+    // Skipped for an incomplete visit and for inspection_only /
+    // customer_declined closeouts (no sign is left). Never throws.
     try {
       const { consumeCompletionSupplies } = require('../services/supplies-consumption');
       await consumeCompletionSupplies(db, {
@@ -13650,6 +13651,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         customerId: svc.customer_id || null,
         technicianId: svc.technician_id || null,
         isIncompleteVisit,
+        visitPerformed,
+        serviceLine: reportServiceLine,
       });
     } catch (e) { logger.error(`[dispatch] completion supplies consumption failed: ${e.message}`); }
 
