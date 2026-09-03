@@ -498,7 +498,12 @@ async function capRefusal(trx, { mode, policy, cap, now }) {
  */
 async function sendAuthority(trx, { placement, path, policy, mode, draft, review, approvedBy, now }) {
   if (!isEnabled('linkAuthority')) {
-    return mode === 'auto' ? { ok: false, code: 'not_authorized', error: 'GATE_LINK_AUTHORITY is off — no automatic send' } : { ok: true, rowId: null, approvalId: null, level: null };
+    if (mode === 'auto') return { ok: false, code: 'not_authorized', error: 'GATE_LINK_AUTHORITY is off — no automatic send' };
+    // the legacy click stands on its own only for a row nothing has decided: a placement the bridge PARKED
+    // (awaiting_owner) carries open owner decisions (a price, a signed agreement, a legal send) the send would clear
+    // unchecked while the gate is off — it waits for the gate or the card
+    if (placement.status !== 'prospect') return { ok: false, code: 'not_authorized', error: 'GATE_LINK_AUTHORITY is off — this placement was parked by the authority bridge and keeps its open decisions; re-enable the gate or decide it on the card' };
+    return { ok: true, rowId: null, approvalId: null, level: null };
   }
   const instance = await openSendInstance(trx, { placement, path, policy });
   if (!instance.ok) return instance;

@@ -664,28 +664,34 @@ async function runAuthorityBridge(db, {
   });
   if (ran && ran.skipped) { out.skipped = ran.reason || 'lease_held'; return out; }
 
-  // §6.4 — every pending authorized draft (this run's and the ones the cap deferred); the outreach gate is the
-  // sender's own first check
-  if (autoSend && isEnabled('linkProspectOutreach')) {
-    try {
-      out.autoSend = await autoSendDecided(db, { send, now });
-      if (out.autoSend.attempted) logger.info(`[link-authority] auto-outreach: ${out.autoSend.sent}/${out.autoSend.attempted} sent${out.autoSend.skipped.length ? ` (${out.autoSend.skipped.map((s) => s.code).join(', ')})` : ''}`);
-    } catch (err) {
-      logger.error(`[link-authority] auto-outreach failed: ${err.message}`);
-      out.errors.push({ autoSend: err.message });
-    }
-  }
+  if (autoSend) await dispatchAutoSends(db, out, { send, now });
+  await bellForParked(notify, out, parkedDomains, now);
+  return out;
+}
 
-  // ONE bell per run that parked something (never per card); keyed by ET day so a re-run refreshes it
-  if (out.parked > 0) {
-    try {
-      await notify('Link placements await your decision', `${out.parked} placement${out.parked === 1 ? '' : 's'} parked awaiting your approval: ${parkedDomains.slice(0, 8).join(', ')}${parkedDomains.length > 8 ? ` +${parkedDomains.length - 8} more` : ''}`, {
+// §6.4 — every pending authorized draft (this run's and the ones the cap deferred); the outreach gate is the
+// sender's own first check. A failure is one error entry on the run, never a thrown nightly.
+async function dispatchAutoSends(db, out, { send, now }) {
+  if (!isEnabled('linkProspectOutreach')) return;
+  try {
+    out.autoSend = await autoSendDecided(db, { send, now });
+    const skipped = out.autoSend.skipped.length ? ` (${out.autoSend.skipped.map((s) => s.code).join(', ')})` : '';
+    if (out.autoSend.attempted) logger.info(`[link-authority] auto-outreach: ${out.autoSend.sent}/${out.autoSend.attempted} sent${skipped}`);
+  } catch (err) {
+    logger.error(`[link-authority] auto-outreach failed: ${err.message}`);
+    out.errors.push({ autoSend: err.message });
+  }
+}
+
+// ONE bell per run that parked something (never per card); keyed by ET day so a re-run refreshes it
+async function bellForParked(notify, out, parkedDomains, now) {
+  if (!(out.parked > 0)) return;
+  try {
+    await notify('Link placements await your decision', `${out.parked} placement${out.parked === 1 ? '' : 's'} parked awaiting your approval: ${parkedDomains.slice(0, 8).join(', ')}${parkedDomains.length > 8 ? ` +${parkedDomains.length - 8} more` : ''}`, {
         link: '/admin/seo', bell: true, dedupeKey: `link-authority:${etDateString(now)}`, refreshOnDedupe: true,
         metadata: { lane: 'link_authority', parked: out.parked, domains: parkedDomains },
       });
-    } catch (err) { logger.error(`[link-authority] bell failed: ${err.message}`); }
-  }
-  return out;
+  } catch (err) { logger.error(`[link-authority] bell failed: ${err.message}`); }
 }
 
 module.exports = { runAuthorityBridge, aggregateState, annotateApprovals, invalidateApprovals, autoSendDecided, openOwnerHold, LOCK_KEY, HOMEPAGE, RUN_LIMIT_MAX, DEFAULT_LIMIT };

@@ -328,6 +328,11 @@ describe('sendOutreach under the contract', () => {
     const r = await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' });
     expect(r).toMatchObject({ ok: true, authority: null });
     expect(approvals(s.db)).toHaveLength(0);
+    // a placement the bridge PARKED keeps its open decisions: the gate-off click never clears that park unchecked
+    const parked = scenario({ placement: { status: 'awaiting_owner', parked_from_status: 'prospect' } });
+    expect(await Outreach.sendOutreach({ prospectId: parked.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/parked by the authority bridge/) });
+    expect(placement(parked.db)).toMatchObject({ status: 'awaiting_owner', outreach_status: 'drafted' });
+    expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
   });
 });
 
