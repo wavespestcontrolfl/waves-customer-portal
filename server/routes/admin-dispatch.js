@@ -12578,8 +12578,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // merge, an event insert) must never be reported as "not delivered"
       // (GitHub Codex r3 P1).
       let completionSmsProviderAccepted = false;
-      // What the accepted text WAS, so the catch can stamp the honest 'sent'
-      // state (sentSmsBody is scoped inside the try).
+      // What the attempted text IS (body/type/channel/review/pay-link), taken
+      // before the provider call so the catch can stamp the honest 'sent'
+      // state when acceptance is known only from the thrown error
+      // (sentSmsBody is scoped inside the try).
       let completionSmsAcceptedSnapshot = null;
       // The ONE committed-but-not-finalized exit for a recoverable completion
       // text failure (GitHub Codex r3 P1): finalizing here would make every
@@ -12949,6 +12951,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             identityTrustLevel: 'phone_matches_customer',
             metadata: smsMetadata,
           };
+          // Captured BEFORE the provider call: sendCustomerMessage throws
+          // past acceptance when its audit insert fails (providerOutcome on
+          // the error), and the catch needs what was sent — body, type,
+          // channel, whether the review link rode along, whether the
+          // pay-link bookkeeping applies — to record the honest 'sent' state
+          // (pre-push Codex P1 on #3772). Acceptance itself is
+          // completionSmsProviderAccepted / e.providerOutcome, never this.
+          completionSmsAcceptedSnapshot = {
+            body: sentSmsBody,
+            type: sentSmsType,
+            channel: sentSmsChannel,
+            reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
+            // Block-scoped inside this try; the accepted-error catch reads it
+            // from the snapshot for the invoice bookkeeping.
+            invoiceLinkAllowed: allowCompletionInvoiceLink,
+          };
           let smsResult = await sendCustomerMessage(sendInput);
           if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
             logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
@@ -12956,6 +12974,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             delete fallbackMetadata.mediaUrls;
             delete fallbackMetadata.allowMediaUrls;
             fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
+            completionSmsAcceptedSnapshot.channel = 'sms';
             smsResult = await sendCustomerMessage({
               ...sendInput,
               metadata: fallbackMetadata,
@@ -12968,15 +12987,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
           completionSmsProviderAccepted = smsResult.sent === true;
-          completionSmsAcceptedSnapshot = completionSmsProviderAccepted ? {
-            body: sentSmsBody,
-            type: sentSmsType,
-            channel: sentSmsChannel,
-            reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
-            // Block-scoped inside this try; the accepted-error catch reads it
-            // from the snapshot for the invoice bookkeeping below.
-            invoiceLinkAllowed: allowCompletionInvoiceLink,
-          } : null;
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
           // worker retries a 'blocked' status — so the held text is requeued
