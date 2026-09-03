@@ -774,7 +774,7 @@ async function processCancellationRequest({
   if (!scoped) try {
     const customer = await db('customers')
       .where({ id: customerId })
-      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode', 'churn_episode_id');
+      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode');
     if (customer) {
       wasChurnedStage = customer.pipeline_stage === 'churned';
       const now = new Date();
@@ -789,8 +789,17 @@ async function processCancellationRequest({
         next_charge_date: null,
         updated_at: now,
       };
-      churnEpisodeId = customer.churn_episode_id || randomUUID();
-      if (!customer.churn_episode_id) update.churn_episode_id = churnEpisodeId;
+      // The episode is chosen from the row AS LOCKED (below), never from
+      // this entry read: a concurrent cancel must not mint a second id from
+      // the same unstamped row, and a concurrent reactivation that cleared
+      // the stamp after this read must not have an obsolete id reused
+      // without being written back — the returned identity always equals
+      // customers.churn_episode_id as committed.
+      const mintEpisode = async (conn) => {
+        const live = await conn('customers').where({ id: customerId }).first('churn_episode_id');
+        churnEpisodeId = (live && live.churn_episode_id) || randomUUID();
+        if (!(live && live.churn_episode_id)) update.churn_episode_id = churnEpisodeId;
+      };
       // Preserve the original churn timestamp/reason if already churned.
       if (!wasChurnedStage) {
         update.pipeline_stage_changed_at = now;
@@ -870,6 +879,8 @@ async function processCancellationRequest({
           // the plan ledger and tier, the writes the scoped wind-down and
           // every booking/ledger writer serialize on.
           await lockCustomerComms(trx, customerId);
+          await trx('customers').where({ id: customerId }).forUpdate().first('id');
+          await mintEpisode(trx);
           await trx('customers').where({ id: customerId }).update(update);
           // The ledger clear is atomic with the wind-down REGARDLESS of the
           // ledger-read gate (codex r48): rows left behind while the gate
@@ -882,7 +893,9 @@ async function processCancellationRequest({
         });
       } else {
         // Legacy (H0) path, byte-identical: sequential writes, and on failure
-        // the catch below records 'churn' and CONTINUES like H0 did.
+        // the catch below records 'churn' and CONTINUES like H0 did. The
+        // episode read is unlocked here (no transaction to lock in).
+        await mintEpisode(db);
         await db('customers').where({ id: customerId }).update(update);
         await disarmPaymentRails(db);
       }

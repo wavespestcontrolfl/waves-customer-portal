@@ -300,3 +300,22 @@ test('a repeat run on a still-churned row REUSES the stamped episode — never r
   expect(db.__tables.customers[0].churn_episode_id).toBe('ep-first');
   expect(result.churnEpisodeId).toBe('ep-first');
 });
+
+test('the episode is chosen from the row AS LOCKED — a stamp that landed between the entry read and the lock is reused, never overwritten', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  // A concurrent cancel committed its episode after this run's entry read.
+  const orig = db.transaction;
+  db.transaction = async (fn) => { db.__tables.customers[0].churn_episode_id = 'ep-race'; return orig(fn); };
+  try {
+    const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-3' });
+    expect(result.churned).toBe(true);
+    expect(db.__tables.customers[0].churn_episode_id).toBe('ep-race');
+    expect(result.churnEpisodeId).toBe('ep-race');
+    // Lock order inside the wind-down: rung 6, then the customers row.
+    const raws = db.__statements.filter((s) => s.raw).map((s) => s.bindings && s.bindings[0]);
+    expect(raws[0]).toBe('customer-comms:cust-1');
+  } finally {
+    db.transaction = orig;
+  }
+});
