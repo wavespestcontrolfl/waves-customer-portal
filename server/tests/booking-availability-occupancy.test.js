@@ -108,13 +108,15 @@ describe('buildBookingAvailability — travel-gap mirror (GATE_SLOT_TRAVEL_GAP)'
     expect(dayStarts(await buildPalmetto())).toEqual(['09:00', '14:00']);
   });
 
-  test('find-time gets the customer-facing buffer only when the gate is on', async () => {
+  test('find-time gets the customer-facing buffer, and occupancy the coords, only when the gate is on', async () => {
     await build();
     expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ bufferMinutes: 0 }));
+    expect(listOccupiedWindows).toHaveBeenLastCalledWith(expect.objectContaining({ withCoords: false }));
     process.env.GATE_SLOT_TRAVEL_GAP = 'true';
     process.env.SLOT_TRAVEL_BUFFER_MINUTES = '20';
     await build();
     expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ bufferMinutes: 20 }));
+    expect(listOccupiedWindows).toHaveBeenLastCalledWith(expect.objectContaining({ withCoords: true }));
   });
 
   test('gate on: the touching hour is dropped, the clear one survives', async () => {
@@ -150,8 +152,9 @@ describe('buildBookingAvailability — commit-gate occupancy mirror', () => {
     // public-reschedule exclusion (default []).
     expect(listOccupiedWindows).toHaveBeenCalledWith({
       dateFrom: D, dateTo: D, excludeServiceIds: [],
-      // Guarded lat/lng ride along for the travel-gap mirror.
-      withCoords: true,
+      // Guarded lat/lng ride along for the travel-gap mirror ONLY while the
+      // gate is on — dark = the legacy scan, no customers join (r2 P2).
+      withCoords: false,
     });
   });
 

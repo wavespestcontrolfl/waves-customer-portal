@@ -126,6 +126,16 @@ describe('travelGapConflicts — route neighbours only', () => {
     expect(travelGapConflicts(candidate, [farLater]).map((c) => c.stop.id)).toEqual(['far-later']);
   });
 
+  test('stops tied at the boundary are all neighbours — the farther tied stop still sets the gap', () => {
+    const nearTied = { startMin: 615, endMin: 660, ...PALMETTO, id: 'near' };
+    const farTied = { startMin: 600, endMin: 660, ...FAR_SOUTH, id: 'far' }; // same 11:00 end
+    expect(travelGapConflicts(candidate, [nearTied, farTied]).map((c) => c.stop.id)).toEqual(['far']);
+    expect(travelGapConflicts(candidate, [farTied, nearTied]).map((c) => c.stop.id)).toEqual(['far']);
+    const nearAfter = { startMin: 750, endMin: 795, ...PALMETTO, id: 'near-after' };
+    const farAfter = { startMin: 750, endMin: 810, ...FAR_SOUTH, id: 'far-after' }; // same 12:30 start
+    expect(travelGapConflicts(candidate, [nearAfter, farAfter]).map((c) => c.stop.id)).toEqual(['far-after']);
+  });
+
   test('every overlapping stop is a conflict regardless of position; malformed stops are skipped', () => {
     const overlapA = { startMin: 700, endMin: 720, id: 'a' };
     const overlapB = { startMin: 730, endMin: 800, id: 'b' };

@@ -120,21 +120,26 @@ function travelGapConflicts(candidate, stops) {
   if (!candidate || ![candidate.startMin, candidate.endMin].every(Number.isFinite)) return [];
   if (!Array.isArray(stops) || stops.length === 0) return [];
   const overlaps = [];
-  let before = null;
-  let after = null;
+  // Every stop tied at the boundary is a neighbour (two legacy rows ending
+  // at the same minute: the farther one still sets the gap).
+  let before = [];
+  let after = [];
   for (const stop of stops) {
     if (!stop || ![stop.startMin, stop.endMin].every(Number.isFinite)) continue;
     if (windowsOverlap(candidate, stop)) {
       overlaps.push({ stop, reason: 'overlap' });
     } else if (stop.endMin <= candidate.startMin) {
-      if (!before || stop.endMin > before.endMin) before = stop;
-    } else if (!after || stop.startMin < after.startMin) {
-      after = stop;
+      if (!before.length || stop.endMin > before[0].endMin) before = [stop];
+      else if (stop.endMin === before[0].endMin) before.push(stop);
+    } else if (!after.length || stop.startMin < after[0].startMin) {
+      after = [stop];
+    } else if (stop.startMin === after[0].startMin) {
+      after.push(stop);
     }
   }
   const neighbours = [];
-  for (const stop of [before, after]) {
-    if (stop && travelGapViolation(candidate, stop)) neighbours.push({ stop, reason: 'travel_gap' });
+  for (const stop of [...before, ...after]) {
+    if (travelGapViolation(candidate, stop)) neighbours.push({ stop, reason: 'travel_gap' });
   }
   return overlaps.concat(neighbours);
 }

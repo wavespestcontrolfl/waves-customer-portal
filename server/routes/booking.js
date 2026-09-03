@@ -7,7 +7,7 @@ const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { violatesTravelGap, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
+const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
@@ -1014,8 +1014,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // Public self-reschedule: the moving row must not block the slot it
       // is vacating — same exclusion findAvailableSlots already applies.
       excludeServiceIds,
-      // Guarded lat/lng for the travel-gap mirror below.
-      withCoords: true,
+      // Guarded lat/lng for the travel-gap mirror below — only while the
+      // gate is on, so the dark query stays the legacy scan (no customers
+      // join) (GH codex #3803 r2 P2).
+      withCoords: travelGapEnabled(),
     });
     occupiedByDate = new Map();
     for (const row of occupiedRows) {
@@ -1383,6 +1385,20 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
 });
 
 // POST /api/booking/confirm
+// The pin a seeded follow-up's conflict sweep measures with: the row's own
+// stamped lat/lng when the seeder copied one from the parent, else the
+// booking pin the parent commit used. A SQL NULL must fall through — /book
+// parents are inserted without a stamp, and Number(null) is 0, which would
+// measure every follow-up from the Gulf of Guinea (GH codex #3803 r2 P1).
+function seededRowPin(row, offerLat, offerLng) {
+  const own = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+  const fallback = (v) => (Number.isFinite(v) ? v : null);
+  return {
+    lat: own(row?.lat) ?? fallback(offerLat),
+    lng: own(row?.lng) ?? fallback(offerLng),
+  };
+}
+
 // createSelfBooking — the booking-commit operation behind POST /api/booking/confirm,
 // extracted so non-HTTP callers (e.g. the voice agent's confirm_booking tool) run the
 // EXACT same path: customer resolution, advisory-locked conflict re-check, the two-row
@@ -3782,10 +3798,7 @@ async function createSelfBooking(payload = {}) {
               // stamped pin (the seeder copies the parent's lat/lng), else
               // the booking pin the parent commit measured with — the
               // mirrored guard every commit surface carries (pre-push P1).
-              travel: {
-                lat: Number.isFinite(Number(row.lat)) ? Number(row.lat) : (Number.isFinite(offerLat) ? offerLat : null),
-                lng: Number.isFinite(Number(row.lng)) ? Number(row.lng) : (Number.isFinite(offerLng) ? offerLng : null),
-              },
+              travel: seededRowPin(row, offerLat, offerLng),
             });
             if (clashes.length > 0) {
               // Demote the colliding occurrence to the documented
