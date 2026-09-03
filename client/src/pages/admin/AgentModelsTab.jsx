@@ -282,7 +282,10 @@ export default function AgentModelsTab() {
         // when the model it lands on is the one it was pinned to.
         if (!unpin && sharing.every((x) => next === baseAfterDraft(legOf(x)) && !legOf(x).pinned)) continue;
         const label = sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.fallback ? " · fallback" : ""}`;
-        byEnv.set(env, { env, from: leg.model, to: destinations[0], destinations, unpin, label, lanes: sharing.length, restart: sharing.some((x) => x.applies !== "live") });
+        // Timing comes from the leg the env actually feeds (a live fallback pin
+        // such as ASK_WAVES_MODEL applies on the next request even though the
+        // lane's primary is boot-time).
+        byEnv.set(env, { env, from: leg.model, to: destinations[0], destinations, unpin, label, lanes: sharing.length, restart: sharing.some((x) => !legOf(x).live) });
       }
     }
     return [...byEnv.values()];
@@ -365,8 +368,49 @@ export default function AgentModelsTab() {
     });
   };
 
-  // A picker change: FIND opens the search for the env(s), anything else
-  // drafts. A Models-in-use row drafts every selector on that model at once.
+  // Entitlement check before ANY draft, catalog pick or live-search pick:
+  // a catalogued id is not necessarily enabled on this account, and a
+  // selector like FLAGSHIP carries no-backup lanes that would fail after
+  // restart instead of degrading. The probe is a provider GET, no tokens.
+  const [probeState, setProbeState] = useState(null); // { id, envs } while checking
+  const [pickProblem, setPickProblem] = useState(null);
+  const probeThenDraft = async (envs, id, provider) => {
+    setPickProblem(null);
+    setProbeState({ id, envs });
+    try {
+      const verdict = await adminFetch("/admin/agents/models/probe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, id }),
+      });
+      // A missing or rejected provider key means the check could not run at
+      // all (local dev has placeholder keys); draft anyway and say so. A
+      // definite "unknown id" or "not enabled" answer refuses the draft.
+      const unverifiable = verdict && !verdict.ok && ["no_key", "http_401"].includes(verdict.reason);
+      if (verdict?.ok || unverifiable) {
+        envs.forEach((env) => setDraftValue(env, id));
+        if (unverifiable) setPickProblem(`${modelLabel(catalog, id)} drafted UNVERIFIED: the provider check could not run on this server (${verdict.reason === "no_key" ? "no API key" : "API key rejected"}). Confirm the id is enabled for the prod account before applying.`);
+      } else {
+        const why =
+          verdict?.reason === "not_entitled"
+            ? "this account is not enabled for it"
+            : verdict?.reason === "not_found"
+              ? "the provider does not know this id"
+              : verdict?.reason === "no_key"
+                ? "no API key for that provider on this server"
+                : `check failed (${verdict?.reason || "unknown"})`;
+        setPickProblem(`${modelLabel(catalog, id)} was not drafted: ${why}.`);
+      }
+    } catch (e) {
+      setPickProblem(`${modelLabel(catalog, id)} was not drafted: ${e?.message || "check failed"}.`);
+    } finally {
+      setProbeState(null);
+    }
+  };
+
+  // A picker change: FIND opens the search for the env(s); UNPIN / "keep"
+  // draft directly (nothing to verify); a model id is probed first. A
+  // Models-in-use row drafts every selector on that model at once.
   const onPick = (envs, accepts, currentLabel) => (e) => {
     const v = e.target.value;
     const list = Array.isArray(envs) ? envs : [envs];
@@ -374,16 +418,31 @@ export default function AgentModelsTab() {
       setFind({ envs: list, accepts, currentLabel });
       return;
     }
-    list.forEach((env) => setDraftValue(env, v));
+    if (!v || v === UNPIN) {
+      list.forEach((env) => setDraftValue(env, v));
+      return;
+    }
+    probeThenDraft(list, v, catalog[v]?.provider);
   };
 
   const onFound = (envs, model) => {
     setDiscovered((prev) => ({
       ...prev,
       // Offered only for the modality it was found for; a text-selector find
-      // must not surface in a vision picker later in the session.
-      [model.id]: { label: model.label || model.id, provider: model.provider, caps: [find?.accepts?.cap || "text"], status: "current", discovered: true },
+      // must not surface in a vision picker later in the session. A Fable /
+      // Mythos id keeps its deep-only restriction whether it was already
+      // catalogued or came from the search.
+      [model.id]: {
+        ...(prev[model.id] || catalog[model.id] || {}),
+        label: model.label || model.id,
+        provider: model.provider,
+        caps: [find?.accepts?.cap || "text"],
+        status: "current",
+        discovered: true,
+        ...((model.requiresDeep || catalog[model.id]?.requires === "deep") ? { requires: "deep" } : {}),
+      },
     }));
+    // The Find dialog already probed this id.
     envs.forEach((env) => setDraftValue(env, model.id));
     setFind(null);
   };
@@ -401,7 +460,7 @@ export default function AgentModelsTab() {
   const visibleLanes = useMemo(() => {
     if (!data) return [];
     return data.lanes.filter((l) => {
-      if (laneModel && l.primary.model !== laneModel && l.fallback?.model !== laneModel) return false;
+      if (laneModel && !legsOf(l).some((leg) => leg.model === laneModel)) return false;
       if (filter === "changed") return laneChanged(l);
       if (filter === "pinned") return legsOf(l).some((leg) => leg.pinned);
       if (filter === "fanout") return l.fanout;
@@ -446,6 +505,16 @@ export default function AgentModelsTab() {
           {loading ? "Refreshing" : "Refresh"}
         </Button>
       </div>
+      {probeState && (
+        <div className="text-12 text-ink-secondary" role="status">
+          Checking {modelLabel(catalog, probeState.id)} with its provider before drafting…
+        </div>
+      )}
+      {pickProblem && (
+        <div className="text-12 text-alert-fg" role="alert">
+          {pickProblem}
+        </div>
+      )}
 
       {/* Models in use — one row per model actually running */}
       <section aria-labelledby="models-in-use-heading" className="flex flex-col gap-2">
@@ -600,7 +669,11 @@ export default function AgentModelsTab() {
                                     <span className="u-nums text-ink-secondary">
                                       {s.env}
                                       <span className="ml-2">
-                                        {s.overridden ? <Badge tone="strong">env override</Badge> : <Badge>code default</Badge>}
+                                        {s.overridden ? (
+                                          <Badge tone="strong">{s.overrideEnv && s.overrideEnv !== s.env ? `set via ${s.overrideEnv}` : "env override"}</Badge>
+                                        ) : (
+                                          <Badge>code default</Badge>
+                                        )}
                                       </span>
                                     </span>
                                     <span className="u-nums text-ink-secondary">{s.laneCount} primary</span>

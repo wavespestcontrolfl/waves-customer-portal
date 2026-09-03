@@ -35,6 +35,8 @@ function patternsFor(ref, isFallback) {
   switch (ref.kind) {
     case 'tier':
       return [new RegExp(`\\b${esc(ref.key)}\\b`)];
+    case 'literal':
+      return [new RegExp(esc(ref.model))];
     case 'route':
       return [new RegExp(`ROUTES\\.${esc(ref.key)}\\b`)];
     case 'policy': {
@@ -43,7 +45,7 @@ function patternsFor(ref, isFallback) {
       return [direct];
     }
     case 'env': {
-      const pin = new RegExp(`process\\.env\\.${esc(ref.env)}\\b`);
+      const pin = new RegExp(`process\\.env\\.${esc(Array.isArray(ref.env) ? ref.env[0] : ref.env)}\\b`);
       if (ref.literal !== undefined) return [pin, new RegExp(esc(ref.literal))];
       return [pin, ...patternsFor(ref.ref, isFallback)];
     }

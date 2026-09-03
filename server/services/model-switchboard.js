@@ -114,13 +114,21 @@ const T = (tier) => ({ kind: 'tier', key: tier });
 const R = (route) => ({ kind: 'route', key: route });
 const P = (policy, leg) => ({ kind: 'policy', key: policy, leg });
 const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live });
+// D(env | [env, ...aliases], literal): the call site reads the first set var
+// in order (satellite: OPENAI_VISION_MODEL || OPENAI_MODEL || 'gpt-5-mini').
+// The composer writes the FIRST (specific) name; aliases only report.
 const D = (env, literal, opts = {}) => ({ kind: 'env', env, literal, live: !!opts.live, accepts: opts.accepts });
 //   S(providerEnv, legs) provider switch, exactly as call-recording-processor.js
 //                      and call-research-miner.js build their route: primary =
 //                      legs[process.env[providerEnv] || 'openai']; fallback =
 //                      legs.openai when the primary is anthropic, else legs.anthropic.
 //                      A lane whose primary is S() derives its fallback from it.
-const S = (providerEnv, legs) => ({ kind: 'switch', env: providerEnv, legs });
+//                      `fallbackLegs` overrides the fallback refs where the call
+//                      site's fallback ignores the primary override (research
+//                      miner: CALL_RESEARCH_MODEL moves the primary only).
+const S = (providerEnv, legs, fallbackLegs = null) => ({ kind: 'switch', env: providerEnv, legs, fallbackLegs });
+//   LIT(model)         a model id the call site hardcodes with no env at all
+const LIT = (model, accepts) => ({ kind: 'literal', model, accepts });
 
 const POLICIES = [
   { key: 'fastText', label: 'Fast text', description: 'Classification, tagging, intent, sentiment — short JSON' },
@@ -186,9 +194,9 @@ const LANES = [
   L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
   L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
   L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: SHARED_GEMINI_PIN }),
-  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), also: [D('OPENAI_VISION_MODEL', 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'three legs in parallel · owner ruling 2026-09-02: one Gemini model — not yet coded' }),
-  L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), D('GEMINI_PROPERTY_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D('OPENAI_PROPERTY_MODEL', 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
-  L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), D('GEMINI_VISION_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D('OPENAI_VISION_MODEL', 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })] }),
+  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'three legs in parallel · owner ruling 2026-09-02: one Gemini model — not yet coded' }),
+  L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), D('GEMINI_PROPERTY_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
+  L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), D('GEMINI_VISION_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })] }),
   L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', D('GEMINI_TURF_OCR_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), T('VISION')),
   L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'drives customer-facing health scores (owner 2026-07-21)' }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
@@ -240,7 +248,8 @@ const LANES = [
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
   L('seo_advisor', 'SEO weekly advisor + action drafts', 'seo/seo-advisor.js, seo/seo-action-generator.js', 'qa', T('FLAGSHIP')),
   L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', T('FLAGSHIP')),
-  L('chart_builder', 'AI chart builder (NL → SQL + chart)', 'ai-chart-builder.js', 'qa', T('FLAGSHIP'), T('GEMINI_VISION_BEST'), { note: 'Gemini reads the rendered chart' }),
+  L('chart_builder_image', 'AI chart builder · image intent read', 'ai-chart-builder.js', 'qa', T('GEMINI_VISION_BEST'), T('FLAGSHIP'), { note: 'image-backed charts only; stage 1 of 2' }),
+  L('chart_builder_sql', 'AI chart builder · SQL + chart spec', 'ai-chart-builder.js', 'qa', T('FLAGSHIP'), null, { note: 'every chart; stage 2 — an Anthropic outage fails the lane' }),
 
   // ── High-stakes reasoner ──
   L('ib_admin', 'Intelligence Bar · admin', 'routes/admin-intelligence-bar.js', 'reason', E('INTELLIGENCE_BAR_MODEL', T('FLAGSHIP'))),
@@ -285,11 +294,15 @@ const LANES = [
   L('call_extraction', 'Call extraction V2', 'call-recording-processor.js', 'locked',
     S('CALL_EXTRACTION_PROVIDER', { openai: D('CALL_EXTRACTION_MODEL', 'gpt-5.6-sol'), anthropic: T('CALL_EXTRACTION_ANTHROPIC'), gemini: D('GEMINI_EXTRACTION_MODEL', 'gemini-2.5-pro') }),
     null, { inbound: true, lock: LOCK.benchmark('25-call bake-off 2026-07-18 · run a new bake-off to move it'), note: 'CALL_EXTRACTION_PROVIDER=openai|anthropic|gemini picks the primary; kill = gemini' }),
+  L('call_extraction_v1', 'Call extraction V1 (runs first; V2 above is the gated shadow)', 'call-recording-processor.js', 'locked', D('GEMINI_EXTRACTION_V1_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true, lock: LOCK.benchmark('authoritative extractor until V2 is promoted') }),
   L('call_research', 'Call-research corpus miner', 'call-research-miner.js', 'locked',
-    S('CALL_RESEARCH_PROVIDER', { openai: D('CALL_RESEARCH_MODEL', 'gpt-5.6-sol'), anthropic: E('CALL_RESEARCH_MODEL', T('CALL_RESEARCH_ANTHROPIC')) }),
-    null, { inbound: true, lock: LOCK.benchmark('7-arm bake-off 2026-07-18'), note: 'CALL_RESEARCH_PROVIDER=openai|anthropic picks the primary' }),
+    S('CALL_RESEARCH_PROVIDER',
+      { openai: D('CALL_RESEARCH_MODEL', 'gpt-5.6-sol'), anthropic: E('CALL_RESEARCH_MODEL', T('CALL_RESEARCH_ANTHROPIC')), gemini: D('CALL_RESEARCH_MODEL', 'gemini-2.5-pro') },
+      // call-research-miner.js:70-72 — the fallback never takes CALL_RESEARCH_MODEL
+      { openai: LIT('gpt-5.6-sol', { providers: ['openai'], cap: 'text' }), anthropic: T('CALL_RESEARCH_ANTHROPIC') }),
+    null, { inbound: true, lock: LOCK.benchmark('7-arm bake-off 2026-07-18'), note: 'CALL_RESEARCH_PROVIDER=openai|anthropic|gemini picks the primary; CALL_RESEARCH_MODEL overrides the primary only' }),
   L('transcription', 'Call transcription (primary + long-call verifier)', 'call-recording-processor.js', 'locked', D('OPENAI_TRANSCRIPTION_MODEL', 'gpt-4o-transcribe-diarize'), D('GEMINI_TRANSCRIPTION_MODEL', 'gemini-3.5-flash'), { inbound: true, lock: LOCK.provider('audio pipeline with its own validation') }),
-  L('transcript_label', 'Transcript speaker relabeling', 'call-recording-processor.js', 'locked', D('OPENAI_TRANSCRIPT_LABEL_MODEL', 'gpt-5-mini'), null, { lock: LOCK.provider('audio pipeline') }),
+  L('transcript_label', 'Transcript speaker relabeling', 'call-recording-processor.js', 'locked', D(['OPENAI_TRANSCRIPT_LABEL_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini'), null, { lock: LOCK.provider('audio pipeline') }),
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
@@ -359,17 +372,25 @@ function resolveRef(ref) {
       const attributed = selKey && MODELS[selKey] === leg?.model ? selKey : null;
       return { model: leg?.model, selector: attributed, via: `TEXT_POLICIES.${ref.key}.${ref.leg}${attributed ? ` → ${attributed}` : ''}`, pinEnv: null, pinned: false, live: false, accepts: attributed ? SELECTOR_BY_KEY[attributed].accepts : null };
     }
+    case 'literal':
+      return { model: ref.model, selector: null, via: 'code constant', pinEnv: null, pinned: false, unpinnedModel: ref.model, live: false, accepts: ref.accepts || { providers: [providerOf(ref.model)], cap: 'text' } };
     case 'env': {
-      const pinned = !!process.env[ref.env];
+      const names = Array.isArray(ref.env) ? ref.env : [ref.env];
+      const setName = names.find((n) => process.env[n]) || null;
+      const pinned = !!setName;
+      const primaryName = names[0];
       // unpinnedModel = what the leg runs on once the env var is deleted, so
-      // the composer can offer "unpin" with an honest before/after.
+      // the composer can offer "unpin" with an honest before/after. With an
+      // alias chain that is the next set alias, then the literal / base.
+      const afterUnpin = names.slice(1).map((n) => process.env[n]).find(Boolean) || null;
       if (ref.literal !== undefined) {
-        const model = process.env[ref.env] || ref.literal;
-        return { model, selector: null, via: `${ref.env}${pinned ? '' : ' (code default)'}`, pinEnv: ref.env, pinned, unpinnedModel: ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
+        const model = (setName && process.env[setName]) || ref.literal;
+        const via = setName ? `${setName}${setName !== primaryName ? ' (alias)' : ''}` : `${primaryName} (code default)`;
+        return { model, selector: null, via, pinEnv: primaryName, pinned, unpinnedModel: afterUnpin || ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
       }
       const base = resolveRef(ref.ref);
-      const model = process.env[ref.env] || base.model;
-      return { model, selector: base.selector, via: pinned ? `${ref.env} (pinned)` : `${ref.env} → ${base.via}`, pinEnv: ref.env, pinned, unpinnedModel: base.model, live: ref.live, accepts: base.accepts };
+      const model = (setName && process.env[setName]) || base.model;
+      return { model, selector: base.selector, via: setName ? `${setName} (pinned)` : `${primaryName} → ${base.via}`, pinEnv: primaryName, pinned, unpinnedModel: afterUnpin || base.model, live: ref.live, accepts: base.accepts };
     }
     default:
       return null;
@@ -386,7 +407,8 @@ function resolveSwitch(ref) {
   const raw = process.env[ref.env];
   const provider = raw && ref.legs[raw] ? raw : 'openai';
   const primary = resolveRef(ref.legs[provider]);
-  const fallbackRef = provider === 'anthropic' ? ref.legs.openai : ref.legs.anthropic;
+  const fallbackLegs = ref.fallbackLegs || ref.legs;
+  const fallbackRef = provider === 'anthropic' ? fallbackLegs.openai : fallbackLegs.anthropic;
   const fallback = resolveRef(fallbackRef);
   const tag = (leg) => ({ ...leg, via: `${ref.env}=${provider}${raw ? '' : ' (default)'} → ${leg.via}` });
   return { primary: tag(primary), fallback: fallback ? tag(fallback) : null };

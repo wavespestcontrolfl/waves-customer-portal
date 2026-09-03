@@ -145,6 +145,27 @@ describe('model-switchboard', () => {
     }
   });
 
+  it('research miner: CALL_RESEARCH_MODEL moves the primary only, never the fallback', () => {
+    const prevM = process.env.CALL_RESEARCH_MODEL;
+    const prevP = process.env.CALL_RESEARCH_PROVIDER;
+    try {
+      process.env.CALL_RESEARCH_MODEL = 'gpt-9.9-test';
+      delete process.env.CALL_RESEARCH_PROVIDER;
+      jest.resetModules();
+      const lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'call_research');
+      expect(lane.primary.model).toBe('gpt-9.9-test');
+      expect(lane.fallback.model).toBe(MODELS.CALL_RESEARCH_ANTHROPIC);
+      process.env.CALL_RESEARCH_PROVIDER = 'anthropic';
+      jest.resetModules();
+      const lane2 = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'call_research');
+      expect(lane2.primary.model).toBe('gpt-9.9-test'); // override applies to whichever primary
+      expect(lane2.fallback.model).toBe('gpt-5.6-sol'); // DEFAULT_MODEL_FOR.openai, untouched by the override
+    } finally {
+      if (prevM === undefined) delete process.env.CALL_RESEARCH_MODEL; else process.env.CALL_RESEARCH_MODEL = prevM;
+      if (prevP === undefined) delete process.env.CALL_RESEARCH_PROVIDER; else process.env.CALL_RESEARCH_PROVIDER = prevP;
+    }
+  });
+
   it('locks the lanes a generic picker must not move', () => {
     const { lanes, selectors } = sb.getSwitchboard();
     for (const id of ['call_extraction', 'transcription', 'embeddings', 'image_gen', 'mentions_prober']) {
