@@ -327,7 +327,8 @@ async function listOwnerQueue(db) {
         why_not: whyNot || (primary ? null : `one approval covers the ${coveredByGroup.get(p.payment_group_id)} locations sharing this fee — approve it on the first card`),
         shared_fee: sharedFee ? { group_id: p.payment_group_id, placements: coveredByGroup.get(p.payment_group_id) } : null,
         // the send click's inputs (§6.4 / §13): the draft the click sends, its review, the recipient match to acknowledge
-        draft: r.dimension === 'communication' ? { to: p.outreach_to_email || null, subject: p.outreach_subject || null, body: p.outreach_body || null, review: draftReview, recipient_review: reviewFor.get(p.id) || null } : undefined,
+        // `hash` travels back with the click: the claim sends only the text the card displayed (§3.6b)
+        draft: r.dimension === 'communication' ? { to: p.outreach_to_email || null, subject: p.outreach_subject || null, body: p.outreach_body || null, hash: M.draftHash(p), review: draftReview, recipient_review: reviewFor.get(p.id) || null } : undefined,
       };
     });
     return {
@@ -605,11 +606,13 @@ const SEND_CODE_STATUS = Object.freeze({
   not_found: 404, gate_off: 403, gmail_not_connected: 503, rate_limited: 429, already_sent: 409, not_actionable: 409,
   not_authorized: 409, customer_recipient: 409, recipient_review_required: 409, recipient_lookup_failed: 503,
   path_moved: 409, path_unlinked: 409, no_draft: 409, incomplete_draft: 409, invalid_recipient: 409, not_outreach: 409,
-  inbox_in_flight: 409, recipient_changed: 409,
+  inbox_in_flight: 409, recipient_changed: 409, draft_changed: 409,
   send_failed: 502, finalize_failed: 500,
 });
-async function sendRow(db, { authorityId, actor, reviewedLookupHash = null, send = null }) {
+async function sendRow(db, { authorityId, actor, reviewedLookupHash = null, draftHash = null, send = null }) {
   if (!actor) refuse(400, 'a sending admin identity is required');
+  // the click sends the text the card displayed (§3.6b) — the claim refuses a draft edited since
+  if (typeof draftHash !== 'string' || !draftHash) refuse(400, 'the hash of the draft the card displayed is required — refresh the queue and send again');
   const row = await db(AUTH).where({ id: authorityId }).first('id', 'prospect_id', 'dimension', 'instance_kind', 'ended_at', 'satisfied_at');
   if (!row) refuse(404, 'authority row not found');
   if (row.dimension !== 'communication' || row.instance_kind !== '-') refuse(409, 'only the initial send is sent from the queue');
@@ -619,7 +622,7 @@ async function sendRow(db, { authorityId, actor, reviewedLookupHash = null, send
   const notHere = placement.claimed_at ? `leased at ${placement.status}` : whyNotHere(placement, row);
   if (notHere) refuse(409, `the placement is no longer awaiting your decision (${notHere}) — refresh the queue`);
   const sendOutreach = send || require('./link-prospect-outreach').sendOutreach;
-  const r = await sendOutreach({ prospectId: placement.id, approvedBy: actor, mode: 'owner', reviewedLookupHash });
+  const r = await sendOutreach({ prospectId: placement.id, approvedBy: actor, mode: 'owner', reviewedLookupHash, draftHash });
   if (!r.ok) {
     const err = new OwnerQueueError(SEND_CODE_STATUS[r.code] || 400, r.error || `send refused: ${r.code}`);
     err.code = r.code;

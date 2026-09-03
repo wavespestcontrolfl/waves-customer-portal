@@ -2724,7 +2724,7 @@ function LinkBuildingBoard({ canRun }) {
 // =========================================================================
 // Friendly text for the structured result codes the outreach routes return.
 // a refusal that means the recipient match the card showed is no longer the one the server would send against
-const REVIEW_RESET_CODES = new Set(["recipient_review_required", "customer_recipient", "recipient_changed"]);
+const REVIEW_RESET_CODES = new Set(["recipient_review_required", "customer_recipient", "recipient_changed", "draft_changed"]);
 const OUTREACH_CODE_MSG = {
   gate_off: "Outreach lane is OFF — set GATE_LINK_OUTREACH to enable sending.",
   gmail_not_connected: "Gmail isn't connected — authorize it first.",
@@ -2747,6 +2747,8 @@ const OUTREACH_CODE_MSG = {
   recipient_lookup_failed: "The customer-recipient check failed — not sent. Try again.",
   inbox_in_flight: "Another placement already has a conversation with this recipient — one conversation per inbox.",
   recipient_changed: "The draft was re-addressed while you looked at it — reload and send again.",
+  draft_changed: "The draft changed while you looked at it — reload and read the current text before sending.",
+  draft_hash_required: "This card is stale — reload and send again.",
   path_moved: "The acquisition path changed since the draft — reload and draft again.",
   path_unlinked: "Not linked to an acquisition path yet — the registry catch-up links it within the hour.",
 };
@@ -2771,6 +2773,22 @@ function DraftReviewLine({ review }) {
   if (!review || review.clean) return null;
   const parts = [...(review.flags || []), ...(review.lint || []).map((l) => `lint: ${l.rule}`)];
   return <div style={{ fontSize: 12, color: D.muted }}>{`Owner review: ${parts.join(", ") || review.reason}`}</div>;
+}
+
+// §3.6b — a send on an attested path attests to the publisher's agreement: the
+// owner reads it HERE before Approve & send, as the Owner queue card shows it.
+function LegalAttestationLine({ p }) {
+  if (!p.legal_attestation) return null;
+  return (
+    <div style={{ fontSize: 12, color: D.amber }}>
+      Legal attestation{p.authority_level ? ` (${p.authority_level})` : ""} — sending attests to the publisher's agreement:{" "}
+      {p.legal_terms_url ? (
+        <a href={p.legal_terms_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>read the agreement</a>
+      ) : (
+        "no agreement url in the evidence — re-investigate before sending"
+      )}
+    </div>
+  );
 }
 
 // Raw POST that returns the parsed body even on non-2xx, so we can read the
@@ -2817,7 +2835,8 @@ function OutreachApprovals({ canRun, onChange }) {
     // the acknowledged match travels with the click (§13): the server sends only when the lookup still yields it
     // the acknowledgement is bound to the hash it was given for: a reloaded card with a new match starts unacknowledged
     const ackKey = `${id}:${p.recipient_review?.lookup_hash || ""}`;
-    const body = acks[ackKey] && p.recipient_review?.lookup_hash ? { reviewed_lookup_hash: p.recipient_review.lookup_hash } : {};
+    // the click sends the text this card displayed (§3.6b): the server refuses a draft edited since
+    const body = { draft_hash: p.draft_hash || "", ...(acks[ackKey] && p.recipient_review?.lookup_hash ? { reviewed_lookup_hash: p.recipient_review.lookup_hash } : {}) };
     const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/send`, body);
     setMsg({ ok, text: ok ? "Outreach sent." : (OUTREACH_CODE_MSG[r.code] || r.error || "Send failed.") });
     if (!ok && r.code === "recipient_review_required") setAcks((prev) => ({ ...prev, [ackKey]: false })); // the reload below shows the current match
@@ -2877,6 +2896,7 @@ function OutreachApprovals({ canRun, onChange }) {
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 4, whiteSpace: "pre-wrap", maxHeight: 84, overflow: "hidden" }}>{p.outreach_body}</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
                   <DraftReviewLine review={p.draft_review} />
+                  <LegalAttestationLine p={p} />
                   <RecipientReview review={p.recipient_review} acked={acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`]} disabled={busyId === p.id} onAck={(v) => setAcks({ ...acks, [`${p.id}:${p.recipient_review?.lookup_hash || ""}`]: v })} />
                 </div>
               </div>
@@ -3560,7 +3580,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     setResult(null);
     const lookupHash = row.draft?.recipient_review?.lookup_hash || "";
     const ackKey = `${row.id}:${lookupHash}`; // the acknowledgement is bound to the hash it was given for
-    const body = acks[ackKey] && lookupHash ? { reviewed_lookup_hash: lookupHash } : {};
+    // the click sends the text this card displayed (§3.6b): the server refuses a draft edited since
+    const body = { draft_hash: row.draft?.hash || "", ...(acks[ackKey] && lookupHash ? { reviewed_lookup_hash: lookupHash } : {}) };
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/send`, { method: "POST", body });
       setResult({ tone: D.green, text: `Sent the pitch to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}` });

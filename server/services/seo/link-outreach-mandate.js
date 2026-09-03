@@ -41,7 +41,8 @@ const CLASSIFIER_RULES = Object.freeze([
   { flag: 'reciprocal_promise', re: /\b(link\s*back|in\s+return|in\s+exchange|reciprocal|link\s+(?:to|at)\s+you|we(?:'ll|\s+will)\s+link|link\s+swap|link\s+exchange|exchange\s+links|(?:can|could|would|will|happy\s+to|glad\s+to|able\s+to)\s+(?:also\s+)?(?:add|include|place|feature|put|give)\s+(?:a\s+|the\s+|your\s+)?link|link\s+(?:to|for)\s+your|we(?:'ll|\s+will|\s+can|\s+could|\s+would)?\s+(?:also\s+)?(?:promote|mention|feature|showcase|highlight|recommend|share)\s+(?:you|your)|(?:promote|mention|feature|showcase|highlight|recommend)\s+your\s+(?:site|website|business|page|brand|company|content|guide)|on\s+ours|(?:publish|host|run|post)(?:ing)?\s+(?:a\s+|the\s+|your\s+)?(?:guest\s+post|article|piece|content)|your\s+(?:guest\s+post|article|content)\s+on\s+our|we(?:'ll|\s+will|\s+can|\s+could|\s+would)\s+(?:also\s+)?(?:add|include|list|place)\s+(?:you|your|a\s+link|the\s+link)|add\s+your\s+(?:link|site|website|url|business|listing))\b/i },
   { flag: 'payment', re: /(\$\s?\d|\b(?:pay(?:ment|ing)?|paid|fee|fees|sponsor(?:ed|ship)?|compensat(?:e|ion)|invoice|budget\s+for|rate\s+card|purchas(?:e|ed|ing)|buy(?:ing)?|bought|price|pricing|cost(?:s)?|charge(?:s|d)?|rates?\s+for|(?:our|flat|monthly|annual|placement|listing)\s+rates?)\b)/i },
   { flag: 'discount', re: /\b(discount(?:ed|s)?|reduced\s+(?:rate|price|pricing|fee|cost)|(?:special|lower|preferred|introductory)\s+(?:rate|price|pricing)|%\s*off|percent\s+off|coupon|complimentary|free\s+(?:service|treatment|inspection|month|visit)|on\s+the\s+house|no\s+charge)\b/i },
-  { flag: 'guarantee', re: /\b(guarantee[ds]?|we\s+promise|promise\s+to|assure\s+you|100%)\b/i },
+  // `100%` needs no trailing boundary: `%` and the space after it are both non-word characters, so a `\b` there never matches
+  { flag: 'guarantee', re: /\b(?:guarantee[ds]?|we\s+promise|promise\s+to|assure\s+you)\b|\b100\s?%/i },
   { flag: 'commitment', re: /\b(exclusive|exclusivity|contract|agreement|commit(?:ment)?\s+to|retainer|partnership\s+deal|ongoing\s+(?:fee|payment|arrangement))\b/i },
 ]);
 
@@ -136,9 +137,13 @@ async function sourceHits(q, src, { recipients, googleLocals, domains, recipient
   const byDomain = domains.length
     ? await q(src.table).whereRaw(`split_part(${STORED_SQL}, '@', 2) = ANY(?) OR split_part(${STORED_SQL}, '@', 2) LIKE ANY(?)`, [src.column, domains, src.column, domains.map((d) => `%.${d}`)]).select(...cols)
     : [];
+  // the two lookups are separate statements: a contact re-addressed to the recipient between them is seen only here, so
+  // a domain hit whose stored address EQUALS a recipient is an exact match — promoted, never recorded as a shared-domain
+  // one (an acknowledged shared match would otherwise carry the now-exact customer address past the hard block)
+  const late = onRecipient(byDomain);
   const shared = [];
-  for (const h of byDomain) for (const r of recipientsByDomain.get(orgDomainOf(h.email)) || []) shared.push([r, { source: src.source, id: h.id }]);
-  return { exact: [...exact, ...canon], shared };
+  for (const h of byDomain) if (!recipients.has(normalizeEmail(h.email))) for (const r of recipientsByDomain.get(orgDomainOf(h.email)) || []) shared.push([r, { source: src.source, id: h.id }]);
+  return { exact: [...exact, ...canon, ...late], shared };
 }
 
 /**

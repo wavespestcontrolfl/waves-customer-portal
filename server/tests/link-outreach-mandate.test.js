@@ -34,6 +34,8 @@ describe('classifyDraft', () => {
     ['a discount', 'your readers get 20% off their first treatment', ['discount']],
     ['a free service', 'a free inspection for your staff', ['discount']],
     ['a guarantee', 'we guarantee results', ['guarantee']],
+    ['a standalone 100%', 'We offer 100% placement', ['guarantee']],
+    ['100% at the end of the text', 'we deliver 100%', ['guarantee']],
     ['an unusual commitment', 'an exclusive partnership deal', ['commitment']],
   ])('flags %s', (_label, text, flags) => {
     for (const f of flags) expect(M.classifyDraft(text)).toContain(f);
@@ -84,6 +86,17 @@ describe('recipientReview (§13)', () => {
   const customer = (over = {}) => ({ id: `c-${Math.random()}`, email: null, service_contact_email: null, service_contact2_email: null, service_contact3_email: null, ...over });
   const seed = (over = {}) => makeDb({ customers: [], notification_prefs: [], leads: [], ...over });
 
+  test('a contact re-addressed to the recipient between the exact and the shared-domain statements is a customer, never an ambiguous match', async () => {
+    const c = customer({ email: 'other@bradentonherald.com' });
+    const db = seed({ customers: [c] });
+    let statements = 0;
+    // the exact statement ran first and saw `other@`; the shared-domain statement (the second on customers.email) sees the change
+    db._beforeResolve = (table) => { if (table === 'customers' && ++statements === 2) db._tables.customers[0].email = 'editor@bradentonherald.com'; };
+    const r = await M.recipientReview(db, 'editor@bradentonherald.com');
+    expect(r).toMatchObject({ kind: 'customer', matched: [{ source: 'customers.email', id: c.id }] });
+    // the promoted hit is the same contact the exact statement would have found — hashed as the customer block it is
+    expect(r.lookup_hash).toBe((await M.recipientReview(seed({ customers: [customer({ id: c.id, email: 'editor@bradentonherald.com' })] }), 'editor@bradentonherald.com')).lookup_hash);
+  });
   test('a clear recipient', async () => {
     const r = await M.recipientReview(seed({ customers: [customer({ email: 'someone@else.com' })] }), 'editor@bradentonherald.com');
     expect(r).toMatchObject({ kind: 'clear', recipient: 'editor@bradentonherald.com', matched: [] });

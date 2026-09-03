@@ -471,11 +471,12 @@ const decideDomainHandler = (decision) => (req, res, next) => ownerQueueCall(res
   logger.info(`[backlink-owner-queue] ${actorOf(req)} ${decision}: ${r.domain} → ${r.agent_state} (${r.audited} row(s) audited)`);
   return r;
 });
-// POST /api/admin/backlink-agent/owner-queue/rows/:id/send — { reviewed_lookup_hash? }. The click IS the send approval
-// (§6.3 2c); requireAdmin like the board's send: it mails from the primary inbox.
+// POST /api/admin/backlink-agent/owner-queue/rows/:id/send — { draft_hash, reviewed_lookup_hash? }. The click IS the send
+// approval (§6.3 2c) of the draft the card DISPLAYED (draft_hash, §3.6b); requireAdmin like the board's send: it mails
+// from the primary inbox.
 router.post('/owner-queue/rows/:id/send', requireAdmin, (req, res, next) => ownerQueueCall(res, next, async () => {
-  const hash = (req.body || {}).reviewed_lookup_hash;
-  const r = await ownerQueue.sendRow(db, { authorityId: req.params.id, actor: actorOf(req), reviewedLookupHash: typeof hash === 'string' ? hash : null });
+  const { reviewed_lookup_hash: hash, draft_hash: draftHash } = req.body || {};
+  const r = await ownerQueue.sendRow(db, { authorityId: req.params.id, actor: actorOf(req), reviewedLookupHash: typeof hash === 'string' ? hash : null, draftHash: typeof draftHash === 'string' ? draftHash : null });
   logger.info(`[backlink-owner-queue] ${actorOf(req)} sent the pitch for ${r.prospectId} (${r.authority ? r.authority.level : 'no authority row'})`);
   return r;
 }));
@@ -736,7 +737,19 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     // §6.4 / §13 — what the owner sees before Approve & send: the draft review and the recipient match to acknowledge
     let byEmail = null; let reviewError = null;
     try { byEmail = await M.reviewByEmail(db, items.map((p) => p.outreach_to_email)); } catch (err) { reviewError = err.message; } // one batch for the whole list
+    // the click's bindings (§3.6b): the hash of the text THIS list displays (the click carries it back; the claim refuses
+    // a draft edited since) — and the send's legal context on an attested path (the open communication row's level, the
+    // agreement the owner reads before a send that attests to it), shown here as the Owner queue shows it
+    const pathIds = [...new Set(items.map((p) => p.path_id).filter(Boolean))];
+    const pathById = new Map((pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'legal_attestation', 'investigation') : []).map((p) => [p.id, p]));
+    const openRows = items.length ? await db('seo_link_placement_authorities').whereIn('prospect_id', items.map((p) => p.id)).where({ dimension: 'communication', instance_kind: '-' }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'level') : [];
+    const levelByProspect = new Map(openRows.map((r) => [r.prospect_id, r.level]));
     for (const p of items) {
+      p.draft_hash = M.draftHash(p);
+      p.authority_level = levelByProspect.get(p.id) || null;
+      const path = pathById.get(p.path_id) || null;
+      p.legal_attestation = Boolean(path && path.legal_attestation === true);
+      p.legal_terms_url = p.legal_attestation ? ownerQueue.legalTermsUrlOf(path) : null;
       p.draft_review = M.draftReview(p);
       p.recipient_review = byEmail ? byEmail.get(p.outreach_to_email) || null : { kind: 'error', recipient: p.outreach_to_email, matched: [], lookup_hash: null, error: reviewError };
     }
@@ -765,17 +778,20 @@ router.post('/prospects/:id/outreach/draft', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/backlink-agent/prospects/:id/outreach/send — approve + send.
-// The authenticated operator call IS the approval click (design §9). Sends only
-// when the lane gate is on; rate-limited + idempotent (see link-prospect-outreach).
-// requireAdmin: sending from the PRIMARY Waves inbox is admin-only — techs may draft
-// (compose) but not approve+send.
+// POST /api/admin/backlink-agent/prospects/:id/outreach/send — approve + send:
+// { draft_hash, reviewed_lookup_hash? }. The authenticated operator call IS the
+// approval click (design §9) of the draft the list DISPLAYED (draft_hash, §3.6b —
+// required: the claim refuses a draft edited since). Sends only when the lane gate
+// is on; rate-limited + idempotent (see link-prospect-outreach). requireAdmin:
+// sending from the PRIMARY Waves inbox is admin-only — techs may draft (compose)
+// but not approve+send.
 router.post('/prospects/:id/outreach/send', requireAdmin, async (req, res, next) => {
   try {
+    const { reviewed_lookup_hash: hash, draft_hash: draftHash } = req.body || {};
+    if (typeof draftHash !== 'string' || !draftHash) return res.status(400).json({ ok: false, code: 'draft_hash_required', error: 'the hash of the draft the list displayed is required — reload and send again' });
     const Outreach = require('../services/seo/link-prospect-outreach');
-    const hash = req.body?.reviewed_lookup_hash;
     const result = await Outreach.sendOutreach({
-      prospectId: req.params.id, approvedBy: actorOf(req) || 'admin', mode: 'owner', reviewedLookupHash: typeof hash === 'string' ? hash : null,
+      prospectId: req.params.id, approvedBy: actorOf(req) || 'admin', mode: 'owner', reviewedLookupHash: typeof hash === 'string' ? hash : null, draftHash,
     });
     if (!result.ok) {
       const status = ownerQueue.SEND_CODE_STATUS[result.code] || 400;

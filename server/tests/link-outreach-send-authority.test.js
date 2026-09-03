@@ -687,33 +687,56 @@ describe('the nightly auto-send (§6.4)', () => {
   });
 });
 
+describe('the click sends the text it displayed (§3.6b)', () => {
+  test('a draft hash that no longer matches the locked draft refuses inside the claim — nothing sent, no approval written; the current hash sends', async () => {
+    const s = scenario();
+    await nightly(s.db);
+    const shown = M.draftHash(placement(s.db));
+    Object.assign(placement(s.db), { outreach_body: `${CLEAN_BODY}\nP.S. edited in another tab after the card loaded.` });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', draftHash: shown })).toMatchObject({ ok: false, code: 'draft_changed', error: expect.stringMatching(/changed while you looked/) });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    expect(approvals(s.db)).toHaveLength(0);
+    expect(placement(s.db).outreach_status).toBe('drafted');
+    const current = M.draftHash(placement(s.db));
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', draftHash: current })).ok).toBe(true);
+    expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
+    expect(approvals(s.db)[0]).toMatchObject({ action: 'outreach_send', action_hash: current });
+  });
+});
+
 describe('the Owner queue Send action', () => {
   test('the card offers Send on a drafted OWNER_OUTREACH row; sendRow routes to the sender as the owner with the acknowledged hash', async () => {
     const s = scenario();
     await nightly(s.db);
     const { cards } = await Q.listOwnerQueue(s.db);
     const row = cards[0].rows.find((r) => r.dimension === 'communication');
-    expect(row).toMatchObject({ approvable: true, action: 'outreach_send', draft: { to: 'editor@example.org', subject: 'A resource for your readers', review: { clean: true }, recipient_review: { kind: 'clear' } } });
+    expect(row).toMatchObject({ approvable: true, action: 'outreach_send', draft: { to: 'editor@example.org', subject: 'A resource for your readers', hash: M.draftHash(placement(s.db)), review: { clean: true }, recipient_review: { kind: 'clear' } } });
     const send = jest.fn(async () => ({ ok: true, message_id: 'm', thread_id: 't', authority: { level: 'OWNER_OUTREACH', approval_id: 'a' } }));
-    const r = await Q.sendRow(s.db, { authorityId: row.id, actor: 'Adam', reviewedLookupHash: 'h', send });
-    expect(send).toHaveBeenCalledWith({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', reviewedLookupHash: 'h' });
+    // the click carries the hash of the draft the card displayed — without it the row is refused before the sender
+    await expect(Q.sendRow(s.db, { authorityId: row.id, actor: 'Adam', reviewedLookupHash: 'h', send })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/hash of the draft/) });
+    expect(send).not.toHaveBeenCalled();
+    const r = await Q.sendRow(s.db, { authorityId: row.id, actor: 'Adam', reviewedLookupHash: 'h', draftHash: row.draft.hash, send });
+    expect(send).toHaveBeenCalledWith({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', reviewedLookupHash: 'h', draftHash: row.draft.hash });
     expect(r).toMatchObject({ sent: true, prospectId: s.row.id, message_id: 'm' });
   });
   test('sendRow refuses: no actor, an unknown row, a non-communication row, a leased or released placement; a sender refusal maps to its status with the review attached', async () => {
     const s = scenario();
     await nightly(s.db);
     const row = commRow(s.db);
-    await expect(Q.sendRow(s.db, { authorityId: row.id, actor: null })).rejects.toMatchObject({ status: 400 });
-    await expect(Q.sendRow(s.db, { authorityId: uid(), actor: 'Adam' })).rejects.toMatchObject({ status: 404 });
+    const draftHash = M.draftHash(placement(s.db));
+    await expect(Q.sendRow(s.db, { authorityId: row.id, actor: null, draftHash })).rejects.toMatchObject({ status: 400 });
+    await expect(Q.sendRow(s.db, { authorityId: uid(), actor: 'Adam', draftHash })).rejects.toMatchObject({ status: 404 });
     s.db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: s.row.id, dimension: 'execution', instance_kind: '-', instance_key: '-:1', level: 'OWNER_FREE' });
-    await expect(Q.sendRow(s.db, { authorityId: s.db._tables.seo_link_placement_authorities[1].id, actor: 'Adam' })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/initial send/) });
+    await expect(Q.sendRow(s.db, { authorityId: s.db._tables.seo_link_placement_authorities[1].id, actor: 'Adam', draftHash })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/initial send/) });
     placement(s.db).claimed_at = NOW;
-    await expect(Q.sendRow(s.db, { authorityId: row.id, actor: 'Adam' })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/leased/) });
+    await expect(Q.sendRow(s.db, { authorityId: row.id, actor: 'Adam', draftHash })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/leased/) });
     placement(s.db).claimed_at = null;
     const refused = jest.fn(async () => ({ ok: false, code: 'recipient_review_required', error: 'review it', review: { kind: 'ambiguous', lookup_hash: 'h9' } }));
-    await expect(Q.sendRow(s.db, { authorityId: row.id, actor: 'Adam', send: refused })).rejects.toMatchObject({ status: 409, code: 'recipient_review_required', review: { lookup_hash: 'h9' }, message: 'review it' });
+    await expect(Q.sendRow(s.db, { authorityId: row.id, actor: 'Adam', draftHash, send: refused })).rejects.toMatchObject({ status: 409, code: 'recipient_review_required', review: { lookup_hash: 'h9' }, message: 'review it' });
     const capped = jest.fn(async () => ({ ok: false, code: 'rate_limited' }));
-    await expect(Q.sendRow(s.db, { authorityId: row.id, actor: 'Adam', send: capped })).rejects.toMatchObject({ status: 429 });
+    await expect(Q.sendRow(s.db, { authorityId: row.id, actor: 'Adam', draftHash, send: capped })).rejects.toMatchObject({ status: 429 });
+    const stale = jest.fn(async () => ({ ok: false, code: 'draft_changed', error: 'the draft changed while you looked at it' }));
+    await expect(Q.sendRow(s.db, { authorityId: row.id, actor: 'Adam', draftHash, send: stale })).rejects.toMatchObject({ status: 409, code: 'draft_changed' });
   });
   test('the card withholds Send for a customer recipient and for a row whose draft was cleared; Approve on a communication row is refused', async () => {
     const s = scenario({ contacts: { customers: [{ id: 'c1', email: 'editor@example.org' }] } });

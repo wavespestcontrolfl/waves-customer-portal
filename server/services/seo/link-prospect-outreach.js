@@ -279,7 +279,7 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
  * Only one send can win the CAS; on a Gmail failure we revert OUR claim to 'drafted'
  * for retry; we never mark sent on a failed send.
  */
-async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', reviewedLookupHash = null, now }) {
+async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', reviewedLookupHash = null, draftHash = null, now }) {
   if (!SEND_MODES.includes(mode)) return { ok: false, code: 'bad_mode' };
   // an automatic send exists only under the authority contract (§7): nothing has stamped AUTO_OUTREACH otherwise
   if (mode === 'auto' && !isEnabled('linkAuthority')) return { ok: false, code: 'not_authorized', error: 'GATE_LINK_AUTHORITY is off — no automatic send' };
@@ -304,7 +304,7 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
   // locked — every later mutation is gated on that token, which no other writer
   // touches (so unrelated edits to updated_at can't strand a finalize).
   const sendToken = randomUUID();
-  const claim = await db.transaction((trx) => claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLookupHash, approvedBy, sendToken, now }))
+  const claim = await db.transaction((trx) => claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLookupHash, draftHash, approvedBy, sendToken, now }))
     .catch((err) => { if (err instanceof Rollback) return err.result; throw err; });
   if (!claim.ok) return claim;
   const { row: claimed, authority } = claim;
@@ -373,12 +373,16 @@ async function finalizeSend({ prospectId, sendToken, claimed, authority, threadR
  *     Reject / Watch, an investigator re-rank and the bridge all take it before their row locks, so a domain
  *     decision commits before or after this claim, never inside it — the manual status edit orders domain →
  *     inbox → row, the order kept here); the recipient's INBOX (the §13 guard); then the prospect row;
- *   the row and path the send acts on (lockedSendRow) → the recipient review (reviewRecipient) → the cap
- *     (capRefusal) → the authority (sendAuthority) → the drafted→sending CAS.
+ *   the row and path the send acts on (lockedSendRow) → the draft the click DISPLAYED (`draftHash`, §3.6b: the
+ *     card's hash must equal the locked draft's — a draft edited under an open card, in another tab or by another
+ *     operator, is not the text this admin reviewed, and an owner's approval never binds text the owner never read;
+ *     every click entry — both routes and the queue's sendRow — requires the hash, the automatic send has no card) →
+ *     the recipient review (reviewRecipient) → the cap (capRefusal) → the authority (sendAuthority) → the
+ *     drafted→sending CAS.
  * Returns { ok, row, authority } or a refusal; a refusal after the authority step wrote an approval is THROWN
  * (Rollback) so nothing commits.
  */
-async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLookupHash, approvedBy, sendToken, now = null }) {
+async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLookupHash, draftHash = null, approvedBy, sendToken, now = null }) {
   await trx.raw('SELECT pg_advisory_xact_lock(?)', [OUTREACH_LOCK_KEY]);
   await lockProspectDomain(trx, prospect.target_domain);
   // the inbox guard, serialized on the recipient the pre-read draft names; the locked row must still name it below
@@ -393,6 +397,7 @@ async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLo
   const locked = await lockedSendRow(trx, { prospectId, prospect, mode, inbox });
   if (!locked.ok) return locked;
   const { current, onPath, draft } = locked;
+  if (draftHash != null && M.draftHash(draft) !== draftHash) return { ok: false, code: 'draft_changed', error: 'the draft changed while you looked at it — reload and read the current text before sending' };
   const reviewed = await reviewRecipient(trx, { prospectId, recipient: draft.outreach_to_email, mode, reviewedLookupHash });
   if (!reviewed.ok) return reviewed;
   const attemptAt = now || new Date();
