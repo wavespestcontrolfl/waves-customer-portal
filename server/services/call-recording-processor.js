@@ -13994,6 +13994,30 @@ const CallRecordingProcessor = {
                 entity_id: customer.id,
               });
 
+              // Open-estimate accept link (GATE_CALL_CONFIRMATION_ESTIMATE_LINK):
+              // a booking taken against a sent-but-unaccepted estimate lands
+              // unpriced on purpose (the per-visit price is fixed by the
+              // frequency the customer picks at accept), so the visit would
+              // otherwise complete unbilled or be accepted on the doorstep
+              // (owner case 2026-09-03). Carrying the link lets the customer
+              // accept, pick the plan, and add the card before the visit.
+              // The link resolver is the composer's (newest OPEN estimate,
+              // viewability + pricing-authority gates; no link rather than
+              // a stale one). Best-effort and primary recipient only —
+              // the estimate is the account holder's to accept, so the
+              // extra-contact fan-out below keeps the plain body.
+              if (smsBody && isEnabled('callConfirmationEstimateLink')) {
+                try {
+                  const { buildLatestEstimateLink } = require('./composer-customer-links');
+                  const est = await buildLatestEstimateLink([customerId], { purpose: 'call_booking_confirmation' });
+                  if (est?.url) {
+                    smsBody = `${String(smsBody).trimEnd()}\n\nYou can accept your estimate and choose your plan here: ${est.url}`;
+                  }
+                } catch (estErr) {
+                  logger.warn(`[call-proc] open-estimate link skipped for customer ${customerId}: ${estErr.message}`);
+                }
+              }
+
               // Content-level dedup: even if the concurrent-run guard
               // misses (e.g., admin reprocess inside the same minute),
               // don't fire an identical confirmation the customer just got.

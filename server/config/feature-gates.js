@@ -825,6 +825,21 @@ const gates = {
   // attaches to, so it FAILS CLOSED (explicit opt-in in every environment)
   // until the owner verifies the first customer-wide match end-to-end.
   estimateExistingApptCustomerWide: process.env.GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE === 'true',
+  // Estimate accept may adopt a visit that is already en_route/on_site —
+  // the on-site accept: the tech is at the door, the customer accepts the
+  // sent estimate from the phone, and the in-progress visit must become the
+  // plan's first (priced) application instead of minting a duplicate
+  // pending row. Same fail-closed opt-in as the customer-wide gate above
+  // (changes which visit an acceptance attaches to).
+  estimateAdoptInProgressVisit: process.env.GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT === 'true',
+  // Call-pipeline booking confirmation carries the customer's open estimate
+  // link: a phone booking against an unaccepted (sent/viewed) estimate is
+  // unpriced by design — the recurring rate is plan billing, and the
+  // per-visit price depends on the frequency the customer picks at accept.
+  // The link lets them accept, pick the plan, and add the card before the
+  // visit instead of on the doorstep. Customer-facing copy → dark until
+  // the owner approves the wording; `false`/unset is the kill.
+  callConfirmationEstimateLink: process.env.GATE_CALL_CONFIRMATION_ESTIMATE_LINK === 'true',
 
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,

@@ -158,6 +158,26 @@ describe('buildLatestEstimateLink', () => {
     expect(b.offset).toHaveBeenCalledWith(15);
   });
 
+  test('short-link purpose defaults to the composer insert and a caller can label its own send', async () => {
+    const { shortenOrPassthrough } = require('../services/short-url');
+    const rows = [{ id: 'e-ok', token: 'tk-ok', customer_id: 'c1', status: 'sent', service_type: 'Pest' }];
+    mockBuilders = { estimates: chainBuilder({ rows }) };
+    isEstimateCustomerViewable.mockReturnValue(true);
+
+    await buildLatestEstimateLink(['c1']);
+    expect(shortenOrPassthrough).toHaveBeenLastCalledWith(
+      expect.stringContaining('/estimate/tk-ok'),
+      expect.objectContaining({ purpose: 'composer_insert' }),
+    );
+
+    mockBuilders = { estimates: chainBuilder({ rows }) };
+    await buildLatestEstimateLink(['c1'], { purpose: 'call_booking_confirmation' });
+    expect(shortenOrPassthrough).toHaveBeenLastCalledWith(
+      expect.stringContaining('/estimate/tk-ok'),
+      expect.objectContaining({ purpose: 'call_booking_confirmation' }),
+    );
+  });
+
   test('no viewable open estimate answers a plain reason', async () => {
     mockBuilders = { estimates: chainBuilder({ rows: [] }) };
     const r = await buildLatestEstimateLink(['c1']);

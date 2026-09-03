@@ -1095,6 +1095,18 @@ function makeAdoptionPropertyScope(conn, estimate) {
   };
 }
 
+// Statuses an estimate accept may adopt as the plan's first visit. An
+// in-progress row (en_route/on_site) is admitted only behind the gate: the
+// on-site accept — the customer accepting from the phone while the tech is
+// at the property — otherwise fell through to the slot picker and minted a
+// duplicate visit while the real one completed unpriced (owner case
+// 2026-09-03). Read at call time so the flag is a live kill.
+function adoptableAppointmentStatuses() {
+  return featureGates.isEnabled('estimateAdoptInProgressVisit')
+    ? ['pending', 'confirmed', 'en_route', 'on_site']
+    : ['pending', 'confirmed'];
+}
+
 async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts = {}) {
   const conn = opts.database || db;
   const requestedId = opts.appointmentId ? String(opts.appointmentId) : '';
@@ -1107,7 +1119,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // `services` for catalog identity (codex #3228 r5), and unqualified `id`
   // in ORDER BY would be ambiguous on that query.
   const baseQuery = () => conn('scheduled_services')
-    .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+    .whereIn('scheduled_services.status', adoptableAppointmentStatuses())
     .where('scheduled_services.scheduled_date', '>=', today)
     .where((builder) => {
       if (estimate.customer_id) {
@@ -11123,7 +11135,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
           const updatedCount = await trx('scheduled_services')
             .where({ id: existingAppointmentRow.id })
-            .whereIn('status', ['pending', 'confirmed'])
+            // Same status set the preflight offered (the gate must not
+            // admit a row there and 409 it here).
+            .whereIn('status', adoptableAppointmentStatuses())
             .where('scheduled_date', '>=', etDateString())
             .where((builder) => {
               builder.whereNull('customer_id').orWhere('customer_id', customerId);

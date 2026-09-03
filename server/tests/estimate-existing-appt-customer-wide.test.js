@@ -156,6 +156,33 @@ describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () 
     );
   });
 
+  it('in-progress gate OFF: only pending/confirmed rows are adoptable (linked and customer-wide)', async () => {
+    featureGates.isEnabled.mockImplementation((k) => k === 'estimateExistingApptCustomerWide');
+    const conn = makeFakeConn([null, [CW_ROW]]);
+    await findLinkedUpcomingAppointment(ESTIMATE, null, { database: conn });
+    for (const rec of conn.queries) {
+      expect(clauseArgs(rec, 'whereIn')).toEqual(
+        expect.arrayContaining([['scheduled_services.status', ['pending', 'confirmed']]])
+      );
+    }
+  });
+
+  it('in-progress gate ON: en_route/on_site rows become adoptable — the on-site accept adopts the visit in progress', async () => {
+    featureGates.isEnabled.mockImplementation((k) => (
+      k === 'estimateExistingApptCustomerWide' || k === 'estimateAdoptInProgressVisit'
+    ));
+    const onSiteRow = { ...CW_ROW, id: 'ss-on-site', status: 'on_site' };
+    const conn = makeFakeConn([null, [onSiteRow]]);
+    const row = await findLinkedUpcomingAppointment(ESTIMATE, null, { database: conn });
+    expect(row).toEqual(onSiteRow);
+    expect(conn.queries).toHaveLength(2);
+    for (const rec of conn.queries) {
+      expect(clauseArgs(rec, 'whereIn')).toEqual(
+        expect.arrayContaining([['scheduled_services.status', ['pending', 'confirmed', 'en_route', 'on_site']]])
+      );
+    }
+  });
+
   it('gate ON but the estimate has no customer → fallback never runs', async () => {
     featureGates.isEnabled.mockImplementation((k) => k === 'estimateExistingApptCustomerWide');
     const conn = makeFakeConn([null, CW_ROW]);

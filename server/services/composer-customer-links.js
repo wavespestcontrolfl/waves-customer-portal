@@ -173,7 +173,7 @@ async function buildPayBalanceLink(customerIds) {
   };
 }
 
-async function buildLatestEstimateLink(customerIds) {
+async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert' } = {}) {
   const { isEstimateCustomerViewable } = require('../routes/estimate-public');
   // Viewability (expiry, linkage-invalidation) is a predicate the query can't
   // express, and a filter applied AFTER a limit lets newer hidden rows mask an
@@ -216,7 +216,9 @@ async function buildLatestEstimateLink(customerIds) {
     entityId: estimate.id,
     customerId: estimate.customer_id,
     channel: 'sms',
-    purpose: 'composer_insert',
+    // Click-tracking label only (short-url row.purpose): the composer
+    // insert by default; the call-booking confirmation passes its own.
+    purpose,
   });
   return {
     url,
