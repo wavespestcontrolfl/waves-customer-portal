@@ -195,18 +195,9 @@ const FLEA_EXTERIOR_SOURCE_OPTIONS = [
   { value: "MEASURED_TURF", label: "Measured turf" },
   { value: "MANUAL_OVERRIDE", label: "Manual override" },
 ];
-const FLEA_OFFER_OPTIONS = [
-  {
-    value: "flea_elimination_two_visit",
-    label: "Flea Elimination Package",
-    detail: "2 visits, conditional retreat guarantee",
-  },
-  {
-    value: "flea_knockdown_single",
-    label: "Flea Knockdown Visit",
-    detail: "1 visit, no retreat warranty",
-  },
-];
+// Flea is sold ONLY as the two-visit Flea Elimination Package (owner ruling
+// 2026-09-03: "flea should be two visits"); the single-visit knockdown is no
+// longer selectable here. fleaOfferKey stays pinned to the package.
 const FLEA_COMPLEXITY_OPTIONS = [
   { value: "light", label: "Light", detail: "$0" },
   { value: "moderate", label: "Moderate", detail: "+$35 initial / +$15 follow-up" },
@@ -4615,7 +4606,7 @@ export default function EstimateToolViewV2({
         treeShrubTier: form.svcTs ? form.tsTier || "standard" : undefined,
         treeShrubAccess: form.svcTs ? form.tsAccess || "easy" : undefined,
         mosquitoPressure: formIsCommercial ? form.mosquitoPressure || "" : "",
-        fleaOfferKey: form.fleaOfferKey || "flea_elimination_two_visit",
+        fleaOfferKey: "flea_elimination_two_visit",
         fleaComplexity: form.fleaComplexity || "light",
         fleaExteriorSourceSuspected: !!form.fleaExteriorSourceSuspected,
         fleaExterior: !!form.svcFleaExterior,
@@ -7839,29 +7830,6 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcFlea" label="Flea Control Service" />{" "}
               {form.svcFlea && (
                 <div className="ml-7 mb-3 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
-                    {FLEA_OFFER_OPTIONS.map((option) => {
-                      const active = (form.fleaOfferKey || "flea_elimination_two_visit") === option.value;
-                      return (
-                        <button
-                          key={option.value}
-                          type="button"
-                          onClick={() => set("fleaOfferKey", option.value)}
-                          className={cn(
-                            "text-left p-3 rounded-sm border-hairline u-focus-ring",
-                            active
-                              ? "bg-zinc-900 border-zinc-900 text-white"
-                              : "bg-white border-zinc-300 text-zinc-800 hover:bg-zinc-100",
-                          )}
-                        >
-                          <div className="text-13 font-medium">{option.label}</div>
-                          <div className={cn("mt-1 text-11 leading-snug", active ? "text-zinc-200" : "text-ink-secondary")}>
-                            {option.detail}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
                   <div className="mb-3">
                     <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
                       Infestation / prep complexity
