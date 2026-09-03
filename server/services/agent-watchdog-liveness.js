@@ -8,7 +8,8 @@
  * day when the answer is never / too long ago — otherwise a dead Hermes cron
  * would look exactly like a quiet, healthy portal.
  *
- * Dark behind GATE_HERMES_WATCHDOG (call-time read). Kill = unset.
+ * Dark behind GATE_HERMES_WATCHDOG (call-time read) AND the shared
+ * GATE_HERMES_WORKER the endpoint's auth requires. Kill = unset either.
  * Scheduled in scheduler.js every 23 min — coprime with the watchdog's 10-min
  * cadence so the sample walks through every phase offset (the call-stall
  * watchdog's '*\/7' reasoning).
@@ -17,7 +18,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 
 const DEFAULT_STALE_MINUTES = 45;
@@ -36,7 +37,10 @@ async function lastObservedAt() {
 }
 
 async function runWatchdogLivenessCheck({ now = new Date() } = {}) {
-  if (!gateEnvValue('GATE_HERMES_WATCHDOG')) return { skipped: true };
+  // The endpoint sits behind BOTH gates (linkWorkerAuth answers 403 while the
+  // shared worker integration is off, so no observed row can land); ringing
+  // "watchdog silent" then would page for a deliberate state.
+  if (!gateEnvValue('GATE_HERMES_WATCHDOG') || !isEnabled('hermesWorker')) return { skipped: true };
   const last = await lastObservedAt();
   const ageMinutes = last ? Math.round((now.getTime() - last.getTime()) / 60000) : null;
   const limit = staleMinutes();

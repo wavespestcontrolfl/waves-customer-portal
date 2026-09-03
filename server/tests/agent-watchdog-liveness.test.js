@@ -14,10 +14,10 @@ const mockDb = jest.fn(() => {
 });
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => true), isEnabled: jest.fn(() => true) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
 
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, isEnabled } = require('../config/feature-gates');
 const NotificationService = require('../services/notification-service');
 const { runWatchdogLivenessCheck, DEFAULT_STALE_MINUTES } = require('../services/agent-watchdog-liveness');
 
@@ -26,6 +26,7 @@ const NOW = new Date('2026-09-03T18:00:00.000Z'); // 14:00 ET
 beforeEach(() => {
   jest.clearAllMocks();
   gateEnvValue.mockReturnValue(true);
+  isEnabled.mockReturnValue(true);
   delete process.env.HERMES_WATCHDOG_STALE_MINUTES;
   lastRow = null;
 });
@@ -34,6 +35,15 @@ test('gate off → skipped, no DB read, no bell', async () => {
   gateEnvValue.mockReturnValue(false);
   const r = await runWatchdogLivenessCheck({ now: NOW });
   expect(r).toEqual({ skipped: true });
+  expect(mockDb).not.toHaveBeenCalled();
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+});
+
+test('shared worker gate off → skipped (polls get a deliberate 403, so silence is not news)', async () => {
+  isEnabled.mockReturnValue(false);
+  const r = await runWatchdogLivenessCheck({ now: NOW });
+  expect(r).toEqual({ skipped: true });
+  expect(isEnabled).toHaveBeenCalledWith('hermesWorker');
   expect(mockDb).not.toHaveBeenCalled();
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
 });
