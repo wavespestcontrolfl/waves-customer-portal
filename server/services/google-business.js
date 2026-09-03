@@ -5,6 +5,7 @@ function getGoogle() {
   return _googleapis;
 }
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
@@ -1665,7 +1666,15 @@ class GoogleBusinessService {
       let emailed = false;
       try {
         const email = require('./email');
-        const sent = await email.send({ to: 'contact@wavespestcontrol.com', subject, heading: 'Review sync health', body });
+        // The 'review' bell above stays the claim; in-app mode adds the
+        // ops_digest row the Activity feed lists (email cadence).
+        const sent = await deliverOpsDigest({
+          key: 'gbp-sync-health',
+          subject,
+          text: body,
+          link: '/admin/reviews',
+          sendEmail: () => email.send({ to: 'contact@wavespestcontrol.com', subject, heading: 'Review sync health', body }),
+        });
         emailed = !!sent?.ok;
       } catch { /* the bell already carries the full body */ }
       if (!emailed) {

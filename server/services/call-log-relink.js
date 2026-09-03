@@ -56,6 +56,11 @@ const REHOME_SWEEP_LIMIT = 200;
 // Verbatim sentinel from call-recording-processor.js — marks a rejected
 // empty-voicemail row whose customer link was deliberately cleared.
 const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
+// An operator's explicit UNLINK leaves call_log.customer_id NULL on purpose;
+// the sweep must never write the phone match back over that decision (Codex
+// #3764 r1 P1) — the predicate is carried by the scan AND the write, like
+// the sentinel.
+const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../utils/call-link-override');
 
 function maskPhone(value) {
   const digits = String(value || '').replace(/\D/g, '');
@@ -132,6 +137,7 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
       // Rejected empty voicemails were DELIBERATELY unlinked by the
       // processor; sync must never re-attach them.
       .whereRaw('transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
+      .whereRaw(NOT_EXPLICITLY_UNLINKED_SQL)
       .orderBy('id', 'asc')
       .limit(PAGE_SIZE)
       .select('id', 'twilio_call_sid', 'direction', 'from_phone', 'to_phone', 'created_at');
@@ -189,6 +195,7 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
       .whereIn('id', callIds)
       .whereNull('customer_id')
       .whereRaw('transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
+      .whereRaw(NOT_EXPLICITLY_UNLINKED_SQL)
       .update({ customer_id: customer.id, updated_at: new Date() });
     if (updated > 0) {
       linked += updated;

@@ -216,6 +216,11 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
       providerErrorCode: failure.twilioCode,
       providerHttpStatus: failure.httpStatus,
       retryAfterMs: failure.retryAfterMs,
+      // TwilioService.sendSMS throws only AFTER scheduling its own
+      // twilio_failure bell for the API exception — callers that own a
+      // failure alert of their own must not raise a second one for the
+      // same provider event.
+      providerAlerted: true,
     };
   }
 }

@@ -3,6 +3,7 @@ const logger = require('./logger');
 const trackTransitions = require('./track-transitions');
 const { transitionJobStatus } = require('./job-status');
 const { etDateString } = require('../utils/datetime-et');
+const { randomUUID } = require('crypto');
 const { gateEnvValue } = require('../config/feature-gates');
 
 // customers.churn_reason is varchar(30) — keep this at/under 30 chars.
@@ -16,6 +17,7 @@ const PORTAL_CANCEL_REASON_PREFIX = 'Portal cancellation request';
 // POST /api/requests gate, the /api/schedule payload, and this sweep can
 // never drift; re-exported below for existing consumers.
 const { CANCELLABLE_STATUSES, LIVE_TRACK_STATES } = require('./cancellation-eligibility');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 // Card-hold outcomes that leave money unresolved: the fee path never throws
 // into the host flow — a decline / ambiguous Stripe outcome / post-charge
 // write failure comes back as a reason code with the hold parked for review.
@@ -78,67 +80,171 @@ async function rentedTermiteStationState(customerId) {
   return { rented, flaggedRental };
 }
 
-async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null } = {}) {
+async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null, termId = null, episodeKey = null } = {}) {
   const { rented, flaggedRental } = await rentedTermiteStationState(customerId);
   if (!rented.length && !flaggedRental) return { raised: false, reason: 'no_rented_stations' };
   const NotificationService = require('./notification-service');
   const count = rented.length;
-  // An ACCELERATED program end (end_at_term later switched to
-  // end_now_refund) SUPERSEDES the earlier dated task — staff must never
-  // hold a wait-until-term-end instruction and a pull-now instruction at
-  // once. Stamp the dated task read and say so in the new body.
-  let supersededDated = false;
-  if (!retrieveAfter) {
+  // Keyed on (PREPAID TERM, CHURN EPISODE, class) when a term governs the
+  // cancel: the admin duplicate latch only echoes a prior run for 24h, so a
+  // repeat end-of-coverage commit on the same decided term after that opens
+  // a NEW request — a request-keyed task would hand staff a second dated
+  // instruction for the same stations (same rule as the refund task,
+  // prepay_refund:term:<id>). The episode (customers.churn_episode_id,
+  // carried on the request) keeps a WON-BACK customer who later cancels the
+  // same still-current term from being silenced by the first episode's row.
+  // Dated and immediate classes stay distinct (an end_at_term →
+  // end_now_refund transition must still raise "pull now"), and the dated
+  // class carries its boundary (a corrected coverage end is a new
+  // instruction). No term / no episode (portal path, non-prepaid admin
+  // cancel, unanchored churn) keeps the per-EVENT key: retries of the same
+  // request stay idempotent, while a restored customer who later cancels
+  // another rental program gets a fresh task.
+  const termKeyed = !!(termId && episodeKey);
+  const dedupeKey = termKeyed
+    ? `termite_station_retrieval:term:${termId}:${episodeKey}:${retrieveAfter ? `dated:${retrieveAfter}` : 'immediate'}`
+    : `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`;
+  let raised = null;
+  // Staff hold at most ONE open retrieval instruction per account. Before
+  // this raise, every earlier UNREAD retrieval row for the customer is
+  // stamped read, whatever its class or date: an ACCELERATED program end
+  // (end_at_term later switched to end_now_refund) must not leave a
+  // wait-until-term-end instruction beside a pull-now one; a CORRECTED
+  // coverage end must not leave two retrieval dates; and a prior churn
+  // episode's dated row (cancel at term end, win-back before the date,
+  // cancel the same still-current term again) or a repeat end-of-coverage
+  // commit that opened a new request must not leave two identical
+  // instructions. Supersession follows REQUEST CHRONOLOGY, never call
+  // order, and is judged over EVERY retrieval row of the account (read or
+  // not): the raise for the NEWEST request wins. Any row raised by a newer
+  // request — open, or already acted on — means this raise is stale (a
+  // lost-task repair of an older acceptance, or a retry after a later
+  // correction): it retires nothing and inserts nothing. Otherwise every
+  // other OPEN row is retired, and this event's own row — read because a
+  // later instruction retired it, or acted on before a correction was
+  // reverted — is reopened so the winning instruction is the open one
+  // (notifyAdmin dedupes against it without reopening). Read rows are
+  // otherwise never touched: an instruction staff already acted on is
+  // history, not a duplicate. Rows without a request (portal no-request
+  // raises, legacy rows) count as oldest.
+  // Retire + raise are ONE transaction under an account-scoped advisory
+  // lock (the same `admin:<key>` namespace notifyAdmin's per-key dedupe
+  // lock uses): two concurrent raises for different requests would
+  // otherwise each see no stale row, take only their distinct per-key
+  // locks, and both insert; and a retire committed apart from its
+  // replacement could leave the old instruction unread beside the new one
+  // (or neither standing). notifyAdmin runs on this trx, so both land or
+  // neither does, and the second raiser's probe sees the first's row.
+  const requestKeyPrefix = `termite_station_retrieval:${customerId}:`;
+  const parseMeta = (row) => {
+    let meta = row.metadata;
+    if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+    return meta || {};
+  };
+  // The request a row was raised for: stamped in metadata since the term
+  // key shipped; earlier rows carry it only inside their request key.
+  const rowRequestId = (meta) => {
+    if (meta.requestId) return String(meta.requestId);
+    const key = String(meta.dedupeKey || '');
+    if (!key.startsWith(requestKeyPrefix)) return null;
+    const suffix = key.slice(requestKeyPrefix.length);
+    return suffix && suffix !== 'no-request' ? suffix : null;
+  };
+  let superseded = null;
+  let yieldedTo = null;
+  await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:termite_station_retrieval:${customerId}`]);
     try {
-      const stamped = await db('notifications')
+      const history = await trx('notifications')
         .where({ recipient_type: 'admin' })
-        .whereNull('read_at')
         .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
         .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
-        .whereRaw("metadata->>'retrieveAfter' IS NOT NULL")
-        .update({ read_at: new Date() });
-      supersededDated = Number(stamped) > 0;
+        .select('id', 'read_at', 'metadata');
+      const others = (history || []).map((row) => ({ row, meta: parseMeta(row) })).filter(({ meta }) => String(meta.dedupeKey || '') !== dedupeKey);
+      const requestIds = [...new Set([requestId, ...others.map(({ meta }) => rowRequestId(meta))].filter(Boolean).map(String))];
+      const openedAt = new Map();
+      if (requestIds.length) {
+        const rows = await trx('service_requests').whereIn('id', requestIds).select('id', 'created_at');
+        for (const r of rows || []) openedAt.set(String(r.id), new Date(r.created_at).getTime() || 0);
+      }
+      const ownOpenedAt = requestId ? (openedAt.get(String(requestId)) || 0) : 0;
+      const newer = others.find(({ meta }) => {
+        const rid = rowRequestId(meta);
+        return !!rid && (openedAt.get(rid) || 0) > ownOpenedAt;
+      });
+      if (newer) { yieldedTo = rowRequestId(newer.meta); return; }
+      // The body's supersession note is derived from the account's whole
+      // task HISTORY, not from what this call retired, so a routine retry
+      // of the same event renders the identical body (refreshOnDedupe
+      // compares content — a transient note would reopen an acted-on task).
+      if (others.length) superseded = { dated: others.some(({ meta }) => !!meta.retrieveAfter) };
+      const retire = others.filter(({ row }) => row.read_at == null);
+      if (retire.length) {
+        await trx('notifications').whereIn('id', retire.map(({ row }) => row.id)).update({ read_at: new Date() });
+        const ownRead = (history || []).find((row) => row.read_at != null && String(parseMeta(row).dedupeKey || '') === dedupeKey);
+        if (ownRead) await trx('notifications').where({ id: ownRead.id }).update({ read_at: null });
+      }
     } catch (supersedeErr) {
-      // NOT swallowed: raising the immediate task while the dated one may
-      // still stand would leave staff two contradictory instructions with
-      // no review error naming the stale one. Throwing lands as
+      // NOT swallowed: raising the new task while a stale one may still
+      // stand would leave staff two contradictory instructions with no
+      // review error naming the stale one. Throwing lands as
       // termite_retrieval_task on the run, and the latch's lost-task repair
-      // retries this whole raise (supersede + task) (deferred P2 from
-      // #3666 r32).
-      logger.error(`[cancellation-processor] dated-retrieval supersede failed for ${customerId}: ${supersedeErr.message}`);
-      throw new Error(`dated retrieval task could not be superseded: ${supersedeErr.message}`);
+      // retries this whole raise (retire + task) (deferred P2 from #3666
+      // r32).
+      logger.error(`[cancellation-processor] retrieval-task retire failed for ${customerId}: ${supersedeErr.message}`);
+      throw new Error(`earlier retrieval task could not be superseded: ${supersedeErr.message}`);
     }
+    // The body names what the new instruction replaces: the dated → immediate
+    // transition keeps its specific wording; every other retirement reads as
+    // a plain "act on this one".
+    const supersedeNote = !superseded
+      ? ''
+      : (!retrieveAfter && superseded.dated
+        ? ' This supersedes the earlier dated retrieval task — the program now ends immediately.'
+        : ' This supersedes an earlier station-retrieval task for this account — act on this one.');
+    // retrieveAfter (C3 end_of_coverage): paid termite visits stay on the
+    // calendar through the coverage boundary — pulling the stations now would
+    // make those visits undeliverable, so the task is DATED, never "pull now".
+    const timing = (retrieveAfter
+      ? ` Paid coverage runs through ${retrieveAfter} — schedule the retrieval AFTER that date, not before; covered termite visits still deliver until then.`
+      : ' Schedule the retrieval visit.') + supersedeNote;
+    raised = await NotificationService.notifyAdmin(
+      'service',
+      retrieveAfter
+        ? `Termite stations to retrieve after paid coverage ends ${retrieveAfter}`
+        : 'Termite stations to retrieve after cancellation',
+      (count
+        ? `${count} Waves-owned bait station${count === 1 ? '' : 's'} on this property need to be pulled.`
+        : 'This account is flagged as a bait-station rental — confirm the stations on site.')
+        + timing
+        + ' No charge to the customer.',
+      {
+        icon: '🪵',
+        // Forces the bell past GATE_ADMIN_BELL_POLICY (bellAllowed honours
+        // options.bell first): this is an office TASK, not an FYI, and must
+        // never be silenced by the category allowlist.
+        bell: true,
+        link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+        dedupeKey,
+        // A same-key re-raise whose INSTRUCTION changed (a corrected coverage
+        // date on the same request) rewrites the standing row and surfaces
+        // it unread again; identical content stays a plain dedupe.
+        refreshOnDedupe: true,
+        metadata: {
+          kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental,
+          ...(requestId ? { requestId } : {}),
+          ...(termKeyed ? { termId, churnEpisode: episodeKey } : {}),
+          ...(retrieveAfter ? { retrieveAfter } : {}),
+        },
+        trx,
+      }
+    );
+  });
+  if (yieldedTo) {
+    logger.info(`[cancellation-processor] retrieval task for request ${requestId || 'no-request'} yields to the open instruction of newer request ${yieldedTo} (${customerId})`);
+    return { raised: true, stationCount: count, deduped: true, supersededByNewer: yieldedTo };
   }
-  // retrieveAfter (C3 end_of_coverage): paid termite visits stay on the
-  // calendar through the coverage boundary — pulling the stations now would
-  // make those visits undeliverable, so the task is DATED, never "pull now".
-  const timing = retrieveAfter
-    ? ` Paid coverage runs through ${retrieveAfter} — schedule the retrieval AFTER that date, not before; covered termite visits still deliver until then.`
-    : ` Schedule the retrieval visit.${supersededDated ? ' This supersedes the earlier dated retrieval task — the program now ends immediately.' : ''}`;
-  const result = await NotificationService.notifyAdmin(
-    'service',
-    retrieveAfter
-      ? `Termite stations to retrieve after paid coverage ends ${retrieveAfter}`
-      : 'Termite stations to retrieve after cancellation',
-    (count
-      ? `${count} Waves-owned bait station${count === 1 ? '' : 's'} on this property need to be pulled.`
-      : 'This account is flagged as a bait-station rental — confirm the stations on site.')
-      + timing
-      + ' No charge to the customer.',
-    {
-      icon: '🪵',
-      // Forces the bell past GATE_ADMIN_BELL_POLICY (bellAllowed honours
-      // options.bell first): this is an office TASK, not an FYI, and must
-      // never be silenced by the category allowlist.
-      bell: true,
-      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
-      // Keyed per cancellation EVENT (request), not per customer: retries of
-      // the same request stay idempotent, while a restored customer who later
-      // cancels another rental program gets a fresh task.
-      dedupeKey: `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`,
-      metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental, ...(retrieveAfter ? { retrieveAfter } : {}) },
-    }
-  );
+  const result = raised;
   // notifyAdmin resolves null (never throws) when the deduped insert fails —
   // surface that as an error so the cancel is not reported fully processed
   // while Waves-owned stations have no retrieval task.
@@ -227,7 +333,11 @@ function tierDiscountRate(tier) {
  * label moves. Fails closed when a monthly lane's ledger cannot attribute
  * the scoped families (unattributed-only scalar).
  */
-async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
+// pinnedScope (wind-down boundary re-plan): the families this run ALREADY
+// swept own no live rows any more, so their ownership is taken as given and
+// only the SURVIVING side (remaining families, their components, their
+// per-application rows) is re-derived from live state.
+async function planScopedWindDown(customerId, scopedFamilies, dbh = db, { pinnedScope = null } = {}) {
   const { inferTierFromServiceCount, uniqueServiceFamilies, detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
   const { loadComponents } = require('./plan-rate-ledger');
   const customer = await dbh('customers').where({ id: customerId })
@@ -251,7 +361,18 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
     for (const f of uniqueServiceFamilies(detectWaveGuardPlanKeys(row))) if (!owned.includes(f)) owned.push(f);
   }
-  const inScope = scopedFamilies.filter((f) => owned.includes(f));
+  const pinned = Array.isArray(pinnedScope) && pinnedScope.length ? pinnedScope : null;
+  if (pinned) {
+    // A live row still in a swept family = a visit booked after the sweep
+    // (under the writer lock this is the only way one exists). The wind-down
+    // must not demote the account and report the family cancelled while
+    // that visit stays dispatchable — refuse; the run parks and a fresh
+    // preview re-sweeps it.
+    const stillLive = pinned.filter((f) => owned.includes(f));
+    if (stillLive.length) return { ok: false, error: 'scope_still_live', families: stillLive };
+    for (const f of pinned) owned.push(f);
+  }
+  const inScope = pinned ? [...pinned] : scopedFamilies.filter((f) => owned.includes(f));
   if (!inScope.length) return { ok: false, error: 'scope_not_owned' };
   const remaining = owned.filter((f) => !inScope.includes(f));
   if (!remaining.length) return { ok: false, error: 'scope_is_whole_account' };
@@ -323,7 +444,7 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
     // GH r26 P1). A row invoiced between preview and commit drops out of the
     // recomputed plan and trips scoped_pricing_changed, like any drift.
     if (perAppRows.length) {
-      const invoiced = await db('invoices')
+      const invoiced = await dbh('invoices')
         .whereIn('scheduled_service_id', perAppRows.map((r) => r.id))
         .whereNot({ status: 'void' })
         .select('scheduled_service_id');
@@ -335,11 +456,88 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
     ok: true, owned, inScope, remaining, tierBefore, tierAfter, discountBefore, discountAfter,
     monthlyLane, perApplicationLane, remainingRates, perAppRows,
     scalarBefore: customer.monthly_rate == null ? null : Number(customer.monthly_rate), scalarAfter,
+    billingMode: customer.billing_mode || null,
   };
 }
 
-async function applyScopedWindDown(customerId, plan, { requestId, actorLabel = 'Portal', lateFeeWaived = false } = {}) {
+// Canonical string of a scoped plan's money-bearing facts — the same shape
+// the admin commit builds from the approved preview (approvedScopedPricing)
+// and reasserts at the wind-down boundary.
+// tierbefore + mode: a tier or billing-mode edit that commits during the
+// sweep (both take the writer lock ahead of the boundary re-plan) changes
+// the plan's INPUTS even when every priced output stays the same (e.g. a
+// per-application account whose surviving visits are all invoiced) — it
+// must be re-approved, never silently overwritten or applied on the wrong
+// lane's assets.
+function scopedPricingFingerprint(plan) {
+  return [
+    `tier=${plan.tierAfter ?? ''}`,
+    `monthly=${plan.scalarAfter ?? ''}`,
+    `rates=${(plan.remainingRates || []).map((r) => `${r.family}:${r.before}:${r.after}`).sort().join(',')}`,
+    `perapp=${(plan.perAppRows || []).map((p) => `${p.id}:${p.before}:${p.after}`).sort().join(',')}`,
+    `tierbefore=${plan.tierBefore ?? ''}`,
+    `mode=${plan.billingMode ?? ''}`,
+  ].join('|');
+}
+
+class ScopedPricingChangedError extends Error {
+  constructor(message) { super(message); this.code = 'scoped_pricing_changed'; }
+}
+
+// Apply the scoped wind-down (tier demote + surviving-family reprice).
+//
+// The whole thing — re-plan, approval compare, reprice, demote — runs in
+// ONE transaction that FIRST takes the per-customer writer lock (rung 6 of
+// scheduling/occupancy.js's ORDERING CONTRACT, utils/customer-comms-lock):
+// every writer that inserts a scheduled_services row or rewrites the plan
+// ledger / tier holds the same key, so a surviving-family visit or component
+// can land only BEFORE the re-plan (then it is priced here, and a mismatch
+// with the approved facts refuses the run) or AFTER the commit (then its
+// writer prices it off the demoted tier). No silent window (#3666 r34 P2;
+// the drift-guard / phantom-check attempts that preceded this were closable
+// only from the writers' side).
+//
+// `scopedFamilies` present = re-plan from live rows at the boundary with the
+// entry plan's swept scope pinned; `approvedScopedPricing` present = the
+// fresh plan must serialize to exactly it or ScopedPricingChangedError is
+// thrown (the run parks scoped_pricing_changed and a fresh preview
+// re-approves the live numbers). Neither = apply `plan` as given under the
+// lock (test harnesses).
+async function applyScopedWindDown(customerId, entryPlan, {
+  requestId, actorLabel = 'Portal', lateFeeWaived = false, scopedFamilies = null, approvedScopedPricing = null,
+} = {}) {
+  let plan = entryPlan;
   await db.transaction(async (trx) => {
+    await lockCustomerComms(trx, customerId);
+    // The customers ROW too: a billing-mode-only admin edit takes no writer
+    // lock (it fences tier/rate edits only), so the re-plan below must read
+    // a row no such edit can change until this commits — and one that
+    // already committed is what it reads.
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    if (Array.isArray(scopedFamilies) && scopedFamilies.length) {
+      // A read failure propagates as scoped_wind_down (retrying a fresh
+      // preview cannot repair a connection/schema fault); only successfully
+      // read live state that no longer matches is scoped_pricing_changed.
+      const fresh = await planScopedWindDown(customerId, scopedFamilies, trx, { pinnedScope: entryPlan.inScope });
+      if (!fresh.ok) {
+        throw new ScopedPricingChangedError(`scoped wind-down could not be re-planned at the boundary (${fresh.error})`);
+      }
+      if (approvedScopedPricing != null) {
+        const live = scopedPricingFingerprint(fresh);
+        if (live !== approvedScopedPricing) {
+          throw new ScopedPricingChangedError(`scoped pricing drifted since approval (approved ${approvedScopedPricing} vs live ${live})`);
+        }
+      }
+      plan = fresh;
+    }
+    // A hold on a swept family created after the processor's unlocked
+    // invalidation pass (startHold takes this same lock) would survive the
+    // cancel and later text a false restart — retire it here, under the
+    // lock, before the ledger/tier writes.
+    await trx('plan_holds')
+      .where({ customer_id: customerId, status: 'active' })
+      .whereIn('family_key', plan.inScope || [])
+      .update({ status: 'cancelled', updated_at: new Date() });
     if (plan.monthlyLane) {
       await trx('customer_plan_rates').where({ customer_id: customerId }).whereIn('family_key', plan.inScope).del();
       // CAS like the per-application lane below: the plan was computed at
@@ -432,6 +630,7 @@ async function applyScopedWindDown(customerId, plan, { requestId, actorLabel = '
   } catch (noteErr) {
     logger.warn(`[cancellation-processor] scoped audit note failed for ${customerId}: ${noteErr.message}`);
   }
+  return { plan };
 }
 
 /**
@@ -604,14 +803,40 @@ async function processCancellationRequest({
   let churned = false;
   let termiteRetrievalPending = null;
   let wasChurnedStage = false;
+  // The churn EPISODE (customers.churn_episode_id): minted here on the
+  // first churn of an episode (no stamp on the row), reused on a repeat
+  // run, cleared by every reactivation path that clears churned_at. The
+  // caller keys the term's end-of-coverage side effects on it — never on
+  // churned_at/stage inference.
+  let churnEpisodeId = null;
   // A scoped cancel never churns the account — the customer keeps the
   // families that stay; their billing wind-down happens per family below.
   if (!scoped) try {
-    const customer = await db('customers')
-      .where({ id: customerId })
-      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode');
-    if (customer) {
+    // Every churn fact — whether this is a repeat churn, the episode, the
+    // churn stamps, the MRR snapshot — is derived from the row AS LOCKED,
+    // never from an earlier unlocked read: a concurrent cancel must not
+    // mint a second episode from the same unstamped row, and a concurrent
+    // reactivation that cleared the stamps must not have this run follow a
+    // stale repeat-churn branch (writing 'churned' without restoring
+    // churned_at) or reuse an obsolete episode without writing it back.
+    // The returned identity always equals customers.churn_episode_id as
+    // committed. Returns false when the row does not exist.
+    const gated = gateEnvValue('GATE_CANCEL_FLOW_V2');
+    const churnWrite = async (trx) => {
+      const customer = await trx('customers')
+        .where({ id: customerId })
+        .forUpdate()
+        .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode', 'churn_episode_id');
+      if (!customer) return false;
       wasChurnedStage = customer.pipeline_stage === 'churned';
+      // A stored episode is REUSED only while the row is still churned. A
+      // promotion to a live stage that never cleared the stamp (tier
+      // alignment in self-booking-plan-sync promotes a booked churned member
+      // to active_customer without touching churn_episode_id) is a win-back
+      // all the same: this cancel is a NEW episode, or its end-of-term side
+      // effects would dedupe against the earlier churn's.
+      const reuseEpisode = wasChurnedStage && !!customer.churn_episode_id;
+      churnEpisodeId = reuseEpisode ? customer.churn_episode_id : randomUUID();
       const now = new Date();
       const update = {
         active: false,
@@ -623,6 +848,7 @@ async function processCancellationRequest({
         autopay_enabled: false,
         next_charge_date: null,
         updated_at: now,
+        ...(reuseEpisode ? {} : { churn_episode_id: churnEpisodeId }),
       };
       // Preserve the original churn timestamp/reason if already churned.
       if (!wasChurnedStage) {
@@ -659,29 +885,9 @@ async function processCancellationRequest({
       // ledger failure must fail the churn write (→ 'churn' error → office
       // review alert), never be swallowed. Dark: gate off → byte-identical
       // to H0.
-      // Both saved payment METHODS (StripeService.charge() picks the default
-      // by payment_methods.autopay_enabled alone) and any armed
-      // failed-payment retry (the ladder does not check active/churn) are
-      // independent charge rails and belong to the same wind-down.
-      const disarmPaymentRails = async (dbh) => {
-        await dbh('payment_methods')
-          .where({ customer_id: customerId })
-          .update({ autopay_enabled: false });
-        await dbh('payments')
-          .where({ customer_id: customerId, status: 'failed' })
-          .whereNull('superseded_by_payment_id')
-          .whereNotNull('next_retry_at')
-          .update({ next_retry_at: null });
-      };
-
-      if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
-        // PR E: the ENTIRE billing wind-down — customer flags/tier clear,
-        // authoritative ledger reset, payment-method disable, retry disarm —
-        // is ONE transaction. All-or-nothing is what makes the abort below
-        // sound: on a throw here, nothing persisted and the account is
-        // exactly as it was. The advisory ledger reset (gate off for
-        // GATE_PLAN_RATE_LEDGER) runs after commit and only warns — an
-        // advisory hiccup must never take the committed wind-down back.
+      if (gated) {
+        // PR E (GATE_CANCEL_FLOW_V2): the tier/rate wind-down (see the
+        // transaction below for the all-or-nothing rule).
         update.waveguard_tier = null;
         update.waveguard_tier_source = null;
         update.monthly_rate = null;
@@ -691,32 +897,66 @@ async function processCancellationRequest({
         if (wasChurnedStage && customer.churn_mrr == null && Number(customer.monthly_rate) > 0) {
           update.churn_mrr = Number(customer.monthly_rate);
         }
-        // Per-application lane fields (billing_mode + per_application_fee)
-        // are NOT cleared here: they are the live price for unsettled work
-        // (an in-progress visit, or a completed-but-uninvoiced application),
-        // and any pre-check would race a pending→en_route transition. They
-        // are cleared AFTER the visit sweep by one atomic conditional UPDATE
-        // (see the gated block near the end of this function).
-        const { resetLedgerToScalar } = require('./plan-rate-ledger');
-        await db.transaction(async (trx) => {
-          await trx('customers').where({ id: customerId }).update(update);
-          // The ledger clear is atomic with the wind-down REGARDLESS of the
-          // ledger-read gate (codex r48): rows left behind while the gate
-          // is off become authoritative the moment it flips, resurrecting
-          // the cancelled rate on a win-back. A failure here rolls the
-          // whole wind-down back and the gated abort below stops the run
-          // BEFORE any service is swept — nothing is left half-done.
-          await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
-          await disarmPaymentRails(trx);
-        });
-      } else {
-        // Legacy (H0) path, byte-identical: sequential writes, and on failure
-        // the catch below records 'churn' and CONTINUES like H0 did.
-        await db('customers').where({ id: customerId }).update(update);
-        await disarmPaymentRails(db);
       }
+      await trx('customers').where({ id: customerId }).update(update);
+      return true;
+    };
+    // Both saved payment METHODS (StripeService.charge() picks the default
+    // by payment_methods.autopay_enabled alone) and any armed
+    // failed-payment retry (the ladder does not check active/churn) are
+    // independent charge rails and belong to the same wind-down.
+    const disarmPaymentRails = async (dbh) => {
+      await dbh('payment_methods')
+        .where({ customer_id: customerId })
+        .update({ autopay_enabled: false });
+      await dbh('payments')
+        .where({ customer_id: customerId, status: 'failed' })
+        .whereNull('superseded_by_payment_id')
+        .whereNotNull('next_retry_at')
+        .update({ next_retry_at: null });
+    };
 
-      churned = true;
+    if (gated) {
+      // PR E: the ENTIRE billing wind-down — customer flags/tier clear,
+      // authoritative ledger reset, payment-method disable, retry disarm —
+      // is ONE transaction. All-or-nothing is what makes the abort below
+      // sound: on a throw here, nothing persisted and the account is
+      // exactly as it was. The advisory ledger reset (gate off for
+      // GATE_PLAN_RATE_LEDGER) runs after commit and only warns — an
+      // advisory hiccup must never take the committed wind-down back.
+      // Per-application lane fields (billing_mode + per_application_fee)
+      // are NOT cleared here: they are the live price for unsettled work
+      // (an in-progress visit, or a completed-but-uninvoiced application),
+      // and any pre-check would race a pending→en_route transition. They
+      // are cleared AFTER the visit sweep by one atomic conditional UPDATE
+      // (see the gated block near the end of this function).
+      const { resetLedgerToScalar } = require('./plan-rate-ledger');
+      await db.transaction(async (trx) => {
+        // Rung 6 before the customers row lock: this transaction rewrites
+        // the plan ledger and tier, the writes the scoped wind-down and
+        // every booking/ledger writer serialize on.
+        await lockCustomerComms(trx, customerId);
+        if (!(await churnWrite(trx))) return;
+        // The ledger clear is atomic with the wind-down REGARDLESS of the
+        // ledger-read gate (codex r48): rows left behind while the gate
+        // is off become authoritative the moment it flips, resurrecting
+        // the cancelled rate on a win-back. A failure here rolls the
+        // whole wind-down back and the gated abort below stops the run
+        // BEFORE any service is swept — nothing is left half-done.
+        await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
+        await disarmPaymentRails(trx);
+        churned = true;
+      });
+    } else {
+      // Legacy (H0) path: sequential writes, and on failure the catch
+      // below records 'churn' and CONTINUES like H0 did. The customers
+      // write is the one statement it always was, now under the row lock
+      // (no rung 6: this transaction takes no other lock, so it cannot sit
+      // in a cycle with the writers that do).
+      if (await db.transaction(churnWrite)) {
+        await disarmPaymentRails(db);
+        churned = true;
+      }
     }
   } catch (err) {
     errors.push('churn');
@@ -1219,31 +1459,30 @@ async function processCancellationRequest({
     }
     if (!scopedWoundDown) errors.push('scoped_wind_down');
   }
-  // The operator approved SPECIFIC numbers: a ledger/hold/tier write landing
-  // after the commit's validation would recompute different prices here and
-  // silently charge them. Reassert the approved snapshot at the wind-down
-  // boundary — a mismatch refuses the repricing (partial + belled; a fresh
-  // preview re-approves the live numbers).
-  if (scoped && scopedPlan?.ok && approvedScopedPricing != null) {
-    const live = [
-      `tier=${scopedPlan.tierAfter ?? ''}`,
-      `monthly=${scopedPlan.scalarAfter ?? ''}`,
-      `rates=${(scopedPlan.remainingRates || []).map((r) => `${r.family}:${r.before}:${r.after}`).sort().join(',')}`,
-      `perapp=${(scopedPlan.perAppRows || []).map((p) => `${p.id}:${p.before}:${p.after}`).sort().join(',')}`,
-    ].join('|');
-    if (live !== approvedScopedPricing) {
-      errors.push('scoped_pricing_changed');
-      logger.error(`[cancellation-processor] scoped pricing drifted since approval for ${customerId} — wind-down refused (approved ${approvedScopedPricing} vs live ${live})`);
-      scopedPlan = { ok: false, error: 'pricing_changed' };
-    }
-  }
+  // The operator approved SPECIFIC numbers, and the sweep above is slow: a
+  // ledger/hold/tier write — or a surviving-family visit — landing after
+  // the commit's validation must be priced or refused, never silently
+  // charged. applyScopedWindDown re-plans the surviving side from live rows
+  // under the per-customer writer lock and reasserts the approved snapshot
+  // in the same transaction; a mismatch refuses the repricing
+  // (scoped_pricing_changed: partial + belled; a fresh preview re-approves
+  // the live numbers).
   if (scoped && scopedPlan?.ok) {
     try {
-      await applyScopedWindDown(customerId, scopedPlan, { requestId, actorLabel, lateFeeWaived: feeWaiverConfirmed });
+      const applied = await applyScopedWindDown(customerId, scopedPlan, {
+        requestId, actorLabel, lateFeeWaived: feeWaiverConfirmed, scopedFamilies, approvedScopedPricing,
+      });
+      scopedPlan = applied.plan;
       scopedWoundDown = true;
     } catch (err) {
-      errors.push('scoped_wind_down');
-      logger.error(`[cancellation-processor] scoped wind-down failed for ${customerId}: ${err.message}`);
+      if (err && err.code === 'scoped_pricing_changed') {
+        errors.push('scoped_pricing_changed');
+        logger.error(`[cancellation-processor] scoped pricing drifted since approval for ${customerId} — wind-down refused (${err.message})`);
+        scopedPlan = { ...scopedPlan, ok: false, error: 'pricing_changed' };
+      } else {
+        errors.push('scoped_wind_down');
+        logger.error(`[cancellation-processor] scoped wind-down failed for ${customerId}: ${err.message}`);
+      }
     }
   }
 
@@ -1357,6 +1596,7 @@ async function processCancellationRequest({
     // record was lost reconstructs the pull count from it.
     repairedCount: repairs.length,
     termiteRetrievalPending,
+    churnEpisodeId: churned ? churnEpisodeId : null,
     // C3 facts the caller records on the case: what was kept, and whether
     // the requested waiver was CONFIRMED by every applicable fee rail —
     // never the raw request while a fee may still charge.
@@ -1373,7 +1613,7 @@ async function processCancellationRequest({
 }
 
 module.exports = {
-  processCancellationRequest, raiseTermiteRetrievalTask, rentedTermiteStationState,
+  processCancellationRequest, raiseTermiteRetrievalTask, rentedTermiteStationState, scopedPricingFingerprint,
   planScopedWindDown, applyScopedWindDown, familyOfServiceRow, priorCancelledVisits,
   CHURN_REASON, PORTAL_CANCEL_REASON_PREFIX, CANCELLABLE_STATUSES,
 };

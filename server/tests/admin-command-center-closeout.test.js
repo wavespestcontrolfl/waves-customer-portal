@@ -91,6 +91,33 @@ const run = () => __private.getJobsNeedingAttention({ date: DATE, technicianId: 
 beforeEach(() => {
   jest.clearAllMocks();
   closeoutAlertsPrivate.memo.clear();
+  delete process.env.GATE_CLOSEOUT_MONEY_COMMS_ALERTS;
+});
+
+test('money + comms facts render per-visit cards with their labels only behind GATE_CLOSEOUT_MONEY_COMMS_ALERTS', async () => {
+  const facts = {
+    comms: fact('failed', 'completion_sms_failed'),
+    invoice: fact('pending', 'expected_invoice_not_minted'),
+    invoiceDelivery: fact('pending', 'no_invoice_yet'),
+  };
+  installJobs([jobRow('svc-1')]);
+  getCloseoutStatus.mockResolvedValue(closeout({ facts }));
+  const moneyTypes = ['completion_notice_failed', 'invoice_not_minted', 'invoice_delivery_incomplete'];
+  // Gate off: byte-identical to today — nothing.
+  expect((await run()).filter((a) => moneyTypes.includes(a.type))).toEqual([]);
+  process.env.GATE_CLOSEOUT_MONEY_COMMS_ALERTS = 'true';
+  closeoutAlertsPrivate.memo.clear();
+  const cards = (await run()).filter((a) => moneyTypes.includes(a.type));
+  expect(cards).toEqual([
+    expect.objectContaining({ id: 'svc-1_completion_notice_failed', type: 'completion_notice_failed', label: 'Completion notice failed', severity: 'medium', metadata: expect.objectContaining({ closeoutFact: 'comms', closeoutReason: 'completion_sms_failed' }) }),
+    // Reason-qualified id (GH r1 P1): a later parked-manual exception on a dismissed visit is new work.
+    expect.objectContaining({ id: 'svc-1_invoice_not_minted:expected_invoice_not_minted', type: 'invoice_not_minted', label: 'Invoice owed but not minted', metadata: expect.objectContaining({ closeoutFact: 'invoice' }) }),
+  ]);
+  closeoutAlertsPrivate.memo.clear();
+  getCloseoutStatus.mockResolvedValue(closeout({ facts: { invoiceDelivery: fact('failed', 'receipt_delivery_exhausted') } }));
+  expect((await run()).filter((a) => moneyTypes.includes(a.type))).toEqual([
+    expect.objectContaining({ id: 'svc-1_invoice_delivery_incomplete:receipt_delivery_exhausted', label: 'Invoice or receipt delivery incomplete', summary: expect.stringMatching(/failed after retries/) }),
+  ]);
 });
 
 test('fully closed-out visit fires no closeout alerts', async () => {

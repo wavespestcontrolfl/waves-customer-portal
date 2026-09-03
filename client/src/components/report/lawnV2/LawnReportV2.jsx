@@ -13,6 +13,7 @@
 import { useRef, useState, useEffect, createContext, useContext } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
+import { usePrintRequested } from '../usePrintRequested';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
@@ -79,18 +80,26 @@ const clamp = (v, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, v));
 
 // ── Primitives ────────────────────────────────────────────────────────────────
 
+// Print (the PDF/static render via PrintContext, or the live page's @media
+// print pass via beforeprint) and reduced motion skip the animations and
+// render the final frame immediately.
+function useSettled() {
+  const print = usePrint();
+  const printing = usePrintRequested();
+  return print || printing || (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
 // Flips true just after mount so CSS transitions animate from an initial state.
 // Respects prefers-reduced-motion (starts already-settled).
 function useMounted(delay = 40) {
-  const print = usePrint();
-  const reduce = print || (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const reduce = useSettled();
   const [m, setM] = useState(reduce);
   useEffect(() => {
     if (reduce) return undefined;
     const t = setTimeout(() => setM(true), delay);
     return () => clearTimeout(t);
   }, [reduce, delay]);
-  return m;
+  return reduce || m;
 }
 
 
@@ -98,8 +107,7 @@ function useMounted(delay = 40) {
 // gauges fill as the customer reaches them (owner ask 2026-07-09). Print and
 // reduced-motion render the final frame immediately.
 function useInViewOnce(threshold = 0.35) {
-  const print = usePrint();
-  const reduce = print || (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const reduce = useSettled();
   const ref = useRef(null);
   const [inView, setInView] = useState(reduce);
   useEffect(() => {
@@ -112,14 +120,13 @@ function useInViewOnce(threshold = 0.35) {
     obs.observe(el);
     return () => obs.disconnect();
   }, [reduce, inView, threshold]);
-  return [ref, inView];
+  return [ref, reduce || inView];
 }
 
 // Counts the displayed number up in step with the ring draw-in; snaps straight
 // to the final value for print / reduced motion.
 function useCountUp(target, run, duration = 900) {
-  const print = usePrint();
-  const reduce = print || (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const reduce = useSettled();
   const [shown, setShown] = useState(reduce ? target : 0);
   useEffect(() => {
     if (!Number.isFinite(target)) return undefined;
@@ -134,13 +141,16 @@ function useCountUp(target, run, duration = 900) {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [target, run, reduce, duration]);
-  return shown;
+  // Settled reads the target directly: the print flush commits synchronously
+  // and must not wait on the effect above to copy it into state.
+  return reduce ? target : shown;
 }
 
 // Circular score ring. value null → renders a muted "—" with the tracking color.
 // The arc fills on mount (animated strokeDashoffset).
 export function ScoreRing({ value, size = 120, stroke = 10, status }) {
   const [ringRef, ringInView] = useInViewOnce(0.4);
+  const printing = usePrintRequested();
   const n = toScore(value);
   const known = Number.isFinite(n);
   const shown = useCountUp(known ? Math.round(n) : 0, known && ringInView);
@@ -159,7 +169,7 @@ export function ScoreRing({ value, size = 120, stroke = 10, status }) {
           stroke={meta.color} strokeWidth={stroke} strokeLinecap="round"
           strokeDasharray={c} strokeDashoffset={ringInView ? offset : c}
           transform={`rotate(-90 ${size / 2} ${size / 2})`}
-          style={{ transition: 'stroke-dashoffset 0.9s cubic-bezier(0.4,0,0.2,1)' }}
+          style={{ transition: printing ? 'none' : 'stroke-dashoffset 0.9s cubic-bezier(0.4,0,0.2,1)' }}
         />
       )}
       <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle"

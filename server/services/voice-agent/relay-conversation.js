@@ -19,6 +19,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const MODELS = require('../../config/models');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { maskSid } = require('../twilio-failure-alerts');
 const { toE164, isLikelyE164 } = require('../../utils/phone');
 const { createLeadFromExtraction } = require('../lead-from-extraction');
 const { syncVoiceMessageForCall } = require('../conversations');
@@ -500,6 +501,9 @@ class RelayConversation {
     // summary (so the close needs no second LLM round trip), and the
     // once-per-call owner-alert latch.
     this._transcript = [];
+    // kind → verdict: true = the tool confirmed it to the caller, false = the
+    // tool REFUSED it (a stray "written estimate" line is then no promise).
+    this._promises = new Map();
     this._modelSummary = null;
     // Detached WRITE tools that blew their timeout and are still running:
     // toolName -> promise. Blocks a same-tool retry (see _executeToolBounded)
@@ -941,6 +945,9 @@ class RelayConversation {
       // per turn but two capture_lead calls can land inside ONE turn.
       isOwnerAlerted: () => this._ownerAlerted,
       markOwnerAlerted: () => { this._ownerAlerted = true; },
+      // Promises the tools confirmed to the caller (capture_lead: a queued
+      // estimate). Recorded as owed commitments at close.
+      notePromise: (kind, verdict = true, extra = {}) => { this._promises.set(String(kind || ''), { verdict: verdict === true, expectation: extra?.expectation || null, at: new Date() }); },
       markReserviceFiled: () => { this._reserviceFiled = true; },
     };
   }
@@ -1320,7 +1327,44 @@ class RelayConversation {
             + `— ${this._transcript.length} turns lost from the audit trail`
           );
         }
-        await syncVoiceMessageForCall(this.callSid); // awaited so a rejection is caught here, not floated
+        // Awaited so a rejection is caught HERE, not floated — and caught
+        // here rather than by the outer catch: the message sync and the
+        // commitments below are two best-effort steps on an already-durable
+        // transcript, and relay calls never pass through the recording
+        // processor, so a sync failure must not cost Sandy's promises their
+        // only chance to reach Owed (Codex #3725 r18 P2).
+        try {
+          await syncVoiceMessageForCall(this.callSid);
+        } catch (syncErr) {
+          logger.warn(`[voice-relay] voice message sync failed callSid=${maskSid(this.callSid)}: ${syncErr.message}`);
+        }
+        // Sandy's own promises — "someone will call you back", a queued
+        // estimate — become owed commitments the office works from the
+        // same queue as human calls. Read from the SCRUBBED transcript the
+        // reconcile just wrote, never the raw turns. Best-effort, gated.
+        if (updated && transcriptUpdate?.transcription) {
+          try {
+            const { isEnabled } = require('../../config/feature-gates');
+            if (isEnabled('callCommitments')) {
+              const { recordRelayCommitments } = require('../call-commitments');
+              const recorded = await recordRelayCommitments(db, {
+                callSid: this.callSid,
+                transcript: transcriptUpdate.transcription,
+                estimateQueued: this._promises.has('send_estimate') ? this._promises.get('send_estimate').verdict : null,
+                estimateExpectation: this._promises.get('send_estimate')?.expectation || null,
+                estimatePromisedAt: this._promises.get('send_estimate')?.at || null,
+                // Re-fenced inside the write: a reconnect that takes the
+                // claim after the reconcile above must not have this
+                // session's promises recorded under it.
+                sessionKey: this.sessionKey || null,
+              });
+              if (recorded.superseded) logger.info(`[voice-relay] commitments skipped, claim now foreign callSid=${maskSid(this.callSid)}`);
+              else if (recorded.found) logger.info(`[voice-relay] recorded ${recorded.written} owed commitment(s) callSid=${maskSid(this.callSid)}`);
+            }
+          } catch (err) {
+            logger.warn(`[voice-relay] commitments not recorded callSid=${maskSid(this.callSid)}: ${err.message}`);
+          }
+        }
       } catch (err) {
         logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
       }

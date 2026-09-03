@@ -4,9 +4,10 @@
 // unknown-trend behavior, MeterSvg empty-string guard.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { LawnTrends, WaterIntakeBar } from './LawnReportV2';
+import { LawnTrends, ScoreRing as LawnScoreRing, WaterIntakeBar } from './LawnReportV2';
+import { ScoreRing as TreeShrubScoreRing } from '../treeShrubV2/TreeShrubReportV2';
 import { MeterSvg, TrendChip } from '../GaugePrimitives';
 
 afterEach(cleanup);
@@ -232,5 +233,43 @@ describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
     render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, visitInPlanWeek: false } }} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
     expect(screen.getByTestId('lawn-week-plan')).toBeInTheDocument();
     expect(screen.queryByTestId('lawn-week-plan-aftercare-note')).toBeNull();
+  });
+});
+
+// The live page's Print button / Cmd+P used to print every ring the customer
+// had not scrolled to as 0 with an empty arc: draw-in and count-up are gated
+// on an IntersectionObserver and the `print` PrintContext only covers the
+// ?mode=pdf renders, not the @media print pass. beforeprint now settles the
+// rings in place (shared usePrintRequested — same code path in both reports).
+describe('ScoreRing settles on beforeprint without ever scrolling into view', () => {
+  it.each([
+    ['lawnV2', LawnScoreRing],
+    ['treeShrubV2', TreeShrubScoreRing],
+  ])('%s: a never-intersected ring renders its final value and full arc once printing begins', (_label, ScoreRing) => {
+    // test-setup's IntersectionObserver stub never fires, so the ring sits in
+    // its pre-scroll state — exactly the frame the print pass used to capture.
+    const { container } = render(<ScoreRing value={72} size={120} stroke={10} />);
+    const arc = () => container.querySelectorAll('circle')[1];
+    const circumference = Number(arc().getAttribute('stroke-dasharray'));
+    expect(screen.getByText('0')).toBeInTheDocument();
+    expect(Number(arc().getAttribute('stroke-dashoffset'))).toBeCloseTo(circumference, 5);
+
+    // Deliberately NOT wrapped in act(): the browser snapshots when the
+    // beforeprint handlers return, so the value and arc must be in the DOM
+    // synchronously — act() would drain passive effects and mask a late copy
+    // (codex P1 r1).
+    const prevActEnv = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      window.dispatchEvent(new Event('beforeprint'));
+      expect(screen.getByText('72')).toBeInTheDocument();
+    } finally {
+      globalThis.IS_REACT_ACT_ENVIRONMENT = prevActEnv;
+    }
+    act(() => {}); // drain anything left so the remaining assertions see steady state
+
+    expect(screen.getByText('72')).toBeInTheDocument();
+    expect(Number(arc().getAttribute('stroke-dashoffset'))).toBeCloseTo(circumference * (1 - 0.72), 5);
+    expect(arc().style.transition).toBe('none');
   });
 });

@@ -511,3 +511,26 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('changed while you were unarchiving') });
   });
 });
+
+describe('POST /:id/mark-accepted — converter pricing refusals reach the admin UI with their code (pre-push codex P1 on #3751)', () => {
+  const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+
+  test('a coded 409 from the manual-acceptance service is serialized as { error, code }', async () => {
+    db.mockImplementation(() => makeBuilder({ first: { estimate_data: {} } }));
+    const refusal = Object.assign(
+      new Error('This estimate was issued with a flat monthly termite-monitoring price that our current per-application billing can\'t honor automatically — nothing was booked. Please call the office and we\'ll re-issue it with today\'s per-application pricing.'),
+      { statusCode: 409, code: 'LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE' },
+    );
+    markEstimateManuallyAccepted.mockRejectedValueOnce(refusal);
+    const handler = routeHandler(adminEstimatesRouter, '/:id/mark-accepted', 'post');
+    const res = makeRes();
+    const next = jest.fn();
+    await handler({ params: { id: 'est-1' }, body: {}, technicianId: 'tech-1' }, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE',
+      error: expect.stringMatching(/call the office/i),
+    }));
+  });
+});

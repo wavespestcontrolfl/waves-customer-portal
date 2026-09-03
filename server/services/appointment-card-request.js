@@ -1378,6 +1378,11 @@ async function recordWebhookFirstConsentEcho({ row, setupIntentId, disclosureVer
 async function completeSecureCardCapture({ token, setupIntentId, ip = null, userAgent = null, disclosureVersion = null }) {
   const request = await db('appointment_card_requests').where({ token }).first();
   if (!request) return { ok: false, code: 'not_found' };
+  // Standalone Auto Pay setup rows (kind='customer', no visit) complete
+  // through their own tail — no fee disclosure, no plan choice.
+  if (request.kind === 'customer') {
+    return require('./autopay-setup-link').completeAutopaySetupCapture({ request, setupIntentId, ip, userAgent });
+  }
   if (request.status === 'completed' || request.status === 'satisfied') {
     // Webhook-first race (Codex #3342 r7 P1): when setup_intent.succeeded
     // beats the browser's POST, the webhook tail stamped fee_agreed_at with
@@ -1713,6 +1718,11 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
 async function loadSecureCardPageData(token) {
   const request = await db('appointment_card_requests').where({ token }).first();
   if (!request) return null;
+  // Standalone Auto Pay setup rows (kind='customer') have no visit to key
+  // liveness/fees/plans on — their payload comes from the standalone module.
+  if (request.kind === 'customer') {
+    return require('./autopay-setup-link').loadAutopaySetupPageData(request);
+  }
 
   const visit = await db('scheduled_services')
     .where({ id: request.scheduled_service_id })
@@ -3379,6 +3389,7 @@ module.exports = {
   isWithinApptCancelWindow,
   sendDeferredInvitationEmailLeg,
   resolveExemption,
+  renderTemplate,
   LIVE_VISIT_STATUSES,
   _test: {
     dateLineFor,

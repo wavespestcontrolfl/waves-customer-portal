@@ -1911,6 +1911,43 @@ const InvoiceService = {
     };
   },
 
+  /**
+   * Retention-offer lookup + slot reservation for a mint, run on the mint
+   * transaction under a SAVEPOINT. Fail-soft by contract — but a plain
+   * try/catch on the caller's trx is NOT fail-open in Postgres: any failed
+   * statement aborts the WHOLE transaction, so the mint that followed died
+   * with "current transaction is aborted" and four priced completions went
+   * out unbilled with a report-only text (2026-08-31→09-01, a bad column
+   * in the visit select). The savepoint rolls back only this block; the
+   * invoice still mints. Returns the retention application ({ offerId,
+   * lineItem, … }) when a slot was reserved, else null.
+   */
+  async applyRetentionOfferUnderSavepoint({ customerId, scheduledServiceId, lineItems, trx }) {
+    if (!trx) return null;
+    try {
+      return await trx.transaction(async (sp) => {
+        // Reserve the offer slot with a CAS UPDATE inside the SAME mint
+        // transaction BEFORE the line exists (codex P0): a concurrent mint
+        // that loses the race reserves nothing and adds no line, so the
+        // charge count and the $75 cap can never be exceeded. A rolled-back
+        // mint reverts the reservation with it.
+        const retention = await this.buildRetentionOfferLineForMint({
+          customerId,
+          scheduledServiceId,
+          lineItems,
+          database: sp,
+        });
+        if (!retention) return null;
+        const { reserveRetentionSlot } = require("./cancellation-resolution/retention-offer");
+        const reserved = await reserveRetentionSlot(retention, sp);
+        return reserved ? retention : null;
+      });
+    } catch (retentionErr) {
+      logger.warn(`[invoice] retention-offer check failed for customer ${customerId}: ${retentionErr.message}`);
+      return null;
+    }
+  },
+
   async createFromService(
     serviceRecordId,
     {
@@ -2038,31 +2075,18 @@ const InvoiceService = {
       // BEFORE extras (setup fees, operator additions) are appended, so the
       // 15% never touches supplemental charges (codex r1 P2). Fail-soft —
       // a lookup problem never blocks the invoice; consumption is CAS'd in
-      // the mint transaction.
-      try {
-        // Reserve the offer slot with a CAS UPDATE inside the SAME mint
-        // transaction BEFORE the line exists (codex P0): a concurrent mint
-        // that loses the race reserves nothing and adds no line, so the
-        // charge count and the $75 cap can never be exceeded. A rolled-back
-        // mint reverts the reservation with it.
-        if (conn) {
-          const retention = await this.buildRetentionOfferLineForMint({
-            customerId: sr.customer_id,
-            scheduledServiceId: sr.scheduled_service_id || null,
-            lineItems,
-            database: conn,
-          });
-          if (retention) {
-            const { reserveRetentionSlot } = require("./cancellation-resolution/retention-offer");
-            const reserved = await reserveRetentionSlot(retention, conn);
-            if (reserved) {
-              lineItems = [...lineItems, retention.lineItem];
-              retentionOfferApplication = retention;
-            }
-          }
+      // the mint transaction, under a SAVEPOINT (see the helper).
+      if (conn) {
+        const retention = await this.applyRetentionOfferUnderSavepoint({
+          customerId: sr.customer_id,
+          scheduledServiceId: sr.scheduled_service_id || null,
+          lineItems,
+          trx: conn,
+        });
+        if (retention) {
+          lineItems = [...lineItems, retention.lineItem];
+          retentionOfferApplication = retention;
         }
-      } catch (retentionErr) {
-        logger.warn(`[invoice] retention-offer check failed for customer ${sr.customer_id}: ${retentionErr.message}`);
       }
       if (Array.isArray(extraLineItems) && extraLineItems.length) {
         lineItems = [...lineItems, ...extraLineItems];

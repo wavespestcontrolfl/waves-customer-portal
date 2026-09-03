@@ -68,6 +68,7 @@ import {
 } from "lucide-react";
 import { CustomerActionBar } from "./StickyActionBar";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
+import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
 import { formatAddress } from "../../utils/format-address";
 import {
   Card,
@@ -91,6 +92,7 @@ import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import { describeAutopaySetupLinkResult } from "../schedule/cardLinkStatus";
 import {
   CONSENT_TEXT,
   CONSENT_VERSION,
@@ -844,6 +846,10 @@ function ElectronicAuthorizationContractV2({
   const [contractAction, setContractAction] = useState("");
   const [contractErr, setContractErr] = useState("");
   const [signingUrl, setSigningUrl] = useState("");
+  // Standalone Auto Pay setup link (GATE_AUTOPAY_SETUP_LINK): copy the
+  // tokenized /secure link or text it — outcome reported verbatim.
+  const [setupLinkBusy, setSetupLinkBusy] = useState(false);
+  const [setupLinkResult, setSetupLinkResult] = useState(null);
   const [contractDeliveryActionKey, setContractDeliveryActionKey] = useState("");
   const [documentTemplates, setDocumentTemplates] = useState([]);
   const [documentTemplatesLoading, setDocumentTemplatesLoading] = useState(false);
@@ -913,6 +919,31 @@ function ElectronicAuthorizationContractV2({
       });
     return () => { cancelled = true; };
   }, []);
+
+  const requestAutopaySetupLink = async (delivery) => {
+    if (setupLinkBusy) return;
+    if (delivery === "sms" && !window.confirm("Text this customer an Auto Pay setup link now?")) return;
+    setSetupLinkBusy(true);
+    setSetupLinkResult(null);
+    try {
+      const result = await adminFetch(
+        `/admin/customers/${customer.id}/autopay-setup-link`,
+        { method: "POST", body: JSON.stringify({ delivery }) },
+      );
+      let copied = false;
+      if (result?.action === "link_created" && result.secureUrl) {
+        try { await navigator.clipboard.writeText(result.secureUrl); copied = true; } catch { copied = false; }
+      }
+      // Never claim "copied" when the clipboard write failed — the URL is
+      // rendered below either way.
+      setSetupLinkResult({ ...result, copied });
+      if (result?.action === "auto_secured") await onRefresh?.();
+    } catch (err) {
+      setSetupLinkResult({ action: "skipped", reason: err.message || "request_failed" });
+    } finally {
+      setSetupLinkBusy(false);
+    }
+  };
 
   const createContract = async () => {
     if (!canCreateContract || creatingContract) return;
@@ -1147,21 +1178,57 @@ function ElectronicAuthorizationContractV2({
               contracts.
             </div>{" "}
           </div>{" "}
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={
-              activeContract
-                ? () => regenerateLink(activeContract)
-                : createContract
-            }
-            disabled={creatingContract || !canCreateContract}
-          >
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {" "}
-            <Link2 size={13} className="mr-1" />
-            {activeContract ? "New Link" : "Create Link"}
-          </Button>{" "}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => requestAutopaySetupLink("inline")}
+              disabled={setupLinkBusy}
+              title="Copy a 30-day Auto Pay setup link (card or bank account) for this customer"
+            >
+              Copy Auto Pay link
+            </Button>{" "}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => requestAutopaySetupLink("sms")}
+              disabled={setupLinkBusy}
+              title="Text this customer an Auto Pay setup link"
+            >
+              Text Auto Pay link
+            </Button>{" "}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={
+                activeContract
+                  ? () => regenerateLink(activeContract)
+                  : createContract
+              }
+              disabled={creatingContract || !canCreateContract}
+            >
+              {" "}
+              <Link2 size={13} className="mr-1" />
+              {activeContract ? "New Link" : "Create Link"}
+            </Button>{" "}
+          </div>{" "}
         </div>{" "}
+        {setupLinkResult ? (
+          <div
+            className={cn(
+              "px-4 py-2 text-12 border-b border-hairline border-zinc-200",
+              describeAutopaySetupLinkResult(setupLinkResult).tone === "bad"
+                ? "text-alert-fg"
+                : "text-ink-secondary",
+            )}
+          >
+            {describeAutopaySetupLinkResult(setupLinkResult).text}
+            {setupLinkResult.secureUrl ? (
+              <span className="ml-2 break-all u-nums text-zinc-900">{setupLinkResult.secureUrl}</span>
+            ) : null}
+          </div>
+        ) : null}
         <div className="grid grid-cols-1 md:grid-cols-3 border-b border-hairline border-zinc-200">
           {[
             ["Details", "Recipient, name, payment, attachments"],
@@ -5503,6 +5570,7 @@ export default function Customer360ProfileV2({
   // (past + future) and limited, so use this for next-service selection.
   const upcomingScheduled = data.upcomingScheduled || scheduled;
   const accountProperties = data.accountProperties || [];
+  const addressNeighbors = data.addressNeighbors || [];
   const annualPrepayTerms = data.annualPrepayTerms || [];
   const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || null;
   // What the profile shows/acts on: a truly active term, else a still-outstanding
@@ -6232,6 +6300,65 @@ export default function Customer360ProfileV2({
                           key={p.id}
                           type="button"
                           onClick={() => onSelectCustomer?.(p.id)}
+                          className={className}
+                        >
+                          {content}
+                        </button>
+                      );
+                    })}
+                  </div>{" "}
+                </div>
+              )}
+              {addressNeighbors.length > 0 && (
+                <div
+                  className="mb-4 pb-3 border-b border-hairline border-zinc-200"
+                  data-testid="address-neighbors"
+                >
+                  {" "}
+                  <SectionTitle>Others at this address</SectionTitle>{" "}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {addressNeighbors.map((n) => {
+                      const name =
+                        `${n.firstName || ""} ${n.lastName || ""}`.trim() ||
+                        "(no name)";
+                      const addr = [n.address?.line1, n.address?.line2]
+                        .filter(Boolean)
+                        .join(", ");
+                      const className =
+                        "text-left rounded-sm border-hairline border-zinc-200 bg-zinc-50 hover:bg-zinc-100 u-focus-ring p-2.5";
+                      const content = (
+                        <>
+                          {" "}
+                          <div className="text-14 font-medium text-zinc-900">
+                            {name}
+                          </div>{" "}
+                          <div className="text-14 text-ink-secondary truncate">
+                            {[n.phone, STAGE_LABELS[n.pipelineStage] || n.pipelineStage]
+                              .filter(Boolean)
+                              .join(" · ") || "No contact on file"}
+                          </div>{" "}
+                          <div className="text-12 text-ink-tertiary mt-1 truncate">
+                            {addr || "Address on file"}
+                            {n.matchedVia === "property" ? " · secondary property" : ""}
+                          </div>{" "}
+                        </>
+                      );
+                      if (!onSelectCustomer) {
+                        return (
+                          <a
+                            key={n.id}
+                            href={`/admin/customers?customerId=${encodeURIComponent(n.id)}`}
+                            className={cn(className, "block no-underline")}
+                          >
+                            {content}
+                          </a>
+                        );
+                      }
+                      return (
+                        <button
+                          key={n.id}
+                          type="button"
+                          onClick={() => onSelectCustomer?.(n.id)}
                           className={className}
                         >
                           {content}
@@ -6976,6 +7103,7 @@ export default function Customer360ProfileV2({
           {activeTab === "comms" && (
             <div className="flex flex-col h-full">
               {" "}
+              <OwedCommitmentsSummary customerId={customerId} />
               <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
               <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-3 max-h-[400px]">
                 {commsLoading && (

@@ -11,11 +11,13 @@ jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn
 
 const {
   runCallLogRelink,
+  relinkUnattributedCalls,
   pickContactPhone,
   phoneLookupKey,
   isLinkableKey,
   TRANSCRIPTION_REJECTED_SENTINEL,
 } = require('../services/call-log-relink');
+const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../utils/call-link-override');
 
 describe('pickContactPhone — the customer side of the call', () => {
   test('inbound → from_phone', () => {
@@ -77,6 +79,46 @@ describe('deliberate-unlink guards', () => {
     // change with it or deliberately-unlinked voicemails become relinkable.
     expect(TRANSCRIPTION_REJECTED_SENTINEL)
       .toBe('[Recording had no usable speech; an implausible transcription was rejected.]');
+  });
+});
+
+describe('relinkUnattributedCalls — an operator\'s explicit unlink is never written back (codex #3764 gh-r1 P1)', () => {
+  // Chainable recorder: every builder method records itself and returns the
+  // builder; awaiting a builder resolves from the per-table script.
+  function makeConn(script) {
+    const builders = [];
+    const conn = (table) => {
+      const b = { table, calls: [] };
+      for (const m of ['where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orderBy', 'limit', 'select', 'join', 'update']) {
+        b[m] = (...a) => { b.calls.push([m, ...a]); return b; };
+      }
+      b.then = (res, rej) => Promise.resolve(script(b)).then(res, rej);
+      builders.push(b);
+      return b;
+    };
+    return { conn, builders };
+  }
+  const has = (b, m) => b.calls.some((c) => c[0] === m);
+  const rawSqls = (b) => b.calls.filter((c) => c[0] === 'whereRaw').map((c) => c[1]);
+
+  test('the predicate names the override key and the null customer_id, and rides both the scan and the write', async () => {
+    expect(NOT_EXPLICITLY_UNLINKED_SQL).toContain("metadata -> 'customer_link_override' ->> 'customer_id') IS NOT NULL");
+    const { conn, builders } = makeConn((b) => {
+      if (b.table === 'call_log' && has(b, 'update')) return 1;
+      if (b.table === 'call_log' && has(b, 'select') && !has(b, 'join')) {
+        return [{ id: 'c1', twilio_call_sid: 'CA1', direction: 'inbound', from_phone: '+19415550111', to_phone: '+19415550122', created_at: new Date() }];
+      }
+      if (b.table === 'customers') return [{ id: 'cust-1', phone: '+19415550111' }];
+      return []; // the rehome retry sweep
+    });
+    const result = await relinkUnattributedCalls({ conn });
+    expect(result.linked).toBe(1);
+    const scan = builders.find((b) => b.table === 'call_log' && has(b, 'select') && !has(b, 'join'));
+    const write = builders.find((b) => b.table === 'call_log' && has(b, 'update'));
+    expect(rawSqls(scan)).toContain(NOT_EXPLICITLY_UNLINKED_SQL);
+    expect(rawSqls(write)).toContain(NOT_EXPLICITLY_UNLINKED_SQL);
+    // The write still carries the sentinel guard too — the unlink predicate is additive.
+    expect(rawSqls(write)).toContain('transcription IS DISTINCT FROM ?');
   });
 });
 

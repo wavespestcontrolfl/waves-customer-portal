@@ -26,6 +26,9 @@
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
  *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
+ *   GATE_AGENT_ACTIVITY=true    (Activity tab in /admin/agents — read-only feed over existing ledgers; dark in dev AND prod)
+ *   GATE_OPS_DIGESTS_IN_APP=true (owner ops digests become ops_digest bell rows in the Activity feed instead of contact@ emails; dark in dev AND prod)
+ *   GATE_CLOSEOUT_MONEY_COMMS_ALERTS=true (closeout alerts also map the comms / invoice / invoiceDelivery facts — failed completion notice, invoice owed but not minted, invoice or receipt delivery incomplete — as per-visit cards + closeout_gaps_today members; their outage holds the floor; read-only, no comms; dark in dev AND prod)
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
@@ -57,10 +60,11 @@
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
+ *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
- *   GATE_ESTIMATE_LAWN_CALENDAR=true (12-month application strip under the lawn price card, arithmetic on visitsPerYear only; dev-open, prod dark)
+ *   GATE_ESTIMATE_LAWN_CALENDAR=true (season timeline under the lawn price card — four SWFL turf seasons from the current month, one-line focus each, cadence + projected months per frequency from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
@@ -135,6 +139,24 @@ const gates = {
   // carries no planContext and /secure renders exactly the card-only
   // experience; the select-plan endpoint 404s (unobservable while dark).
   securePlanChoice: process.env.GATE_SECURE_PLAN_CHOICE === 'true',
+
+  // Standalone "set up Auto Pay" link (owner ruling 2026-09-01): an
+  // operator sends an existing customer a tokenized /secure/:token page
+  // with no visit attached (kind='customer' rows in
+  // appointment_card_requests, 30-day expiry) — card, plus bank account
+  // only while GATE_ACCEPT_ACH_CAPTURE is also on (one ACH-capture kill
+  // switch for every tokenized capture, judged at mint AND completion),
+  // instant bank verification only, same save → consent → enroll tail as
+  // every other save surface. Operator-initiated only (Customers page
+  // action: copy link, or text it via the card_request purpose with the
+  // autopay_setup_link template, seeded inactive — and the text ALSO needs
+  // GATE_AUTOPAY_CUSTOMER_SMS, since the message type classifies as an
+  // Auto Pay customer SMS; the action reports autopay_sms_gate_off
+  // otherwise). Gate off: the admin
+  // action reports gate_off and mints nothing; already-minted links keep
+  // working (the gate governs new links). Customer-facing money surface —
+  // fail-closed ==='true' in every environment.
+  autopaySetupLink: process.env.GATE_AUTOPAY_SETUP_LINK === 'true',
 
   // Appointment-card fee rail (owner-approved 2026-08-01): auto-charge the
   // no-show/late-cancel fee the /secure lane DISCLOSES against the card it
@@ -795,6 +817,29 @@ const gates = {
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
 
+  // Backlink path investigator (Manager v2 step 3) — the hourly job that
+  // fetches ≤8 pages per registry domain and spends ONE WORKHORSE LLM call to
+  // classify HOW a link can be acquired (plan §5). PAY-PER-DOMAIN (fetches +
+  // LLM), so opt-in in EVERY env (not default-on in dev) — a dev box with a
+  // real ANTHROPIC_API_KEY must not burn batches on boot. Investigation only:
+  // it never sends, pays, or leases work. While ON, a registry domain still
+  // at `new` (never investigated) is not claimable either (plan §7) — the
+  // worker reads this gate for that rule.
+  linkInvestigator: process.env.GATE_LINK_INVESTIGATOR === 'true',
+
+  // GATE_LINK_AUTHORITY — Backlink Manager v2 step 4: the acquisition-authority
+  // policy engine may grant AUTO_* levels, and every automated claim and every
+  // irreversible step re-checks it. OFF ⇒ no automated lease of ANY level is
+  // granted (owner-approved rows included), in-flight work stops before its
+  // next irreversible action; nothing's lifecycle status changes (plan §12).
+  // Step 4a (PR 1) declares it and shows it on the Policy panel; step 4b lands
+  // the waiver/approval schema (PR 2a-i) and then gates the nightly
+  // `link-authority` bridge on it (PR 2a-ii: off ⇒ selection-only, no
+  // placements, no parks, no bell). Nothing consumes a stamp until the claim
+  // predicate re-check lands (PR 4). The shipped policy defaults route every
+  // row to the owner regardless. Opt-in in EVERY env.
+  linkAuthority: process.env.GATE_LINK_AUTHORITY === 'true',
+
   // Backlink profile → astro sameAs sync — weekly job that opens a PR adding
   // verifier-confirmed (status live/indexed) directory/citation/social profile
   // URLs from seo_link_prospects to the marketing site's entity-profiles.auto.json
@@ -1085,6 +1130,13 @@ const gates = {
   // outage) ring an admin bell instead of silently costing leads — the
   // 2026-08-31 wedge and a row stuck since 07-10 both went unnoticed.
   callProcessingStallWatchdog: process.env.GATE_CALL_PROCESSING_STALL_WATCHDOG === 'true',
+  // Call commitments: every processed call records what Waves promised and
+  // what the caller agreed to as evidence-linked rows (call_commitments),
+  // seeded from the V2 extraction plus one bounded model pass over the
+  // transcript, and links each promise to the later record that fulfils it.
+  // Off → nothing is written; the Calls tab still renders rows already
+  // recorded. Kill switch: unset. See services/call-commitments.js.
+  callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered
@@ -1526,11 +1578,13 @@ const gates = {
   // flip. The lead auto-send lane skips these rows regardless of the gate.
   // Enable with GATE_SEND_REQUIRES_SERVER_PRICING=true; unset = revoke.
   sendRequiresServerPricing: process.env.GATE_SEND_REQUIRES_SERVER_PRICING === 'true',
-  // Lawn program calendar on the estimate page: a 12-month strip under the
-  // lawn price card marking N evenly spaced application months, where N is
-  // the selected frequency's visitsPerYear. Pure arithmetic on data already
-  // on the page — no product, step, or fertilizer names (owner-owned business
-  // logic). Gates only the /data `lawnCalendar` flag. Dev-open, prod dark.
+  // Lawn program seasons on the estimate page: under the lawn price card,
+  // the four SWFL turf seasons in order from the current month, each with a
+  // one-line focus and the number of the selected frequency's applications
+  // the scheduling catalog puts there. Gates the /data `lawnCalendar` block
+  // ({ programs: { [frequencyKey]: { visitsPerYear, cadence, months } } },
+  // projected by describeLawnProgramCadence). No product, step, or
+  // fertilizer names (owner-owned business logic). Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_LAWN_CALENDAR=true.
   estimateLawnCalendar: isProd ? process.env.GATE_ESTIMATE_LAWN_CALENDAR === 'true' : true,
 
@@ -1840,6 +1894,23 @@ const gates = {
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
 
+  // Zelle payment-notice reconciler — the Gmail sync recognises Capital One
+  // "Someone sent you money with Zelle" notices (forwarded from the owner's
+  // personal inbox to contact@), matches the payer + exact amount to ONE open
+  // self-pay invoice and settles it through services/invoice-manual-payment.js
+  // — the operator's Add-payment path — INCLUDING the paid receipt (email +
+  // SMS). OWNER RULING 2026-09-02: an exact single match may mark the invoice
+  // paid and send the receipt with no human in the loop; anything else parks
+  // on the Invoices page for one-click Apply / Ignore. Money + a customer
+  // comm, so it ships dark in prod. OFF = the hook returns before any DB
+  // read and the email flows through normal classification exactly as
+  // today; the parked-notice admin routes stay live so history remains
+  // actionable after a kill. Read at CALL time (gateEnvValue) so unsetting
+  // GATE_ZELLE_NOTICE_RECONCILE on Railway is a live kill switch — the
+  // consumer (services/zelle-notice-reconciler.js) and logGateStatus must
+  // keep using this same parser.
+  zelleNoticeReconcile: isProd ? gateEnvValue('GATE_ZELLE_NOTICE_RECONCILE') : process.env.GATE_ZELLE_NOTICE_RECONCILE !== 'false',
+
   // Treatment Zone Mapper — tech traces the treated perimeter over a satellite
   // photo of the property; the traced path + snapshot replace the generic
   // schematic on the customer's service report. Gates BOTH the tech capture
@@ -2070,6 +2141,13 @@ const gates = {
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   techTips: gateEnvValue('GATE_TECH_TIPS'),
 
+  // Ops queue (2026-09-02): the Agents hub "Queue" tab — a read-only
+  // projection of every long-running lane's persisted state (pending /
+  // parked / failed) in one place. No actions live there. OFF unless set,
+  // dev AND prod — GET /api/admin/agents/queue/availability answers
+  // { available: false }, /queue is 404, and the tab is not rendered.
+  // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
+  adminOpsQueue: gateEnvValue('GATE_ADMIN_OPS_QUEUE'),
   // Intelligence Bar tool activity (2026-09-02): POST /query answers carry a
   // `toolActivity` list — one operator-facing line per tool call the exchange
   // ran (label, done / error / proposed, duration, round) — and the ⌘K
@@ -2097,6 +2175,41 @@ const gates = {
   // Read at CALL time so a flip needs no redeploy.
   techDictationUpload: gateEnvValue('GATE_TECH_DICTATION_UPLOAD'),
 
+
+  // Agent Activity feed — the Activity tab in /admin/agents: one read-only
+  // timeline built from autonomous_runs, content_email_approvals,
+  // message_drafts and job_health (server/services/agent-activity.js). OFF
+  // unless set ('1' / 'true' / 'on'), in dev AND prod — gate-off answer of
+  // GET /admin/agents/activity is { available: false } and the tab shows a
+  // "not enabled" note. Kill switch: unset. This entry is for
+  // logGateStatus; the service reads gateEnvValue('GATE_AGENT_ACTIVITY')
+  // at CALL time (the techTips idiom), so a flip needs no redeploy.
+  agentActivity: gateEnvValue('GATE_AGENT_ACTIVITY'),
+
+  // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
+  // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become
+  // ops_digest bell rows the Activity feed lists, and the email is skipped
+  // (bell-write failure still emails). OFF (default, dev AND prod): every
+  // sender emails exactly as before. Requires GATE_AGENT_ACTIVITY too (the
+  // rows need a surface) — with it off the helper fails closed to email.
+  // The reply-to-approve flows and the stripe-webhook-health / llm-dispatch
+  // FIX alerts are not routed here. Kill switch: unset. This entry is for
+  // logGateStatus; the helper reads both env vars at CALL time.
+  opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
+
+  // Closeout money + comms alerts — services/closeout-alerts.js maps three
+  // more closeout facts to operator issues: comms failed (completion notice
+  // rejected by the provider), invoice pending on an actionable reason
+  // (parked manual bill, frozen required mint, expected-<lane>-not-minted),
+  // and invoiceDelivery failed / never-sent (receipt with no recipient or
+  // exhausted, pay-link text failed, paid-but-no-receipt, payer invoice
+  // unsent). Transient, queue-owned, consent-blocked and not_required
+  // states stay silent. With the gate on, comms + invoiceDelivery outages
+  // also HOLD the closeout_gaps_today floor like the mapped facts do. OFF
+  // (default, dev AND prod): the pre-gate five-fact mapping, byte-identical.
+  // Read-only, no comms, no bell-policy change. Kill switch: unset. This
+  // entry is for logGateStatus; the service reads gateEnvValue at CALL time.
+  closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

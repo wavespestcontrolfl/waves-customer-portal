@@ -418,6 +418,10 @@ describe('selectSecurePlan — fail-closed states', () => {
     await expect(selectSecurePlan({ token: 'tok', plan: 'weekly_gold' })).rejects.toMatchObject({ code: 'invalid_plan' });
     setTables({ appointment_card_requests: { first: () => null } });
     await expect(selectSecurePlan({ token: 'tok', plan: 'per_application' })).rejects.toMatchObject({ code: 'not_found' });
+    // A standalone Auto Pay setup row (kind='customer', no visit) has no
+    // plan choice and must be indistinguishable from an unknown token.
+    setTables({ appointment_card_requests: { first: () => ({ ...pendingRequest, kind: 'customer', scheduled_service_id: null }) } });
+    await expect(selectSecurePlan({ token: 'tok', plan: 'per_application' })).rejects.toMatchObject({ code: 'not_found' });
   });
 
   test('terminal request → already_secured', async () => {

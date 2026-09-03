@@ -63,7 +63,22 @@ already on it (no homeowner PII/links); settlement happens via the webhook,
 not the route,
 `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
-`/api/public/estimates/:token/find-slots`, `/api/reports/:token/*`,
+`/api/public/estimates/:token/find-slots`, `/api/reports/:token/*` (the
+service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
+the queued PDF / report-email renders that share `buildReportV1Data` —
+renders the report's IDENTITY facts from the completion-time snapshot on
+`service_records.service_data.reportIdentitySnapshot` when the record
+carries one: `customerName`, `serviceAddress` / `propertyAddress` /
+`cityState` and the `mapCenter` those resolved to, `technicianName`, the
+`serviceDisplayName` title, and each application's approved product facts
+(EPA number, precaution / re-entry / summary copy, approval). Records
+completed before the snapshot shipped carry none and keep the live
+customers / scheduled_services / technicians / products_catalog joins; a
+snapshot leg that could not be frozen (missing customer or technician row)
+is omitted and that leg stays live. The PDF filename and the canonical lawn
+pin read the same overlaid row. Presentation (technician photo URL, copy
+config) and the deliberately live sections (next visit, review CTA,
+cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
@@ -109,7 +124,12 @@ its own eligibility judgments is a P0),
 `/api/bouncie` + `/api/webhooks/bouncie`, `/api/webhooks/sendgrid`,
 `/api/webhooks/resend` (Svix-signed), `/api/webhooks/lead`
 (+ `POST /api/leads`, an alias accepting the same pair with identical
-semantics),
+semantics; both also accept an OPTIONAL `timeline` — the visitor's own
+"when do you want this handled?" answer, `now` | `this_week` |
+`this_month` | `browsing` plus the form aliases in
+`server/services/lead-timeline.js`; stored verbatim in
+`extracted_data.timeline`, mapped onto `leads.urgency`, and it WINS over
+the AI triage's urgency guess; unknown values are ignored, never guessed),
 `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
@@ -398,7 +418,9 @@ Also accepts an OPTIONAL `prefill_lead_id` + `prefill_token` pair — the
 lead-prefill HMAC below — which, when valid, makes the lead capture UPDATE
 that existing open call-pipeline lead instead of inserting a new row; the
 same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
-with identical semantics).
+with identical semantics. Also accepts the OPTIONAL `timeline` described
+under `/api/webhooks/lead` above, with the same storage and urgency
+semantics; it survives the later `/api/public/quote/calculate` snapshot).
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,
@@ -507,6 +529,17 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+`/accept` fails CLOSED when the accepted plan's money cannot be resolved
+(#3751): 409 `{ error, code }` with nothing booked and call-the-office copy
+— `PER_APPLICATION_ADD_ON_UNPRICED` (an established per-application
+customer adding a unit whose per-application price cannot be derived),
+`LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE` (an in-flight count-less termite
+quote whose card discloses monthly installments — re-issued by the
+office, never converted against its card), and
+`INVOICE_MODE_PER_APPLICATION_UNRESOLVED` (an invoice-mode recurring
+accept with no resolved per-application amount — never the monthly
+display rate). Same contract via the admin manual-acceptance path, which
+preserves these 4xx verbatim.
 `/select-tier` refuses any tier above the tier the ENGINE wrote for the
 estimate's qualifying services (400 `tier_not_available_for_current_services`
 + `maxTier`; downgrades stay allowed): the ceiling is the last opt-out
@@ -518,6 +551,18 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+`/data` carries an optional `lawnCalendar` block behind
+`GATE_ESTIMATE_LAWN_CALENDAR` (dev-open, prod dark): `{ programs: {
+[frequencyKey]: { visitsPerYear, cadence, months } } }` for the recurring
+lawn section's frequencies, where `cadence` is the customer-facing interval
+line and `months` the 0-based ET month indices of the program's projected
+applications from the current month — both derived server-side by
+`describeLawnProgramCadence` (self-booking-plan-sync.js) from the catalog
+plan matching the frequency's visitsPerYear through the scheduler's own
+`buildRecurringOccurrenceDates`; no customer data, no dates. A frequency
+with no catalog plan is omitted; the key is ABSENT when the gate is off or
+nothing resolves (it was boolean `true` from 2026-08 until #3755). The page
+only buckets months into seasons — it never derives an interval itself.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,
@@ -814,7 +859,21 @@ Any change to this endpoint, its auth, or its frame handling is
 security-critical).
 `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
-appointment-card-request funnel — dark until `APPOINTMENT_CARD_REQUEST`
+appointment-card-request funnel — ALSO serves the standalone "set up
+Auto Pay" link (`appointment_card_requests.kind='customer'`, dark behind
+`GATE_AUTOPAY_SETUP_LINK`, operator-minted only from the Customers page):
+same token/format/header/limiter contract; the GET payload carries
+`kind:'customer'`, no visit/fee/plan fields, `paymentMethodTypes`
+(card_or_bank with INSTANT bank verification only, card-only under an
+unhealthy `customers.ach_status`), and renders `closed` once
+`expires_at` (30 days) passes, the customer is archived or becomes
+payer-billed, or Auto Pay is already active (the pending row is RETIRED to
+`expired` so every later GET stays closed — never healed to satisfied); a
+`completed` row renders `secured` only while the enrollment is still live
+and chargeable; the POST runs the same
+live-verify (purpose `autopay_setup_link` + request id) and the same
+save → consent → enroll tail under the same claim/lease; `select-plan`
+is not applicable to these rows. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
 AND the `secure_appointment_card` SMS template are both enabled, and
 unreachable until the funnel mints links. Bearer token
 (`appointment_card_requests.token` — 22-char base64url / 128-bit since

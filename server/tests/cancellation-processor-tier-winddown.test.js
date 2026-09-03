@@ -56,6 +56,7 @@ jest.mock('../models/db', () => {
       whereNot(col, val) { conds.push((r) => r[col] !== val); return q; },
       del() { const keep = rows.filter((r) => !matches(r, conds)); const n = rows.length - keep.length; tables[table] = keep; return Promise.resolve(n); },
       whereRaw() { return q; },
+      forUpdate() { return q; },
       select() { return Promise.resolve(rows.filter((r) => matches(r, conds))); },
       first(...cols) {
         const row = rows.find((r) => matches(r, conds)) || null;
@@ -81,7 +82,10 @@ jest.mock('../models/db', () => {
     const snapshot = JSON.parse(JSON.stringify(tables));
     const trx = (table) => makeQuery(table);
     trx.isTransaction = true;
-    trx.raw = async () => {};
+    // Every statement the transaction issues, in order, so a test can assert
+    // the rung-6 customer-comms lock is the FIRST thing it does.
+    trx.raw = async (sql, bindings) => { db.__statements.push({ raw: sql, bindings }); };
+    db.__statements.push({ begin: true });
     try {
       return await fn(trx);
     } catch (err) {
@@ -91,11 +95,13 @@ jest.mock('../models/db', () => {
     }
   };
   db.__tables = tables;
+  db.__statements = [];
   return db;
 });
 
 const db = require('../models/db');
 const { processCancellationRequest, applyScopedWindDown } = require('../services/cancellation-processor');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 function seedCustomer() {
   db.__tables.customers = [{
@@ -245,4 +251,138 @@ test('a per-application reprice whose CAS lands on zero rows aborts the wind-dow
   await applyScopedWindDown('cust-1', plan, { requestId: 'req-1' });
   expect(db.__tables.customers[0].waveguard_tier).toBe('Bronze');
   expect(db.__tables.scheduled_services[0].estimated_price).toBe(95);
+});
+
+test('the wind-down transaction takes the rung-6 customer-comms lock as its FIRST statement — booking and ledger writers serialize on the same key', async () => {
+  db.__tables.invoices = [];
+  db.__tables.service_requests = [{ id: 'req-1', metadata: null }];
+  seedCustomer();
+  db.__statements.length = 0;
+  await applyScopedWindDown('cust-1', {
+    ok: true, inScope: ['lawn_care'], remaining: ['pest_control'], tierBefore: 'Silver', tierAfter: 'Bronze',
+    monthlyLane: false, perApplicationLane: true, remainingRates: [], perAppRows: [],
+  }, { requestId: 'req-1' });
+  const [begin, first] = db.__statements;
+  expect(begin).toEqual({ begin: true });
+  expect(first).toEqual({ raw: expect.stringContaining('pg_advisory_xact_lock'), bindings: ['customer-comms:cust-1'] });
+  // The key is the shared writer lock, byte for byte (utils/customer-comms-lock).
+  const probe = []; await lockCustomerComms({ raw: async (sql, b) => probe.push({ raw: sql, bindings: b }) }, 'cust-1');
+  expect(first).toEqual(probe[0]);
+});
+
+test('the churn wind-down transaction takes the rung-6 lock before rewriting the tier and ledger', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  db.__tables.scheduled_services = [];
+  db.__statements.length = 0;
+  await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', actor: { type: 'portal' } });
+  const firstRaw = db.__statements.find((s) => s.raw);
+  expect(firstRaw).toEqual({ raw: expect.stringContaining('pg_advisory_xact_lock'), bindings: ['customer-comms:cust-1'] });
+  expect(db.__tables.customers[0].waveguard_tier).toBeNull();
+});
+
+test('the churn EPISODE is minted on the first churn (no stamp on the row) and returned to the caller', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-1' });
+  expect(result.churned).toBe(true);
+  const customer = db.__tables.customers[0];
+  expect(customer.churn_episode_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(result.churnEpisodeId).toBe(customer.churn_episode_id);
+});
+
+test('a repeat run on a still-churned row REUSES the stamped episode — never re-minted', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churned_at: '2026-08-01', churn_episode_id: 'ep-first' });
+  const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-2' });
+  expect(result.churned).toBe(true);
+  expect(db.__tables.customers[0].churn_episode_id).toBe('ep-first');
+  expect(result.churnEpisodeId).toBe('ep-first');
+});
+
+test('a LIVE row still carrying a stale episode (a promotion that never cleared the stamp) churns under a FRESH episode', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  Object.assign(db.__tables.customers[0], { pipeline_stage: 'active_customer', active: true, churned_at: null, churn_episode_id: 'ep-stale' });
+  const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-3' });
+  expect(result.churned).toBe(true);
+  const c = db.__tables.customers[0];
+  expect(c.churn_episode_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(c.churn_episode_id).not.toBe('ep-stale');
+  expect(result.churnEpisodeId).toBe(c.churn_episode_id);
+});
+
+test('the episode is chosen from the row AS LOCKED — a stamp that landed between the entry read and the lock is reused, never overwritten', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  // A concurrent cancel committed its episode after this run's entry read.
+  const orig = db.transaction;
+  db.transaction = async (fn) => { Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churn_episode_id: 'ep-race' }); return orig(fn); };
+  try {
+    const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-3' });
+    expect(result.churned).toBe(true);
+    expect(db.__tables.customers[0].churn_episode_id).toBe('ep-race');
+    expect(result.churnEpisodeId).toBe('ep-race');
+    // Lock order inside the wind-down: rung 6, then the customers row.
+    const raws = db.__statements.filter((s) => s.raw).map((s) => s.bindings && s.bindings[0]);
+    expect(raws[0]).toBe('customer-comms:cust-1');
+  } finally {
+    db.transaction = orig;
+  }
+});
+
+test('gate OFF: the episode is still minted under the customers row lock', async () => {
+  seedCustomer();
+  const orig = db.transaction;
+  db.transaction = async (fn) => { Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churn_episode_id: 'ep-race-legacy' }); return orig(fn); };
+  try {
+    const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-4' });
+    expect(result.churned).toBe(true);
+    expect(db.__tables.customers[0].churn_episode_id).toBe('ep-race-legacy');
+    expect(result.churnEpisodeId).toBe('ep-race-legacy');
+    // H0 residue untouched: tier and rate stay (byte-identical wind-down).
+    expect(db.__tables.customers[0].waveguard_tier).toBe('Gold');
+  } finally {
+    db.transaction = orig;
+  }
+});
+
+test('churn facts follow the row AS LOCKED: a concurrent churn that landed after the entry read is a REPEAT churn (stamps preserved)', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  const orig = db.transaction;
+  db.transaction = async (fn) => {
+    Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churned_at: '2026-08-01', churn_reason: 'moved', churn_mrr: 140, churn_episode_id: 'ep-first' });
+    return orig(fn);
+  };
+  try {
+    const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'too pricey', requestId: 'req-5' });
+    expect(result.churned).toBe(true);
+    const c = db.__tables.customers[0];
+    expect(c.churned_at).toBe('2026-08-01');
+    expect(c.churn_reason).toBe('moved');
+    expect(c.churn_episode_id).toBe('ep-first');
+    expect(result.churnEpisodeId).toBe('ep-first');
+  } finally { db.transaction = orig; }
+});
+
+test('churn facts follow the row AS LOCKED: a reactivation that landed after the entry read makes this a FRESH churn (new stamps, new episode)', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churned_at: '2026-08-01', churn_episode_id: 'ep-old' });
+  const orig = db.transaction;
+  db.transaction = async (fn) => {
+    Object.assign(db.__tables.customers[0], { pipeline_stage: 'active_customer', active: true, churned_at: null, churn_reason: null, churn_episode_id: null });
+    return orig(fn);
+  };
+  try {
+    const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'too pricey', requestId: 'req-6' });
+    expect(result.churned).toBe(true);
+    const c = db.__tables.customers[0];
+    expect(c.churned_at).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(c.churn_episode_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(c.churn_episode_id).not.toBe('ep-old');
+    expect(result.churnEpisodeId).toBe(c.churn_episode_id);
+  } finally { db.transaction = orig; }
 });

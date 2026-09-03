@@ -22,6 +22,7 @@ const logger = require('./logger');
 const pricingEngine = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
 const { loadExistingQualifyingServiceKeys, resolveCustomerQualifyingEvidence, isActivePlanCustomer, isMembershipCustomerRow } = require('./waveguard-existing-services');
+const { findCustomersAtAddress } = require('./customer-address-match');
 const { computeMembershipContext } = require('./estimate-membership-context');
 
 function errorWithStatus(message, statusCode) {
@@ -1980,59 +1981,18 @@ async function resolveEstimateWritePayload({
 async function detectUnlinkedMemberAddress(database, body = {}) {
   try {
     if (body.customerId || !body.address) return null;
-    const street = String(body.address).split(',')[0].trim();
-    const houseNumber = (street.match(/^\d{1,6}/) || [])[0];
-    if (!houseNumber || street.length < 6) return null;
-    // House-number prefix narrows cheaply; the street comparator (the same
-    // canonical one the membership snapshot uses) decides the real match.
-    const { sameStreetAddress } = require('./estimator-engine/address-compare');
-    // Bounded but generous (codex #3338 r17): a common house number can
-    // match many active addresses, and an unordered small limit could drop
-    // the true member before the street comparator runs. 50 per leg with a
-    // deterministic order keeps the scan bounded while making a same-house-
-    // number collision that deep implausible.
-    const candidates = await database('customers')
-      .where((q) => q.where('active', true).orWhereNull('active'))
-      .whereNull('deleted_at')
-      .where('address_line1', 'ilike', `${houseNumber} %`)
-      .orderBy('id')
-      .limit(50)
-      .select('id', 'first_name', 'last_name', 'address_line1', 'city', 'zip', 'waveguard_tier', 'monthly_rate');
-    // A member's NON-PRIMARY addresses live in customer_properties, not
-    // customers.address_line1 (codex #3338 r12) — a secondary-property
-    // estimate must warn the same way. Best-effort: environments without
-    // the table just skip this leg.
-    try {
-      const propertyCandidates = await database('customer_properties as cp')
-        .join('customers as c', 'cp.customer_id', 'c.id')
-        .where('cp.active', true)
-        .where((q) => q.where('c.active', true).orWhereNull('c.active'))
-        .whereNull('c.deleted_at')
-        .where('cp.address_line1', 'ilike', `${houseNumber} %`)
-        .orderBy('cp.id')
-        .limit(50)
-        .select(
-          'c.id', 'c.first_name', 'c.last_name', 'c.waveguard_tier', 'c.monthly_rate',
-          'cp.address_line1', 'cp.city', 'cp.zip',
-        );
-      candidates.push(...propertyCandidates);
-    } catch (propErr) {
-      logger.warn(`[admin-estimate] unlinked-member property-address leg skipped: ${propErr.message}`);
-    }
-    for (const candidate of candidates) {
-      if (!candidate.address_line1) continue;
-      const candidateAddress = [candidate.address_line1, candidate.city, candidate.zip].filter(Boolean).join(', ');
-      if (!sameStreetAddress(candidateAddress, body.address)) continue;
-      if (!isMembershipCustomerRow(candidate)) continue;
-      const name = `${candidate.first_name || ''} ${candidate.last_name || ''}`.trim() || 'an active member';
-      return {
-        customerId: candidate.id,
-        customerName: name,
-        waveguardTier: candidate.waveguard_tier || null,
-        message: `This address matches ${name}'s account${candidate.waveguard_tier ? ` (WaveGuard ${candidate.waveguard_tier})` : ''}, but the estimate isn't linked to a customer — member pricing (combined WaveGuard tier) was NOT applied. Link the customer and save again to price at the member rate.`,
-      };
-    }
-    return null;
+    // Same candidate set the builder's link suggestions and the Customer 360
+    // "Others at this address" block use (customer-address-match.js).
+    const rows = await findCustomersAtAddress(database, body.address);
+    const candidate = rows.find(isMembershipCustomerRow);
+    if (!candidate) return null;
+    const name = `${candidate.first_name || ''} ${candidate.last_name || ''}`.trim() || 'an active member';
+    return {
+      customerId: candidate.id,
+      customerName: name,
+      waveguardTier: candidate.waveguard_tier || null,
+      message: `This address matches ${name}'s account${candidate.waveguard_tier ? ` (WaveGuard ${candidate.waveguard_tier})` : ''}, but the estimate isn't linked to a customer — member pricing (combined WaveGuard tier) was NOT applied. Link the customer and save again to price at the member rate.`,
+    };
   } catch (err) {
     logger.warn(`[admin-estimate] unlinked-member address check skipped: ${err.message}`);
     return null;

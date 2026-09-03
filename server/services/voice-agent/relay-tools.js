@@ -1386,6 +1386,9 @@ async function executeTool(name, input = {}, ctx = {}) {
           estimateQueued = false;
         }
       }
+      // The session records the promise the caller will hear: a queued
+      // estimate becomes an owed commitment at close (call-commitments).
+      if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
       const expectationCopy = {
         about_15_minutes: 'The office is open: tell the caller the written estimate usually goes out in about 15 minutes.',
         when_office_opens: 'The office is closed: tell the caller the written estimate goes out when the office opens — do not name a time.',

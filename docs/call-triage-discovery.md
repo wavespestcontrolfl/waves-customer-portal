@@ -372,7 +372,7 @@ route_decisions (
   ai_validation_schema_version    varchar,
   enrichment_version              varchar,
   created_at                      timestamptz,
-  UNIQUE (call_log_id, decision_version, mode)
+  UNIQUE (call_log_id, decision_version, mode, recording_sid)  -- recording_sid: the recording the decision was derived from ('' when none, and on every pre-2026-09 row — never backfilled); a replaced recording's pass writes its own row; the legacy 3-column constraint is kept until the contract migration drops it (rolling-deploy expand/contract)
 );
 ```
 
@@ -591,7 +591,7 @@ Accept criteria: backfill labeling shows zero critical false-positive auto-creat
 7. **Relative date resolution** — "tomorrow at 10"; resolved from `call_log.created_at` in America/New_York to ISO; appointment proceeds.
 8. **Past datetime** — extractor returns past timestamp; `past_or_unresolved_datetime` veto.
 9. **Reschedule/cancel ambiguity** — "I might need to cancel Friday"; no new appointment; triage item created.
-10. **Duplicate Twilio callbacks** — recording-status + transcription both arrive; exactly one `route_decision`, one set of side effects, idempotent on `(call_log_id, decision_version, mode)`.
+10. **Duplicate Twilio callbacks** — recording-status + transcription both arrive; exactly one `route_decision`, one set of side effects, idempotent on `(call_log_id, decision_version, mode, recording_sid)` — a replaced recording (operator adoption, a superseding callback) is a new recording and gets its own row.
 11. **ParentCallSid forwarded call** — parent/child group dedupes via `source_call_group_id`.
 12. **Invalid Twilio signature** — `enforce` mode rejects with 403; `log` mode logs and processes.
 13. **Proxy HTTPS mismatch** — `req.protocol='http'` + `X-Forwarded-Proto='https'`; signature validates against reconstructed URL.

@@ -37,6 +37,9 @@ const WRONG_FIELD_OPTIONS = [
 
 // Human-readable labels for the deterministic + model triage reasons.
 const REASON_LABELS = {
+  additional_recording: "Second recording arrived — listen and adopt",
+  customer_creation_failed: "Customer record failed to save",
+  lead_creation_failed: "Lead failed to save",
   out_of_service_area: "Out of service area",
   missing_service_address: "Missing address",
   address_unverifiable: "Address unverifiable",
@@ -170,6 +173,13 @@ export function ConfirmEvidence({ payload }) {
         p.unit_ask_building.city,
         p.unit_ask_building.postal_code,
       ].filter(Boolean).join(", "),
+    },
+    // The customer answered the approval-gated unit text: the reply lands
+    // HERE only (no CRM write), so the reviewer must see it beside the ask
+    // to give the card its human verdict.
+    p.customer_reply_unit && {
+      label: "Customer replied",
+      value: `${p.customer_reply_unit} (by text${p.customer_reply_at ? ` ${new Date(p.customer_reply_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET` : ""}) — confirm and enter it on the record`,
     },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },

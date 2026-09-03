@@ -1687,3 +1687,55 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     expect(r.reason).toBe('one_time_items');
   });
 });
+
+describe('markEstimateManuallyAccepted — converter operational 4xx refusals keep their status and code (GH codex P1 on #3751)', () => {
+  test('an unpriced per-application add-on refusal surfaces as the converter\'s 409, not a generic 500', async () => {
+    const estimate = {
+      id: 'estimate-409',
+      status: 'viewed',
+      customer_id: 'customer-1',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '51.75',
+      onetime_total: null,
+      waveguard_tier: 'Bronze',
+    };
+    const { database } = makeDb(estimate);
+    const refusal = new Error('This add-on\'s per-visit price could not be derived — nothing was booked.');
+    refusal.code = 'PER_APPLICATION_ADD_ON_UNPRICED';
+    refusal.isOperational = true;
+    refusal.status = 409;
+    refusal.statusCode = 409;
+    const estimateConverter = { convertEstimate: jest.fn().mockRejectedValue(refusal) };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    })).rejects.toMatchObject({ statusCode: 409, code: 'PER_APPLICATION_ADD_ON_UNPRICED', message: expect.stringMatching(/nothing was booked/i) });
+  });
+
+  test('a non-operational converter failure still collapses to the generic 500', async () => {
+    const estimate = {
+      id: 'estimate-500',
+      status: 'viewed',
+      customer_id: 'customer-1',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '51.75',
+      onetime_total: null,
+      waveguard_tier: 'Bronze',
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = { convertEstimate: jest.fn().mockRejectedValue(new Error('db down')) };
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    })).rejects.toMatchObject({ statusCode: 500 });
+  });
+});

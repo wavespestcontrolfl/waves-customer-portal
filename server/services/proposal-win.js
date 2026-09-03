@@ -215,6 +215,7 @@ function commercialWinPromotionStamps(customer = {}, today = etDateString()) {
   if (customer.pipeline_stage === 'churned' || customer.churned_at) {
     stamps.churned_at = null;
     stamps.churn_reason = null;
+    stamps.churn_episode_id = null;
   }
   // Un-archive a soft-deleted customer being reactivated on a win (mirrors
   // EstimateConverter) — otherwise the won/invoiced customer stays hidden from

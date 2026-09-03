@@ -36,7 +36,8 @@ const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispat
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
-const { buildCompletionAdvisory } = require('../services/service-report/report-data');
+const { buildCompletionAdvisory, approvedReportProductFacts } = require('../services/service-report/report-data');
+const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { tipsForVisit, freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue } = require('../config/feature-gates');
 const {
@@ -5580,6 +5581,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
+    // The prior run released the attempt itself (the SMS / token-mint /
+    // mint-failure 503s) rather than dying mid-flight: none of its lanes is
+    // still running, so a 'sending' marker it failed to clear is stale.
+    const resumingReleasedCompletion = resumingCommittedCompletion && claim.releasedForResume === true;
 
     // Visit-group membership re-check, now that the durable claim is
     // committed (codex r2 P0). Stamping (visit-groups.js) locks the row
@@ -6759,6 +6764,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // a correction slipping between the two missed the fresh record
           // and was then overwritten. Locking up front makes finalization
           // and correction strictly ordered whichever starts first.
+          //
+          // Customer FOR SHARE is taken BEFORE the visit lock — the same
+          // customer → visit order customer-dedupe's executeMerge uses
+          // (customers locked first, then the loser's scheduled visits
+          // updated), so a merge racing a completion cannot form a lock
+          // cycle (codex P1 #3742 r4). Feeds the report identity snapshot.
+          const snapshotCustomerRow = await trx('customers')
+            .where({ id: svc.customer_id })
+            .forShare()
+            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
           const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
           // Linked-timer snapshot under the same lock (codex P2 #3152
           // round 23): the post-commit sync's version boundary is THIS
@@ -7051,7 +7066,69 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // (service-closeout-requirements.js frozenCloseoutRequirements).
             ...(closeoutRequirementsSnapshot ? { closeoutRequirements: closeoutRequirementsSnapshot } : {}),
           };
+          // Report identity snapshot (report-identity-snapshot.js): the
+          // customer name, visit address, technician name, linked service
+          // title, and each applied product's approved report facts are
+          // frozen INSIDE the transaction so later customer / schedule /
+          // technician / catalog edits cannot rewrite this visit's report.
+          // Customer and technician are re-read HERE against the locked row
+          // (not the handler's pre-transaction join): a rename, move, or
+          // reassignment that committed between the preflight read and this
+          // lock must freeze as it stands at commit, not as it stood when the
+          // tech opened the panel (pre-push codex P1). Product facts come
+          // from the catalog rows the product loop below re-validates; a
+          // failed read leaves productFacts undefined so the renderer keeps
+          // its live fallback for this record only.
+          // These reads run INSIDE the transaction and propagate like every
+          // other in-trx read here: a failed statement aborts the Postgres
+          // transaction, so a swallowed rejection could not make the leg
+          // "fail-soft" — it would only rename the rollback (pre-push codex
+          // P1). A missing row (deleted customer, no technician) still just
+          // omits that leg via buildReportIdentitySnapshot.
+          // The visit row (stamped address, service_type) is the LOCKED row;
+          // the customer and technician are looked up by the SAME ids
+          // recordInsert persists below (svc.customer_id / svc.technician_id),
+          // so the frozen name can never disagree with the FK the report
+          // routes join for the photo (pre-push codex P1).
+          const snapshotVisitRow = lockedSvcRow || svc;
+          // Lock order is customer (FOR SHARE, taken above before the visit
+          // FOR UPDATE) → visit → technician → catalog, so a concurrent
+          // rename / reassignment / catalog edit cannot commit between these
+          // reads and the completion commit — the frozen values are the
+          // rows as they stand at commit (pre-push codex P1).
+          const snapshotTechnicianRow = svc.technician_id
+            ? await trx('technicians').where({ id: svc.technician_id }).forShare().first('name')
+            : null;
+          // ONE catalog read set inside the trx serves both the frozen report
+          // facts and the product loop's validation below, so the facts the
+          // report freezes are the rows the completion actually validated
+          // against (pre-push codex P1). Keys are canonical lower-case uuids:
+          // Postgres returns ids lower-case however the request spelled them.
+          const snapshotProductIds = [...new Set((products || []).map((p) => canonicalProductId(p?.productId)).filter(Boolean))];
+          const completionCatalogRowsById = new Map(
+            (snapshotProductIds.length
+              // FOR UPDATE, not FOR SHARE: deductProductInventory below
+              // upgrades to FOR UPDATE on these same rows, and two
+              // completions holding compatible share locks would deadlock
+              // on the upgrade (codex P1).
+              ? await trx('products_catalog').whereIn('id', snapshotProductIds).forUpdate().select('*')
+              : []
+            ).map((row) => [canonicalProductId(row.id), row]),
+          );
+          const reportProductFactsSnapshot = {};
+          for (const productId of snapshotProductIds) {
+            reportProductFactsSnapshot[productId] = approvedReportProductFacts(
+              completionCatalogRowsById.get(productId) || null,
+            );
+          }
+          const reportIdentitySnapshot = buildReportIdentitySnapshot({
+            visit: snapshotVisitRow,
+            customer: snapshotCustomerRow || null,
+            technicianName: snapshotTechnicianRow ? snapshotTechnicianRow.name : null,
+            productFacts: reportProductFactsSnapshot,
+          });
           const serviceData = {
+            reportIdentitySnapshot,
             protocol: {
               visitOutcome,
               actions: reportProtocolActions,
@@ -7925,7 +8002,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               err.isOperational = true; err.statusCode = 400;
               throw err;
             }
-            const product = await trx('products_catalog').where({ id: p.productId }).first();
+            // Same read set the report identity snapshot froze from.
+            const product = completionCatalogRowsById.get(canonicalProductId(p.productId));
             if (!product) {
               const err = new Error(`Product not found: ${p.productId}`);
               err.isOperational = true; err.statusCode = 400;
@@ -10415,6 +10493,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const portalUrl = publicPortalUrl();
     let reportUrl = portalUrl;
     let reportToken = null;
+    // Retained for the withhold branch ahead of the SMS lane: the bell for a
+    // failed mint fires THERE (where the completion text is actually
+    // withheld), not here — a mint failure on a visit that was never going to
+    // text (internal-only, no phone, already handled) is a log line, not a
+    // "text withheld" bell (GitHub Codex r1 P1).
+    let reportTokenMintError = null;
+    const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
     // delivery_mode 'disabled' (typed kill switch) suppresses the customer
     // report entirely — don't mint a public token at all (Codex P2). The
     // record still exists; flipping the mode back later can mint on demand.
@@ -10424,10 +10509,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         reportToken = await ensureReportToken(record.id);
         if (reportToken) reportUrl = `${portalUrl}/report/${reportToken}`;
       } catch (err) {
+        // Post-commit: the visit still completes. A report-v1 visit's
+        // completion text is WITHHELD below (completionSmsWithheldForMissing-
+        // ReportToken) so the customer is not told "your report is ready"
+        // with a link to the portal home; that branch raises the bell.
+        reportTokenMintError = err;
         logger.error(`[dispatch] service report token mint failed: ${err.message}`);
       }
     }
-    const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
     // Auto-publish tech-captured visual moments to the customer report
     // (owner 2026-08-27, dark ship — kill switch GATE_AUTO_PUBLISH_VISUAL_MOMENTS).
     // Runs BEFORE the PDF enqueue below so the rendered artifact carries
@@ -11404,6 +11493,80 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         }
         logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
+        // Exception-based (CLAUDE.md rule 14): a LIVE mint failure used to
+        // be a log line only — the visit completed, the customer got the
+        // report-only text, and the office found out when nobody paid
+        // (2026-08-31→09-01: four priced completions, one still unbilled
+        // two days later). Bell once per visit; the office bills by hand.
+        // This catch covers the WHOLE invoicing block, so `invoice` may
+        // already hold a committed row when a later step (prepaid credit,
+        // back-link) threw — then the office must RECONCILE that invoice,
+        // never mint a second one (GH r1 P1). No amount in the copy: the
+        // base amount here is not the total the mint would have produced
+        // (add-ons, discounts, setup fee, tax — GH r1 P1). The SMS path runs
+        // AFTER this bell and can skip or fail on its own, so the copy does
+        // not claim the text was delivered (GH r1 P2). Fail-soft — the
+        // completion is already committed.
+        try {
+          const NotificationService = require('../services/notification-service');
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          const visitLabel = `${svc.service_type || 'this visit'} on ${String(svc.scheduled_date).slice(0, 10)}`;
+          // Under the visit's invoice-mint lock, RESCAN for a live invoice
+          // and pick the wording in the same transaction (GH r2 P1): the
+          // failed mint released its lock, and Charge Now / checkout /
+          // a resume can mint between that release and this bell — a
+          // "create the invoice" instruction beside a live invoice is how
+          // a second collectible invoice happens. notifyAdmin dedupes on
+          // this trx too (its `trx` option), so lock, rescan, wording and
+          // insert commit together.
+          const bell = await db.transaction(async (trx) => {
+            await acquireScheduledInvoiceMintLock(trx, svc.id);
+            const liveNow = invoice?.id
+              ? invoice
+              : await completionSuppressorInvoiceLookup(trx, { scheduled_service_id: svc.id });
+            return liveNow?.id
+              ? NotificationService.notifyAdmin(
+              'billing',
+              'Completion invoice needs review — a post-mint step failed',
+              `The completion for ${visitLabel} committed and invoice ${liveNow.invoice_number || liveNow.id} exists, but a later invoicing step failed. Review that invoice on the customer page before it is sent — do NOT create a second invoice for this visit.`,
+              {
+                link: `/admin/customers/${svc.customer_id}`,
+                bell: true,
+                dedupeKey: `live_invoice_postmint_failed:${svc.id}`,
+                trx,
+                metadata: {
+                  customerId: svc.customer_id,
+                  scheduledServiceId: svc.id,
+                  serviceRecordId: record.id,
+                  invoiceId: liveNow.id,
+                  error: String(invErr?.message || '').slice(0, 200),
+                },
+              },
+            )
+            : NotificationService.notifyAdmin(
+              'billing',
+              'Completion invoice not created — bill this visit by hand',
+              `The completion for ${visitLabel} committed, but its invoice could not be created; any completion text that sends will carry no pay link. Create and send the invoice from the customer page at the visit's price plus any add-ons or setup fee.`,
+              {
+                link: `/admin/customers/${svc.customer_id}`,
+                bell: true,
+                dedupeKey: `live_invoice_mint_failed:${svc.id}`,
+                trx,
+                metadata: {
+                  customerId: svc.customer_id,
+                  scheduledServiceId: svc.id,
+                  serviceRecordId: record.id,
+                  error: String(invErr?.message || '').slice(0, 200),
+                },
+              },
+            );
+          });
+          // notifyAdmin returns null (no throw) when its dedupe lock/insert
+          // fails — log that too, or a lost bell reads as delivered.
+          if (!bell) logger.error(`[dispatch] live invoice-mint-failed bell NOT recorded for ${svc.id} (notifyAdmin returned null)`);
+        } catch (bellErr) {
+          logger.error(`[dispatch] live invoice-mint-failed bell FAILED for ${svc.id}: ${bellErr.message}`);
+        }
       }
     } else if (preMintedInvoice) {
       // Back-link the pre-minted invoice to the freshly created service_record
@@ -11982,9 +12145,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const completionSmsAttemptedAt = recordStructuredNotes.completionSmsAttemptedAt
       ? new Date(recordStructuredNotes.completionSmsAttemptedAt).getTime()
       : 0;
+    // A released resume ignores a fresh 'sending' marker: the run that set
+    // it ended (it released the attempt) and its failed-status writes both
+    // threw, so honoring it would skip the text and finalize without sending
+    // (GitHub Codex r3 P1 on the split PR). A stale-window reclaim keeps the
+    // guard — that run may still be mid-send.
     const completionSmsSendingFresh = recordStructuredNotes.completionSmsStatus === 'sending'
       && completionSmsAttemptedAt
-      && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000;
+      && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000
+      && !resumingReleasedCompletion;
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
       // 'deferred' = a send-window hold requeued the text on the
@@ -12316,7 +12485,276 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
+    // Report EMAIL enqueue, independent of the SMS lane (email-only customers
+    // still get the report). Hoisted into a function so the SMS lane's
+    // retry-503 exit below can queue the email BEFORE releasing the attempt
+    // (GitHub Codex r4 P1): the email channel must never wait on a retry
+    // the tech may not make. Idempotent — emailAlreadyHandled plus the
+    // queue's per-record dedupe make the call at the original site a no-op
+    // after an early one. Not called from the token-withhold exit: with no
+    // token there is nothing to email either; the retry that re-mints
+    // re-enters both lanes.
+    const queueServiceReportEmailIfEligible = async () => {
+      const serviceReportEmailEnabled = serviceReportV1Delivery
+        ? await runtimeServiceReportFlag(
+            req,
+            'service_report_email_delivery_enabled',
+            'SERVICE_REPORT_EMAIL_DELIVERY_ENABLED',
+            false,
+          )
+        : false;
+      // Email delivery is gated independently of the completion-SMS toggle (see
+      // serviceReportEmailEligible) so email-only customers still get the report.
+      if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && !serviceReportEmailEnabled) {
+        const latestNotes = parseJsonObject(record.structured_notes);
+        if (!latestNotes.serviceReportV1EmailStatus) {
+          const disabledDelta = {
+            serviceReportV1EmailStatus: 'disabled',
+            serviceReportV1EmailDisabledAt: new Date().toISOString(),
+          };
+          const disabledNotes = { ...latestNotes, ...disabledDelta };
+          await mergeRecordNotesKeys(record.id, disabledDelta)
+            .catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
+          record.structured_notes = disabledNotes;
+        }
+      }
+
+      if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && serviceReportEmailEnabled) {
+        const latestNotes = parseJsonObject(record.structured_notes);
+        const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
+        if (!emailAlreadyHandled) {
+          try {
+            // The email worker rebuilds and ATTACHES the current PDF at send
+            // time — an emailed attachment is unrecallable. While grounded
+            // copy is still pending, the job is enqueued DURABLY with a
+            // 20-minute hold (survives a process restart, unlike a promise
+            // callback — codex P1 r15+r16); the settlement callback below
+            // pulls next_attempt_at forward the moment copy settles, so the
+            // hold only fully elapses if the process died — and by then the
+            // locked late write/sanitize has landed anyway.
+            // Hold on timeout even if the regen landed grounded MEANWHILE
+            // (codex P1 r22): the initial PDF may have started rendering the
+            // stale copy during the timed-out window, and only the held path's
+            // worker fence + key invalidation guarantees the email attaches a
+            // post-settlement render.
+            const emailHoldMs = lawnRecRegenAttempted && (lawnRecRegenTimedOut || !lawnRecRegenGrounded)
+              ? 20 * 60 * 1000 : 0;
+            const queued = await enqueueServiceReportV1EmailDelivery({
+              serviceRecordId: record.id,
+              customerId: svc.customer_id,
+              token: reportToken,
+              reportUrl,
+              pdfUrl: reportToken ? `${portalUrl}/api/reports/${reportToken}` : null,
+              delayMs: emailHoldMs,
+              payload: {
+                scheduled_service_id: svc.id,
+                source: emailHoldMs ? 'dispatch_complete_held_for_grounding' : 'dispatch_complete',
+                // The delivery worker enforces grounding readiness itself for
+                // held jobs (elapsed time is not proof the settlement ran —
+                // codex P1 r17).
+                // The assessment identity rides on EVERY lawn-report delivery,
+                // not just held ones (issue #3135). When regeneration settles
+                // inside the hold window the job is enqueued normally, and
+                // without this the worker had no assessment to fence — that
+                // delivery dispatched with no version check and no send seal.
+                // awaiting_grounding stays hold-only: it means "sanitize before
+                // sending", which is a held-path obligation.
+                ...(completedLawnAssessmentId ? { lawn_assessment_id: completedLawnAssessmentId } : {}),
+                ...(emailHoldMs ? { awaiting_grounding: true } : {}),
+              },
+            });
+            if (emailHoldMs && queued.delivery?.id && lawnRecFinalCopyPromise) {
+              const heldDeliveryId = queued.delivery.id;
+              logger.info(`[dispatch] report email held ${Math.round(emailHoldMs / 60000)}m for ${record.id} pending grounded copy`);
+              void lawnRecFinalCopyPromise.then(async (finalCopy) => {
+                // Pull forward only on VERIFIED settlement (codex P1 r18) —
+                // unverified keeps the full hold, and the worker's own
+                // sanitize gate still protects the send.
+                if (!finalCopy?.verified) return;
+                await db('service_report_deliveries')
+                  .where({ id: heldDeliveryId, status: 'queued' })
+                  .update({ next_attempt_at: new Date(), updated_at: new Date() })
+                  .catch((pullErr) => logger.warn(`[dispatch] held email pull-forward failed for ${record.id}: ${pullErr.message}`));
+              }).catch((chainErr) => logger.error(`[dispatch] held email pull-forward chain failed for ${record.id}: ${chainErr.message}`));
+            }
+            const queuedDelta = {
+              serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),
+              serviceReportV1EmailDeliveryId: queued.delivery?.id || null,
+              serviceReportV1EmailQueuedAt: queued.delivery?.created_at || new Date().toISOString(),
+              serviceReportV1EmailError: queued.ok ? null : queued.error || null,
+            };
+            const queuedNotes = { ...latestNotes, ...queuedDelta };
+            await mergeRecordNotesKeys(record.id, queuedDelta);
+            record.structured_notes = queuedNotes;
+          } catch (err) {
+            const failedDelta = {
+              serviceReportV1EmailStatus: 'failed',
+              serviceReportV1EmailError: err.message || 'Email queue failed',
+              serviceReportV1EmailFailedAt: new Date().toISOString(),
+            };
+            const failedNotes = { ...latestNotes, ...failedDelta };
+            await mergeRecordNotesKeys(record.id, failedDelta)
+              .catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
+            record.structured_notes = failedNotes;
+            logger.error(`[dispatch] v1 report email queue failed: ${err.message}`);
+          }
+        }
+      }
+    };
+
+    // Third-party Bill-To delivery, callable from the resumable SMS exit as
+    // well as the ordinary finalization below: the payer AP channel does not
+    // depend on the homeowner text, so a retryable completion-SMS failure
+    // must not leave the payer invoice a draft until the tech retries
+    // (GitHub Codex #3745 r6 P1). Idempotent — the status check skips an
+    // invoice already sent/finalized on a resumed attempt.
+    const sendPayerInvoiceToApIfEligible = async () => {
+      // Third-party Bill-To: a payer-billed auto-invoice is intentionally NOT
+      // carried by the homeowner completion SMS (pay link suppressed) and is never
+      // collected in person, so the homeowner channel can't finalize it. Route it
+      // to the payer's AP inbox here and finalize on success — otherwise the
+      // third-party AR is silently stranded as an unsent draft. A payer with no
+      // usable AP email leaves the invoice unfinalized for operator correction
+      // (sendInvoiceEmail returns ok:false rather than mailing the homeowner).
+      // Only deliver to the payer when this invoice hasn't already been sent —
+      // `invoiceCreated` is also true when a completion REUSES an existing unpaid
+      // invoice (a pre-minted invoice already `sent`/`viewed`, or a request where
+      // invoiceAlreadySent suppressed the homeowner link). Re-sending would
+      // duplicate the AP billing email. Fresh completion invoices are `draft`.
+      // email_sent_at is sendInvoiceEmail's own durable stamp: an accepted AP
+      // email whose markDeliverySent then failed leaves status 'draft' with
+      // the stamp set, and a resumed attempt must not mail it again (GitHub
+      // Codex r3 P2 on the split PR).
+      const payerInvoiceAlreadyDelivered = !!invoiceAlreadySent
+        || !!invoice?.email_sent_at
+        || ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
+          .includes(String(invoice?.status || '').toLowerCase());
+      // Backfill closeouts skip the automatic payer AP send too — the invoice
+      // stays unfinalized for the operator to review and send by hand (same
+      // recovery path as a failed AP send below).
+      if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion) {
+        try {
+          const InvoiceEmail = require('../services/invoice-email');
+          const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);
+          if (payerSend?.ok) {
+            const InvoiceService = require('../services/invoice');
+            invoice = await InvoiceService.markDeliverySent(invoice.id, {
+              email: true,
+              source: 'dispatch_completion_payer',
+            });
+          } else {
+            logger.warn(`[dispatch] Payer invoice ${invoice.id} not delivered to AP (${payerSend?.error || 'unknown'}) — left unfinalized for operator correction`);
+          }
+        } catch (payerSendErr) {
+          logger.error(`[dispatch] Payer invoice AP send failed for ${invoice.id}: ${payerSendErr.message}`);
+        }
+      }
+    };
+
+    if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
+      && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
+      // Report-v1 visit with no public report token (mint failed above): the
+      // report-lane template would render "your report is ready" around
+      // reportUrl, which is the portal HOME on this path (delivery.js only
+      // null-guards an empty url). Withhold the text instead. Marked 'failed'
+      // — the existing one-shot vocabulary (closeout-status reads it as
+      // completion_sms_failed, and it is NOT completionSmsAlreadyHandled, so a
+      // resumed completion after the mint recovers sends normally). This
+      // branch is the only place the token-mint bell fires: it is reached only
+      // when a text WOULD have gone out (phone on file, not suppressed, not
+      // already handled), so the bell always corresponds to a real withheld
+      // text — same dedupe/transport as the email and PDF lane alerts. No
+      // separate SMS-failure bell on this path.
+      const withheldDelta = {
+        completionSmsStatus: 'failed',
+        completionSmsError: 'report token unavailable — completion text withheld',
+        completionSmsFailedAt: new Date().toISOString(),
+      };
+      const withheldNotes = { ...recordStructuredNotes, ...withheldDelta };
+      await mergeRecordNotesKeys(record.id, withheldDelta)
+        .catch((updateErr) => logger.error(`[dispatch] completion SMS withheld status update failed: ${updateErr.message}`));
+      record.structured_notes = withheldNotes;
+      await markBundledReviewFailed();
+      logger.error(`[dispatch] Completion SMS withheld for service_record ${record.id}: report token unavailable`);
+      const { alertServiceReportTokenMintFailed } = require('../services/service-report/failure-alerts');
+      await alertServiceReportTokenMintFailed({
+        serviceRecordId: record.id,
+        customerId: svc.customer_id,
+        error: reportTokenMintError || 'report token unavailable',
+      });
+      // The withheld text must stay RECOVERABLE (GitHub Codex r2 P1): if this
+      // handler ran on to markCompletionAttemptSucceeded, every later submit
+      // would replay the stored response / 409 service_already_completed and
+      // never re-enter this lane, and there is no manual report-send action.
+      // So exit through the same release-for-resume + 503 the required-mint
+      // and manual-billing alert failures use: the service_record is already
+      // committed, the attempt goes back to side_effects_pending, and the
+      // tech's retry re-enters here — ensureReportToken runs again and, once
+      // it succeeds, the 'failed' marker above is not completionSmsAlreadyHandled
+      // so the report text sends normally.
+      // The payer AP channel does not depend on the report token or the
+      // homeowner text — deliver it before releasing, exactly as the SMS
+      // resume exit does, or a payer invoice sits as a draft until the tech
+      // retries (GitHub Codex r2 P1 on the split PR).
+      await sendPayerInvoiceToApIfEligible();
+      const withheldErr = reportTokenMintError || new Error('report token unavailable');
+      const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, withheldErr);
+      if (!released) {
+        logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+      }
+      return res.status(503).json({
+        error: released
+          ? 'The service report link could not be created, so the completion text was NOT sent — the closeout is saved but NOT finalized. Retry the closeout.'
+          : `The service report link could not be created, so the completion text was NOT sent — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+        code: 'service_report_token_mint_failed',
+        ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+        serviceRecordId: record.id,
+      });
+    } else if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
+      // Set the moment the provider ACCEPTS the text and read by the catch
+      // below: a route-local failure after acceptance (the post-send notes
+      // merge, an event insert) must never be reported as "not delivered"
+      // (GitHub Codex r3 P1).
+      let completionSmsProviderAccepted = false;
+      // What the attempted text IS (body/type/channel/review/pay-link), taken
+      // before the provider call so the catch can stamp the honest 'sent'
+      // state when acceptance is known only from the thrown error
+      // (sentSmsBody is scoped inside the try).
+      let completionSmsAcceptedSnapshot = null;
+      // A definite provider REJECTION (or failed quiet-hours requeue) seen
+      // inside the try, kept here so a route-local write that throws AFTER
+      // it (the failed-notes merge, the bundled-review release) still takes
+      // the rejection path in the catch instead of finalizing as a
+      // pre-acceptance exception (GitHub Codex r2 P1 on the split PR).
+      // Normalized to the providerOutcome shape the catch already reads.
+      let completionSmsRejectedOutcome = null;
+      // The ONE committed-but-not-finalized exit for a recoverable completion
+      // text failure (GitHub Codex r3 P1): finalizing here would make every
+      // later submit replay the stored response, and there is no dedicated
+      // completion-SMS resend action (building one is a customer-comm side
+      // effect — Adam's call). Same release-for-resume + 503 as the
+      // token-mint failure: the 'failed' marker is not
+      // completionSmsAlreadyHandled, so the tech's retry re-enters the lane
+      // and re-sends. The email channel does not depend on the text: it is
+      // queued first so the customer keeps it even if the tech never retries
+      // (GitHub Codex r4 P1). Used by the provider-rejection path inside the
+      // try and by the catch when a rejection's audit insert threw.
+      const exitForCompletionSmsResume = async (sendErr) => {
+        await queueServiceReportEmailIfEligible();
+        await sendPayerInvoiceToApIfEligible();
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, sendErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return res.status(503).json({
+          error: released
+            ? 'The completion text could not be sent — the closeout is saved but NOT finalized. Retry the closeout to send it.'
+            : `The completion text could not be sent — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'completion_sms_send_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        });
+      };
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         // Use the recap STORED on the record (the server-generated effectiveCustomerRecap,
@@ -12659,6 +13097,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             identityTrustLevel: 'phone_matches_customer',
             metadata: smsMetadata,
           };
+          // Captured BEFORE the provider call: sendCustomerMessage throws
+          // past acceptance when its audit insert fails (providerOutcome on
+          // the error), and the catch needs what was sent — body, type,
+          // channel, whether the review link rode along, whether the
+          // pay-link bookkeeping applies — to record the honest 'sent' state
+          // (pre-push Codex P1 on #3772). Acceptance itself is
+          // completionSmsProviderAccepted / e.providerOutcome, never this.
+          completionSmsAcceptedSnapshot = {
+            body: sentSmsBody,
+            type: sentSmsType,
+            channel: sentSmsChannel,
+            reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
+            // Block-scoped inside this try; the accepted-error catch reads it
+            // from the snapshot for the invoice bookkeeping.
+            invoiceLinkAllowed: allowCompletionInvoiceLink,
+          };
           let smsResult = await sendCustomerMessage(sendInput);
           if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
             logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
@@ -12666,6 +13120,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             delete fallbackMetadata.mediaUrls;
             delete fallbackMetadata.allowMediaUrls;
             fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
+            completionSmsAcceptedSnapshot.channel = 'sms';
             smsResult = await sendCustomerMessage({
               ...sendInput,
               metadata: fallbackMetadata,
@@ -12677,6 +13132,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
             sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
+          completionSmsProviderAccepted = smsResult.sent === true;
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
           // worker retries a 'blocked' status — so the held text is requeued
@@ -12687,6 +13143,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // review claim is NOT marked failed on this path. If the enqueue
           // itself fails, fall through to the ordinary blocked handling.
           let completionHoldQueued = false;
+          let completionHoldQueueError = null;
           if (!smsResult.sent
             && smsResult.code === 'QUIET_HOURS_HOLD'
             && smsResult.deferred
@@ -12765,6 +13222,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // the ask (delivered replays mark the request delivered via
               // the finalization hook instead).
             } catch (queueErr) {
+              completionHoldQueueError = queueErr;
               logger.error(`[dispatch] Completion SMS requeue failed for record ${record.id}: ${queueErr.message}`);
             }
           }
@@ -12774,16 +13232,78 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             record.structured_notes = { ...sendingNotes, ...smsNotesDelta };
             logger.info(`[dispatch] Completion SMS for customer ${svc.customer_id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
           } else if (!smsResult.sent) {
+            // A quiet-hours hold whose scheduled-SMS enqueue FAILED is not a
+            // policy block even though the result still says blocked: the
+            // deferral was never persisted and no worker will ever send it
+            // (GitHub Codex r3 P1) — it is a delivery failure with the
+            // enqueue error.
+            const holdEnqueueFailed = !!completionHoldQueueError;
+            const policyBlocked = smsResult.blocked && !holdEnqueueFailed;
+            completionSmsRejectedOutcome = policyBlocked ? null : {
+              sent: false,
+              terminal: !holdEnqueueFailed && smsResult.terminal === true,
+              providerAlerted: !holdEnqueueFailed && !!smsResult.providerAlerted,
+              providerErrorCode: holdEnqueueFailed ? 'SEND_WINDOW_REQUEUE_FAILED' : (smsResult.providerErrorCode || smsResult.code || null),
+              providerHttpStatus: smsResult.providerHttpStatus || null,
+              error: holdEnqueueFailed
+                ? `send-window requeue failed: ${completionHoldQueueError.message || completionHoldQueueError}`
+                : (smsResult.reason || smsResult.code || 'SMS send failed'),
+            };
             Object.assign(smsNotesDelta, {
-              completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
-              completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',
+              completionSmsStatus: policyBlocked ? 'blocked' : 'failed',
+              completionSmsError: holdEnqueueFailed
+                ? `send-window requeue failed: ${completionHoldQueueError.message || completionHoldQueueError}`
+                : (smsResult.reason || smsResult.code || 'SMS send failed'),
               completionSmsFailedAt: new Date().toISOString(),
             });
             const failedNotes = { ...sendingNotes, ...smsNotesDelta };
             await mergeRecordNotesKeys(record.id, smsNotesDelta);
             record.structured_notes = failedNotes;
             await markBundledReviewFailed(smsResult);
-            logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+            logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${holdEnqueueFailed ? 'send-window requeue failed' : (smsResult.code || smsResult.reason || 'unknown')}`);
+            // 'blocked' is a policy outcome (consent / opt-out) and intentional;
+            // only a delivery FAILURE bells — this is a one-shot sender and
+            // nothing retries it, so the bell is the only signal.
+            if (!policyBlocked) {
+              // A permanent provider refusal (twilio-sms.js terminal: true —
+              // e.g. an invalid number) cannot be recovered by re-running
+              // the send, so the closeout finalizes and the bell says what
+              // to fix. Everything else — a retryable provider failure or a
+              // failed requeue — is recoverable by re-entering this lane.
+              const resumable = holdEnqueueFailed || smsResult.terminal !== true;
+              if (smsResult.providerAlerted && !holdEnqueueFailed) {
+                // A Twilio API exception already raised twilio_failure from
+                // TwilioService.sendSMS (providerAlerted rides up from the
+                // provider wrapper's catch) — one provider event, one bell
+                // (GitHub Codex r4 P1). The completion-specific recovery
+                // still reaches the tech through the 503 below and the
+                // closeout reader's completion_sms_failed fact.
+                logger.info(`[dispatch] completion SMS failure for ${record.id} already alerted as twilio_failure (${smsResult.providerErrorCode || smsResult.providerHttpStatus || 'api'}) — no completion_sms_failed bell`);
+              } else {
+                const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
+                await alertCompletionSmsFailed({
+                  serviceRecordId: record.id,
+                  customerId: svc.customer_id,
+                  smsType: sentSmsType,
+                  // sendCustomerMessage wraps every provider failure as the
+                  // generic code PROVIDER_FAILURE and carries the actionable
+                  // Twilio classification (21610, 21614, 20429 …) in
+                  // providerErrorCode — same precedence as dropped-call-sms.js.
+                  errorClass: holdEnqueueFailed
+                    ? 'SEND_WINDOW_REQUEUE_FAILED'
+                    : (smsResult.providerErrorCode || smsResult.code || 'provider_failure'),
+                  error: holdEnqueueFailed
+                    ? completionHoldQueueError
+                    : (smsResult.reason || smsResult.code || 'SMS send failed'),
+                  resumable,
+                });
+              }
+              if (resumable) {
+                return exitForCompletionSmsResume(holdEnqueueFailed
+                  ? completionHoldQueueError
+                  : new Error(smsResult.reason || smsResult.code || 'Completion SMS provider failure'));
+              }
+            }
           } else {
             Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
@@ -12847,17 +13367,107 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
       } catch (e) {
-        const failedDelta = {
-          completionSmsStatus: 'failed',
-          completionSmsError: e.message || 'SMS send failed',
-          completionSmsFailedAt: new Date().toISOString(),
-        };
-        const failedNotes = { ...parseJsonObject(record.structured_notes), ...failedDelta };
-        await mergeRecordNotesKeys(record.id, failedDelta)
-          .catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
-        record.structured_notes = failedNotes;
-        await markBundledReviewFailed();
-        logger.error(`Completion SMS failed: ${e.message}`);
+        // sendCustomerMessage attaches providerOutcome to the error it throws
+        // when Twilio ACCEPTED the message but the audit row failed to
+        // persist (send-customer-message.js auditErr); the flag covers the
+        // route-local writes AFTER acceptance (the 'sent' notes merge, event
+        // inserts) that throw a plain error. Either way the text most likely
+        // reached the customer, so the honest state is 'sent' with the audit
+        // error recorded — NOT 'failed' (closeout-status would report
+        // completion_sms_failed, the UI would say the text failed, and a
+        // resume would send it again — GitHub Codex r2/r3/r4 P1s). No
+        // failure bell, no release-for-resume, and the bundled review is
+        // marked exactly as the success path would have.
+        const providerAccepted = completionSmsProviderAccepted || e.providerOutcome?.sent === true;
+        if (providerAccepted) {
+          const snap = completionSmsAcceptedSnapshot || {};
+          const acceptedDelta = {
+            completionSmsStatus: 'sent',
+            ...(snap.body ? { sentSmsBody: snap.body } : {}),
+            sentSmsAt: new Date().toISOString(),
+            ...(snap.type ? { sentSmsType: snap.type } : {}),
+            ...(snap.channel ? { sentSmsChannel: snap.channel } : {}),
+            completionSmsAuditError: e.message || 'post-send write failed',
+          };
+          const acceptedNotes = { ...parseJsonObject(record.structured_notes), ...acceptedDelta };
+          await mergeRecordNotesKeys(record.id, acceptedDelta)
+            .catch((updateErr) => logger.error(`Completion SMS accepted-state update failed: ${updateErr.message}`));
+          record.structured_notes = acceptedNotes;
+          if (snap.reviewCarried !== false) await markBundledReviewDelivered();
+          else await markBundledReviewFailed();
+          // The text reached the customer, so the invoice bookkeeping the
+          // success branch performs after acceptance still applies: a
+          // delivered pay-link text must not leave the invoice in draft, and a
+          // delivered combined receipt must claim receipt_sent_at so the
+          // deferred receipt job skips its SMS leg (GitHub Codex r5 P1). Both
+          // are idempotent (markDeliverySent is a status sync; the claim is
+          // whereNull) and best-effort like their success-path twins.
+          if (invoice?.id && invoiceCreated && payUrl && snap.invoiceLinkAllowed) {
+            try {
+              const InvoiceService = require('../services/invoice');
+              invoice = await InvoiceService.markDeliverySent(invoice.id, {
+                sms: true,
+                source: snap.type || 'completion_sms_with_invoice',
+                payUrl,
+              });
+            } catch (statusErr) {
+              logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id} after an accepted send: ${statusErr.message}`);
+            }
+          }
+          if (snap.type === 'service_complete_paid_receipt' && invoice?.id) {
+            await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
+              .update({ receipt_sent_at: db.fn.now(), updated_at: new Date() })
+              .catch((stampErr) => logger.warn(`[dispatch] combined-receipt claim failed for invoice ${invoice.id} after an accepted send — the deferred receipt may also text: ${stampErr.message}`));
+          }
+          logger.warn(`[dispatch] Completion SMS for service_record ${record.id} was accepted by the provider (${e.providerOutcome?.providerMessageId || 'no message id'}) but a post-send write failed (${e.message}) — recorded as sent, no failure bell, do not re-send`);
+        } else {
+          // sendCustomerMessage attaches providerOutcome on BOTH outcomes
+          // when the audit insert throws: a definite provider REJECTION that
+          // reached here is the ordinary !smsResult.sent case wearing an
+          // exception — the text did not go out and the cause is the
+          // provider's, so it gets the same terminal/retryable split, the
+          // same one-bell rule, and the same release-for-resume (pre-push
+          // Codex P1 on the split PR).
+          const rejected = (e.providerOutcome && e.providerOutcome.sent === false ? e.providerOutcome : null)
+            || completionSmsRejectedOutcome;
+          const failedDelta = {
+            completionSmsStatus: 'failed',
+            completionSmsError: (rejected ? rejected.error : null) || e.message || 'SMS send failed',
+            completionSmsFailedAt: new Date().toISOString(),
+          };
+          const failedNotes = { ...parseJsonObject(record.structured_notes), ...failedDelta };
+          await mergeRecordNotesKeys(record.id, failedDelta)
+            .catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
+          record.structured_notes = failedNotes;
+          await markBundledReviewFailed();
+          logger.error(`Completion SMS failed: ${e.message}`);
+          // A send that THREW before acceptance (an inactive template, a
+          // render failure) is not recovered by re-running it — the cause
+          // needs an operator fix first, and holding the closeout open would
+          // 503 every retry until then, stranding the email/PDF lanes behind
+          // it. So that path finalizes, and the bell says so (pre-push Codex
+          // P1 r5): resumable:false, no release-for-resume. A provider
+          // rejection is resumable unless the provider called it terminal.
+          const resumable = rejected ? rejected.terminal !== true : false;
+          if (rejected?.providerAlerted) {
+            logger.info(`[dispatch] completion SMS failure for ${record.id} already alerted as twilio_failure (${rejected.providerErrorCode || rejected.providerHttpStatus || 'api'}) — no completion_sms_failed bell`);
+          } else {
+            const { alertCompletionSmsFailed } = require('../services/service-report/failure-alerts');
+            await alertCompletionSmsFailed({
+              serviceRecordId: record.id,
+              customerId: svc.customer_id,
+              smsType: null,
+              errorClass: rejected
+                ? (rejected.providerErrorCode || 'provider_failure')
+                : (e.code || e.name || 'exception'),
+              error: rejected ? (rejected.error || e.message || 'Completion SMS provider failure') : e,
+              resumable,
+            });
+          }
+          if (resumable) {
+            return exitForCompletionSmsResume(new Error(rejected.error || 'Completion SMS provider failure'));
+          }
+        }
       }
     } else if (effectiveSendCompletionSms && svc.cust_phone && recapSmsAlreadySentForVisit) {
       // Record the skip in structured_notes so the audit trail (and the
@@ -12892,111 +13502,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       logger.info(`[dispatch] Completion SMS already sent for service_record ${record.id}; skipping retry send`);
     }
 
-    const serviceReportEmailEnabled = serviceReportV1Delivery
-      ? await runtimeServiceReportFlag(
-          req,
-          'service_report_email_delivery_enabled',
-          'SERVICE_REPORT_EMAIL_DELIVERY_ENABLED',
-          false,
-        )
-      : false;
-    // Email delivery is gated independently of the completion-SMS toggle (see
-    // serviceReportEmailEligible) so email-only customers still get the report.
-    if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && !serviceReportEmailEnabled) {
-      const latestNotes = parseJsonObject(record.structured_notes);
-      if (!latestNotes.serviceReportV1EmailStatus) {
-        const disabledDelta = {
-          serviceReportV1EmailStatus: 'disabled',
-          serviceReportV1EmailDisabledAt: new Date().toISOString(),
-        };
-        const disabledNotes = { ...latestNotes, ...disabledDelta };
-        await mergeRecordNotesKeys(record.id, disabledDelta)
-          .catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
-        record.structured_notes = disabledNotes;
-      }
-    }
-
-    if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && serviceReportEmailEnabled) {
-      const latestNotes = parseJsonObject(record.structured_notes);
-      const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
-      if (!emailAlreadyHandled) {
-        try {
-          // The email worker rebuilds and ATTACHES the current PDF at send
-          // time — an emailed attachment is unrecallable. While grounded
-          // copy is still pending, the job is enqueued DURABLY with a
-          // 20-minute hold (survives a process restart, unlike a promise
-          // callback — codex P1 r15+r16); the settlement callback below
-          // pulls next_attempt_at forward the moment copy settles, so the
-          // hold only fully elapses if the process died — and by then the
-          // locked late write/sanitize has landed anyway.
-          // Hold on timeout even if the regen landed grounded MEANWHILE
-          // (codex P1 r22): the initial PDF may have started rendering the
-          // stale copy during the timed-out window, and only the held path's
-          // worker fence + key invalidation guarantees the email attaches a
-          // post-settlement render.
-          const emailHoldMs = lawnRecRegenAttempted && (lawnRecRegenTimedOut || !lawnRecRegenGrounded)
-            ? 20 * 60 * 1000 : 0;
-          const queued = await enqueueServiceReportV1EmailDelivery({
-            serviceRecordId: record.id,
-            customerId: svc.customer_id,
-            token: reportToken,
-            reportUrl,
-            pdfUrl: reportToken ? `${portalUrl}/api/reports/${reportToken}` : null,
-            delayMs: emailHoldMs,
-            payload: {
-              scheduled_service_id: svc.id,
-              source: emailHoldMs ? 'dispatch_complete_held_for_grounding' : 'dispatch_complete',
-              // The delivery worker enforces grounding readiness itself for
-              // held jobs (elapsed time is not proof the settlement ran —
-              // codex P1 r17).
-              // The assessment identity rides on EVERY lawn-report delivery,
-              // not just held ones (issue #3135). When regeneration settles
-              // inside the hold window the job is enqueued normally, and
-              // without this the worker had no assessment to fence — that
-              // delivery dispatched with no version check and no send seal.
-              // awaiting_grounding stays hold-only: it means "sanitize before
-              // sending", which is a held-path obligation.
-              ...(completedLawnAssessmentId ? { lawn_assessment_id: completedLawnAssessmentId } : {}),
-              ...(emailHoldMs ? { awaiting_grounding: true } : {}),
-            },
-          });
-          if (emailHoldMs && queued.delivery?.id && lawnRecFinalCopyPromise) {
-            const heldDeliveryId = queued.delivery.id;
-            logger.info(`[dispatch] report email held ${Math.round(emailHoldMs / 60000)}m for ${record.id} pending grounded copy`);
-            void lawnRecFinalCopyPromise.then(async (finalCopy) => {
-              // Pull forward only on VERIFIED settlement (codex P1 r18) —
-              // unverified keeps the full hold, and the worker's own
-              // sanitize gate still protects the send.
-              if (!finalCopy?.verified) return;
-              await db('service_report_deliveries')
-                .where({ id: heldDeliveryId, status: 'queued' })
-                .update({ next_attempt_at: new Date(), updated_at: new Date() })
-                .catch((pullErr) => logger.warn(`[dispatch] held email pull-forward failed for ${record.id}: ${pullErr.message}`));
-            }).catch((chainErr) => logger.error(`[dispatch] held email pull-forward chain failed for ${record.id}: ${chainErr.message}`));
-          }
-          const queuedDelta = {
-            serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),
-            serviceReportV1EmailDeliveryId: queued.delivery?.id || null,
-            serviceReportV1EmailQueuedAt: queued.delivery?.created_at || new Date().toISOString(),
-            serviceReportV1EmailError: queued.ok ? null : queued.error || null,
-          };
-          const queuedNotes = { ...latestNotes, ...queuedDelta };
-          await mergeRecordNotesKeys(record.id, queuedDelta);
-          record.structured_notes = queuedNotes;
-        } catch (err) {
-          const failedDelta = {
-            serviceReportV1EmailStatus: 'failed',
-            serviceReportV1EmailError: err.message || 'Email queue failed',
-            serviceReportV1EmailFailedAt: new Date().toISOString(),
-          };
-          const failedNotes = { ...latestNotes, ...failedDelta };
-          await mergeRecordNotesKeys(record.id, failedDelta)
-            .catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
-          record.structured_notes = failedNotes;
-          logger.error(`[dispatch] v1 report email queue failed: ${err.message}`);
-        }
-      }
-    }
+    await queueServiceReportEmailIfEligible();
 
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
@@ -13172,41 +13678,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    // Third-party Bill-To: a payer-billed auto-invoice is intentionally NOT
-    // carried by the homeowner completion SMS (pay link suppressed) and is never
-    // collected in person, so the homeowner channel can't finalize it. Route it
-    // to the payer's AP inbox here and finalize on success — otherwise the
-    // third-party AR is silently stranded as an unsent draft. A payer with no
-    // usable AP email leaves the invoice unfinalized for operator correction
-    // (sendInvoiceEmail returns ok:false rather than mailing the homeowner).
-    // Only deliver to the payer when this invoice hasn't already been sent —
-    // `invoiceCreated` is also true when a completion REUSES an existing unpaid
-    // invoice (a pre-minted invoice already `sent`/`viewed`, or a request where
-    // invoiceAlreadySent suppressed the homeowner link). Re-sending would
-    // duplicate the AP billing email. Fresh completion invoices are `draft`.
-    const payerInvoiceAlreadyDelivered = !!invoiceAlreadySent
-      || ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
-        .includes(String(invoice?.status || '').toLowerCase());
-    // Backfill closeouts skip the automatic payer AP send too — the invoice
-    // stays unfinalized for the operator to review and send by hand (same
-    // recovery path as a failed AP send below).
-    if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion) {
-      try {
-        const InvoiceEmail = require('../services/invoice-email');
-        const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);
-        if (payerSend?.ok) {
-          const InvoiceService = require('../services/invoice');
-          invoice = await InvoiceService.markDeliverySent(invoice.id, {
-            email: true,
-            source: 'dispatch_completion_payer',
-          });
-        } else {
-          logger.warn(`[dispatch] Payer invoice ${invoice.id} not delivered to AP (${payerSend?.error || 'unknown'}) — left unfinalized for operator correction`);
-        }
-      } catch (payerSendErr) {
-        logger.error(`[dispatch] Payer invoice AP send failed for ${invoice.id}: ${payerSendErr.message}`);
-      }
-    }
+    // Third-party Bill-To: route the payer-billed auto-invoice to the AP inbox
+    // (closure defined beside exitForCompletionSmsResume, which also runs it).
+    await sendPayerInvoiceToApIfEligible();
 
     const finalRecordNotes = parseJsonObject(record.structured_notes);
     const completionSmsStatus = finalRecordNotes.completionSmsStatus
@@ -16245,6 +16719,23 @@ function completionUsesReportLane({
   return Boolean(reportV1InvoiceArmed);
 }
 
+// A report-v1 completion text is a gateway to the report: without a public
+// token there is no report link to send, and the rendered body would say
+// "your report is ready" around the portal HOME. The route withholds the text
+// on this path (stamped 'failed' so a later re-completion retries it once the
+// mint recovers). Legacy (non-report-v1) visits keep their portal-home link —
+// that is where their visit detail lives. delivery_mode 'disabled' never
+// mints and never texts, so it is not a withhold. Pure for testability (_test).
+function completionSmsWithheldForMissingReportToken({
+  serviceReportV1Delivery,
+  typedDeliveryMode,
+  reportToken,
+}) {
+  if (!serviceReportV1Delivery) return false;
+  if (typedDeliveryMode === 'disabled') return false;
+  return !reportToken;
+}
+
 // completionInvoiceAmount and membershipDuesCoverVisit moved to
 // services/billing-lane.js (imported at top) — the schedule payloads'
 // completion-billing prediction must share the exact same authority.
@@ -16742,6 +17233,7 @@ module.exports._test = {
   completionSavedCardFallbackPolicy,
   completionUsesReportLane,
   reportV1InvoiceBodyCarriesPayLink,
+  completionSmsWithheldForMissingReportToken,
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
   applyBackfillRecordTimingPolicy,

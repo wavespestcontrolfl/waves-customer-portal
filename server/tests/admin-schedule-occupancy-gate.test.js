@@ -57,6 +57,8 @@ jest.mock('../services/scheduling/occupancy', () => {
 });
 jest.mock('../utils/customer-comms-lock', () => ({
   lockCustomerComms: jest.fn().mockResolvedValue(undefined),
+  // The bare-connection plan sync re-enters under this wrapper (rung 6).
+  withCustomerCommsLock: jest.fn(async (db, customerId, fn) => db.transaction(async (trx) => fn(trx))),
 }));
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })),
@@ -103,7 +105,10 @@ function chain(row) {
   builder.insert = jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ ...SVC, id: 'new-1' }]), onConflict: jest.fn(() => ({ ignore: jest.fn().mockResolvedValue([]) })) }));
   builder.del = jest.fn().mockResolvedValue(0);
   builder.delete = jest.fn().mockResolvedValue(0);
-  builder.columnInfo = jest.fn().mockResolvedValue({});
+  // The create parent now runs the booking stamping contract, which
+  // refuses a column map without source_action (attribution must land
+  // somewhere) — model the real table's provenance column.
+  builder.columnInfo = jest.fn().mockResolvedValue({ source_action: {} });
   builder.then = (resolve, reject) => Promise.resolve(row === undefined ? [] : [row]).then(resolve, reject);
   return builder;
 }

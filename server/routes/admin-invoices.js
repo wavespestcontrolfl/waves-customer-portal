@@ -1,4 +1,5 @@
 const express = require('express');
+const { randomUUID } = require('crypto');
 const router = express.Router();
 const multer = require('multer');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -26,7 +27,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // search, recipients, attachments, credit-context, followup) and every
 // mutation require the admin role.
 const SINGLE_INVOICE_GET_RE = /^\/[A-Za-z0-9-]+$/;
-const NAMED_INVOICE_GETS = new Set(['/stats', '/customers']);
+const NAMED_INVOICE_GETS = new Set(['/stats', '/customers', '/payment-notices']);
 router.use((req, res, next) => (
   req.method === 'GET'
     && SINGLE_INVOICE_GET_RE.test(req.path)
@@ -651,6 +652,203 @@ router.post('/email-message/ai', requireAdmin, async (req, res, next) => {
 });
 
 // GET /:id/recipients — preview invoice delivery recipients before sending
+// ── Zelle payment notices (GATE_ZELLE_NOTICE_RECONCILE lane) ──────────────
+// The park queue for Capital One Zelle notices the reconciler could not
+// settle on its own (services/zelle-notice-reconciler.js). Static paths —
+// declared BEFORE every /:id route so Express never reads "payment-notices"
+// as an invoice id, and listed in NAMED_INVOICE_GETS so the single-invoice
+// staff exemption above does not apply (admin only). These stay live with
+// the gate off so parked history remains actionable after a kill.
+const PAYMENT_NOTICE_LIST_MAX = 100;
+router.get('/payment-notices', requireAdmin, async (req, res, next) => {
+  try {
+    const status = req.query.status === 'all' ? null : 'parked';
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit, 10) || 50), PAYMENT_NOTICE_LIST_MAX);
+    const q = db('inbound_payment_notices').orderBy('received_at', 'desc').limit(limit);
+    if (status) q.where({ status });
+    const rows = await q.select('*');
+    res.json({ notices: rows });
+  } catch (err) { next(err); }
+});
+
+// POST /payment-notices/:id/apply { invoiceId } — the operator's one-click
+// resolution of a parked notice: settle `invoiceId` through the SAME
+// recordManualPayment path the reconciler uses (Zelle tender, receipt email +
+// SMS — owner ruling 2026-09-02), then close the notice. The invoice is
+// re-checked LIVE (exact cents, open self-pay, payer re-resolved) and the
+// notice is claimed before anything settles — the client's choice and the
+// stored candidate list are never trusted on their own.
+router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) => {
+  const { id } = req.params;
+  try {
+    const invoiceId = typeof req.body?.invoiceId === 'string' ? req.body.invoiceId.trim() : '';
+    if (!invoiceId) return res.status(400).json({ error: 'invoiceId is required' });
+    const notice = await db('inbound_payment_notices').where({ id }).first();
+    if (!notice) return res.status(404).json({ error: 'Payment notice not found' });
+    if (notice.status !== 'parked') {
+      return res.status(409).json({ error: `Payment notice is ${notice.status}, not parked`, status: notice.status });
+    }
+    if (notice.amount_cents == null) {
+      return res.status(400).json({ error: 'This notice carries no amount — record the payment from the invoice instead' });
+    }
+    // LIVE eligibility, never the stored list (which is only the dropdown and
+    // deliberately includes ±$5 leads and may be stale): the invoice must be
+    // an open self-pay invoice whose amount due equals the notice to the
+    // cent RIGHT NOW, and pass the payer re-resolution — a $117 notice can
+    // never settle a $120 invoice, and a since-paid or since-reassigned
+    // invoice is refused.
+    const { openSelfPayInvoicesByAmountDue, rowIsSelfPayDue } = require('../services/open-balance');
+    const exact = (await openSelfPayInvoicesByAmountDue(notice.amount_cents)).find((r) => r.id === invoiceId);
+    if (!exact || !(await rowIsSelfPayDue(exact.customer_id, exact))) {
+      return res.status(400).json({ error: 'Invoice is not an open self-pay invoice with exactly this amount due — pick an exact-amount invoice, or record the payment from the invoice itself' });
+    }
+    // Claim COMMITTED first (parked → processing, stamped with the invoice and
+    // the recorder this Apply writes onto it): recordManualPayment commits the
+    // ledger on its own connection, so a failure between that commit and the
+    // close below must leave a claim the reconciler's stale sweep can match
+    // to the settled invoice and close (closeIfSettled) — never a parked row
+    // inviting a second Apply for money already recorded. The partial UNIQUE
+    // index on matched_invoice_id has the DATABASE refuse two notices on one
+    // invoice.
+    const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+    // The transfer may already be on the ledger with no notice row (the
+    // operator's own Add-payment tap, or a late sync settlement after this
+    // notice was swept): a Zelle-paid invoice for this customer at these
+    // cents inside the window refuses — unless the notice was parked as
+    // possible_duplicate, which is exactly the operator overriding that.
+    const { directZelleRecentlyRecorded, zelleReference } = require('../services/zelle-notice-reconciler');
+    if (notice.park_reason !== 'possible_duplicate' && await directZelleRecentlyRecorded(exact, notice.amount_cents)) {
+      return res.status(409).json({ error: 'A Zelle payment at this amount was already recorded for this customer within 14 days — check the customer\'s invoices; if this is a second transfer, record it from the invoice and ignore this notice' });
+    }
+    const claimToken = randomUUID();
+    let claimed;
+    try {
+      claimed = await db('inbound_payment_notices').where({ id, status: 'parked' }).update({
+        status: 'processing', claim_token: claimToken, match_method: 'manual', matched_invoice_id: invoiceId, matched_customer_id: exact.customer_id, applied_by: recordedBy, updated_at: db.fn.now(),
+      });
+    } catch (err) {
+      if (err.code !== '23505') throw err;
+      return res.status(409).json({ error: 'Another payment notice is already settling this invoice' });
+    }
+    if (!claimed) {
+      const current = await db('inbound_payment_notices').where({ id }).first('status');
+      return res.status(409).json({ error: `Payment notice is ${current?.status || 'gone'}, not parked`, status: current?.status || null });
+    }
+    // NO transaction held across the settlement (recordManualPayment opens
+    // its own; an outer one would let a sync settlement and this Apply each
+    // hold one of the two pool connections and wait forever for the inner
+    // one). The committed claim is the serialization: a second Apply or an
+    // Ignore requires `parked` (409 now), the reconciler's sweep leaves a
+    // fresh processing claim alone, and the close below is a CAS on
+    // `processing` — a lost close is recovered by closeIfSettled.
+    const zelleRef = zelleReference(notice.payer_name);
+    let settled;
+    try {
+      settled = await recordManualPayment(invoiceId, {
+        method: 'zelle',
+        reference: zelleRef,
+        note: notice.memo ? `Zelle memo: ${notice.memo}` : '',
+        recordedBy,
+        sendReceipt: true,
+        via: 'both',
+        // Atomic with the paid flip: the exact-cent check above is advisory
+        // (dropdown truth); the fence under the invoice lock is what
+        // guarantees the ledger records the notice's amount or nothing.
+        expectedAmountCents: notice.amount_cents,
+        // The self-pay check above is likewise pre-lock: re-run on the
+        // locked invoice so a payer assigned meanwhile refuses.
+        requireSelfPay: true,
+        // The OPERATOR tapped Apply: the receipt is operator-initiated,
+        // exactly like Add payment (automated stays false). Pre-lock and
+        // under the invoice lock (FOR UPDATE through the paid flip): our
+        // claim must still be ours.
+        settlementFence: (conn) => conn('inbound_payment_notices')
+          .where({ id, status: 'processing', claim_token: claimToken })
+          .forUpdate()
+          .first('id')
+          .then(Boolean),
+      });
+    } catch (err) {
+      // A statusCode-shaped refusal settled nothing. Anything else may have
+      // thrown AFTER the ledger committed — ask the invoice, and never hand a
+      // settled notice back to the queue as failed.
+      const refusal = [400, 404, 409].includes(err.statusCode);
+      // Same fingerprint the reconciler's sweep uses (paid + Zelle + this
+      // recorder + this notice's payer reference) — a paid invoice under a
+      // shared display name is not proof this Zelle transfer was recorded.
+      const { settledInvoiceFor } = require('../services/zelle-notice-reconciler');
+      const paid = refusal ? null : await settledInvoiceFor(invoiceId, { recordedBy, reference: zelleRef });
+      if (paid) {
+        logger.error(`[admin-invoices:payment-notices] ${invoiceId} settled but a later step threw (${err.message}) — closing notice ${id} as applied, receipt unknown`);
+        settled = { invoice: paid, receipt: null };
+      } else {
+        await db('inbound_payment_notices').where({ id, status: 'processing', claim_token: claimToken })
+          .update({ status: 'parked', park_reason: 'apply_failed', apply_error: refusal ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`, matched_invoice_id: null, applied_by: null, updated_at: db.fn.now() });
+        throw err;
+      }
+    }
+    const { invoice, receipt } = settled;
+    const closed = await db('inbound_payment_notices').where({ id, status: 'processing', claim_token: claimToken }).update({
+      status: 'applied',
+      park_reason: null,
+      apply_error: null,
+      match_method: 'manual',
+      matched_invoice_id: invoiceId,
+      matched_customer_id: invoice?.customer_id || exact.customer_id,
+      applied_at: db.fn.now(),
+      applied_by: recordedBy,
+      updated_at: db.fn.now(),
+    });
+    if (!closed) {
+      // The ledger committed. Our token still on the row = the sweep parked
+      // our claim during a slow settlement → force the row to match the
+      // ledger. A different token = someone reclaimed the notice → leave
+      // their claim alone and surface it.
+      const current = await db('inbound_payment_notices').where({ id }).first('claim_token', 'status');
+      if (current && current.claim_token === claimToken) {
+        logger.error(`[admin-invoices:payment-notices] notice ${id} was ${current.status} after ${invoiceId} settled — forcing applied to match the ledger`);
+        await db('inbound_payment_notices').where({ id, claim_token: claimToken }).update({
+          status: 'applied', park_reason: null, apply_error: null, match_method: 'manual', matched_invoice_id: invoiceId,
+          matched_customer_id: invoice?.customer_id || exact.customer_id, applied_at: db.fn.now(), applied_by: recordedBy, updated_at: db.fn.now(),
+        });
+      } else {
+        logger.error(`[admin-invoices:payment-notices] notice ${id} was RECLAIMED (${current?.status || 'gone'}) before ${invoiceId}'s settlement closed — leaving the new claim alone`);
+        await require('../services/notification-service').notifyAdmin('payment', 'Zelle payment needs review',
+          `${notice.payer_name || 'Unknown payer'} · $${(notice.amount_cents / 100).toFixed(2)} settled ${invoice?.invoice_number || invoiceId} AFTER the notice was reclaimed — verify it was not applied to a second invoice`,
+          { link: '/admin/invoices', dedupeKey: `zelle-notice:${id}:late`, metadata: { noticeId: id }, bellDefault: true })
+          .catch((e) => logger.warn(`[admin-invoices:payment-notices] owner notification failed: ${e.message}`));
+      }
+    }
+    await db('emails').where({ id: notice.email_id }).update({ auto_action: `zelle_notice_applied:${invoice?.invoice_number || exact.invoice_number}`, updated_at: new Date() })
+      .catch((err) => logger.warn(`[admin-invoices:payment-notices] auto_action stamp failed: ${err.message}`));
+    res.json({ ok: true, invoice, receipt });
+  } catch (err) {
+    if ([400, 404, 409].includes(err.statusCode)) {
+      return res.status(err.statusCode).json({
+        error: err.message,
+        ...(err.currentStatus !== undefined ? { current_status: err.currentStatus } : {}),
+      });
+    }
+    logger.error(`[admin-invoices] payment-notice apply failed: ${err.message}`);
+    next(err);
+  }
+});
+
+router.post('/payment-notices/:id/ignore', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const changed = await db('inbound_payment_notices')
+      .where({ id, status: 'parked' })
+      .update({ status: 'ignored', updated_at: db.fn.now() });
+    if (!changed) {
+      const notice = await db('inbound_payment_notices').where({ id }).first('status');
+      if (!notice) return res.status(404).json({ error: 'Payment notice not found' });
+      return res.status(409).json({ error: `Payment notice is ${notice.status}, not parked`, status: notice.status });
+    }
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 router.get('/:id/recipients', requireAdmin, async (req, res, next) => {
   try {
     const recipients = await getInvoiceDeliveryRecipients(req.params.id);

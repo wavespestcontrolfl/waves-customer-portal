@@ -158,6 +158,7 @@ jest.mock('../models/db', () => {
       // so live-row family resolution yields scope_not_owned — exactly the
       // post-first-attempt state the repair-only retry runs from.
       leftJoin() { return q; },
+      forUpdate() { return q; },
       whereIn(col, vals) { conds.push((r) => (vals instanceof Set ? vals.has(r[col]) : vals.includes(r[col]))); return q; },
       whereNotIn(col, vals) { conds.push((r) => !vals.includes(r[col])); return q; },
       whereRaw(sql) {
@@ -184,6 +185,13 @@ jest.mock('../models/db', () => {
     return q;
   }
   const db = (table) => makeQuery(table);
+  // The retrieval-task raise runs retire + insert on one transaction under
+  // an advisory lock; the fake shares the same tables and swallows raw().
+  db.transaction = async (fn) => {
+    const trx = (table) => makeQuery(table);
+    trx.raw = async () => ({});
+    return fn(trx);
+  };
   db.__tables = tables;
   db.__reset = () => { Object.keys(tables).forEach((k) => delete tables[k]); };
   return db;

@@ -12,6 +12,7 @@ const { blogPostShareability } = require('./content/blog-share-gate');
 const CreativeEngine = require('./social-creative-engine');
 const { runExclusive } = require('../utils/cron-lock');
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const { etParts } = require('../utils/datetime-et');
 
 const FASTEST_RISER_PROFILES = [
@@ -891,14 +892,22 @@ async function alertLegacyCardFallback(plan = {}, { link, creative }) {
       creativeStateSummary(creative),
       link ? `linked page hero unavailable (${link})` : 'no live page matched the topic, so no hero to use',
     ].join('; ');
-    await sendgrid.sendOne({
-      to,
-      fromEmail,
-      fromName: 'Waves Pest Control',
-      subject: `FIX: social studio fell back to the legacy brand card — ${cleanText(plan.topic, 80)} (${cleanText(plan.city, 40)})`,
-      text: `The autonomous social studio published with the legacy fixed SVG card.\n\nTopic: ${plan.topic}\nCity: ${plan.city}\nChannels: ${(plan.channels || []).join(', ')}\nLink: ${link || '(none)'}\n\nWhy: ${why}\n\nFix: set SOCIAL_CREATIVE_ENGINE_ENABLED=true on Railway, or make sure a live blog post matches this topic so its hero photo is used.`,
-      categories: ['ops', 'social-studio'],
-      suppressErrorLog: true,
+    const subject = `FIX: social studio fell back to the legacy brand card — ${cleanText(plan.topic, 80)} (${cleanText(plan.city, 40)})`;
+    const text = `The autonomous social studio published with the legacy fixed SVG card.\n\nTopic: ${plan.topic}\nCity: ${plan.city}\nChannels: ${(plan.channels || []).join(', ')}\nLink: ${link || '(none)'}\n\nWhy: ${why}\n\nFix: set SOCIAL_CREATIVE_ENGINE_ENABLED=true on Railway, or make sure a live blog post matches this topic so its hero photo is used.`;
+    await deliverOpsDigest({
+      key: 'social-studio-fallback',
+      subject,
+      text,
+      link: '/admin/social-media',
+      sendEmail: () => sendgrid.sendOne({
+        to,
+        fromEmail,
+        fromName: 'Waves Pest Control',
+        subject,
+        text,
+        categories: ['ops', 'social-studio'],
+        suppressErrorLog: true,
+      }),
     });
   } catch (err) {
     // err.message carries the raw SendGrid body, which can echo addresses —

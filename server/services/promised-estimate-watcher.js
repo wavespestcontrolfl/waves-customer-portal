@@ -24,6 +24,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { deliverOpsDigest } = require('./ops-digest');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { etDateString } = require('../utils/datetime-et');
@@ -58,6 +59,27 @@ function maskPhone(phone) {
 // hop through twilio_call_sid, (c) shared customer_id, (d) normalized-phone
 // match. sent_at > call time is essential — repeat callers usually have an
 // older sent estimate on the same phone that must not self-clear the row.
+// Owned by the Owed lane once the commitments feature tracks this promise
+// as a LIVE row — ONLY while GATE_CALL_COMMITMENTS is on. Off (a rollback
+// after rows were recorded), the commitments watchdog is a no-op, so this
+// email must keep covering those calls or nothing pages them. A stale
+// untouched AI row (a reprocess no longer detected it — staleAiRowSql) is
+// not in the queue either, so it must not stand this lane down: the call's
+// own flags decide, exactly as before the row existed. Used by this lane
+// only — the callbacks digest keeps its same-day coverage and never hands
+// off. Static SQL, no user input; `c` is the call_log alias of the
+// enclosing query.
+function commitmentsHandoffClause(kind) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('callCommitments')) return '';
+  const { staleAiRowSql } = require('./call-commitments');
+  return `AND NOT EXISTS (
+        SELECT 1 FROM call_commitments cc
+        WHERE cc.call_log_id = c.id AND cc.kind = '${kind}'
+          AND NOT ${staleAiRowSql('cc')}
+      )`;
+}
+
 async function loadUnkeptPromises() {
   const { rows } = await db.raw(
     `
@@ -83,6 +105,12 @@ async function loadUnkeptPromises() {
       AND c.v2_extraction_status = 'valid'
       AND (c.disposition IS NULL
            OR c.disposition NOT IN ('spam_discarded', 'wrong_number_closed'))
+      -- Owned by the Owed lane once the commitments feature tracks this
+      -- promise as a row (GATE_CALL_COMMITMENTS on): the queue and its
+      -- overdue bell carry it, so this email stands down for that call.
+      -- Calls processed before the flip keep this coverage until they
+      -- resolve; gate off, every call keeps it (commitmentsHandoffClause).
+      ${commitmentsHandoffClause('send_estimate')}
       AND NOT EXISTS (
         SELECT 1
         FROM estimates e
@@ -266,15 +294,22 @@ async function runPromisedEstimateWatcher(opts = {}) {
   }
 
   try {
-    await mailer.sendOne({
-      to,
-      fromEmail: fromEmail(),
-      fromName: FROM_NAME,
+    await deliverOpsDigest({
+      key: 'promised-estimate',
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
-      categories: ['ops', 'promised-estimate'],
-      suppressErrorLog: true,
+      link: '/admin/pipeline',
+      sendEmail: () => mailer.sendOne({
+        to,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: composed.subject,
+        html: composed.html,
+        text: composed.text,
+        categories: ['ops', 'promised-estimate'],
+        suppressErrorLog: true,
+      }),
     });
   } catch (err) {
     logger.error(`[promised-estimate-watcher] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);
@@ -286,6 +321,7 @@ async function runPromisedEstimateWatcher(opts = {}) {
 }
 
 module.exports = {
+  commitmentsHandoffClause,
   runPromisedEstimateWatcher,
   _private: { composePromisedEstimateDigest },
 };

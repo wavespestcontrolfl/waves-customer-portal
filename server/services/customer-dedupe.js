@@ -1218,6 +1218,45 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         }
       }
     }
+    // An operator's customer link on a call (call_log.metadata.
+    // customer_link_override — admin relink) embeds the customer id in
+    // jsonb, so the FK repoint above never sees it; the next processing
+    // pass honours the override over everything and would hand the call
+    // back to the retired loser (Codex #3736 r5 P1). Rewrite it to the
+    // winner in the same transaction, journaled by call id so the undo
+    // moves it back. Repoint failures abort the merge like an FK's would.
+    let overrideCallIds = [];
+    // Stamped INTO the rewritten override and journaled, so the undo can
+    // tell THIS merge's rewrite from an operator relink to the same winner
+    // made afterwards (Codex #3764 r1 P2): the relink endpoint writes a
+    // fresh override object without the stamp, and the undo rewrites only
+    // overrides whose NEWEST stamp is this one. Stamps are a stack
+    // (merge_stamps), not a scalar (Codex #3764 r2 P2): for A→B then B→C,
+    // undoing B→C pops its stamp and leaves A→B's in place for its own undo.
+    const overrideMergeStamp = new Date().toISOString();
+    try {
+      await trx.transaction(async (sp) => {
+        const ids = (await sp('call_log')
+          .whereRaw("metadata -> 'customer_link_override' ->> 'customer_id' = ?", [String(loserId)])
+          .select('id').limit(REPOINT_ID_CAP + 1)).map((r) => r.id);
+        if (!ids.length) return;
+        const count = await sp('call_log')
+          .whereRaw("metadata -> 'customer_link_override' ->> 'customer_id' = ?", [String(loserId)])
+          .update({
+            metadata: sp.raw(
+              "jsonb_set(jsonb_set(metadata, '{customer_link_override,customer_id}', ?::jsonb, false), '{customer_link_override,merge_stamps}', COALESCE(metadata -> 'customer_link_override' -> 'merge_stamps', '[]'::jsonb) || ?::jsonb, true)",
+              [JSON.stringify(String(winnerId)), JSON.stringify([overrideMergeStamp])],
+            ),
+            updated_at: sp.fn.now(),
+          });
+        if (count) {
+          repointed['call_log.customer_link_override'] = count;
+          overrideCallIds = (ids.length === count && count <= REPOINT_ID_CAP) ? ids : { count };
+        }
+      });
+    } catch (e) {
+      throw new Error(`executeMerge: customer_link_override repoint failed: ${e.message}`);
+    }
     // Reconcile collection cases after the repoint (PR C / codex gh-r7):
     // the merge can land two live cases under the winner. Under the case
     // locks taken above this read is authoritative. dialing/held rows are
@@ -1761,6 +1800,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       repointed_ids: JSON.stringify({
         version: 1,
         tables: repointedIds,
+        // call_log rows whose operator link (metadata.customer_link_override)
+        // was rewritten loser→winner; the undo rewrites them back.
+        customer_link_override_call_ids: overrideCallIds,
+        customer_link_override_merged_at: overrideMergeStamp,
         // Deleted loser plan-rate components, restored verbatim on undo
         // (local codex P0 on #3245). No PII — family keys and amounts only.
         plan_rate_rows: loserPlanRateRows,
@@ -3420,6 +3463,37 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         skipped.push({ key: plan.key, reason: 'rows_changed_during_revert', count: plan.ids.length - count });
       }
       if (count) repointedBack[plan.key] = count;
+    }
+
+    // Operator call links the merge rewrote to the winner go back to the
+    // loser — only where the override's NEWEST merge stamp is THIS merge's
+    // (a relink made since the merge, even one to the same winner, wrote a
+    // fresh override without it: an operator decision, and it stays; an
+    // earlier merge's stamp stays underneath for its own undo). A count-
+    // only record cannot be replayed and is reported, like any FK table; a
+    // record without the stamp cannot be told apart from later relinks and
+    // refuses the same way.
+    const overrideCallIds = recorded.customer_link_override_call_ids;
+    const overrideMergeStamp = recorded.customer_link_override_merged_at || null;
+    if (Array.isArray(overrideCallIds) && overrideCallIds.length) {
+      if (!overrideMergeStamp) refuse('operator call links were rewritten without row-level records — revert by hand from the journal');
+      const count = await trx('call_log')
+        .whereIn('id', overrideCallIds)
+        .whereRaw("metadata -> 'customer_link_override' ->> 'customer_id' = ?", [String(winnerId)])
+        .whereRaw("metadata -> 'customer_link_override' -> 'merge_stamps' ->> -1 = ?", [String(overrideMergeStamp)])
+        .update({
+          metadata: trx.raw(
+            "jsonb_set(jsonb_set(metadata, '{customer_link_override,customer_id}', ?::jsonb, false), '{customer_link_override,merge_stamps}', (metadata -> 'customer_link_override' -> 'merge_stamps') - -1, true)",
+            [JSON.stringify(String(loserId))],
+          ),
+          updated_at: trx.fn.now(),
+        });
+      if (count) repointedBack['call_log.customer_link_override'] = count;
+      if (count !== overrideCallIds.length) {
+        skipped.push({ key: 'call_log.customer_link_override', reason: 'rows_changed_during_revert', count: overrideCallIds.length - count });
+      }
+    } else if (overrideCallIds && typeof overrideCallIds === 'object' && overrideCallIds.count) {
+      refuse('operator call links were rewritten without row-level records — revert by hand from the journal');
     }
 
     // Restore each moved-back payment method's ORIGINAL default/autopay

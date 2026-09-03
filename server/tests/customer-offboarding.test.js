@@ -12,6 +12,9 @@ jest.mock('../models/db', () => {
   // the tier-clear + plan-rate-ledger sync now run inside one transaction
   // (codex #3245 r3) and call trx('customers')/trx.fn.now like real knex.
   mock.transaction = jest.fn(async (cb) => cb(mock));
+  // Rung 6 (customer-comms) advisory lock — recorded so a test can assert it
+  // is taken before the tier clear.
+  mock.raw = jest.fn(async () => ({ rows: [] }));
   return mock;
 });
 jest.mock('../services/logger', () => ({
@@ -368,6 +371,9 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
       tierCleared: true,
       refunded: 49,
     });
+    // The tier clear + ledger sync serialize against the cancellation
+    // wind-down on the rung-6 writer lock, taken before the customers row.
+    expect(require('../models/db').raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-comms:cust-1']);
   });
 
   it('refuses to run when ineligible', async () => {

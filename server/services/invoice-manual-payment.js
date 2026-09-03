@@ -8,8 +8,42 @@
  *
  * Contract (unchanged from the route):
  *   recordManualPayment(invoiceId, { method, reference, note, recordedBy,
- *                                    sendReceipt = true, via = 'both' })
+ *                                    sendReceipt = true, via = 'both',
+ *                                    expectedAmountCents, requireSelfPay,
+ *                                    automated })
  *     → { invoice, receipt }   receipt = { email, sms } | null
+ *
+ * expectedAmountCents (optional, the Zelle notice reconciler): the amount the
+ * caller is settling FOR. Checked under the invoice row lock right before the
+ * paid flip — if the amount due moved since the caller looked (an edit, a
+ * credit), nothing is written and a 409 says so, so the ledger can never
+ * record a different sum than the money that arrived.
+ *
+ * requireSelfPay (optional, both Zelle notice paths): the caller matched the
+ * invoice as an OPEN SELF-PAY invoice (no payer, no statement, live payer
+ * resolution empty) before calling. Re-run those predicates on the LOCKED row
+ * inside the transaction — a concurrent payer reassignment between the
+ * caller's check and the paid flip would otherwise settle another billing
+ * party's invoice with the homeowner's transfer. Refuses with a 409 and
+ * writes nothing.
+ *
+ * automated (optional, the Zelle reconciler's auto-settlement): nobody tapped
+ * a button, so the receipt is NOT sent inline — a receipt_delivery_jobs row
+ * is inserted IN the settlement transaction (the automatic receipt queue,
+ * receipt-delivery-queue.js, is the one mechanism that honors
+ * payment_receipt / email_enabled opt-outs, the SMS send window and the
+ * retry ladder) and drained after commit. The job commits with the
+ * payment or not at all. `receipt` then reads { queued: true }. Operator
+ * paths leave it false and send inline.
+ *
+ * settlementFence (optional, both Zelle paths): async (db|trx) => boolean.
+ * Run TWICE: on the pre-lock read before any Stripe session is retired (a
+ * worker that no longer owns its claim must not destroy the customer's
+ * checkout), and under the invoice row lock right before the paid flip on
+ * the payment connection — there the callers SELECT … FOR UPDATE their
+ * notice claim (id + status + claim_token) so the row stays locked through
+ * the commit and a swept-and-RECLAIMED worker can never commit a second
+ * invoice for one transfer. false → 409, nothing written.
  *
  * Refusals throw an Error carrying `statusCode` (400 / 404 / 409) and
  * `isOperational`; the lost-race 409 also carries `currentStatus`. Anything
@@ -70,7 +104,14 @@ async function recordManualPayment(id, {
   recordedBy = 'admin',
   sendReceipt = true,
   via = 'both',
+  expectedAmountCents = null,
+  requireSelfPay = false,
+  automated = false,
+  settlementFence = null,
 } = {}) {
+  if (expectedAmountCents != null && !(Number.isSafeInteger(expectedAmountCents) && expectedAmountCents > 0)) {
+    throw refusal(400, 'expectedAmountCents must be a positive integer number of cents');
+  }
   if (!method || !VALID_PAYMENT_METHODS.includes(method)) {
     throw refusal(400, `method must be one of: ${VALID_PAYMENT_METHODS.join(', ')}`);
   }
@@ -116,6 +157,26 @@ async function recordManualPayment(id, {
   // after the transfer is recorded; refuse while money is in flight. Runs
   // pre-lock (Stripe call), same as apply-credit; the trx's collectible
   // guard covers the seam.
+  // Zelle-caller predicates FIRST, on the pre-lock read: a stale or raced
+  // automated match must refuse here, BEFORE the customer's live Stripe
+  // session is retired below — never cancel a valid checkout for a
+  // settlement that then records nothing. The under-lock re-checks below
+  // remain the race fences.
+  if (expectedAmountCents != null) {
+    const actualCents = Math.round(invoiceAmountDue(invoice) * 100);
+    if (actualCents !== expectedAmountCents) {
+      throw refusal(409, `Invoice amount due is $${(actualCents / 100).toFixed(2)}, not the $${(expectedAmountCents / 100).toFixed(2)} being recorded — nothing was recorded`, { amountMismatch: { expectedCents: expectedAmountCents, actualCents } });
+    }
+  }
+  if (requireSelfPay) {
+    const { rowIsSelfPayDue } = require('./open-balance');
+    if (invoice.payer_id || invoice.payer_statement_id || !(await rowIsSelfPayDue(invoice.customer_id, invoice))) {
+      throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
+    }
+  }
+  if (settlementFence && !(await settlementFence(db))) {
+    throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed) — nothing was recorded');
+  }
   const triagedPiId = invoice.stripe_payment_intent_id || null;
   const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'recording a manual payment' });
   if (openPi) throw refusal(openPi.status, openPi.error);
@@ -160,6 +221,36 @@ async function recordManualPayment(id, {
     if (!locked) return null;
     const lockedPiId = locked.stripe_payment_intent_id || null;
     if (lockedPiId && lockedPiId !== triagedPiId) return { racedNewPaymentIntent: lockedPiId };
+    // Amount fence under the same lock as the paid flip: the caller settles
+    // a specific sum; the ledger row below records invoiceAmountDue(row), so
+    // the two must agree NOW, not when the caller last looked.
+    if (expectedAmountCents != null) {
+      const actualCents = Math.round(invoiceAmountDue(locked) * 100);
+      if (actualCents !== expectedAmountCents) return { amountMismatch: { expectedCents: expectedAmountCents, actualCents } };
+    }
+    // Self-pay fence under the same lock: the row's own payer columns plus
+    // the live payer re-resolution (rowIsSelfPayDue, fail-closed). A payer
+    // assigned after the caller's eligibility check makes this refuse. The
+    // resolution rides THIS trx: the Zelle callers hold their notice trx on
+    // one connection and this trx on the other (DB_POOL_MAX floor is 2), so
+    // a third acquire here would wait on itself.
+    if (requireSelfPay) {
+      // Lock the payer-SOURCE rows the resolution reads (customers.payer_id,
+      // the visit's payer_id / self_pay_override) AND the payer rows they
+      // point at (an inactive payer resolves as self-pay; a concurrent
+      // re-activation must wait) so no reassignment can commit between this
+      // read and the paid flip. Lock order: invoice → customer → visit → payer.
+      const cust = await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id', 'payer_id');
+      const visit = locked.scheduled_service_id
+        ? await trx('scheduled_services').where({ id: locked.scheduled_service_id }).forUpdate().first('id', 'payer_id')
+        : null;
+      const payerIds = [...new Set([cust?.payer_id, visit?.payer_id].filter(Boolean))];
+      if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id', 'asc').forUpdate().select('id');
+      const { rowIsSelfPayDue } = require('./open-balance');
+      const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked, { database: trx });
+      if (!selfPay) return { notSelfPay: true };
+    }
+    if (settlementFence && !(await settlementFence(trx))) return { fenceLost: true };
     const [row] = await trx('invoices')
       .where({ id })
       .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
@@ -223,11 +314,28 @@ async function recordManualPayment(id, {
     // collect. Complete it on the SAME trx so a paid invoice never keeps
     // an `active` plan that blocks edits / credit reversal.
     await PaymentPlans.completeActivePlansForInvoice(row.id, trx);
+    if (sendReceipt && automated) {
+      // Same transaction as the paid flip: the receipt job is durable the
+      // moment the payment is. The customer sent the money themselves (a
+      // Zelle transfer minutes ago), so the receipt is customer-initiated
+      // for the send-window decision.
+      await require('./receipt-delivery-queue').enqueueReceiptDelivery({ invoiceId: id, source: 'zelle_notice_reconciler', customerInitiated: true, database: trx });
+    }
     return row;
   });
 
   if (updatedInvoice?.racedNewPaymentIntent) {
     throw refusal(409, 'A new payment session started for this invoice — retry recording the payment');
+  }
+  if (updatedInvoice?.amountMismatch) {
+    const { expectedCents, actualCents } = updatedInvoice.amountMismatch;
+    throw refusal(409, `Invoice amount due is $${(actualCents / 100).toFixed(2)}, not the $${(expectedCents / 100).toFixed(2)} being recorded — nothing was recorded`, { amountMismatch: updatedInvoice.amountMismatch });
+  }
+  if (updatedInvoice?.fenceLost) {
+    throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed) — nothing was recorded');
+  }
+  if (updatedInvoice?.notSelfPay) {
+    throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
   }
   if (!updatedInvoice) {
     // Lost the race to a concurrent caller (or another path marked it
@@ -303,14 +411,20 @@ async function recordManualPayment(id, {
   // Optional inline receipt — same pipeline as /:id/send-receipt.
   let emailResult = null;
   let smsResult = null;
-  if (sendReceipt) {
+  let queued = false;
+  if (sendReceipt && automated) {
+    // The job row committed with the payment above; just nudge the drain.
+    require('./receipt-delivery-queue').scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
+    queued = true;
+  } else if (sendReceipt) {
     const { sendReceiptEmail } = require('./invoice-email');
-    if (via === 'email' || via === 'both') {
+    const emailLeg = via === 'email' || via === 'both';
+    if (emailLeg) {
       emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
     }
     if (via === 'sms' || via === 'both') {
       try {
-        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
+        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true });
         smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
       } catch (err) {
         smsResult = { ok: false, error: err.message };
@@ -331,7 +445,7 @@ async function recordManualPayment(id, {
   const final = await db('invoices').where({ id }).first();
   return {
     invoice: final,
-    receipt: sendReceipt ? { email: emailResult, sms: smsResult } : null,
+    receipt: !sendReceipt ? null : queued ? { queued: true } : { email: emailResult, sms: smsResult },
   };
 }
 

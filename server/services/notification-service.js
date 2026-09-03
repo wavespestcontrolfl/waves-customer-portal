@@ -175,14 +175,20 @@ const NotificationService = {
     // so a recurring signal (an estimate re-opened again tomorrow) can ring
     // again once the window passes while two opens inside it contend on the
     // same stable lock. One mechanism for every admin emitter (rule 15).
-    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, ...createOpts } = opts;
+    // trx (optional, with dedupeKey): run the lock + probe + insert on the
+    // CALLER's open transaction instead of one of our own, so a caller that
+    // retires earlier rows and raises the replacement commits both together
+    // (termite station retrieval: staff must never see the old instruction
+    // unread beside the new one). Errors then PROPAGATE — swallowing one
+    // inside a caller's transaction would leave it aborted and doom the
+    // commit — so the caller owns containment.
+    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, trx: callerTrx = null, ...createOpts } = opts;
     if (!dedupeKey) {
-      return this.create({ recipientType: 'admin', category, title, body, ...createOpts });
+      return this.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
     }
     const windowMs = Number(dedupeWindowMs);
     const metadata = { ...(createOpts.metadata || {}), dedupeKey };
-    try {
-      const persisted = await db.transaction(async (trx) => {
+    const dedupeAndInsert = async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
         let existingQuery = trx('notifications')
           .where({ recipient_type: 'admin' })
@@ -215,8 +221,11 @@ const NotificationService = {
         // the null return below, never as success.
         if (!created) throw new Error('admin notification insert failed');
         return { notification: created, deduped: false };
-      });
-      return { ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true } : {}) };
+    };
+    const shape = (persisted) => ({ ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true } : {}) });
+    if (callerTrx) return shape(await dedupeAndInsert(callerTrx));
+    try {
+      return shape(await db.transaction(dedupeAndInsert));
     } catch (err) {
       logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
       return null;

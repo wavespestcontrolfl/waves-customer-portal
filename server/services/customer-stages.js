@@ -95,6 +95,9 @@ function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason
       if (oldStage === 'churned' || customer.churned_at) {
         stamps.churned_at = null;
         stamps.churn_reason = null;
+        // The churn EPISODE (cancellation-processor mints it) ends with the
+        // reactivation — the next churn is a new one with fresh side effects.
+        stamps.churn_episode_id = null;
       }
       // Entering a live customer stage is a (re)activation: the row must be
       // live for whereLiveCustomer or the UI shows an active stage the
@@ -146,6 +149,7 @@ async function promoteCustomerOnBooking(database, customerId) {
     updates.active = true;
     updates.churned_at = null;
     updates.churn_reason = null;
+    updates.churn_episode_id = null;
   }
   if (!Object.keys(updates).length) return false;
   updates.updated_at = new Date();

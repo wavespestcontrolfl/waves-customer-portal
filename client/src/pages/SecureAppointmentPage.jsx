@@ -160,7 +160,11 @@ export default function SecureAppointmentPage() {
   // the server confirmed completion, the save IS done — a transient
   // refetch failure must render the secured state, never an error message
   // or the card form again.
-  const refreshOrSecured = useCallback(async () => {
+  // fallback: the state to render when the refetch fails. 'secured' once
+  // the server CONFIRMED completion; 'saving' when completion is merely in
+  // progress on a standalone link (the tail can still revert — never claim
+  // success the server has not; GH Codex #3726 r5 P2).
+  const refreshOrSecured = useCallback(async (fallback = 'secured') => {
     try {
       const res = await fetch(`${API_BASE}/public/secure-card/${token}`);
       if (res.ok) {
@@ -170,13 +174,13 @@ export default function SecureAppointmentPage() {
         setState(payload.state === 'ready' ? 'ready' : payload.state);
         return;
       }
-    } catch { /* fall through to the secured fallback */ }
+    } catch { /* fall through to the fallback */ }
     // Suppress term-specific copy in the fallback (Codex #3153 r21 P2):
     // the pre-completion note may be stale (a concurrent tab can have
     // monotonically lowered/cleared the frozen terms) — secured posture
     // without quoting terms we could not refresh.
     setData((d) => (d ? { ...d, cancelFeeNote: null } : d));
-    setState('secured');
+    setState(fallback);
   }, [token]);
 
   // The disclosure version THIS tab's render carried — the server stamps
@@ -339,7 +343,9 @@ export default function SecureAppointmentPage() {
             }
           }
         }
-        await refreshOrSecured();
+        // A standalone link mid-completion falls back to "finishing up",
+        // never a success the server has not confirmed.
+        await refreshOrSecured(data?.kind === 'customer' ? 'saving' : 'secured');
         return;
       }
       // The server requires a recorded plan selection before the capture
@@ -350,11 +356,22 @@ export default function SecureAppointmentPage() {
         setError('Please choose how you’d like to pay, then save your card.');
         return;
       }
+      // Bank no longer offered (gate off / ACH state changed after the form
+      // loaded): re-pull so the server mints the card-only generation — a
+      // retry on the same succeeded bank intent can only refuse again.
+      if (err?.code === 'bank_not_allowed') {
+        // The replacement intent remounts the capture (key above); reset
+        // the gate state so the CTA cannot fire under the old consent.
+        setCaptureState({ ready: false, agreed: false, loadFailed: false });
+        await refresh();
+        setError('Bank accounts aren’t available right now — please use a card.');
+        return;
+      }
       setError('We could not finish saving your card. Please try again, or text us and we’ll help.');
     } finally {
       setBusy(false);
     }
-  }, [busy, complete, refresh, refreshOrSecured, pendingStickyEcho]);
+  }, [busy, complete, refresh, refreshOrSecured, pendingStickyEcho, data?.kind]);
 
   const selectPlan = useCallback(async (plan) => {
     if (planBusy) return;
@@ -399,6 +416,10 @@ export default function SecureAppointmentPage() {
   }, [planBusy, token, refresh, state]);
 
   const greeting = data?.firstName ? `${data.firstName}, you` : 'You';
+  // Standalone Auto Pay setup link (GATE_AUTOPAY_SETUP_LINK): no visit,
+  // no fee disclosure, no plan choice — the same capture with its own copy.
+  const standalone = data?.kind === 'customer';
+  const bankOffered = Array.isArray(data?.paymentMethodTypes) && data.paymentMethodTypes.includes('us_bank_account');
 
   if (state === 'loading') {
     return (
@@ -426,10 +447,13 @@ export default function SecureAppointmentPage() {
     return (
       <Shell>
         <Card>
-          <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>Nothing needed here</h1>
+          <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>
+            {standalone ? 'This link is no longer active' : 'Nothing needed here'}
+          </h1>
           <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
-            This appointment doesn&rsquo;t need a card on file anymore. If anything
-            changed, text or call us — we&rsquo;re happy to help.
+            {standalone
+              ? 'This Auto Pay setup link has expired or Auto Pay is already set up. Text or call us for a fresh link — we’re happy to help.'
+              : <>This appointment doesn&rsquo;t need a card on file anymore. If anything changed, text or call us — we&rsquo;re happy to help.</>}
           </p>
           <ContactRow />
         </Card>
@@ -445,9 +469,9 @@ export default function SecureAppointmentPage() {
             {data?.firstName ? `You're all set, ${data.firstName}!` : 'You’re all set!'}
           </h1>
           <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
-            Your card is on file and your appointment is secured. Nothing was
-            charged today — your card is only charged after your service is
-            completed.
+            {standalone
+              ? 'Auto Pay is set up. Nothing was charged today — after each completed service, that service’s amount is charged to your saved payment method automatically. You can change or remove it anytime in the Waves app.'
+              : 'Your card is on file and your appointment is secured. Nothing was charged today — your card is only charged after your service is completed.'}
           </p>
           {/* Frozen fee terms ride the secured payload for page-consented
               rows (Codex #3153 r9): the confirmation must not read as an
@@ -465,6 +489,24 @@ export default function SecureAppointmentPage() {
             <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
           ) : null}
           {data ? <VisitSummary data={data} /> : null}
+          <ContactRow />
+        </Card>
+      </Shell>
+    );
+  }
+
+  // Standalone link mid-completion (the server holds the completion claim):
+  // the method is saved at Stripe but Auto Pay is not confirmed yet — say
+  // so, never "set up", and never re-show the form.
+  if (state === 'saving') {
+    return (
+      <Shell>
+        <Card>
+          <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>Finishing up&hellip;</h1>
+          <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
+            Your payment method was received and Auto Pay is being turned on. Refresh
+            this page in a moment to confirm.
+          </p>
           <ContactRow />
         </Card>
       </Shell>
@@ -551,14 +593,18 @@ export default function SecureAppointmentPage() {
     <Shell>
       <Card>
         <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>
-          {planRecurring
-            ? (data?.firstName ? `${data.firstName}, choose how you’d like to pay` : 'Choose how you’d like to pay')
-            : <>{greeting}&rsquo;re one step from all set</>}
+          {standalone
+            ? (data?.firstName ? `${data.firstName}, set up Auto Pay` : 'Set up Auto Pay')
+            : planRecurring
+              ? (data?.firstName ? `${data.firstName}, choose how you’d like to pay` : 'Choose how you’d like to pay')
+              : <>{greeting}&rsquo;re one step from all set</>}
         </h1>
         <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
-          {planRecurring
-            ? 'Your appointment is booked. Pick a plan below, add a card, and you’re all set.'
-            : 'Add a card on file to secure your visit. Nothing is charged today — your card is only charged after your service is completed.'}
+          {standalone
+            ? `Save a ${bankOffered ? 'card or bank account' : 'card'} and each visit is paid automatically after it’s completed. Nothing is charged today.`
+            : planRecurring
+              ? 'Your appointment is booked. Pick a plan below, add a card, and you’re all set.'
+              : 'Add a card on file to secure your visit. Nothing is charged today — your card is only charged after your service is completed.'}
         </p>
         {data?.cancelFeeNote ? (
           <p style={{ fontSize: 14, color: S.muted, lineHeight: 1.5, marginTop: 6 }}>
@@ -595,8 +641,13 @@ export default function SecureAppointmentPage() {
         {showCapture ? (
           <>
             <InlineAutoPayCapture
+              // Keyed on the intent: a replacement intent (bank refused →
+              // card-only re-mint) gets a FRESH capture — new Elements, reset
+              // ready/agreed/tender — never a stale instance with the old
+              // consent still ticked (GH Codex P1).
+              key={data.clientSecret}
               ref={captureRef}
-              intent={{ clientSecret: data.clientSecret, publishableKey: data.publishableKey }}
+              intent={{ clientSecret: data.clientSecret, publishableKey: data.publishableKey, paymentMethodTypes: data.paymentMethodTypes, capturedMethodType: data.capturedMethodType || null }}
               loadStripeSdk={loadStripeSdk}
               busy={busy}
               onStateChange={setCaptureState}
@@ -616,7 +667,11 @@ export default function SecureAppointmentPage() {
                 cursor: busy || !(captureState.ready && captureState.agreed) ? 'default' : 'pointer',
               }}
             >
-              {busy ? 'Saving…' : (planRecurring ? 'Save card & confirm my plan' : 'Save card & secure my visit')}
+              {busy
+                ? 'Saving…'
+                : standalone
+                  ? (captureState.methodType === 'us_bank_account' ? 'Save bank account & turn on Auto Pay' : 'Save card & turn on Auto Pay')
+                  : (planRecurring ? 'Save card & confirm my plan' : 'Save card & secure my visit')}
             </button>
             {(planRecurring || planOneTime) ? (
               <p style={{ textAlign: 'center', fontSize: 12.5, color: S.muted, marginTop: 10, marginBottom: 0 }}>

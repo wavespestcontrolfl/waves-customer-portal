@@ -49,13 +49,21 @@ const MAX_OPEN_INVOICES = 200;
 // this exact selection, so "is there an open balance" can never disagree with
 // the invoice list (the columns are needed either way: eligibility itself is
 // remainder > 0, cents-checked in JS below).
+// The open-self-pay predicates, shared by the per-customer read below and
+// the Zelle notice reconciler's cross-customer amount lookup so the two can
+// never disagree about what "open self-pay invoice" means: presented
+// (sent/viewed/overdue — drafts were never presented), not payer-billed, not
+// on a statement, remainder > 0 (cents-checked again in JS by the caller).
+function applyOpenSelfPayPredicates(query) {
+  return query
+    .whereIn('invoices.status', ['sent', 'viewed', 'overdue'])
+    .whereNull('invoices.payer_id')
+    .whereNull('invoices.payer_statement_id')
+    .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) > 0');
+}
+
 function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db } = {}) {
-  const query = database('invoices')
-    .where({ customer_id: customerId })
-    .whereIn('status', ['sent', 'viewed', 'overdue'])
-    .whereNull('payer_id')
-    .whereNull('payer_statement_id')
-    .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
+  const query = applyOpenSelfPayPredicates(database('invoices').where({ customer_id: customerId }))
     .orderBy('created_at', 'asc')
     .limit(MAX_OPEN_INVOICES)
     .select(
@@ -67,6 +75,31 @@ function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db }
   return query;
 }
 
+// Cross-customer: every open self-pay invoice whose amount due is within
+// `toleranceCents` of `amountCents` (0 = exact cents — the only value the
+// Zelle reconciler auto-applies on; a wider tolerance only builds the
+// operator's candidate list). Joins the customer's name for identity
+// corroboration. Callers still run rowIsSelfPayDue per row (live payer
+// re-resolution, fail closed) before treating a row as settleable.
+const MAX_AMOUNT_CANDIDATES = 25;
+async function openSelfPayInvoicesByAmountDue(amountCents, { toleranceCents = 0, limit = MAX_AMOUNT_CANDIDATES, database = db } = {}) {
+  const cents = Math.round(Number(amountCents));
+  if (!Number.isFinite(cents) || cents <= 0) return [];
+  const lo = cents - Math.max(0, Math.round(Number(toleranceCents) || 0));
+  const hi = cents + Math.max(0, Math.round(Number(toleranceCents) || 0));
+  return applyOpenSelfPayPredicates(database('invoices'))
+    .join('customers', 'customers.id', 'invoices.customer_id')
+    .whereRaw('ROUND((invoices.total - COALESCE(invoices.credit_applied, 0)) * 100) BETWEEN ? AND ?', [lo, hi])
+    .orderBy('invoices.created_at', 'asc')
+    .limit(Math.min(Math.max(1, Number(limit) || MAX_AMOUNT_CANDIDATES), MAX_AMOUNT_CANDIDATES))
+    .select(
+      'invoices.id', 'invoices.invoice_number', 'invoices.status', 'invoices.customer_id',
+      'invoices.service_type', 'invoices.service_date', 'invoices.due_date', 'invoices.created_at',
+      'invoices.total', 'invoices.credit_applied', 'invoices.scheduled_service_id',
+      'customers.first_name as customer_first_name', 'customers.last_name as customer_last_name',
+    );
+}
+
 // The per-row self-pay test the SQL cannot make alone: cents-authoritative
 // remainder plus the LIVE payer re-resolution (fail-closed toward DROP).
 // `onResolveFailure` (optional) fires when the drop is a RESOLVE FAILURE
@@ -76,11 +109,12 @@ function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db }
 // balance line) must be able to tell "smaller balance" from "incomplete
 // balance" and suppress instead. Existing callers that render the invoices
 // individually (email note, sweep) are unchanged.
-async function rowIsSelfPayDue(customerId, row, { onResolveFailure = null } = {}) {
+async function rowIsSelfPayDue(customerId, row, { onResolveFailure = null, database = db } = {}) {
   if (!(invoiceAmountDue(row) > 0)) return false;
   const PayerService = require('./payer');
   try {
     const resolved = await PayerService.resolveForInvoice({
+      database,
       customerId: String(customerId),
       ...(row.scheduled_service_id ? { scheduledServiceId: String(row.scheduled_service_id) } : {}),
       throwOnError: true,
@@ -277,4 +311,4 @@ function stripBalanceLineFromBody(body, line) {
   return body.split(clause).join('').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, rowIsSelfPayDue, pastDueSmsLineForCustomer, stripBalanceLineFromBody, MAX_OPEN_INVOICES };
+module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, pastDueSmsLineForCustomer, stripBalanceLineFromBody, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };

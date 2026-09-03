@@ -102,6 +102,47 @@ describe('completion-lane registry (static)', () => {
     expect(after.flags).toEqual([]);
   });
 
+  test('the assessment experience (Waves Assessment) is decided: consultation posture, no report lane of its own', () => {
+    // Owner 2026-09-02: the Lawn Diagnostic IS the customer report.
+    const healthy = classifyCatalogRow({
+      service_key: 'lawn_inspection',
+      billing_type: 'one_time',
+      completion_mode: 'internal_only',
+      project_type: null,
+      delivery_mode: 'auto_send', // ignored on non-typed profiles
+      profile_active: true,
+    });
+    expect(healthy.lane).toBe('assessment_experience');
+    expect(healthy.flags).toEqual([]);
+    // A generic service_report profile would send a second, generic report
+    // beside the Lawn Diagnostic — the lane the owner ruled out.
+    const live = classifyCatalogRow({
+      service_key: 'lawn_inspection',
+      billing_type: 'one_time',
+      completion_mode: 'service_report',
+      project_type: null,
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(live.flags).toContain('assessment_experience_report_lane_active:service_report_expected_internal_only');
+    const typed = classifyCatalogRow({
+      service_key: 'lawn_inspection',
+      billing_type: 'one_time',
+      completion_mode: 'service_report',
+      project_type: 'one_time_lawn_treatment',
+      profile_active: true,
+    });
+    expect(typed.flags).toContain('assessment_experience_has_typed_pointer');
+    const missing = classifyCatalogRow({
+      service_key: 'lawn_inspection',
+      billing_type: 'one_time',
+      completion_mode: null,
+      project_type: null,
+      profile_active: null,
+    });
+    expect(missing.flags).toContain('assessment_experience_missing_profile:falls_through_to_generic_report');
+  });
+
   test('billing rider suppression requires the internal_only consultation mode', () => {
     // service_report is a live report lane regardless of delivery_mode —
     // resolveCompletionDeliveryPosture ignores delivery on generic profiles.

@@ -20,6 +20,7 @@ const {
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
+const { applyReportIdentitySnapshotToLegacyPdf } = require('../services/service-report/report-identity-snapshot');
 const {
   WAVES_ADDRESS_LINE,
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -924,9 +925,13 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
       .first()
       .catch(() => null);
 
-    const customer = req.customer;
     const credentialText = await getServiceReportCredentialText();
-    generateServiceReportPDF(customer, service, products, res, { compliance, invoice, credentialText });
+    // Same completion-time identity the tokenized report renders (name,
+    // serviced address, technician, product facts) — the portal download
+    // must not diverge from the /report/:token preview after a customer,
+    // technician, or catalog edit.
+    const frozen = applyReportIdentitySnapshotToLegacyPdf({ customer: req.customer, service, products });
+    generateServiceReportPDF(frozen.customer, frozen.service, frozen.products, res, { compliance, invoice, credentialText });
   } catch (err) {
     next(err);
   }
@@ -1108,7 +1113,8 @@ router.get('/shared/:token', sharedDocLimiter, async (req, res, next) => {
         .catch(() => []);
 
       const credentialText = await getServiceReportCredentialText();
-      return generateServiceReportPDF(customer, service, products, res, { compliance, credentialText });
+      const frozen = applyReportIdentitySnapshotToLegacyPdf({ customer, service, products });
+      return generateServiceReportPDF(frozen.customer, frozen.service, frozen.products, res, { compliance, credentialText });
     }
 
     // Stored document — mint the S3 URL only after the public share token has

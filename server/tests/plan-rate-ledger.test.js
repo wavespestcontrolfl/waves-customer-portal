@@ -76,6 +76,8 @@ function makeLedgerDb(initialRows = [], { hasTable = true } = {}) {
   };
   db.schema = { hasTable: async () => hasTable };
   db.store = store;
+  // Rung 6 (customer-comms) advisory lock taken by every ledger rewrite.
+  db.raw = jest.fn(async () => ({ rows: [] }));
   return db;
 }
 
@@ -436,6 +438,9 @@ describe('seedLedgerComponents (codex r7/r8)', () => {
     await seedLedgerComponents(db, 'cust-1', { pest_control: 45, mosquito: 30 }, { source: 'plan_sync' });
     expect(db.store.map((r) => [r.family_key, r.monthly_rate]).sort())
       .toEqual([['mosquito', 30], ['pest_control', 45]]);
+    // Opened the outermost transaction itself → the rewrite serializes
+    // against the cancellation wind-down on rung 6, taken before the first write.
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-comms:cust-1']);
   });
 
   test('authoritative failures throw; advisory failures warn', async () => {
@@ -934,6 +939,15 @@ describe('syncScalarWriteToLedger (codex r2)', () => {
     ]);
     db.transaction = async (fn) => fn(db);
     await syncScalarWriteToLedger(db, 'cust-1', 75, { source: 'ib_update' });
+    // Opened the outermost transaction itself → rung 6 taken inside it.
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-comms:cust-1']);
+    db.raw.mockClear();
+    const inner = makeLedgerDb([]);
+    inner.isTransaction = true;
+    inner.transaction = async (fn) => fn(inner);
+    await syncScalarWriteToLedger(inner, 'cust-1', 75, { source: 'ib_update' });
+    // Inside a caller's transaction the caller owns the lock order.
+    expect(inner.raw).not.toHaveBeenCalled();
     expect(db.store).toHaveLength(1);
     expect(db.store[0]).toMatchObject({ family_key: UNATTRIBUTED, monthly_rate: 75 });
   });
@@ -946,6 +960,9 @@ describe('resetLedgerToScalar', () => {
       { customer_id: 'cust-1', family_key: 'lawn_care', monthly_rate: 50 },
     ]);
     await resetLedgerToScalar(db, 'cust-1', 75, { source: 'admin_edit' });
+    // The bare helper takes NO lock: the caller's outer transaction holds
+    // rung 6 before its customers row lock (see LOCKING in the module).
+    expect(db.raw).not.toHaveBeenCalled();
     expect(db.store).toHaveLength(1);
     expect(db.store[0]).toMatchObject({ family_key: UNATTRIBUTED, monthly_rate: 75 });
     await resetLedgerToScalar(db, 'cust-1', 0, { source: 'admin_edit' });

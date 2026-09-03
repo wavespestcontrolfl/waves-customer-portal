@@ -27,6 +27,7 @@ import PublicLoadError from '../components/PublicLoadError';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
+import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import PriceCard from '../components/estimate/PriceCard';
@@ -4349,64 +4350,119 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
   );
 }
 
-// Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): a 12-month strip
-// starting at the current ET month, with N evenly spaced application months
-// where N is the selected frequency's visitsPerYear. Pure arithmetic on data
-// already on the card — no product, step, or fertilizer names (owner-owned
-// business logic). The owner's 2026-07-23 ruling removed the "N applications
-// per year" HEADLINE from the price card; this is a separate visual block
-// behind its own gate.
-const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// Lawn program seasons (GATE_ESTIMATE_LAWN_CALENDAR): the four SWFL turf
+// seasons in order from the current month, each with a one-line focus and
+// how many of the program's applications the scheduler puts in it.
+// Replaces the 12-month pill strip (owner 2026-09-02: twelve pills with N
+// filled read as noise, not a program). The cadence line and the projected
+// months arrive on the /data payload (`lawnCalendar.programs[frequencyKey]`)
+// from the scheduling catalog — this block only buckets months into
+// seasons, so it can never promise an interval the scheduler does not keep
+// (GH Codex P1). The season bands and their focus copy are the same
+// customer-facing seasonal context the lawn health widget already uses
+// (server/services/fawn-weather.js getSeasonalContext): spring green-up
+// Mar–Apr, summer peak May–Sep, fall transition Oct–Nov, winter dormancy
+// Dec–Feb. The summer note stays jurisdiction-neutral on purpose: the
+// fertilizer restriction window differs by county and city (pre-push Codex
+// P1), so the row says we work around it rather than naming dates.
+// No product, step, or fertilizer names — the per-visit program is
+// owner-owned business logic; this block only says what each season is
+// FOR and how many of the program's visits the cadence puts in it.
+const LAWN_SEASONS = [
+  { key: 'spring', label: 'Spring', range: 'Mar – Apr', months: [2, 3], focus: 'Green-up as the lawn comes out of dormancy and the soil warms.' },
+  { key: 'summer', label: 'Summer', range: 'May – Sep', months: [4, 5, 6, 7, 8], focus: 'Peak growth, with the year’s heaviest insect and fungus pressure.', note: 'We work around the summer fertilizer restrictions in your county.' },
+  { key: 'fall', label: 'Fall', range: 'Oct – Nov', months: [9, 10], focus: 'Weed prevention while growth slows.' },
+  { key: 'winter', label: 'Winter', range: 'Dec – Feb', months: [11, 0, 1], focus: 'Root strength while the lawn rests.' },
+];
 
-// Returns 12 entries starting at startMonthIndex (0 = January): { label, marked }.
-// Applications are spread evenly across the year (12 / N months apart) from
-// the first month, rounded so 9 apps land ~every 1.33 months, 12 every
-// month, 4 every quarter. N > 12 saturates to every month.
-export function lawnCalendarMonths(visitsPerYear, startMonthIndex) {
-  const n = Math.min(12, Math.max(0, Math.round(Number(visitsPerYear) || 0)));
-  const start = ((Number(startMonthIndex) || 0) % 12 + 12) % 12;
-  const marked = new Set();
-  for (let i = 0; i < n; i += 1) marked.add(Math.round((i * 12) / n) % 12);
-  return Array.from({ length: 12 }, (_, offset) => ({
-    label: MONTH_ABBR[(start + offset) % 12],
-    marked: marked.has(offset),
+// `months` are the server-projected 0-based month indices of the program's
+// applications, first one first. Returns the four seasons starting with the
+// one containing the first month, each stamped { ...season, current,
+// applications }; the counts sum to months.length by construction.
+export function lawnProgramSeasons(months) {
+  const hits = (Array.isArray(months) ? months : []).map((m) => Number(m)).filter((m) => Number.isInteger(m) && m >= 0 && m < 12);
+  const start = hits.length ? hits[0] : etParts(new Date()).month - 1;
+  const first = Math.max(0, LAWN_SEASONS.findIndex((s) => s.months.includes(start)));
+  return LAWN_SEASONS.map((_, i) => LAWN_SEASONS[(first + i) % LAWN_SEASONS.length]).map((s, i) => ({
+    ...s,
+    current: i === 0,
+    applications: hits.filter((m) => s.months.includes(m)).length,
   }));
 }
 
-export function LawnProgramCalendar({ visitsPerYear, now = null }) {
-  const n = Math.round(Number(visitsPerYear) || 0);
-  if (!(n > 0)) return null;
-  const startMonthIndex = etParts(now || new Date()).month - 1;
-  const months = lawnCalendarMonths(n, startMonthIndex);
-  const weeks = Math.max(1, Math.round(52 / Math.min(n, 12)));
+// `program` = { visitsPerYear, cadence, months } from the /data payload.
+export function LawnProgramCalendar({ program }) {
+  const [open, setOpen] = useState(false);
+  // The browser print path keeps whatever is on screen: open the seasons
+  // before the print dialog so a collapsed block does not drop the program
+  // from the printed estimate (GH Codex P2). flushSync so the DOM is
+  // expanded before beforeprint returns — a batched update could land after
+  // the browser captured the page (pre-push Codex P1).
+  useEffect(() => {
+    const onBeforePrint = () => flushSync(() => setOpen(true));
+    window.addEventListener('beforeprint', onBeforePrint);
+    return () => window.removeEventListener('beforeprint', onBeforePrint);
+  }, []);
+  const n = Math.round(Number(program?.visitsPerYear) || 0);
+  if (!(n > 0) || !program?.cadence) return null;
+  const seasons = lawnProgramSeasons(program.months);
   return (
     <div aria-label="Your lawn program calendar" style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
         Your program
       </div>
       <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
-        {n} applications a year — about every {weeks} weeks
+        {n} applications a year — {program.cadence}
       </div>
-      <div role="list" style={{ display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 6, marginTop: 10 }}>
-        {months.map((m, i) => (
-          <div
-            key={`${m.label}-${i}`}
-            role="listitem"
-            aria-label={`${m.label}${m.marked ? ': application' : ''}`}
-            data-marked={m.marked ? 'true' : 'false'}
-            style={{
-              textAlign: 'center', padding: '6px 0', borderRadius: 999, fontSize: 14, fontWeight: 600,
-              border: `1.5px solid ${m.marked ? COLORS.glassNavy : ESTIMATE_BORDER}`,
-              background: m.marked ? COLORS.glassNavy : 'transparent',
-              color: m.marked ? COLORS.white : ESTIMATE_MUTED,
-            }}
-          >
-            {m.label}
-          </div>
-        ))}
-      </div>
-      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
-        Timing shifts a little with weather and turf condition.
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls="lawn-program-seasons"
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 8, padding: 0, border: 'none', background: 'transparent',
+          fontSize: 15, fontWeight: 600, color: COLORS.glassNavy, cursor: 'pointer', fontFamily: 'inherit',
+        }}
+      >
+        What each season covers
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 150ms' }}>
+          <path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      <div id="lawn-program-seasons" hidden={!open}>
+        <div role="list" style={{ marginTop: 6 }}>
+          {seasons.map((s, i) => (
+            <div
+              key={s.key}
+              role="listitem"
+              data-season={s.key}
+              data-current={s.current ? 'true' : 'false'}
+              style={{
+                display: 'grid', gridTemplateColumns: '4px minmax(0, 1fr)', columnGap: 12,
+                padding: '10px 0', borderTop: i === 0 ? 'none' : `1px solid ${ESTIMATE_BORDER}`,
+              }}
+            >
+              <div aria-hidden="true" style={{ borderRadius: 2, background: s.current ? COLORS.glassNavy : ESTIMATE_BORDER }} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, fontSize: 15, lineHeight: 1.4 }}>
+                  <div style={{ fontWeight: 600, color: ESTIMATE_BODY }}>
+                    {s.label}
+                    <span style={{ fontWeight: 400, color: ESTIMATE_MUTED, whiteSpace: 'nowrap' }}> {s.range}{s.current ? ' · now' : ''}</span>
+                  </div>
+                  <div style={{ fontWeight: 600, color: s.applications > 0 ? ESTIMATE_BODY : ESTIMATE_MUTED, whiteSpace: 'nowrap' }}>
+                    {s.applications} {s.applications === 1 ? 'application' : 'applications'}
+                  </div>
+                </div>
+                <div style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5, marginTop: 2 }}>
+                  {s.focus}{s.note ? ` ${s.note}` : ''}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
+          Timing shifts a little with weather and turf condition.
+        </div>
       </div>
     </div>
   );
@@ -4453,9 +4509,10 @@ export function ServiceSection({
   // Opens the "Does the lawn size look off?" sheet. Wired only when the
   // server payload flags measurementReviewEnabled (gate-on, non-preview).
   onMeasurementChallenge = null,
-  // Lawn program calendar under the lawn price card — wired only when the
-  // payload flags lawnCalendar (gate on) and the plan is recurring.
-  showLawnCalendar = false,
+  // Lawn program calendar under the lawn price card — the payload's
+  // lawnCalendar block ({ programs: { [frequencyKey]: { visitsPerYear,
+  // cadence, months } } }, gate on) when the plan is recurring, else null.
+  lawnCalendar = null,
 }) {
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
   // eats most of the card width and crunches the headline — stack the badge
@@ -4651,8 +4708,8 @@ export function ServiceSection({
           />
         ) : null}
 
-        {showLawnCalendar && section.key === 'lawn_care' && current ? (
-          <LawnProgramCalendar visitsPerYear={current.visitsPerYear} />
+        {section.key === 'lawn_care' && current && lawnCalendar?.programs?.[current.key] ? (
+          <LawnProgramCalendar program={lawnCalendar.programs[current.key]} />
         ) : null}
 
         {/* Termite station rental rider (owner 2026-07-26): stations are
@@ -6062,6 +6119,14 @@ function EstimateViewPageInner() {
             setPrepayConsentChecked(false);
             throw new Error(body.error || 'Your total changed while confirming — please confirm the updated amount.');
           }
+          if (['PER_APPLICATION_ADD_ON_UNPRICED', 'LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE', 'INVOICE_MODE_PER_APPLICATION_UNRESOLVED'].includes(body.code)) {
+            // A fail-closed PRICING refusal (#3751, docs/public-route-
+            // contracts.md): nothing was booked and the office has to
+            // re-quote. NOT a scheduling conflict — keep the reservation,
+            // preference and plan selections, and surface the server's
+            // call-the-office message instead of a slot-picker retry loop.
+            throw new Error(body.error || 'We couldn\'t confirm this plan\'s pricing online — please call the office and we\'ll finish it for you.');
+          }
           if (/estimate is no longer active/i.test(body.error || '')) {
             setCtaPhase('configure');
             setReservation(null);
@@ -6944,7 +7009,7 @@ function EstimateViewPageInner() {
                 bondBusy={bondBusy}
                 onToggleInteriorService={onToggleInteriorService}
                 interiorBusy={interiorBusy}
-                showLawnCalendar={data?.lawnCalendar === true && serviceMode === 'recurring'}
+                lawnCalendar={serviceMode === 'recurring' ? data?.lawnCalendar || null : null}
                 onMeasurementChallenge={data?.measurementReviewEnabled && !adminDraftPreview
                   ? (basis) => setMeasurementReviewBasis(basis || {})
                   : null}
