@@ -2578,7 +2578,16 @@ export default function DispatchPageV2({
               services={services}
               technicians={technicians}
               owesCompletion={completedVisitOwesCompletion}
-              onEdit={(svc) => setEditingService(svc)}
+              onEdit={(svc) => {
+                // A block wearing the "Closeout owed" chip must open the
+                // completion panel (resume), not the appointment editor —
+                // same routing the mobile list uses (pre-push Codex P1).
+                if (completedVisitOwesCompletion(svc)) {
+                  handleComplete(svc);
+                } else {
+                  setEditingService(svc);
+                }
+              }}
               onProtocol={(svc) => setProtocolService(svc)}
               onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
               onViewCustomer={openCustomerSidebar}
