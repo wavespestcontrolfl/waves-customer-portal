@@ -429,7 +429,12 @@ async function sendAuthority(trx, { placement, path, policy, mode, draft, review
   const hash = P.decisionInputsHash('communication', ctx);
   const revision = Number(path.revision_communication ?? path.revision ?? 1);
   if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== revision) return { ok: false, code: 'not_authorized', error: 'the send inputs changed since the authority was decided — the nightly bridge re-decides it' };
-  if (row.level === P.LEVELS.AUTO_OUTREACH) return { ok: true, rowId: row.id, approvalId: null, level: row.level };
+  if (row.level === P.LEVELS.AUTO_OUTREACH) {
+    // the draft is deliberately outside the decision hash (the approval binds it): a draft edited after the
+    // nightly stamped AUTO_OUTREACH is re-reviewed on the LOCKED text — an unclean one is the owner's, never automatic
+    if (mode === 'auto' && !M.draftReview({ ...placement, ...draft }).clean) return { ok: false, code: 'not_authorized', error: 'the draft changed since the automatic decision and is no longer clean — the nightly bridge re-decides it for the owner' };
+    return { ok: true, rowId: row.id, approvalId: null, level: row.level };
+  }
   if (mode === 'auto') return { ok: false, code: 'not_authorized', error: `${row.level}: the owner's click is the send authority` };
   if (row.level !== P.LEVELS.OWNER_OUTREACH && row.level !== P.LEVELS.OWNER_LEGAL) return { ok: false, code: 'not_authorized', error: `${row.level} authorizes no send` };
   // a send that itself accepts the publisher's terms needs the accept_terms

@@ -103,6 +103,17 @@ describe('sendOutreach under the contract', () => {
     expect(commRow(s.db).satisfied_at).toBeTruthy();
     expect(approvals(s.db)).toHaveLength(0);
   });
+  test('AUTO_OUTREACH stamped, draft edited before the send claims it: an unclean draft is refused automatically (the owner may still send it)', async () => {
+    const s = scenario({ policy: AUTO_POLICY });
+    await nightly(s.db);
+    expect(commRow(s.db).level).toBe('AUTO_OUTREACH');
+    Object.assign(placement(s.db), { outreach_body: `${CLEAN_BODY}\nWe can pay a placement fee.` });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/no longer clean/) });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    expect(placement(s.db).outreach_status).toBe('drafted');
+    const r = await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner' });
+    expect(r).toMatchObject({ ok: true, authority: { level: 'AUTO_OUTREACH', approval_id: null } });
+  });
   test('the policy cap bounds an automatic send inside the claim: cap 0 ⇒ not_authorized, cap reached ⇒ rate_limited; the owner keeps the hard cap only', async () => {
     const zero = scenario({ policy: { auto_outreach_min_score: 60, auto_outreach_daily_cap: 0 } });
     await nightly(zero.db);
