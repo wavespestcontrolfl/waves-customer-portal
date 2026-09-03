@@ -117,6 +117,13 @@ function applyReplayLane(label) {
   return `${label}:replay`;
 }
 
+// The `policy` column EVERY row of a chain carries — the chain row and each
+// leg's call row — so aggregation by policy never splits a chain, and replay
+// traffic is never attributed to the live policy (Codex r5 on #3846).
+function recordedPolicyLabel(policy) {
+  return applyReplayLane(policyLabel(policy));
+}
+
 // Named TEXT_POLICIES entries carry their registry key as `name` (set in
 // config/models.js). Route-signature matching is NOT safe here: with current
 // env defaults customerCopy/visionAnalysis and highStakes/deepAnalysis
@@ -178,7 +185,7 @@ function buildRow(policy, result, rowKind = 'chain') {
   return {
     ...contextColumns(ctx),
     row_kind: rowKind,
-    policy: applyReplayLane(policyLabel(policy)).slice(0, 120),
+    policy: recordedPolicyLabel(policy).slice(0, 120),
     ok: !!result?.ok,
     // WHY the chain failed, from the first leg's code — the class the alert
     // rules and eval selection key on; null on success. A rejection from the
@@ -397,7 +404,10 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     // llm/call.js requires this module, so its require is lazy.
     let errorCode = 'error';
     try { errorCode = require('./llm/call').providerErrorReason(provider, err); } catch { /* keep the generic code */ }
-    void recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: label });
+    const failedId = recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: label });
+    // The calls most worth debugging are the ones that failed: an opted-in
+    // lane keeps the request bodies of a rejected call too (no response).
+    if (trace) recordTrace(failedId, { system: trace.system, prompt: trace.prompt, laneId });
     throw err;
   }
   // An Anthropic Message that resolved with stop_reason 'refusal' is a
@@ -974,6 +984,7 @@ module.exports = {
   detectExceptions,
   policyLabel,
   runAsReplay,
+  recordedPolicyLabel,
   HEARTBEAT_POLICY,
   FALLBACK_RATE_THRESHOLD,
   FALLBACK_MIN_VOLUME,

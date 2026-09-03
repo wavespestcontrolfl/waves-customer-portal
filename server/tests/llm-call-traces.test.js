@@ -139,6 +139,16 @@ describe('recordTrace', () => {
     expect(typeof traceRows()[0].call_id).toBe('number');
   });
 
+  it('ledgerCall traces a REJECTED direct-SDK call too: request bodies kept, no response, the error rethrown unchanged', async () => {
+    process.env.GATE_LLM_CALL_LEDGER = 'true';
+    const { ledgerCall } = load();
+    const boom = Object.assign(new Error('overloaded'), { status: 529 });
+    await expect(ledgerCall('anthropic', 'm', () => Promise.reject(boom), { laneId: 'traced_plain', trace: { system: 'sys', prompt: 'ask 941-555-1234' } })).rejects.toBe(boom);
+    await flush();
+    expect(traceRows()).toEqual([expect.objectContaining({ lane_id: 'traced_plain', system_redacted: 'sys', prompt_redacted: 'ask [phone]', response_redacted: null })]);
+    expect(typeof traceRows()[0].call_id).toBe('number');
+  });
+
   it('an incomplete OpenAI response (max_output_tokens) traces its PARTIAL output', async () => {
     process.env.GATE_LLM_CALL_LEDGER = 'true';
     process.env.OPENAI_API_KEY = 'k';

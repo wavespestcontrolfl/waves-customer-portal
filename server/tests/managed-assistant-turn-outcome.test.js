@@ -91,6 +91,18 @@ describe('managed assistant — the turn recorder sees how the stream ended', ()
     expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: 'max_events' });
   });
 
+  it("a provider rejection of the turn's event POST keeps its status — the recorder sees anthropic_429, the customer gets the fallback", async () => {
+    global.fetch = jest.fn(async (url, opts = {}) => {
+      if (opts.method === 'POST') return { ok: false, status: 429, text: async () => 'rate limited' };
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    const res = await turn();
+    expect(res.reply).toMatch(/having trouble right now/);
+    const { failure } = recorded();
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toMatchObject({ status: 429, code: 'anthropic_429' });
+  });
+
   it('a throw after a failed stream keeps the first failure', async () => {
     global.fetch = fetchFor([{ event: 'error', data: {} }]);
     // the reply save blows up after the stream already failed

@@ -443,7 +443,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
   const failures = [];
   // The chain's registry name, so its call rows carry the same policy label
   // as the chain row (labels resolve in one place: policyLabel).
-  const chainLabel = metrics.policyLabel(policy);
+  const chainLabel = metrics.recordedPolicyLabel(policy);
   // Every chain runs under a shared wall-clock deadline. Callers with an
   // explicit timeoutMs keep their original semantics (each leg gets the full
   // remainder — fact-check's hard 60s ceiling). Callers WITHOUT one get

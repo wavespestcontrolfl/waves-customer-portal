@@ -151,7 +151,7 @@ async function apiCall(method, path, body) {
   });
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Anthropic ${res.status}: ${errText.slice(0, 400)}`);
+    throw Object.assign(new Error(`Anthropic ${res.status}: ${errText.slice(0, 400)}`), { status: res.status, code: `anthropic_${res.status}` });
   }
   return res.json();
 }
@@ -235,7 +235,7 @@ class AgentDispatcher {
       // Session state (lint options, attempts) was registered above — a
       // transient initial-message failure must not leak it into the
       // process-global maps.
-      recordSession('initial_message_failed');
+      recordSession(err.code || 'initial_message_failed');
       clearDraft(sessionId);
       return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId, agent_id: route.agent_id };
     }
@@ -244,7 +244,7 @@ class AgentDispatcher {
     try {
       await this._streamAndExecute(sessionId, sessionTimeoutMs);
     } catch (err) {
-      recordSession('streaming_failed');
+      recordSession(err.code || 'streaming_failed');
       const partial = getDraft(sessionId);
       clearDraft(sessionId);
       return {
@@ -393,7 +393,7 @@ async function* streamSessionEvents(sessionId, deadline) {
     });
     if (!res.ok || !res.body) {
       const errText = res.body ? await res.text() : '';
-      throw new Error(`SSE open failed ${res.status}: ${errText.slice(0, 200)}`);
+      throw Object.assign(new Error(`SSE open failed ${res.status}: ${errText.slice(0, 200)}`), { status: res.status, code: `anthropic_${res.status}` });
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();

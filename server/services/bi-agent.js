@@ -26,7 +26,7 @@ async function apiCall(method, path, body) {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw Object.assign(new Error(`API ${res.status}: ${await res.text()}`), { status: res.status, code: `anthropic_${res.status}` });
   return res.json();
 }
 
@@ -37,7 +37,7 @@ async function* streamSessionEvents(sessionId) {
       'anthropic-beta': BETA_HEADER, 'accept': 'text/event-stream',
     },
   });
-  if (!res.ok) throw new Error(`Stream ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw Object.assign(new Error(`Stream ${res.status}: ${await res.text()}`), { status: res.status, code: `anthropic_${res.status}` });
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';

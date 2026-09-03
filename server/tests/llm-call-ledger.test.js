@@ -384,6 +384,18 @@ describe('llm call ledger', () => {
       expect(chain).toMatchObject({ ok: false, error_class: 'provider', lane_id: null });
     });
 
+    it('inside runAsReplay every row of the chain carries the `:replay` policy — the call rows agree with the chain row', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      global.fetch = fetchJson(OPENAI_BODY);
+      const { call, metrics } = load();
+      const policy = { name: 'ledgerReplay', primary: { provider: 'openai', model: 'o' }, fallback: { provider: 'anthropic', model: 'a' } };
+      expect(await metrics.runAsReplay(() => call.dispatchWithFallback(policy, { text: 't' }))).toMatchObject({ ok: true, provider: 'openai' });
+      await flush();
+      const rows = ledgerRows();
+      expect(rows.find((r) => r.row_kind === 'chain')).toMatchObject({ policy: 'ledgerReplay:replay', workload: 'replay' });
+      expect(rows.filter((r) => r.row_kind === 'call').map((r) => [r.policy, r.workload])).toEqual([['ledgerReplay:replay', 'replay']]);
+    });
+
     it('a refused primary fails its leg over — the call row, the chain row and the caller all say anthropic_refusal', async () => {
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       global.fetch = fetchJson(OPENAI_BODY);
@@ -451,11 +463,14 @@ describe('llm call ledger', () => {
       await metrics.recordSessionUsage({ laneId: 'agent_bi', sessionId: 's', failure: new Error('socket hang up') });
       await metrics.recordSessionUsage({ laneId: 'agent_content', sessionId: 's', failure: 'missing_draft' });
       await metrics.recordSessionUsage({ laneId: 'agent_backlink', sessionId: 's', failure: 'session_error_event' });
+      // a provider response the runner's helper threw keeps its status (the helpers attach `code`)
+      await metrics.recordSessionUsage({ laneId: 'agent_content', sessionId: 's', failure: Object.assign(new Error('Anthropic API 429: slow down'), { status: 429, code: 'anthropic_429' }) });
       await metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's', failure: null });
       expect(ledgerRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([
         [false, 'runner_error', 'infrastructure', 10],
         [false, 'missing_draft', 'incomplete', 10],
         [false, 'session_error_event', 'provider', 10],
+        [false, 'anthropic_429', 'provider', 10],
         [true, null, null, 10],
       ]);
     });

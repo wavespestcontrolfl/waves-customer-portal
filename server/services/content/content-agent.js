@@ -40,7 +40,7 @@ async function apiCall(method, path, body) {
   });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${err}`);
+    throw Object.assign(new Error(`Anthropic API ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
   return res.json();
 }
@@ -56,7 +56,7 @@ async function* streamSessionEvents(sessionId) {
   });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Stream error ${res.status}: ${err}`);
+    throw Object.assign(new Error(`Stream error ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
 
   const reader = res.body.getReader();
