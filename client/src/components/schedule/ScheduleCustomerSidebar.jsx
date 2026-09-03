@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { MoreHorizontal, X } from 'lucide-react';
 import { adminFetch } from '../../lib/adminFetch';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
+import CancelFeeNotice from './CancelFeeNotice';
 import { TIMEZONE } from '../../lib/timezone';
 import { appointmentHistory as buildAppointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
@@ -569,6 +570,7 @@ export default function ScheduleCustomerSidebar({
                   This message is saved with the cancellation note. A cancellation text is sent when a reminder record exists.
                 </div>
               </div>
+              <CancelFeeNotice serviceId={service.id} scope={cancelScope} />
             </div>
 
             <div className="border-t border-hairline border-zinc-200 px-6 py-4 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">

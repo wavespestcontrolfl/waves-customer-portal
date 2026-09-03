@@ -57,6 +57,7 @@ jest.mock('../utils/datetime-et', () => ({
   addETDays: jest.fn(),
   formatETDate: jest.fn(() => 'July 13, 2026'),
   formatETTime: jest.fn(() => '9:00 AM'),
+  formatETDay: jest.fn(() => 'Monday'),
   // Real implementation: the sticky-window lookup composes reschedule_log's
   // original DATE+TIME into an ET instant with it, and the tests pin real
   // ET math (fixed EDT dates), not a stub's.
@@ -761,28 +762,67 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
   const holdRow = { id: 'h1', cancel_window_hours: 24, no_show_fee_amount: 49 };
   it('no hold → nothing to ask', async () => {
     stubDb(null);
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: false, feeApplies: false });
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: false, feeApplies: false, rule: expect.objectContaining({ code: 'no_card', willCharge: false }) });
+  });
+  it('held + in-window with the local card row gone → STILL a charge verdict: the direct cancel path self-heals the attach and charges', async () => {
+    stubDb([holdRow, null]);
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, rule: { code: 'in_window', willCharge: true } });
   });
   it('held + in-window start → fee applies with the hold\'s own fee amount', async () => {
     stubDb(holdRow);
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: true, feeAmount: 49 });
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toEqual({ held: true, feeApplies: true, feeAmount: 49, rule: expect.objectContaining({ code: 'in_window', willCharge: true }) });
+    // ET wall clock of the start + the fee + the rule, in one sentence.
+    // Stubbed ET formatters (see the datetime-et mock) — the shape is what's under test.
+    expect(res.rule.text).toBe('A card is saved and the visit starts Monday, July 13, 2026 at 9:00 AM, within the 24-hour late-cancel window. The $49 late-cancel fee will be charged — rule: cancellations within 24 hours of the visit.');
+  });
+  it('parked hold → never a charge prompt, matching the handler\'s already_parked (no window math)', async () => {
+    stubDb({ ...holdRow, parked_at: new Date('2026-07-05T12:00:00Z') });
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z')); // would be in-window
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: false, parked: true, rule: { code: 'hold_parked', willCharge: false } });
+    expect(mockApptTime).not.toHaveBeenCalled();
+  });
+  it('held + start days out → free cancel, and the rule says why in plain words', async () => {
+    stubDb(holdRow);
+    mockApptTime.mockResolvedValue(new Date('2026-07-13T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: expect.objectContaining({ code: 'outside_window', willCharge: false }) });
+    expect(res.rule.text).toBe('A card is saved. The visit starts Monday, July 13, 2026 at 9:00 AM, outside the 24-hour late-cancel window, so this is a free cancel and nothing will be charged.');
+  });
+  it('held minutes ago with the visit inside the window → booking-age free period, named as such', async () => {
+    stubDb({ ...holdRow, held_at: new Date(now.getTime() - 20 * 60000) });
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: false, rule: { code: 'booking_age', willCharge: false } });
+    expect(res.rule.text).toMatch(/agreed only 20 minutes ago/);
   });
   it('held but start past the arrival-window grace → no fee, no prompt', async () => {
     stubDb(holdRow);
     mockApptTime.mockResolvedValue(new Date('2026-07-01T12:00:00Z'));
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+    const pastRes = await cardHoldCancelPreview('svc1', now);
+    expect(pastRes).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: expect.objectContaining({ code: 'past_start', willCharge: false }) });
+    // Park-on-cancel may keep the authorization — never assert a release.
+    expect(pastRes.rule.text).not.toMatch(/released/);
   });
   it('feature flag off → fee never applies (chargeNoShowFee would no-op)', async () => {
     process.env.ONE_TIME_CARD_HOLD = 'false';
     stubDb(holdRow);
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: expect.objectContaining({ willCharge: false }) });
   });
   it('a THROWN appt-time lookup is unresolved fee-may-apply — never a silent "no fee" the commit could contradict', async () => {
     stubDb(holdRow);
     mockApptTime.mockRejectedValue(new Error('lookup down'));
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: true, feeAmount: 49, unresolved: true });
+    const unresolvedRes = await cardHoldCancelPreview('svc1', now);
+    expect(unresolvedRes).toEqual({ held: true, feeApplies: true, feeAmount: 49, unresolved: true, rule: expect.objectContaining({ code: 'unresolved', willCharge: null }) });
+    // This rail's cancel handler releases FREE on a failed lookup — the
+    // copy must say so, not promise a billing-review park.
+    expect(unresolvedRes.rule.text).toMatch(/released free/);
+    expect(unresolvedRes.rule.text).not.toMatch(/billing review\.$/);
     // The helper asks for the thrown flavor — a fail-soft null would make
     // the unresolved branch unreachable and the preview lie fee-free.
     expect(mockApptTime).toHaveBeenCalledWith('svc1', { throwOnError: true });
@@ -791,14 +831,14 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     process.env.ONE_TIME_CARD_HOLD = 'false';
     stubDb(holdRow);
     mockApptTime.mockRejectedValue(new Error('lookup down'));
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: expect.objectContaining({ willCharge: false }) });
     // Decided before the time lookup: the gate short-circuits the resolution.
     expect(mockApptTime).not.toHaveBeenCalled();
   });
   it('a cleanly-null appt time stays fee-free — timeless visits are not fee prompts', async () => {
     stubDb(holdRow);
     mockApptTime.mockResolvedValue(null);
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: expect.objectContaining({ willCharge: false }) });
   });
 });
 
@@ -982,7 +1022,7 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
   it('the PREVIEW also refuses sticky on a dead slot — no fee prompt for stale-row cleanup', async () => {
     stubDb({ ...holdRow, no_show_fee_amount: 49 }, { rescheduleLog: [lateCustomerMove] });
     mockApptTime.mockResolvedValue(new Date('2026-07-05T12:00:00Z'));
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: expect.objectContaining({ willCharge: false }) });
   });
 
   it('a reschedule made BEFORE fee consent (held_at) can never authorize a fee — terms not yet accepted', async () => {
@@ -1117,13 +1157,13 @@ describe('handleCardHoldCancellation — sticky window (reschedule-then-cancel d
   it('the cancel PREVIEW mirrors the sticky verdict (operator prompt must not lie)', async () => {
     stubDb([{ ...holdRow, no_show_fee_amount: 49 }, { id: 'pm-live' }], { rescheduleLog: [lateCustomerMove] });
     mockApptTime.mockResolvedValue(farStart);
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: true, feeAmount: 49 });
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: true, feeAmount: 49, rule: expect.objectContaining({ willCharge: true }) });
   });
 
   it('the PREVIEW reports no fee once the card is removed — matching the handler\'s revocation release', async () => {
     stubDb([{ ...holdRow, no_show_fee_amount: 49 }, null], { rescheduleLog: [lateCustomerMove] });
     mockApptTime.mockResolvedValue(farStart);
-    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: expect.objectContaining({ willCharge: false }) });
   });
 
   it('the mint NEVER writes the sticky marker — acceptance is the sole writer (a pre-consent seed could survive an old-worker accept)', async () => {

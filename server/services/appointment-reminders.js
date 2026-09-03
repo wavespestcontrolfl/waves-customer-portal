@@ -5347,5 +5347,11 @@ AppointmentReminders.confirmationArrivalWindow = confirmationArrivalWindow;
 // Per-row customer-facing label (parent + add-ons) — the grouped appointment
 // page / calendar list members with it (codex #3609 r15/r16).
 AppointmentReminders.buildServiceLabel = buildServiceLabel;
+// The visit's ET start instant, shared with BOTH card-fee rails
+// (estimate-card-holds, appointment-card-request) and the deferred-replay
+// registry. It lived only in _test until 2026-09-03, so every prod
+// destructure got undefined and the cancel previews fell into their
+// fail-closed "fee may apply" branch for every secured visit.
+AppointmentReminders.scheduledServiceApptTime = scheduledServiceApptTime;
 
 module.exports = AppointmentReminders;

@@ -70,6 +70,10 @@ jest.mock('../services/estimate-card-holds', () => ({
   resolveOrMintRecapCompletionInvoice: (...a) => mockResolveOrMintInvoice(...a),
   findStickyLateReschedule: (...a) => mockFindSticky(...a),
   isStickyCancelWindowEnabled: () => mockStickyGateOn,
+  // Pure rule describer — the real one, so the preview's operator copy is
+  // exercised against the same verdicts the handler tests set up.
+  describeCancelFeeRule: jest.requireActual('../services/estimate-card-holds').describeCancelFeeRule,
+  freeCancelReason: jest.requireActual('../services/estimate-card-holds').freeCancelReason,
 }));
 jest.mock('../services/billing-lane', () => ({
   resolveBillingLane: jest.fn(() => ({ mode: 'one_time' })),
@@ -986,11 +990,17 @@ describe('handleAppointmentCardCancellation', () => {
 describe('appointmentCardCancelPreview', () => {
   test('no eligible row → {secured:false, feeApplies:false}', async () => {
     mockTableHandlers = handlersWith({ request: null });
-    expect(await appointmentCardCancelPreview('svc-1')).toEqual({ secured: false, feeApplies: false });
+    expect(await appointmentCardCancelPreview('svc-1')).toEqual({
+      secured: false, feeApplies: false,
+      rule: { code: 'no_card', willCharge: false, text: expect.stringMatching(/^No card is saved/) },
+    });
   });
   test('eligible + in-window + gate on → fee preview with the frozen amount', async () => {
     mockApptTime = new Date(Date.now() + 3 * HOUR);
-    expect(await appointmentCardCancelPreview('svc-1')).toEqual({ secured: true, feeApplies: true, feeAmount: 49 });
+    expect(await appointmentCardCancelPreview('svc-1')).toEqual({
+      secured: true, feeApplies: true, feeAmount: 49,
+      rule: { code: 'in_window', willCharge: true, text: expect.stringMatching(/within the 24-hour late-cancel window\. The \$49 late-cancel fee will be charged/) },
+    });
   });
   test('gate off → feeApplies false (charge would no-op anyway)', async () => {
     mockGateOn = false;
@@ -998,7 +1008,49 @@ describe('appointmentCardCancelPreview', () => {
     const res = await appointmentCardCancelPreview('svc-1');
     // Dark rail presents as ABSENT — no lookups, no fee-may-apply
     // previews (Codex #3153 r11).
-    expect(res).toEqual({ secured: false, feeApplies: false });
+    expect(res).toEqual({ secured: false, feeApplies: false, rule: expect.objectContaining({ code: 'rail_dark', willCharge: false }) });
+    expect(res.rule.text).not.toMatch(/card is saved/i);
+  });
+  test('secured but exempt → the exemption is named, never "no card saved"', async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'released' } });
+    let res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: false, feeApplies: false, rule: { code: 'fee_settled', willCharge: false } });
+    expect(res.rule.text).toMatch(/already settled \(released\)/);
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), no_show_fee_amount: null } });
+    res = await appointmentCardCancelPreview('svc-1');
+    expect(res.rule).toMatchObject({ code: 'no_agreed_fee', willCharge: false });
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'pending', stripe_payment_method_id: null } });
+    res = await appointmentCardCancelPreview('svc-1');
+    expect(res.rule).toMatchObject({ code: 'not_secured', willCharge: false });
+    expect(res.rule.text).not.toMatch(/^No card is saved/);
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'satisfied' } });
+    res = await appointmentCardCancelPreview('svc-1');
+    expect(res.rule).toMatchObject({ code: 'secured_no_fee_terms', willCharge: false });
+    expect(res.rule.text).not.toMatch(/never saved|A card is saved/);
+    mockTableHandlers = handlersWith({ hold: { id: 'h-parked' } });
+    res = await appointmentCardCancelPreview('svc-1');
+    expect(res.rule).toMatchObject({ code: 'card_hold_lane', willCharge: false });
+    expect(res.rule.text).not.toMatch(/released|settled/);
+  });
+  test('in-window but the saved card was removed → card_removed, no charge prompt (direct verdict, not only sticky)', async () => {
+    mockTableHandlers = handlersWith({ pmRow: null });
+    mockApptTime = new Date(Date.now() + 3 * HOUR);
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: true, feeApplies: false, rule: { code: 'card_removed', willCharge: false } });
+  });
+  test('outside-window → no fee, and the rule names the visit start and the free-cancel reason', async () => {
+    mockApptTime = new Date(Date.now() + 100 * HOUR);
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window', willCharge: false } });
+    expect(res.rule.text).toMatch(/outside the 24-hour late-cancel window, so this is a free cancel and nothing will be charged\.$/);
+  });
+  test('unresolved (thrown time lookup) → willCharge null and the rule says the cancel parks for review', async () => {
+    mockApptTime = null;
+    require('../services/appointment-reminders').scheduledServiceApptTime.mockRejectedValueOnce(new Error('db blip'));
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: true, feeApplies: true, unresolved: true, rule: { code: 'unresolved', willCharge: null } });
+    expect(res.rule.text).toMatch(/may charge the fee, release the card free, or park it for review/);
+    expect(res.rule.text).toMatch(/parked for billing review/);
   });
 });
 
