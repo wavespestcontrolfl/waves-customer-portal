@@ -656,6 +656,28 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
   },
 ];
 
+// Appointment page links (GH Codex #3844 r2 P1): every /appointment route
+// 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
+// delivery-time re-check — so they are immediate-only, and /sms re-reads the
+// gate. The composer inserts the branded short form ({short}/l/<code>, a
+// short_codes row of kind 'appointment'); the long /appointment/<token>
+// form is judged too.
+async function appointmentLinkPresent(runs, host) {
+  for (const run of linkRuns(runs, /\/appointment\//i)) {
+    if (canonicalPortalToken(run, host, /^\/appointment\/([A-Za-z0-9_-]{16,})$/i)) return true;
+  }
+  const shortRuns = linkRuns(runs, /\/l\//i);
+  if (!shortRuns.length) return false;
+  const shortHost = new URL(require('./short-url').shortLinkBaseUrl()).host.toLowerCase();
+  for (const run of shortRuns) {
+    const code = canonicalPortalToken(run, shortHost, /^\/l\/([A-Za-z0-9_-]+)$/i);
+    if (!code) continue;
+    const row = await db('short_codes').where({ code }).first('kind');
+    if (row?.kind === 'appointment') return true;
+  }
+  return false;
+}
+
 async function immediateOnlyLinkSendCheck(body) {
   const runs = decodedRuns(body);
   const host = new URL(publicPortalUrl()).host.toLowerCase();
@@ -665,6 +687,7 @@ async function immediateOnlyLinkSendCheck(body) {
       if (token && await kind.applies(token)) return { present: true, label: kind.label };
     }
   }
+  if (await appointmentLinkPresent(runs, host)) return { present: true, label: 'Appointment page' };
   return { present: false };
 }
 
@@ -678,7 +701,14 @@ async function immediateOnlyLinkSendCheck(body) {
  *               unexpired, non-terminal customer_contracts row (a rotated
  *               or expired link matches nothing → refuse).
  *   card      — /secure/<token> visit-lane rows (kind 'visit'; the Auto Pay
- *               seam judges kind 'customer'): status must still be pending.
+ *               seam judges kind 'customer'): status must still be pending,
+ *               never texted, AND the canonical funnel
+ *               (requestCardForAppointment, inline) must still answer this
+ *               very token — gate, template, price, payer, hold lane,
+ *               first-time customer, saved-card auto-secure all re-run at
+ *               the send (GH Codex #3844 r2 P1).
+ *   appointment — {short}/l/<code> (kind 'appointment') or /appointment/<token>:
+ *               GATE_APPOINTMENT_PAGE must still be on (r2 P1).
  *   statement — /pay/statement/<token>: GATE_PAYER_STATEMENTS still on (the
  *               pay page 404s the moment it is off — GH Codex #3844 r1 P1),
  *               a payable payer_statements row whose ACTIVE payer's AP phone
@@ -689,7 +719,9 @@ async function immediateOnlyLinkSendCheck(body) {
  * CLOSED on any miss. { ok: true } when nothing applies or all checks out;
  * `cards` rides back with every live visit-lane link so the caller can
  * CLAIM the card request's one-text-ever send before dispatch
- * (claimCardRequestSends) — a row already texted (sent_at) refuses here.
+ * (claimCardRequestSends) — a row already texted (sent_at) refuses here —
+ * and `statements` with every verified statement id so a real send can
+ * stamp finalized → sent (markStatementsSent).
  */
 async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
   const runs = decodedRuns(body);
@@ -708,6 +740,8 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
     return null;
   };
 
+  const cards = [];
+  const statements = [];
   for (const run of linkRuns(runs, /\/contract\//i)) {
     const token = canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i);
     if (!token) return refuse('A contract link in this message is not on the Waves portal — remove it before sending.');
@@ -738,9 +772,13 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
     if (!payer || !last10(payer.ap_phone) || last10(payer.ap_phone) !== String(toLast10 || '')) {
       return refuse("This statement link only goes to the payer's AP phone on file — remove it before sending.");
     }
+    if (!statements.includes(stmt.id)) statements.push(stmt.id);
   }
 
-  const cards = [];
+  if (await appointmentLinkPresent(runs, host) && process.env.GATE_APPOINTMENT_PAGE !== 'true') {
+    return refuse('Appointment pages are switched off (GATE_APPOINTMENT_PAGE) — remove the appointment link before sending.');
+  }
+
   for (const run of secureLinkRuns(runs)) {
     const token = canonicalSecureToken(run, host);
     if (!token) continue; // the Auto Pay seam already refused a non-canonical /secure run
@@ -750,9 +788,39 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
     if (row.sent_at) return refuse('This card request was already texted — the customer gets one card request per appointment. Remove the link before sending.');
     const bad = await owned(row.customer_id, 'card request link');
     if (bad) return bad;
+    // The canonical funnel's live eligibility, at the send: the ONE entry
+    // point re-runs every gate and must hand back THIS token (a reused
+    // pending row). auto_secured = a consented saved card covered the ask
+    // meanwhile (the funnel secured the visit, as any trigger would) — the
+    // text has nothing to ask.
+    const funnel = await require('./appointment-card-request').requestCardForAppointment({
+      scheduledServiceId: row.scheduled_service_id, trigger: 'admin', delivery: 'inline',
+    });
+    if (funnel?.action === 'auto_secured') {
+      return refuse('A consented card already secures this appointment — remove the card request link before sending.');
+    }
+    if (funnel?.action !== 'link_created' || !String(funnel.secureUrl || '').endsWith(`/secure/${token}`)) {
+      return refuse(`${cardRequestSkipReason(funnel?.reason)} — remove the card request link before sending.`);
+    }
     if (!cards.some((c) => c.token === token)) cards.push({ token, scheduledServiceId: row.scheduled_service_id });
   }
-  return cards.length ? { ok: true, cards } : { ok: true };
+  return {
+    ok: true,
+    ...(cards.length ? { cards } : {}),
+    ...(statements.length ? { statements } : {}),
+  };
+}
+
+/**
+ * A REAL provider send of a composer statement link is the statement's
+ * first delivery when it was still 'finalized' — stamp finalized → sent
+ * through the email delivery's own writer so the viewed/dunning lifecycle
+ * picks it up (GH Codex #3844 r2 P1). Value-guarded there (never
+ * downgrades, never re-stamps a resend).
+ */
+async function markStatementsSent(statementIds) {
+  const { markStatementSent } = require('./payer-statement-email');
+  for (const id of statementIds) await markStatementSent(id);
 }
 
 /**
@@ -844,6 +912,8 @@ async function buildAppointmentPageLink(visit) {
   return {
     url,
     line,
+    // Immediate sends only — the gate is re-read on /sms alone (r2 P1).
+    immediateOnly: true,
     appointment: { id: visit.id, scheduledDate: dateOnly(visit.scheduled_date), serviceType: visit.service_type || null },
   };
 }
@@ -1067,27 +1137,25 @@ async function buildContractSigningLink(customerIds, req) {
  * Payer statement pay link — FAIL CLOSED on identity: a statement covers
  * the bill-to's whole book and its pay page charges the PAYER's Stripe
  * customer, so the link only ever goes to the payer's own AP phone. The
- * recipient number must equal the AP phone of an active payer one of the
- * account's rows bills to; a homeowner's number never qualifies. Newest
- * payable statement (finalized/sent/viewed — the settle module's own
- * predicate) across EVERY active payer whose AP phone is the number — one
- * account can bill rows to several payer records sharing a contact (GH
- * Codex #3844 r1 P2). Raw URL, same as the follow-up emails.
+ * recipient is resolved as a PAYER, not a customer (GH Codex #3844 r2 P1 —
+ * the AP phone is normally no customer's phone at all): every active payer
+ * whose AP phone is the number, newest payable statement (finalized/sent/
+ * viewed — the settle module's own status set) across all of them. A
+ * homeowner's number never qualifies. Raw URL, same as the follow-up emails.
  */
-async function buildStatementLink(customerIds, recipientLast10) {
+async function buildStatementLink(recipientLast10) {
   if (!require('../config/feature-gates').isEnabled('payerStatements')) {
     return { url: null, line: '', reason: 'Payer statements are switched off (GATE_PAYER_STATEMENTS)' };
   }
-  const billed = await db('customers').whereIn('id', customerIds).whereNotNull('payer_id').select('payer_id');
-  const payerIds = [...new Set(billed.map((r) => r.payer_id))];
-  if (!payerIds.length) {
-    return { url: null, line: '', reason: 'This account bills to itself — statement links are for third-party payers only' };
+  if (!/^\d{10}$/.test(String(recipientLast10 || ''))) {
+    return { url: null, line: '', reason: 'Enter a full 10-digit phone number first' };
   }
-  const payers = await db('payers').whereIn('id', payerIds).where({ active: true }).select('id', 'display_name', 'ap_phone');
-  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-  const matching = payers.filter((p) => last10(p.ap_phone) && last10(p.ap_phone) === String(recipientLast10 || ''));
+  const matching = await db('payers')
+    .where({ active: true })
+    .whereRaw("right(regexp_replace(COALESCE(ap_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [recipientLast10])
+    .select('id', 'display_name');
   if (!matching.length) {
-    return { url: null, line: '', reason: "This number is not the payer's AP phone on file — statement links go to the bill-to contact only" };
+    return { url: null, line: '', reason: "This number is not a payer's AP phone on file — statement links go to the bill-to contact only" };
   }
   // Payability filtered in SQL (the settle module's own status set), so an
   // older payable statement behind a run of paid ones is still found.
@@ -1128,6 +1196,7 @@ module.exports = {
   autopayLinkSendCheck,
   immediateOnlyLinkSendCheck,
   bearerLinkSendCheck,
+  markStatementsSent,
   claimCardRequestSends,
   releaseCardRequestSends,
   markCardRequestSends,

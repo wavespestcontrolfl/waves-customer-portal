@@ -12,7 +12,9 @@ jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (longUrl) => longUrl),
   existingShortUrlFor: jest.fn(async () => null),
   invoiceShortCodePrefix: jest.fn(() => 'wpc-test'),
+  shortLinkBaseUrl: () => 'https://wavespest.co',
 }));
+jest.mock('../services/payer-statement-email', () => ({ markStatementSent: jest.fn() }));
 jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn() }));
 jest.mock('../services/pay-combined', () => ({
   combinedEligibleSiblings: jest.fn(async () => null),
@@ -107,6 +109,7 @@ const {
   buildServiceReportLink,
   buildContractSigningLink,
   buildStatementLink,
+  markStatementsSent,
   claimCardRequestSends,
   releaseCardRequestSends,
   markCardRequestSends,
@@ -992,38 +995,31 @@ describe('buildStatementLink', () => {
 
   test('gate off → reason names GATE_PAYER_STATEMENTS, no reads', async () => {
     isEnabled.mockReturnValue(false);
-    const r = await buildStatementLink(['c1'], '5551234567');
+    const r = await buildStatementLink('5551234567');
     expect(r.reason).toMatch(/GATE_PAYER_STATEMENTS/);
     expect(mockDb).not.toHaveBeenCalled();
   });
 
-  test('self-pay account → reason', async () => {
-    mockBuilders = { customers: chainBuilder({ rows: [] }) };
-    const r = await buildStatementLink(['c1'], '5551234567');
+  test('FAIL CLOSED: the recipient number must be an active payer\'s AP phone — a homeowner\'s number resolves no payer and gets no statement', async () => {
+    const payers = chainBuilder({ rows: [] });
+    payers.whereRaw = jest.fn(() => payers);
+    mockBuilders = { payers, payer_statements: chainBuilder({ firstRow: { id: 31, status: 'sent', token: 'f'.repeat(64), total: '412.50' } }) };
+    const r = await buildStatementLink('5551234567');
     expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/bills to itself/);
-  });
-
-  test('FAIL CLOSED: the recipient number must be the payer\'s AP phone — a homeowner\'s number gets no statement', async () => {
-    mockBuilders = {
-      customers: chainBuilder({ rows: [{ payer_id: 7 }] }),
-      payers: chainBuilder({ rows: [{ id: 7, display_name: 'Gulf Coast PM', ap_phone: '(941) 555-0100' }] }),
-      payer_statements: chainBuilder({ firstRow: { id: 31, status: 'sent', token: 'f'.repeat(64), total: '412.50' } }),
-    };
-    const r = await buildStatementLink(['c1'], '5551234567');
-    expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/not the payer's AP phone/);
+    expect(r.reason).toMatch(/not a payer's AP phone/);
+    expect(payers.where).toHaveBeenCalledWith({ active: true });
+    expect(payers.whereRaw).toHaveBeenCalledWith(expect.stringContaining('ap_phone'), ['5551234567']);
     expect(mockDb).not.toHaveBeenCalledWith('payer_statements');
   });
 
-  test('AP phone matches → newest payable statement, raw /pay/statement link', async () => {
+  test('AP phone matches → newest payable statement, raw /pay/statement link, immediate-only', async () => {
+    const payers = chainBuilder({ rows: [{ id: 7, display_name: 'Gulf Coast PM' }] });
+    payers.whereRaw = jest.fn(() => payers);
     mockBuilders = {
-      customers: chainBuilder({ rows: [{ payer_id: 7 }, { payer_id: 7 }] }),
-      payers: chainBuilder({ rows: [{ id: 7, display_name: 'Gulf Coast PM', ap_phone: '+1 (941) 555-0100' }] }),
+      payers,
       payer_statements: chainBuilder({ firstRow: { id: 31, payer_id: 7, status: 'sent', token: 'f'.repeat(64), total: '412.50' } }),
     };
-    const r = await buildStatementLink(['c1', 'c2'], '9415550100');
-    expect(mockBuilders.payers.whereIn).toHaveBeenCalledWith('id', [7]);
+    const r = await buildStatementLink('9415550100');
     expect(mockBuilders.payer_statements.whereIn).toHaveBeenCalledWith('payer_id', [7]);
     // Payability is a SQL predicate (no row page to fall off), tokened rows only.
     expect(mockBuilders.payer_statements.whereIn).toHaveBeenCalledWith('status', ['finalized', 'sent', 'viewed']);
@@ -1036,15 +1032,13 @@ describe('buildStatementLink', () => {
   });
 
   test('several active payers share the AP phone → the newest payable statement across ALL of them, named for its own payer', async () => {
+    const payers = chainBuilder({ rows: [{ id: 7, display_name: 'Gulf Coast PM' }, { id: 8, display_name: 'Gulf Coast HOA' }] });
+    payers.whereRaw = jest.fn(() => payers);
     mockBuilders = {
-      customers: chainBuilder({ rows: [{ payer_id: 7 }, { payer_id: 8 }] }),
-      payers: chainBuilder({ rows: [
-        { id: 7, display_name: 'Gulf Coast PM', ap_phone: '(941) 555-0100' },
-        { id: 8, display_name: 'Gulf Coast HOA', ap_phone: '941-555-0100' },
-      ] }),
+      payers,
       payer_statements: chainBuilder({ firstRow: { id: 52, payer_id: 8, status: 'finalized', token: 'd'.repeat(64), total: '80.00' } }),
     };
-    const r = await buildStatementLink(['c1', 'c2'], '9415550100');
+    const r = await buildStatementLink('9415550100');
     expect(mockBuilders.payer_statements.whereIn).toHaveBeenCalledWith('payer_id', [7, 8]);
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/pay/statement/${'d'.repeat(64)}`);
     expect(r.statement).toEqual({ id: 52, number: 'S-52', total: 80, payerName: 'Gulf Coast HOA' });
@@ -1054,6 +1048,16 @@ describe('buildStatementLink', () => {
 describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
   const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
   const expiringLinkSendCheck = immediateOnlyLinkSendCheck;
+
+  test('an appointment page link (branded short form of kind appointment, or the long /appointment form) is immediate-only', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'appointment' } }) };
+    expect(await immediateOnlyLinkSendCheck('Everything about your visit: wavespest.co/l/Ab12cD')).toEqual({ present: true, label: 'Appointment page' });
+    expect(mockBuilders.short_codes.where).toHaveBeenCalledWith({ code: 'Ab12cD' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'estimate' } }) };
+    expect(await immediateOnlyLinkSendCheck('See it: wavespest.co/l/Ab12cD')).toEqual({ present: false });
+    expect(await immediateOnlyLinkSendCheck('portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Appointment page' });
+    expect(await immediateOnlyLinkSendCheck('evil.example/l/Ab12cD')).toEqual({ present: false });
+  });
 
   test('a statement pay link and a visit-lane card request are immediate-only; a customer-kind /secure link is the Auto Pay seam\'s', async () => {
     expect(await immediateOnlyLinkSendCheck(`Pay here: portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`)).toEqual({ present: true, label: 'Statement pay' });
@@ -1091,13 +1095,18 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
   const CONTRACT_BODY = `Please sign: portal.wavespestcontrol.com/contract/${TOKEN}`;
   const live = { id: 'k1', customer_id: 'c1', status: 'sent', share_token_expires_at: new Date(Date.now() + 86400e3) };
 
-  function wire({ contract = live, owner = { id: 'c1', phone: '+1 (941) 555-0100' }, card = null } = {}) {
+  function wire({ contract = live, owner = { id: 'c1', phone: '+1 (941) 555-0100' }, card = null, funnel } = {}) {
     const contracts = chainBuilder({ firstRow: contract });
     mockBuilders = {
       customer_contracts: contracts,
       customers: chainBuilder({ firstRow: owner }),
       appointment_card_requests: chainBuilder({ firstRow: card }),
+      short_codes: chainBuilder({ firstRow: null }),
     };
+    // The canonical funnel, re-run at the send: by default it still answers this token.
+    requestCardForAppointment.mockReset().mockResolvedValue(
+      funnel || { requested: false, action: 'link_created', reason: 'request_exists', secureUrl: `https://portal.wavespestcontrol.com/secure/${TOKEN}` },
+    );
     return contracts;
   }
 
@@ -1156,7 +1165,8 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       };
     };
     wireStmt({ stmt: { id: 31, payer_id: 7, status: 'sent' }, payer: { id: 7, ap_phone: '(941) 555-0100' } });
-    expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
+    // The verified statement rides back so a real send can stamp finalized → sent.
+    expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, statements: [31] });
     expect(mockBuilders.payer_statements.where).toHaveBeenCalledWith({ token: STMT });
     expect(mockBuilders.payers.where).toHaveBeenCalledWith({ id: 7, active: true });
     // The kill switch is honored at send time — a stale tab cannot deliver a
@@ -1188,6 +1198,44 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     expect((await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/different customer/);
     wire({ card: { id: 'r1', kind: 'customer', status: 'pending', customer_id: 'c9' } });
     expect(await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+  });
+
+  test('a visit-lane card link re-runs the canonical funnel at the send: a skip refuses with its reason, auto_secured refuses, a different token refuses', async () => {
+    const secure = `Secure your visit: portal.wavespestcontrol.com/secure/${TOKEN}`;
+    const card = { id: 'r1', kind: 'visit', status: 'pending', customer_id: 'c1', scheduled_service_id: 'v1' };
+    wire({ card });
+    await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' });
+    expect(requestCardForAppointment).toHaveBeenCalledWith({ scheduledServiceId: 'v1', trigger: 'admin', delivery: 'inline' });
+    wire({ card, funnel: { requested: false, action: 'skipped', reason: 'zero_price_visit' } });
+    expect((await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/\$0 — nothing to secure.*remove the card request link/);
+    wire({ card, funnel: { requested: false, action: 'skipped', reason: 'card_hold_lane' } });
+    expect((await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/holds a card through its estimate/);
+    wire({ card, funnel: { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' } });
+    expect((await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/consented card already secures/);
+    wire({ card, funnel: { requested: true, action: 'link_created', reason: 'created', secureUrl: 'https://portal.wavespestcontrol.com/secure/someOtherToken0000' } });
+    expect((await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).ok).toBe(false);
+  });
+
+  test('an appointment page link refuses at the send once GATE_APPOINTMENT_PAGE is off', async () => {
+    const prev = process.env.GATE_APPOINTMENT_PAGE;
+    try {
+      wire();
+      mockBuilders.short_codes = chainBuilder({ firstRow: { kind: 'appointment' } });
+      process.env.GATE_APPOINTMENT_PAGE = 'true';
+      expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      delete process.env.GATE_APPOINTMENT_PAGE;
+      expect((await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/GATE_APPOINTMENT_PAGE/);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prev;
+    }
+  });
+
+  test('markStatementsSent goes through the email delivery\'s own finalized → sent writer, per statement', async () => {
+    const { markStatementSent } = require('../services/payer-statement-email');
+    await markStatementsSent([31, 52]);
+    expect(markStatementSent).toHaveBeenCalledWith(31);
+    expect(markStatementSent).toHaveBeenCalledWith(52);
   });
 
   describe('card request send claim (the service\'s own one-text mechanics, run by the composer send)', () => {

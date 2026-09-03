@@ -360,20 +360,32 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test('statement: the builder receives the account ids AND the recipient number (AP-phone match is the builder\'s)', async () => {
-    wireDb({ customers: soloCustomer() });
+  test('statement: resolved as a PAYER from the recipient number — no customer lookup at all (the AP phone is normally no customer\'s phone)', async () => {
+    wireDb({ customers: makeCustomersBuilder({ selectResults: [[]] }) });
     builders.buildStatementLink.mockResolvedValue({
       url: 'https://portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64),
       line: 'You can view and pay statement S-31 securely here: https://portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64) + '\n\n',
+      immediateOnly: true,
       statement: { id: 31, number: 'S-31', total: 412.5, payerName: 'Gulf Coast PM' },
     });
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'statement' });
+      // A customerId that does NOT own the number would 400 every other kind; a statement ignores it.
+      const res = await post(baseUrl, 'customer-link', { phone: '+19415550100', kind: 'statement', customerId: CUSTOMER_UUID });
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(builders.buildStatementLink).toHaveBeenCalledWith([CUSTOMER_UUID], '5551234567');
+      expect(builders.buildStatementLink).toHaveBeenCalledWith('9415550100');
+      expect(db).not.toHaveBeenCalledWith('customers');
       expect(body.statement).toEqual({ id: 31, number: 'S-31', total: 412.5, payerName: 'Gulf Coast PM' });
+      expect(body.immediateOnly).toBe(true);
+      expect(body.customerId).toBeUndefined();
       expect(body.url).toBe('portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64));
+    });
+
+    builders.buildStatementLink.mockResolvedValue({ url: null, line: '', reason: "This number is not a payer's AP phone on file" });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'statement' });
+      expect(res.status).toBe(404);
+      expect((await res.json()).error).toMatch(/not a payer's AP phone/);
     });
   });
 

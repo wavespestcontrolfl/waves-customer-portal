@@ -209,6 +209,8 @@ router.post('/sms', async (req, res, next) => {
   // before dispatch (claimCardRequestSends) — released on every no-send
   // exit, marked after a real provider send.
   let cardClaim = null;
+  // Verified composer statement links — a real send is their first delivery.
+  let statementLinkIds = null;
   const releaseCardClaim = async () => {
     if (!cardClaim) return;
     const claim = cardClaim;
@@ -463,6 +465,7 @@ router.post('/sms', async (req, res, next) => {
       const { bearerLinkSendCheck, claimCardRequestSends } = require('../services/composer-customer-links');
       const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), { trustedCustomerId: trustedCustomerId || null });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
+      if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
       if (bearerCheck.cards) {
         const claim = await claimCardRequestSends(bearerCheck.cards);
         if (!claim.ok) return abortUnsent(409, claim.error);
@@ -661,6 +664,18 @@ router.post('/sms', async (req, res, next) => {
         }
       } catch (stampErr) {
         logger.warn(`[communications] Auto Pay link sent_at stamp failed (text already sent): ${stampErr.message}`);
+      }
+    }
+    // Composer-carried statement links: a REAL provider send is the
+    // statement's first delivery — finalized → sent through the email
+    // delivery's own writer (fail-soft: lifecycle bookkeeping, no resend
+    // risk — the statement stays payable either way).
+    if (statementLinkIds && result?.sent) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        if (isRealProviderSend(result)) await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
+      } catch (stampErr) {
+        logger.warn(`[communications] statement sent stamp failed (text already sent): ${stampErr.message}`);
       }
     }
     // Composer-carried card request links: a REAL provider send IS the
@@ -1783,9 +1798,12 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       prep_guide: (ids) => builders.buildPrepGuideLink(ids),
       service_report: (ids) => builders.buildServiceReportLink(ids),
       contract: (ids, primaryId) => builders.buildContractSigningLink([primaryId], req),
-      // A payer statement covers the bill-to's whole book: the builder only
-      // answers when the recipient number IS the payer's AP phone.
-      statement: (ids) => builders.buildStatementLink(ids, last10),
+      // A payer statement covers the bill-to's whole book and goes to the
+      // PAYER's AP phone — which is normally no customer's phone at all, so
+      // this kind never resolves a customer: the builder resolves the payer
+      // from the recipient number itself (GH Codex #3844 r2 P1). Any
+      // customerId the composer carries is irrelevant to it.
+      statement: () => builders.buildStatementLink(last10),
     };
     if (!builderByKind[kind]) {
       return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
@@ -1794,6 +1812,17 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     const last10 = fullPhoneLast10(req.body?.phone);
     if (!last10) {
       return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
+    }
+    if (kind === 'statement') {
+      const result = await builderByKind.statement();
+      if (!result?.url) return res.status(404).json({ error: result?.reason || 'No payable statement for that number' });
+      return res.json({
+        kind,
+        url: stripSmsLinkScheme(result.url),
+        line: stripSmsLinkScheme(result.line),
+        statement: result.statement || undefined,
+        immediateOnly: result.immediateOnly || undefined,
+      });
     }
 
     const customerId = req.body?.customerId;

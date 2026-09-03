@@ -32,6 +32,13 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
 jest.mock('../services/autopay-setup-link', () => ({ KIND: 'customer', setupLinkIneligibility: jest.fn() }));
+// The card funnel + its marker finalizer, re-run / invoked by the composer send.
+jest.mock('../services/appointment-card-request', () => ({
+  LIVE_VISIT_STATUSES: ['pending', 'confirmed'],
+  requestCardForAppointment: jest.fn(async () => ({ requested: false, action: 'link_created', reason: 'request_exists', secureUrl: 'https://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY' })),
+  markCardLinkSendOutcome: jest.fn(async () => true),
+}));
+jest.mock('../services/payer-statement-email', () => ({ markStatementSent: jest.fn() }));
 jest.mock('../services/sms-media', () => ({
   mediaFromOutboundAttachments: jest.fn(() => []),
   signMediaForClient: jest.fn(async (media) => media),
@@ -83,6 +90,7 @@ jest.mock('../services/short-url', () => ({
   existingShortUrlFor: jest.fn(async () => null),
   createTrackedShortLink: jest.fn(async (url) => ({ code: null, shortUrl: url })),
   invoiceShortCodePrefix: jest.fn(() => 'wpc'),
+  shortLinkBaseUrl: () => 'https://wavespest.co',
 }));
 // Controllable gates: the auto-send interlock (claim check + reservation row)
 // is gated on smsAutoSend, OFF by default so the manual send path is unchanged
@@ -461,10 +469,48 @@ describe('admin communications SMS route', () => {
         const claim = stamps.find((s) => s.table === 'scheduled_services');
         expect(Object.keys(claim.payload).sort()).toEqual(['card_link_sent_at', 'updated_at']);
         expect(claim.sent).toBe(0); // claimed before dispatch
-        const marker = stamps.find((s) => s.table === 'appointment_card_requests');
-        expect(Object.keys(marker.payload).sort()).toEqual(['sent_at', 'updated_at']);
-        expect(marker.sent).toBe(1); // marked after
+        // The canonical funnel was re-run at the send, then the service's own finalizer marked the request.
+        const { requestCardForAppointment, markCardLinkSendOutcome } = require('../services/appointment-card-request');
+        expect(requestCardForAppointment).toHaveBeenCalledWith({ scheduledServiceId: 'v-77', trigger: 'admin', delivery: 'inline' });
+        expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v-77', claim.payload.card_link_sent_at);
         expect(stamps.filter((s) => s.table === 'scheduled_services')).toHaveLength(1); // never released
+      });
+    });
+
+    test('the funnel refusing at the send (visit repriced to $0 meanwhile) refuses BEFORE any claim or provider call', async () => {
+      const { requestCardForAppointment } = require('../services/appointment-card-request');
+      requestCardForAppointment.mockResolvedValueOnce({ requested: false, action: 'skipped', reason: 'zero_price_visit' });
+      wireCardDb();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/nothing to secure/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        expect(stamps.find((s) => s.table === 'scheduled_services')).toBeUndefined();
+      });
+    });
+
+    test('a verified statement link: a real send stamps finalized → sent through the email delivery\'s writer; a suppressed send does not', async () => {
+      const STMT_BODY = `Pay here: portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`;
+      const { markStatementSent } = require('../services/payer-statement-email');
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'finalized' });
+        else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+      });
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM3' });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(200);
+        expect(markStatementSent).toHaveBeenCalledWith(31);
+      });
+      markStatementSent.mockClear();
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, suppressed: true });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(200);
+        expect(markStatementSent).not.toHaveBeenCalled();
       });
     });
 
