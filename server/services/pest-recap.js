@@ -324,6 +324,10 @@ async function submitRecap({
   // Set under the lock if the existing record shows the visit was NOT performed
   // (incomplete / inspection-only / customer-declined) — gates the referral credit.
   let recapPriorNonPerformed = false;
+  // True when the scheduled service was already 'completed' before this
+  // recap (a re-recap / edit of a historical completion, not the completion
+  // itself) — callers must not apply once-per-completion effects.
+  let recapPriorCompleted = false;
   // Concurrency idempotency (Codex P1): scheduled_service_id has only a
   // non-unique index, so two simultaneous submits (double-tap, browser
   // retry, admin+tech race) could each pass the existing-record lookup
@@ -375,6 +379,7 @@ async function submitRecap({
     // Re-read status under the lock — svc.status was read before the lock
     // and may be stale once a concurrent submit has completed the visit.
     const lockedStatus = locked ? locked.status : svc.status;
+    recapPriorCompleted = lockedStatus === COMPLETED_STATUS;
 
     // 0b. Reject a recap on a cancelled/skipped visit before writing any
     //     artifact. Returning here aborts the transaction body with nothing
@@ -1295,6 +1300,7 @@ async function submitRecap({
     // A recap re-closing a NOT-performed visit (incomplete / inspection-only
     // / declined) — callers must not apply performed-visit effects.
     priorNonPerformed: recapPriorNonPerformed,
+    priorCompleted: recapPriorCompleted,
     trackCompleted,
     smsSent,
     smsError,

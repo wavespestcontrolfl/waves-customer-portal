@@ -124,6 +124,9 @@ exports.up = async function up(knex) {
       // absent (GH codex r3 P2).
       if (existing.inventory_on_hand == null) fill.inventory_on_hand = item.inventory_on_hand;
       if (existing.low_stock_threshold == null) fill.low_stock_threshold = item.low_stock_threshold;
+      // …and the unit those counts are in, or the sweep reports no_unit and
+      // the admin form cannot save stock values (GH codex r4 P2).
+      if (existing.inventory_unit == null) fill.inventory_unit = 'each';
       if (existing.per_completion_service_lines == null) fill.per_completion_service_lines = JSON.stringify(KIT_SERVICE_LINES);
       if (existing.auto_reorder_vendor_id == null && item.pricing) fill.auto_reorder_vendor_id = gemplers.id;
       if (existing.cost_per_unit == null && item.pricing) { fill.cost_per_unit = Number((item.pricing.price / Number(item.pricing.quantity)).toFixed(4)); fill.cost_unit = 'each'; }

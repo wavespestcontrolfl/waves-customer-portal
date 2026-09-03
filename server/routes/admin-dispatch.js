@@ -13620,6 +13620,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         isIncompleteVisit,
         visitPerformed,
         serviceLine: reportServiceLine,
+        serviceType: svc.service_type || null,
       });
     } catch (e) { logger.error(`[dispatch] completion supplies consumption failed: ${e.message}`); }
 
@@ -14088,20 +14089,35 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
     // /:serviceId/complete, same at-most-once index, never throws. A recap
     // re-closing a NOT-performed visit (submitRecap's priorNonPerformed —
     // the same verdict that blocks referral credit and the card charge)
-    // consumes nothing, matching the original closeout (GH codex r3 P2).
-    try {
-      const { consumeCompletionSupplies } = require('../services/supplies-consumption');
-      const svcRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('customer_id', 'technician_id', 'service_type');
-      await consumeCompletionSupplies(db, {
-        scheduledServiceId: req.params.serviceId,
-        serviceRecordId: result.recordId || null,
-        customerId: svcRow?.customer_id || null,
-        technicianId: svcRow?.technician_id || null,
-        isIncompleteVisit: false,
-        visitPerformed: result.priorNonPerformed !== true,
-        serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
-      });
-    } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }
+    // consumes nothing, matching the original closeout (GH codex r3 P2). A
+    // recap EDIT of a visit that was already completed (priorCompleted) is
+    // not a new visit — no kit was left, nothing is consumed (GH codex r4
+    // P2); the at-most-once index still covers a retry of the completing
+    // recap itself.
+    if (result.priorCompleted !== true) {
+      try {
+        const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+        const svcRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('customer_id', 'technician_id', 'service_type');
+        const consumption = await consumeCompletionSupplies(db, {
+          scheduledServiceId: req.params.serviceId,
+          serviceRecordId: result.recordId || null,
+          customerId: svcRow?.customer_id || null,
+          technicianId: svcRow?.technician_id || null,
+          isIncompleteVisit: false,
+          visitPerformed: result.priorNonPerformed !== true,
+          serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
+          serviceType: svcRow?.service_type || null,
+        });
+        // The recap path has no job-costing kickoff of its own; a kit
+        // movement carries cost_used, so recalc (idempotent UPSERT,
+        // fire-and-forget) whenever something was actually consumed (GH
+        // codex r4 P2).
+        if (consumption?.consumed?.length) {
+          const JobCosting = require('../services/job-costing');
+          JobCosting.calculateJobCost(req.params.serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
+        }
+      } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }
+    }
     res.json(result);
   } catch (err) { next(err); }
 });

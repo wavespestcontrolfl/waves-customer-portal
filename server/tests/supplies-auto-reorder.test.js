@@ -27,7 +27,7 @@ jest.mock('../models/db', () => {
       if (table === 'products_catalog') {
         if (mockState.fresh !== undefined) return mockState.fresh;
         const c = mockState.candidates[0];
-        return c ? { inventory_on_hand: c.inventory_on_hand, low_stock_threshold: c.low_stock_threshold, auto_reorder_enabled: true, active: true } : null;
+        return c ? { inventory_on_hand: c.inventory_on_hand, low_stock_threshold: c.low_stock_threshold, auto_reorder_enabled: true, active: true, reorder_quantity: c.reorder_quantity, auto_reorder_vendor_id: c.auto_reorder_vendor_id, inventory_unit: c.inventory_unit } : null;
       }
       return null;
     };
@@ -158,7 +158,7 @@ test('a concurrent auto row (insert ignored by the unique index) → deduped, no
 
 test('stock received between the candidate scan and the insert → no row, no bell (locked re-read)', async () => {
   mockState.candidates = [lowSign];
-  mockState.fresh = { inventory_on_hand: '730', low_stock_threshold: '100', auto_reorder_enabled: true, active: true };
+  mockState.fresh = { inventory_on_hand: '730', low_stock_threshold: '100', auto_reorder_enabled: true, active: true, reorder_quantity: '650', auto_reorder_vendor_id: 'vend-gemplers', inventory_unit: 'each' };
   const notify = jest.fn(async () => ({}));
   const res = await runSuppliesAutoReorderSweep({ notify });
   expect(res.created).toHaveLength(0);
@@ -169,7 +169,7 @@ test('stock received between the candidate scan and the insert → no row, no be
 
 test('auto-reorder disabled between the candidate scan and the insert → no row', async () => {
   mockState.candidates = [lowSign];
-  mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: false, active: true };
+  mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: false, active: true, reorder_quantity: '650', auto_reorder_vendor_id: 'vend-gemplers', inventory_unit: 'each' };
   const res = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
   expect(mockState.inserted).toHaveLength(0);
   expect(res.deduped[0]).toMatchObject({ reason: 'no_longer_low' });
@@ -177,10 +177,29 @@ test('auto-reorder disabled between the candidate scan and the insert → no row
 
 test('the request row is written from the locked re-read, not the scan snapshot', async () => {
   mockState.candidates = [lowSign];
-  mockState.fresh = { inventory_on_hand: '60', low_stock_threshold: '100', auto_reorder_enabled: true, active: true };
+  mockState.fresh = { inventory_on_hand: '60', low_stock_threshold: '100', auto_reorder_enabled: true, active: true, reorder_quantity: '650', auto_reorder_vendor_id: 'vend-gemplers', inventory_unit: 'each' };
   await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
   expect(mockState.inserted[0].current_stock).toBe(60);
   expect(mockState.inserted[0].reason).toContain('at 60 each');
+});
+
+test('reorder quantity edited between the scan and the lock → the request and the bell use the locked value', async () => {
+  mockState.candidates = [lowSign];
+  mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: true, active: true, reorder_quantity: '325', auto_reorder_vendor_id: 'vend-gemplers', inventory_unit: 'each' };
+  const notify = jest.fn(async () => ({}));
+  const res = await runSuppliesAutoReorderSweep({ notify });
+  expect(mockState.inserted[0].requested_quantity).toBe(325);
+  expect(mockState.inserted[0].target_stock).toBe(425);
+  expect(res.created[0].requestedQuantity).toBe(325);
+  expect(notify.mock.calls[0][2]).toContain('Reorder 325 each');
+});
+
+test('reorder quantity cleared under the lock → unconfigured, no row', async () => {
+  mockState.candidates = [lowSign];
+  mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: true, active: true, reorder_quantity: null, auto_reorder_vendor_id: 'vend-gemplers', inventory_unit: 'each' };
+  const res = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+  expect(mockState.inserted).toHaveLength(0);
+  expect(res.unconfigured[0]).toMatchObject({ reason: 'no_reorder_quantity' });
 });
 
 test('no reorder_quantity → unconfigured, no row', async () => {

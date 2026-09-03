@@ -14,6 +14,11 @@
  *   - skipped entirely for an incomplete visit, and for a closeout where no
  *     visit was performed (inspection_only / customer_declined) — no sign
  *     is left either way.
+ *   - skipped for an inspection SERVICE (service type contains
+ *     "inspection", e.g. "Pest Inspection Service") completed normally —
+ *     the card is a pesticide-application notice and an inspection applies
+ *     nothing. Owner can overrule by renaming the service or ruling
+ *     otherwise; the rule lives in INSPECTION_SERVICE_RE.
  *   - retired products (active = false) are never consumed.
  *   - a kit item the technician ALSO logged in the completion product picker
  *     (an ordinary usage movement for the same product + visit already
@@ -33,6 +38,8 @@
 const logger = require('./logger');
 
 const SOURCE = 'completion_consumable';
+// A scheduled inspection (no application) leaves no yard sign.
+const INSPECTION_SERVICE_RE = /\binspection\b/i;
 
 function parseLines(raw) {
   if (raw == null) return null;
@@ -55,11 +62,13 @@ async function consumeCompletionSupplies(db, {
   isIncompleteVisit = false,
   visitPerformed = true,
   serviceLine = null,
+  serviceType = null,
 } = {}) {
   const result = { consumed: [], skipped: [], errors: [] };
   if (!scheduledServiceId) { result.skipped.push({ reason: 'no_scheduled_service_id' }); return result; }
   if (isIncompleteVisit) { result.skipped.push({ reason: 'incomplete_visit' }); return result; }
   if (visitPerformed === false) { result.skipped.push({ reason: 'visit_not_performed' }); return result; }
+  if (serviceType && INSPECTION_SERVICE_RE.test(String(serviceType))) { result.skipped.push({ reason: 'inspection_service' }); return result; }
 
   let products;
   try {
@@ -150,4 +159,4 @@ async function consumeCompletionSupplies(db, {
   return result;
 }
 
-module.exports = { consumeCompletionSupplies, appliesToLine, COMPLETION_CONSUMABLE_SOURCE: SOURCE };
+module.exports = { consumeCompletionSupplies, appliesToLine, COMPLETION_CONSUMABLE_SOURCE: SOURCE, INSPECTION_SERVICE_RE };

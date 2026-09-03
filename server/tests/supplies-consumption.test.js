@@ -76,6 +76,19 @@ test('inspection_only / customer_declined closeout (visitPerformed=false) → sk
   expect(selectSpy).not.toHaveBeenCalled();
 });
 
+test('an inspection service completed normally consumes nothing (no application, no sign)', async () => {
+  const { db, inserts } = fakeDb({ products: [sign] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'Pest Inspection Service' });
+  expect(res.skipped).toEqual([{ reason: 'inspection_service' }]);
+  expect(inserts).toHaveLength(0);
+});
+
+test('a treatment service type is not an inspection', async () => {
+  const { db, inserts } = fakeDb({ products: [sign] });
+  await consumeCompletionSupplies(db, { ...args, serviceType: 'Quarterly Pest Control' });
+  expect(inserts).toHaveLength(1);
+});
+
 test('consumable with a count → one usage movement and a decrement', async () => {
   const { db, updates, inserts } = fakeDb({ products: [sign] });
   const res = await consumeCompletionSupplies(db, args);
