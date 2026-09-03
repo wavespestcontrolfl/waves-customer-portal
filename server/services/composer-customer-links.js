@@ -362,29 +362,50 @@ async function buildAutopaySetupLink(customerId) {
 
 // The /secure/:token bearer the composer inserts (autopay-setup-link mints
 // 16 random bytes base64url = 22 chars; the visit lane's card requests share
-// the page and the table).
-const SECURE_LINK_RE = /\/secure\/([A-Za-z0-9_-]{16,})/g;
+// the page and the table). Bodies carry the link scheme-stripped
+// (stripSmsLinkScheme), so the match is host + path, scheme optional.
+const SECURE_PATH_RE = /\/secure\/([A-Za-z0-9_-]{16,})/g;
+// A canonical link: the portal host (exact, port included) preceded by a
+// scheme or a token boundary — never by a path separator, so
+// "https://evil.example/portal.wavespestcontrol.com/secure/<token>" is not
+// a match (pre-push Codex P0: a suffix check is not a host check).
+function canonicalSecureLinkRe() {
+  const host = new URL(publicPortalUrl()).host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[\\s(<\\[])(?:https?:\\/\\/)?${host}\\/secure\\/([A-Za-z0-9_-]{16,})`, 'gi');
+}
 
 /**
  * Delivery-seam check for a composer body carrying Auto Pay setup links
  * (GH Codex #3812 r2 P1/P2). The composer posts every send as
  * original_message_type 'manual', so the canonical Auto Pay classifier in
- * send-customer-message never sees it and the insert-time lever check goes
- * stale while a draft sits open. EVERY /secure token in the body is judged
+ * send-customer-message never sees it and the insert-time checks go stale
+ * while a draft sits open. EVERY /secure occurrence in the body is judged
  * (pre-push Codex P0 — a visit link first must not shadow an Auto Pay link
- * after it). Called by /sms and /schedule-sms with the recipient's last-10:
+ * after it), each must sit on the canonical portal host (pre-push P1 — a
+ * look-alike host carrying a real token is not a Waves link), and each
+ * customer-kind row is re-run through the mint's own side-effect-free
+ * eligibility (pre-push P1). Called by /sms and /schedule-sms with the
+ * recipient's last-10:
  *   { present: false }                       — no customer-kind Auto Pay link in the body
- *   { present: true, ok: true, tokens }      — every Auto Pay link is live, pending and
+ *   { present: true, ok: true, tokens }      — every Auto Pay link is live, eligible and
  *                                              owned by the recipient; the caller reclassifies
  *   { present: true, ok: false, error }      — refuse the send with this message
  * Visit-lane card requests (kind 'visit') use the same page but their own
  * gates — they are neither judged nor reclassified here.
  */
 async function autopayLinkSendCheck(body, toLast10) {
-  const tokens = [...new Set([...String(body || '').matchAll(SECURE_LINK_RE)].map((m) => m[1]))];
-  if (!tokens.length) return { present: false };
-  const { KIND } = require('./autopay-setup-link');
+  const text = String(body || '');
+  const anySecure = [...text.matchAll(SECURE_PATH_RE)];
+  if (!anySecure.length) return { present: false };
   const refuse = (error) => ({ present: true, ok: false, error });
+  const canonical = [...text.matchAll(canonicalSecureLinkRe())];
+  // Every /secure path in the body must be one of the canonical matches —
+  // any occurrence on another host (or nested under one) refuses the send.
+  if (canonical.length !== anySecure.length) {
+    return refuse('A /secure link in this message is not on the Waves portal — remove it before sending.');
+  }
+  const tokens = [...new Set(canonical.map((m) => m[1]))];
+  const { KIND, setupLinkIneligibility } = require('./autopay-setup-link');
   const live = [];
   for (const token of tokens) {
     const row = await db('appointment_card_requests')
@@ -400,8 +421,11 @@ async function autopayLinkSendCheck(body, toLast10) {
   const lever = await autopaySmsLever();
   if (lever) return refuse(`${AUTOPAY_SKIP_REASONS[lever]} — remove the Auto Pay link before sending.`);
   for (const { customerId } of live) {
-    const owner = await db('customers').where({ id: customerId }).first('phone');
-    const ownerLast10 = String(owner?.phone || '').replace(/\D/g, '').slice(-10);
+    const eligibility = await setupLinkIneligibility(customerId);
+    if (eligibility.reason) {
+      return refuse(`${AUTOPAY_SKIP_REASONS[eligibility.reason] || `Auto Pay setup link no longer applies (${eligibility.reason})`} — remove the Auto Pay link before sending.`);
+    }
+    const ownerLast10 = String(eligibility.customer?.phone || '').replace(/\D/g, '').slice(-10);
     if (!ownerLast10 || ownerLast10 !== String(toLast10 || '')) {
       return refuse('This Auto Pay setup link belongs to a different customer — remove it before sending.');
     }

@@ -31,7 +31,7 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
-jest.mock('../services/autopay-setup-link', () => ({ KIND: 'customer' }));
+jest.mock('../services/autopay-setup-link', () => ({ KIND: 'customer', setupLinkIneligibility: jest.fn() }));
 jest.mock('../services/sms-media', () => ({
   mediaFromOutboundAttachments: jest.fn(() => []),
   signMediaForClient: jest.fn(async (media) => media),
@@ -392,10 +392,10 @@ describe('admin communications SMS route', () => {
   describe('Auto Pay setup link in the body (delivery seam)', () => {
     const SECURE_BODY = 'Set it up here: https://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY';
     function wireAutopayDb({ row, owner = { id: 'cust-A', phone: '+15551234567' } }) {
+      require('../services/autopay-setup-link').setupLinkIneligibility.mockResolvedValue({ reason: null, customer: owner });
       db.mockImplementation((table) => {
         const first = jest.fn();
         if (table === 'appointment_card_requests') first.mockResolvedValue(row);
-        else if (table === 'customers') first.mockResolvedValue(owner);
         else if (table === 'sms_templates') first.mockResolvedValue({ is_active: true });
         return { where: jest.fn(function () { return this; }), first };
       });

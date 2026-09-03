@@ -179,34 +179,48 @@ async function payerExemption(customerId) {
 }
 
 /**
+ * Side-effect-free eligibility — the front half of requestAutopaySetupLink,
+ * shared with the composer's delivery seam so a draft that sat open while
+ * the customer was archived / moved to a payer / enrolled / paused / changed
+ * lane cannot text a stale setup credential (pre-push Codex P1). Resolves
+ * { reason: null, customer } when a link may go out, else { reason }.
+ */
+async function setupLinkIneligibility(customerId) {
+  if (!isAutopaySetupLinkEnabled()) return { reason: 'gate_off' };
+  if (!customerId) return { reason: 'no_customer' };
+  const customer = await db('customers').where({ id: customerId }).first();
+  // Deletion is SOFT (deleted_at) — an archived customer never gets a
+  // link (GH Codex P0).
+  if (!customer || customer.deleted_at) return { reason: 'customer_not_found' };
+
+  const exempt = await payerExemption(customerId);
+  if (exempt) return { reason: exempt };
+
+  const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
+  if (await customerOnAutopay(customer)) return { reason: 'autopay_already_active' };
+  // A PAUSED enrollment is still configured (method + pointer intact) —
+  // customerOnAutopay says false, but "set up" here would neither resume
+  // the pause nor add anything (GH Codex #3726 r3 P2). Resuming is the
+  // customer's/office's explicit action, never a side effect of this link.
+  if (customer.autopay_enabled && isPaused(customer)) return { reason: 'autopay_paused' };
+  // Per-visit and per-application lanes are the ones where "each completed
+  // visit is charged" is TRUE. Monthly dues and annual prepay cover their
+  // visits (no completion charge), one-time has no recurring relationship
+  // — the page/SMS copy would misstate the cadence (GH Codex #3726 r3 P1).
+  if (!billingLaneSupported(customer)) return { reason: 'unsupported_billing_lane' };
+  return { reason: null, customer };
+}
+
+/**
  * The one entry point (operator surfaces only). Returns
  *   { requested, action: 'link_created' | 'sent' | 'auto_secured' | 'skipped', reason, secureUrl?, expiresAt? }
  * Never throws.
  */
 async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigger = 'admin' }) {
   try {
-    if (!isAutopaySetupLinkEnabled()) return skip('gate_off');
-    if (!customerId) return skip('no_customer');
-    const customer = await db('customers').where({ id: customerId }).first();
-    // Deletion is SOFT (deleted_at) — an archived customer never gets a
-    // link (GH Codex P0).
-    if (!customer || customer.deleted_at) return skip('customer_not_found');
-
-    const exempt = await payerExemption(customerId);
-    if (exempt) return skip(exempt);
-
-    const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
-    if (await customerOnAutopay(customer)) return skip('autopay_already_active');
-    // A PAUSED enrollment is still configured (method + pointer intact) —
-    // customerOnAutopay says false, but "set up" here would neither resume
-    // the pause nor add anything (GH Codex #3726 r3 P2). Resuming is the
-    // customer's/office's explicit action, never a side effect of this link.
-    if (customer.autopay_enabled && isPaused(customer)) return skip('autopay_paused');
-    // Per-visit and per-application lanes are the ones where "each completed
-    // visit is charged" is TRUE. Monthly dues and annual prepay cover their
-    // visits (no completion charge), one-time has no recurring relationship
-    // — the page/SMS copy would misstate the cadence (GH Codex #3726 r3 P1).
-    if (!billingLaneSupported(customer)) return skip('unsupported_billing_lane');
+    const eligibility = await setupLinkIneligibility(customerId);
+    if (eligibility.reason) return skip(eligibility.reason);
+    const { customer } = eligibility;
 
     // A consented, chargeable saved card covers the ask — enroll it and
     // send nothing (mirrors the visit lane's auto-secure, minus the row:
@@ -956,6 +970,7 @@ module.exports = {
   PURPOSE,
   TEMPLATE_KEY,
   isAutopaySetupLinkEnabled,
+  setupLinkIneligibility,
   requestAutopaySetupLink,
   loadAutopaySetupPageData,
   completeAutopaySetupCapture,

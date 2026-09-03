@@ -22,7 +22,7 @@ jest.mock('../services/referral-engine', () => ({
   getLiveSettings: jest.fn(async () => ({ program_active: true })),
 }));
 jest.mock('../routes/estimate-public', () => ({ isEstimateCustomerViewable: jest.fn() }));
-jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: jest.fn(), KIND: 'customer' }));
+jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: jest.fn(), setupLinkIneligibility: jest.fn(), KIND: 'customer' }));
 // Only the Auto Pay customer-SMS gate reads true — every other gate (the
 // pricing-authority send gate the estimate builder consults) stays off.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'autopayCustomerSms') }));
@@ -42,7 +42,7 @@ const { openBalanceSummary } = require('../services/open-balance');
 const { combinedEligibleSiblings } = require('../services/pay-combined');
 const { enrollPromoter, getLiveSettings } = require('../services/referral-engine');
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
-const { requestAutopaySetupLink } = require('../services/autopay-setup-link');
+const { requestAutopaySetupLink, setupLinkIneligibility } = require('../services/autopay-setup-link');
 const { isEnabled } = require('../config/feature-gates');
 const ReviewService = require('../services/review-request');
 const {
@@ -367,9 +367,9 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
   function wire({ row, owner = { phone: '(941) 555-0184' }, template = { is_active: true } }) {
     mockBuilders = {
       appointment_card_requests: chainBuilder({ firstRow: row }),
-      customers: chainBuilder({ firstRow: owner }),
       sms_templates: chainBuilder({ firstRow: template }),
     };
+    setupLinkIneligibility.mockReset().mockResolvedValue({ reason: null, customer: owner });
   }
 
   test('no /secure link in the body → not present, no lookups', async () => {
@@ -408,6 +408,39 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
     expect((await autopayLinkSendCheck(BODY, '9415550184')).error).toMatch(/different customer/);
   });
 
+  test('the mint\'s own eligibility is re-run at send — a customer gone payer-billed since the insert refuses', async () => {
+    wire({ row: live });
+    setupLinkIneligibility.mockResolvedValue({ reason: 'payer_billed' });
+    const r = await autopayLinkSendCheck(BODY, '9415550184');
+    expect(setupLinkIneligibility).toHaveBeenCalledWith('c1');
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/third-party payer/);
+  });
+
+  test('a real token on a look-alike host is not a Waves link — refused before any lookup', async () => {
+    wire({ row: live });
+    const r = await autopayLinkSendCheck('Set it up: https://evil.example/secure/abcDEF123_-xyz789QWERTY', '9415550184');
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/not on the Waves portal/);
+    expect(mockDb).not.toHaveBeenCalledWith('appointment_card_requests');
+  });
+
+  test('a canonical host nested under another host is not a Waves link either', async () => {
+    wire({ row: live });
+    const r = await autopayLinkSendCheck('Set it up: https://evil.example/portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY', '9415550184');
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/not on the Waves portal/);
+    // Same body with a second, canonical link: the foreign one still refuses.
+    const r2 = await autopayLinkSendCheck('https://evil.example/portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY ' + BODY, '9415550184');
+    expect(r2.ok).toBe(false);
+  });
+
+  test('the scheme-stripped form the composer inserts is accepted', async () => {
+    wire({ row: live });
+    const r = await autopayLinkSendCheck('Set it up here: portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY', '9415550184');
+    expect(r.ok).toBe(true);
+  });
+
   test('a visit-lane card request on the same page is not reclassified', async () => {
     wire({ row: { ...live, kind: 'visit' } });
     expect(await autopayLinkSendCheck(BODY, '9415550184')).toEqual({ present: false });
@@ -422,7 +455,8 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
     let lastToken = null;
     acr.where = jest.fn((q) => { lastToken = q?.token; return acr; });
     acr.first = jest.fn(async () => rows[lastToken] || null);
-    mockBuilders = { appointment_card_requests: acr, customers: chainBuilder({ firstRow: { phone: '(941) 555-0184' } }), sms_templates: chainBuilder({ firstRow: { is_active: true } }) };
+    mockBuilders = { appointment_card_requests: acr, sms_templates: chainBuilder({ firstRow: { is_active: true } }) };
+    setupLinkIneligibility.mockReset().mockResolvedValue({ reason: null, customer: { phone: '(941) 555-0184' } });
     const body = 'Card: https://portal.wavespestcontrol.com/secure/visitTOKENvisitTOKEN00 and ' + BODY;
     const r = await autopayLinkSendCheck(body, '9415550184');
     expect(r.ok).toBe(false);
@@ -438,10 +472,8 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
     const acr = chainBuilder(); let lastToken = null;
     acr.where = jest.fn((q) => { lastToken = q?.token; return acr; });
     acr.first = jest.fn(async () => rows[lastToken] || null);
-    const cust = chainBuilder(); let lastId = null;
-    cust.where = jest.fn((q) => { lastId = q?.id; return cust; });
-    cust.first = jest.fn(async () => owners[lastId] || null);
-    mockBuilders = { appointment_card_requests: acr, customers: cust, sms_templates: chainBuilder({ firstRow: { is_active: true } }) };
+    setupLinkIneligibility.mockReset().mockImplementation(async (id) => ({ reason: null, customer: owners[id] }));
+    mockBuilders = { appointment_card_requests: acr, sms_templates: chainBuilder({ firstRow: { is_active: true } }) };
     const body = BODY + ' or https://portal.wavespestcontrol.com/secure/otherCUSTOMERtoken0000';
     const r = await autopayLinkSendCheck(body, '9415550184');
     expect(r.ok).toBe(false);
