@@ -1292,6 +1292,9 @@ async function submitRecap({
     recordId,
     completed: true,
     created: createdRecord,
+    // A recap re-closing a NOT-performed visit (incomplete / inspection-only
+    // / declined) — callers must not apply performed-visit effects.
+    priorNonPerformed: recapPriorNonPerformed,
     trackCompleted,
     smsSent,
     smsError,

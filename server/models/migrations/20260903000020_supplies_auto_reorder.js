@@ -119,6 +119,11 @@ exports.up = async function up(knex) {
       const fill = {};
       if (existing.reorder_quantity == null) { fill.reorder_quantity = item.reorder_quantity; fill.auto_reorder_enabled = true; }
       if (existing.per_completion_usage == null) fill.per_completion_usage = 1;
+      // A row that never tracked stock can never sweep (findLowStockCandidates
+      // needs both non-null) — seed the opening count and threshold only when
+      // absent (GH codex r3 P2).
+      if (existing.inventory_on_hand == null) fill.inventory_on_hand = item.inventory_on_hand;
+      if (existing.low_stock_threshold == null) fill.low_stock_threshold = item.low_stock_threshold;
       if (existing.per_completion_service_lines == null) fill.per_completion_service_lines = JSON.stringify(KIT_SERVICE_LINES);
       if (existing.auto_reorder_vendor_id == null && item.pricing) fill.auto_reorder_vendor_id = gemplers.id;
       if (existing.cost_per_unit == null && item.pricing) { fill.cost_per_unit = Number((item.pricing.price / Number(item.pricing.quantity)).toFixed(4)); fill.cost_unit = 'each'; }
@@ -155,6 +160,10 @@ exports.up = async function up(knex) {
         vendor_sku: item.pricing.vendor_sku,
         vendor_product_url: item.pricing.vendor_product_url,
         is_best_price: true,
+        // Owner-supplied manual price: the best-price recalc only accepts
+        // approved / auto_approved rows, and the column defaults to pending
+        // (GH codex r3 P2). Same shape as the 20260710 pre-slab seed.
+        ...(await knex.schema.hasColumn('vendor_pricing', 'approval_status') ? { approval_status: 'approved' } : {}),
       });
     }
     if (hasMovements && item.inventory_on_hand > 0) {
