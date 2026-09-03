@@ -674,7 +674,7 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(mockDispatch.mock.calls[1][1].text).toContain('PREVIOUS ATTEMPTS WERE REJECTED');
     expect(mockDispatch.mock.calls[1][1].text).toContain('named a technician the reviewer did not name (the words: "tyler")');
     expect(mockDispatch.mock.calls[3][1].text).toContain('attempt 1:');
-    expect(mockDispatch.mock.calls[3][1].text).toContain('attempt 2: contained a phone number\n');
+    expect(mockDispatch.mock.calls[3][1].text).toContain('attempt 2: contained a phone number (the words: "941-555-1212")');
     expect(mockDispatch.mock.calls[3][1].text).toContain('attempt 3:');
     expect(mockDispatch.mock.calls[3][1].text).toContain('(the words: "our records")');
     // Attempts 3 and 4 are review-only: no account facts in the user text.
@@ -706,6 +706,9 @@ describe('draftReviewReply — fallback ladder', () => {
       for (let i = 0; i < 3; i++) { const v = Drafter.safeCopyReply(gg, 'service_quality', prior); expect(v).toBeTruthy(); expect(v).not.toMatch(RELATIONSHIP_HINT); seen.add(v); prior = [...prior, v]; }
     }
     expect(seen.size).toBeGreaterThanOrEqual(3);
+    // Once every variant is recent at a location the first is re-used rather than parking (pre-push r9).
+    const all = [...seen].filter((v) => v.startsWith('Hi Dana,'));
+    expect(Drafter.safeCopyReply(g, 'service_quality', all)).toBe(all[0]);
     const noText = grounding({ firstName: '', text: '', mentionedTechNames: [], topics: [], account: null });
     expect(Drafter.safeCopyReply(noText, 'no_text', [])).toBe(good('Hello there,\n\nThanks for the five stars. Glad to be your pest and lawn team.'));
     expect(Drafter.safeCopyReply(grounding({ rating: 2 }), 'low_rating', [])).toBeNull();

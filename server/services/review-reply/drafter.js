@@ -1026,10 +1026,16 @@ function safeCopyReply(grounding, mode, recentReplies = []) {
     `We appreciate ${noun}. Glad you chose us.`,
     `Much appreciated. Thanks for choosing us.`,
   ];
-  for (const body of variants) {
-    const text = `${greeting}\n\n${body}\n\n${signOffFor(grounding.locationName)}`;
+  const texts = variants.map((body) => `${greeting}\n\n${body}\n\n${signOffFor(grounding.locationName)}`);
+  // Prefer a variant the location has not used lately …
+  for (const text of texts) {
     if (!verifyReplyDetailed(text, grounding, { recentReplies, mode })) return text;
   }
+  // … but the non-repetition rule exists to keep model replies varied, not
+  // to starve the last rung: once every variant is recent, the first one is
+  // re-used. It still passes every other rule (no recent greeting name can be
+  // in it — it carries only this reviewer's first name).
+  if (!verifyReplyDetailed(texts[0], grounding, { recentReplies: [], mode })) return texts[0];
   return null;
 }
 
