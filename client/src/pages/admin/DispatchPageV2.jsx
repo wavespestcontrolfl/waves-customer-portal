@@ -2342,6 +2342,7 @@ export default function DispatchPageV2({
       {viewMode === "list" && (
         <ScheduleListView
           technicians={data?.technicians || []}
+          refreshKey={scheduleRefreshKey}
           owesCompletion={completedVisitOwesCompletion}
           onEdit={(svc) => {
             // An owed closeout resumes through the completion panel on every

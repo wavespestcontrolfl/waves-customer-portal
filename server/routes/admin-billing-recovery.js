@@ -26,6 +26,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { legacyServiceRecordExistsSql } = require('../services/service-record-presence');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const InvoiceService = require('../services/invoice');
@@ -130,7 +131,11 @@ function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false }
     // with nothing minted; they surface as leak_kind
     // 'completed_no_service_record' and stay un-billable here until the
     // completion flow mints the record (the bill route 422s without one).
-    .whereRaw("(sr.status = 'completed' OR (sr.id IS NULL AND ss.status = 'completed'))")
+    // A pre-FK legacy record matched by tuple is NOT "no record": the
+    // dispatch feeds refuse to re-open those (service-record-presence.js),
+    // so surfacing them here with an "Open completion" action would dead-end
+    // (Codex #3799 r3/r4). They reconcile by hand from the record itself.
+    .whereRaw(`(sr.status = 'completed' OR (sr.id IS NULL AND ss.status = 'completed' AND NOT ${legacyServiceRecordExistsSql('ss')}))`)
     .whereRaw(`NOT ${HAS_INVOICE_SQL}`)                  // no existing invoice
     .whereRaw('COALESCE(ss.is_callback, false) = false') // not a callback (free re-treat)
     .whereRaw('COALESCE(sr.is_callback, false) = false')

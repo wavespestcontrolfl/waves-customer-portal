@@ -36,7 +36,7 @@ const STATUS_LABELS = {
   on_site: 'On Site', completed: 'Completed', skipped: 'Skipped', cancelled: 'Cancelled',
 };
 
-export default function ScheduleListView({ technicians = [], onEdit, onRefresh, owesCompletion }) {
+export default function ScheduleListView({ technicians = [], onEdit, onRefresh, owesCompletion, refreshKey = 0 }) {
   const [services, setServices] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -110,7 +110,9 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
       setTotal(data.total || 0);
     } catch { setServices([]); setTotal(0); }
     setLoading(false);
-  }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page]);
+    // refreshKey: the parent bumps it after a completion so an owed row's
+    // badge / routing clear without a reload (the list owns its own cache).
+  }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page, refreshKey]);
 
   useEffect(() => { fetchList(); }, [fetchList]);
 

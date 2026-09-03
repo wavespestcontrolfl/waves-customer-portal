@@ -55,6 +55,7 @@ const {
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const { hasServiceRecordSql } = require('../services/service-record-presence');
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
@@ -4659,15 +4660,12 @@ function duplicateSeriesConflictBody(existingSeries) {
   };
 }
 
-// Whether a scheduled visit has a completion record — FK only. Records
-// completed before 20260427000007 carried a NULL backlink; migration
-// 20260903000040 heals every uniquely-resolvable one (the same (customer_id,
-// service_date, service_type) resolution job-costing's resolveServiceRecord
-// applies at runtime), so a soft-join here would only re-derive what the
-// backlink now says and drift from Billing Recovery's FK join (Codex #3799
-// r2/r3). Ambiguous legacy tuples stay NULL and read as owed — fail-closed.
-// Shared by the day, week, and list feeds so every surface agrees.
-const HAS_SERVICE_RECORD_SQL = 'EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id) as has_service_record';
+// Whether a scheduled visit has a completion record: FK backlink OR a
+// pre-FK legacy row matched by tuple — see service-record-presence.js for
+// why an ambiguous legacy match must still count as "has a record" (a
+// resume would mint a second record). Shared by the day, week, and list
+// feeds; Billing Recovery uses the same helper for its status-only leak.
+const HAS_SERVICE_RECORD_SQL = `${hasServiceRecordSql('scheduled_services')} as has_service_record`;
 
 // POST /api/admin/schedule — create new service
 router.post('/', requireAdmin, async (req, res, next) => {
@@ -6479,7 +6477,14 @@ router.get('/list', async (req, res, next) => {
       serviceTypeRaw: s.service_type,
       status: s.status,
       has_service_record: s.has_service_record === true,
+      // The FULL completion context the day / week feeds carry: CompletionPanel
+      // enters typed mode only with findingsSchema (+ companionSchemas), or
+      // /complete rejects the recovery with typed_findings_required (r4 P1).
       completionProfile: listProjectContextByServiceId.get(s.id)?.completionProfile || null,
+      inspectionCreditAvailable: listProjectContextByServiceId.get(s.id)?.inspectionCreditAvailable === true,
+      completionProfileLookupFailed: listProjectContextByServiceId.get(s.id)?.completionProfileLookupFailed === true,
+      findingsSchema: listProjectContextByServiceId.get(s.id)?.findingsSchema || null,
+      companionSchemas: listProjectContextByServiceId.get(s.id)?.companionSchemas || null,
       linkedProject: listProjectContextByServiceId.get(s.id)?.linkedProject || null,
       windowStart: s.window_start,
       windowEnd: s.window_end,

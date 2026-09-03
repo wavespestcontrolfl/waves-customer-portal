@@ -30,3 +30,14 @@ describe('ScheduleListView closeout-owed badge', () => {
     expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-owed' }));
   });
 });
+
+describe('ScheduleListView refreshKey', () => {
+  it('refetches when the parent bumps refreshKey after a completion', async () => {
+    const { rerender } = render(<ScheduleListView refreshKey={0} />);
+    await screen.findByText('Owed Customer');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    rerender(<ScheduleListView refreshKey={1} />);
+    await screen.findByText('Owed Customer');
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
