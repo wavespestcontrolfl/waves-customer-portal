@@ -9,7 +9,7 @@ Verified independently before adopting: BASF's Trelona ATBS FAQ (PSS 26-1201) �
 | Review point | Verdict | Why |
 |---|---|---|
 | Cartridge model understated (2 per station; 33% of *cartridges* ≈ $68/yr, not $34) | **Accepted** | FAQ confirms two per station; the variable is renamed to a per-cartridge rate |
-| $249 / $0-setup / 36-month plan is a break-even product | **Accepted** | with $68 cartridges the three-year cumulative is +$16 on $747 |
+| $249 / $0-setup / 36-month plan is a break-even product | **Accepted — it is worse than break-even** | with two cartridges per station the three-year cumulative is a loss: $430 hardware + install ($360 stations, $70 labor) plus 3 × $137 steady-state years = $841 cost against $747 revenue → **−$94**; even skipping the year-one cartridge swap (−$68) leaves $773 of cost, −$26 |
 | Massey $225 is an incumbent renewal, not a new-install benchmark; Sentricon stations cannot be taken over | **Accepted** | no hardware in Massey's renewal; a Waves quote is a new Trelona install |
 | Drop the 36-month term; 12-month prepaid coverage + annual renewal | **Accepted** | uses the prepay lane as-is, removes PR A3 and every cancel-flow change |
 | Setup fee + annual fee, one customer-facing plan, retreat-only, no bond/drywood at launch | **Accepted** | matches Sentricon/Terminix/Massey structure; sidesteps the prepay+bond refusal |
@@ -67,13 +67,13 @@ Candidate price shapes (setup fee + annual protection, both prepaid):
 
 | Shape | Setup (15 stations) | Annual (11–15) | Year one | Setup margin | Annual margin | 3-yr cumulative |
 |---|---|---|---|---|---|---|
-| **P1 — cost-recovery setup, margin in the annual** | stations × $30 × 1.0 = **$450** | base $249 + $50 per 5-station bracket above 10 → **$299** | $749 | 4% | 54% | +$506 on $1,347 (38%) |
+| **P1 — cost-recovery setup, margin in the annual** | stations × (stationCost + $6) × 1.0 = 15 × $30 = **$450** at $24/station ($366 at $18.37) | base $249 + $50 per 5-station bracket above 10 → **$299** | $749 | 4% | 54% | +$506 on $1,347 (38%) |
 | P2 — today's install formula, lower annual | $653 (existing 1.45×) | $249 | $902 | 34% | 45% | +$559 on $1,400 (40%) |
-| Rejected — $0 setup, $249, 36-month term | $0 | $249 | $249 | — | — | +$16 on $747 (2%) |
+| Rejected — $0 setup, $249, 36-month term | $0 | $249 | $249 | — | — | **−$94** on $747 (−13%): $430 hardware + install, then 3 × $137; −$26 if year one skips the cartridge swap |
 
-At $18.37/station the same shapes read P1 $366 + $299 = $665 year one, P2 $530 + $249 = $779. P1 lowers the entry price $150 below today's year one and keeps the recurring number (the one a customer compares to a competitor's renewal) at a real margin; P2 keeps today's setup economics. Both use the existing per-station install formula (a plan-specific multiplier) and the existing 5-station bracket function; neither needs a term.
+Both setup shapes are the one existing per-station install base, `stations × (stationCost + $5.25 + $0.75)`, at a plan-specific multiplier: **P1 at 1.0×** ($30/station when the catalog-linked station cost is $24.00, $24.37 at $18.37), **P2 at today's 1.45×**. The setup therefore follows the approved vendor price (§A3): at $18.37/station the same shapes read P1 $366 + $299 = $665 year one, P2 $530 + $249 = $779. There is no fixed $30 rule — $30 is the worked example at $24. P1 lowers the entry price $150 below today's year one and keeps the recurring number (the one a customer compares to a competitor's renewal) at a real margin; P2 keeps today's setup economics. Both use the existing 5-station bracket function; neither needs a term.
 
-**Worked example — a 16-station home** (single story, ≈2,100 sf, 230 LF perimeter → **16 stations**, bracket 16–20, one full box; an existing quarterly pest customer at Silver). The expired rental offer on file for that home was $0 install + quarterly monitoring at $445.20/yr (Silver); the incumbent renews it at $225/yr on stations the incumbent already owns. Under this scope (setup not tier-discounted, annual fee tier-discounted like monitoring today): **P1** setup 16 × $30 = $480 ($390 at $18.37/station) + annual $349 (Silver −10% → $314) = **$794 year one ($704 at the cheaper box), then $314/yr**; **P2** install $696 ($565) + $299 (Silver → $269) = $965 ($834) year one, then $269/yr. Yearly cost to Waves ≈ $144 ($58 labor, $72 cartridges on 32 installed at 33%, $14 follow-up reserve) → 54–59% on the annual fee. One expired draft on that account priced 182 rented stations ($7,402 retail, $3,575/yr) — an input error worth a glance.
+**Worked example — a 16-station home** (single story, ≈2,100 sf, 230 LF perimeter → **16 stations**, bracket 16–20, one full box; an existing quarterly pest customer at Silver). The expired rental offer on file for that home was $0 install + quarterly monitoring at $445.20/yr (Silver); the incumbent renews it at $225/yr on stations the incumbent already owns. Under this scope (setup not tier-discounted, annual fee tier-discounted like monitoring today): **P1** setup 16 × ($24 + $6) = $480 ($390 at $18.37/station) + annual $349 (Silver −10% → $314) = **$794 year one ($704 at the cheaper box), then $314/yr**; **P2** install $696 ($565) + $299 (Silver → $269) = $965 ($834) year one, then $269/yr. Yearly cost to Waves ≈ $144 ($58 labor, $72 cartridges on 32 installed at 33%, $14 follow-up reserve) → on the Silver-discounted annual fee **54% under P1 ($314) but 46% under P2 ($269)**; undiscounted, 59% ($349) and 52% ($299). P2's lower annual is the price-shape trade: it recovers margin in the setup and gives up eight points a year. One expired draft on that account priced 182 rented stations ($7,402 retail, $3,575/yr) — an input error worth a glance.
 
 ### A2. The product
 
@@ -103,7 +103,7 @@ Retired from the customer-facing menu at flip: quarterly monitoring (activity-dr
 
 ### A4. Rulings
 
-1. **Price shape**: P1 — setup `stations × $30` (≈ $450 at 15) + annual $249 base / $50 per 5-station bracket above 10 ($299 at 11–15) (rec); or P2 — today's $653 install + $249/yr. Customer name for the plan.
+1. **Price shape**: P1 — setup `stations × (stationCost + $6)` at 1.0× (≈ $450 at 15 with the $24 station, $366 at $18.37) + annual $249 base / $50 per 5-station bracket above 10 ($299 at 11–15) (rec); or P2 — today's $653 install + $249/yr. Customer name for the plan.
 2. **Term**: none — 12-month prepaid coverage, annual renewal (rec). Commitment-for-waived-setup only as a later promotion.
 3. **Spacing**: 15 ft estimating default; 20 ft label maximum; field placement authoritative.
 4. **Replacement assumption**: 33% of installed cartridges (2 per station) until the ledger measures it.

@@ -88,6 +88,19 @@ const CHECKS = [
           from services`,
   },
   {
+    key: 'catalog_engine_key_duplicate_owners',
+    // Mirrors the runtime guard in server/services/slot-reservation.js: an
+    // engine key claimed by MORE THAN ONE active row is refused (no service_id
+    // stamp), so both rows are effectively unmapped even though each carries a
+    // non-empty engine_keys array (codex r7 P2). Same predicate as the guard —
+    // is_active only, archived rows included if still active.
+    title: 'Active catalog rows that claim the same engine key (slot-reservation refuses to stamp service_id on these)',
+    sql: `select k.engine_key, count(*) as active_owners, string_agg(s.service_key, ', ' order by s.service_key) as service_keys
+          from services s cross join lateral jsonb_array_elements_text(s.engine_keys) as k(engine_key)
+          where s.is_active and jsonb_typeof(s.engine_keys) = 'array'
+          group by k.engine_key having count(*) > 1 order by k.engine_key`,
+  },
+  {
     key: 'catalog_cadence_drift',
     title: 'Catalog rows whose frequency label disagrees with visits_per_year (shared cadence vocabulary; unmapped labels surface with expected NULL)',
     sql: `select service_key, name, frequency, visits_per_year, ${CADENCE_CASE_SQL} as expected_visits
@@ -246,13 +259,15 @@ const CHECKS = [
   },
   {
     key: 'customers_billing_lanes',
+    // Same internal-test exclusion as the uninvoiced mirror (codex r7 P2):
+    // owner test accounts sit in active pipeline stages and are not customers.
     title: 'Real customers by billing lane and fee coverage',
     sql: `select coalesce(billing_mode,'NULL') as lane, count(*) as n,
                  count(*) filter (where monthly_rate > 0) as with_monthly_rate,
                  count(*) filter (where per_application_fee > 0) as with_per_application_fee,
                  count(*) filter (where billing_mode='per_application' and (per_application_fee is null or per_application_fee <= 0)) as per_app_without_fee,
                  count(*) filter (where per_application_fee > 0 and monthly_rate > 0 and abs(per_application_fee - monthly_rate) < 0.01) as fee_equals_monthly
-          from customers where pipeline_stage in ('active_customer','won','at_risk') group by 1 order by 2 desc`,
+          from customers c where pipeline_stage in ('active_customer','won','at_risk') ${INTERNAL_TEST_SQL} group by 1 order by 2 desc`,
   },
   {
     key: 'visits_uninvoiced',

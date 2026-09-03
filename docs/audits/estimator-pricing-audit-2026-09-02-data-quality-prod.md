@@ -8,6 +8,10 @@ Generated 2026-09-03T05:43:04.582Z · database host ma….pr….rl….net · win
 |---|---|---|---|---|---|---|
 | 92 | 77 | 27 | 50 | 60 | 1 | 20 |
 
+## Active catalog rows that claim the same engine key (slot-reservation refuses to stamp service_id on these)
+
+_Round 7 (Codex P2): new check, not yet run against production — regenerate on the next read-only run. Executed on the local test schema: 0 rows._
+
 ## Catalog rows whose frequency label disagrees with visits_per_year
 
 _(0 rows)_
@@ -175,6 +179,8 @@ _Round 3 (Codex P2): `accepted_without_cost` now evaluates the LATEST snapshot p
 | 100 | 99 | 34 | 324 | 114 |
 
 ## Real customers by billing lane and fee coverage
+
+_Round 7 (Codex P2): the query now excludes `INTERNAL_TEST_CUSTOMERS` (the same predicate as the uninvoiced mirror), so owner test accounts in an active pipeline stage no longer count as real customers. The table below is the pre-exclusion 2026-09-03T05:43Z run and was not re-queried; the 813-customer and 128-of-182 figures are upper bounds until the next read-only run._
 
 | lane | n | with_monthly_rate | with_per_application_fee | per_app_without_fee | fee_equals_monthly |
 |---|---|---|---|---|---|
