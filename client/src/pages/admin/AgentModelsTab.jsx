@@ -192,6 +192,20 @@ export default function AgentModelsTab() {
     return out;
   }, [data]);
 
+  // A selector's drafted value, following registry aliases: a selector that
+  // derives from another (OPENAI_SMS_DRAFT ← OPENAI_FAST while unset) moves
+  // with its parent's draft unless drafted itself.
+  const selectorDraft = useCallback(
+    (key) => {
+      const s = selectorByKey[key];
+      if (!s) return undefined;
+      if (draft[s.env]) return draft[s.env];
+      if (s.derived && s.derivesFrom) return selectorDraft(s.derivesFrom);
+      return undefined;
+    },
+    [draft, selectorByKey],
+  );
+
   // Effective model for a leg after the draft: a lane pin wins over its
   // selector, exactly as `process.env.PIN || MODELS.TIER` does at boot.
   const effectiveLeg = useCallback(
@@ -199,15 +213,15 @@ export default function AgentModelsTab() {
       if (!leg) return null;
       if (leg.pinEnv && draft[leg.pinEnv] === UNPIN) {
         // Unpinned: the selector's (possibly also drafted) value wins again.
-        const selEnv = leg.selector && selectorByKey[leg.selector]?.env;
-        return (selEnv && draft[selEnv]) || leg.unpinnedModel;
+        return (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel;
       }
       if (leg.pinEnv && draft[leg.pinEnv]) return draft[leg.pinEnv];
       if (leg.pinEnv && leg.pinned) return leg.model; // pinned today; only the pin moves it
-      if (leg.selector && draft[selectorByKey[leg.selector]?.env]) return draft[selectorByKey[leg.selector].env];
+      const viaSelector = leg.selector && selectorDraft(leg.selector);
+      if (viaSelector) return viaSelector;
       return leg.model;
     },
-    [draft, selectorByKey],
+    [draft, selectorDraft],
   );
 
   const laneChanged = useCallback(
@@ -224,17 +238,27 @@ export default function AgentModelsTab() {
   const changes = useMemo(() => {
     if (!data) return [];
     const pinnedAfterDraft = (leg) => (leg.pinEnv && draft[leg.pinEnv] ? draft[leg.pinEnv] !== UNPIN : !!leg.pinned);
-    const baseAfterDraft = (leg) => {
-      const selEnv = leg.selector && selectorByKey[leg.selector]?.env;
-      return (selEnv && draft[selEnv]) || leg.unpinnedModel || leg.model;
-    };
+    const baseAfterDraft = (leg) => (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel || leg.model;
     const byEnv = new Map();
     for (const s of data.selectors) {
       const next = draft[s.env];
       if (next && next !== s.current) {
-        const follows = (leg) => leg && leg.selector === s.key && !pinnedAfterDraft(leg);
-        const lanes = data.lanes.filter((l) => follows(l.primary) || follows(l.fallback)).length;
-        byEnv.set(s.env, { env: s.env, from: s.current, to: next, label: `${s.key} selector`, lanes, restart: true });
+        // Followers = this selector plus any selector that derives from it and
+        // is not set or drafted on its own (the registry alias).
+        const keys = [s.key, ...data.selectors.filter((d) => d.derived && d.derivesFrom === s.key && !draft[d.env]).map((d) => d.key)];
+        const follows = (leg) => leg && keys.includes(leg.selector) && !pinnedAfterDraft(leg);
+        const following = data.lanes.filter((l) => follows(l.primary) || follows(l.fallback));
+        const lockedLanes = following.filter((l) => l.lock).map((l) => l.name);
+        const derivedKeys = keys.slice(1);
+        byEnv.set(s.env, {
+          env: s.env,
+          from: s.current,
+          to: next,
+          label: `${s.key} selector${derivedKeys.length ? ` (+ ${derivedKeys.join(", ")}, unset so it follows)` : ""}`,
+          lanes: following.length,
+          lockedLanes,
+          restart: true,
+        });
       }
     }
     for (const l of data.lanes) {
@@ -248,7 +272,8 @@ export default function AgentModelsTab() {
         // Unpinning a shared env can land its lanes on different models (a
         // selector-backed leg vs one with its own literal default).
         const destinations = unpin ? [...new Set(sharing.map((x) => baseAfterDraft(legOf(x))))] : [next];
-        if (unpin && destinations.length === 1 && destinations[0] === leg.model) continue;
+        // An unpin is always a change (the Railway variable goes away) even
+        // when the model it lands on is the one it was pinned to.
         if (!unpin && sharing.every((x) => next === baseAfterDraft(legOf(x)) && !legOf(x).pinned)) continue;
         const label = sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.fallback ? " · fallback" : ""}`;
         byEnv.set(env, { env, from: leg.model, to: destinations[0], destinations, unpin, label, lanes: sharing.length, restart: sharing.some((x) => x.applies !== "live") });
@@ -346,7 +371,9 @@ export default function AgentModelsTab() {
   const onFound = (envs, model) => {
     setDiscovered((prev) => ({
       ...prev,
-      [model.id]: { label: model.label || model.id, provider: model.provider, caps: [], rate: null, status: "current", discovered: true },
+      // Offered only for the modality it was found for; a text-selector find
+      // must not surface in a vision picker later in the session.
+      [model.id]: { label: model.label || model.id, provider: model.provider, caps: [find?.accepts?.cap || "text"], rate: null, status: "current", discovered: true },
     }));
     envs.forEach((env) => setDraftValue(env, model.id));
     setFind(null);
@@ -824,6 +851,11 @@ export default function AgentModelsTab() {
                     {c.lanes > 1 ? ` · ${c.lanes} lanes` : ""}
                     {c.restart ? "" : " · next request"}
                   </span>
+                  {c.lockedLanes?.length > 0 && (
+                    <span className="text-11 text-alert-fg">
+                      Also moves locked lanes that follow this selector by design: {c.lockedLanes.join(", ")}.
+                    </span>
+                  )}
                   {(fromRate || toRate) && (
                     <span className="text-11 text-ink-secondary u-nums">
                       List rate: {fromRate || "—"} → {toRate || "—"}
@@ -877,6 +909,9 @@ function FindModelDialog({ target, onClose, onPick }) {
   const [probing, setProbing] = useState(null);
   const [problem, setProblem] = useState(null);
   const requestRef = useRef(0);
+  // A probe that resolves after Cancel / Escape must not draft anything.
+  const closedRef = useRef(false);
+  useEffect(() => () => { closedRef.current = true; }, []);
 
   useEffect(() => {
     const query = q.trim();
@@ -917,12 +952,13 @@ function FindModelDialog({ target, onClose, onPick }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: model.provider, id: model.id }),
       });
+      if (closedRef.current) return;
       if (verdict?.ok) onPick(model);
       else setProblem(`${model.id}: ${verdict?.reason === "not_entitled" ? "listed, but this account is not enabled for it" : verdict?.reason === "not_found" ? "the provider does not know this id" : `check failed (${verdict?.reason || "unknown"})`}`);
     } catch (e) {
-      setProblem(e?.message || "Check failed");
+      if (!closedRef.current) setProblem(e?.message || "Check failed");
     } finally {
-      setProbing(null);
+      if (!closedRef.current) setProbing(null);
     }
   };
 

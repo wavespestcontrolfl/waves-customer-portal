@@ -88,6 +88,14 @@ describe('model-switchboard', () => {
     }
   });
 
+  it('models the registry alias: OPENAI_SMS_DRAFT follows OPENAI_FAST until set', () => {
+    const { selectors } = sb.getSwitchboard();
+    const smsDraft = selectors.find((s) => s.key === 'OPENAI_SMS_DRAFT');
+    expect(smsDraft.derivesFrom).toBe('OPENAI_FAST');
+    expect(smsDraft.derived).toBe(!process.env.MODEL_OPENAI_SMS_DRAFT);
+    expect(MODELS.OPENAI_SMS_DRAFT).toBe(process.env.MODEL_OPENAI_SMS_DRAFT || MODELS.OPENAI_FAST);
+  });
+
   it('locks the lanes a generic picker must not move', () => {
     const { lanes, selectors } = sb.getSwitchboard();
     for (const id of ['call_extraction', 'transcription', 'embeddings', 'image_gen', 'mentions_prober']) {
