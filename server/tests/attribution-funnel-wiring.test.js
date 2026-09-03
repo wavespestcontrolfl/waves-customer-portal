@@ -39,7 +39,10 @@ describe('public-quote ad_service_attribution wiring', () => {
   });
 
   test('skips the funnel row entirely when the source has no mapped channel (fail-closed)', () => {
-    expect(src).toMatch(/if\s*\(channelAttr\)\s*\{/);
+    // A current touch needs a mapped channel; a repeat's root repair runs
+    // regardless of this visit's channel (#3834).
+    expect(src).toMatch(/else if\s*\(channelAttr \|\| duplicateOfLeadId\)\s*\{/);
+    expect(src).toMatch(/let touch = !channelAttr \? null : \{/);
   });
 });
 

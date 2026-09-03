@@ -2006,7 +2006,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const attachedCallLead = ['voicemail', 'inbound_call'].includes(lead?.lead_type);
       if (attachedCallLead) {
         await backfillCallLeadAttribution({ leadId: lead.id, customerId, serviceInterest });
-      } else if (channelAttr) {
+      } else if (channelAttr || duplicateOfLeadId) {
         // A repeat run is not a second marketing lead: the funnel and
         // service-line queries count attribution rows without excluding
         // duplicate lead statuses (codex #3834 r2 P1), and the original's
@@ -2024,7 +2024,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // to the wrong touch and corrupt first-touch ROI (codex r11 P2). A
         // root whose stored source has no channel gets no row, exactly as
         // its own run would have.
-        let touch = {
+        // The current touch needs a mapped channel; a repeat's root repair
+        // does not depend on this visit's channel at all (pre-push r12).
+        let touch = !channelAttr ? null : {
           leadId: lead.id, serviceInterest, leadDate: etDateString(), channel: channelAttr,
           leadSourceDetail: sourceMeta.leadSourceDetail, gclid, wbraid, gbraid, fbclid, fbc, fbp,
           utmCampaign: attr?.utm?.campaign || null, utmTerm: attr?.utm?.term || null,
