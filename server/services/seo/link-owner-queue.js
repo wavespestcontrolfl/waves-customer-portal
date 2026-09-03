@@ -43,6 +43,12 @@ const { BRIDGE_STATES } = require('./link-authority-selection');
 const AUTH = 'seo_link_placement_authorities';
 const PARKED = 'awaiting_owner';
 const PARKABLE = 'prospect';
+// §3.3b: two cards the bridge never parks — an outreach path's DEFERRED payment surfaces once the publisher exposes a
+// checkout (`ready_for_payment`), and a renewal instance sits on a placed / live / indexed placement the Judge owns
+const CHECKOUT = 'ready_for_payment';
+const PLACED_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
+const CARD_STATUSES = Object.freeze([PARKED, CHECKOUT, ...PLACED_STATUSES]);
+const isOwner = (level) => typeof level === 'string' && level.startsWith('OWNER_');
 const noop = () => {};
 
 class OwnerQueueError extends Error {
@@ -63,6 +69,16 @@ function actionFor(row) {
   if (row.dimension === 'execution') return row.instance_kind === 'terms' ? 'accept_terms' : 'acquire';
   if (row.dimension === 'payment') return row.instance_kind === '-' ? 'purchase' : 'renewal';
   return row.instance_kind === 'followup' ? 'outreach_followup' : 'outreach_send';
+}
+
+// Which of a placement's rows the owner decides from the queue in the placement's CURRENT status (plan §3.3b) — the
+// listing and the locked click apply the same test: parked from prospect ⇒ every row; at the publisher's checkout ⇒
+// the deferred payment; placed / live / indexed ⇒ the renewal payment instance. null = decided here.
+function whyNotHere(placement, row) {
+  if (placement.status === PARKED) return placement.parked_from_status === PARKABLE ? null : `parked from ${placement.parked_from_status} — not the queue's to decide`;
+  if (placement.status === CHECKOUT) return row.dimension === 'payment' ? null : 'the placement is at the publisher\'s checkout — only its payment is decided here';
+  if (PLACED_STATUSES.includes(placement.status)) return row.dimension === 'payment' && actionFor(row) === 'renewal' ? null : `the placement is ${placement.status} — only its renewal is decided here`;
+  return `the placement is ${placement.status} — not awaiting your decision`;
 }
 
 // null = Approve applies; otherwise the reason the card shows instead of a button
@@ -112,7 +128,10 @@ async function loadApprovals(q, rows) {
   for (const r of rows) {
     const a = r.approval_id ? byId.get(r.approval_id) : null;
     r.approval = a || null;
-    r.approved = Boolean(a && a.decision === 'approved' && !a.invalidated_at);
+    // a CONSUMED approval on a row still unsatisfied (its execution reported a terminal failure / ambiguity and the
+    // instance awaits rotation) is spent, not live authority (§3.6b) — the retry obtains a fresh one; on a satisfied
+    // row it is the durable prerequisite it reads as
+    r.approved = Boolean(a && a.decision === 'approved' && !a.invalidated_at && (!a.consumed_at || r.satisfied_at));
   }
   return rows;
 }
@@ -171,8 +190,13 @@ const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v))
 // ---------------------------------------------------------------------------
 async function listOwnerQueue(db) {
   const { policy } = await P.loadPolicy(db);
-  const parked = await db('seo_link_prospects').where({ status: PARKED, parked_from_status: PARKABLE }).whereNotNull('domain_id')
-    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'outreach_status', 'claimed_at', 'updated_at');
+  const candidates = await db('seo_link_prospects').whereIn('status', [...CARD_STATUSES]).whereNotNull('domain_id')
+    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'claimed_at', 'updated_at');
+  const liveRows = candidates.length ? await db(AUTH).whereIn('prospect_id', candidates.map((p) => p.id)).whereNull('ended_at') : [];
+  // a parked prospect is a card outright; a checkout / placed placement only while an OPEN owner-level row it decides
+  // here exists — otherwise every placed link would be a card with nothing to click
+  const parked = candidates.filter((p) => (p.status === PARKED ? p.parked_from_status === PARKABLE
+    : liveRows.some((r) => r.prospect_id === p.id && !r.satisfied_at && isOwner(r.level) && whyNotHere(p, r) === null)));
   if (!parked.length) return { cards: [] };
   const domains = await db('seo_link_domains').whereIn('id', [...new Set(parked.map((p) => p.domain_id))]).whereIn('agent_state', [...BRIDGE_STATES])
     .select('id', 'domain', 'agent_state', 'score', 'score_reasons', 'spam_score', 'domain_rating', 'organic_traffic', 'referring_domains', 'competitors_linked', 'best_path_id', 'source', 'discovery_priority');
@@ -182,7 +206,8 @@ async function listOwnerQueue(db) {
   const pathIds = [...new Set([...domains.map((d) => d.best_path_id), ...cardsFor.map((p) => p.path_id)].filter(Boolean))];
   const paths = pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
   const pathById = new Map(paths.map((p) => [p.id, p]));
-  const rows = await loadApprovals(db, await db(AUTH).whereIn('prospect_id', cardsFor.map((p) => p.id)).whereNull('ended_at'));
+  const cardIds = new Set(cardsFor.map((p) => p.id));
+  const rows = await loadApprovals(db, liveRows.filter((r) => cardIds.has(r.prospect_id)));
   const waivers = await db('seo_link_floor_waivers').whereIn('domain_id', domains.map((d) => d.id)).whereNull('invalidated_at').orderBy('approved_at', 'desc')
     .select('id', 'domain_id', 'path_id', 'overridden_floors', 'decision_inputs_hash', 'note', 'approved_by', 'approved_at');
   const activeWaiverFor = new Map(); // (domain|path) → { id } when the floors hash still holds
@@ -206,7 +231,7 @@ async function listOwnerQueue(db) {
     const path = pathById.get(p.path_id) || pathById.get(d.best_path_id) || null;
     if (!path || path.id !== d.best_path_id) return false;
     const ctx = { path, domain: d, policy, score: d.score };
-    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && whyNotApprovable(r, path) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null).reason);
+    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && whyNotApprovable(r, path) === null && whyNotHere(p, r) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null).reason);
   };
   const groupPrimary = new Map();
   const byId = [...cardsFor].sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -233,7 +258,7 @@ async function listOwnerQueue(db) {
     const shared = Boolean(path && path.fee_scope === 'account_wide' && p.payment_group_id);
     const ctx = onBestPath ? { path, domain: d, policy, score: d.score } : null;
     const mine = rows.filter((r) => r.prospect_id === p.id).map((r) => {
-      let whyNot = onBestPath ? whyNotApprovable(r, path) : 'placement is not on the domain\'s current best path — the nightly bridge rotates it';
+      let whyNot = onBestPath ? (whyNotApprovable(r, path) || whyNotHere(p, r)) : 'placement is not on the domain\'s current best path — the nightly bridge rotates it';
       // the same freshness test the click applies — a stale stamp never shows a button that can only 409, and an
       // APPROVED row whose inputs moved since (price, policy, revision) is shown as awaiting the bridge's re-decision
       // rather than as live spending authority (the bridge invalidates it on its next pass)
@@ -253,7 +278,7 @@ async function listOwnerQueue(db) {
       };
     });
     return {
-      placement: { id: p.id, target_page: p.target_page, location_key: p.location_key, link_type: p.link_type, outreach_status: p.outreach_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
+      placement: { id: p.id, target_page: p.target_page, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
       domain: { id: d.id, domain: d.domain, agent_state: d.agent_state, score: d.score, score_reasons: d.score_reasons, spam_score: d.spam_score, domain_rating: d.domain_rating, organic_traffic: d.organic_traffic, referring_domains: d.referring_domains, competitors_linked: d.competitors_linked, source: d.source, discovery_priority: d.discovery_priority },
       path: path ? {
         id: path.id, on_best_path: onBestPath, acquisition_type: path.acquisition_type, link_type: path.link_type, submission_url: path.submission_url,
@@ -304,7 +329,8 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     // the card must still BE a card under the lock: another tab's Reject / Watch, a worker claim or a Judge move
     // since the page loaded means this approval would authorize something the owner no longer sees
     const placementNow = await trx('seo_link_prospects').where({ id: placement.id }).forUpdate().first();
-    if (!placementNow || placementNow.status !== PARKED || placementNow.parked_from_status !== PARKABLE || placementNow.claimed_at) refuse(409, `the placement is no longer awaiting your decision (${placementNow ? placementNow.status : 'gone'}) — refresh the queue`);
+    const notHere = !placementNow ? 'gone' : placementNow.claimed_at ? `leased at ${placementNow.status}` : whyNotHere(placementNow, row);
+    if (notHere) refuse(409, `the placement is no longer awaiting your decision (${notHere}) — refresh the queue`);
     if (!BRIDGE_STATES.includes(domain.agent_state)) refuse(409, `the domain is ${domain.agent_state.replace(/_/g, ' ')} — it left the queue; refresh`);
     Object.assign(placement, placementNow);
     await loadApprovals(trx, [row]);
@@ -361,8 +387,8 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
       // the best path, same per-dimension path_revision (an older stamp with a reverted-equal hash must not inherit an
       // approval the next bridge pass would invalidate for the whole group) — the hash carries no path identity, so a stale-path or in-flight row with an equal hash must never inherit
       // the owner's spending authority) — locked, like the clicked placement
-      const siblings = (await trx('seo_link_prospects').where({ domain_id: domain.id, payment_group_id: placement.payment_group_id, path_id: path.id, status: PARKED, parked_from_status: PARKABLE }).whereNull('claimed_at').forUpdate().select('id'))
-        .map((s) => s.id).filter((id) => id !== placement.id);
+      const siblings = (await trx('seo_link_prospects').where({ domain_id: domain.id, payment_group_id: placement.payment_group_id, path_id: path.id }).whereIn('status', [...CARD_STATUSES]).whereNull('claimed_at').forUpdate().select('id', 'status', 'parked_from_status'))
+        .filter((s) => s.id !== placement.id && whyNotHere(s, row) === null).map((s) => s.id);
       if (siblings.length) {
         const candidates = await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', siblings).where({ path_id: path.id, path_revision: pathRevision, dimension: 'payment', instance_key: row.instance_key, level: row.level, decision_inputs_hash: hash }).whereNull('ended_at').whereNull('satisfied_at'));
         for (const c of candidates) if (!c.approved) attached.push(c.id);

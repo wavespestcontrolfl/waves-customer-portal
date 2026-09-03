@@ -3568,6 +3568,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
               <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, fontFamily: MONO }}>
                 {c.domain.domain}
                 {c.placement.location_key && c.placement.location_key !== "-" ? <span style={{ color: D.muted, fontWeight: 400 }}>{` · ${c.placement.location_key}`}</span> : ""}
+                {c.placement.status === "ready_for_payment" && <span style={{ color: D.amber, fontWeight: 400 }}>{" · at the publisher's checkout"}</span>}
+                {["placed", "live", "indexed"].includes(c.placement.status) && <span style={{ color: D.amber, fontWeight: 400 }}>{` · ${c.placement.status} — renewal`}</span>}
               </div>
               <div style={{ fontSize: 12, color: D.muted }}>
                 {`DR ${c.domain.domain_rating ?? "—"} · traffic ${compact(c.domain.organic_traffic)} · spam ${c.domain.spam_score ?? "—"} · score ${c.domain.score ?? "—"} · ${c.domain.competitors_linked ?? 0} competitor${c.domain.competitors_linked === 1 ? "" : "s"} linked · D30 ${c.d30_confidence == null ? "n/a" : c.d30_confidence}`}

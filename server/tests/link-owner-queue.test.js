@@ -127,6 +127,69 @@ describe('listOwnerQueue', () => {
   });
 });
 
+  test('§3.3b cards the bridge never parks: the deferred payment at the publisher\'s checkout, a renewal on a live placement', async () => {
+    // an outreach path with a USD fee: the nightly DEFERS OWNER_PAYMENT — no park, no card — until the placement reaches the checkout
+    const s = await parked({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
+    const fee = openRows(s.db, 'payment')[0];
+    expect(fee.level).toBe('OWNER_PAYMENT');
+    const pl = placementOf(s.db, fee);
+    expect(pl.status).toBe('prospect');
+    expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+    await expect(Q.approveRow(s.db, { authorityId: fee.id, actor: ACTOR, approvedAmountCents: 20000, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/the placement is prospect — not awaiting your decision/) });
+    expect(approvals(s.db)).toHaveLength(0);
+    // the publisher exposed a checkout: the card is the payment's — the other rows on it are not decided here
+    Object.assign(pl, { status: 'ready_for_payment', outreach_status: 'sent' });
+    const [card] = (await Q.listOwnerQueue(s.db)).cards;
+    expect(card.placement.status).toBe('ready_for_payment');
+    expect(card.rows.find((r) => r.action === 'purchase')).toMatchObject({ approvable: true, quote_cents: 20000 });
+    for (const r of card.rows.filter((r) => r.dimension !== 'payment')) expect(r.approvable).toBe(false);
+    const r = await Q.approveRow(s.db, { authorityId: fee.id, actor: ACTOR, approvedAmountCents: 20000, now: NOW, bridge: inline });
+    expect(r.approval).toMatchObject({ action: 'purchase', approved_amount_cents: 20000, instance_key: fee.instance_key });
+    expect(rows(s.db).find((x) => x.id === fee.id).approval_id).toBe(r.approval.id);
+    expect(placementOf(s.db, fee).status).toBe('ready_for_payment'); // the bridge moves nothing at the checkout
+
+    // a renewal instance on a LIVE placement: the Judge owns the status; the card is the renewal's and nothing else's
+    const live = await parked({ make: paidPath, path: { renewal_cost_cents: 3900, renewal_period: 'annual' } });
+    const first = openRows(live.db, 'payment')[0];
+    Object.assign(first, { satisfied_at: NOW, satisfied_reason: 'charged' });
+    Object.assign(placementOf(live.db, first), { status: 'live', parked_from_status: null });
+    storedDomain(live.db).agent_state = 'acquired';
+    const mine = async () => (await Q.listOwnerQueue(live.db)).cards.filter((c) => c.placement.id === first.prospect_id); // the sibling locations stay parked cards
+    expect(await mine()).toHaveLength(0); // nothing open the owner decides here ⇒ no card
+    const renewalHash = P.decisionInputsHash('payment', { path: storedPath(live.db), domain: storedDomain(live.db), policy: P.normalizePolicyRow(null), score: storedDomain(live.db).score, instanceKey: '2027:1' });
+    rows(live.db).push({ ...first, id: uid(), instance_kind: '2027', instance_key: '2027:1', decision_inputs_hash: renewalHash, satisfied_at: undefined, satisfied_reason: undefined, approval_id: undefined });
+    const [card2] = await mine();
+    expect(card2.placement.status).toBe('live');
+    expect(card2.decidable).toBe(false);
+    const renewal = card2.rows.find((r) => r.action === 'renewal');
+    expect(renewal).toMatchObject({ approvable: true, quote_cents: 3900 });
+    for (const r of card2.rows.filter((r) => r.action !== 'renewal')) expect(r.approvable).toBe(false);
+    const r2 = await Q.approveRow(live.db, { authorityId: renewal.id, actor: ACTOR, approvedAmountCents: 3900, now: NOW, bridge: inline });
+    expect(r2.approval).toMatchObject({ action: 'renewal', action_hash: '2027', approved_amount_cents: 3900 });
+    expect(placementOf(live.db, first).status).toBe('live');
+  });
+
+  test('a consumed approval on a still-unsatisfied row is spent, not live authority: the card asks again and a fresh approval attaches', async () => {
+    const { db } = await parked({ make: paidPath });
+    const fee = openRows(db, 'payment')[0];
+    const first = await Q.approveRow(db, { authorityId: fee.id, actor: ACTOR, approvedAmountCents: 4500, now: NOW, bridge: inline });
+    // the runner leased it and reported a failed terminal outcome: the approval is consumed, the instance awaits rotation
+    approvals(db).find((a) => a.id === first.approval.id).consumed_at = LATER;
+    Object.assign(placementOf(db, fee), { status: 'awaiting_owner', parked_from_status: 'prospect' });
+    const card = (await Q.listOwnerQueue(db)).cards.find((c) => c.placement.id === fee.prospect_id);
+    const row = card.rows.find((r) => r.id === fee.id);
+    expect(row).toMatchObject({ approved: false, approvable: true });
+    const again = await Q.approveRow(db, { authorityId: fee.id, actor: ACTOR, approvedAmountCents: 4500, now: LATER, bridge: inline });
+    expect(again.approval.id).not.toBe(first.approval.id);
+    expect(rows(db).find((x) => x.id === fee.id).approval_id).toBe(again.approval.id);
+    // …while on a SATISFIED row the consumed approval is the durable prerequisite it reads as
+    Object.assign(rows(db).find((x) => x.id === fee.id), { satisfied_at: LATER, satisfied_reason: 'charged' });
+    approvals(db).find((a) => a.id === again.approval.id).consumed_at = LATER;
+    Object.assign(placementOf(db, fee), { status: 'awaiting_owner', parked_from_status: 'prospect' });
+    const settled = (await Q.listOwnerQueue(db)).cards.find((c) => c.placement.id === fee.prospect_id);
+    expect(settled.rows.find((r) => r.id === fee.id)).toMatchObject({ approved: true, approvable: false });
+  });
+
 describe('approveRow', () => {
   test('freezes the §3.6b snapshot, attaches, releases the park and the domain reads ready_to_acquire', async () => {
     const { db, d, p } = await parked();
