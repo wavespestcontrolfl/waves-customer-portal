@@ -111,7 +111,13 @@ const paymentActivity = async (trx, prospectIds) => (await paidPlacementIds(trx,
 // checkout first). A price the owner must ENTER (OWNER_INPUT_REQUIRED) is an
 // input, not a checkout step: it parks immediately.
 const DEFERRABLE_PAYMENT_LEVELS = Object.freeze(['OWNER_PAYMENT', 'AUTO_PAID_WITHIN_POLICY', 'OWNER_MANUAL_PAYMENT']);
-const deferred = (r, outreach) => outreach === true && r.dimension === 'payment' && DEFERRABLE_PAYMENT_LEVELS.includes(r.level);
+// The publisher's account / form step on a SEND-FIRST outreach path (execution_after_send true, plan §6.4: the
+// acquire claims at contacted/negotiating only after the send satisfied) is settled AFTER the pitch just the same:
+// parking the `prospect` for it would block the draft (the drafter and saveDraft load `prospect` rows only) and
+// hold the aggregate at qualified, so the send-first conversation could never begin. `p` = { outreach, sendFirst }.
+const deferred = (r, p) => p.outreach === true && (
+  (r.dimension === 'payment' && DEFERRABLE_PAYMENT_LEVELS.includes(r.level))
+  || (p.sendFirst === true && r.dimension === 'execution' && r.instance_kind === '-'));
 
 const freshCounters = () => ({ placementsCreated: 0, rowsWritten: 0, redecided: 0, ended: 0, parked: 0, released: 0, invalidatedApprovals: 0, invalidatedWaivers: 0, aggregateChanges: 0, skippedLeased: 0, pinned: 0, parkedDomains: [] });
 
@@ -169,6 +175,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   const staleAfter = Math.max(ts(policyUpdatedAt), ts(domain.updated_at), ts(path.updated_at), waiver ? ts(waiverRow.approved_at) : 0);
 
   const outreachPath = OUTREACH_ACQUISITION_TYPES.includes(path.acquisition_type);
+  const lane = { outreach: outreachPath, sendFirst: outreachPath && path.execution_after_send !== false };
 
   // the lane's shape, and the domain's placements outside it (the other lane's
   // keys after a re-rank); a settled payment on an off-shape row means the
@@ -176,7 +183,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   // second payment instance under another group and the group-keyed duplicate
   // guard could not see the first, so the shape change waits for the owner
   const shape = new Set(expectedLocations(path));
-  const offShape = (await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'location_key')).filter((p) => !shape.has(p.location_key));
+  const offShape = (await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'location_key', 'claimed_at')).filter((p) => !shape.has(p.location_key));
   const offShapePaid = offShape.length ? await paymentActivity(trx, offShape.map((p) => p.id)) : false;
   // refused BEFORE any placement is adopted, reused or created: a reused in-shape row would open a fresh payment
   // instance beside the settled off-shape proof just the same. Selection suppresses this domain (held); only a
@@ -184,12 +191,32 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   if (offShapePaid) return { skipped: 'settled payment on a placement outside the lane shape: owner review before this lane is bridged', out };
 
   let placements = [];
+  const dormant = [];
   for (const location of expectedLocations(path)) {
-    let row = await findPlacementRow(trx, domain.domain, HOMEPAGE, { location, columns: ['*'] });
-    // one conversation per inbox: an active outreach row on ANOTHER page beside
-    // the homepage row means the homepage row is not this domain's conversation —
-    // adopting or moving it would open a second one
-    if (row && location === '-' && inFlight && inFlight.id !== row.id) return { skipped: `outreach conversation in flight on another page (${inFlight.status})`, out };
+    let row = null;
+    let conversation = false;
+    if (location === '-') {
+      // the lane's conversation when one is already bridged: the domain-bound unscoped row on the best path that
+      // carries open rows — looked up FIRST, so the answer never depends on which active row the inbox lock
+      // happened to return (a dormant homepage row and the adopted conversation are both `prospect` to it)
+      const bound = await trx('seo_link_prospects').where({ domain_id: domain.id, path_id: path.id, location_key: '-' }).select('*');
+      if (bound.length) {
+        const withOpen = new Set((await trx(AUTH).whereIn('prospect_id', bound.map((p) => p.id)).whereNull('ended_at').select('prospect_id')).map((r) => r.prospect_id));
+        row = bound.find((p) => withOpen.has(p.id)) || null;
+        conversation = Boolean(row);
+      }
+    }
+    if (!row) row = await findPlacementRow(trx, domain.domain, HOMEPAGE, { location, columns: ['*'] });
+    // one conversation per inbox: an active outreach row on ANOTHER page beside an UNBRIDGED homepage row means the
+    // homepage row is not this domain's conversation. Pinned (sent / locked) or leased, the homepage row is a
+    // conversation of its own — two for one inbox is a conflict nothing here may resolve. Dormant, the in-flight row
+    // IS the placement (adopted / moved below) and the homepage row's open instances end, so it neither votes nor
+    // re-selects the domain — never a nightly slot spent on the same standoff
+    if (row && location === '-' && inFlight && inFlight.id !== row.id && !conversation) {
+      if (isOutreachLocked(row) || row.claimed_at) return { skipped: `outreach conversation in flight on another page (${inFlight.status})`, out };
+      dormant.push(row);
+      row = null;
+    }
     if (!row && location === '-' && inFlight) {
       // an outreach conversation already exists for this inbox (a manual or
       // strategy-agent row on another page): that row IS the placement rather
@@ -270,12 +297,25 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   // or N unscoped signups — and never decided: its open unsatisfied instances
   // end `superseded`, so it carries no authority (not claimable under the
   // authority contract) and stops being a staleness source. Its history stays.
-  if (offShape.length) {
-    const retiring = await trx(AUTH).whereIn('prospect_id', offShape.map((p) => p.id)).whereNull('ended_at').whereNull('satisfied_at').select('id', 'approval_id');
+  // A row still LEASED keeps its authority this run — the worker may be performing the external step under it
+  // and reports against it; the same boundary the mover observes (claimed_at IS NULL). Retired once released.
+  const retirable = offShape.filter((p) => !p.claimed_at);
+  if (retirable.length) {
+    const retiring = await trx(AUTH).whereIn('prospect_id', retirable.map((p) => p.id)).whereNull('ended_at').whereNull('satisfied_at').select('id', 'approval_id');
     if (retiring.length) {
       out.invalidatedApprovals += await invalidateApprovals(trx, retiring, 'placement outside the lane shape', now);
       await trx(AUTH).whereIn('id', retiring.map((r) => r.id)).update({ ended_at: now, end_outcome: 'superseded', updated_at: now });
       out.ended += retiring.length;
+    }
+  }
+  // a dormant homepage row displaced by the in-flight conversation: EVERY open instance ends (a satisfied one too —
+  // it proves a conversation that is not this lane's), so the row carries no authority and is never a staleness source
+  if (dormant.length) {
+    const displaced = await trx(AUTH).whereIn('prospect_id', dormant.map((p) => p.id)).whereNull('ended_at').select('id', 'approval_id');
+    if (displaced.length) {
+      out.invalidatedApprovals += await invalidateApprovals(trx, displaced, 'displaced by the in-flight conversation', now);
+      await trx(AUTH).whereIn('id', displaced.map((r) => r.id)).update({ ended_at: now, end_outcome: 'superseded', updated_at: now });
+      out.ended += displaced.length;
     }
   }
 
@@ -398,7 +438,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       if (authorized(r)) return false;
       if (!isOwner(r.level)) return false;
       if (r.dimension === 'communication' && !draftReady && (r.level === 'OWNER_OUTREACH' || r.level === 'OWNER_LEGAL')) return false;
-      if (deferred(r, outreachPath)) return false;
+      if (deferred(r, lane)) return false;
       return true;
     };
     const ownerGated = live.some(gates);
@@ -429,7 +469,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
         } else out.released += 1;
       }
     }
-    summaries.push({ id: placement.id, status, authority, rows: live, outreach: outreachPath, claimed_at: placement.claimed_at || null });
+    summaries.push({ id: placement.id, status, authority, rows: live, ...lane, claimed_at: placement.claimed_at || null });
   }
 
   // informational stamp on the path — that column only, never the revision or updated_at
@@ -451,11 +491,11 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     const others = all.filter((p) => !seen.has(p.id));
     const otherRows = others.length ? await annotateApprovals(trx, await trx(AUTH).whereIn('prospect_id', others.map((p) => p.id)).whereNull('ended_at').select('*')) : [];
     const otherPathIds = [...new Set(others.map((p) => p.path_id).filter(Boolean))];
-    const otherPaths = otherPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', otherPathIds).select('id', 'acquisition_type') : [];
-    const outreachById = new Map(otherPaths.map((p) => [p.id, OUTREACH_ACQUISITION_TYPES.includes(p.acquisition_type)]));
+    const otherPaths = otherPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', otherPathIds).select('id', 'acquisition_type', 'execution_after_send') : [];
+    const laneById = new Map(otherPaths.map((p) => { const outreach = OUTREACH_ACQUISITION_TYPES.includes(p.acquisition_type); return [p.id, { outreach, sendFirst: outreach && p.execution_after_send !== false }]; }));
     // an off-shape row (the other lane's keys) is INERT in the aggregate except for a live/indexed link it already won:
     // its workflow status cannot progress (no authority) and must not hold the domain at acquiring / qualified
-    for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), outreach: outreachById.get(p.path_id) === true, claimed_at: p.claimed_at || null, offShape: !shape.has(p.location_key) });
+    for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), ...(laneById.get(p.path_id) || { outreach: false, sendFirst: false }), claimed_at: p.claimed_at || null, offShape: !shape.has(p.location_key) });
     const next = aggregateState([...seen.values()]);
     if (next !== domain.agent_state) {
       const moved = await trx('seo_link_domains').where({ id: domain.id, agent_state: domain.agent_state }).update({ agent_state: next, rejected_by: next === 'rejected' ? 'bridge' : null, updated_at: now });
@@ -478,11 +518,12 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
 // row — a historical lost/rejected one, an unbridged one — casts no vote; an
 // `offShape` placement counts only for a live/indexed link it already won).
 // "authorized" = satisfied, AUTO_*, or OWNER_* with a valid approval; a
-// DEFERRED row (payment on an outreach placement, `outreach: true`) is not
-// pending — it is settled at checkout, after the send.
+// DEFERRED row (payment on an outreach placement, `outreach: true`; the acquire
+// step on a send-first one, `sendFirst: true`) is not pending — it is settled
+// at checkout / at the publisher's step, after the send.
 function aggregateState(placements) {
   const rows = (p) => p.rows || [];
-  const pending = (p) => rows(p).filter((r) => !deferred(r, p.outreach));
+  const pending = (p) => rows(p).filter((r) => !deferred(r, p));
   const leased = (p) => Boolean(p.claimed_at);
   const authorizedPending = (p) => p.status === PARKABLE && !leased(p) && pending(p).length > 0 && pending(p).every(authorized);
   const ownerPending = (p) => p.status === PARKABLE && pending(p).some((r) => !authorized(r) && isOwner(r.level));

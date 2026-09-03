@@ -145,10 +145,14 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     // outside the lane's shape (a re-rank across shapes), or a fee_scope the paid group no longer matches.
     // Suppressed here (not skipped nightly): the owner's regroup / shape review (PR 2b card) changes the
     // inputs, and only a forced run (domainIds) reaches the bridge, which refuses the same cases.
+    // A domain whose route is GONE (best_path_id cleared) is never held: every row reads off-shape against the
+    // empty lane, and the bridge's no-best-path retirement runs before any shape hold — the paid row's open
+    // execution instance must still be retired and the domain returned to investigating.
     const paidHere = all.some((p) => paid.has(p.id));
-    const held = paidHere && (all.some((p) => !expected.includes(p.location_key) && paid.has(p.id)) || groupMismatch(best, mine));
+    const held = Boolean(d.best_path_id) && paidHere && (all.some((p) => !expected.includes(p.location_key) && paid.has(p.id)) || groupMismatch(best, mine));
     if (held && !forced.has(d.id)) continue;
-    const offShapeOpen = all.some((p) => !expected.includes(p.location_key) && (rowsByProspect.get(p.id) || []).some((r) => !r.satisfied_at));
+    // a LEASED off-shape row keeps its instance until the worker releases it (the bridge retires unleased rows only)
+    const offShapeOpen = all.some((p) => !expected.includes(p.location_key) && !p.claimed_at && (rowsByProspect.get(p.id) || []).some((r) => !r.satisfied_at));
     // a PINNED conversation (locked send state / sent stamp — the mover refuses it) is this domain's placement for its
     // location wherever it sits: bridged in place and never a path-mismatch source until the lock releases. On the
     // best path it is decided like any other row (a policy / path / domain change still re-decides its open

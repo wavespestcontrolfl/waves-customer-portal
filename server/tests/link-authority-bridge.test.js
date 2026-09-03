@@ -268,14 +268,36 @@ describe('outreach-lane paths', () => {
     expect(rows(db).find((x) => x.dimension === 'payment').level).toBe('OWNER_INPUT_REQUIRED');
     expect([r.parked, placements(db)[0].status]).toEqual([1, 'awaiting_owner']);
   });
-  test('an exact homepage row beside an ACTIVE conversation on another page is not adopted — one conversation per inbox', async () => {
+  test('a DORMANT homepage row beside an ACTIVE conversation on another page: the conversation is adopted, the homepage row displaced — never a nightly standoff', async () => {
+    const { db, d, p } = scenario({ make: outreachPath });
+    const conversation = { id: uid(), target_domain: 'example.org', target_page: 'https://www.wavespestcontrol.com/pest-control/', location_key: '-', domain_id: null, path_id: null, status: 'contacted', link_type: 'resource', outreach_status: 'sent', outreach_sent_at: EARLIER, source: 'manual', updated_at: EARLIER };
+    const homepage = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: d.id, path_id: null, status: 'prospect', link_type: 'directory', source: 'manual', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(conversation, homepage);
+    // the homepage row's stray open instance (a historical decision) is displaced with it
+    db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: homepage.id, path_id: p.id, dimension: 'communication', instance_kind: '-', instance_key: '-:1', level: 'OWNER_OUTREACH', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: EARLIER, satisfied_reason: 'sent' });
+    const r = await run(db);
+    expect(r).toMatchObject({ decided: 1, placementsCreated: 0, ended: 1, rowsWritten: 1, errors: [] });
+    expect(placements(db).find((x) => x.id === conversation.id)).toMatchObject({ domain_id: d.id, path_id: p.id, status: 'contacted' });
+    expect(placements(db).find((x) => x.id === homepage.id)).toMatchObject({ path_id: null, status: 'prospect' });
+    expect(rows(db).filter((x) => x.prospect_id === homepage.id).map((x) => x.end_outcome)).toEqual(['superseded']);
+    expect(rows(db).find((x) => x.prospect_id === conversation.id)).toMatchObject({ dimension: 'communication', satisfied_reason: 'sent' });
+    expect(domainState(db)).toBe('acquiring');
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // converged
+    // the next run finds the bridged conversation FIRST whatever order the inbox lock returns the two `prospect`-class rows in
+    db._tables.seo_link_prospects.reverse();
+    Object.assign(db._tables.seo_link_policy[0], { updated_at: new Date(NOW.getTime() + 1000) });
+    const again = await run(db, { now: new Date(NOW.getTime() + 60000), domainIds: [d.id] });
+    expect(again).toMatchObject({ decided: 1, rowsWritten: 0, ended: 0, errors: [] });
+    expect(rows(db).filter((x) => !x.ended_at).map((x) => x.prospect_id)).toEqual([conversation.id]);
+  });
+  test('a PINNED or LEASED homepage row beside an active conversation on another page is a real conflict: skipped, nothing adopted', async () => {
     const { db } = scenario({ make: outreachPath });
     const conversation = { id: uid(), target_domain: 'example.org', target_page: 'https://www.wavespestcontrol.com/pest-control/', location_key: '-', domain_id: null, path_id: null, status: 'contacted', link_type: 'resource', outreach_status: 'sent', source: 'manual', updated_at: EARLIER };
-    const homepage = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: null, path_id: null, status: 'prospect', link_type: 'directory', source: 'manual', updated_at: EARLIER };
+    const homepage = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: null, path_id: null, status: 'prospect', link_type: 'resource', outreach_status: 'sending', source: 'manual', updated_at: EARLIER };
     db._tables.seo_link_prospects.push(conversation, homepage);
     const r = await run(db);
     expect(r.errors).toEqual([{ domain: 'example.org', skipped: 'outreach conversation in flight on another page (contacted)' }]);
-    expect(placements(db).map((x) => [x.path_id || null, x.link_type])).toEqual([[null, 'resource'], [null, 'directory']]);
+    expect(placements(db).every((x) => !x.path_id)).toBe(true);
     expect(rows(db)).toHaveLength(0);
   });
   test('the display stamp never overwrites a placement timestamp written under it (a draft reported mid-run stays visible to selection)', async () => {
@@ -507,6 +529,21 @@ describe('re-decision', () => {
     expect(domainState(db)).toBe('investigating');
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // converged
   });
+  test('a PAID signup domain whose route is cleared (best_path_id null) is not held by the lane-shape hold: its open execution instance is retired and it returns to investigating', async () => {
+    const { db, d } = scenario({ make: paidPath, policy: { max_auto_purchase_cents: 10000, monthly_paid_budget_cents: 100000 } });
+    await run(db);
+    const paid = rows(db).filter((x) => x.dimension === 'payment');
+    for (const x of paid) Object.assign(x, { satisfied_at: NOW, satisfied_reason: 'charged' }); // the checkout succeeded…
+    expect(rows(db).filter((x) => x.dimension === 'execution' && !x.satisfied_at)).toHaveLength(WAVES_LOCATIONS.length); // …the submit is still owed
+    Object.assign(db._tables.seo_link_domains[0], { best_path_id: null, updated_at: new Date(NOW.getTime() + 1000) }); // disproveGonePaths
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([{ id: d.id, domain: 'example.org', why: 'stale' }]);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r).toMatchObject({ decided: 1, ended: WAVES_LOCATIONS.length, aggregateChanges: 1, errors: [] });
+    expect(rows(db).filter((x) => x.dimension === 'execution').every((x) => x.end_outcome === 'superseded')).toBe(true);
+    expect(rows(db).filter((x) => x.dimension === 'payment').every((x) => !x.ended_at)).toBe(true); // the paid proof is history, kept open
+    expect(domainState(db)).toBe('investigating');
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+  });
   test('a settled payment on a placement outside the lane shape HOLDS the domain: suppressed in selection, refused by a forced run before any in-shape row is reused or created', async () => {
     const { db, d, p } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
     const old = paidPath(d);
@@ -557,6 +594,24 @@ describe('re-decision', () => {
       const send = rows(db).find((x) => x.dimension === 'communication');
       expect(Boolean(send.satisfied_at)).toBe(satisfied);
     }
+  });
+  test('the publisher step on a SEND-FIRST outreach path (execution_after_send=true) never parks the prospect before its draft: the send comes first; submit-first parks at once', async () => {
+    for (const [after, parked, status, state] of [[true, 0, 'prospect', 'qualified'], [false, 1, 'awaiting_owner', 'qualified']]) {
+      const { db } = scenario({ make: outreachPath, path: { account_required: true, agent_completable: false, execution_after_send: after } });
+      const r = await run(db);
+      expect(rows(db).find((x) => x.dimension === 'execution').level).toBe('OWNER_HUMAN_STEP');
+      expect([r.parked, placements(db)[0].status, domainState(db)]).toEqual([parked, status, state]);
+    }
+    // with the pitch approved, a send-first domain is ready_to_acquire — the human step waits for the contacted row
+    const { db } = scenario({ make: outreachPath, path: { account_required: true, agent_completable: false, execution_after_send: true } });
+    await run(db);
+    const send = rows(db).find((x) => x.dimension === 'communication');
+    const approval = { id: uid(), decision: 'approved', invalidated_at: null };
+    db._tables.seo_link_approvals.push(approval);
+    Object.assign(send, { approval_id: approval.id });
+    Object.assign(db._tables.seo_link_policy[0], { updated_at: new Date(NOW.getTime() + 1000) });
+    await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(domainState(db)).toBe('ready_to_acquire');
   });
   test('adopting a durably SENT row still at prospect advances it to contacted (the sender refuses it, a paid checkout claims only from contacted)', async () => {
     const { db } = scenario({ make: outreachPath });
@@ -734,6 +789,25 @@ describe('re-decision', () => {
     expect(rows(db).filter((x) => gbp.some((g) => g.id === x.prospect_id)).every((x) => x.end_outcome === 'superseded')).toBe(true);
     expect(rows(db).filter((x) => !x.ended_at).map((x) => x.dimension)).toEqual(['communication']);
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // converged
+  });
+  test('an off-shape row still LEASED keeps its authority this run (the worker reports against it); it is retired once released', async () => {
+    const { db, d } = scenario({ make: outreachPath });
+    const signup = pathRow(d, { submission_url: 'https://example.org/add' });
+    db._tables.seo_link_acquisition_paths.push(signup);
+    const leased = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: signup.id, status: 'prospect', link_type: 'directory', claimed_at: NOW, updated_at: EARLIER };
+    const free = { ...leased, id: uid(), location_key: WAVES_LOCATIONS[1].id, claimed_at: null };
+    db._tables.seo_link_prospects.push(leased, free);
+    for (const pl of [leased, free]) db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: pl.id, path_id: signup.id, dimension: 'execution', instance_kind: '-', instance_key: '-:1', level: 'AUTO_FREE', decision_inputs_hash: 'old', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: null });
+    const r = await run(db);
+    expect(r).toMatchObject({ placementsCreated: 1, ended: 1, errors: [] });
+    expect(rows(db).find((x) => x.prospect_id === leased.id).ended_at).toBeNull();
+    expect(rows(db).find((x) => x.prospect_id === free.id).end_outcome).toBe('superseded');
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // the lease is not a nightly staleness source
+    leased.claimed_at = null; // the worker released it
+    expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
+    const r2 = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r2.ended).toBe(1);
+    expect(rows(db).find((x) => x.prospect_id === leased.id).end_outcome).toBe('superseded');
   });
   test('a zero-total payment proof (no_payment_required) does not cover a paid successor: it rotates; a charged one carries', async () => {
     const { db, d, p } = scenario({ make: paidPath });
@@ -943,6 +1017,8 @@ describe('aggregateState (§3.1)', () => {
     ['rejected only when every placement is DENY', [{ status: 'prospect', rows: [A('DENY')] }], 'rejected'],
     ['a DENY beside an INVALID is not a rejection', [{ status: 'prospect', rows: [A('DENY')] }, { status: 'prospect', rows: [A('INVALID')] }], 'qualified'],
     ['a deferred outreach payment does not hold an authorized send back', [{ status: 'prospect', outreach: true, rows: [A('AUTO_OUTREACH'), { ...A('OWNER_PAYMENT'), dimension: 'payment' }] }], 'ready_to_acquire'],
+    ['the publisher step on a send-first outreach path does not hold an authorized send back', [{ status: 'prospect', outreach: true, sendFirst: true, rows: [A('AUTO_OUTREACH'), { ...A('OWNER_HUMAN_STEP'), dimension: 'execution', instance_kind: '-' }] }], 'ready_to_acquire'],
+    ['the same step on a submit-first outreach path is pending', [{ status: 'prospect', outreach: true, sendFirst: false, rows: [A('AUTO_OUTREACH'), { ...A('OWNER_HUMAN_STEP'), dimension: 'execution', instance_kind: '-' }] }], 'qualified'],
     ['a leased prospect is acquiring, not pending', [{ status: 'prospect', claimed_at: NOW, rows: [A('AUTO_FREE')] }], 'acquiring'],
     ['live beside a leased sibling is still acquiring', [{ status: 'live', rows: [A('OWNER_FREE', true)] }, { status: 'prospect', claimed_at: NOW, rows: [A('AUTO_FREE')] }], 'acquiring'],
     ['live beside an owner-held sibling is qualified, not acquired', [{ status: 'live', rows: [A('OWNER_FREE', true)] }, { status: 'awaiting_owner', rows: [A('OWNER_FREE')] }], 'qualified'],
