@@ -233,13 +233,18 @@ async function login(page, creds) {
     return (await page.locator(`${SELECTORS.loginPass}:visible`).count()) === 0 && isTrustedSiteOneUrl(page.url());
   };
   let ok = false;
+  let lastError = null;
   for (let i = 0; i < 3 && !ok; i += 1) {
     if (i) await page.waitForTimeout(3000);
-    ok = await attempt();
+    // A transient navigation / wait failure is one failed attempt of three;
+    // an off-host redirect or missing fields is run-level at once (Codex r4
+    // P2). Exhaustion is run-level too: nothing was submitted, retry tomorrow.
+    try { ok = await attempt(); }
+    catch (e) { if (e.runLevel) throw e; lastError = e; logger.warn(`[siteone-bot] login attempt ${i + 1} failed: ${String(e.message).slice(0, 120)}`); }
   }
   if (!ok) {
     const err = (await page.locator(SELECTORS.loginError).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-    throw runLevel(`siteone login failed${err ? `: ${err}` : ''}`);
+    throw runLevel(`siteone login failed${err ? `: ${err}` : lastError ? `: ${String(lastError.message).slice(0, 120)}` : ''}`);
   }
 }
 
@@ -357,7 +362,12 @@ async function verifyBillToAccount(page, { evidence, upload }) {
   if (await visible(page, SELECTORS.mfaField)) await refuse('mfa_required', 'SiteOne checkout asks for a verification code — bot never supplies it');
   if (await visible(page, SELECTORS.cardField)) await refuse('card_required', 'SiteOne checkout asks for card entry — bot never supplies it');
   const terms = page.locator(SELECTORS.termsCheckbox).first();
-  if ((await terms.count()) && !(await terms.isChecked().catch(() => true))) await refuse('terms_required', 'SiteOne checkout requires accepting terms — owner action');
+  if (await terms.count()) {
+    // Fail CLOSED on an unreadable state (Codex r4 P2): unknown ≠ accepted.
+    let accepted = null;
+    try { accepted = await terms.isChecked(); } catch { await refuse('terms_unreadable', 'SiteOne checkout shows a terms checkbox whose state could not be read — owner action'); }
+    if (!accepted) await refuse('terms_required', 'SiteOne checkout requires accepting terms — owner action');
+  }
   const bill = page.locator(SELECTORS.billToAccount).first();
   if (!(await bill.count())) await refuse('no_bill_to_account', 'bill-to-account option not offered at checkout');
   try { await bill.click({ timeout: 5000 }); }

@@ -206,7 +206,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.cartTotal) return el({ count: 1, text: '$99.00' });
       if (sel === S.checkoutButton) return el({ count: 1 });
       if (sel === S.mfaField || sel === S.cardField) return el();
-      if (sel === S.termsCheckbox) return el();
+      if (sel === S.termsCheckbox) return el(st.termsUnreadable ? { count: 1 } : {}); // count 1 with no `checked` → isChecked throws
       if (sel === S.billToAccount) return el({ count: 1, checked: st.accountChecked === true, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } });
       if (sel === S.billToAccountSelected) return el({ count: st.accountChecked ? 1 : 0 });
       if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountText === undefined ? 'Account # 12345' : st.accountText });
@@ -217,7 +217,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       return el();
     };
     const page = {
-      goto: async (u) => { st.url = u; },
+      goto: async (u) => { if (st.gotoFailOnce) { st.gotoFailOnce = false; throw new Error('net::ERR_TIMED_OUT'); } st.url = u; },
       url: () => st.url,
       evaluate: async () => 'ok',
       waitForFunction: async () => {},
@@ -248,6 +248,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     ['ship_to_mismatch', { shipToText: 'Ship to: 9 Other Rd, Venice, FL 34285' }],
     ['ship_to_unverified', { shipToText: null }],
     ['account_ambiguous', { accountCount: 2 }],
+    ['terms_unreadable', { termsUnreadable: true }], // unknown ≠ accepted (r4 P2)
     ['account_hidden', { accountVisible: false }], // a hidden node carrying the right number is not what the checkout shows
     ['ship_to_hidden', { shipToVisible: false }],
     ['checkout_total_ambiguous', { totalCount: 2 }], // hidden desktop/mobile duplicate
@@ -290,6 +291,13 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ accountSelectable: false });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
     expect(st.placeClicked).toBe(0);
+  });
+
+  test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ gotoFailOnce: true });
+    const r = await s1.place(args(), deps);
+    expect(r).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.loggedIn).toBe(true);
   });
 
   test('bill-to-account confirmed → checkout total cap-checked → one place-order click, cart left to the vendor', async () => {

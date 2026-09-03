@@ -198,6 +198,10 @@ function packagedOrderQuantity({ requested, unit, requestUnit, packRaw }) {
   if (!requestedOz || !packOz) return { error: 'no_pack_size', message: `price row pack size "${packRaw || '—'}" cannot be read against a request in ${requestUnit}` };
   const reqDim = unitDefinition(unit)?.dimension;
   const packDim = unitDefinition(pack.unit)?.dimension;
+  // The bare ounce family (oz / ounce) is deliberately unresolved — weight or
+  // volume is a human's call (inventory-unit-review.js) — so it never
+  // becomes a package count sent to a vendor (Codex r4 P1).
+  if (reqDim === 'ambiguous' || packDim === 'ambiguous') return { error: 'ambiguous_unit', message: `${reqDim === 'ambiguous' ? `request unit ${requestUnit}` : `price row pack size "${packRaw}"`} is an unresolved ounce (weight or volume?) — resolve it in Unit Review first` };
   if (measurable(reqDim) && measurable(packDim) && reqDim !== packDim) return { error: 'pack_unit_mismatch', message: `price row pack size "${packRaw}" (${packDim}) does not match a request in ${requestUnit} (${reqDim})` };
   const quantity = Math.ceil(requestedOz / packOz - 1e-9);
   const orderedQuantity = Number(((quantity * packOz) / convertToOz(1, unit)).toFixed(4));
@@ -330,12 +334,17 @@ async function reserveUnderCaps(conn, ledgerId, cents, { now = new Date(), env =
   });
 }
 
+// Open auto requests with no claim — or whose only claim is a SiteOne DRY
+// RUN park (needs_review, error 'dry_run:…'): nothing was submitted, and the
+// bell says "unset SITEONE_BOT_DRY_RUN to order for real", so the request
+// stays eligible and insertClaim re-arms that row (Codex r4 P1).
+const DRY_RUN_RECLAIMABLE_SQL = "(vendor_orders.status = 'needs_review' AND vendor_orders.error LIKE 'dry_run:%')";
 async function findDispatchable(conn = db) {
   return conn('product_restock_requests as prr')
     .leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id')
     .where('prr.status', 'open')
     .where('prr.source', 'auto_reorder')
-    .whereNull('vo.id')
+    .where((q) => q.whereNull('vo.id').orWhereRaw("(vo.status = 'needs_review' AND vo.error LIKE 'dry_run:%')"))
     .whereRaw("NULLIF(prr.metadata->>'vendorId', '') IS NOT NULL")
     .select('prr.id')
     .orderBy('prr.created_at');
@@ -558,13 +567,14 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   const pricing = await vendorPricingFor(trx, product.id, vendor.id);
   const order = pricing?.vendor_sku ? vendorOrderQuantity({ adapter: registry[adapterKey], request, pricing }) : null;
   const payload = { productId: product.id, quantity, unit: request.unit || null, vendorSku: pricing?.vendor_sku || null, vendorQuantity: order?.quantity ?? null, packSize: order?.packSize ?? null, orderedQuantity: order?.orderedQuantity ?? null };
-  const inserted = await trx('vendor_orders').insert({
-    restock_request_id: request.id,
-    vendor_id: vendor.id,
-    adapter: adapterKey,
-    status: 'placing',
-    request_payload: JSON.stringify(payload),
-  }).onConflict('restock_request_id').ignore().returning('*');
+  const claimRow = { restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, status: 'placing', request_payload: JSON.stringify(payload) };
+  // The unique claim is re-armed ONLY over a dry-run park (nothing was ever
+  // submitted); every other existing row wins the conflict (at-most-once).
+  const inserted = await trx('vendor_orders').insert(claimRow)
+    .onConflict('restock_request_id')
+    .merge({ ...claimRow, error: null, evidence: null, amount_cents: null, placed_at: null, external_order_number: null, response_payload: null, updated_at: new Date() })
+    .whereRaw(DRY_RUN_RECLAIMABLE_SQL)
+    .returning('*');
   const ledger = inserted && inserted[0];
   return { ledger, pricing, order };
 }

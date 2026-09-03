@@ -913,29 +913,37 @@ function initScheduledJobs() {
     // whose bell never landed, is a possibly-submitted order that a flipped
     // switch must not hide. Own job_health row (nested runExclusive): a
     // failed order goes red on ITS row, not the sweep's.
-    const dispatch = async () => {
-      try {
-        await runExclusive('vendor-order-dispatch', () =>
-          require('./procurement/order-dispatch').runVendorOrderDispatch());
-      } catch (err) {
-        logger.error(`Vendor order dispatch failed: ${err.message}`);
-      }
-    };
-    if (!gateEnvValue('GATE_AUTO_REORDER')) { await dispatch(); return; }
-    // Sweep → dispatch as ONE cross-replica sequence under the sweep's lock
-    // (Codex r3 P2): a deploy overlap cannot have pod A's sweep raise a
-    // request (bell suppressed because the dispatcher will order) while pod
-    // B's dispatcher, holding its own lease from an earlier snapshot, skips
-    // it until tomorrow. The dispatcher also rescans before releasing.
-    logger.info('Running: Supplies auto-reorder sweep');
+    // Sweep → dispatch as ONE cross-replica sequence under the sweep's lease
+    // (Codex r3 P2 / r4 P2): the dispatcher's lease is only ever taken NESTED
+    // here — gate on or off — so no replica can hold it outside the sequence
+    // and a request raised by one pod is never left for another pod's
+    // already-running dispatcher to miss. A sweep failure is retained, the
+    // dispatcher still runs (reconciliation), then the failure is rethrown so
+    // the sweep's job_health goes red (Codex r4 P1). The dispatcher's own
+    // failures go red on ITS row, inside runVendorOrderDispatch.
     try {
       await runExclusive('supplies-auto-reorder', async () => {
-        try {
-          await require('./procurement/auto-reorder').runSuppliesAutoReorderSweep();
-        } catch (err) {
-          logger.error(`Supplies auto-reorder sweep failed: ${err.message}`);
+        let sweepError = null;
+        if (gateEnvValue('GATE_AUTO_REORDER')) {
+          logger.info('Running: Supplies auto-reorder sweep');
+          try {
+            await require('./procurement/auto-reorder').runSuppliesAutoReorderSweep();
+          } catch (err) {
+            sweepError = err;
+            logger.error(`Supplies auto-reorder sweep failed: ${err.message}`);
+          }
         }
-        await dispatch();
+        try {
+          const dispatched = await runExclusive('vendor-order-dispatch', () =>
+            require('./procurement/order-dispatch').runVendorOrderDispatch());
+          // Nested under the sequence lease this cannot be held elsewhere; a
+          // skip is an error to surface, not a silent day's delay.
+          if (dispatched?.skipped === true) throw new Error(`vendor order dispatch skipped (${dispatched.reason || 'lease held'})`);
+        } catch (err) {
+          logger.error(`Vendor order dispatch failed: ${err.message}`);
+          if (!sweepError) sweepError = err;
+        }
+        if (sweepError) throw sweepError;
       });
     } catch (err) {
       logger.error(`Supplies auto-reorder sequence failed: ${err.message}`);

@@ -64,7 +64,7 @@ jest.mock('../models/db', () => {
       mockState.ledgerRows.push(saved);
       return [saved];
     };
-    q.insert = (r) => { row = r; return { onConflict: () => ({ ignore: () => ({ returning }) }), returning }; };
+    q.insert = (r) => { row = r; return { onConflict: () => ({ ignore: () => ({ returning }), merge: () => ({ whereRaw: () => ({ returning }), returning }) }), returning }; };
     q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : []).then(ok, err);
     return q;
   };
@@ -323,6 +323,8 @@ test('vendorOrderQuantity: packages by pack size in the same dimension; counts f
   expect(q(sm, '500', 'each', '500')).toEqual({ quantity: 500, packSize: null, orderedQuantity: 500 });
   expect(q(sm, '500', 'fl_oz', '500').error).toBe('count_unit_required');
   expect(q(s1, '0', 'fl_oz', '1 gal').error).toBe('no_quantity');
+  expect(q(s1, '32', 'oz', '1 gal').error).toBe('ambiguous_unit'); // bare ounce: weight or volume is a human's call (r4 P1)
+  expect(q(s1, '128', 'fl_oz', '16 oz').error).toBe('ambiguous_unit');
 });
 
 test.each([

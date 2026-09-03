@@ -86,9 +86,18 @@ function revokeBlocker(row) {
 // P2).
 async function revoke(row) {
   await db.transaction(async (trx) => {
-    const locked = await trx('vendor_orders').where({ id: row.id }).forUpdate().first('status', 'placed_at', 'evidence');
+    const locked = await trx('vendor_orders').where({ id: row.id }).forUpdate().first('status', 'placed_at', 'evidence', 'external_order_number', 'amount_cents', 'updated_at');
     if (!locked || !(locked.status === 'placed' || (locked.status === 'needs_review' && locked.placed_at))) throw new Error(`ledger row is ${locked?.status || 'missing'} — not a dispatched order; re-run`);
-    if (parseEvidence(locked.evidence).revokedAt) throw new Error(`ledger row was revoked at ${parseEvidence(locked.evidence).revokedAt} by a concurrent run — nothing to do`);
+    const lockedEvidence = parseEvidence(locked.evidence);
+    if (lockedEvidence.revokedAt) throw new Error(`ledger row was revoked at ${lockedEvidence.revokedAt} by a concurrent run — nothing to do`);
+    // The operator's decision was made on the row they READ: if a late
+    // placement landed in between (order number, total, latePlacementAt —
+    // or any write at all), the decision is stale — re-read and decide again
+    // (Codex r4 P1).
+    const same = (a, b) => String(a ?? '') === String(b ?? '');
+    const changed = !same(locked.external_order_number, row.external_order_number) || !same(locked.amount_cents, row.amount_cents)
+      || !same(lockedEvidence.latePlacementAt, parseEvidence(row.evidence).latePlacementAt) || !same(new Date(locked.updated_at).toISOString(), new Date(row.updated_at).toISOString());
+    if (changed) throw new Error(`ledger row changed since you read it (now ${locked.status}, #${locked.external_order_number || '—'} ${dollars(locked.amount_cents)}${lockedEvidence.latePlacementAt ? `, order confirmed late at ${lockedEvidence.latePlacementAt}` : ''}) — re-run to decide on the current facts`);
     const revokedAt = new Date().toISOString();
     await trx('vendor_orders').where({ id: row.id }).update({
       status: 'needs_review',

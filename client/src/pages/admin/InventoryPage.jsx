@@ -2802,7 +2802,8 @@ function RestockRequestsTab({ showToast, onUpdate }) {
         method: "POST",
         body: JSON.stringify({
           action,
-          quantity: draft.quantity || request.requestedQuantity || null,
+          // The same figure the input shows: what the automatic order actually bought first (packages round up), else the requested amount.
+          quantity: draft.quantity || request.order?.orderedQuantity || request.requestedQuantity || null,
           unit: draft.unit || request.unit || request.inventoryUnit || null,
           note: draft.note || null,
         }),
