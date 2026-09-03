@@ -181,8 +181,10 @@ function buildRow(policy, result, rowKind = 'chain') {
     policy: applyReplayLane(policyLabel(policy)).slice(0, 120),
     ok: !!result?.ok,
     // WHY the chain failed, from the first leg's code — the class the alert
-    // rules and eval selection key on; null on success.
-    error_class: result?.ok ? null : classifyFailure(failures[0]?.reason || result?.reason || 'error'),
+    // rules and eval selection key on; null on success. A rejection from the
+    // caller's validate hook keeps that provenance (its codes are the
+    // lane's own vocabulary — model-quality, not plumbing).
+    error_class: result?.ok ? null : classifyFailure(failures[0]?.reason || result?.reason || 'error', { validator: failures[0]?.validator === true }),
     provider: result?.ok ? result.provider || null : null,
     model: result?.ok ? result.model || null : null,
     fallback_used: !!result?.fallbackUsed,
@@ -193,6 +195,7 @@ function buildRow(policy, result, rowKind = 'chain') {
         // Reasons are short codes or validator messages — cap length so a
         // pathological error string can't bloat the row.
         reason: String(f.reason || '').slice(0, 300),
+        ...(f.validator === true ? { validator: true } : {}),
       })))
       : null,
   };
@@ -446,43 +449,66 @@ async function upsertSessionRow(row) {
  * their `finally` once the SSE loop ends (however it ends); never throws into
  * them. Re-recording the same session id updates its row (see
  * upsertSessionRow). `latency_ms` is the wall time since `startedAt`: the
- * run for one-shot runners, the longest turn for the assistant. `agentId` is
- * accepted for the runners' convenience but has no column yet — the session
- * id (provider_ref) resolves it in the Console.
+ * run for one-shot runners, the longest turn for the assistant. `failure`
+ * is the runner's OWN outcome — null on success, else the Error it threw or
+ * a short code (`initial_message_failed`, `missing_draft`,
+ * `session_error_event`) — combined with the remote status: the row is ok
+ * only when the session is not terminated AND the runner succeeded, so an
+ * application-level failure is never hidden behind an idle session. When
+ * the usage GET itself fails (429, network, the 15 s timeout) the session
+ * is still written — from the id the runner already holds, with null token
+ * counts a later re-record fills in (GREATEST treats null as absent) — so a
+ * billed session never vanishes from the ledger during API degradation.
+ * `agentId` is accepted for the runners' convenience but has no column yet —
+ * the session id (provider_ref) resolves it in the Console.
  */
-async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null } = {}) {
+async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, failure = null } = {}) {
   try {
     if (!ledgerEnabled() || !sessionId) return null;
-    const { anthropicSessionsFetch } = require('./intelligence-bar/managed-agents-ops-tools');
-    const session = await anthropicSessionsFetch(`/v1/sessions/${encodeURIComponent(sessionId)}`);
+    let session = null;
+    try {
+      const { anthropicSessionsFetch } = require('./intelligence-bar/managed-agents-ops-tools');
+      session = await anthropicSessionsFetch(`/v1/sessions/${encodeURIComponent(sessionId)}`);
+    } catch (err) {
+      logger.warn(`[llm-dispatch-metrics] session ${sessionId} usage unavailable (${err.message}) — recording the session without token counts`);
+    }
     const tokens = extractUsage('anthropic', { usage: session?.usage });
     const terminated = session?.status === 'terminated';
+    const errorCode = terminated ? 'session_terminated' : failureCode(failure);
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
-    logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId || 'agent?'}) usage in=${tokens.input_tokens} out=${tokens.output_tokens}`);
+    logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId || 'agent?'}) usage in=${tokens.input_tokens} out=${tokens.output_tokens}${errorCode ? ` ${errorCode}` : ''}`);
     return await upsertSessionRow({
       ...contextColumns(ctx),
       lane_id: lane,
       row_kind: 'session',
       policy: String(lane || `anthropic/${model || 'session'}`).slice(0, 120),
-      ok: !terminated,
+      ok: !errorCode,
       provider: 'anthropic',
       requested_model: model ? String(model).slice(0, 120) : null,
-      served_model: String(session?.model || model || '').slice(0, 120) || null,
+      served_model: session?.model ? String(session.model).slice(0, 120) : null,
       input_tokens: tokens.input_tokens,
       cached_input_tokens: tokens.cached_input_tokens,
       cache_write_tokens: tokens.cache_write_tokens,
       output_tokens: tokens.output_tokens,
       reasoning_tokens: tokens.reasoning_tokens,
       latency_ms: startedAt ? toCount(Date.now() - Number(startedAt)) : null,
-      error_code: terminated ? 'session_terminated' : null,
-      error_class: terminated ? classifyFailure('session_terminated') : null,
+      error_code: errorCode,
+      error_class: errorCode ? classifyFailure(errorCode) : null,
       provider_ref: String(sessionId).slice(0, 120),
     });
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] recordSessionUsage skipped: ${err.message}`);
     return null;
   }
+}
+
+// The runner's outcome as a ledger error code: a thrown Error keeps its own
+// `code` when it has one, otherwise `runner_error`; a string is a code.
+function failureCode(failure) {
+  if (!failure) return null;
+  if (failure instanceof Error) return String(failure.code || 'runner_error').slice(0, 80);
+  return String(failure).slice(0, 80);
 }
 
 /**

@@ -27,6 +27,9 @@ exports.up = async function up(knex) {
     t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
     t.index(['created_at'], 'llm_call_traces_created_at_idx');
     t.index(['run_id'], 'llm_call_traces_run_id_idx');
+    // The cascade from the daily 30-day ledger prune looks children up by
+    // call_id for every deleted parent; it is also the call → trace lookup.
+    t.index(['call_id'], 'llm_call_traces_call_id_idx');
   });
 };
 

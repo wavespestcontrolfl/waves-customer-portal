@@ -152,6 +152,7 @@ class ManagedAssistant {
 
     let sessionId = conversation.managed_session_id;
     const turnStartedAt = Date.now();
+    let failure = null;
     try {
 
       // 4. Create or resume Managed Agent session
@@ -211,6 +212,7 @@ class ManagedAssistant {
       };
 
     } catch (err) {
+      failure = err;
       logger.error(`[managed-assistant] Error: ${err.message}`);
       return {
         reply: "I'm having trouble right now. Let me connect you with our team. — Waves Pest Control",
@@ -221,8 +223,8 @@ class ManagedAssistant {
       // so every turn re-records the session's cumulative usage and the
       // recorder updates that session's single row in place (latency = this
       // turn). Runs on the error path too — a turn that threw mid-stream
-      // still consumed tokens.
-      if (sessionId) void recordSessionUsage({ laneId: 'agent_assistant', sessionId, agentId: MANAGED_AGENT_ID, model: AGENT_CONFIG.model, startedAt: turnStartedAt });
+      // still consumed tokens, and marks the session row failed for good.
+      if (sessionId) void recordSessionUsage({ laneId: 'agent_assistant', sessionId, agentId: MANAGED_AGENT_ID, model: AGENT_CONFIG.model, startedAt: turnStartedAt, failure });
     }
   }
 

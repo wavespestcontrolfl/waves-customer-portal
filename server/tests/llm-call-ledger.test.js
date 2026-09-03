@@ -352,6 +352,25 @@ describe('llm call ledger', () => {
       expect(calls.map((c) => c.ok)).toEqual([false, true]);
     });
 
+    it('keeps validator provenance: a validate-hook rejection classifies as instruction / incomplete, and the failure entry says so', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      global.fetch = fetchJson(OPENAI_BODY);
+      mockAnthropicCreate.mockResolvedValue(ANTHROPIC_MESSAGE);
+      const { call } = load();
+      const policy = { name: 'ledgerValidate', primary: { provider: 'openai', model: 'o' }, fallback: { provider: 'anthropic', model: 'a' } };
+      const out = await call.dispatchWithFallback(policy, { text: 't' }, { validate: () => 'trade_name' });
+      expect(out).toMatchObject({ ok: false, reason: 'all_providers_failed' });
+      expect(out.failures).toEqual([expect.objectContaining({ reason: 'trade_name', validator: true }), expect.objectContaining({ reason: 'trade_name', validator: true })]);
+      await flush();
+      const chain = ledgerRows().find((r) => r.row_kind === 'chain');
+      expect(chain).toMatchObject({ ok: false, error_class: 'instruction' });
+      expect(JSON.parse(chain.failure_reasons)[0]).toMatchObject({ reason: 'trade_name', validator: true });
+      mockInsert.mockClear();
+      await call.dispatchWithFallback(policy, { text: 't' }, { validate: () => 'missing_summary' });
+      await flush();
+      expect(ledgerRows().find((r) => r.row_kind === 'chain')).toMatchObject({ ok: false, error_class: 'incomplete' });
+    });
+
     it('classifies a failed chain by its first failure reason', async () => {
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       global.fetch = fetchJson({}, { ok: false, status: 503 });
@@ -380,13 +399,36 @@ describe('llm call ledger', () => {
       expect(row.latency_ms).toBeGreaterThanOrEqual(1500);
     });
 
-    it('marks a terminated session as failed, and swallows fetch errors', async () => {
+    it('marks a terminated session as failed', async () => {
       global.fetch = fetchJson({ id: 's', status: 'terminated', usage: { input_tokens: 1, output_tokens: 1 } });
       const { metrics } = load();
       await metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's' });
       expect(ledgerRows()[0]).toMatchObject({ ok: false, error_code: 'session_terminated', error_class: 'infrastructure' });
+    });
+
+    it("combines the runner's own outcome with the remote status — an idle session behind a failed run is a failed row", async () => {
+      global.fetch = fetchJson({ id: 's', status: 'idle', usage: { input_tokens: 10, output_tokens: 2 } });
+      const { metrics } = load();
+      await metrics.recordSessionUsage({ laneId: 'agent_bi', sessionId: 's', failure: new Error('socket hang up') });
+      await metrics.recordSessionUsage({ laneId: 'agent_content', sessionId: 's', failure: 'missing_draft' });
+      await metrics.recordSessionUsage({ laneId: 'agent_backlink', sessionId: 's', failure: 'session_error_event' });
+      await metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's', failure: null });
+      expect(ledgerRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([
+        [false, 'runner_error', 'infrastructure', 10],
+        [false, 'missing_draft', 'incomplete', 10],
+        [false, 'session_error_event', 'provider', 10],
+        [true, null, null, 10],
+      ]);
+    });
+
+    it('still writes the session (null token counts) when the usage GET fails, so a billed session never vanishes', async () => {
       global.fetch = jest.fn(() => Promise.reject(new Error('network')));
-      await expect(metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's2' })).resolves.toBeNull();
+      const { metrics } = load();
+      await expect(metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's2', model: 'req-m', startedAt: Date.now() - 10 })).resolves.toEqual(expect.any(Number));
+      expect(ledgerRows()[0]).toMatchObject({ row_kind: 'session', provider_ref: 's2', ok: true, error_code: null, input_tokens: null, output_tokens: null, requested_model: 'req-m', served_model: null });
+      global.fetch = jest.fn(() => Promise.reject(new Error('network')));
+      await metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's3', failure: 'streaming_failed' });
+      expect(ledgerRows()[1]).toMatchObject({ provider_ref: 's3', ok: false, error_code: 'streaming_failed', input_tokens: null });
     });
 
     it('writes ONE atomic upsert keyed by session id whose every merged column is monotone (no writer ordering assumed)', async () => {

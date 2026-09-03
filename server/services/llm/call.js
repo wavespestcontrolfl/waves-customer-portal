@@ -262,12 +262,14 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
     // Latency includes the body read; usage is recorded on every billed
     // outcome below (incomplete and empty_json cost tokens too).
     const served = { servedModel: data?.model || null, providerRef: data?.id || null, usage: usageOf('openai', data), latencyMs: elapsedMs(t0) };
+    // Extracted before the incomplete branch: the partial output of a
+    // max_output_tokens cut-off is exactly what its trace needs to show.
+    const out = extractOpenAIText(data);
     if (data?.status && data.status !== 'completed') {
       logger.warn(`[llm] OpenAI response ${data.status}${data.incomplete_details?.reason ? ` (${data.incomplete_details.reason})` : ''}`);
-      recordLedgerCall(base, { ...served, ok: false, errorCode: 'openai_incomplete' });
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'openai_incomplete', response: out });
       return { ok: false, reason: 'openai_incomplete' };
     }
-    const out = extractOpenAIText(data);
     const json = jsonMode ? parseLooseJson(out) : null;
     if (jsonMode && !json) {
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json', response: out });
@@ -474,7 +476,12 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
     let rejection = payload.jsonMode === false && !String(result.text || '').trim()
       ? 'empty_text'
       : null;
+    // The caller's validate hook owns its codes (`too_long`, `trade_name`,
+    // `missing_summary`…): a rejection from it is a model-quality failure,
+    // so the failure entry carries that provenance for classifyFailure.
+    let fromValidator = false;
     if (typeof validate === 'function') {
+      fromValidator = true;
       try {
         rejection = validate(result, route) || null;
       } catch (err) {
@@ -492,6 +499,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
         provider: route.provider,
         model: route.model,
         reason: truncated ? `${rejection} (response truncated at max_tokens=${payload.maxTokens ?? '?'})` : String(rejection),
+        ...(fromValidator ? { validator: true } : {}),
       });
       continue;
     }

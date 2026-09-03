@@ -84,8 +84,10 @@ const BIAgent = {
 
     // Call ledger (never throws): one session row with the session's token
     // usage, written however the session ends from here on — a failed first
-    // event, a stream that throws or times out, all still consumed tokens.
-    // Upserted by session id, so re-billing is safe.
+    // event, a stream that throws or times out, all still consumed tokens —
+    // carrying this runner's own outcome. Upserted by session id, so
+    // re-billing is safe.
+    let failure = null;
     try {
       await apiCall('POST', `/sessions/${sessionId}/events`, {
         type: 'user', content: [{ type: 'text', text: prompt }],
@@ -125,11 +127,14 @@ const BIAgent = {
         }
 
         if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') break;
-        if (event === 'error') { logger.error(`[bi-agent] Error: ${JSON.stringify(data)}`); break; }
+        if (event === 'error') { logger.error(`[bi-agent] Error: ${JSON.stringify(data)}`); failure = 'session_error_event'; break; }
       }
 
+    } catch (err) {
+      failure = err;
+      throw err;
     } finally {
-      void recordSessionUsage({ laneId: 'agent_bi', sessionId, agentId: BI_AGENT_ID, model: BI_AGENT_CONFIG.model, startedAt: startTime });
+      void recordSessionUsage({ laneId: 'agent_bi', sessionId, agentId: BI_AGENT_ID, model: BI_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
 
     const durationSeconds = Math.round((Date.now() - startTime) / 1000);

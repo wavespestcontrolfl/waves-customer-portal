@@ -135,6 +135,26 @@ describe('recordTrace', () => {
     expect(typeof traceRows()[0].call_id).toBe('number');
   });
 
+  it('an incomplete OpenAI response (max_output_tokens) traces its PARTIAL output', async () => {
+    process.env.GATE_LLM_CALL_LEDGER = 'true';
+    process.env.OPENAI_API_KEY = 'k';
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({
+      id: 'resp_p', model: 'm', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'partial answer 941-555-1234' }] }],
+      usage: { input_tokens: 5, output_tokens: 50 },
+    }) }));
+    try {
+      let call;
+      jest.isolateModules(() => { call = require('../services/llm/call'); });
+      expect(await call.callOpenAI({ model: 'm', system: 'sys', text: 'ask', laneId: 'traced_plain', maxTokens: 50 })).toEqual({ ok: false, reason: 'openai_incomplete' });
+      await flush();
+      expect(traceRows()).toEqual([expect.objectContaining({ lane_id: 'traced_plain', system_redacted: 'sys', prompt_redacted: 'ask', response_redacted: 'partial answer [phone]' })]);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
   it('ledgerCall without a trace option records the call only', async () => {
     process.env.GATE_LLM_CALL_LEDGER = 'true';
     const { ledgerCall } = load();

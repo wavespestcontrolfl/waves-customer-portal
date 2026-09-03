@@ -157,6 +157,7 @@ const LeadResponseAgent = {
     prompt += `\n\nFollow your workflow: analyze → gather context → draft response → decide auto-send vs queue → set up follow-up → save report.`;
 
     let sessionId = null;
+    let failure = null;
     try {
       const session = await apiCall('POST', '/sessions', {
         agent: LEAD_AGENT_ID,
@@ -293,6 +294,7 @@ const LeadResponseAgent = {
         if (event === 'done' || event === 'session_complete' || event === 'session.status_idle' || stopReason === 'end_turn') break;
         if (event === 'error' || event === 'session.error') {
           logger.error(`[lead-agent] Agent error: ${JSON.stringify(data)}`);
+          failure = 'session_error_event';
           break;
         }
       }
@@ -311,6 +313,7 @@ const LeadResponseAgent = {
       };
 
     } catch (err) {
+      failure = err;
       logger.error(`[lead-agent] Failed for lead ${lead.leadId}: ${err.message}`);
 
       // Non-fatal — the webhook already sent a basic auto-reply as fallback
@@ -318,8 +321,9 @@ const LeadResponseAgent = {
     } finally {
       // Call ledger (never throws): one session row with the session's token
       // usage, written however the session ends — a stream that throws still
-      // consumed tokens. No session id = nothing was created, nothing to bill.
-      if (sessionId) void recordSessionUsage({ laneId: 'agent_lead', sessionId, agentId: LEAD_AGENT_ID, model: LEAD_RESPONSE_AGENT_CONFIG.model, startedAt: startTime });
+      // consumed tokens — carrying this runner's own outcome. No session id =
+      // nothing was created, nothing to bill.
+      if (sessionId) void recordSessionUsage({ laneId: 'agent_lead', sessionId, agentId: LEAD_AGENT_ID, model: LEAD_RESPONSE_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
   },
 };

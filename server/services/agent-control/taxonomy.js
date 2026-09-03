@@ -137,7 +137,8 @@ function classifyFailure(errorCode, ctx = {}) {
   if (code === 'judge_failed') return 'incorrect';
   if (code === 'eval_regression') return 'regression';
   // 401/403/404 are provider-side too (credentials, access, model not found) — Codex r12.
-  if (code === 'no_key' || code === 'all_providers_failed' || /_(5\d\d|429|529|503|401|403|404)$/.test(code)) return 'provider';
+  // `session_error_event`: the Managed Agents stream emitted an error event.
+  if (code === 'no_key' || code === 'all_providers_failed' || code === 'session_error_event' || /_(5\d\d|429|529|503|401|403|404)$/.test(code)) return 'provider';
   // status-qualified 408s (Codex r13) and the adapters' own deadlines —
   // `<provider>_timeout` from llm/call.js providerErrorReason (Codex on #3793).
   if (code === 'timeout_budget_exhausted' || code === 'timeout' || /_(408|timeout)$/.test(code)) return 'timeout';

@@ -58,6 +58,7 @@ describeOrSkip('llm call ledger schema', () => {
     const names = rows.map((r) => r.indexname);
     expect(names).toContain('llm_call_traces_created_at_idx');
     expect(names).toContain('llm_call_traces_run_id_idx');
+    expect(names).toContain('llm_call_traces_call_id_idx');
 
     const [call] = await knex('llm_dispatch_log')
       .insert({ policy: '__schema_test__', ok: true, row_kind: 'call', provider: 'openai', input_tokens: 1, output_tokens: 1 })

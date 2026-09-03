@@ -73,6 +73,7 @@ describe('agent-control taxonomy', () => {
     ['anthropic_timeout', {}, 'timeout'],
     ['gemini_timeout', {}, 'timeout'],
     ['anthropic_refusal', {}, 'instruction'],
+    ['session_error_event', {}, 'provider'],
     ['openai_incomplete', { pastBudget: true }, 'timeout'],
     ['openai_incomplete', {}, 'incomplete'],
     ['budget_exhausted', {}, 'budget'],

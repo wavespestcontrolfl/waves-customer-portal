@@ -135,8 +135,10 @@ const ContentAgent = {
 
     // Call ledger (never throws): one session row with the session's token
     // usage, written however the session ends from here on — a failed first
-    // event, a stream that throws or times out, all still consumed tokens.
-    // Upserted by session id, so re-billing is safe.
+    // event, a stream that throws or times out, all still consumed tokens —
+    // carrying this runner's own outcome. Upserted by session id, so
+    // re-billing is safe.
+    let failure = null;
     try {
       // Send the user prompt
       await apiCall('POST', `/sessions/${sessionId}/events`, {
@@ -217,12 +219,16 @@ const ContentAgent = {
         // ── Error ──
         if (event === 'error') {
           logger.error(`[content-agent] Agent error: ${JSON.stringify(data)}`);
+          failure = 'session_error_event';
           break;
         }
       }
 
+    } catch (err) {
+      failure = err;
+      throw err;
     } finally {
-      void recordSessionUsage({ laneId: 'agent_content', sessionId, agentId: CONTENT_AGENT_ID, model: CONTENT_AGENT_CONFIG.model, startedAt: startTime });
+      void recordSessionUsage({ laneId: 'agent_content', sessionId, agentId: CONTENT_AGENT_ID, model: CONTENT_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
 
     const durationMs = Date.now() - startTime;
