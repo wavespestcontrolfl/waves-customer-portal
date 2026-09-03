@@ -11238,13 +11238,34 @@ const CallRecordingProcessor = {
           try {
             const clarifyAni = firstExternalPhone(call.from_phone);
             const hasStreet = !!String(extracted.address_line1 || '').trim();
-            const unitOwed = clarifyUnitOwed;
+            // The ACTIVE missing_unit_number card is the source of truth for
+            // the unit ask (codex post-trim r2 P1 ×2): on a reprocess the
+            // card insert above no-ops against the open card, so (a) the
+            // building the customer is asked about must be the one on that
+            // surviving card, not this run's validation, and (b) a card
+            // that already carries the customer's texted reply is answered
+            // — parkClarifyAsk lets a consumed ask fall through to a fresh
+            // one, so the dedupe has to happen here.
+            let unitCard = null;
+            if (clarifyUnitOwed) {
+              const row = await db('triage_items')
+                .where({ call_log_id: call.id, reason_code: 'missing_unit_number' })
+                .whereIn('status', ['open', 'in_progress'])
+                .first('payload');
+              let payload = row?.payload;
+              if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
+              unitCard = row ? { answered: !!payload?.customer_reply_unit, building: payload?.unit_ask_building || null } : null;
+            }
+            const unitOwed = !!unitCard && !unitCard.answered;
             // The street ask is a NEW-prospect ask (same posture as the
             // dropped-call text): an existing customer's saved address
             // would retire it at approval, and the second-property case
             // belongs to the office callback.
-            const streetOwed = !hasStreet && (!customerId || createdCustomerFromCall === true);
+            const streetOwed = !clarifyUnitOwed && !hasStreet && (!customerId || createdCustomerFromCall === true);
             const clarifyMissing = unitOwed ? ['unit_number'] : (streetOwed ? ['street_address'] : []);
+            if (clarifyUnitOwed && !unitOwed) {
+              logger.info(`[call-proc] clarify unit ask skipped for ${maskSid(callSid)}: ${unitCard ? 'customer already replied on the card' : 'no active card'}`);
+            }
             if (clarifyAni && clarifyMissing.length) {
               // A durable draft must not outlive a lost claim: a peer may
               // have reprocessed the call as spam/DNC meanwhile (codex r1
@@ -11252,11 +11273,11 @@ const CallRecordingProcessor = {
               if (!(await stillOwnsClaim())) return abandonToPeer('the completed-call clarify draft');
               const { parkClarifyAsk } = require('./estimate-clarify-asks');
               const n = v2AddressValidation?.normalized || {};
-              const unitAskBuilding = unitOwed ? {
+              const unitAskBuilding = unitOwed ? (unitCard.building?.street_line_1 ? unitCard.building : {
                 street_line_1: n.street_line_1 || extracted.address_line1 || null,
                 city: n.city || extracted.city || null,
                 postal_code: n.postal_code || extracted.zip || null,
-              } : null;
+              }) : null;
               const parked = await parkClarifyAsk({
                 missing: clarifyMissing,
                 phone: clarifyAni,
