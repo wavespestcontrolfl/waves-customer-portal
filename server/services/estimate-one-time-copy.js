@@ -367,18 +367,27 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
   };
 }
 
-// Row copies for a breakdown, aligned by index: ONE copy per logical job
-// (the V2 exclusion pricer expands one quote into several rows all stamped
-// rodent_exclusion — the first row carries the pack, the component rows
-// stay bare), and included (service-credit) rows never carry copy. Both
-// render paths use this so they cannot diverge (codex #3823 r3 P2s).
+// Keys whose pricer expands ONE logical job into several rows (the V2
+// exclusion pricer stamps wire-mesh / minimum / inspection-fee rows all
+// rodent_exclusion): the first row carries the pack, the component rows
+// stay bare. Every other key is one row = one purchased job — an estimate
+// can legitimately carry two one_time_lawn treatments (weed + lawn pest),
+// and each keeps its copy (codex #3823 r9 P2).
+const COMPONENT_EXPANSION_KEYS = new Set(['rodent_exclusion']);
+
+// Row copies for a breakdown, aligned by index; included (service-credit)
+// rows never carry copy. Both render paths use this so they cannot diverge
+// (codex #3823 r3 P2s).
 function resolveOneTimeRowCopies(rows = []) {
   const seen = new Set();
   return (Array.isArray(rows) ? rows : []).map((row) => {
     if (!row || row.serviceSpecificDiscountApplied === true || row.kind === 'included') return null;
     const copy = resolveOneTimeServiceCopy(row);
-    if (!copy || seen.has(copy.key)) return null;
-    seen.add(copy.key);
+    if (!copy) return null;
+    if (COMPONENT_EXPANSION_KEYS.has(copy.key)) {
+      if (seen.has(copy.key)) return null;
+      seen.add(copy.key);
+    }
     return copy;
   });
 }

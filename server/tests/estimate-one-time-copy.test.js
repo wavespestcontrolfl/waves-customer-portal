@@ -268,15 +268,24 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(resolveOneTimeServiceCopy({ service: 'termite_bait', label: 'Termite Bait Station Installation' }).includes.join(' ')).not.toMatch(/8–10 feet/);
   });
 
-  test('resolveOneTimeRowCopies: one copy per logical job, included rows bare', () => {
+  test('resolveOneTimeRowCopies: exclusion component rows share one copy, included rows bare, two lawn treatments each keep theirs', () => {
     const rows = [
       { service: 'rodent_exclusion', label: 'Exclusion — wire mesh', amount: 400 },
       { service: 'rodent_exclusion', label: 'Exclusion — job minimum', amount: 150 },
       { service: 'rodent_exclusion', label: 'Inspection fee', amount: 0, serviceSpecificDiscountApplied: true },
       { service: 'wasp', label: 'Wasp Nest Treatment', amount: 150, nestRemovalSelected: true },
+      // oneTimeLawn (weed) + lawnPestControl are two purchased jobs both stamped one_time_lawn (codex r9 P2).
+      { service: 'one_time_lawn', label: 'One-Time Lawn Treatment', amount: 120, treatmentType: 'weed' },
+      { service: 'one_time_lawn', label: 'Lawn Pest Control', amount: 140, treatmentType: 'pest' },
     ];
     const copies = resolveOneTimeRowCopies(rows);
-    expect(copies.map((c) => (c ? c.key : null))).toEqual(['rodent_exclusion', null, null, 'wasp']);
+    expect(copies.map((c) => (c ? c.key : null))).toEqual(['rodent_exclusion', null, null, 'wasp', 'one_time_lawn', 'one_time_lawn']);
+  });
+
+  test('one-time lawn copy is neutral across turf basis and treatment type (fertilization is not described as a corrective treatment)', () => {
+    const lawn = ONE_TIME_SERVICE_COPY.one_time_lawn;
+    expect(`${lawn.outcome} ${lawn.includes.join(' ')}`).not.toMatch(/chinch|weed|fungus/i);
+    expect(lawn.hero.sub).not.toMatch(/measured/i);
   });
 
   test('legacy mapper carries the sold-scope flags the pack reads (bed bug warranty, wasp removal, dethatching debris)', () => {
@@ -405,6 +414,29 @@ describe('React /data contract', () => {
     );
     expect(contract.oneTimeBreakdown.items[0].copy.key).toBe('german_roach');
     expect(contract.oneTimeServiceCopy).toBeUndefined();
+  });
+
+  test('aligned one-time-choice rows resolve against their raw counterpart, so a unit-band pest choice stays interior-only and a wasp add-on keeps its removal', () => {
+    const estData = { result: { recurring: { services: [] }, oneTime: { items: [
+      { service: 'one_time_pest', name: 'One-Time Pest Control', price: 189, includedScope: 'interior_unit_general_pest' },
+      { service: 'wasp', name: 'Wasp Nest Treatment', price: 225, nestRemovalSelected: true },
+    ] } } };
+    // The aligned choice breakdown keeps only service/label/amount/detail/kind.
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 414, items: [
+        { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 189, detail: 'Single treatment', kind: 'charge' },
+        { service: 'wasp', label: 'Wasp Nest Treatment', amount: 225, detail: 'Single treatment', kind: 'charge' },
+      ] } },
+      { status: 'sent', show_one_time_option: true },
+      estData,
+    );
+    const [pest, wasp] = contract.oneTimeBreakdown.items;
+    expect(pest.copy.includes).toContain(ONE_TIME_SERVICE_COPY.one_time_pest.interiorUnitBullet);
+    expect(pest.copy.includes).not.toContain(ONE_TIME_SERVICE_COPY.one_time_pest.exteriorBullet);
+    expect(wasp.copy.includes[0]).toBe(ONE_TIME_SERVICE_COPY.wasp.removalBullet);
+    // The contract row itself is unchanged — only the resolver input was enriched.
+    expect(pest.includedScope).toBeUndefined();
+    expect(pest.amount).toBe(189);
   });
 
   test('a WDO quote (regulated certificate surface) gets no chips and no row copy', () => {

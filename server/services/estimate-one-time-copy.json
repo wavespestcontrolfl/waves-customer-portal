@@ -286,10 +286,10 @@
     }
   },
   "one_time_lawn": {
-    "outcome": "One targeted treatment for the problem in front of you — chinch bugs, weeds, or fungus — matched to your turf.",
+    "outcome": "One targeted lawn application — the treatment you chose, matched to your grass type.",
     "includes": [
-      "Treatment matched to your grass type and the issue on the lawn",
-      "Weed, fungus, and chinch-bug pressure checked while we're there",
+      "Application matched to your grass type and the treatment you chose",
+      "Turf condition checked while we're there, with notes on anything else we see",
       "Treatment documented in your service report"
     ],
     "assurance": null,
@@ -304,7 +304,7 @@
     "hero": {
       "eyebrow": "Your one-time lawn treatment",
       "h1": "Hello {first}, your lawn treatment quote is ready!",
-      "sub": "One targeted application priced from your measured turf — approve online and pick a day. Licensed & insured."
+      "sub": "One targeted application priced from your turf area — approve online and pick a day. Licensed & insured."
     }
   },
   "rodent_inspection": {

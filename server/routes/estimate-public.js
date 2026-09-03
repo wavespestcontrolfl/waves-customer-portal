@@ -22645,10 +22645,26 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // Row copy never rides a regulated certificate surface (WDO in the aligned
   // OR raw rows — the aligned breakdown can drop the WDO row): the whole
   // page stays narrative-free, not just the WDO row (codex pre-push P0).
+  const rawContractRows = normalizeOneTimeBreakdown(estData)?.items || [];
   const rowCopyAllowed = !hasRegulatedCertificateServiceMix([], [
     ...(basePayload.oneTimeBreakdown?.items || []),
-    ...(normalizeOneTimeBreakdown(estData)?.items || []),
+    ...rawContractRows,
   ]);
+  // The aligned one-time-choice breakdown (show_one_time_option) keeps only
+  // service/label/amount/detail per row, so the copy pack would read a
+  // unit-band pest choice as full-perimeter and a flea / wasp / Bora-Care
+  // add-on as scope-less. Resolve each row against its authoritative raw
+  // counterpart (same service key, label-matched when the key repeats):
+  // the raw row supplies the sold-scope flags, the aligned row keeps its
+  // own label/amount (codex #3823 r9 P1). The contract row itself is
+  // unchanged — only the resolver input is enriched.
+  const rawRowFor = (row) => {
+    const service = String(row?.service || '').toLowerCase();
+    if (!service) return null;
+    const candidates = rawContractRows.filter((raw) => String(raw?.service || '').toLowerCase() === service);
+    if (!candidates.length) return null;
+    return candidates.find((raw) => String(raw.label || '') === String(row.label || '')) || candidates[0];
+  };
   const contractPayload = basePayload.oneTimeBreakdown && Array.isArray(basePayload.oneTimeBreakdown.items)
     ? {
       ...basePayload,
@@ -22657,7 +22673,10 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
         items: (() => {
           const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel);
           if (!rowCopyAllowed) return labeled;
-          const copies = resolveOneTimeRowCopies(labeled);
+          const copies = resolveOneTimeRowCopies(labeled.map((row) => {
+            const raw = rawRowFor(row);
+            return raw ? { ...raw, ...row } : row;
+          }));
           return labeled.map((row, i) => (copies[i] ? { ...row, copy: copies[i] } : row));
         })(),
       },
