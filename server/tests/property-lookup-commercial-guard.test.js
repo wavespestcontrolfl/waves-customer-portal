@@ -1241,7 +1241,7 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     expect(isCommercialProfile(profile, {})).toBe(false);
   });
 
-  test('unit address: the building\'s dimensions are not carried into the unit quote; a verified sqft is the unit\'s, a verified lot is still the parcel\'s', () => {
+  test('unit address: the building\'s dimensions are not carried into the unit quote; a field-verified save is surfaced, never auto-applied', () => {
     const whole = buildEnrichedProfile(
       rentalComplexRecord({ squareFootage: 63096, lotSize: 93940, stories: 3, hasPool: true, poolCageSqft: 900, _source: 'county' }),
       null, null, null, null, null, unit,
@@ -1273,14 +1273,15 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
       }),
       null, null, null, null, null, unit,
     );
-    expect(verified.homeSqFt).toBe(1100);
+    // The estimate tool's save persisted whatever the lookup pre-filled, so
+    // a "verified" figure under the unit address may be the building's
+    // (codex r4 P1): surfaced on the flag, not applied.
+    expect(verified.homeSqFt).toBe(0);
     expect(verified.lotSqFt).toBe(0);
-    expect(verified.stories).toBe(2);
-    expect(verified.storiesSource).toBe('verified');
-    // The flag names what the earlier save kept, so a building figure saved
-    // under the unit address is visible and re-savable (codex r4).
+    expect(verified.stories).toBe(1);
+    expect(verified.storiesSource).toBe('default');
     expect(verified.fieldVerifyFlags.find((f) => f.field === 'propertyType').reason)
-      .toMatch(/field-verified 1,100 sq ft and 2 stories .* was kept/);
+      .toMatch(/field-verified 1,100 sq ft and 2 stories is saved on this unit address but was NOT applied/);
   });
 
   test('unit address on a stacked-association aggregate: one structure for the perimeter estimate', () => {
@@ -1294,9 +1295,10 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     );
     expect(profile.isCommercial).toBe(false);
     expect(profile.buildingCount).toBe(1);
-    expect(profile.homeSqFt).toBe(1200);
-    // 4·√1200 ≈ 139 LF for one structure, not 6·4·√(1200/6) ≈ 339.
-    expect(profile.estimatedPerimeterLF).toBeLessThan(200);
+    // Dims blank (the verified 1,200 is surfaced, not applied), so no
+    // perimeter is derived from the aggregate at all.
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile.estimatedPerimeterLF).toBeNull();
   });
 
   test('unit address: parcel-scale satellite areas are discarded with the building dims', () => {

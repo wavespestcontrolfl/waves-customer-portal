@@ -1792,14 +1792,17 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // the building's / the parcel's, not the unit's — carrying any of it
     // into a one-unit quote is the whole-complex overquote the unit-scope
     // lane exists to end (codex r1 P1 ×3 on top of the pre-push P1):
-    //  - sqft: blank for the unit's own figure; a tech-verified value IS
-    //    the unit's and survives.
-    //  - lot: ALWAYS 0 — a unit has no individual lot, and a verified lot
-    //    on this address can only be the parcel saved before the
-    //    reclassification existed.
+    //  - sqft / stories: blank for the unit's own figures. A field-
+    //    verified value on this address is NOT auto-applied either: the
+    //    estimate tool's save persisted whatever the lookup pre-filled,
+    //    so a "verified" figure saved under the unit address before this
+    //    reclassification existed can be the building's (codex r4 P1).
+    //    It is surfaced on the flag instead — the operator confirms it is
+    //    the unit's and enters it, once.
+    //  - lot: ALWAYS 0 — a unit has no individual lot.
     //  - stories: the building's floor count would derive a fractional
     //    footprint from the unit's sqft (1,200 sf / 3 floors = 400 sf), so
-    //    a unit is single-level (1) unless a tech verified otherwise.
+    //    a unit is single-level (1), stamped 'default'.
     //  - pool / cage: the complex's amenities are not serviced for a
     //    tenant's unit.
     //  - satellite analysis: EVERY read (areas, densities, water, pool)
@@ -1810,13 +1813,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     const isVerified = (field) => rc._fieldEvidence?.[field]?.sourceType === 'verified';
     rc = {
       ...rc,
-      squareFootage: isVerified('squareFootage') ? rc.squareFootage : 0,
+      // What a person saved on this address, for the flag only.
+      _unitVerifiedSaved: {
+        squareFootage: isVerified('squareFootage') ? Number(rc.squareFootage) || 0 : 0,
+        stories: (rc._storiesSource === 'verified' || isVerified('stories')) ? Number(rc.stories) || 0 : 0,
+      },
+      squareFootage: 0,
       lotSize: 0,
-      stories: (rc._storiesSource === 'verified' || isVerified('stories')) ? rc.stories : 1,
+      stories: 1,
       // The assumed 1 is a DEFAULT nobody observed: stamped so the client's
       // "save as field-verified" skips it unless the operator touches the
       // field (codex r2 P1 — same contract as the unknown-stories aggregate).
-      _storiesSource: (rc._storiesSource === 'verified' || isVerified('stories')) ? rc._storiesSource : 'default',
+      _storiesSource: 'default',
       hasPool: null,
       poolCageSqft: null,
       // A stacked-association aggregate's building count multiplies the
@@ -1925,16 +1933,17 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup });
   if (residentialUnitLookup) {
     const wholeUnits = verifiedUnitCountOf(rc) ?? Math.max(Number(rc?.unitCount) || 0, Number(rc?._parcel?.residentialUnits) || 0);
-    // Name what a person's earlier field-verified save KEPT on this unit
-    // address, so an operator who saved the building's figures under the
-    // unit address can see exactly which values to re-save (codex r4).
+    // Name what a person's earlier field-verified save holds on this unit
+    // address — not auto-applied (it may be the building's figure saved
+    // under the unit address), so the operator confirms and enters it.
+    const saved = rc?._unitVerifiedSaved || {};
     const keptVerified = [
-      rc?.squareFootage ? `${Number(rc.squareFootage).toLocaleString()} sq ft` : null,
-      rc?._storiesSource === 'verified' ? `${rc.stories} stor${Number(rc.stories) === 1 ? 'y' : 'ies'}` : null,
+      saved.squareFootage ? `${saved.squareFootage.toLocaleString()} sq ft` : null,
+      saved.stories ? `${saved.stories} stor${saved.stories === 1 ? 'y' : 'ies'}` : null,
     ].filter(Boolean);
     fieldVerifyFlags.push({
       field: 'propertyType',
-      reason: `Unit address inside a${wholeUnits > 1 ? ` ${wholeUnits.toLocaleString()}-unit` : 'n'} apartment/condo building — quoted as ONE residential unit (condo pricing, ground floor, single level, no lot, no pool assumed), not the whole property. Confirm the floor, and get the unit's own sq ft from the customer: the building's sq ft, lot, story count, pool, and every satellite read were dropped as parcel-wide${keptVerified.length ? `; the field-verified ${keptVerified.join(' and ')} saved on this unit address was kept — re-save if that was the building's figure` : ''}. Quote the whole property only if the association, complex owner, or property manager is the customer`,
+      reason: `Unit address inside a${wholeUnits > 1 ? ` ${wholeUnits.toLocaleString()}-unit` : 'n'} apartment/condo building — quoted as ONE residential unit (condo pricing, ground floor, single level, no lot, no pool assumed), not the whole property. Confirm the floor, and get the unit's own sq ft from the customer: the building's sq ft, lot, story count, pool, and every satellite read were dropped as parcel-wide${keptVerified.length ? `; a field-verified ${keptVerified.join(' and ')} is saved on this unit address but was NOT applied — enter it if it is the unit's own figure` : ''}. Quote the whole property only if the association, complex owner, or property manager is the customer`,
       priority: 'HIGH',
     });
   }
