@@ -111,6 +111,25 @@ const CONTACT_SOURCES = Object.freeze([
   { source: 'leads.email', table: 'leads', column: 'email' },
 ]);
 
+const groupByDomain = (recipients) => recipients.reduce((m, r) => { const d = domainOf(r); if (d) (m.get(d) || m.set(d, []).get(d)).push(r); return m; }, new Map());
+/**
+ * One contact source's hits, each landed on the recipient it matches, as flat [recipient, { source, id }] pairs:
+ * `exact` = the stored address equals the recipient (normalized the same way — case + every whitespace character;
+ * the stored value comes back so each hit lands on its own recipient) or is its gmail-canonical form at a google
+ * host; `shared` = the stored address shares the recipient's business domain.
+ */
+async function sourceHits(q, src, { recipients, googleLocals, domains, recipientsByDomain }) {
+  const idCol = src.idColumn || 'id';
+  const cols = [`${idCol} as id`, `${src.column} as email`];
+  const onRecipient = (rows) => rows.map((h) => [normalizeEmail(h.email), { source: src.source, id: h.id }]).filter(([r]) => recipients.has(r));
+  const exact = onRecipient(await q(src.table).whereRaw(`${STORED_SQL} = ANY(?)`, [src.column, [...recipients]]).select(...cols));
+  const canon = googleLocals.length ? onRecipient(await q(src.table).whereRaw(GMAIL_CANONICAL_SQL, [src.column, GOOGLE_HOSTS, src.column, googleLocals]).select(...cols)) : [];
+  const byDomain = domains.length ? await q(src.table).whereRaw(`split_part(${STORED_SQL}, '@', 2) = ANY(?)`, [src.column, domains]).select(...cols) : [];
+  const shared = [];
+  for (const h of byDomain) for (const r of recipientsByDomain.get(domainOf(h.email)) || []) shared.push([r, { source: src.source, id: h.id }]);
+  return { exact: [...exact, ...canon], shared };
+}
+
 /**
  * One review per recipient — { kind: 'clear' | 'customer' | 'ambiguous', recipient, matched: [{ source, id }],
  * lookup_hash } — for a whole list in three queries per contact source (exact, shared domain, gmail-canonical),
@@ -124,23 +143,13 @@ async function recipientReviews(q, emails) {
   const googleLocals = [...new Set(recipients.filter((r) => GOOGLE_HOSTS.includes(domainOf(r))).map((r) => r.slice(0, r.lastIndexOf('@'))))];
   const exact = new Map(recipients.map((r) => [r, []]));
   const shared = new Map(recipients.map((r) => [r, []]));
+  const lookup = { recipients: new Set(recipients), googleLocals, domains, recipientsByDomain: groupByDomain(recipients) };
+  const seen = (list, hit) => list.some((e) => e.source === hit.source && e.id === hit.id);
   for (const src of CONTACT_SOURCES) {
-    const idCol = src.idColumn || 'id';
-    // stored addresses are normalized the same way as the recipient (case + surrounding whitespace); the
-    // stored value comes back so each hit lands on its own recipient
-    const hits = await q(src.table).whereRaw(`${STORED_SQL} = ANY(?)`, [src.column, recipients]).select(`${idCol} as id`, `${src.column} as email`);
-    for (const h of hits) { const r = normalizeEmail(h.email); if (exact.has(r)) exact.get(r).push({ source: src.source, id: h.id }); }
-    if (googleLocals.length) {
-      const canon = await q(src.table).whereRaw(GMAIL_CANONICAL_SQL, [src.column, GOOGLE_HOSTS, src.column, googleLocals]).select(`${idCol} as id`, `${src.column} as email`);
-      for (const h of canon) { const r = normalizeEmail(h.email); if (exact.has(r) && !exact.get(r).some((e) => e.source === src.source && e.id === h.id)) exact.get(r).push({ source: src.source, id: h.id }); }
-    }
-    if (domains.length) {
-      const byDomain = await q(src.table).whereRaw(`split_part(${STORED_SQL}, '@', 2) = ANY(?)`, [src.column, domains]).select(`${idCol} as id`, `${src.column} as email`);
-      for (const h of byDomain) {
-        const d = domainOf(h.email);
-        for (const r of recipients) if (domainOf(r) === d && !exact.get(r).some((e) => e.source === src.source && e.id === h.id)) shared.get(r).push({ source: src.source, id: h.id });
-      }
-    }
+    const hits = await sourceHits(q, src, lookup);
+    for (const [r, hit] of hits.exact) if (!seen(exact.get(r), hit)) exact.get(r).push(hit);
+    // a shared-domain hit that is already an exact hit for the recipient is the same contact, not a second one
+    for (const [r, hit] of hits.shared) if (!seen(exact.get(r), hit)) shared.get(r).push(hit);
   }
   // deterministic: the queries carry no ORDER BY, and the hash the owner acknowledges must equal the one the locked send recomputes
   const bySourceId = (a, b) => (a.source < b.source ? -1 : a.source > b.source ? 1 : String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0);

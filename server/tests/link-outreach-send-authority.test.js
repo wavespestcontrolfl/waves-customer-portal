@@ -249,6 +249,17 @@ describe('sendOutreach under the contract', () => {
     expect(gmail.sendMessage).not.toHaveBeenCalled();
     for (const s of [none, prior, stale, deny, terms]) expect(approvals(s.db)).toHaveLength(0);
   });
+  test('a send that accepts the publisher\'s terms is refused BEFORE any level grants — an AUTO_OUTREACH row in auto mode included', async () => {
+    const s = scenario({ policy: AUTO_POLICY, path: { terms_accepted_by_send: true, legal_attestation: true, legal_attestation_requires_owner: false, legal_terms_hash: 'a'.repeat(64), investigation: { legal_terms_url: 'https://example.org/terms' } } });
+    await nightly(s.db);
+    commRow(s.db).level = 'AUTO_OUTREACH'; // whatever the nightly decided, the automatic grant must not reach Gmail
+    Object.assign(placement(s.db), { status: 'prospect', parked_from_status: null }); // unparked, so auto mode reaches the authority
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/accepts the publisher/) });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/accepts the publisher/) });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    expect(placement(s.db).outreach_status).toBe('drafted');
+    expect(approvals(s.db)).toHaveLength(0);
+  });
   test('GATE_LINK_AUTHORITY off: the shipped owner click stands alone (no rows, no approval); an automatic send is refused', async () => {
     isEnabled.mockImplementation((g) => g !== 'linkAuthority');
     const s = scenario();
@@ -312,8 +323,34 @@ describe('one conversation per inbox (§13)', () => {
     // a dormant row to the same inbox (prospect, no send) does not
     Object.assign(other, { status: 'prospect', parked_from_status: null, outreach_status: 'none' });
     expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).ok).toBe(true);
-    expect(s.db._raws.some((r) => /link_outreach_inbox/.test(String(r)))).toBe(false); // the raw records the SQL, not the binding
-    expect(s.db._raws.some((r) => /hashtext/.test(String(r)))).toBe(true);
+    // the claim's lock order: the cap lock, the placement's DOMAIN (the registry's per-domain writer lock — Reject /
+    // Watch / a re-rank serialize on it), the recipient's inbox, then the row locks — the manual status edit's order too
+    const all = s.db._raws.map(String);
+    const raws = all.slice(all.lastIndexOf('SELECT pg_advisory_xact_lock(?) [778932]')); // the last claim (the one that sent)
+    const at = (re) => raws.findIndex((r) => re.test(r));
+    expect(raws.length).toBeGreaterThan(1);
+    expect(at(/lost_recovery:example\.org/)).toBeGreaterThan(0);
+    expect(at(/link_outreach_inbox:editor@example\.org/)).toBeGreaterThan(at(/lost_recovery:example\.org/));
+    expect(at(/FOR UPDATE seo_link_prospects/)).toBeGreaterThan(at(/link_outreach_inbox:editor@example\.org/));
+  });
+  test('a CLOSED conversation releases the inbox: a lost / rejected placement, or one carrying the closure stamp; a live one without the stamp still holds it', async () => {
+    const s = scenario({ policy: AUTO_POLICY });
+    await nightly(s.db);
+    // the earlier placement pitched this inbox and was lost — its lifetime send stamp does not hold the inbox forever
+    const other = { id: uid(), domain_id: null, path_id: null, target_domain: 'other.org', target_page: '/', location_key: '-', status: 'lost', outreach_status: 'sent', outreach_to_email: 'editor@example.org', outreach_sent_at: EARLIER, conversation_closed_at: null, link_type: 'editorial', updated_at: EARLIER };
+    s.db._tables.seo_link_prospects.push(other);
+    expect(await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' })).toBeNull();
+    Object.assign(other, { status: 'rejected' });
+    expect(await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' })).toBeNull();
+    // live with the conversation still open (no stamp: a late send or follow-up may be pending) holds the inbox …
+    Object.assign(other, { status: 'live' });
+    expect((await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' }))?.id).toBe(other.id);
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'inbox_in_flight' });
+    // … until its communication lifecycle completes and the closure is stamped (§3.3)
+    Object.assign(other, { conversation_closed_at: NOW });
+    expect(await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' })).toBeNull();
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).ok).toBe(true);
+    expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
   });
   test('a gmail alias of an open conversation is the same inbox', async () => {
     const s = scenario({ policy: AUTO_POLICY, placement: { outreach_to_email: 'editor@gmail.com' } });
@@ -462,6 +499,23 @@ describe('the nightly auto-send (§6.4)', () => {
     expect(again.selected).toBe(0); // nothing changed on the domain
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ prospectId: s.row.id, mode: 'auto' }));
     expect(again.autoSend).toEqual({ attempted: 1, sent: 1, skipped: [] });
+  });
+  test('a backlog of older submit-first drafts does not starve the send-first drafts behind it: the batch is filled after they are excluded', async () => {
+    const db = makeDb({ seo_link_domains: [], seo_link_acquisition_paths: [], seo_link_prospects: [], seo_link_placement_authorities: [], seo_link_policy: [policyRow()] });
+    const seedDraft = (i, after) => {
+      const d = domainRow({ domain: `d${i}.org` }); const p = outreachPath(d, { execution_after_send: after }); d.best_path_id = p.id;
+      const row = draftedRow(d, p, { target_domain: d.domain, outreach_to_email: `editor@${d.domain}`, updated_at: new Date(EARLIER.getTime() + i * 1000) });
+      db._tables.seo_link_domains.push(d); db._tables.seo_link_acquisition_paths.push(p); db._tables.seo_link_prospects.push(row);
+      db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: row.id, path_id: p.id, dimension: 'communication', instance_kind: '-', instance_key: '-', level: 'AUTO_OUTREACH', ended_at: null, satisfied_at: null, approval_id: null });
+      return row;
+    };
+    for (let i = 0; i < 120; i += 1) seedDraft(i, false); // 120 submit-first drafts, all older than the batch size
+    const sendFirst = seedDraft(120, true); // the newest row is the only one the nightly may send
+    const send = jest.fn(async () => ({ ok: true }));
+    const r = await bridge.autoSendDecided(db, { send, now: NOW });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ prospectId: sendFirst.id, mode: 'auto' }));
+    expect(r).toEqual({ attempted: 1, sent: 1, skipped: [] });
   });
   test('the real sender over the store: the run sends, the placement reads contacted and the instance is satisfied', async () => {
     const s = scenario({ policy: AUTO_POLICY });

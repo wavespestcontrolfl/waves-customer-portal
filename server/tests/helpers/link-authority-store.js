@@ -88,7 +88,7 @@ function makeDb(seed = {}) {
     _failUpdate: null,
     _beforeResolve: null,
     _beforeUpdate: null,
-    raw: async (sql) => { raws.push(sql); return {}; },
+    raw: async (sql, bindings = []) => { raws.push(bindings.length ? `${sql} ${JSON.stringify(bindings)}` : sql); return {}; },
     transaction: async (cb) => cb(db),
     _tables: tables,
     _raws: raws,

@@ -152,16 +152,15 @@ async function autoSendDecided(db, { send, now }) {
   const out = { attempted: 0, sent: 0, skipped: [] };
   const rows = await db(AUTH).where({ dimension: 'communication', instance_kind: '-', level: P.LEVELS.AUTO_OUTREACH }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'path_id');
   if (!rows.length) return out;
-  const byProspect = new Map(rows.map((r) => [r.prospect_id, r]));
-  const all = (await db('seo_link_prospects').whereIn('id', [...byProspect.keys()]).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').orderBy('updated_at', 'asc').limit(AUTO_SEND_BATCH).select('id', 'path_id'));
-  if (!all.length) return out;
-  // a SUBMIT-FIRST path (execution_after_send=false) sends its pitch only after the acquisition — never from here
-  const sendFirst = new Set((await db('seo_link_acquisition_paths').whereIn('id', [...new Set(all.map((p) => p.path_id).filter(Boolean))]).select('id', 'execution_after_send')).filter((x) => x.execution_after_send !== false).map((x) => x.id));
-  const candidates = all.filter((p) => sendFirst.has(p.path_id));
-  if (!candidates.length) return out;
-  for (const p of candidates) {
-    const r = byProspect.get(p.id);
-    if (!r || r.path_id !== p.path_id) continue;
+  // a SUBMIT-FIRST path (execution_after_send=false) sends its pitch only after the acquisition — never from here.
+  // Its drafts are excluded BEFORE the batch limit: a backlog of them at the head of the ordering would otherwise
+  // fill every batch and starve the send-first drafts behind it on every nightly run.
+  const sendFirst = new Set((await db('seo_link_acquisition_paths').whereIn('id', [...new Set(rows.map((r) => r.path_id).filter(Boolean))]).select('id', 'execution_after_send')).filter((x) => x.execution_after_send !== false).map((x) => x.id));
+  const decidedPath = new Map(rows.filter((r) => sendFirst.has(r.path_id)).map((r) => [r.prospect_id, r.path_id]));
+  if (!decidedPath.size) return out;
+  const batch = await db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...sendFirst]).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').orderBy('updated_at', 'asc').limit(AUTO_SEND_BATCH).select('id', 'path_id');
+  for (const p of batch) {
+    if (decidedPath.get(p.id) !== p.path_id) continue; // the row left the path its instance was decided on — the bridge rotates it
     out.attempted += 1;
     let res;
     try { res = await send({ prospectId: p.id, approvedBy: 'auto-outreach', mode: 'auto', now }); } catch (err) { res = { ok: false, code: 'error', error: err.message }; }

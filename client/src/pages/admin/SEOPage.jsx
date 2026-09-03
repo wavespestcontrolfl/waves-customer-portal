@@ -2723,6 +2723,8 @@ function LinkBuildingBoard({ canRun }) {
 // OUTREACH APPROVALS — review drafts, approve + send, reconcile (Backlink M3b)
 // =========================================================================
 // Friendly text for the structured result codes the outreach routes return.
+// a refusal that means the recipient match the card showed is no longer the one the server would send against
+const REVIEW_RESET_CODES = new Set(["recipient_review_required", "customer_recipient", "recipient_changed"]);
 const OUTREACH_CODE_MSG = {
   gate_off: "Outreach lane is OFF — set GATE_LINK_OUTREACH to enable sending.",
   gmail_not_connected: "Gmail isn't connected — authorize it first.",
@@ -3506,6 +3508,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   useEffect(() => {
     load();
   }, [refreshKey]);
+  // after a mutation: the parent refreshes every panel when it owns the key, else this panel reloads itself
+  const refresh = () => (onMutated ? onMutated() : load());
 
   // what the inline bridge run did with the click — or why the nightly run will
   const bridgeNote = (b) => {
@@ -3541,7 +3545,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/approve`, { method: "POST", body });
       setResult({ tone: D.green, text: `Approved ${DIMENSION_LABELS[row.dimension] || row.dimension} on ${card.domain.domain}${r.attached?.length > 1 ? ` (${r.attached.length} locations share the fee)` : ""} — ${bridgeNote(r.bridge)}` });
-      if (onMutated) onMutated(); else await load();
+      await refresh();
     } catch (e) {
       setError(e?.message || "Approve failed");
     } finally {
@@ -3554,17 +3558,18 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     setBusy(row.id);
     setError(null);
     setResult(null);
-    const ackKey = `${row.id}:${row.draft?.recipient_review?.lookup_hash || ""}`; // bound to the hash it was given for
-    const body = acks[ackKey] && row.draft?.recipient_review?.lookup_hash ? { reviewed_lookup_hash: row.draft.recipient_review.lookup_hash } : {};
+    const lookupHash = row.draft?.recipient_review?.lookup_hash || "";
+    const ackKey = `${row.id}:${lookupHash}`; // the acknowledgement is bound to the hash it was given for
+    const body = acks[ackKey] && lookupHash ? { reviewed_lookup_hash: lookupHash } : {};
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/send`, { method: "POST", body });
       setResult({ tone: D.green, text: `Sent the pitch to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}` });
-      if (onMutated) onMutated(); else await load();
+      await refresh();
     } catch (e) {
       setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
       // the match changed under the card (or the lookup now yields one): drop the stale acknowledgement and reload so
       // the owner reviews the CURRENT match — the server sends only against the hash it just computed
-      if (e?.code === "recipient_review_required" || e?.code === "customer_recipient" || e?.code === "recipient_changed") {
+      if (REVIEW_RESET_CODES.has(e?.code)) {
         setAcks((prev) => ({ ...prev, [ackKey]: false }));
         await load();
       }
@@ -3580,7 +3585,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/domains/${card.domain.id}/${action}`, { method: "POST", body: { note: notes[card.domain.id] || null } });
       setResult({ tone: D.text, text: `${card.domain.domain} → ${String(r.agent_state).replace(/_/g, " ")}${r.watch_recheck_at ? `, rechecked ${formatETDate(r.watch_recheck_at)}` : ""}` });
-      if (onMutated) onMutated(); else await load();
+      await refresh();
     } catch (e) {
       setError(e?.message || `${action} failed`);
     } finally {
