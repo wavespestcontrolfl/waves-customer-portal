@@ -345,6 +345,7 @@ const {
   capturedEmails,
   requestedServiceTokens,
   serviceTypeMatches,
+  estimateCoversAsk,
   requestedWindow,
   requestedAddressIsOnFile,
   bookingAtRequestedAddress,
@@ -506,12 +507,45 @@ describe('evidence helpers', () => {
     const [exclusion] = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['rodent_exclusion'] } } }));
     expect(serviceTypeMatches('Rodent Control', exclusion)).toBe(false);
     expect(serviceTypeMatches('Rodent Control rodent_exclusion', exclusion)).toBe(true);
-    // The specific service the caller named is one more list to cover: a
-    // flea treatment filed under pest_general is not a generic pest booking.
+    // The specific service the caller named narrows the PRIMARY category
+    // into one requirement: a flea treatment filed under pest_general is
+    // not a generic pest booking, and it is one ask, not two.
     const flea = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_general'], requested_specific_service: 'Flea Treatment' } } }));
-    expect(flea).toEqual([['pest'], ['flea']]);
+    expect(flea).toEqual([['pest', 'flea']]);
+    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: [], requested_specific_service: 'Flea Treatment' } } }))).toEqual([['flea']]);
+    // quote_promised cards carry the same ask under quote_scope.
+    expect(requestedServiceTokens(item({ payload: { quote_scope: { requested_service_categories: ['lawn_care'] } } }))).toEqual([['lawn']]);
     expect(flea.every((tokens) => serviceTypeMatches('Quarterly Pest Control pest_control', tokens))).toBe(false);
     expect(flea.every((tokens) => serviceTypeMatches('Flea Treatment pest_control', tokens))).toBe(true);
+  });
+
+  test('a delivered estimate keeps the quote only when it prices every requested service at the asked address', () => {
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    const base = { call_log_id: 'call-1', call_customer_id: 'cust-1', customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205' };
+    const card = (scope) => item({ ...base, reason_code: 'quote_promised', payload: { quote_scope: { requested_service_categories: ['pest_general', 'lawn_care'], requested_specific_service: 'Flea Treatment', requested_address: none, ...scope } } });
+    const est = (over) => ({ id: 'e1', service_interest: null, address: '77 Oak Street, Bradenton, FL 34205', estimate_data: { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }], grandTotal: 100 }, oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } } }, ...over });
+    expect(estimateCoversAsk(card({}), est({}))).toBe(true);
+    // A generic pest estimate is not the flea treatment — unless the
+    // engine's own input flag says the flea program was priced; a service
+    // the estimate lacks counts when a sibling in its group prices it.
+    const generic = { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }] } } };
+    expect(estimateCoversAsk(card({}), est({ estimate_data: generic }))).toBe(false);
+    expect(estimateCoversAsk(card({}), est({ estimate_data: { ...generic, inputs: { svcFlea: true } } }))).toBe(true);
+    const partial = est({ estimate_data: { result: { oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } } } });
+    expect(estimateCoversAsk(card({}), partial)).toBe(false);
+    expect(estimateCoversAsk(card({}), partial, [{ id: 'e2', service_interest: 'Lawn Care', estimate_data: {} }])).toBe(true);
+    // Another address, a street with no locality, or no address at all;
+    // the property row it prices stands in for a missing address column.
+    expect(estimateCoversAsk(card({}), est({ address: '5 Pine Ave, Sarasota, FL 34236' }))).toBe(false);
+    expect(estimateCoversAsk(card({}), est({ address: '77 Oak Street' }))).toBe(false);
+    expect(estimateCoversAsk(card({}), est({ address: null }))).toBe(false);
+    expect(estimateCoversAsk(card({}), est({ address: null, property_address_line1: '77 Oak St', property_zip: '34205' }))).toBe(true);
+    // The ask named another address: the estimate must price THAT one.
+    const named = { ...none, street_line_1: '5 Pine Ave', city: 'Sarasota', postal_code: '34236' };
+    expect(estimateCoversAsk(card({ requested_address: named }), est({}))).toBe(false);
+    expect(estimateCoversAsk(card({ requested_address: named }), est({ address: '5 Pine Ave, Sarasota, FL 34236' }))).toBe(true);
+    // A card filed before the snapshot existed has no ask to cover.
+    expect(estimateCoversAsk(item({ ...base, reason_code: 'quote_promised', payload: { flag: 'quote_promised' } }), est({}))).toBe(false);
   });
 
   test('direct bookings are bound to the address the card asked for: on-file when none was named, the named address otherwise', () => {
@@ -587,6 +621,17 @@ describe('evidence helpers', () => {
     expect(bookingCoversRequest(skipping, [booking({ scheduled_date: '2026-07-30' })], ctx)).toBe(true);
     expect(bookingCoversRequest(skipping, [booking({ scheduled_date: '2026-07-28' })], ctx)).toBe(true);
     expect(bookingCoversRequest(skipping, [booking({ scheduled_date: null })], ctx)).toBe(false);
+    // Two separate requests in one coarse category need two bookings: the
+    // flea treatment (the primary narrowed by the specific service) and the
+    // general-pest visit the model listed as a second request are not both
+    // answered by the one flea booking (codex r17 P1).
+    const two = card({ requested_date_range_start: '2026-07-30', requested_service_categories: ['pest_general', 'pest_general'], requested_specific_service: 'Flea Treatment' });
+    const fleaVisit = booking({ id: 'b1', service_type: 'Flea Treatment', service_category_snapshot: 'pest_general' });
+    const genericVisit = booking({ id: 'b2', service_type: 'Quarterly Pest Control', service_category_snapshot: 'pest_general' });
+    expect(bookingCoversRequest(two, [fleaVisit], ctx)).toBe(false);
+    expect(bookingCoversRequest(two, [genericVisit], ctx)).toBe(false);
+    expect(bookingCoversRequest(two, [fleaVisit, genericVisit], ctx)).toBe(true);
+    expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30', requested_service_categories: ['pest_general'], requested_specific_service: 'Flea Treatment' }), [fleaVisit], ctx)).toBe(true);
     const infestation = card({ requested_date_range_start: '2026-07-30', requested_service_intent: 'active_infestation_treatment' });
     expect(bookingCoversRequest(infestation, [booking({ is_recurring: true })], ctx)).toBe(true);
     expect(bookingCoversRequest(infestation, [booking({})], ctx)).toBe(true);

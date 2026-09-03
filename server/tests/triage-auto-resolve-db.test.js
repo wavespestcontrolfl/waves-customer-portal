@@ -97,7 +97,9 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   // customer (the shape a relink leaves behind).
   // firstSendAccept: accepted during the first send — admin-estimates
   // finalization keeps accepted_at + lastDeliveredAt with sent_at null.
-  async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin, deliveredAgeMin = estimateAgeMin, estimateOwner = 'call', firstSendAccept = false }) {
+  // estimateScope: 'ask' prices the card's ask (pest control at the on-file
+  // address); 'other_service' / 'other_address' do not (codex r17 P1).
+  async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin, deliveredAgeMin = estimateAgeMin, estimateOwner = 'call', firstSendAccept = false, estimateScope = 'ask' }) {
     const { customerId } = await seedCustomer(sid.slice(-2));
     const ownerId = estimateOwner === 'other' ? (await seedCustomer(`${sid.slice(-2)}x`)).customerId : customerId;
     const callAt = new Date(Date.now() - (cardAgeMin + 5) * 60000);
@@ -111,10 +113,12 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const [card] = await db('triage_items').insert({
       call_log_id: call.id, category: 'time_ambiguous', severity: 'blocking', reason_code: 'quote_promised',
       status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
-      payload: JSON.stringify({ flag: 'quote_promised' }),
+      payload: JSON.stringify({ flag: 'quote_promised', quote_scope: { requested_service_categories: ['pest_control'], requested_specific_service: null, requested_service_intent: 'preventative_one_time', requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 } } }),
     }).returning('id');
     const [est] = await db('estimates').insert({
       customer_id: ownerId, status: firstSendAccept ? 'accepted' : 'sent',
+      service_interest: estimateScope === 'other_service' ? 'Lawn Care' : 'Pest Control',
+      address: estimateScope === 'other_address' ? '99 Elsewhere Rd, 34205' : '1234 Fixture Ave, 34205',
       sent_at: firstSendAccept ? null : new Date(Date.now() - estimateAgeMin * 60000),
       accepted_at: firstSendAccept ? new Date(Date.now() - estimateAgeMin * 60000) : null,
       estimate_data: JSON.stringify({
@@ -185,12 +189,18 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const suppressed = await seedQuoteCall(SID.replace(/e2$/, 'q3'), { cardAgeMin: 60, estimateAgeMin: 10, deliveredAgeMin: null });
     const foreign = await seedQuoteCall(SID.replace(/e2$/, 'q4'), { cardAgeMin: 60, estimateAgeMin: 10, estimateOwner: 'other' });
     const acceptedOnSend = await seedQuoteCall(SID.replace(/e2$/, 'q5'), { cardAgeMin: 60, estimateAgeMin: 10, firstSendAccept: true });
+    const otherService = await seedQuoteCall(SID.replace(/e2$/, 'q6'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'other_service' });
+    const otherAddress = await seedQuoteCall(SID.replace(/e2$/, 'q7'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'other_address' });
     const result = await sweep.runTriageAutoResolve({ now: new Date() });
     expect(result.skipped).toBe(false);
     const closed = await db('triage_items').where({ id: fresh.cardId }).first();
     expect(closed.status).toBe('resolved');
     expect(closed.resolution_source).toBe('auto');
     expect(closed.resolution_note).toBe(sweep.RULE_NOTES.quote_fulfilled);
+    // A delivered estimate for another service, or pricing another address,
+    // does not keep THIS card's promise (codex r17 P1).
+    expect((await db('triage_items').where({ id: otherService.cardId }).first()).status).toBe('open');
+    expect((await db('triage_items').where({ id: otherAddress.cardId }).first()).status).toBe('open');
     const open = await db('triage_items').where({ id: stale.cardId }).first();
     expect(open.status).toBe('open');
     const suppressedCard = await db('triage_items').where({ id: suppressed.cardId }).first();

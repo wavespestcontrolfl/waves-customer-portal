@@ -221,6 +221,19 @@ describe('triage surfacing', () => {
     });
   });
 
+  test('quote_promised cards carry the filing-time quote scope — the same ask snapshot, under its own key', () => {
+    const withService = { ...extraction, service_request: { ...(extraction.service_request || {}), primary_service_category: 'pest_control', secondary_categories: ['mosquito_control'], specific_service_name: 'Flea Treatment', service_intent: 'preventative_one_time', quote_promised: true } };
+    const payload = JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'quote_promised', extraction: withService }).payload);
+    expect(payload.quote_scope).toEqual({
+      requested_service_categories: ['pest_control', 'mosquito_control'],
+      requested_specific_service: 'Flea Treatment',
+      requested_service_intent: 'preventative_one_time',
+      requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 1 },
+    });
+    expect(payload.scheduling_window).toBeUndefined();
+    expect(JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction: withService }).payload).quote_scope).toBeUndefined();
+  });
+
   test('multi_property_call cards carry the extra addresses and file as address_review', () => {
     const item = buildTriageItem({ callLogId: 'c1', flag: 'multi_property_call', extraction });
     expect(item.category).toBe('address_review');

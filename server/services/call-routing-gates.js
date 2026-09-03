@@ -145,6 +145,48 @@ function buildRouteDecision({
   };
 }
 
+// The filing-time snapshot of WHAT and WHERE the caller asked for — the
+// evidence sweep matches later bookings (scheduling_window) and delivered
+// estimates (quote_scope) against THIS, never the call's rolling
+// ai_extraction_enriched: a force-reprocess overwrites that while the open
+// card keeps its original ask.
+function askSnapshot(extraction) {
+  return {
+    // Filing-time snapshot of the requested service: the evidence sweep
+    // matches a later booking against THIS, never the call's rolling
+    // ai_extraction_enriched (a force-reprocess overwrites that while the
+    // open card keeps its original ask).
+    requested_service_categories: [
+      extraction?.service_request?.primary_service_category,
+      ...(Array.isArray(extraction?.service_request?.secondary_categories) ? extraction.service_request.secondary_categories : []),
+    ].filter((c) => typeof c === 'string' && c.trim()),
+    // The specific catalog service the caller named, when the model
+    // picked one: a coarse category (pest_general for a flea treatment)
+    // is not the ask, and a generic booking in that category must not
+    // answer it.
+    requested_specific_service: typeof extraction?.service_request?.specific_service_name === 'string' && extraction.service_request.specific_service_name.trim()
+      ? extraction.service_request.specific_service_name.trim()
+      : null,
+    // The cadence the caller asked for: a recurring-plan inquiry and a
+    // one-time request both reduce to the same category, and a one-time
+    // booking must never answer the plan ask.
+    requested_service_intent: typeof extraction?.service_request?.service_intent === 'string' && extraction.service_request.service_intent
+      ? extraction.service_request.service_intent
+      : null,
+    // Filing-time snapshot of WHERE the caller asked for service, for the
+    // same reason: the sweep's same-customer booking arm applies only
+    // when the ask named no address or exactly the on-file one.
+    requested_address: {
+      street_line_1: extraction?.property?.service_address?.street_line_1 ?? null,
+      street_line_2: extraction?.property?.service_address?.street_line_2 ?? null,
+      city: extraction?.property?.service_address?.city ?? null,
+      postal_code: extraction?.property?.service_address?.postal_code ?? null,
+      raw_text: extraction?.property?.service_address?.raw_text ?? null,
+      additional_properties: Array.isArray(extraction?.property?.additional_properties) ? extraction.property.additional_properties.length : 0,
+    },
+  };
+}
+
 function buildTriageItem({
   callLogId,
   flag,
@@ -350,40 +392,15 @@ function buildTriageItem({
       callback_window_start: s.callback_window_start ?? null,
       callback_window_end: s.callback_window_end ?? null,
       scheduling_notes_raw: s.scheduling_notes_raw ?? null,
-      // Filing-time snapshot of the requested service: the evidence sweep
-      // matches a later booking against THIS, never the call's rolling
-      // ai_extraction_enriched (a force-reprocess overwrites that while the
-      // open card keeps its original ask).
-      requested_service_categories: [
-        extraction?.service_request?.primary_service_category,
-        ...(Array.isArray(extraction?.service_request?.secondary_categories) ? extraction.service_request.secondary_categories : []),
-      ].filter((c) => typeof c === 'string' && c.trim()),
-      // The specific catalog service the caller named, when the model
-      // picked one: a coarse category (pest_general for a flea treatment)
-      // is not the ask, and a generic booking in that category must not
-      // answer it.
-      requested_specific_service: typeof extraction?.service_request?.specific_service_name === 'string' && extraction.service_request.specific_service_name.trim()
-        ? extraction.service_request.specific_service_name.trim()
-        : null,
-      // The cadence the caller asked for: a recurring-plan inquiry and a
-      // one-time request both reduce to the same category, and a one-time
-      // booking must never answer the plan ask.
-      requested_service_intent: typeof extraction?.service_request?.service_intent === 'string' && extraction.service_request.service_intent
-        ? extraction.service_request.service_intent
-        : null,
-      // Filing-time snapshot of WHERE the caller asked for service, for the
-      // same reason: the sweep's same-customer booking arm applies only
-      // when the ask named no address or exactly the on-file one.
-      requested_address: {
-        street_line_1: extraction?.property?.service_address?.street_line_1 ?? null,
-        street_line_2: extraction?.property?.service_address?.street_line_2 ?? null,
-        city: extraction?.property?.service_address?.city ?? null,
-        postal_code: extraction?.property?.service_address?.postal_code ?? null,
-        raw_text: extraction?.property?.service_address?.raw_text ?? null,
-        additional_properties: Array.isArray(extraction?.property?.additional_properties) ? extraction.property.additional_properties.length : 0,
-      },
+      ...askSnapshot(extraction),
     };
   }
+
+  // A promised quote is a promise about SPECIFIC services at ONE address:
+  // the delivered estimate must cover those services and price that
+  // address before the card closes (codex r17 P1). Same snapshot as the
+  // scheduling cards, under its own key — quote cards carry no window.
+  if (flag === 'quote_promised') flagPayload.quote_scope = askSnapshot(extraction);
 
   // Address-review cards carry the address the call NAMED, snapshotted at
   // filing: the evidence sweep proves "a visit completed at the address this

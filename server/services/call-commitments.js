@@ -863,9 +863,12 @@ const ownerAgrees = (row, probe) => {
 };
 
 // probes: [{ key, callId, twilioCallSid, callStartedAt, customerId, phone,
-// after }] — one per card, with its own boundary and the call's CURRENT
-// customer / caller number. Returns Map key → the EARLIEST qualifying
-// direct proof.
+// after, covers? }] — one per card, with its own boundary and the call's
+// CURRENT customer / caller number. covers(row, siblings) — optional — is
+// the probe's own scope test (the triage sweep binds a delivered estimate
+// to the card's quote_scope); siblings are the other rows of the
+// estimate's group, so a multi-property proposal is judged as a whole.
+// Returns Map key → the EARLIEST qualifying direct proof.
 async function directEstimatesSentAfter(conn, probes) {
   const out = new Map();
   if (!probes.length) return out;
@@ -876,21 +879,42 @@ async function directEstimatesSentAfter(conn, probes) {
     probesByCall.set(String(p.callId), list);
   }
   const minAfter = new Date(Math.min(...probes.map((p) => new Date(p.after).getTime())));
+  const SCOPE_COLS = ["service_interest", "estimate_data", "estimate_group_id"];
   const cols = [
-    ...HANDOFF_COLS(conn), "source", "customer_id", "customer_phone",
+    ...HANDOFF_COLS(conn), "source", "customer_id", "customer_phone", "address", ...SCOPE_COLS,
     conn.raw("estimate_data #>> '{estimatorEngine,callLogId}' as stamped_call_id"),
     conn.raw("estimate_data ->> 'lead_id' as mirror_lead_id"),
+    conn.raw("(SELECT cp.address_line1 FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_address_line1"),
+    conn.raw("(SELECT cp.address_line2 FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_address_line2"),
+    conn.raw("(SELECT cp.city FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_city"),
+    conn.raw("(SELECT cp.zip FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_zip"),
   ];
-  const consider = (callId, row, basis) => {
-    for (const p of probesByCall.get(String(callId)) || []) {
-      if (!ownerAgrees(row, p)) continue;
-      const at = witnessAt(row, new Date(p.after));
-      if (!at) continue;
-      const cur = out.get(p.key);
-      if (!cur || at < new Date(cur.matched_at)) {
-        out.set(p.key, { kind: "estimate_sent", record_type: "estimate", record_id: row.id, matched_at: at, strength: "direct", basis });
+  // Candidates are judged after BOTH routes ran: a scope test needs the
+  // group siblings, fetched once for every candidate that has any.
+  const candidates = [];
+  const scoped = probes.some((p) => typeof p.covers === "function");
+  const consider = (callId, row, basis) => candidates.push({ callId, row, basis });
+  const judge = async () => {
+    const groupIds = scoped ? [...new Set(candidates.map((c) => c.row.estimate_group_id).filter(Boolean))] : [];
+    const siblingsByGroup = new Map();
+    if (groupIds.length) {
+      const rows = await conn("estimates").whereIn("estimate_group_id", groupIds).select("id", "estimate_group_id", ...SCOPE_COLS);
+      for (const r of rows) siblingsByGroup.set(String(r.estimate_group_id), [...(siblingsByGroup.get(String(r.estimate_group_id)) || []), r]);
+    }
+    for (const { callId, row, basis } of candidates) {
+      const siblings = row.estimate_group_id ? (siblingsByGroup.get(String(row.estimate_group_id)) || []).filter((s) => String(s.id) !== String(row.id)) : [];
+      for (const p of probesByCall.get(String(callId)) || []) {
+        if (!ownerAgrees(row, p)) continue;
+        if (typeof p.covers === "function" && !p.covers(row, siblings)) continue;
+        const at = witnessAt(row, new Date(p.after));
+        if (!at) continue;
+        const cur = out.get(p.key);
+        if (!cur || at < new Date(cur.matched_at)) {
+          out.set(p.key, { kind: "estimate_sent", record_type: "estimate", record_id: row.id, matched_at: at, strength: "direct", basis });
+        }
       }
     }
+    return out;
   };
   const callIds = [...probesByCall.keys()];
   // No sent_at prefilter anywhere below: the handoff witness is the whole
@@ -903,12 +927,12 @@ async function directEstimatesSentAfter(conn, probes) {
   for (const r of stamped) consider(r.stamped_call_id, r, "estimate_stamped_with_this_call");
 
   const probeBySid = new Map(probes.filter((p) => p.twilioCallSid).map((p) => [p.twilioCallSid, p]));
-  if (!probeBySid.size) return out;
+  if (!probeBySid.size) return judge();
   const leads = (await conn("leads")
     .whereIn("twilio_call_sid", [...probeBySid.keys()])
     .select("id", "estimate_id", "twilio_call_sid", "created_at"))
     .filter((l) => mintedByCall(l, probeBySid.get(l.twilio_call_sid)));
-  if (!leads.length) return out;
+  if (!leads.length) return judge();
   const callBySid = new Map([...probeBySid].map(([sid, p]) => [sid, String(p.callId)]));
   const estimateIds = leads.map((l) => l.estimate_id).filter(Boolean);
   const leadIds = leads.map((l) => String(l.id));
@@ -934,7 +958,7 @@ async function directEstimatesSentAfter(conn, probes) {
     const callIds = new Set(matched.map((l) => callBySid.get(l.twilio_call_sid)).filter(Boolean));
     for (const callId of callIds) consider(callId, r, "estimate_linked_to_this_call_sent");
   }
-  return out;
+  return judge();
 }
 
 async function resolveFulfillment(conn, commitment, call) {

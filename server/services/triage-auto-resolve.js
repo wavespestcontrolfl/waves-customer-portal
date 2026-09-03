@@ -283,8 +283,15 @@ function readingMatchesOnFile(item, reading) {
 // The readings of the card's filing-time ask, or null when the ask is not
 // one address (no snapshot, a second property, or a unit / city / ZIP
 // fragment with no street). An empty list = the ask named no address.
+// The card's filing-time ask: scheduling_window on the scheduling-shaped
+// cards, quote_scope on quote_promised — the same snapshot under two keys.
+function requestAsk(item) {
+  const payload = parseMaybeJson(item.payload);
+  return payload?.scheduling_window || payload?.quote_scope || null;
+}
+
 function requestedAddressReadings(item) {
-  const ask = parseMaybeJson(item.payload)?.scheduling_window?.requested_address;
+  const ask = requestAsk(item)?.requested_address;
   if (!ask || typeof ask !== 'object') return null;
   if (Number(ask.additional_properties) > 0) return null;
   const readings = [
@@ -341,8 +348,8 @@ function bookingAtRequestedAddress(item, visit, places) {
 // card filed before the snapshot existed yields no categories, so its
 // association arm stays closed.
 function requestedServiceTokens(item) {
-  const payload = parseMaybeJson(item.payload);
-  const cats = payload?.scheduling_window?.requested_service_categories;
+  const ask = requestAsk(item);
+  const cats = ask?.requested_service_categories;
   if (!Array.isArray(cats)) return [];
   const tokensOf = (text) => [...new Set(String(text || '').toLowerCase().split(/[^a-z]+/).filter((t) => t && !SERVICE_STOPWORDS.has(t)))];
   const out = [];
@@ -350,12 +357,36 @@ function requestedServiceTokens(item) {
     const tokens = tokensOf(c);
     if (tokens.length) out.push(tokens);
   }
-  // The specific service the caller named is one more list the bookings
-  // must cover: a flea treatment filed under pest_general is not answered
-  // by a generic quarterly pest booking.
-  const specific = tokensOf(payload?.scheduling_window?.requested_specific_service);
-  if (specific.length) out.push(specific);
+  // The specific service the caller named narrows the PRIMARY category —
+  // one requirement, not two: a flea treatment filed under pest_general is
+  // not answered by a generic quarterly pest booking, and a second
+  // pest_general the model listed as a separate request stays its own
+  // requirement needing its own booking (codex r17 P1).
+  const specific = tokensOf(ask?.requested_specific_service);
+  if (specific.length) {
+    if (out.length) out[0] = [...new Set([...out[0], ...specific])];
+    else out.push(specific);
+  }
   return out;
+}
+
+// Every requirement answered by a DIFFERENT record: a caller who asked for
+// a flea treatment AND a separate general-pest visit is not answered by one
+// flea booking that happens to match both token lists. Backtracking over
+// tiny lists (a handful of requirements, a customer's live bookings).
+function coveredByDistinct(requirements, records, wordsOf) {
+  const used = new Set();
+  const place = (i) => {
+    if (i === requirements.length) return true;
+    for (const r of records) {
+      if (used.has(r) || !serviceTypeMatches(wordsOf(r), requirements[i])) continue;
+      used.add(r);
+      if (place(i + 1)) return true;
+      used.delete(r);
+    }
+    return false;
+  };
+  return requirements.length > 0 && place(0);
 }
 
 // A booking answers a requested category only when EVERY meaningful token
@@ -847,6 +878,10 @@ const cardBoundary = (item) => new Date(Math.max(
 // must also belong to the call's CURRENT customer (or, unowned, carry the
 // caller's number): a relink moves the call and its lead but not the
 // estimates, and the old customer's estimate proves nothing to the new one.
+// And it must COVER the card's filing-time quote_scope — the services asked
+// for, at the address asked for (estimateCoversAsk): a reprocess that moved
+// the service or the property, or an estimate pricing part of a multi-
+// service ask, does not keep the promise this card recorded.
 async function loadEstimateEvidence(conn, items, flag) {
   const quoteItems = items.filter((i) => i.reason_code === 'quote_promised');
   if (!quoteItems.length) return;
@@ -860,6 +895,7 @@ async function loadEstimateEvidence(conn, items, flag) {
       customerId: item.call_customer_id || null,
       phone: callerPhone(item),
       after: cardBoundary(item),
+      covers: (row, siblings) => estimateCoversAsk(item, row, siblings),
     })));
     for (const item of quoteItems) {
       const proof = proofs.get(item.id);
@@ -1013,7 +1049,75 @@ function bookingCoversRequest(item, mine, { singleProperty, places }) {
   if (singleProperty && requestedAddressIsOnFile(item) && window) {
     pool = pool.concat(parents.filter((v) => inAsk(v) && visitAtOnFileAddress(item, v, places)));
   }
-  return categories.every((tokens) => pool.some((v) => serviceTypeMatches(`${v.service_type || ''} ${v.service_category_snapshot || ''}`, tokens)));
+  return coveredByDistinct(categories, pool, (v) => `${v.service_type || ''} ${v.service_category_snapshot || ''}`);
+}
+
+// The service words an estimate carries: the service families the shared
+// line reader infers (estimate-service-lines — the one reader of every
+// pricing-engine shape), the raw names of its recurring / one-time lines,
+// the engine's per-service input flags (svcFlea, svcRoach, ...), and its
+// service_interest. Never estimate_text — the rendered document's
+// boilerplate names services it does not price — and never the category
+// column, which is RESIDENTIAL / COMMERCIAL.
+function estimateWords(row) {
+  const { inferEstimateServiceLines, serviceKeysFromText, SERVICE_LINE_LABELS, parseEstimateData } = require('./estimate-service-lines');
+  const words = [row.service_interest];
+  const family = (key) => { if (key && key !== 'unknown') words.push(key, SERVICE_LINE_LABELS[key]); };
+  for (const line of inferEstimateServiceLines(row)) family(line.key);
+  const data = parseEstimateData(row.estimate_data) || {};
+  const entries = [];
+  for (const root of [data.result, data.engineResult]) {
+    if (!root || typeof root !== 'object') continue;
+    for (const list of [root.recurring?.services, root.oneTime?.items, root.oneTime?.specItems, root.specItems, root.lineItems]) {
+      if (Array.isArray(list)) entries.push(...list);
+    }
+  }
+  const names = [];
+  for (const e of entries) {
+    if (e && typeof e === 'object') names.push(e.service, e.serviceKey, e.service_key, e.name, e.label, e.detail, e.det);
+  }
+  words.push(...names);
+  // The line reader classifies one-time lines only beside commercial ones;
+  // a one-time-only estimate (a flea treatment) still belongs to a family.
+  for (const key of serviceKeysFromText(...names)) family(key);
+  for (const inputs of [data.inputs, data.engineInputs]) {
+    if (!inputs || typeof inputs !== 'object') continue;
+    for (const [k, v] of Object.entries(inputs)) {
+      if (k.startsWith('svc') && v) words.push(k.slice(3).replace(/([a-z])([A-Z])/g, '$1 $2'));
+    }
+  }
+  return words.filter((w) => typeof w === 'string').join(' ');
+}
+
+// An estimate as the address-bearing record the booking rules understand:
+// its address column ("123 Main St, Bradenton, FL 34205") or, failing that,
+// the property row it prices. A street with no locality cannot prove WHICH
+// street, exactly as a street-only visit stamp cannot.
+function estimateAsVisit(row) {
+  const raw = String(row.address || '').trim();
+  if (raw) {
+    const { city, zip } = localityOfRaw(raw);
+    return { service_address_line1: raw.split(',')[0].trim(), service_address_line2: null, service_address_city: city, service_address_zip: zip };
+  }
+  if (row.property_address_line1) {
+    return { service_address_line1: row.property_address_line1, service_address_line2: row.property_address_line2 || null, service_address_city: row.property_city || null, service_address_zip: row.property_zip || null };
+  }
+  return null;
+}
+
+// Does a delivered estimate keep the quote THIS card recorded? Every
+// requested service (the primary narrowed by the specific one, each
+// secondary) must be priced by the estimate or a sibling in its group, and
+// the estimate itself must price the address the ask named — the on-file
+// one when it named none. A card with no quote_scope (filed before the
+// snapshot existed) has no ask to cover, so nothing qualifies.
+function estimateCoversAsk(item, row, siblings = []) {
+  const requirements = requestedServiceTokens(item);
+  if (!requirements.length) return false;
+  const words = [row, ...siblings].map(estimateWords).join(' ');
+  if (!requirements.every((tokens) => serviceTypeMatches(words, tokens))) return false;
+  const visit = estimateAsVisit(row);
+  return Boolean(visit) && bookingAtRequestedAddress(item, visit, new Map());
 }
 
 // Bookings and completed visits for the not_confirmed / address arms.
@@ -1259,6 +1363,7 @@ module.exports = {
   capturedEmails,
   requestedServiceTokens,
   serviceTypeMatches,
+  estimateCoversAsk,
   requestedWindow,
   requestedAddressIsOnFile,
   bookingAtRequestedAddress,
