@@ -130,7 +130,8 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // target the office closed in the window makes this a fresh inquiry,
     // reopened on THIS row only (codex r12 P1).
     expect(src).toMatch(/const targetOpen = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, onlyLeadId: duplicateOfLeadId \}\);/);
-    expect(src).toMatch(/if \(!targetOpen\) \{\n\s+await db\('leads'\)\.where\(\{ id: lead\.id, status: 'duplicate' \}\)\.update\(\{ status: 'new'/);
+    expect(src).toMatch(/const reopened = await db\('leads'\)\.where\(\{ id: lead\.id, status: 'duplicate' \}\)\.update\(\{ status: 'new'/);
+    expect(src).toMatch(/if \(reopened\) duplicateOfLeadId = null;/);
     expect(src).toMatch(/if \(!lead && !additionalProperties\.length\) \{\n\s+duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
     // The replace path carries the marker forward...
     expect(src).toMatch(/'duplicate_of_lead_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'duplicate_of_lead_id'/);

@@ -1858,8 +1858,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (duplicateOfLeadId) {
       const targetOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, onlyLeadId: duplicateOfLeadId });
       if (!targetOpen) {
-        await db('leads').where({ id: lead.id, status: 'duplicate' }).update({ status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
-        duplicateOfLeadId = null;
+        // 0 rows ⇒ a staff transition on this row won; its marker stands and
+        // the request keeps following the database (no second funnel row).
+        const reopened = await db('leads').where({ id: lead.id, status: 'duplicate' }).update({ status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
+        if (reopened) duplicateOfLeadId = null;
       }
     }
 
