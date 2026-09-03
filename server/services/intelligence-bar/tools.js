@@ -1338,6 +1338,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
       stageStamp.active = true;
       stageStamp.churned_at = null;
       stageStamp.churn_reason = null;
+      stageStamp.churn_episode_id = null;
     } else if (clean.pipeline_stage === 'churned') {
       stageStamp.churned_at = db.raw(
         "CASE WHEN pipeline_stage = 'churned' THEN churned_at ELSE ? END", [etDateString()]);

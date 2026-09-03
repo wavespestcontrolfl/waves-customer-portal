@@ -369,6 +369,14 @@ async function sendCancellationReceived({
   // End-of-coverage cancel: paid visits STAY through effectiveAt — never
   // claim upcoming visits are off the calendar.
   keptThrough = false,
+  // End-of-coverage cancel: the prepaid term the kept coverage belongs to
+  // and the churn episode it was decided in (customers.churn_episode_id,
+  // carried on the request). The end-of-term email is sent once per (term,
+  // episode), not per request — a repeat commit on the same decided term
+  // after the admin latch's 24h echo window opens a NEW request; a won-back
+  // customer churning again is a new episode.
+  prepayTermId = null,
+  termEpisodeKey = null,
   // Office-waived scheduled-visit fee (C3 waiveLateFee, verified by the
   // processor): the in-window fee clause would contradict the waiver.
   feeWaived = false,
@@ -396,18 +404,20 @@ async function sendCancellationReceived({
   // for the request. Honor that for existing rows — the received→completed
   // upgrade applies to new requests only. Best-effort: an unreadable table
   // falls through to the class-keyed send.
+  const outcomeClass = processed === true ? 'completed' : 'received';
+  const termKeyed = !!(keptThrough && prepayTermId && termEpisodeKey);
+  // Only a provider-ACCEPTED send counts — the library also persists
+  // blocked/failed rows under a key, and honoring one of those would mark
+  // the channel successful while no email reached the customer.
+  const acceptedUnderKeys = (keys) => db('email_messages')
+    .whereIn('idempotency_key', keys)
+    .where(function accepted() {
+      this.whereNotNull('sent_at').orWhereIn('status', ['sent', 'delivered']);
+    })
+    .first('id');
   if (!idempotencyKey) {
     try {
-      const legacy = await db('email_messages')
-        .where({ idempotency_key: `account.cancellation_received:${request.id}` })
-        // Only a provider-ACCEPTED legacy send counts — the library also
-        // persists blocked/failed rows under the key, and honoring one of
-        // those would mark the channel successful while no email reached
-        // the customer.
-        .where(function accepted() {
-          this.whereNotNull('sent_at').orWhereIn('status', ['sent', 'delivered']);
-        })
-        .first('id');
+      const legacy = await acceptedUnderKeys([`account.cancellation_received:${request.id}`]);
       if (legacy) return { ok: true, deduped: true, legacyKey: true };
     } catch (probeErr) {
       logger.warn(`[account-membership-email] legacy cancellation-key probe failed for ${request.id}: ${probeErr.message}`);
@@ -426,12 +436,20 @@ async function sendCancellationReceived({
     // The outcome class is part of the identity: a repaired retry reuses the
     // SAME request, and its completed confirmation must not dedupe against
     // the earlier partial "closing out by hand" send — each class sends at
-    // most once per request.
-    idempotencyKey: idempotencyKey || `account.cancellation_received:${request.id}:${processed === true ? 'completed' : 'received'}`,
+    // most once per request. An end-of-coverage cancel keys on the (TERM,
+    // churn episode) instead (a repeat commit on the same decided term
+    // opens a new request; a won-back customer churning again is a new
+    // episode); the class suffix is kept so a partial send never blocks the
+    // completed end-of-term copy.
+    idempotencyKey: idempotencyKey || (termKeyed
+      ? `account.cancellation_received:term:${prepayTermId}:${termEpisodeKey}:${outcomeClass}`
+      : `account.cancellation_received:${request.id}:${outcomeClass}`),
     categories: ['cancellation_received'],
     metadata: {
       service_request_id: request.id,
       request_category: request.category,
+      ...(prepayTermId ? { prepay_term_id: prepayTermId } : {}),
+      ...(termEpisodeKey ? { churn_episode: termEpisodeKey } : {}),
     },
   });
 }

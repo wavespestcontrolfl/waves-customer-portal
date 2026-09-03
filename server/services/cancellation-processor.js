@@ -3,6 +3,7 @@ const logger = require('./logger');
 const trackTransitions = require('./track-transitions');
 const { transitionJobStatus } = require('./job-status');
 const { etDateString } = require('../utils/datetime-et');
+const { randomUUID } = require('crypto');
 const { gateEnvValue } = require('../config/feature-gates');
 
 // customers.churn_reason is varchar(30) — keep this at/under 30 chars.
@@ -79,15 +80,30 @@ async function rentedTermiteStationState(customerId) {
   return { rented, flaggedRental };
 }
 
-async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null } = {}) {
+async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null, termId = null, episodeKey = null } = {}) {
   const { rented, flaggedRental } = await rentedTermiteStationState(customerId);
   if (!rented.length && !flaggedRental) return { raised: false, reason: 'no_rented_stations' };
   const NotificationService = require('./notification-service');
   const count = rented.length;
-  // Keyed per cancellation EVENT (request), not per customer: retries of
-  // the same request stay idempotent, while a restored customer who later
-  // cancels another rental program gets a fresh task.
-  const dedupeKey = `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`;
+  // Keyed on (PREPAID TERM, CHURN EPISODE, class) when a term governs the
+  // cancel: the admin duplicate latch only echoes a prior run for 24h, so a
+  // repeat end-of-coverage commit on the same decided term after that opens
+  // a NEW request — a request-keyed task would hand staff a second dated
+  // instruction for the same stations (same rule as the refund task,
+  // prepay_refund:term:<id>). The episode (customers.churn_episode_id,
+  // carried on the request) keeps a WON-BACK customer who later cancels the
+  // same still-current term from being silenced by the first episode's row.
+  // Dated and immediate classes stay distinct (an end_at_term →
+  // end_now_refund transition must still raise "pull now"), and the dated
+  // class carries its boundary (a corrected coverage end is a new
+  // instruction). No term / no episode (portal path, non-prepaid admin
+  // cancel, unanchored churn) keeps the per-EVENT key: retries of the same
+  // request stay idempotent, while a restored customer who later cancels
+  // another rental program gets a fresh task.
+  const termKeyed = !!(termId && episodeKey);
+  const dedupeKey = termKeyed
+    ? `termite_station_retrieval:term:${termId}:${episodeKey}:${retrieveAfter ? `dated:${retrieveAfter}` : 'immediate'}`
+    : `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`;
   let raised = null;
   // Staff hold at most ONE open retrieval instruction per account. Before
   // this raise, every earlier UNREAD retrieval row for the customer is
@@ -173,7 +189,12 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
         bell: true,
         link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
         dedupeKey,
-        metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental, ...(retrieveAfter ? { retrieveAfter } : {}) },
+        metadata: {
+          kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental,
+          ...(requestId ? { requestId } : {}),
+          ...(termKeyed ? { termId, churnEpisode: episodeKey } : {}),
+          ...(retrieveAfter ? { retrieveAfter } : {}),
+        },
         trx,
       }
     );
@@ -737,12 +758,18 @@ async function processCancellationRequest({
   let churned = false;
   let termiteRetrievalPending = null;
   let wasChurnedStage = false;
+  // The churn EPISODE (customers.churn_episode_id): minted here on the
+  // first churn of an episode (no stamp on the row), reused on a repeat
+  // run, cleared by every reactivation path that clears churned_at. The
+  // caller keys the term's end-of-coverage side effects on it — never on
+  // churned_at/stage inference.
+  let churnEpisodeId = null;
   // A scoped cancel never churns the account — the customer keeps the
   // families that stay; their billing wind-down happens per family below.
   if (!scoped) try {
     const customer = await db('customers')
       .where({ id: customerId })
-      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode');
+      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode', 'churn_episode_id');
     if (customer) {
       wasChurnedStage = customer.pipeline_stage === 'churned';
       const now = new Date();
@@ -757,6 +784,8 @@ async function processCancellationRequest({
         next_charge_date: null,
         updated_at: now,
       };
+      churnEpisodeId = customer.churn_episode_id || randomUUID();
+      if (!customer.churn_episode_id) update.churn_episode_id = churnEpisodeId;
       // Preserve the original churn timestamp/reason if already churned.
       if (!wasChurnedStage) {
         update.pipeline_stage_changed_at = now;
@@ -1493,6 +1522,7 @@ async function processCancellationRequest({
     // record was lost reconstructs the pull count from it.
     repairedCount: repairs.length,
     termiteRetrievalPending,
+    churnEpisodeId: churned ? churnEpisodeId : null,
     // C3 facts the caller records on the case: what was kept, and whether
     // the requested waiver was CONFIRMED by every applicable fee rail —
     // never the raw request while a fee may still charge.

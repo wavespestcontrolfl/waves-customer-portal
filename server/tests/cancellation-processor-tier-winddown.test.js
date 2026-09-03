@@ -280,3 +280,23 @@ test('the churn wind-down transaction takes the rung-6 lock before rewriting the
   expect(firstRaw).toEqual({ raw: expect.stringContaining('pg_advisory_xact_lock'), bindings: ['customer-comms:cust-1'] });
   expect(db.__tables.customers[0].waveguard_tier).toBeNull();
 });
+
+test('the churn EPISODE is minted on the first churn (no stamp on the row) and returned to the caller', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-1' });
+  expect(result.churned).toBe(true);
+  const customer = db.__tables.customers[0];
+  expect(customer.churn_episode_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(result.churnEpisodeId).toBe(customer.churn_episode_id);
+});
+
+test('a repeat run on a still-churned row REUSES the stamped episode — never re-minted', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churned_at: '2026-08-01', churn_episode_id: 'ep-first' });
+  const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-2' });
+  expect(result.churned).toBe(true);
+  expect(db.__tables.customers[0].churn_episode_id).toBe('ep-first');
+  expect(result.churnEpisodeId).toBe('ep-first');
+});

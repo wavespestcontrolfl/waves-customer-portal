@@ -691,6 +691,47 @@ async function adminCoverageBoundaryInForce(customerId) {
   return boundaries.some((r) => new Date(r.created_at).getTime() >= churnedAt - 60 * 60 * 1000);
 }
 
+// The dedupe identity for a decided prepaid term's end-of-coverage side
+// effects (dated termite task, end-of-term confirmation): the TERM and the
+// CHURN EPISODE — customers.churn_episode_id, minted by the processor on
+// the first churn of an episode and cleared by every reactivation path
+// that clears churned_at. The ordinary path takes the id the processor
+// just returned and stamps it on the request (metadata.cancel_plan) and
+// the case snapshot; a repair reads the REQUEST's own stamp, so an
+// acceptance processed in an earlier episode keeps that episode's keys and
+// one never processed under any episode (or opened before this shipped)
+// has no stamp → no term key → request-keyed dedupe, exactly as before.
+// The confirmation leg also carries the coverage BOUNDARY: an admin
+// correcting term_end and repeating the cancel must re-tell the customer
+// the new date, not dedupe against the old one (the dated task carries its
+// date in its own key).
+const termEpisodeOf = (term, episodeId, boundary) => (term && episodeId
+  ? { termId: term.id, episodeKey: String(episodeId), boundary: dateOnly(boundary) || dateOnly(term.term_end) || null }
+  : null);
+const termEpisodeSendArgs = (episode) => ({
+  prepayTermId: episode ? episode.termId : null,
+  termEpisodeKey: episode ? `${episode.episodeKey}:${episode.boundary || 'no-boundary'}` : null,
+});
+const termEpisodeRaiseArgs = (episode) => (episode ? { termId: episode.termId, episodeKey: episode.episodeKey } : {});
+// Durable retry state: the episode the processor churned this request
+// under. Written before the term-keyed side effects so a repair after a
+// lost response finds it; a lost stamp only means that repair falls back
+// to request-keyed dedupe (at-most-twice beats never telling anyone).
+async function stampRequestEpisode(requestRow, episodeId) {
+  const meta = requestCancelPlanMeta(requestRow) || {};
+  if (String(meta.churnEpisodeId || '') === String(episodeId)) return;
+  const next = { ...meta, churnEpisodeId: String(episodeId) };
+  try {
+    await db('service_requests').where({ id: requestRow.id }).update({
+      metadata: JSON.stringify({ cancel_plan: next }),
+      updated_at: new Date(),
+    });
+    requestRow.metadata = JSON.stringify({ cancel_plan: next });
+  } catch (metaErr) {
+    logger.warn(`[admin-cancellation] churn episode stamp failed for request ${requestRow.id}: ${metaErr.message}`);
+  }
+}
+
 // The request-scoped history note the processor stamps on every visit this
 // request cancels — the immutable retry marker (never the editable reason).
 const historyNoteFor = (requestId) => `Admin cancellation request ${requestId}`;
@@ -1363,10 +1404,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             // this the stale error echoes forever and the office never
             // gets its pull instruction.
             const datedTermite = priorSnap.effectiveDate === 'end_of_coverage';
+            // The repair's identity is the REQUEST's own episode stamp and the
+            // snapshot's boundary (the date the resend renders), never the
+            // customer's current stamp or a term_end corrected since.
+            const repairMeta = requestCancelPlanMeta(reqRow);
+            const repairEpisode = termEpisodeOf(term, repairMeta && repairMeta.churnEpisodeId, datedTermite ? priorSnap.effectiveOn : null);
             if (hasTermiteErr && (!datedTermite || priorSnap.effectiveOn)) {
               try {
                 const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
-                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: datedTermite ? priorSnap.effectiveOn : null });
+                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: datedTermite ? priorSnap.effectiveOn : null, ...termEpisodeRaiseArgs(repairEpisode) });
                 promotedErrors = promotedErrors.filter((e) => e !== 'termite_retrieval_task');
               } catch (termiteErr) {
                 logger.warn(`[admin-cancellation] deferred termite retrieval repair failed for request ${reqRow.id}: ${termiteErr.message}`);
@@ -1395,6 +1441,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
                 effectiveAt: priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.effectiveOn
                   ? `${priorSnap.effectiveOn}T12:00:00-04:00` : null,
                 keptThrough: priorSnap.effectiveDate === 'end_of_coverage',
+                ...termEpisodeSendArgs(repairEpisode),
                 entryPoint: 'admin_cancel_plan',
                 identityTrustLevel: 'admin_operator',
               });
@@ -1911,12 +1958,16 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // that did not end. Skipped on a conflict/failed disposition: that run
   // is already partial (belled), and the repair retry re-runs the
   // processor, which re-derives the pending task from live rows.
+  // The episode the processor churned this request under — stamped on the
+  // request BEFORE the term-keyed side effects, and carried on the case.
+  if (result && result.churnEpisodeId) await stampRequestEpisode(request, result.churnEpisodeId);
+  const termEpisode = termEpisodeOf(term, result && result.churnEpisodeId, prepayPlan.keepThrough || null);
   if (result && result.termiteRetrievalPending) {
     if (processed && ['ends_at_term', 'ended_now', 'decision_already_recorded'].includes(termOutcome)) {
       try {
         const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
         await raiseTermiteRetrievalTask(customerId, request.id,
-          { retrieveAfter: result.termiteRetrievalPending.retrieveAfter });
+          { retrieveAfter: result.termiteRetrievalPending.retrieveAfter, ...termEpisodeRaiseArgs(termEpisode) });
       } catch (termiteErr) {
         errors.push('termite_retrieval_task');
         logger.error(`[admin-cancellation] deferred termite retrieval task failed for request ${request.id}: ${termiteErr.message}`);
@@ -1948,6 +1999,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       ? (carriedPrepay.proposedRefund && !carriedPrepay.refund ? { proposedRefund: carriedPrepay.proposedRefund } : {})
       : (refundFacts && !refundRecorded ? { proposedRefund: refundFacts } : {})),
     sendConfirmation: input.sendConfirmation,
+    ...(result && result.churnEpisodeId ? { churnEpisodeId: String(result.churnEpisodeId) } : {}),
     tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
     monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
     billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
@@ -1990,6 +2042,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // "upcoming visits are off the calendar" copy would be false, so the
       // senders switch to the end-of-term wording.
       keptThrough: !!prepayPlan.keepThrough,
+      // The end-of-term confirmation is sent once per (TERM, churn episode),
+      // not per request — see termEpisodeOf.
+      ...termEpisodeSendArgs(termEpisode),
       entryPoint: 'admin_cancel_plan',
       identityTrustLevel: 'admin_operator',
     });
