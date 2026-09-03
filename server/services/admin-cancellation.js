@@ -785,6 +785,10 @@ async function ratchetAcceptedChoices(requestRow, input, fallbackScope) {
       metadata: JSON.stringify({ cancel_plan: next }),
       updated_at: new Date(),
     });
+    // The row object is the base every later metadata write on this run
+    // merges into (the episode stamp) — a stale copy would silently revert
+    // the waiver/opt-out just persisted.
+    requestRow.metadata = JSON.stringify({ cancel_plan: next });
   } catch (metaErr) {
     logger.warn(`[admin-cancellation] ${Object.keys(ratchet).join('/')} ratchet failed for request ${requestRow.id}: ${metaErr.message}`);
   }
@@ -1274,12 +1278,25 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         let openTie = false;
         try {
           const priorReq = prior.service_request_id
-            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
+            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'metadata')
             : null;
           openTie = !!priorReq && priorReq.status === 'new';
-          tied = openTie
-            || (!!priorReq && priorReq.status === 'resolved'
-              && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000);
+          let resolvedTie = !!priorReq && priorReq.status === 'resolved'
+            && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000;
+          // The window alone is not proof of a retry: a customer won back
+          // and cancelling the same still-current term inside 24h must
+          // process fresh, or the live account stays billable behind an
+          // echo. A resolved run that stamped its churn episode is a retry
+          // only while the customer is STILL in that episode (row churned,
+          // same stamp); an unstamped resolved run (pre-episode, scoped)
+          // keeps the window rule.
+          const priorEpisode = resolvedTie ? (requestCancelPlanMeta(priorReq) || {}).churnEpisodeId : null;
+          if (priorEpisode) {
+            const live = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churn_episode_id');
+            resolvedTie = !!live && live.pipeline_stage === 'churned'
+              && String(live.churn_episode_id || '') === String(priorEpisode);
+          }
+          tied = openTie || resolvedTie;
         } catch (tieErr) {
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
         }
@@ -1385,7 +1402,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       const outcome = priorSnap && priorSnap.outcome ? priorSnap.outcome : null;
       const isConfirmErr = (e) => String(e).startsWith('confirmation_');
       const hasTermiteErr = !!(outcome && Array.isArray(outcome.errors) && outcome.errors.includes('termite_retrieval_task'));
-      if (outcome && (refundRepairedNow || hasTermiteErr
+      const hasEpisodeStampErr = !!(outcome && Array.isArray(outcome.errors) && outcome.errors.includes('churn_episode_stamp'));
+      if (outcome && (refundRepairedNow || hasTermiteErr || hasEpisodeStampErr
         || (Array.isArray(outcome.errors) && outcome.errors.some(isConfirmErr)))) {
         try {
           const reqRow = prior.service_request_id
@@ -1403,6 +1421,13 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             // error the lost task recorded.
             let promotedErrors = (outcome.errors || []).filter((e) => !(refundRepairedNow
               && (e === 'prepay_term_disposition' || e === 'prepay_refund_task')));
+            // A lost churn-episode stamp is WITHDRAWN here, never retro-
+            // fitted: that run's side effects went out under the REQUEST key
+            // (stampRequestEpisode's contract), and stamping now would hand
+            // a later resend a second, term-keyed identity. The office was
+            // belled once; the acceptance closes on the identity the run
+            // actually used, so a later win-back cancel never reuses it.
+            promotedErrors = promotedErrors.filter((e) => e !== 'churn_episode_stamp');
             // A lost DEFERRED retrieval task repairs here too — dated
             // (end-of-coverage) or immediate (end-now): the decided-term
             // latch is the only path a retried run reaches, and without

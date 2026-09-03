@@ -301,12 +301,24 @@ test('a repeat run on a still-churned row REUSES the stamped episode — never r
   expect(result.churnEpisodeId).toBe('ep-first');
 });
 
+test('a LIVE row still carrying a stale episode (a promotion that never cleared the stamp) churns under a FRESH episode', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  seedCustomer();
+  Object.assign(db.__tables.customers[0], { pipeline_stage: 'active_customer', active: true, churned_at: null, churn_episode_id: 'ep-stale' });
+  const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-3' });
+  expect(result.churned).toBe(true);
+  const c = db.__tables.customers[0];
+  expect(c.churn_episode_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(c.churn_episode_id).not.toBe('ep-stale');
+  expect(result.churnEpisodeId).toBe(c.churn_episode_id);
+});
+
 test('the episode is chosen from the row AS LOCKED — a stamp that landed between the entry read and the lock is reused, never overwritten', async () => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   seedCustomer();
   // A concurrent cancel committed its episode after this run's entry read.
   const orig = db.transaction;
-  db.transaction = async (fn) => { db.__tables.customers[0].churn_episode_id = 'ep-race'; return orig(fn); };
+  db.transaction = async (fn) => { Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churn_episode_id: 'ep-race' }); return orig(fn); };
   try {
     const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-3' });
     expect(result.churned).toBe(true);
@@ -323,7 +335,7 @@ test('the episode is chosen from the row AS LOCKED — a stamp that landed betwe
 test('gate OFF: the episode is still minted under the customers row lock', async () => {
   seedCustomer();
   const orig = db.transaction;
-  db.transaction = async (fn) => { db.__tables.customers[0].churn_episode_id = 'ep-race-legacy'; return orig(fn); };
+  db.transaction = async (fn) => { Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churn_episode_id: 'ep-race-legacy' }); return orig(fn); };
   try {
     const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'moving', requestId: 'req-4' });
     expect(result.churned).toBe(true);

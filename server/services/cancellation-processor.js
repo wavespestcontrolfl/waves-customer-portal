@@ -829,7 +829,14 @@ async function processCancellationRequest({
         .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode', 'churn_episode_id');
       if (!customer) return false;
       wasChurnedStage = customer.pipeline_stage === 'churned';
-      churnEpisodeId = customer.churn_episode_id || randomUUID();
+      // A stored episode is REUSED only while the row is still churned. A
+      // promotion to a live stage that never cleared the stamp (tier
+      // alignment in self-booking-plan-sync promotes a booked churned member
+      // to active_customer without touching churn_episode_id) is a win-back
+      // all the same: this cancel is a NEW episode, or its end-of-term side
+      // effects would dedupe against the earlier churn's.
+      const reuseEpisode = wasChurnedStage && !!customer.churn_episode_id;
+      churnEpisodeId = reuseEpisode ? customer.churn_episode_id : randomUUID();
       const now = new Date();
       const update = {
         active: false,
@@ -841,7 +848,7 @@ async function processCancellationRequest({
         autopay_enabled: false,
         next_charge_date: null,
         updated_at: now,
-        ...(customer.churn_episode_id ? {} : { churn_episode_id: churnEpisodeId }),
+        ...(reuseEpisode ? {} : { churn_episode_id: churnEpisodeId }),
       };
       // Preserve the original churn timestamp/reason if already churned.
       if (!wasChurnedStage) {
