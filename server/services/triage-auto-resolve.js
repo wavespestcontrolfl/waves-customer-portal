@@ -298,10 +298,12 @@ function requestedAddressIsOnFile(item) {
   return readings.every((r) => readingMatchesOnFile(item, r));
 }
 
-// The address a booking is POSITIVELY at (its stamped service_address_*
-// when present, else the active property row it points at), or null.
+// The address a booking is POSITIVELY at: its stamped service_address_*
+// when the stamp carries a locality (a street-only legacy stamp — the
+// backfill leaves those — cannot prove WHICH "123 Main St"), else the
+// active property row it points at, else null.
 function bookingPlace(visit, places) {
-  if (visit.service_address_line1) {
+  if (visit.service_address_line1 && (zip5(visit.service_address_zip) || cityKey(visit.service_address_city))) {
     return { key: addressKey(visit.service_address_line1), unit: unitOf(visit.service_address_line1, visit.service_address_line2), city: visit.service_address_city, zip: visit.service_address_zip };
   }
   return visit.property_id ? places.get(String(visit.property_id)) || null : null;

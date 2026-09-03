@@ -521,6 +521,10 @@ describe('evidence helpers', () => {
     expect(bookingAtRequestedAddress(card(none), atOther, places)).toBe(false);
     expect(bookingAtRequestedAddress(card(none), booking({ property_id: 'p1' }), places)).toBe(true);
     expect(bookingAtRequestedAddress(card(none), booking({}), places)).toBe(false);
+    // A street-only stamp (no city, no ZIP) proves no locality: it counts
+    // only through a positively linked property.
+    expect(bookingAtRequestedAddress(card(none), booking({ service_address_line1: '77 Oak Street' }), places)).toBe(false);
+    expect(bookingAtRequestedAddress(card(none), booking({ service_address_line1: '77 Oak Street', property_id: 'p1' }), places)).toBe(true);
     // Named another address → the booking must be positively at THAT one.
     const named = { ...none, street_line_1: '5 Pine Ave', city: 'Sarasota', postal_code: '34236' };
     expect(bookingAtRequestedAddress(card(named), atOther, places)).toBe(true);
