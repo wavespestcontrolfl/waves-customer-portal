@@ -442,7 +442,7 @@ async function maybeBuildCommercialProposalDraft({
         // under the call-row lock; a later composer adopts the answer.
         {
           const { callUnitAnswerFence } = require('../../utils/estimate-claim-sql');
-          const fenceReason = await callUnitAnswerFence(trx, call.id, { address: intent.address });
+          const fenceReason = await callUnitAnswerFence(trx, call.id, { address: intent.address, adopted: context?.adoptedUnitAnswer || null });
           if (fenceReason) return { staleLinkage: fenceReason };
         }
         // GENERATION fence for EVERY call-origin insert — commercial
@@ -542,12 +542,12 @@ async function maybeBuildCommercialProposalDraft({
       return { estimate };
     });
 
-    if (creation.staleLinkage === 'unit_answer_pending') {
+    if (creation.staleLinkage === 'unit_answer_pending' || creation.staleLinkage === 'unit_answer_retracted') {
       // Preserved, not collapsed into stale_call_linkage: the engine exits
-      // quietly on this reason instead of the "existing estimate covers
+      // quietly on these reasons instead of the "existing estimate covers
       // this prospect" bell.
-      logger.info('[commercial-proposal] scaffold abandoned — the caller answered the unit after this run composed; the re-draft with the unit replaces it');
-      return { created: false, blocked: true, reason: 'unit_answer_pending' };
+      logger.info(`[commercial-proposal] scaffold abandoned — ${creation.staleLinkage === 'unit_answer_retracted' ? 'the adopted unit answer was retired by staff while this run composed' : 'the caller answered the unit after this run composed; the re-draft with the unit replaces it'}`);
+      return { created: false, blocked: true, reason: creation.staleLinkage };
     }
     if (creation.staleLinkage) {
       logger.info(`[commercial-proposal] scaffold abandoned — the call's lead linkage changed while composing (${creation.staleLinkage}); the corrected run rebuilds it`);

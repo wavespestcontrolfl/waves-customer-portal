@@ -480,6 +480,22 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
 
   test('a draft for ANOTHER building is not the fence\'s business; a DIFFERENT unit at the asked building — trailing, unit-first, structural, or multi-part — is the stale one the answer corrects', () => {
     expect(unitAnswerFenceReason(FENCE, { address: '5 Other Rd, Venice, FL 34285' })).toBeNull();
+  });
+
+  test('an ADOPTED answer must still be on the locked call row: cleared or replaced mid-run → unit_answer_retracted (pre-push codex P1, r8)', () => {
+    const adopted = { unit: 'Apt 204', at: FENCE.at };
+    const withUnit = '1048 Example Lakes Cir Apt 204, Sarasota, FL 34232';
+    // Still there, same stamp → the ordinary verdict on the final address.
+    expect(unitAnswerFenceReason(FENCE, { address: withUnit, adopted })).toBeNull();
+    expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir, Sarasota, FL 34232', adopted })).toBe('unit_answer_pending');
+    // Dismiss/Deny cleared it.
+    expect(unitAnswerFenceReason(null, { address: withUnit, adopted })).toBe('unit_answer_retracted');
+    expect(unitAnswerFenceReason({}, { address: withUnit, adopted })).toBe('unit_answer_retracted');
+    // A newer reply replaced it (different unit, or same unit re-stamped later).
+    expect(unitAnswerFenceReason({ ...FENCE, unit: 'Apt 205' }, { address: withUnit, adopted })).toBe('unit_answer_retracted');
+    expect(unitAnswerFenceReason({ ...FENCE, at: '2026-09-03T12:30:00Z' }, { address: withUnit, adopted })).toBe('unit_answer_retracted');
+    // No adoption → unchanged behavior.
+    expect(unitAnswerFenceReason(null, { address: withUnit, adopted: null })).toBeNull();
     expect(unitAnswerFenceReason(FENCE, { address: '5 Other Rd Apt 9, Venice, FL 34285' })).toBeNull();
     expect(unitAnswerFenceReason(FENCE, { address: 'Bldg 9, 5 Other Rd, Venice, FL 34285' })).toBeNull();
     expect(unitAnswerFenceReason(FENCE, { address: '1048 Example Lakes Cir Apt 9, Sarasota, FL 34232' })).toBe('unit_answer_pending');
@@ -583,16 +599,19 @@ describe('generation fence + call-lock wiring (source pins)', () => {
   test('both creators check the unit-answer fence on the FINAL address under the call-row lock: after the rejected check, before the generation fence', () => {
     for (const rel of ['../services/estimator-engine/draft-builder.js', '../services/estimator-engine/commercial-proposal.js']) {
       const source = src(rel);
-      const unitFenceAt = source.indexOf('callUnitAnswerFence(trx, call.id, { address: intent.address })');
+      const unitFenceAt = source.indexOf('callUnitAnswerFence(trx, call.id, { address: intent.address, adopted: context?.adoptedUnitAnswer || null })');
       expect(unitFenceAt).toBeGreaterThan(-1);
       expect(source.indexOf('callRejectedForDrafting(trx, call.id')).toBeLessThan(unitFenceAt);
       expect(source.indexOf('callPassStillOwned(trx, call.id', unitFenceAt)).toBeGreaterThan(unitFenceAt);
     }
     // The engine neither bells "an estimate already covers this" nor retries a fenced insert — residential AND commercial.
     const engine = src('../services/estimator-engine/index.js');
-    expect(engine).toContain("draft.duplicateBlock?.reason === 'unit_answer_pending'");
-    expect(engine).toContain("commercialOutcome.reason === 'unit_answer_pending'");
-    expect(src('../services/estimator-engine/commercial-proposal.js')).toContain("creation.staleLinkage === 'unit_answer_pending'");
+    expect(engine).toContain("const UNIT_FENCE_QUIET_REASONS = ['unit_answer_pending', 'unit_answer_retracted'];");
+    expect(engine).toContain('UNIT_FENCE_QUIET_REASONS.includes(draft.duplicateBlock?.reason)');
+    expect(engine).toContain('UNIT_FENCE_QUIET_REASONS.includes(commercialOutcome.reason)');
+    expect(src('../services/estimator-engine/commercial-proposal.js')).toContain("creation.staleLinkage === 'unit_answer_pending' || creation.staleLinkage === 'unit_answer_retracted'");
+    // The adoption records the fence identity the locked read must re-find.
+    expect(engine).toContain('context.adoptedUnitAnswer = { unit: String(fence.unit), at: fence.at || null };');
     // A stamped answer is applied to the composer's FINAL address deterministically, before any creator judges it.
     expect(engine.indexOf('intent.address = withUnitOverride(intent.address, context)')).toBeGreaterThan(engine.indexOf('const { intent, model } = composed;'));
     expect(engine.indexOf('intent.address = withUnitOverride(intent.address, context)')).toBeLessThan(engine.indexOf('let draft = await createDraftEstimate('));

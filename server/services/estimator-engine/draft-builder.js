@@ -1143,7 +1143,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       // draft for another building is untouched.
       {
         const { callUnitAnswerFence } = require('../../utils/estimate-claim-sql');
-        const fenceReason = await callUnitAnswerFence(trx, call.id, { address: intent.address });
+        const fenceReason = await callUnitAnswerFence(trx, call.id, { address: intent.address, adopted: context?.adoptedUnitAnswer || null });
         if (fenceReason) {
           return {
             duplicateBlock: {

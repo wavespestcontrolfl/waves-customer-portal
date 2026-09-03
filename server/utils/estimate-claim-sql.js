@@ -220,9 +220,21 @@ async function callUnitAnswer(dbc, callLogId) {
 // stale or misheard extraction — exactly what the customer's answer
 // corrects) are blocked; so is a draft with no address at all. A fence
 // with no building applies to every unitless or differing draft.
-function unitAnswerFenceReason(fence, { address = null } = {}) {
-  if (!fence || !fence.unit) return null;
+// `adopted` = the fence the composer ADOPTED before this locked read (the
+// engine reads it pre-transaction): the locked row must still carry that
+// same answer (unit + stamp time), or the human retired it mid-run —
+// Dismiss/Deny cleared the fence, or a newer reply replaced it — and a
+// draft carrying the rejected unit must not insert (pre-push codex P1 on
+// #3804, r8). 'unit_answer_retracted' exits as quietly as
+// 'unit_answer_pending'; the next reprocess composes without it.
+function unitAnswerFenceReason(fence, { address = null, adopted = null } = {}) {
   const { unitLineValueKey, dwellingUnitOnLine, splitUnitFirstLine } = require('./address-normalizer');
+  if (adopted && adopted.unit) {
+    if (!fence || !fence.unit) return 'unit_answer_retracted';
+    if (unitLineValueKey(String(fence.unit)) !== unitLineValueKey(String(adopted.unit))) return 'unit_answer_retracted';
+    if (adopted.at && String(fence.at || '') !== String(adopted.at)) return 'unit_answer_retracted';
+  }
+  if (!fence || !fence.unit) return null;
   const fencedKey = unitLineValueKey(String(fence.unit));
   const line = String(address || '').trim();
   if (!line) return 'unit_answer_pending';
@@ -244,9 +256,9 @@ function unitAnswerFenceReason(fence, { address = null } = {}) {
 
 // Read + decide, for the creators' in-lock check. Callers hold the call
 // row lock through their insert (same contract as callPassStillOwned).
-async function callUnitAnswerFence(dbc, callLogId, { address = null } = {}) {
+async function callUnitAnswerFence(dbc, callLogId, { address = null, adopted = null } = {}) {
   const fence = await callUnitAnswer(dbc, callLogId);
-  return unitAnswerFenceReason(fence, { address });
+  return unitAnswerFenceReason(fence, { address, adopted });
 }
 
 // Whether an operator edit may LIFT a unit hold: only once the row's

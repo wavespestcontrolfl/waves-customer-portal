@@ -42,6 +42,12 @@ const { hasWrongPremiseFlag } = require('../lookup-confidence');
 // on the customer-facing path, which has no review lane). The snappedRecord
 // check survives an enrichment failure (flags live on the enriched payload,
 // the audit marker on the record itself).
+// The unit-answer fence's QUIET block reasons (clarify write-back): the
+// engine neither bells "an estimate already covers this" nor retries —
+// pending = the reply's own re-run owns the replacement; retracted = the
+// human retired the fence this run had adopted (pre-push codex P1, r8).
+const UNIT_FENCE_QUIET_REASONS = ['unit_answer_pending', 'unit_answer_retracted'];
+
 function parcelSignalsDescribeGatheredAddress({ enriched, propertyRecord }) {
   if (hasWrongPremiseFlag(enriched)) return false;
   if (propertyRecord?._addressAudit?.snappedRecord) return false;
@@ -1339,6 +1345,12 @@ async function maybeDraftEstimateForCall({
             unitLineOverride = fence.unit;
             if (!serviceAddressOverride?.street_line_1 && b?.street_line_1) serviceAddressOverride = b;
             result.unitAnswerAdopted = true;
+            // The identity the creators' LOCKED fence read must still find
+            // on the call row — a Dismiss/Deny that cleared it (or a newer
+            // reply that replaced it) while this run composed aborts the
+            // insert instead of persisting the rejected unit (pre-push
+            // codex P1 on #3804, r8).
+            context.adoptedUnitAnswer = { unit: String(fence.unit), at: fence.at || null };
           }
         }
       } catch (fenceErr) {
@@ -2148,11 +2160,12 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             return result;
           }
           let commercialOutcome = proposalOutcome;
-          if (commercialOutcome?.blocked && commercialOutcome.reason === 'unit_answer_pending') {
+          if (commercialOutcome?.blocked && UNIT_FENCE_QUIET_REASONS.includes(commercialOutcome.reason)) {
             // Same quiet exit as the residential creator: the unit re-run
-            // owns the replacement and its bell (codex r1 P2 on #3796).
+            // owns the replacement and its bell (codex r1 P2 on #3796); a
+            // retracted adoption composes again on the next reprocess.
             result.blocked = true;
-            result.reasons = ['unit_answer_pending'];
+            result.reasons = [commercialOutcome.reason];
             logger.info('[estimator-engine] commercial scaffold blocked — the caller answered the unit after this run composed; the unit re-draft replaces it', { callLogId: context?.call?.id || null });
             return result;
           }
@@ -2301,13 +2314,15 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       membershipSnapshot, priorQualifyingServices, origin,
     });
 
-    if (draft.blocked && draft.duplicateBlock?.reason === 'unit_answer_pending') {
+    if (draft.blocked && UNIT_FENCE_QUIET_REASONS.includes(draft.duplicateBlock?.reason)) {
       // The caller texted their unit while this whole-building draft was
       // composing (clarify write-back fence): the unit re-run owns the
       // replacement and its own bell — no "an estimate already covers this
-      // prospect" bell, no reconcile retry (it would be fenced again).
+      // prospect" bell, no reconcile retry (it would be fenced again). A
+      // RETRACTED adoption (the human retired the fence mid-run) exits the
+      // same way; the next reprocess composes without the unit.
       result.blocked = true;
-      result.reasons = ['unit_answer_pending'];
+      result.reasons = [draft.duplicateBlock.reason];
       logger.info('[estimator-engine] draft blocked — the caller answered the unit after this run composed; the unit re-draft replaces it', { callLogId: context?.call?.id || null });
       return result;
     }
