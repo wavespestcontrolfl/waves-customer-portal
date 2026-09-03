@@ -1351,6 +1351,14 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     );
     expect(apartments.isCommercial).toBe(false);
     expect(apartments.propertyType).toBe('Condo');
+    // A record with NO commercial text of its own, typed by vision alone
+    // (detection source satellite_ai_property_use) — still one unit.
+    const visionOnly = buildEnrichedProfile(
+      rentalComplexRecord({ propertyType: 'Residential', unitCount: 1 }),
+      { propertyUse: 'COMMERCIAL', commercialUseType: 'MULTIFAMILY_COMMON_AREA' },
+      null, null, null, null, unit,
+    );
+    expect(visionOnly.isCommercial).toBe(false);
     const mixed = buildEnrichedProfile(
       rentalComplexRecord(), { propertyUse: 'MIXED', commercialUseType: 'MULTIFAMILY_COMMON_AREA' },
       null, null, null, null, unit,

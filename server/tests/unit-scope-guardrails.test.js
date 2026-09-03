@@ -1838,8 +1838,13 @@ describe('residentialUnitLookupVerdict — the manual lookup honors a unit addre
       // Vision read a commercial use on THIS parcel.
       expect(residentialUnitLookupVerdict({ ...apartmentVerdict, structuredCommercialSignal: true })).toBe(false);
       expect(residentialUnitLookupVerdict({
-        ...apartmentVerdict, commercialDetectionSource: 'satellite_ai_property_use',
+        ...apartmentVerdict, commercialDetectionSource: 'satellite_ai_property_use', structuredCommercialSignal: true,
       })).toBe(false);
+      // …but a verdict whose ONLY source is vision's multifamily read is
+      // the same whole-property verdict the override permits.
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, commercialDetectionSource: 'satellite_ai_property_use',
+      })).toBe(true);
     });
   });
 

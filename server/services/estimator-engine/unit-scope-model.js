@@ -516,11 +516,15 @@ function residentialUnitLookupVerdict({
   // business tenant, and pricing it residential is the opposite error
   // (pre-push codex P1). Apt / Unit / Apartment / #<n> only.
   if (SUITE_DESIGNATOR_RE.test(String(address))) return false;
-  // Vision looked at THIS parcel and read a commercial use — the record's
+  // Vision looked at THIS parcel and read a commercial USE — the record's
   // multifamily string does not outrank it (the subtype resolver checks
   // apartment/multifamily text before the structured signal, so the
-  // subtype alone cannot tell the two apart).
-  if (structuredCommercialSignal || commercialDetectionSource === 'satellite_ai_property_use') return false;
+  // subtype alone cannot tell the two apart). The caller decides what
+  // counts: vision's own MULTIFAMILY_COMMON_AREA read is the same
+  // whole-property verdict this override permits, so a verdict whose ONLY
+  // source is that read (detection source satellite_ai_property_use) must
+  // not be vetoed by its source alone (pre-push codex P1 r7).
+  if (structuredCommercialSignal) return false;
   // Mixed-use: a record whose text carries BOTH multifamily and a positive
   // commercial use ("Retail Store" land use under an apartment type)
   // collapses to the multifamily subtype because the resolver checks that
