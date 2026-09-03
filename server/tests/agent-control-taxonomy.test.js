@@ -112,12 +112,13 @@ describe('agent-control lane policies', () => {
   // judge whose scores are only comparable on one model (shadow judge). Call
   // research is NOT one: its miner deliberately dispatches with a
   // cross-provider fallback (call-research-miner.js), so it is `offline`.
-  const MEASUREMENT_LANES = ['mentions_prober', 'sealed_eval', 'shadow_judge'];
+  // The SMS route canaries measure whether a route answers — same rule.
+  const MEASUREMENT_LANES = ['mentions_prober', 'sealed_eval', 'shadow_judge', 'sms_canary_default', 'sms_canary_save_sale'];
 
   it('every switchboard lane has a runtime entry and vice versa (drift guard)', () => {
     const laneIds = sb.LANES.map((l) => l.id).sort();
     expect(Object.keys(policies.LANE_RUNTIME).sort()).toEqual(laneIds);
-    expect(laneIds.length).toBe(119);
+    expect(laneIds.length).toBe(121);
   });
 
   it('every entry is valid and every merged policy keeps the timing invariants', () => {

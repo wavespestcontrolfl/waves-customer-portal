@@ -72,6 +72,11 @@ const LANE_RUNTIME = {
   voice_profile: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, expected_cadence: 'daily', ...LONG_BATCH },
   sealed_eval: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'measurement', eval_family: 'routine_copy', expected_cadence: 'daily', ...LONG_BATCH },
   quarantine_arbiter: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'transcription_contact' },
+  // Route canaries: one tiny probe per draft route at boot + every 6h; the
+  // answer IS the measurement (a substitute provider would hide the outage
+  // it exists to catch). Alerts = admin bell + internal SMS to the owner.
+  sms_canary_default: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'measurement', eval_family: null, expected_cadence: 'daily', expected_duration_ms: 15_000 },
+  sms_canary_save_sale: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'measurement', eval_family: null, expected_cadence: 'daily', expected_duration_ms: 15_000 },
 
   // ── Calls ──
   call_extraction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0', ...CALL_PIPELINE },
