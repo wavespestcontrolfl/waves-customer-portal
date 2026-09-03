@@ -772,8 +772,12 @@ function recipientAccountBinder({ toLast10, trustedCustomerId }) {
     if (!trustedCustomerId && recipientAccounts.size > 1) {
       return refuseSend(`That number is on file for more than one customer account — pick the customer from the search dropdown before sending a ${label}.`);
     }
-    const row = customerId ? await db('customers').where({ id: customerId }).first('id', 'account_id') : null;
-    if (!row || !recipientAccounts.has(accountKey(row))) {
+    // The public appointment and report routes 404 once the owning customer
+    // is deleted — a live sibling on the same account must not be texted a
+    // dead bearer (pre-push Codex P1): the owner must be a LIVE row.
+    const row = customerId ? await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'account_id') : null;
+    if (!row) return refuseSend(`This ${label} no longer resolves — remove it and insert a fresh one.`);
+    if (!recipientAccounts.has(accountKey(row))) {
       return refuseSend(`This ${label} belongs to a different customer — remove it before sending.`);
     }
     if (trustedCustomerId) {

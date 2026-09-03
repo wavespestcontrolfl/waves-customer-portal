@@ -1118,6 +1118,13 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ id: 'v1' });
     });
 
+    test('a visit whose owning customer was deleted refuses — the public route 404s it, and a live sibling on the account must not be texted a dead link (pre-push Codex P1)', async () => {
+      wireAccount({ linkCustomer: null, visit: { id: 'v1', customer_id: 'c-gone' } });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer resolves/);
+      expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c-gone' });
+      expect(mockBuilders.customers.whereNull).toHaveBeenCalledWith('deleted_at');
+    });
+
     test('a number on file for more than one ACCOUNT is ambiguous: no trusted customer → refuses (the insert route 409s the same); a trusted customer names the account → passes (GH Codex #3844 r6 P1)', async () => {
       wireAccount({ recipientRows: [acct('c1', 'acct-a'), acct('c2', 'acct-b')], linkCustomer: acct('c1', 'acct-a') });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/more than one customer account/);
