@@ -251,3 +251,20 @@ test('PR 2: the bell decision follows the LOCKED vendor — a switch to a manual
   mockState.autoOrder = false;
   mockState.autoOrderVendor = null;
 });
+
+test('re-bell on an open auto request says what the REQUEST says, not the product\'s edited config (Codex r6 P2)', async () => {
+  // Admin cut reorder_quantity 650 → 100 and swapped the vendor after the
+  // request was raised; the Restock queue still shows the original 650 from
+  // Gemplers, so the bell must too.
+  mockState.candidates = [{ ...lowSign, reorder_quantity: '100', vendor_name: 'Amazon', auto_reorder_vendor_id: 'vend-amazon' }];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Gemplers', requested_quantity: '650', unit: 'each', current_stock: '80', metadata: { vendorId: 'vend-gemplers', vendorSku: '127544', vendorProductUrl: 'https://gemplers.com/x' } };
+  mockState.pricing = { vendor_sku: 'B0AMZ', vendor_product_url: 'https://amazon.com/y' };
+  const notify = jest.fn(async () => ({}));
+  await runSuppliesAutoReorderSweep({ notify });
+  expect(mockState.updates).toHaveLength(0); // populated request never rewritten
+  const [, , body, opts] = notify.mock.calls[0];
+  expect(body).toContain('Reorder 650 each from Gemplers');
+  expect(body).toContain('gemplers.com/x');
+  expect(body).not.toContain('amazon');
+  expect(opts.metadata).toMatchObject({ vendorId: 'vend-gemplers', vendorSku: '127544' });
+});

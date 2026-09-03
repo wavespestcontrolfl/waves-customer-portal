@@ -2,6 +2,7 @@
  * supplies-consumption.js — per-completion consumables.
  *
  * Unit contract (mocked db):
+ *   - GATE_AUTO_REORDER unset → nothing read, nothing written (dark)
  *   - incomplete visit → nothing read, nothing written
  *   - a consumable with a count → one usage movement + decrement
  *   - a duplicate (movement insert ignored by the partial unique index) →
@@ -59,6 +60,22 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
 
 const sign = { id: 'prod-sign', name: 'Sign card', per_completion_usage: '1', inventory_on_hand: '640', inventory_unit: 'each' };
 const args = { scheduledServiceId: 'svc-1', serviceRecordId: 'rec-1', customerId: 'cust-1', technicianId: 'tech-1' };
+
+// The hook shares the lane's kill switch with the sweep: on for the contract
+// below; one test proves unset = nothing read.
+beforeAll(() => { process.env.GATE_AUTO_REORDER = 'true'; });
+afterAll(() => { delete process.env.GATE_AUTO_REORDER; });
+
+test('GATE_AUTO_REORDER unset → skipped before any read (PR ships dark end to end — GH codex r6 P1)', async () => {
+  delete process.env.GATE_AUTO_REORDER;
+  try {
+    const selectSpy = jest.fn();
+    const db = () => ({ where: () => ({ whereNotNull: () => ({ where: () => ({ select: selectSpy }) }) }) });
+    const res = await consumeCompletionSupplies(db, args);
+    expect(res.skipped).toEqual([{ reason: 'gated' }]);
+    expect(selectSpy).not.toHaveBeenCalled();
+  } finally { process.env.GATE_AUTO_REORDER = 'true'; }
+});
 
 test('incomplete visit → skipped before any read', async () => {
   const selectSpy = jest.fn();
