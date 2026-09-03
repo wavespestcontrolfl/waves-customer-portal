@@ -19,7 +19,6 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
 const { computeStalledCalls, MIN_DURATION_SECONDS } = require('./call-processing-stall-watchdog');
-const { activityLabel } = require('./intelligence-bar/authorization-contract');
 const { EXECUTING_RECOVERY_MINUTES } = require('./content/email-approvals');
 const { STALE_CLAIM_MS: DELIVERY_STALE_CLAIM_MS } = require('./service-report/delivery-queue');
 const { STALE_CLAIM_MS: PDF_STALE_CLAIM_MS } = require('./service-report/pdf-queue');
@@ -31,6 +30,15 @@ const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('./call-recording-processor');
 const ITEM_LIMIT = 25;
 const SCAN_LIMIT = 200;
 const RECENT_DAYS = 7;
+
+// Tool names are snake_case identifiers (send_sms, create_estimate); no
+// module exports a display label for them, so the view humanizes the name
+// itself rather than reaching for a helper that does not exist (GitHub
+// Codex r3 P2 — the previous import threw whenever an action was pending).
+function toolTitle(name) {
+  const words = String(name || '').trim().replace(/_/g, ' ');
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Pending action';
+}
 
 function iso(v) {
   if (!v) return null;
@@ -214,7 +222,9 @@ async function laneContentParks() {
   const reviews = Array.isArray(result?.items) ? result.items : [];
   const items = reviews.map((it) => ({
     id: it.id,
-    title: it.brief?.title || it.brief?.topic || it.opportunity_key || it.key || `Opportunity ${String(it.id).slice(0, 8)}`,
+    // buildReviewItem exposes the targeting fields, not the brief object
+    // (GitHub Codex r3 P2): keyword first, then the mined query / page.
+    title: it.target_keyword || it.query || it.target_url || `Opportunity ${String(it.id).slice(0, 8)}`,
     status: 'parked',
     detail: it.skip_reason ? `parked: ${String(it.skip_reason).replace(/_/g, ' ')}` : 'awaiting review',
     at: iso(it.run?.completed_at || it.run?.claimed_at || it.updated_at || it.mined_at),
@@ -282,7 +292,7 @@ async function laneIbPendingActions() {
   // params (an SMS body among them) and never belongs in a metadata view.
   const items = rows.map((r) => ({
     id: r.id,
-    title: activityLabel(r.tool_name || ''),
+    title: toolTitle(r.tool_name),
     status: 'parked',
     detail: `awaiting confirmation on the card${r.context ? ` · ${r.context}` : ''} · expires ${iso(r.expires_at)}`,
     at: iso(r.created_at),

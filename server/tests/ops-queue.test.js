@@ -40,9 +40,6 @@ jest.mock('../services/service-report/delivery-queue', () => ({ STALE_CLAIM_MS: 
 jest.mock('../services/service-report/pdf-queue', () => ({ STALE_CLAIM_MS: 30 * 60 * 1000 }));
 jest.mock('../services/call-recording-processor', () => ({ CALL_EXTRACTION_MAX_ATTEMPTS: 3 }));
 // The stall rule is the watchdog's; here it is a fixture: c1 is stalled.
-jest.mock('../services/intelligence-bar/authorization-contract', () => ({
-  activityLabel: (name) => ({ send_sms: 'Send a text message' })[name] || String(name).replace(/_/g, ' '),
-}));
 jest.mock('../services/call-processing-stall-watchdog', () => ({
   computeStalledCalls: (rows) => rows.filter((r) => r.id === 'c1'),
   MIN_DURATION_SECONDS: 11,
@@ -65,7 +62,8 @@ describe('getOpsQueue', () => {
       { job: 'healthy-one', state: 'healthy', last_success_at: ago(5) },
     ] });
     mockReviewItems.mockResolvedValue({ status: 'pending_review', counts: {}, items: [
-      { id: 'opp-1', skip_reason: 'affiliate_review', brief: { title: 'Best ant bait for lanais' }, run: { completed_at: ago(60) } },
+      // The shape listReviewItems actually returns (buildReviewItem): targeting fields, no brief object.
+      { id: 'opp-1', skip_reason: 'affiliate_review', target_keyword: 'Best ant bait for lanais', query: 'ant bait lanai', run: { completed_at: ago(60) } },
     ] });
     fixtures.call_log = [
       { id: 'c1', from_phone: '+15550000100', direction: 'inbound', processing_status: 'processing', processing_started_at: ago(45), created_at: ago(50) },
@@ -144,7 +142,7 @@ describe('getOpsQueue', () => {
     expect(by.approvals.items[0].at).toBe(ago(200)); // the failure event, not the request
     expect(by.approvals.items.find((i) => i.id === 'ea-5').detail).toMatch(/orphaned claim/);
     expect(by.approvals.items.find((i) => i.id === 'ea-3').detail).toBe('approval email not yet sent');
-    expect(by.ib.items).toEqual([expect.objectContaining({ id: 'pa-1', status: 'parked', title: 'Send a text message' })]);
+    expect(by.ib.items).toEqual([expect.objectContaining({ id: 'pa-1', status: 'parked', title: 'Send sms' })]);
     expect(JSON.stringify(by.ib)).not.toContain('SECRET');
     expect(by.reports.items.map((i) => [i.id, i.status])).toEqual([
       ['delivery:d2', 'failed'], ['pdf:p2', 'parked'], ['delivery:d4', 'parked'],
@@ -198,7 +196,7 @@ describe('getOpsQueue scan cap', () => {
   test('a lane that hits the scan cap reports truncated so counts read as a floor', async () => {
     for (const k of Object.keys(fixtures)) delete fixtures[k];
     mockJobHealth.mockResolvedValue({ jobs: [] });
-    mockReviewItems.mockResolvedValue({ items: [{ id: 'opp-1', brief: { title: 'x' } }], counts: { pending_review: 150 } });
+    mockReviewItems.mockResolvedValue({ items: [{ id: 'opp-1', target_keyword: 'x' }], counts: { pending_review: 150 } });
     fixtures.ib_pending_actions = Array.from({ length: 200 }, (_, i) => ({ id: `pa-${i}`, tool_name: 'send_sms', expires_at: ago(-5), created_at: ago(i) }));
     const q = await getOpsQueue();
     const ib = q.lanes.find((l) => l.key === 'ib');
