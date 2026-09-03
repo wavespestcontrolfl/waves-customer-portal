@@ -702,7 +702,12 @@ async function markLinkedLeadEstimateAccepted({
       // when the original was validated as the SAME opportunity; an original
       // that failed the contact/customer/estimate checks is someone else's
       // inquiry and its funnel is not ours to book (pre-push P1 on #3834 r8).
-      if (sameOpportunity) await bridgeLeadFunnelStage(lead.id, 'won', database);
+      // `lead` was refreshed by the lost claim, so judge the ORIGINAL AS IT
+      // IS NOW: closed since the read, or linked to another estimate, means
+      // it is no longer this opportunity (pre-push P1 on r12).
+      const stillOurs = sameOpportunity && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at
+        && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
+      if (stillOurs) await bridgeLeadFunnelStage(lead.id, 'won', database);
     }
     return;
   }

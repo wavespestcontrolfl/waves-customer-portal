@@ -342,6 +342,22 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-O', patch: expect.objectContaining({ estimate_id: 'estimate-2j' }), conditional: true }]);
   });
 
+  test('when the claim loses only because a concurrent SAME-estimate link won, the original converts directly (no fallback, no double bridge)', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2o', estimate_data: { lead_id: 'lead-dupO' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-dupO': { id: 'lead-dupO', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-origO' } },
+        'lead-origO': { id: 'lead-origO', status: 'new', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' },
+      },
+      raceRows: { 'lead-origO': { id: 'lead-origO', status: 'estimate_sent', estimate_id: 'estimate-2o' } },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2o', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-origO', expect.anything());
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+
   test('a soft-deleted named duplicate never resolves to its live original (nothing converts)', async () => {
     const database = makeAcceptDb({
       linked: [],
@@ -422,9 +438,9 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig6', expect.anything());
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup6', expect.objectContaining({ customerId: 'customer-1' }));
     expect(database._updates).toEqual([{ id: 'lead-dup6', patch: expect.objectContaining({ estimate_id: 'estimate-2g' }), conditional: true }]);
-    // The duplicate row has no ad_service_attribution row of its own, so the
-    // ORIGINAL's funnel row is the one advanced to booked (codex r8 P1).
-    expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-orig6', 'won', database);
+    // The re-read proved the original now belongs to ANOTHER estimate, so it
+    // is no longer this opportunity: its funnel is not booked (pre-push r12).
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
 
   test('an original closed as won between the read and the atomic stamp records no second win on the duplicate row', async () => {
