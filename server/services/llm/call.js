@@ -157,7 +157,16 @@ function providerErrorReason(provider, err) {
  * priority as voice/safety rules. This mirrors callAnthropic's real `system`
  * field. jsonMode parses the reply via parseLooseJson.
  */
-async function callOpenAI({ model, system, text, images = [], jsonMode = true, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low' } = {}) {
+// jsonSchema (optional, JSON-schema object; objects need additionalProperties:
+// false and every key in `required`): with jsonMode it turns the provider's
+// structured-output mode on — the model is constrained to the schema instead
+// of being asked in prose to "return only JSON". Anthropic:
+// output_config.format json_schema; OpenAI Responses: text.format json_schema
+// (strict); Gemini: generationConfig.response_json_schema alongside the JSON
+// mime type. The reply still goes through
+// parseLooseJson, so a site converts by adding its schema and deleting its
+// JSON-shape prose — nothing else about the site changes.
+async function callOpenAI({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low' } = {}) {
   if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_key' };
   try {
     const content = [{ type: 'input_text', text: text || '' }, ...images.map(toOpenAIImage)];
@@ -166,6 +175,7 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, m
     // (inbound email sender/subject/body, call transcripts, names/addresses).
     const body = { model, input: [{ role: 'user', content }], store: false };
     if (system) body.instructions = system;
+    if (jsonMode && jsonSchema) body.text = { format: { type: 'json_schema', name: 'structured_response', schema: jsonSchema, strict: true } };
     // Gate reasoning by cap — see OPENAI_REASONING_FLOOR_TOKENS. Big lanes
     // keep the caller's cap and the standard effort (default 'low') exactly
     // as before; tiny sub-floor lanes drop to minimal effort. The wire-cap
@@ -205,7 +215,7 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, m
  * Gemini generateContent. jsonMode sets response_mime_type and joins ALL text
  * parts (a thinking model can emit a thought part before the answer part).
  */
-async function callGemini({ model, system, text, images = [], jsonMode = true, maxTokens = 2048, temperature = 0.2, timeoutMs } = {}) {
+async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, timeoutMs } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
   try {
@@ -213,6 +223,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, m
     const parts = [...images.map(toGeminiImage), { text: promptText }];
     const generationConfig = { temperature, maxOutputTokens: maxTokens };
     if (jsonMode) generationConfig.response_mime_type = 'application/json';
+    if (jsonMode && jsonSchema) generationConfig.response_json_schema = jsonSchema;
     const resp = await fetch(geminiUrl(model, key), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -238,7 +249,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, m
 // A payload `temperature` is read by the Gemini leg only. Current Anthropic
 // models (Opus 4.7+, Sonnet 5, Fable) reject sampling controls with a 400, so
 // this leg never forwards it.
-async function callAnthropic({ model, system, text, images = [], tools, jsonMode = true, maxTokens = 1024, timeoutMs, anthropicClient } = {}) {
+async function callAnthropic({ model, system, text, images = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, anthropicClient } = {}) {
   if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
   try {
     const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -251,6 +262,7 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
     // are silently not cached — harmless.
     if (system) req.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
     if (tools) req.tools = tools;
+    if (jsonMode && jsonSchema) req.output_config = { format: { type: 'json_schema', schema: jsonSchema } };
     // maxRetries:0 whenever a budget is supplied — the SDK's per-request
     // timeout applies to EACH attempt, so its default retry policy (2 retries)
     // could hold a caller for ~3x its ceiling. Callers with a timeoutMs budget
@@ -276,7 +288,7 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
 
 /**
  * Dispatch a models.ROUTES entry ({ provider, model }) to the matching provider.
- * payload: { system, text, images, jsonMode, maxTokens, tools, temperature,
+ * payload: { system, text, images, jsonMode, jsonSchema, maxTokens, tools, temperature,
  *            anthropicClient } (`anthropicClient` supports existing injected
  *            clients and deterministic tests without bypassing the router).
  */
