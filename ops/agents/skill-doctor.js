@@ -90,10 +90,11 @@ function listPrs({ repo, days, includeOpen }) {
 }
 
 function fetchCodexComments(repo, number) {
-  const out = gh(['api', `repos/${repo}/pulls/${number}/comments`, '--paginate']);
-  // --paginate concatenates JSON arrays; normalise to one array.
-  const pages = out.trim().replace(/\]\s*\[/g, ',');
-  const rows = pages ? JSON.parse(pages) : [];
+  // --slurp wraps every page in one outer array, so the pages are parsed as
+  // JSON and flattened — never regex-rewritten as raw text, which would also
+  // rewrite "][" inside a comment body (Codex r2).
+  const out = gh(['api', `repos/${repo}/pulls/${number}/comments`, '--paginate', '--slurp']);
+  const rows = out.trim() ? JSON.parse(out).flat() : [];
   return rows.filter((c) => c.user && CODEX_LOGIN.test(c.user.login));
 }
 
