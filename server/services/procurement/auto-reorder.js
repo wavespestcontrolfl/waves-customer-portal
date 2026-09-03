@@ -12,9 +12,15 @@
  * non-truthy value is the live kill switch; the sweep returns
  * { skipped: 'gated' } before any DB read.
  *
- * Dedupe is on ANY open|ordered request for the product, not only the
- * sweep's own — a manual request the office already raised must not get an
- * automatic twin.
+ * Dedupe: a live (open|ordered) request of ANY source for the product skips
+ * the insert (a manual request the office already raised must not get an
+ * automatic twin); for the sweep's OWN requests the invariant is enforced by
+ * the DB (partial unique index product_restock_requests_auto_reorder_live_uniq,
+ * ON CONFLICT DO NOTHING here), so a concurrent writer cannot slip a second
+ * auto row in between the read and the insert. The bell is re-attempted on
+ * every sweep while an auto request stays open — its dedupeKey is the
+ * request id, so a bell that failed once is retried and one that landed is
+ * never doubled.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -56,9 +62,25 @@ async function vendorPricingFor(conn, productId, vendorId) {
   }
 }
 
+async function ringRestockBell({ notify, product, request, pricing, onHand, reorderQty }) {
+  const notifyAdmin = notify || ((...args) => require('../notification-service').notifyAdmin(...args));
+  const where = product.vendor_name ? ` from ${product.vendor_name}` : '';
+  const link = pricing?.vendor_product_url ? ` Order link: ${pricing.vendor_product_url}` : '';
+  return notifyAdmin(
+    'system',
+    `Restock: ${product.name} is low (${onHand} ${product.inventory_unit})`,
+    `Reorder ${reorderQty} ${product.inventory_unit}${where} — order manually, then mark the restock request ordered.${link}`,
+    {
+      link: '/admin/inventory?tab=restock',
+      dedupeKey: `auto-reorder:${request.id}`,
+      metadata: { restockRequestId: request.id, productId: product.id, vendorId: product.auto_reorder_vendor_id || null, vendorSku: pricing?.vendor_sku || null, vendorProductUrl: pricing?.vendor_product_url || null },
+    },
+  );
+}
+
 async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
   if (!gateEnvValue(GATE)) return { skipped: 'gated', created: [], deduped: [], unconfigured: [] };
-  const result = { created: [], deduped: [], unconfigured: [], errors: [] };
+  const result = { created: [], deduped: [], unconfigured: [], errors: [], renotified: [] };
 
   const candidates = await findLowStockCandidates(conn);
   for (const p of candidates) {
@@ -68,17 +90,31 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
         result.unconfigured.push({ productId: p.id, name: p.name, reason: !p.inventory_unit ? 'no_unit' : 'no_reorder_quantity' });
         continue;
       }
+      const pricing = await vendorPricingFor(conn, p.id, p.auto_reorder_vendor_id);
+      const onHand = num(p.inventory_on_hand);
+      const threshold = num(p.low_stock_threshold);
       const existing = await conn('product_restock_requests')
         .where({ product_id: p.id })
         .whereIn('status', ['open', 'ordered'])
         .first();
-      if (existing) { result.deduped.push({ productId: p.id, name: p.name, requestId: existing.id }); continue; }
+      if (existing) {
+        result.deduped.push({ productId: p.id, name: p.name, requestId: existing.id });
+        // A still-open auto request whose bell failed earlier would otherwise
+        // sit unworked forever: re-ring (the request-id dedupeKey makes a
+        // landed bell a no-op).
+        if (existing.source === SOURCE && existing.status === 'open') {
+          try {
+            await ringRestockBell({ notify, product: p, request: existing, pricing, onHand, reorderQty });
+            result.renotified.push({ productId: p.id, requestId: existing.id });
+          } catch (notifyErr) {
+            logger.warn(`[auto-reorder] re-bell failed for ${p.name} (request ${existing.id}): ${notifyErr.message}`);
+          }
+        }
+        continue;
+      }
 
-      const pricing = await vendorPricingFor(conn, p.id, p.auto_reorder_vendor_id);
-      const onHand = num(p.inventory_on_hand);
-      const threshold = num(p.low_stock_threshold);
       const now = new Date();
-      const [request] = await conn('product_restock_requests').insert({
+      const inserted = await conn('product_restock_requests').insert({
         product_id: p.id,
         status: 'open',
         priority: 'normal',
@@ -98,26 +134,19 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
         },
         created_at: now,
         updated_at: now,
-      }).returning('*');
+      })
+        .onConflict(conn.raw("(product_id) WHERE status IN ('open', 'ordered') AND source = 'auto_reorder'"))
+        .ignore()
+        .returning('*');
+      const request = inserted && inserted[0];
+      if (!request) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: 'concurrent_auto_request' }); continue; }
       result.created.push({ productId: p.id, name: p.name, requestId: request.id, requestedQuantity: reorderQty, vendor: p.vendor_name || null });
 
-      // One bell per request, deduped on the request id (a re-run after a
-      // partial failure must not ring twice). Green-path silence is not
-      // possible here: with no order adapter, a human has to click.
+      // One bell per request, deduped on the request id. Green-path silence
+      // is not possible here: with no order adapter, a human has to click.
+      // A failure here is retried by the next sweep (existing branch above).
       try {
-        const notifyAdmin = notify || ((...args) => require('../notification-service').notifyAdmin(...args));
-        const where = p.vendor_name ? ` from ${p.vendor_name}` : '';
-        const link = pricing?.vendor_product_url ? ` Order link: ${pricing.vendor_product_url}` : '';
-        await notifyAdmin(
-          'system',
-          `Restock: ${p.name} is low (${onHand} ${p.inventory_unit})`,
-          `Reorder ${reorderQty} ${p.inventory_unit}${where} — order manually, then mark the restock request ordered.${link}`,
-          {
-            link: '/admin/inventory?tab=restock',
-            dedupeKey: `auto-reorder:${request.id}`,
-            metadata: { restockRequestId: request.id, productId: p.id, vendorId: p.auto_reorder_vendor_id || null, vendorSku: pricing?.vendor_sku || null, vendorProductUrl: pricing?.vendor_product_url || null },
-          },
-        );
+        await ringRestockBell({ notify, product: p, request, pricing, onHand, reorderQty });
       } catch (notifyErr) {
         logger.warn(`[auto-reorder] bell failed for ${p.name} (request ${request.id}): ${notifyErr.message}`);
       }

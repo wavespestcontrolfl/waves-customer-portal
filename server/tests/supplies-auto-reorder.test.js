@@ -12,7 +12,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const state = { candidates: [], existing: null, pricing: null, inserted: [], insertThrows: false };
+const state = { candidates: [], existing: null, pricing: null, inserted: [], insertThrows: false, insertConflict: false };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
@@ -23,14 +23,15 @@ jest.mock('../models/db', () => {
       if (table === 'vendor_pricing') return state.pricing;
       return null;
     };
-    q.insert = (row) => ({
-      returning: async () => {
-        if (state.insertThrows) throw new Error('insert boom');
-        const saved = { id: `req-${state.inserted.length + 1}`, ...row };
-        state.inserted.push(saved);
-        return [saved];
-      },
-    });
+    const returning = async () => {
+      if (state.insertThrows) throw new Error('insert boom');
+      if (state.insertConflict) return [];
+      const saved = { id: `req-${state.inserted.length + 1}`, ...row };
+      state.inserted.push(saved);
+      return [saved];
+    };
+    let row;
+    q.insert = (r) => { row = r; return { onConflict: () => ({ ignore: () => ({ returning }) }), returning }; };
     q.then = (onOk, onErr) => Promise.resolve(table.startsWith('products_catalog') ? state.candidates : []).then(onOk, onErr);
     return q;
   };
@@ -53,6 +54,7 @@ beforeEach(() => {
   state.pricing = null;
   state.inserted = [];
   state.insertThrows = false;
+  state.insertConflict = false;
 });
 afterAll(() => { delete process.env.GATE_AUTO_REORDER; });
 
@@ -96,6 +98,35 @@ test('an existing open request of ANY source dedupes — no row, no bell', async
   expect(res.created).toHaveLength(0);
   expect(res.deduped).toEqual([{ productId: 'prod-sign', name: lowSign.name, requestId: 'req-manual' }]);
   expect(state.inserted).toHaveLength(0);
+  expect(notify).not.toHaveBeenCalled();
+});
+
+test('an existing OPEN auto_reorder request re-rings its deduped bell (failed-bell retry)', async () => {
+  state.candidates = [lowSign];
+  state.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder' };
+  const notify = jest.fn(async () => ({}));
+  const res = await runSuppliesAutoReorderSweep({ notify });
+  expect(state.inserted).toHaveLength(0);
+  expect(res.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
+  expect(notify).toHaveBeenCalledTimes(1);
+  expect(notify.mock.calls[0][3].dedupeKey).toBe('auto-reorder:req-auto');
+});
+
+test('an existing ORDERED auto request does not re-ring', async () => {
+  state.candidates = [lowSign];
+  state.existing = { id: 'req-auto', status: 'ordered', source: 'auto_reorder' };
+  const notify = jest.fn(async () => ({}));
+  await runSuppliesAutoReorderSweep({ notify });
+  expect(notify).not.toHaveBeenCalled();
+});
+
+test('a concurrent auto row (insert ignored by the unique index) → deduped, no bell', async () => {
+  state.candidates = [lowSign];
+  state.insertConflict = true;
+  const notify = jest.fn(async () => ({}));
+  const res = await runSuppliesAutoReorderSweep({ notify });
+  expect(res.created).toHaveLength(0);
+  expect(res.deduped[0]).toMatchObject({ productId: 'prod-sign', reason: 'concurrent_auto_request' });
   expect(notify).not.toHaveBeenCalled();
 });
 

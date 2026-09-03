@@ -109,6 +109,23 @@ describeOrSkip('supplies auto-reorder schema (DB-backed)', () => {
     expect(cols.auto_reorder_enabled.nullable).toBe(false);
   });
 
+  test('one live auto_reorder restock request per product is a DB invariant', async () => {
+    const idx = await knex('pg_indexes').where({ indexname: 'product_restock_requests_auto_reorder_live_uniq' }).first();
+    expect(idx).toBeTruthy();
+    expect(idx.indexdef).toMatch(/UNIQUE/);
+    const [product] = await knex('products_catalog').insert({ name: `__test reorder ${Date.now()}`, category: 'supplies', inventory_unit: 'each', inventory_on_hand: 5, needs_pricing: false }).returning('id');
+    try {
+      const row = { product_id: product.id, status: 'open', source: 'auto_reorder', requested_quantity: 1, unit: 'each' };
+      await knex('product_restock_requests').insert(row);
+      await expect(knex('product_restock_requests').insert(row)).rejects.toMatchObject({ code: '23505' });
+      await knex('product_restock_requests').insert({ ...row, source: 'manual' }); // other sources are not constrained
+      await knex('product_restock_requests').insert({ ...row, status: 'received' }); // closed rows are not constrained
+    } finally {
+      await knex('product_restock_requests').where({ product_id: product.id }).del();
+      await knex('products_catalog').where({ id: product.id }).del();
+    }
+  });
+
   test('the completion_consumable partial unique index exists and rejects a duplicate', async () => {
     const idx = await knex('pg_indexes').where({ indexname: 'product_inventory_movements_completion_consumable_uniq' }).first();
     expect(idx).toBeTruthy();

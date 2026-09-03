@@ -8,6 +8,9 @@
  *    (product, visit) — the closeout resume path re-runs the hook and must
  *    not double-decrement. The table has no `source` column; existing
  *    writers keep it in metadata.source, so the predicate does too.
+ *    product_restock_requests gains a partial UNIQUE index (one live
+ *    open|ordered auto_reorder request per product) so the sweep's dedupe
+ *    is a DB invariant, not a read-then-write.
  * 3. Seeds: vendor Gemplers (code 24) and the yard-sign kit — the 4×5
  *    pesticide-application sign card (Gemplers 127544), its 16" plastic
  *    stake (Gemplers 222377), and the "Serviced by Waves" sticker (vendor
@@ -65,6 +68,16 @@ exports.up = async function up(knex) {
       CREATE UNIQUE INDEX IF NOT EXISTS product_inventory_movements_completion_consumable_uniq
         ON product_inventory_movements (product_id, scheduled_service_id)
         WHERE (metadata->>'source') = 'completion_consumable'
+    `);
+  }
+
+  if (await knex.schema.hasTable('product_restock_requests')) {
+    // The sweep's dedupe is enforced HERE, not by its read-then-write:
+    // at most one live (open|ordered) auto_reorder request per product.
+    await knex.raw(`
+      CREATE UNIQUE INDEX IF NOT EXISTS product_restock_requests_auto_reorder_live_uniq
+        ON product_restock_requests (product_id)
+        WHERE status IN ('open', 'ordered') AND source = 'auto_reorder'
     `);
   }
 
@@ -139,6 +152,9 @@ exports.down = async function down(knex) {
   // place (documented no-op — they may carry admin edits by now).
   if (await knex.schema.hasTable('product_inventory_movements')) {
     await knex.raw('DROP INDEX IF EXISTS product_inventory_movements_completion_consumable_uniq');
+  }
+  if (await knex.schema.hasTable('product_restock_requests')) {
+    await knex.raw('DROP INDEX IF EXISTS product_restock_requests_auto_reorder_live_uniq');
   }
   if (!(await knex.schema.hasTable('products_catalog'))) return;
   const cols = await knex('products_catalog').columnInfo();
