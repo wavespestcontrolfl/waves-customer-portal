@@ -229,7 +229,7 @@ function lawnMarketMonthly({ track, lawnSqFt, tier }) {
 // pa12 ≤ pa9 ≤ 0.96·pa6 / pa12 ≤ 0.92·pa6 on floored legs (service-pricing.js
 // priceLawnCare). In-code defaults disarm both; the parity run simulates an
 // overlay to exercise them (codex r14 P2).
-function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced' }) {
+function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced', bermudaSuppression = false }) {
   const { LAWN_TIERS, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO, LAWN_TABLE_MAX_SQFT, LAWN_PRICING_V2 } = constants;
   const useFloor = LAWN_PRICING_V2.useLawnCostFloor === true;
   const pmm = Number(LAWN_PRICING_V2.programMinimumMonthly);
@@ -253,9 +253,17 @@ function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced' }) {
     lift(legs.standard, legs.premium.ann / LAWN_PREMIUM_MONTHLY_CAP_RATIO);
   }
   const leg = legs[tier];
-  const annual = leg.ann;
+  // Bermuda suppression add-on (St. Augustine only; codex r17 P2): perAppBase +
+  // perAppPer1000Sqft × (lawnSqFt / 1,000), rounded to cents, baked into EVERY
+  // application AFTER floor / minimum / ladder resolution (plan-spread pricing,
+  // owner ruling 2026-08-07) — annual = round2(ann + adder × visits). A request on
+  // any other track is ineligible and prices unchanged (service-pricing.js
+  // priceLawnCare). The gate itself is enforced by the engine, not reproduced here.
+  const bs = LAWN_PRICING_V2.bermudaSuppression || {};
+  const suppressionPerApp = bermudaSuppression && track === 'st_augustine' ? round2(Number(bs.perAppBase) + Number(bs.perAppPer1000Sqft) * (lawnSqFt / 1000)) : 0;
+  const annual = suppressionPerApp > 0 ? round2(leg.ann + suppressionPerApp * leg.freq) : leg.ann;
   const perApp = round2(annual / leg.freq);
-  return { monthly: round2(annual / 12), annual, perApp, visits: leg.freq, marketMonthly: leg.marketMonthly, floorAnnual: leg.floorAnnual, floored: leg.floored, lifted: leg.lifted };
+  return { monthly: round2(annual / 12), annual, perApp, visits: leg.freq, marketMonthly: leg.marketMonthly, floorAnnual: leg.floorAnnual, floored: leg.floored, lifted: leg.lifted, suppressionPerApp };
 }
 // Lawn cost stack (shared package arithmetic, re-implemented here)
 function lawnCostStack({ track, lawnSqFt, visits, onSiteMinutesOverride = null, routeDensity = 'DENSE' }) {
@@ -377,7 +385,9 @@ function expectRodentBait({ homeSqFt, stories = 1 }) {
 function expectTermiteBait({ homeSqFt, stories = 1, complexity = 'standard', system = constants.TERMITE.defaultSystem }) {
   const T = constants.TERMITE;
   const fp = footprintOf(homeSqFt, stories);
-  const perimMult = complexity === 'standard' ? T.perimeterMultiplier.standard : T.perimeterMultiplier.complex;
+  // moderate and complex both take the complex multiplier; anything else is
+  // standard (service-pricing.js normalizeTermiteComplexity).
+  const perimMult = complexity === 'complex' || complexity === 'moderate' ? T.perimeterMultiplier.complex : T.perimeterMultiplier.standard;
   const perimeter = Math.round(4 * Math.sqrt(fp) * perimMult);
   const sys = T.systems[system] || T.systems[T.defaultSystem];
   const spacingFt = Number(sys.spacingFt) > 0 ? Number(sys.spacingFt) : T.stationSpacing;
@@ -389,7 +399,7 @@ function expectTermiteBait({ homeSqFt, stories = 1, complexity = 'standard', sys
   const monitoringMonthly = round2(T.monitoring.baseMonthly + steps * T.monitoring.stepMonthly);
   const monitoringAnnual = round2(monitoringMonthly * 12);
   const perApp = round2(monitoringAnnual / T.monitoringVisitsPerYear);
-  return { system, spacingFt, footprint: fp, perimeter, stations, installMaterial: round2(installMaterial), installLabor: round2(installLabor), installPrice, installMarkupOnMaterial: T.installMultiplier - 1, monitoringMonthly, monitoringAnnual, perApp, visits: T.monitoringVisitsPerYear };
+  return { system, spacingFt, complexity, perimMult, footprint: fp, perimeter, stations, installMaterial: round2(installMaterial), installLabor: round2(installLabor), installPrice, installMarkupOnMaterial: T.installMultiplier - 1, monitoringMonthly, monitoringAnnual, perApp, visits: T.monitoringVisitsPerYear };
 }
 
 // ONE-TIME PEST — max(floor, round(quarterlyBase × 2.2)) × urgency; 15% perk; strict > visit-1 clamp
@@ -707,6 +717,33 @@ function runLawnMatrix() {
       }
     } finally { Object.assign(V, saved); }
   }
+  // Bermuda suppression add-on (codex r17 P2): gate-enabled in-process (the engine
+  // reads GATE_BERMUDA_SUPPRESSION at call time through gateEnvValue), priced on
+  // the St. Augustine track at every cadence, ineligible on bahia, and asserted to
+  // FAIL CLOSED when the gate is off — a checked add-on must never price silently
+  // without it. The env value is restored after.
+  const savedGate = process.env.GATE_BERMUDA_SUPPRESSION;
+  process.env.GATE_BERMUDA_SUPPRESSION = 'true';
+  try {
+    for (const track of ['st_augustine', 'bahia']) for (const sqft of [2500, 4500, 8000, 20000]) for (const tier of ['standard', 'enhanced', 'premium']) {
+      const exp = expectLawn({ track, lawnSqFt: sqft, tier, bermudaSuppression: true });
+      const r = runEngine({ ...BASE, lawnSqFt: sqft, services: { lawn: { track, tier, bermudaSuppression: true } } });
+      const li = line(r.result, 'lawn_care');
+      record(section, `[gate on] bermuda suppression ${track} ${sqft}sf ${tier}${track === 'st_augustine' ? '' : ' (ineligible track: no adder)'}`, { track, lawnSqFt: sqft, tier, bermudaSuppression: true }, exp.perApp, li ? li.perApp : null, { extra: { annualExpected: exp.annual, annualActual: li ? li.annual : null, suppressionPerAppExpected: exp.suppressionPerApp, suppressionPerAppActual: li ? ((li.tiers || []).find((t) => t.tier === tier)?.bermudaSuppressionPerApp ?? li.bermudaSuppressionPerApp ?? null) : null, engineError: r.ok ? null : r.error } });
+      if (li) flagIf(offBy(exp.annual, li.annual, 0.005), 'P1', section, `[gate on] bermuda suppression annual ${track} ${sqft} ${tier}`, `annual ${li.annual} vs ${exp.annual}`);
+    }
+  } finally { if (savedGate === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION; else process.env.GATE_BERMUDA_SUPPRESSION = savedGate; }
+  {
+    const savedOff = process.env.GATE_BERMUDA_SUPPRESSION;
+    delete process.env.GATE_BERMUDA_SUPPRESSION;
+    try {
+      const r = runEngine({ ...BASE, lawnSqFt: 4500, services: { lawn: { track: 'st_augustine', tier: 'enhanced', bermudaSuppression: true } } });
+      const failedClosed = !r.ok && /GATE_BERMUDA_SUPPRESSION/.test(r.error || '');
+      const row = { section, name: '[gate off] bermuda suppression requested ⇒ engine fails closed (BERMUDA_SUPPRESSION_GATED), never a silent unchanged price', expected: 'throws BERMUDA_SUPPRESSION_GATED', actual: r.ok ? `priced ${line(r.result, 'lawn_care')?.perApp ?? null}/app without the gate` : r.error, status: failedClosed ? 'match' : 'MISMATCH', extra: null };
+      scenarios.push(row);
+      if (row.status === 'MISMATCH') findings.push({ severity: 'P1', section, name: row.name, detail: String(row.actual) });
+    } finally { if (savedOff !== undefined) process.env.GATE_BERMUDA_SUPPRESSION = savedOff; }
+  }
   for (const track of Object.keys(constants.LAWN_BRACKETS)) {
     // Row edges from EACH track's live bracket rows (codex r15 P2), plus the table cutoff ±1.
     const rowEdges = constants.LAWN_BRACKETS[track].map((r) => r[0]);
@@ -867,6 +904,28 @@ function runTermiteMatrix() {
       record(section, `install footprint ${sqft}${tag}`, { homeSqFt: sqft, system }, exp.installPrice, install, { extra: { system: li ? li.selectedSystem ?? li.system ?? null : null, requestedSystem: li ? li.requestedSystem ?? null : null, spacingFt: exp.spacingFt, stationsExpected: exp.stations, stationsActual: li ? (li.stations ?? li.stationCount) : null, perimeterExpected: exp.perimeter, installMarkupOnMaterialOnly: exp.installMarkupOnMaterial, installLaborNotBilled: exp.installLabor } });
       record(section, `monitoring monthly footprint ${sqft}${tag}`, { homeSqFt: sqft, system }, exp.monitoringMonthly, monthly);
       flagIf(!!li && (li.selectedSystem ?? li.system) !== system, 'P1', section, `requested system honoured ${sqft}${tag}`, `requested ${system}, engine priced ${li ? (li.selectedSystem ?? li.system) : 'nothing'}`);
+    }
+  }
+  // Layout complexity (codex r17 P2): moderate and complex both take
+  // TERMITE.perimeterMultiplier.complex (more perimeter → more stations → higher
+  // install and a higher monitoring bracket), requested on the service line
+  // (services.termite.complexity) OR read from the property feature
+  // (features.complexity) the estimator's real inputs carry; a service-line
+  // 'standard' overrides a complex property feature.
+  const complexityCases = [
+    { name: 'services.termite.complexity=moderate', complexity: 'moderate', input: (sqft) => ({ ...BASE, homeSqFt: sqft, services: { termite: { system: 'trelona', complexity: 'moderate' } } }) },
+    { name: 'services.termite.complexity=complex', complexity: 'complex', input: (sqft) => ({ ...BASE, homeSqFt: sqft, services: { termite: { system: 'trelona', complexity: 'complex' } } }) },
+    { name: 'features.complexity=complex (property fallback)', complexity: 'complex', input: (sqft) => ({ ...BASE, homeSqFt: sqft, features: { complexity: 'complex' }, services: { termite: { system: 'trelona' } } }) },
+    { name: 'features.complexity=complex overridden by services.termite.complexity=standard', complexity: 'standard', input: (sqft) => ({ ...BASE, homeSqFt: sqft, features: { complexity: 'complex' }, services: { termite: { system: 'trelona', complexity: 'standard' } } }) },
+  ];
+  for (const cc of complexityCases) {
+    for (const sqft of [1200, 2000, 3200]) {
+      const exp = expectTermiteBait({ homeSqFt: sqft, complexity: cc.complexity });
+      const r = runEngine(cc.input(sqft));
+      const li = line(r.result, 'termite_bait');
+      record(section, `install footprint ${sqft} [${cc.name}]`, { homeSqFt: sqft, complexity: cc.complexity }, exp.installPrice, li ? (li.installation?.price ?? li.installPrice ?? null) : null, { extra: { complexityExpected: cc.complexity, complexityActual: li ? li.complexity ?? null : null, perimeterMultiplier: exp.perimMult, perimeterExpected: exp.perimeter, perimeterActual: li ? li.perimeter ?? null : null, stationsExpected: exp.stations, stationsActual: li ? (li.stations ?? li.stationCount) : null } });
+      record(section, `monitoring monthly footprint ${sqft} [${cc.name}]`, { homeSqFt: sqft, complexity: cc.complexity }, exp.monitoringMonthly, li ? (li.monitoring?.monthly ?? li.monthly ?? null) : null);
+      flagIf(!!li && li.complexity !== cc.complexity, 'P1', section, `complexity resolved ${sqft} [${cc.name}]`, `expected ${cc.complexity}, engine resolved ${li.complexity}`);
     }
   }
 }
@@ -1157,13 +1216,32 @@ function runCommercialMatrix() {
     { name: 'commercial termite bait', input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { termite: { system: 'trelona' } } } },
     { name: 'commercial tree & shrub', input: { ...BASE, homeSqFt: 5000, lotSqFt: 40000, bedArea: 6000, isCommercial: true, propertyType: 'commercial', services: { treeShrub: { tier: 'standard', treeCount: 20 } } } },
   ];
+  // Auto-priced commercial lines must carry finite, POSITIVE amounts (codex r17
+  // P1): this section bypasses record()/offBy, so a NaN / Infinity / missing
+  // annual, perApp or price on a non-manual-quote line is an engine_error (P1,
+  // counted as a discrepancy, exit 4) — never a silent engine_only observation.
+  // Manual-quote lines (quoteRequired / requiresCustomQuote / manualQuote)
+  // legitimately carry null amounts and are the only exemption.
+  const invalidAmounts = (l) => {
+    if (l.manualQuote) return [];
+    const bad = [];
+    const present = [['annual', l.annual], ['perApp', l.perApp], ['price', l.price]].filter(([, v]) => v !== null && v !== undefined);
+    if (!present.length) bad.push('no annual / perApp / price on an auto-priced line');
+    for (const [k, v] of present) if (!(Number.isFinite(v) && v > 0)) bad.push(`${k}=${v}`);
+    if (l.visits !== null && l.visits !== undefined && (l.annual === null || l.annual === undefined || l.perApp === null || l.perApp === undefined)) bad.push('recurring line missing annual or perApp');
+    return bad;
+  };
   for (const c of cases) {
     const r = runEngine(c.input);
     const lines = r.ok ? r.result.lineItems.map((l) => ({ service: l.service, annual: l.annual ?? null, price: l.price ?? null, perApp: l.perApp ?? l.perVisit ?? null, visits: l.visitsPerYear ?? l.visits ?? null, manualQuote: !!(l.quoteRequired || l.requiresCustomQuote || l.manualQuote), taxable: l.taxable ?? null, taxCategory: l.taxCategory ?? null, margin: l.margin ?? null, review: l.requiresManualReview ?? null })) : [];
-    scenarios.push({ section, name: c.name, expected: null, actual: null, status: r.ok ? 'engine_only' : 'engine_error', extra: { engineError: r.ok ? null : r.error, tier: r.ok ? r.result.waveGuard.tier : null, lines } });
-    // A throwing commercial path is a P1 finding and a counted status, never a
-    // silent observation (codex r3 P1).
+    const badAmounts = lines.flatMap((l) => invalidAmounts(l).map((b) => `${l.service}: ${b}`));
+    const engineError = !r.ok ? r.error : (badAmounts.length ? `invalid amount(s) on an auto-priced line — ${badAmounts.join('; ')}` : null);
+    scenarios.push({ section, name: c.name, expected: null, actual: null, status: engineError ? 'engine_error' : 'engine_only', extra: { engineError, tier: r.ok ? r.result.waveGuard.tier : null, autoPricedLines: lines.filter((l) => !l.manualQuote).length, manualQuoteLines: lines.filter((l) => l.manualQuote).length, lines } });
+    // A throwing commercial path, or an auto-priced line with an invalid amount,
+    // is a P1 finding and a counted status, never a silent observation (codex r3
+    // P1, r17 P1).
     if (!r.ok) findings.push({ severity: 'P1', section, name: c.name, detail: `generateEstimate threw: ${r.error}` });
+    else if (badAmounts.length) findings.push({ severity: 'P1', section, name: c.name, detail: engineError });
   }
 }
 
