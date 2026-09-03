@@ -46,7 +46,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { claimProspectDomain, findPlacementRow, targetPageOf } = require('./prospect-domain-lock');
 const { OUTREACH_ACQUISITION_TYPES, LEVEL_SEVERITY, settleRetiredPlacements, movePatch, isOutreachLocked } = require('./link-registry');
 const P = require('./link-authority-policy');
-const { selectDomains, expectedLocations, rotationOutcome, ts, BRIDGE_STATES, LIVE_STATUSES, ACQUIRING_STATUSES } = require('./link-authority-selection');
+const { selectDomains, paidPlacementIds, groupMismatch, expectedLocations, rotationOutcome, ts, BRIDGE_STATES, LIVE_STATUSES, ACQUIRING_STATUSES, PARKABLE } = require('./link-authority-selection');
 
 const LOCK_KEY = 'link-authority-bridge';
 const RUN_LIMIT_MAX = 500;
@@ -60,12 +60,18 @@ const HOMEPAGE = targetPageOf('/');
 // Placement statuses the bridge may move: prospect ⇄ awaiting_owner. Everything
 // else (contacted/negotiating/placed/live/indexed/lost/rejected/watching) is
 // Judge- or owner-owned history.
-const PARKABLE = 'prospect';
 const PARKED = 'awaiting_owner';
 // Statuses a placement reaches only AFTER its conversation happened: durable
-// evidence of a send even without the outreach markers (the admin route lets
-// a manual row be advanced to contacted/negotiating by hand)
-const CONVERSED_STATUSES = Object.freeze(['contacted', 'negotiating', 'placed', 'live', 'indexed']);
+// evidence of a send even without the outreach markers (the admin route lets a
+// manual row be advanced to contacted/negotiating by hand). placed/live/indexed
+// prove it ONLY on a path whose submit follows the pitch — on a submit-first
+// path (execution_after_send=false) they prove the submit alone and the initial
+// email is still the LATE SEND owed from those states (§6.4).
+const CONVERSED_STATUSES = Object.freeze(['contacted', 'negotiating']);
+const PLACED_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
+const durableSend = (placement, path) => Boolean(placement.outreach_sent_at || placement.outreach_status === 'sent')
+  || CONVERSED_STATUSES.includes(placement.status)
+  || (PLACED_STATUSES.includes(placement.status) && path.execution_after_send !== false);
 
 const isOwner = (l) => typeof l === 'string' && l.startsWith('OWNER_');
 const isAuto = (l) => typeof l === 'string' && l.startsWith('AUTO_');
@@ -92,15 +98,8 @@ async function invalidateApprovals(trx, rows, reason, now) {
   if (!ids.length) return 0;
   return trx('seo_link_approvals').whereIn('id', ids).whereNull('invalidated_at').update({ invalidated_at: now, invalidated_reason: reason, updated_at: now });
 }
-// "a purchase in any state" (plan §3.3) before the purchases table exists: money
-// left (a satisfied payment instance, ended or not) or an owner's valid payment
-// approval on any of these placements
-async function paymentActivity(trx, prospectIds) {
-  if (!prospectIds.length) return false;
-  const rows = await trx(AUTH).whereIn('prospect_id', prospectIds).where({ dimension: 'payment' }).select('id', 'satisfied_at', 'approval_id');
-  if (rows.some((r) => r.satisfied_at)) return true;
-  return (await annotateApprovals(trx, rows)).some((r) => r.approved);
-}
+// the selection module's reader — the bridge and selection must agree on what "paid" means
+const paymentActivity = async (trx, prospectIds) => (await paidPlacementIds(trx, prospectIds)).size > 0;
 // payment on an outreach path is DEFERRED until the publisher exposes a checkout
 // (ready_for_payment, §3.3b): it neither parks the placement nor holds the
 // domain back from ready_to_acquire — the initial send claims on communication
@@ -179,6 +178,10 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   const shape = new Set(expectedLocations(path));
   const offShape = (await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'location_key')).filter((p) => !shape.has(p.location_key));
   const offShapePaid = offShape.length ? await paymentActivity(trx, offShape.map((p) => p.id)) : false;
+  // refused BEFORE any placement is adopted, reused or created: a reused in-shape row would open a fresh payment
+  // instance beside the settled off-shape proof just the same. Selection suppresses this domain (held); only a
+  // forced run lands here.
+  if (offShapePaid) return { skipped: 'settled payment on a placement outside the lane shape: owner review before this lane is bridged', out };
 
   let placements = [];
   for (const location of expectedLocations(path)) {
@@ -207,11 +210,17 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       // it was sent under (the patch refuses it) and is only bound.
       const sync = movePatch(row, path, now) || {};
       const adopt = { ...sync, domain_id: domain.id, path_id: path.id, updated_at: now, ...(row.link_type || sync.link_type ? {} : { link_type: path.link_type }) };
-      await trx('seo_link_prospects').where({ id: row.id }).update(adopt);
-      Object.assign(row, adopt);
+      // a row whose initial email durably went out but that still reads `prospect` (the manual endpoint records
+      // the send without the lifecycle move) is the CONTACTED conversation: the sender refuses a sent row and a
+      // paid outreach checkout claims only from contacted/negotiating, so `prospect` would strand it. CAS on the
+      // status the decision read — a concurrent Judge move wins and the adoption keeps its status.
+      const sentAsProspect = row.status === PARKABLE && Boolean(row.outreach_sent_at || row.outreach_status === 'sent');
+      if (sentAsProspect) adopt.status = 'contacted';
+      const applied = await trx('seo_link_prospects').where({ id: row.id, status: row.status }).update(adopt);
+      if (!applied) { delete adopt.status; await trx('seo_link_prospects').where({ id: row.id }).update(adopt); }
+      Object.assign(row, applied ? adopt : { ...adopt, status: (await trx('seo_link_prospects').where({ id: row.id }).first('status')).status });
     }
     if (!row) {
-      if (offShapePaid) return { skipped: 'settled payment on a placement outside the lane shape: owner review before a new placement', out };
       const [created] = await trx('seo_link_prospects').insert({
         target_domain: domain.domain, target_page: HOMEPAGE, target_url: path.submission_url || null, location_key: location,
         domain_id: domain.id, path_id: path.id, link_type: path.link_type,
@@ -284,7 +293,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   if (path.payment_required && placements.length) {
     const anchor = path.fee_scope === 'account_wide' ? ((placements.find((p) => p.payment_group_id) || {}).payment_group_id || placements[0].id) : null;
     const changing = placements.filter((p) => p.payment_group_id !== (anchor || p.id));
-    regroupHeld = changing.some((p) => p.payment_group_id) && await paymentActivity(trx, allIds);
+    regroupHeld = groupMismatch(path, placements) && await paymentActivity(trx, allIds);
     if (!regroupHeld) {
       for (const p of changing) {
         const groupId = anchor || p.id;
@@ -337,8 +346,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
         // evidence — the worker only sends `prospect` rows, so an unsatisfied
         // instance here could never be satisfied, and the follow-up needs the
         // initial send satisfied
-        const sentBefore = inst.dimension === 'communication' && inst.instance_kind === '-' && !history.some((r) => key(r) === key(inst))
-          && Boolean(placement.outreach_sent_at || placement.outreach_status === 'sent' || CONVERSED_STATUSES.includes(placement.status));
+        const sentBefore = inst.dimension === 'communication' && inst.instance_kind === '-' && !history.some((r) => key(r) === key(inst)) && durableSend(placement, path);
         const [row] = await trx(AUTH).insert({
           prospect_id: placement.id, path_id: path.id, dimension: inst.dimension, instance_kind: inst.instance_kind, instance_key: instanceKey,
           level: inst.level, reason: inst.reason, decision_inputs_hash: hash, path_revision: pathRevision,

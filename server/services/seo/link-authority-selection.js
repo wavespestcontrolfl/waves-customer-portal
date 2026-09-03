@@ -23,6 +23,8 @@ const BRIDGE_STATES = Object.freeze(['qualified', 'ready_to_acquire', 'acquiring
 // §3.1 status classes the aggregate is built from (shared with the bridge)
 const LIVE_STATUSES = Object.freeze(['live', 'indexed']);
 const ACQUIRING_STATUSES = Object.freeze(['placed', 'contacted', 'negotiating', 'ready_for_credentials', 'ready_for_payment']);
+// the one status the bridge parks from / releases to (§3.1 pending work)
+const PARKABLE = 'prospect';
 // The Judge, the worker's reports and the verifier move PLACEMENT statuses in place (placed → live, live → lost,
 // contacted → rejected) and never touch the domain; a satisfied row is never re-decided, so no timestamp carries
 // those moves either — and the verifier bumps updated_at on every live check. The aggregate is therefore re-run
@@ -32,7 +34,35 @@ const ACQUIRING_STATUSES = Object.freeze(['placed', 'contacted', 'negotiating', 
 const CONTRADICTED = Object.freeze({
   acquired: ({ all }) => !all.some((p) => LIVE_STATUSES.includes(p.status)),
   acquiring: ({ mine }) => !mine.some((p) => p.claimed_at || ACQUIRING_STATUSES.includes(p.status)),
+  // pending authorized work means an UNLEASED `prospect` row; a worker that claimed and reported it moved the
+  // placement straight to placed / contacted / live without the domain knowing
+  ready_to_acquire: ({ mine }) => !mine.some((p) => p.status === PARKABLE && !p.claimed_at),
 });
+
+// "a purchase in any state" (plan §3.3) until the purchases table exists: money left (a satisfied payment
+// instance, ended or not) or the owner's valid payment approval. ONE reader for selection and the bridge —
+// the two must agree on which placements are paid, or a held domain would be selected or a selected one held.
+async function paidPlacementIds(db, prospectIds) {
+  if (!prospectIds.length) return new Set();
+  const rows = await db(AUTH).whereIn('prospect_id', prospectIds).where({ dimension: 'payment' }).select('prospect_id', 'satisfied_at', 'approval_id');
+  const paid = new Set(rows.filter((r) => r.satisfied_at).map((r) => r.prospect_id));
+  const approvalIds = [...new Set(rows.filter((r) => !r.satisfied_at && r.approval_id).map((r) => r.approval_id))];
+  if (approvalIds.length) {
+    const valid = new Set((await db('seo_link_approvals').whereIn('id', approvalIds).where({ decision: 'approved' }).whereNull('invalidated_at').select('id')).map((a) => a.id));
+    for (const r of rows) if (r.approval_id && valid.has(r.approval_id)) paid.add(r.prospect_id);
+  }
+  return paid;
+}
+// The payment-group shape the path's fee_scope requires (§3.3): per_location ⇒ every placement its own group;
+// account_wide ⇒ the in-shape placements share one. A placement without a group yet is not a mismatch (first
+// assignment). Reconciled automatically only while no placement of the domain is paid — otherwise HELD for
+// the owner's regroup (the keys never move under a purchase).
+function groupMismatch(path, mine) {
+  if (!path || !path.payment_required) return false;
+  const grouped = mine.filter((p) => p.payment_group_id);
+  if (path.fee_scope === 'account_wide') return new Set(grouped.map((p) => p.payment_group_id)).size > 1;
+  return grouped.some((p) => p.payment_group_id !== p.id);
+}
 
 const ts = (v) => (v ? new Date(v).getTime() : 0);
 // placements per lane: one per GBP location for a signup lane, one unscoped row otherwise
@@ -87,10 +117,11 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   // no best_path_id filter: a domain whose route the investigator disproved (best_path_id cleared) still owns
   // open rows — it is selected once so the bridge retires them (see below), then drops out of the candidates
   const domains = await db('seo_link_domains').whereIn('id', candidateIds).select('id', 'domain', 'agent_state', 'best_path_id', 'updated_at');
-  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id).filter(Boolean))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'revision_payment', 'revision', 'baseline');
+  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id).filter(Boolean))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'fee_scope', 'revision_payment', 'revision', 'baseline');
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
-  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'updated_at', 'outreach_status', 'outreach_sent_at');
+  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'payment_group_id', 'updated_at', 'outreach_status', 'outreach_sent_at');
+  const paid = await paidPlacementIds(db, placements.map((p) => p.id));
   const byDomain = new Map();
   for (const p of placements) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
   const rowsByProspect = new Map();
@@ -110,6 +141,13 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     // re-decided; while it still carries an OPEN UNSATISFIED instance it is stale once, so the bridge can retire it
     const all = byDomain.get(d.id) || [];
     const mine = all.filter((p) => expected.includes(p.location_key));
+    // HELD — a payment-input change the bridge may not apply under a purchase (plan §3.3): a paid placement
+    // outside the lane's shape (a re-rank across shapes), or a fee_scope the paid group no longer matches.
+    // Suppressed here (not skipped nightly): the owner's regroup / shape review (PR 2b card) changes the
+    // inputs, and only a forced run (domainIds) reaches the bridge, which refuses the same cases.
+    const paidHere = all.some((p) => paid.has(p.id));
+    const held = paidHere && (all.some((p) => !expected.includes(p.location_key) && paid.has(p.id)) || groupMismatch(best, mine));
+    if (held && !forced.has(d.id)) continue;
     const offShapeOpen = all.some((p) => !expected.includes(p.location_key) && (rowsByProspect.get(p.id) || []).some((r) => !r.satisfied_at));
     // a PINNED conversation (locked send state / sent stamp — the mover refuses it) is this domain's placement for its
     // location wherever it sits: bridged in place and never a path-mismatch source until the lock releases. On the
@@ -141,7 +179,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     if (forced.has(d.id)) why = 'forced';
     else if (!d.best_path_id) why = all.some((p) => (rowsByProspect.get(p.id) || []).some((r) => !r.satisfied_at)) ? 'stale' : null; // route gone: open unsatisfied rows to retire
     else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';
-    else if (contradicted || offShapeOpen || withRows.some((p) => p.path_id !== d.best_path_id || instanceSetMoved(p) || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
+    else if (contradicted || offShapeOpen || groupMismatch(best, mine) || withRows.some((p) => p.path_id !== d.best_path_id || instanceSetMoved(p) || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
     else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !withRows.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
     if (why) picked.push({ id: d.id, domain: d.domain, why, at: ts(d.updated_at) });
   }
@@ -149,4 +187,4 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   return picked.slice(0, limit).map(({ id, domain, why }) => ({ id, domain, why }));
 }
 
-module.exports = { selectDomains, expectedLocations, termsChanged, rotationOutcome, ts, BRIDGE_STATES, LIVE_STATUSES, ACQUIRING_STATUSES };
+module.exports = { selectDomains, paidPlacementIds, groupMismatch, expectedLocations, termsChanged, rotationOutcome, ts, BRIDGE_STATES, LIVE_STATUSES, ACQUIRING_STATUSES, PARKABLE };

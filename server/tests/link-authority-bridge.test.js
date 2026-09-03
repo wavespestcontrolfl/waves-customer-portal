@@ -507,18 +507,66 @@ describe('re-decision', () => {
     expect(domainState(db)).toBe('investigating');
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // converged
   });
-  test('a settled payment on a placement outside the lane shape blocks a NEW in-shape placement (owner review, never a second payment instance)', async () => {
-    const { db, d } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
-    const old = paidPath(d); // the signup-shape path this was paid under
+  test('a settled payment on a placement outside the lane shape HOLDS the domain: suppressed in selection, refused by a forced run before any in-shape row is reused or created', async () => {
+    const { db, d, p } = scenario({ make: outreachPath, path: { payment_required: true, estimated_cost_cents: 20000, currency: 'USD', fee_scope: 'per_location', merchant_binding: { checkout_origin: 'https://example.org', processor: { host: 'h', merchant_account_id: 'm' } } } });
+    const old = paidPath(d);
     db._tables.seo_link_acquisition_paths.push(old);
-    const paid = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: old.id, status: 'live', link_type: 'directory', payment_group_id: null, updated_at: EARLIER };
+    const paid = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: WAVES_LOCATIONS[0].id, domain_id: d.id, path_id: old.id, status: 'live', link_type: 'directory', updated_at: EARLIER };
     paid.payment_group_id = paid.id;
-    db._tables.seo_link_prospects.push(paid);
+    // a historical in-shape outreach row the bridge would otherwise REUSE (and open a fresh payment instance on)
+    const historical = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: d.id, path_id: p.id, status: 'prospect', link_type: 'resource', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(paid, historical);
     db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: paid.id, path_id: old.id, dimension: 'payment', instance_kind: '-', instance_key: '-:1', level: 'OWNER_PAYMENT', decision_inputs_hash: 'x', path_revision: 1, decided_at: EARLIER, ended_at: null, satisfied_at: EARLIER, satisfied_reason: 'charged' });
-    const r = await run(db);
-    expect(r).toMatchObject({ decided: 0, placementsCreated: 0, rowsWritten: 0, parked: 0 });
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // held: no nightly slot
+    const r = await run(db, { domainIds: [d.id] });
+    expect(r).toMatchObject({ selected: 1, decided: 0, placementsCreated: 0, rowsWritten: 0, parked: 0 });
     expect(r.errors).toEqual([{ domain: 'example.org', skipped: expect.stringMatching(/settled payment on a placement outside the lane shape/) }]);
-    expect(placements(db)).toHaveLength(1);
+    expect(rows(db)).toHaveLength(1); // the proof alone — nothing opened on the historical row
+  });
+  test('a fully settled account-wide group whose fee_scope flips to per_location is HELD (never selected, keys untouched); unpaid it is stale and regroups', async () => {
+    const { db } = scenario({ make: paidPath, path: { fee_scope: 'account_wide' } });
+    await run(db);
+    expect(new Set(placements(db).map((x) => x.payment_group_id)).size).toBe(1);
+    const stored = db._tables.seo_link_acquisition_paths[0];
+    Object.assign(stored, { fee_scope: 'per_location', revision_payment: 2, updated_at: new Date(NOW.getTime() + 1000) });
+    expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']); // unpaid: automatic regroup
+    for (const r of rows(db).filter((x) => x.dimension === 'payment')) Object.assign(r, { satisfied_at: NOW, satisfied_reason: 'group_purchase' });
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // paid: held for the owner's regroup
+    const r = await run(db, { domainIds: [db._tables.seo_link_domains[0].id], now: new Date(NOW.getTime() + 60000) });
+    expect(r.errors).toEqual([]);
+    expect(new Set(placements(db).map((x) => x.payment_group_id)).size).toBe(1); // a forced run refuses the regroup too
+  });
+  test('a worker that claimed and reported a ready_to_acquire placement moves it past prospect: the domain re-aggregates to acquiring', async () => {
+    const { db, d } = scenario({ policy: { auto_free_acquisition: true } });
+    await run(db);
+    expect(domainState(db)).toBe('ready_to_acquire');
+    for (const x of placements(db)) Object.assign(x, { status: 'placed', updated_at: new Date(NOW.getTime() + 1000) });
+    for (const r of rows(db)) Object.assign(r, { satisfied_at: new Date(NOW.getTime() + 1000), satisfied_reason: 'placed' });
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([{ id: d.id, domain: 'example.org', why: 'stale' }]);
+    const r = await run(db, { now: new Date(NOW.getTime() + 60000) });
+    expect(r).toMatchObject({ aggregateChanges: 1, redecided: 0, errors: [] });
+    expect(domainState(db)).toBe('acquiring');
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
+  });
+  test('on a submit-first outreach path (execution_after_send=false) placed/live prove the submit only — the late send stays owed; submit-after-send paths still count them', async () => {
+    for (const [after, satisfied] of [[false, false], [true, true]]) {
+      const { db } = scenario({ make: outreachPath, path: { account_required: true, execution_after_send: after } });
+      const manual = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: null, path_id: null, status: 'placed', link_type: 'resource', outreach_status: null, outreach_sent_at: null, source: 'manual', updated_at: EARLIER };
+      db._tables.seo_link_prospects.push(manual);
+      await run(db);
+      const send = rows(db).find((x) => x.dimension === 'communication');
+      expect(Boolean(send.satisfied_at)).toBe(satisfied);
+    }
+  });
+  test('adopting a durably SENT row still at prospect advances it to contacted (the sender refuses it, a paid checkout claims only from contacted)', async () => {
+    const { db } = scenario({ make: outreachPath });
+    const manual = { id: uid(), target_domain: 'example.org', target_page: bridge.HOMEPAGE, location_key: '-', domain_id: null, path_id: null, status: 'prospect', link_type: 'resource', outreach_status: 'sent', outreach_sent_at: EARLIER, source: 'manual', updated_at: EARLIER };
+    db._tables.seo_link_prospects.push(manual);
+    const r = await run(db);
+    expect(r).toMatchObject({ decided: 1, parked: 0, errors: [] });
+    expect(placements(db)[0]).toMatchObject({ id: manual.id, status: 'contacted' });
+    expect(rows(db)[0]).toMatchObject({ dimension: 'communication', satisfied_reason: 'sent' });
+    expect(domainState(db)).toBe('acquiring');
   });
   test('a fee_scope change after payment activity never regroups: the keys stay, the unsatisfied payment instances park OWNER_INPUT_REQUIRED; without activity the regroup is automatic', async () => {
     const { db } = scenario({ make: paidPath }); // per_location: each placement its own group
@@ -534,7 +582,8 @@ describe('re-decision', () => {
     const charged = rows(db).find((x) => x.dimension === 'payment');
     Object.assign(charged, { satisfied_at: NOW, satisfied_reason: 'charged' });
     Object.assign(stored, { fee_scope: 'per_location', revision_payment: 3, updated_at: new Date(NOW.getTime() + 120000) });
-    const r = await run(db, { now: new Date(NOW.getTime() + 180000) });
+    expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]); // held: the owner's regroup, no nightly slot
+    const r = await run(db, { domainIds: [db._tables.seo_link_domains[0].id], now: new Date(NOW.getTime() + 180000) }); // a forced run refuses the regroup and parks
     expect(r.errors).toEqual([]);
     expect(new Set(placements(db).map((x) => x.payment_group_id)).size).toBe(1); // unchanged
     const pending = rows(db).filter((x) => x.dimension === 'payment' && !x.satisfied_at);
