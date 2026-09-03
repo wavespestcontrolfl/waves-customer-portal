@@ -81,6 +81,8 @@ describe('buildWatchdogSnapshot', () => {
         { job: 'geocoder-backstop', state: 'failing', last_success_age_minutes: 190, consecutive_failures: 3, last_error: 'ECONNRESET' },
         { job: 'old-digest', state: 'stale', last_success_age_minutes: 20000, consecutive_failures: 0, last_error: null },
         { job: 'fine', state: 'healthy', last_success_age_minutes: 1, consecutive_failures: 0, last_error: null },
+        // a per-run advisory lock row: recorded once, stale forever — never a reason
+        { job: 'social_autonomous_approve_2b1f4c8e-9d3a-4e6f-8a1b-0c2d3e4f5a6b', state: 'stale', last_success_age_minutes: 30000, consecutive_failures: 0, last_error: null },
       ],
     });
     getOpsQueue.mockResolvedValue({
@@ -105,6 +107,8 @@ describe('buildWatchdogSnapshot', () => {
     expect(snap.ops_queue.lanes[0].failed).toBe(2);
     expect(snap.link_worker.stale_leases).toBe(1);
     expect(snap.jobs.items.map((j) => j.job)).toEqual(['geocoder-backstop', 'old-digest']);
+    expect(snap.jobs.total).toBe(3); // the lock row is not a scheduled job
+    expect(snap.jobs.unhealthy).toBe(2);
     expect(snap.jobs.items[0]).toEqual({ job: 'geocoder-backstop', state: 'failing', last_success_age_minutes: 190, consecutive_failures: 3 });
     expect(JSON.stringify(snap)).not.toContain('ECONNRESET');
   });

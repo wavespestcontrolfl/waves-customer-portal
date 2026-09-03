@@ -47,6 +47,14 @@ const { getOpsQueue } = require('./ops-queue');
 const STALE_LEASE_HOURS = 2;
 
 const ATTENTION_JOB_STATES = new Set(['failing', 'stuck', 'stale']);
+// job_health also holds per-run advisory-lock rows (e.g. the social studio's
+// `social_autonomous_approve_<runId>`) that record health once and are never
+// touched again — the 8-day floor marks each `stale` forever, which would page
+// a permanent false incident. A job that ends in a UUID is a lock, not a
+// scheduled sweep: it is excluded here (and from the total) rather than
+// reported.
+const PER_ENTITY_LOCK_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isScheduledJob = (j) => !PER_ENTITY_LOCK_RE.test(String(j.job || ''));
 
 // The scheduler heartbeat job (scheduler.js '*/23 * * * *') and how late its
 // tick may run before the scheduler counts as silent: two periods plus slack.
@@ -90,12 +98,13 @@ async function readScheduler() {
 
 async function readJobs() {
   const health = await getScheduledJobHealth();
+  const scheduled = health.jobs.filter(isScheduledJob);
+  const items = scheduled.filter((j) => ATTENTION_JOB_STATES.has(j.state));
   return {
     available: true,
-    total: health.total,
-    unhealthy: health.unhealthy,
-    items: health.jobs
-      .filter((j) => ATTENTION_JOB_STATES.has(j.state))
+    total: scheduled.length,
+    unhealthy: items.length,
+    items: items
       .map((j) => ({
         job: j.job,
         state: j.state,

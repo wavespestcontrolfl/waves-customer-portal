@@ -10,8 +10,9 @@ something changed. Silence is the normal output.
 
 Exit code is always 0 on a completed poll (an unreachable portal is a
 FINDING, not a script failure). Exit 2 only for a local misconfiguration
-(missing secret file, non-http PORTAL_URL, unbuildable request) so the cron's
-own error path surfaces it.
+(missing secret file, non-http PORTAL_URL, unbuildable request, unwritable
+state file) so the cron's own error path surfaces it. A page assembled before
+a state-write failure is still printed first.
 
 State lives in /data/workspace/.waves-watchdog-state.json:
   { "consecutive_failures": n, "last_reasons": [...], "last_paged_at": iso|null,
@@ -126,7 +127,11 @@ def poll():
         snap = json.loads(raw.decode("utf-8"))
     except ValueError:
         return "down", None, "non-JSON response"
-    if not snap.get("database", {}).get("ok", False):
+    # A proxy or half-deployed endpoint can answer 200 with `null` or a list;
+    # that is a failed poll (advances the streak), never a script crash.
+    if not isinstance(snap, dict) or not isinstance(snap.get("database"), dict):
+        return "down", None, "malformed snapshot (not an object)"
+    if not snap["database"].get("ok", False):
         return "down", snap, "database degraded"
     return "ok", snap, "ok"
 
@@ -211,7 +216,6 @@ def main():
         if since is None or since >= REPAGE_CONFIG_HOURS:
             out.append(f"🔧 Waves watchdog not configured: {detail}. Polls continue; nothing is down.")
             state["config_paged_at"] = now_iso()
-        save_state(state)
     elif result == "down":
         state["consecutive_failures"] += 1
         if not state["down_since"]:
@@ -224,7 +228,6 @@ def main():
                 f"{n} consecutive failed polls. Check Railway (portal service + Postgres) and {PORTAL_URL}/api/health."
             )
             state["last_paged_at"] = now_iso()
-        save_state(state)
     else:
         state["config_paged_at"] = None
         if state["consecutive_failures"] >= PAGE_AFTER_FAILURES and state["last_paged_at"]:
@@ -241,10 +244,18 @@ def main():
             out.append("\n".join(lines))
             state["last_paged_at"] = now_iso()
         state["last_reasons"] = reasons
-        save_state(state)
 
+    # Page FIRST: an assembled alert must reach the operator even when the
+    # state file cannot be written. Then persist; an unwritable state path
+    # (missing dir, full disk) is local configuration (exit 2, forwarded by
+    # the cron) — without it every outage poll would restart at failure 1.
     if out:
         print("\n\n".join(out))
+    try:
+        save_state(state)
+    except OSError as e:
+        print(f"watchdog_poll: cannot write state file {STATE_FILE}: {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
