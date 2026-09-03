@@ -874,6 +874,35 @@ describe('review incentives', () => {
     expect(rawHandle.some(([sql]) => sql.includes('last_name) IN') || sql.includes('LOWER(last_name))'))).toBe(false);
   });
 
+  test('candidate search expands surnames ONLY on the reviewer-name fallback — an explicit q keeps plain field matching (GH codex r2 P2)', async () => {
+    const conn = createDbMock({
+      customers: [{ id: 'customer-pepe', first_name: 'Pepe', last_name: 'Street', active: true }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: null,
+        reviewer_name: 'Pepe Muñoz-Pérez',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/pepe',
+      }],
+    });
+    const surnameClauses = () => conn.mock.results.map((r) => r.value).filter((q) => q.table === 'customers').flatMap((q) => q.rawWheres)
+      .filter(([sql]) => sql.includes('last_name) IN') || sql.includes("LIKE ('% ' || LOWER(last_name))"));
+    // "10 Main Street" is an address search: no customer surnamed "Street"
+    // may be pulled in (and ranked ahead of the address hit) by a surname
+    // clause derived from the search-box value.
+    await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn, q: '10 Main Street' });
+    expect(surnameClauses()).toEqual([]);
+    // The reviewer-name fallback still binds the surname alternatives.
+    conn.mock.results.length = 0;
+    await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(surnameClauses()).toEqual([
+      ['LOWER(last_name) IN (?, ?)', ['pepe munoz-perez', 'munoz-perez']],
+      ["(? = LOWER(last_name) OR ? LIKE ('% ' || LOWER(last_name)))", ['pepe muñoz-pérez', 'pepe muñoz-pérez']],
+    ]);
+  });
+
   test('candidate search and manual attribution reject removed reviews', async () => {
     const conn = createDbMock({
       customers: [{

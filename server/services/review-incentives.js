@@ -739,9 +739,12 @@ async function searchAttributionCandidates(options = {}) {
     // suffixes are de-accented while LOWER(last_name) keeps accents, and no
     // unaccent extension exists: the lowercase name is ALSO bound as-is, so
     // a "Muñoz-Pérez" reviewer finds the customer whether the record keeps
-    // the accents or dropped them (GH codex r1 P2).
+    // the accents or dropped them (GH codex r1 P2). Surnames derive from the
+    // REVIEWER NAME fallback only — an explicit search-box value keeps the
+    // plain field matching ("10 Main Street" must not add every customer
+    // surnamed Street, ranked ahead of the address hit; GH codex r2 P2).
     const { reviewerSurnames } = require('./review-click-correlation');
-    const surnames = reviewerSurnames(terms);
+    const surnames = search ? [] : reviewerSurnames(fallbackName);
     query = query.where(function searchCustomers() {
       this.whereILike('first_name', like)
         .orWhereILike('last_name', like)

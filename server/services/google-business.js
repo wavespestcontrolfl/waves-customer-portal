@@ -643,20 +643,24 @@ class GoogleBusinessService {
           // noise — handled, so the caller skips the unlinked notification.
           if (live.customer_id) return { handled: true };
           // One click must correspond to ONE eligible review (pre-push P1
-          // r6): if another unlinked review at this location also sits
-          // inside the click's forward window, the click can't say which of
-          // them the customer wrote — whichever processed first would steal
-          // it. JS-side id filter so mocked whereNot can't drop the guard.
+          // r6): if another unlinked review also sits inside the click's
+          // forward window, the click can't say which of them the customer
+          // wrote — whichever processed first would steal it. A trusted,
+          // location-matched click scopes the check to this GBP; a
+          // location-less legacy click (the surname rung) could have landed
+          // on ANY location's form, so its window spans every location —
+          // otherwise the first location to sync would claim the customer
+          // over a same-surname review elsewhere (GH codex r2 P1). JS-side
+          // id filter so mocked whereNot can't drop the guard.
           const clickedAtMs = new Date(match.clickedAt).getTime();
-          const windowRows = await trx('google_reviews')
+          let windowQuery = trx('google_reviews')
             .whereNull('customer_id')
             .whereNull('missing_since')
-            .where('location_id', row.location_id)
             .whereRaw("(reviewer_name IS NULL OR reviewer_name != '_stats')")
             .where('review_created_at', '>=', new Date(clickedAtMs))
-            .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS))
-            .limit(10)
-            .select('id');
+            .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS));
+          if (match.locationTrusted === true) windowQuery = windowQuery.where('location_id', row.location_id);
+          const windowRows = await windowQuery.limit(10).select('id');
           if (windowRows.some((r) => r.id !== live.id)) return { nomatch: true };
           // Conditional-write guards (pre-push P1 r2): a manual match or a
           // removal-reconcile stamp that committed before the lock was free
@@ -720,17 +724,15 @@ class GoogleBusinessService {
       if (!outcome?.linked) return true;
       const match = outcome.match;
       // FYI bell (exception-based ops): say WHAT linked and WHY so a wrong
-      // match is one glance + one manual re-match away, not silent.
+      // match is one glance + one manual re-match away, not silent. The
+      // WHY is the matcher's own evidence — only what the rung checked, with
+      // the real competing-click facts (GH codex r2 P2).
       try {
         const stars = Number(row.star_rating) || 0;
-        const why = {
-          click_name: "the reviewer's last name matches this customer; other clicks in the window were other names",
-          click_near: 'the only click within minutes of the review; the next-nearest click was hours earlier',
-        }[match.rung] || 'only click in the window, same location';
         await NotificationService.notifyAdmin(
           'review',
           `Auto-linked Google review from ${row.reviewer_name || 'Anonymous'}`,
-          `${stars}-star review was linked by click tracking: the customer tapped their review link ${match.clickOffsetLabel} this review posted (${why}). Wrong match? Re-match it in Reviews.`,
+          `${stars}-star review was linked by click tracking: the customer tapped their review link ${match.clickOffsetLabel} this review posted (${match.evidence}). Wrong match? Re-match it in Reviews.`,
           {
             link: '/admin/reviews',
             metadata: {
