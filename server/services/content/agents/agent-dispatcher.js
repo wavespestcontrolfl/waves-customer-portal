@@ -213,6 +213,11 @@ class AgentDispatcher {
     // module gate 3c uses, so the lint can never disagree with the gate
     // that parks runs. Cleared with clearDraft below.
     if (selfLintOptions) registerSessionLint(sessionId, selfLintOptions);
+    // Call ledger (never throws): one session row per created session, on
+    // every exit from here on — a failed initial message, a streaming
+    // failure or timeout, and success all consumed (or reserved) tokens.
+    // Upserted by session id, so calling it twice is safe.
+    const recordSession = () => void recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0 });
 
     // Post the initial input to the session. Schema mirrors the
     // live Managed Agents contract used by lead-response-agent.js:
@@ -229,14 +234,12 @@ class AgentDispatcher {
       // Session state (lint options, attempts) was registered above — a
       // transient initial-message failure must not leak it into the
       // process-global maps.
+      recordSession();
       clearDraft(sessionId);
       return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId, agent_id: route.agent_id };
     }
 
     // Stream events; execute tool calls; capture emit_draft / emit_metadata_only.
-    // Call ledger (never throws): one session row per finished session, on
-    // both the streaming-failure and success paths so timeouts are billed too.
-    const recordSession = () => void recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0 });
     try {
       await this._streamAndExecute(sessionId, sessionTimeoutMs);
     } catch (err) {

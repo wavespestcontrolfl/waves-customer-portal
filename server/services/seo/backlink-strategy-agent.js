@@ -180,73 +180,73 @@ const BacklinkStrategyAgent = {
 
     const sessionId = session.id;
     logger.info(`[backlink-strategy] Session created: ${sessionId}`);
-
-    await sendSessionEvents(sessionId, [buildUserMessageEvent(prompt)]);
-
     let finalReport = '';
     let toolsExecuted = [];
     let targetsAdded = 0;
     let gapsFound = 0;
-    let maxToolCalls = 60; // strategy agent may need lots of tool calls
-    const pendingCustomToolUses = new Map();
-    const resolvedToolUseIds = new Set();
-
-    notify('auditing', 'Agent is auditing the backlink profile...');
-
-    const executeToolUse = async (toolName, toolInput, toolUseId) => {
-      if (!toolUseId || resolvedToolUseIds.has(toolUseId)) return null;
-      if (--maxToolCalls <= 0) {
-        logger.warn(`[backlink-strategy] Hit max tool calls for session ${sessionId}`);
-        return null;
-      }
-
-      const stageMap = {
-        get_backlink_dashboard: 'auditing',
-        scan_backlinks: 'auditing',
-        get_signup_agent_stats: 'auditing',
-        get_citation_dashboard: 'auditing',
-        scan_competitor_gaps: 'analyzing competitors',
-        get_competitor_gap_opportunities: 'analyzing competitors',
-        add_targets_to_queue: 'adding targets',
-        get_queue_status: 'reviewing queue',
-        get_completed_profiles: 'reviewing profiles',
-        list_prospects: 'reviewing prospects',
-        create_link_prospects: 'adding prospects',
-        check_search_volume: 'checking keywords',
-        check_llm_mentions: 'checking LLM visibility',
-        save_strategy_report: 'saving report',
-      };
-      notify(stageMap[toolName] || 'working', `Executing: ${toolName}`);
-
-      logger.info(`[backlink-strategy] Tool: ${toolName}(${JSON.stringify(toolInput).slice(0, 200)})`);
-
-      let toolResult;
-      try {
-        toolResult = await executeBacklinkTool(toolName, toolInput);
-
-        if (toolName === 'add_targets_to_queue' && toolResult.added) {
-          targetsAdded += toolResult.added;
-        }
-        if (toolName === 'create_link_prospects' && toolResult.added) {
-          targetsAdded += toolResult.added;
-        }
-        if (toolName === 'scan_competitor_gaps' && toolResult.gaps) {
-          gapsFound += toolResult.gaps;
-        }
-      } catch (err) {
-        toolResult = { error: `Tool failed: ${err.message}` };
-        logger.error(`[backlink-strategy] Tool ${toolName} error: ${err.message}`);
-      }
-
-      resolvedToolUseIds.add(toolUseId);
-      toolsExecuted.push({ tool: toolName, input: toolInput, result: toolResult });
-      return toolResult;
-    };
-
     // Call ledger (never throws): one session row with the session's token
-    // usage, written however the stream ends — a loop that throws or times
-    // out still consumed tokens. Upserted by session id, so re-billing is safe.
+    // usage, written however the session ends from here on — a failed first
+    // event, a stream that throws or times out, all still consumed tokens.
+    // Upserted by session id, so re-billing is safe.
     try {
+      await sendSessionEvents(sessionId, [buildUserMessageEvent(prompt)]);
+
+      let maxToolCalls = 60; // strategy agent may need lots of tool calls
+      const pendingCustomToolUses = new Map();
+      const resolvedToolUseIds = new Set();
+
+      notify('auditing', 'Agent is auditing the backlink profile...');
+
+      const executeToolUse = async (toolName, toolInput, toolUseId) => {
+        if (!toolUseId || resolvedToolUseIds.has(toolUseId)) return null;
+        if (--maxToolCalls <= 0) {
+          logger.warn(`[backlink-strategy] Hit max tool calls for session ${sessionId}`);
+          return null;
+        }
+
+        const stageMap = {
+          get_backlink_dashboard: 'auditing',
+          scan_backlinks: 'auditing',
+          get_signup_agent_stats: 'auditing',
+          get_citation_dashboard: 'auditing',
+          scan_competitor_gaps: 'analyzing competitors',
+          get_competitor_gap_opportunities: 'analyzing competitors',
+          add_targets_to_queue: 'adding targets',
+          get_queue_status: 'reviewing queue',
+          get_completed_profiles: 'reviewing profiles',
+          list_prospects: 'reviewing prospects',
+          create_link_prospects: 'adding prospects',
+          check_search_volume: 'checking keywords',
+          check_llm_mentions: 'checking LLM visibility',
+          save_strategy_report: 'saving report',
+        };
+        notify(stageMap[toolName] || 'working', `Executing: ${toolName}`);
+
+        logger.info(`[backlink-strategy] Tool: ${toolName}(${JSON.stringify(toolInput).slice(0, 200)})`);
+
+        let toolResult;
+        try {
+          toolResult = await executeBacklinkTool(toolName, toolInput);
+
+          if (toolName === 'add_targets_to_queue' && toolResult.added) {
+            targetsAdded += toolResult.added;
+          }
+          if (toolName === 'create_link_prospects' && toolResult.added) {
+            targetsAdded += toolResult.added;
+          }
+          if (toolName === 'scan_competitor_gaps' && toolResult.gaps) {
+            gapsFound += toolResult.gaps;
+          }
+        } catch (err) {
+          toolResult = { error: `Tool failed: ${err.message}` };
+          logger.error(`[backlink-strategy] Tool ${toolName} error: ${err.message}`);
+        }
+
+        resolvedToolUseIds.add(toolUseId);
+        toolsExecuted.push({ tool: toolName, input: toolInput, result: toolResult });
+        return toolResult;
+      };
+
       for await (const { event, data } of streamSessionEvents(sessionId)) {
         if (event === 'assistant' || event === 'text') {
           if (data.text) finalReport += data.text;

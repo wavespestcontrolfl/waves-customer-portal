@@ -128,25 +128,25 @@ const ContentAgent = {
 
     const sessionId = session.id;
     logger.info(`[content-agent] Session created: ${sessionId} for topic: ${topic}`);
-
-    // Send the user prompt
-    await apiCall('POST', `/sessions/${sessionId}/events`, {
-      type: 'user',
-      content: [{ type: 'text', text: prompt }],
-    });
-
-    // Stream events and handle tool calls
     let finalReport = '';
     let toolsExecuted = [];
     let postId = null;
     let maxIterations = 50; // content agent needs more room than chat
 
-    notify('researching', 'Agent is researching the topic...');
-
     // Call ledger (never throws): one session row with the session's token
-    // usage, written however the stream ends — a loop that throws or times
-    // out still consumed tokens. Upserted by session id, so re-billing is safe.
+    // usage, written however the session ends from here on — a failed first
+    // event, a stream that throws or times out, all still consumed tokens.
+    // Upserted by session id, so re-billing is safe.
     try {
+      // Send the user prompt
+      await apiCall('POST', `/sessions/${sessionId}/events`, {
+        type: 'user',
+        content: [{ type: 'text', text: prompt }],
+      });
+
+      // Stream events and handle tool calls
+      notify('researching', 'Agent is researching the topic...');
+
       for await (const { event, data } of streamSessionEvents(sessionId)) {
         if (--maxIterations <= 0) {
           logger.warn(`[content-agent] Hit max iterations for session ${sessionId}`);

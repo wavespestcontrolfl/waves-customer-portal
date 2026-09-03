@@ -212,6 +212,15 @@ describe('llm call ledger', () => {
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_529', error_class: 'provider' });
     });
 
+    it('records a refusal as anthropic_refusal while the caller still sees the legacy empty_json / empty-text result', async () => {
+      mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', content: [] });
+      const { call } = load();
+      expect(await call.callAnthropic({ model: 'a', text: 't' })).toEqual({ ok: false, reason: 'empty_json' });
+      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toMatchObject({ ok: true, text: '' });
+      await flush();
+      expect(callRows().map((r) => [r.ok, r.error_code, r.error_class])).toEqual([[false, 'anthropic_refusal', 'instruction'], [false, 'anthropic_refusal', 'instruction']]);
+    });
+
     it('files a statusless SDK timeout as anthropic_timeout / timeout', async () => {
       mockAnthropicCreate.mockRejectedValue(Object.assign(new Error('Request timed out.'), { name: 'APIConnectionTimeoutError' }));
       const { call } = load();
@@ -244,6 +253,26 @@ describe('llm call ledger', () => {
       await expect(metrics.ledgerCall('anthropic', 'm', () => Promise.reject(timedOut))).rejects.toBe(timedOut);
       await flush();
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_timeout', error_class: 'timeout' });
+    });
+
+    it('records an Anthropic refusal as a FAILED call (anthropic_refusal / instruction) with its usage, value unchanged', async () => {
+      const { metrics } = load();
+      const refusal = { ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', content: [] };
+      expect(await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(refusal))).toBe(refusal);
+      await flush();
+      expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_refusal', error_class: 'instruction', input_tokens: 200, output_tokens: 40 });
+    });
+
+    it('DEEP helper: a refusal is a failed Anthropic leg and the OpenAI backup a successful one, same chain', async () => {
+      const { deep } = load();
+      const client = { messages: { create: jest.fn().mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', stop_details: { category: 'x' }, content: [] }) } };
+      global.fetch = fetchJson({ ...OPENAI_BODY, output_text: 'backup answer' });
+      const message = await deep.createDeepMessage(client, { model: 'deep-model', max_tokens: 4096, messages: [{ role: 'user', content: 'q' }] });
+      expect(message.content[0].text).toBe('backup answer');
+      await flush();
+      const rows = callRows();
+      expect(rows.map((r) => [r.provider, r.ok, r.error_code])).toEqual([['anthropic', false, 'anthropic_refusal'], ['openai', true, null]]);
+      expect(rows[1].chain_id).toBe(rows[0].chain_id);
     });
 
     it('DEEP helper: the Anthropic leg and the OpenAI backup share one chain id, each recorded as its own call', async () => {
@@ -360,7 +389,7 @@ describe('llm call ledger', () => {
       await expect(metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's2' })).resolves.toBeNull();
     });
 
-    it('writes ONE atomic upsert keyed by session id — counters keep the greatest snapshot, status the latest', async () => {
+    it('writes ONE atomic upsert keyed by session id whose every merged column is monotone (no writer ordering assumed)', async () => {
       global.fetch = fetchJson({ id: 'sess_2', status: 'idle', usage: { input_tokens: 250, output_tokens: 40 } });
       const { metrics } = load();
       await expect(metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_2' })).resolves.toEqual(expect.any(Number));
@@ -368,10 +397,13 @@ describe('llm call ledger', () => {
       const [table, target, updates] = mockMerge.mock.calls[0];
       expect(table).toBe('llm_dispatch_log');
       expect(String(target)).toBe("(provider_ref) WHERE row_kind = 'session'");
-      for (const col of ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens']) {
+      // counters and latency only grow
+      for (const col of ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens', 'latency_ms']) {
         expect(String(updates[col])).toBe(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
       }
-      for (const col of ['ok', 'error_code', 'error_class', 'latency_ms']) expect(String(updates[col])).toBe(`EXCLUDED.${col}`);
+      // a terminal status is sticky: ok only ever goes false, the first error and served model stay
+      expect(String(updates.ok)).toBe('(llm_dispatch_log.ok AND EXCLUDED.ok)');
+      for (const col of ['error_code', 'error_class', 'served_model']) expect(String(updates[col])).toBe(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
       // the first write's identity and context stay: nothing else is merged
       expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
     });

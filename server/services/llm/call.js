@@ -366,11 +366,16 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
     const out = anthropicText(resp);
     const json = jsonMode ? parseLooseJson(out) : null;
     const served = { servedModel: resp?.model || null, providerRef: resp?.id || null, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
+    // The ledger row says what the provider did: a stop_reason 'refusal' is
+    // a failed call (billed), whatever the caller sees below — the return
+    // shape is unchanged (empty_json in JSON mode, empty text otherwise, and
+    // dispatchWithFallback already fails either over).
+    const refused = resp?.stop_reason === 'refusal';
     if (jsonMode && !json) {
-      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json' });
+      recordLedgerCall(base, { ...served, ok: false, errorCode: refused ? 'anthropic_refusal' : 'empty_json' });
       return { ok: false, reason: 'empty_json' };
     }
-    recordLedgerCall(base, { ...served, ok: true });
+    recordLedgerCall(base, refused ? { ...served, ok: false, errorCode: 'anthropic_refusal' } : { ...served, ok: true });
     return { ok: true, text: out, json, model, response: resp };
   } catch (err) {
     const reason = providerErrorReason('anthropic', err);

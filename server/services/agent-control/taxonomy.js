@@ -145,7 +145,9 @@ function classifyFailure(errorCode, ctx = {}) {
   if (code === 'budget_exhausted' || code === 'max_cost' || code === 'max_tool_calls') return 'budget';
   if (code === 'bad_request' || /_(400|413)$/.test(code)) return 'bad_input';
   if (code === 'empty_json' || code === 'empty_text' || code === 'unparseable' || code === 'truncated') return 'incomplete';
-  if (code.startsWith('banned:') || code === 'safety_gate' || code === 'validator_rejected') return 'instruction';
+  // `<provider>_refusal`: the model declined (stop_reason 'refusal') — the
+  // same family as a safety gate, an eval candidate rather than plumbing.
+  if (code.startsWith('banned:') || code === 'safety_gate' || code === 'validator_rejected' || /_refusal$/.test(code)) return 'instruction';
   // Lane validators: the model answered, but not in the shape it was told to
   // (`*_schema_invalid`, `unmappable_*`) or with a required field missing
   // (`missing_*`). The model's fault — eval candidates, not plumbing.

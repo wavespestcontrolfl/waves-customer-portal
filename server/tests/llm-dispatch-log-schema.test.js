@@ -70,7 +70,7 @@ describeOrSkip('llm call ledger schema', () => {
     expect(Number(left.n)).toBe(0);
   });
 
-  test('session rows are unique per session id and the recorder upserts them atomically — greatest counters, latest status', async () => {
+  test('session rows are unique per session id and the recorder upserts them atomically — monotone counters, sticky terminal status', async () => {
     // The mocked ledger test can only assert the statement's SHAPE; this proves
     // the raw partial-index conflict target and the GREATEST merge on Postgres.
     const originalFetch = global.fetch;
@@ -86,12 +86,15 @@ describeOrSkip('llm call ledger schema', () => {
       expect(typeof first).toBe('number');
       global.fetch = session(250, 40);
       await expect(recordSessionUsage({ laneId: 'schema_test', sessionId: 'schema_sess', model: 'm' })).resolves.toBe(first);
-      // a stale, smaller snapshot landing late must not lower the counters, but its status is the latest word
+      // a stale, smaller snapshot landing late must not lower the counters; termination is terminal
       global.fetch = session(120, 12, 'terminated');
+      await expect(recordSessionUsage({ laneId: 'schema_test', sessionId: 'schema_sess', model: 'm' })).resolves.toBe(first);
+      // …and a delayed PRE-termination snapshot (status idle) cannot resurrect it
+      global.fetch = session(200, 30, 'idle');
       await expect(recordSessionUsage({ laneId: 'schema_test', sessionId: 'schema_sess', model: 'm' })).resolves.toBe(first);
       const rows = await knex('llm_dispatch_log').where({ row_kind: 'session', provider_ref: 'schema_sess' });
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ id: first, input_tokens: 250, output_tokens: 40, ok: false, error_code: 'session_terminated', served_model: 'served-m' });
+      expect(rows[0]).toMatchObject({ id: first, input_tokens: 250, output_tokens: 40, ok: false, error_code: 'session_terminated', error_class: 'infrastructure', served_model: 'served-m' });
       await expect(knex('llm_dispatch_log').insert({ policy: 'x', ok: true, row_kind: 'session', provider_ref: 'schema_sess' })).rejects.toThrow(/duplicate key|unique/i);
       // call rows are NOT unique on provider_ref
       await knex('llm_dispatch_log').insert([{ policy: 'x', ok: true, row_kind: 'call', provider_ref: 'schema_sess' }, { policy: 'x', ok: true, row_kind: 'call', provider_ref: 'schema_sess' }]);

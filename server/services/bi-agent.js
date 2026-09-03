@@ -77,20 +77,20 @@ const BIAgent = {
     });
     const sessionId = session.id;
     logger.info(`[bi-agent] Session ${sessionId}`);
-
-    await apiCall('POST', `/sessions/${sessionId}/events`, {
-      type: 'user', content: [{ type: 'text', text: prompt }],
-    });
-
     let report = '';
     let toolsExecuted = [];
     let smsSent = false;
     let maxIterations = 25;
 
     // Call ledger (never throws): one session row with the session's token
-    // usage, written however the stream ends — a loop that throws or times
-    // out still consumed tokens. Upserted by session id, so re-billing is safe.
+    // usage, written however the session ends from here on — a failed first
+    // event, a stream that throws or times out, all still consumed tokens.
+    // Upserted by session id, so re-billing is safe.
     try {
+      await apiCall('POST', `/sessions/${sessionId}/events`, {
+        type: 'user', content: [{ type: 'text', text: prompt }],
+      });
+
       for await (const { event, data } of streamSessionEvents(sessionId)) {
         if (--maxIterations <= 0) break;
 

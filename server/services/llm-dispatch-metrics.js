@@ -371,11 +371,16 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     void recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: label });
     throw err;
   }
+  // An Anthropic Message that resolved with stop_reason 'refusal' is a
+  // failed call (the model declined; the DEEP helper falls over to OpenAI),
+  // billed for its tokens like any other answered request.
+  const refused = provider === 'anthropic' && value?.stop_reason === 'refusal';
   void recordCall({
     provider,
     requestedModel,
     servedModel: value?.model || value?.modelVersion || null,
-    ok: true,
+    ok: !refused,
+    errorCode: refused ? 'anthropic_refusal' : null,
     usage: extractUsage(provider, value),
     latencyMs: Math.round(performance.now() - t0),
     providerRef: value?.id || null,
@@ -390,24 +395,27 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
 // partial index llm_dispatch_log_session_ref_uidx, migration 000010). The
 // customer assistant re-records after EVERY turn of its long-lived session
 // with cumulative usage, and two turns can overlap, so the write is ONE
-// atomic INSERT … ON CONFLICT: the token counters keep the GREATEST snapshot
-// (cumulative counts only grow, so a stale snapshot can never lower them),
-// status and latency take the latest write. A runner's finally re-bills
-// safely; a sum over session rows never counts a session twice.
+// atomic INSERT … ON CONFLICT whose every merged column is MONOTONE — no
+// ordering between writers is assumed: token counters keep the GREATEST
+// snapshot (cumulative counts only grow), latency keeps the longest turn,
+// and a terminal status is sticky (ok can only go false, the first error
+// code / class stays), so a delayed pre-termination snapshot can never
+// resurrect a terminated session. A runner's finally re-bills safely; a sum
+// over session rows never counts a session twice.
 async function upsertSessionRow(row) {
   try {
     const db = require('../models/db');
     const greatest = (col) => db.raw(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
-    const latest = (col) => db.raw(`EXCLUDED.${col}`);
+    const first = (col) => db.raw(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
     return await writtenId(db('llm_dispatch_log')
       .insert(row)
       .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
       .merge({
-        ok: latest('ok'),
-        error_code: latest('error_code'),
-        error_class: latest('error_class'),
-        latency_ms: latest('latency_ms'),
-        served_model: db.raw('COALESCE(EXCLUDED.served_model, llm_dispatch_log.served_model)'),
+        ok: db.raw('(llm_dispatch_log.ok AND EXCLUDED.ok)'),
+        error_code: first('error_code'),
+        error_class: first('error_class'),
+        latency_ms: greatest('latency_ms'),
+        served_model: first('served_model'),
         input_tokens: greatest('input_tokens'),
         cached_input_tokens: greatest('cached_input_tokens'),
         cache_write_tokens: greatest('cache_write_tokens'),
@@ -426,7 +434,7 @@ async function upsertSessionRow(row) {
  * their `finally` once the SSE loop ends (however it ends); never throws into
  * them. Re-recording the same session id updates its row (see
  * upsertSessionRow). `latency_ms` is the wall time since `startedAt`: the
- * run for one-shot runners, the latest turn for the assistant. `agentId` is
+ * run for one-shot runners, the longest turn for the assistant. `agentId` is
  * accepted for the runners' convenience but has no column yet — the session
  * id (provider_ref) resolves it in the Console.
  */
