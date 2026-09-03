@@ -368,16 +368,20 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
     const out = anthropicText(resp);
     const json = jsonMode ? parseLooseJson(out) : null;
     const served = { servedModel: resp?.model || null, providerRef: resp?.id || null, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
-    // The ledger row says what the provider did: a stop_reason 'refusal' is
-    // a failed call (billed), whatever the caller sees below — the return
-    // shape is unchanged (empty_json in JSON mode, empty text otherwise, and
-    // dispatchWithFallback already fails either over).
-    const refused = resp?.stop_reason === 'refusal';
+    // A stop_reason 'refusal' is a failed leg in BOTH modes — recorded as
+    // such (billed) AND returned as such, so the call row, the chain row and
+    // the caller agree. A refusal can carry partial text: returning it as ok
+    // would hand a truncated answer to the caller and skip the cross-provider
+    // fallback the DEEP helper already takes on a refusal.
+    if (resp?.stop_reason === 'refusal') {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'anthropic_refusal' });
+      return { ok: false, reason: 'anthropic_refusal' };
+    }
     if (jsonMode && !json) {
-      recordLedgerCall(base, { ...served, ok: false, errorCode: refused ? 'anthropic_refusal' : 'empty_json' });
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json' });
       return { ok: false, reason: 'empty_json' };
     }
-    recordLedgerCall(base, refused ? { ...served, ok: false, errorCode: 'anthropic_refusal' } : { ...served, ok: true });
+    recordLedgerCall(base, { ...served, ok: true });
     return { ok: true, text: out, json, model, response: resp };
   } catch (err) {
     const reason = providerErrorReason('anthropic', err);

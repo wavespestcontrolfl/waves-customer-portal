@@ -212,13 +212,14 @@ describe('llm call ledger', () => {
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_529', error_class: 'provider' });
     });
 
-    it('records a refusal as anthropic_refusal while the caller still sees the legacy empty_json / empty-text result', async () => {
+    it('a refusal is a FAILED leg in both modes — anthropic_refusal recorded AND returned, partial text never handed back as ok', async () => {
       mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', content: [] });
       const { call } = load();
-      expect(await call.callAnthropic({ model: 'a', text: 't' })).toEqual({ ok: false, reason: 'empty_json' });
-      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toMatchObject({ ok: true, text: '' });
+      expect(await call.callAnthropic({ model: 'a', text: 't' })).toEqual({ ok: false, reason: 'anthropic_refusal' });
+      mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', content: [{ type: 'text', text: 'I can start by' }] });
+      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'anthropic_refusal' });
       await flush();
-      expect(callRows().map((r) => [r.ok, r.error_code, r.error_class])).toEqual([[false, 'anthropic_refusal', 'instruction'], [false, 'anthropic_refusal', 'instruction']]);
+      expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'anthropic_refusal', 'instruction', 200], [false, 'anthropic_refusal', 'instruction', 200]]);
     });
 
     it('files a statusless SDK timeout as anthropic_timeout / timeout', async () => {
@@ -381,6 +382,28 @@ describe('llm call ledger', () => {
       await flush();
       const chain = ledgerRows().find((r) => r.row_kind === 'chain');
       expect(chain).toMatchObject({ ok: false, error_class: 'provider', lane_id: null });
+    });
+
+    it('a refused primary fails its leg over — the call row, the chain row and the caller all say anthropic_refusal', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      global.fetch = fetchJson(OPENAI_BODY);
+      // text mode, partial text before the refusal: the case that used to come back ok
+      mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', content: [{ type: 'text', text: 'I can start by' }] });
+      const { call } = load();
+      const policy = { name: 'ledgerRefusal', primary: { provider: 'anthropic', model: 'a' }, fallback: { provider: 'openai', model: 'o' } };
+      expect(await call.dispatchWithFallback(policy, { text: 't', jsonMode: false })).toMatchObject({ ok: true, provider: 'openai', fallbackUsed: true });
+      await flush();
+      let rows = ledgerRows();
+      expect(rows.filter((r) => r.row_kind === 'call').map((r) => [r.provider, r.ok, r.error_code, r.error_class])).toEqual([['anthropic', false, 'anthropic_refusal', 'instruction'], ['openai', true, null, null]]);
+      expect(rows.find((r) => r.row_kind === 'chain')).toMatchObject({ ok: true, fallback_used: true, error_class: null });
+      // and when the backup misses too, the chain is classified by the refusal
+      mockInsert.mockClear();
+      global.fetch = fetchJson({ ...OPENAI_BODY, status: 'incomplete' });
+      expect(await call.dispatchWithFallback(policy, { text: 't' })).toMatchObject({ ok: false, reason: 'all_providers_failed' });
+      await flush();
+      rows = ledgerRows();
+      expect(rows.filter((r) => r.row_kind === 'call').map((r) => r.error_code)).toEqual(['anthropic_refusal', 'openai_incomplete']);
+      expect(rows.find((r) => r.row_kind === 'chain')).toMatchObject({ ok: false, error_class: 'instruction' });
     });
   });
 
