@@ -107,6 +107,14 @@ New attention reasons (only the NEW ones; cleared ones are not announced):
 > • ops queue lane calls: failed=2
 > https://portal.wavespestcontrol.com/admin/agents?tab=queue
 
+Configuration, not an outage (HTTP 401 / 403 / 404 — the lane gate off, the
+worker gate off, or a wrong secret). Once per 24 h, and it never advances the
+outage streak:
+
+> 🔧 Waves watchdog not configured: HTTP 404: the watchdog lane is off
+> (GATE_HERMES_WATCHDOG unset) — flip the gate or pause this cron. Polls
+> continue; nothing is down.
+
 Healthy, or nothing changed: **no message**. Quiet is the normal state.
 
 ## Hard limits

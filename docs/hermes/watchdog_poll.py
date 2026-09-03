@@ -14,11 +14,14 @@ FINDING, not a script failure). Exit 2 only for a local misconfiguration
 
 State lives in /data/workspace/.waves-watchdog-state.json:
   { "consecutive_failures": n, "last_reasons": [...], "last_paged_at": iso|null,
-    "down_since": iso|null }
+    "down_since": iso|null, "config_paged_at": iso|null }
 
 Paging rules (deterministic — the portal computes the health, this only
 decides whether it is NEWS):
-  * unreachable / non-200 / database.ok == false  → failure streak += 1;
+  * HTTP 401 / 403 / 404                            → CONFIGURATION, not an
+    outage (the lane gate is off, the worker gate is off, or the key/secret is
+    wrong). One page per 24 h naming the fix; the outage streak is NOT advanced.
+  * unreachable / other non-200 / database.ok == false → failure streak += 1;
     page at exactly 3 consecutive (~30 min), then at most every 6 h while it
     stays down; one "back" page on recovery.
   * 200 + verdict=attention                         → page only for reason keys
@@ -42,6 +45,15 @@ KEY_ID = "hermes_watchdog"
 TIMEOUT_S = 15
 PAGE_AFTER_FAILURES = 3
 REPAGE_DOWN_HOURS = 6
+REPAGE_CONFIG_HOURS = 24
+# The portal answers these deliberately: 404 = GATE_HERMES_WATCHDOG off,
+# 403 = GATE_HERMES_WORKER off or a key outside its capability, 401 = bad
+# signature / secret. None of them means the portal is down.
+CONFIG_STATUSES = {
+    401: "the watchdog signature was rejected — check the secret file matches LINK_WORKER_SECRET_HERMES_WATCHDOG",
+    403: "the worker integration is off (GATE_HERMES_WORKER) or this key lacks the watchdog capability",
+    404: "the watchdog lane is off (GATE_HERMES_WATCHDOG unset) — flip the gate or pause this cron",
+}
 QUEUE_LINK = f"{PORTAL_URL}/admin/agents?tab=queue"
 
 
@@ -67,6 +79,7 @@ def load_state():
         "last_reasons": list(s.get("last_reasons", []) or []),
         "last_paged_at": s.get("last_paged_at"),
         "down_since": s.get("down_since"),
+        "config_paged_at": s.get("config_paged_at"),
     }
 
 
@@ -78,26 +91,28 @@ def save_state(state):
 
 
 def poll():
-    """Return (ok: bool, snapshot|None, detail: str)."""
+    """Return (state: "ok" | "down" | "config", snapshot|None, detail: str)."""
     url = f"{PORTAL_URL}/api/integrations/watchdog-worker/status"
     req = urllib.request.Request(url, headers=signed_headers("GET", url, key_id=KEY_ID), method="GET")
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
             status, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
+        if e.code in CONFIG_STATUSES:
+            return "config", None, f"HTTP {e.code}: {CONFIG_STATUSES[e.code]}"
         body = (e.read() or b"")[:120].decode("utf-8", "replace").replace("\n", " ")
-        return False, None, f"HTTP {e.code} {body}"
+        return "down", None, f"HTTP {e.code} {body}"
     except (urllib.error.URLError, OSError) as e:
-        return False, None, f"unreachable ({e.__class__.__name__})"
+        return "down", None, f"unreachable ({e.__class__.__name__})"
     if status != 200:
-        return False, None, f"HTTP {status}"
+        return "down", None, f"HTTP {status}"
     try:
         snap = json.loads(raw.decode("utf-8"))
     except ValueError:
-        return False, None, "non-JSON response"
+        return "down", None, "non-JSON response"
     if not snap.get("database", {}).get("ok", False):
-        return False, snap, "database degraded"
-    return True, snap, "ok"
+        return "down", snap, "database degraded"
+    return "ok", snap, "ok"
 
 
 def describe(reason, snap):
@@ -131,10 +146,18 @@ def main():
         sys.exit(2)
 
     state = load_state()
-    ok, snap, detail = poll()
+    result, snap, detail = poll()
     out = []
 
-    if not ok:
+    if result == "config":
+        # Deliberate portal state (kill switch, key scope, secret): say so once a
+        # day, never count it toward the outage streak.
+        since = hours_since(state["config_paged_at"])
+        if since is None or since >= REPAGE_CONFIG_HOURS:
+            out.append(f"🔧 Waves watchdog not configured: {detail}. Polls continue; nothing is down.")
+            state["config_paged_at"] = now_iso()
+        save_state(state)
+    elif result == "down":
         state["consecutive_failures"] += 1
         if not state["down_since"]:
             state["down_since"] = now_iso()
@@ -148,6 +171,7 @@ def main():
             state["last_paged_at"] = now_iso()
         save_state(state)
     else:
+        state["config_paged_at"] = None
         if state["consecutive_failures"] >= PAGE_AFTER_FAILURES and state["last_paged_at"]:
             out.append(f"✅ Waves portal reachable again (down since {state['down_since']}).")
         state["consecutive_failures"] = 0
