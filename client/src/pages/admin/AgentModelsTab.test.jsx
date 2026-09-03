@@ -136,6 +136,33 @@ describe("AgentModelsTab", () => {
     await waitFor(() => expect(screen.queryByText(/Drafted UNVERIFIED/)).toBeNull());
   });
 
+  it("discarding a selector draft also drops the hold it generated for a locked follower", async () => {
+    adminFetch.mockImplementation(async (path, init) => {
+      if (path === "/admin/agents/models") {
+        const data = makeData();
+        // A locked lane that follows FLAGSHIP through its own UNSET env: drafting FLAGSHIP holds it via PIN_PROBE.
+        data.lanes.push({ id: "mentions_prober", name: "Mentions prober", describe: "Probes the answer engines", area: "sms", continuity: "verified", inbound: false, lock: { label: "Measurement probe", detail: "frozen" }, fanout: false, applies: "restart", primary: { model: "m1", selector: "FLAGSHIP", pinEnv: "PIN_PROBE", setEnv: null, pinned: false, unpinnedModel: "m1", accepts: { providers: ["anthropic"], cap: "text", deep: false }, live: false }, fallback: null, retry: null, also: [] });
+        return data;
+      }
+      if (path.startsWith("/admin/agents/models/search")) return { newest: [], results: [], unavailable: [] };
+      if (path === "/admin/agents/models/probe") return { ok: true, provider: JSON.parse(init.body).provider, id: JSON.parse(init.body).id };
+      return {};
+    });
+    renderTab();
+    const sms = (await screen.findByText("SMS intent")).closest(".p-4");
+    fireEvent.click(within(sms).getByRole("button", { name: /Change/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
+    const envBlock = () => Array.from(document.querySelectorAll("pre")).map((e) => e.textContent).join("\n");
+    await waitFor(() => expect(envBlock()).toMatch(/MODEL_FLAGSHIP=m2/));
+    expect(envBlock()).toMatch(/PIN_PROBE=m1/); // the hold
+    fireEvent.click(screen.getByRole("button", { name: "Discard change to SMS intent" }));
+    await waitFor(() => expect(envBlock()).not.toMatch(/MODEL_FLAGSHIP=m2/));
+    expect(envBlock()).not.toMatch(/PIN_PROBE=m1/);
+    expect(screen.queryByText(/lanes? moves? after restart/)).toBeNull();
+  });
+
   it("a fan-out lane shows its second model as running alongside, not as a backup", async () => {
     adminFetch.mockImplementation(async (path) => {
       if (path === "/admin/agents/models") {

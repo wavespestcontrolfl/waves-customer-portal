@@ -125,6 +125,17 @@ export default function AgentModelsTab({ setRefreshHandler }) {
     });
   };
   const unverifiedDrafts = Object.entries(unverified).filter(([env]) => draft[env]).map(([env, label]) => `${label} (${env})`).join(", ");
+  // Discarding a selector draft also drops the holds it generated (a locked
+  // follower pinned at its current model), so a hold never outlives the
+  // change it was meant to accompany — the locked card has no discard of its own.
+  const discardEnv = (env) => {
+    setDraftValue(env, "");
+    const selector = (data?.selectors || []).find((s) => s.env === env);
+    if (!selector) return;
+    for (const [pinEnv, current] of Object.entries(holdsFor(data, selector.key))) {
+      if (draft[pinEnv] === current) setDraftValue(pinEnv, "");
+    }
+  };
   const discardAll = () => {
     setDraft({});
     setUnverified({});
@@ -278,7 +289,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
                     open={!!openLanes[l.id]}
                     onToggle={() => toggle(setOpenLanes, l.id)}
                     onPick={openPicker}
-                    onDiscard={(env) => setDraftValue(env, "")}
+                    onDiscard={discardEnv}
                   />
                 ))}
               </div>
