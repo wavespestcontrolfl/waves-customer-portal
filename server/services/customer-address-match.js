@@ -17,13 +17,19 @@
 // best-effort (environments without the table skip it); the primary leg's
 // errors propagate so callers choose fail-soft or fail-loud.
 const logger = require('./logger');
-const { sameStreetAddress } = require('./estimator-engine/address-compare');
+const { sameStreetAddress, canonicalizeLeadingUnit } = require('./estimator-engine/address-compare');
 
 const PER_LEG_LIMIT = 50;
 
+// The complete leading house-number token, read from the street-first form
+// the comparator uses. "123A Main St", "123-125 Main St", "123/2 Main St"
+// and "Unit 7, 123 Main St" all yield the token stored rows begin with, so
+// the ILIKE prefix cannot drop what the comparator would accept.
+const HOUSE_NUMBER_RE = /^(\d{1,6}[a-z]?(?:[-\/]\d{1,6}[a-z]?)?)(?=\s)/i;
+
 function houseNumberOf(address) {
-  const street = String(address || '').split(',')[0].trim();
-  const houseNumber = (street.match(/^\d{1,6}/) || [])[0];
+  const street = canonicalizeLeadingUnit(String(address || '')).split(',')[0].trim();
+  const houseNumber = (street.match(HOUSE_NUMBER_RE) || [])[1];
   if (!houseNumber || street.length < 6) return null;
   return houseNumber;
 }

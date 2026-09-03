@@ -2987,11 +2987,13 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
 // (unit-aware — see services/customer-address-match.js). Feeds the estimate
 // builder's link suggestions. Office-only: the rows name other customers.
 // Registered above /:id so the literal path is not read as a customer id.
-router.get('/at-address', async (req, res, next) => {
+// POST with the address in the body — a street address is PII and a GET
+// query string would land in the Morgan request log (AGENTS.md P1).
+router.post('/at-address', async (req, res, next) => {
   try {
     if (req.techRole === 'technician') return res.status(403).json({ error: 'Admin access required' });
-    const address = String(req.query.address || '').trim();
-    const exclude = req.query.exclude ? String(req.query.exclude) : null;
+    const address = String(req.body?.address || '').trim();
+    const exclude = req.body?.excludeCustomerId ? String(req.body.excludeCustomerId) : null;
     if (address.length < 6) return res.json({ customers: [] });
     const rows = await findCustomersAtAddress(db, address, { excludeCustomerId: exclude });
     res.json({

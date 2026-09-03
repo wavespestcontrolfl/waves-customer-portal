@@ -4069,10 +4069,12 @@ export default function EstimateToolViewV2({
           // Server-side, unit-aware (the canonical street comparator): a
           // typed "Unit 4" excludes "Apt 7" at the same building; a typed
           // address with no unit still lists every unit there.
-          const custR = await fetch(
-            `/api/admin/customers/at-address?address=${encodeURIComponent(address)}`,
-            { headers: authHeaders, signal: lookupController.signal },
-          );
+          const custR = await fetch("/api/admin/customers/at-address", {
+            method: "POST",
+            headers: authHeaders,
+            body: JSON.stringify({ address }),
+            signal: lookupController.signal,
+          });
           if (custR.ok) {
             const custData = await custR.json();
             if (lookupSuperseded()) return;

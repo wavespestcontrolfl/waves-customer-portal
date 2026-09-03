@@ -5,7 +5,7 @@
 // building; a typed address with no unit still matches every unit there.
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 
-const { findCustomersAtAddress } = require('../services/customer-address-match');
+const { findCustomersAtAddress, _private } = require('../services/customer-address-match');
 
 const ROW = (id, line1, line2 = null, extra = {}) => ({
   id, account_id: null, first_name: `F${id}`, last_name: 'Doe', phone: null, email: null,
@@ -76,6 +76,22 @@ describe('findCustomersAtAddress', () => {
     const db = fakeDb({ customers: [ROW('a', '123 Palm Ave')], propertyError: new Error('relation "customer_properties" does not exist') });
     const ids = (await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285')).map((r) => r.id);
     expect(ids).toEqual(['a']);
+  });
+
+  it('keeps the complete house-number token, including leading-unit inputs', () => {
+    expect(_private.houseNumberOf('123 Main St, Venice')).toBe('123');
+    expect(_private.houseNumberOf('123A Main St')).toBe('123A');
+    expect(_private.houseNumberOf('123-125 Main St')).toBe('123-125');
+    expect(_private.houseNumberOf('123/2 Main St')).toBe('123/2');
+    expect(_private.houseNumberOf('Unit 7, 123 Main St, Venice')).toBe('123');
+    expect(_private.houseNumberOf('Apt 4 at 123 Main St')).toBe('123');
+    expect(_private.houseNumberOf('PO Box 12, Venice')).toBeNull();
+  });
+
+  it('a leading-unit input still finds the building', async () => {
+    const db = fakeDb({ customers: [ROW('u7', '123 Main St', 'Apt 7'), ROW('u9', '123 Main St', 'Apt 9')] });
+    const ids = (await findCustomersAtAddress(db, 'Unit 7, 123 Main St, Venice, FL 34285')).map((r) => r.id);
+    expect(ids).toEqual(['u7']);
   });
 
   it('returns nothing without a house number and never touches the database', async () => {
