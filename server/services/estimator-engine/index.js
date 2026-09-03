@@ -1607,7 +1607,8 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       const buildingLine = ov?.street_line_1
         ? [ov.street_line_1, ov.city, ov.postal_code ? `FL ${ov.postal_code}` : null].filter(Boolean).join(', ')
         : null;
-      if (!buildingLine || sameStreetAddress(intent.address, buildingLine)) {
+      const { splitUnitFirstLine } = require('../../utils/address-normalizer');
+      if (!buildingLine || sameStreetAddress(splitUnitFirstLine(intent.address)?.rest || intent.address, buildingLine)) {
         intent.address = withUnitOverride(intent.address, context);
       }
     }

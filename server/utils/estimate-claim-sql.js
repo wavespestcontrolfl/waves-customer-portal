@@ -203,7 +203,7 @@ async function callUnitAnswer(dbc, callLogId) {
 // with no building applies to every unitless or differing draft.
 function unitAnswerFenceReason(fence, { address = null } = {}) {
   if (!fence || !fence.unit) return null;
-  const { unitLineValueKey, unitAnywhereOnLine } = require('./address-normalizer');
+  const { unitLineValueKey, unitAnywhereOnLine, splitUnitFirstLine } = require('./address-normalizer');
   const fencedKey = unitLineValueKey(String(fence.unit));
   const line = String(address || '').trim();
   if (!line) return 'unit_answer_pending';
@@ -211,7 +211,9 @@ function unitAnswerFenceReason(fence, { address = null } = {}) {
   if (b && b.street_line_1) {
     const { sameStreetAddress } = require('../services/estimator-engine/address-compare');
     const buildingLine = [b.street_line_1, b.city, b.postal_code ? `FL ${b.postal_code}` : null].filter(Boolean).join(', ');
-    if (!sameStreetAddress(line, buildingLine)) return null;
+    // Compared on the STREET: a structural unit-first line ("Bldg 9, 123
+    // Main St, …") is not another building (codex r5 P1 on #3796).
+    if (!sameStreetAddress(splitUnitFirstLine(line)?.rest || line, buildingLine)) return null;
   }
   // The unit in EITHER supported position — the composer may return the
   // unit-first form the override deliberately preserves (codex r4 P2).

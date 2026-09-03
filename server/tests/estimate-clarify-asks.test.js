@@ -1986,7 +1986,7 @@ describe('unit re-draft (GATE_CLARIFY_UNIT_WRITEBACK — PR C2: fence + every-li
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ bedroomCountOverride: 0 }));
   });
 
-  test('the detached unit re-run carries the call\'s SETTLED generation read under the call lock; an in-flight reprocess claim adopts none', async () => {
+  test('the detached unit re-run carries the call\'s SETTLED generation read under the call lock; while a reprocess claim is in flight the re-run is DEFERRED (held rows to the operator, the live pass adopts the fence)', async () => {
     const settled = { id: 'call-1', customer_id: 'cust-1', processing_generation: 7, processing_status: 'completed', processing_token: null };
     let a = AWAITING(); mockState.existingDraft = a;
     mockState.firstQueue = [a, a, settled, { id: 'cust-1', address_line1: null }, settled, { id: 'lead-1', address: null }];
@@ -1997,9 +1997,27 @@ describe('unit re-draft (GATE_CLARIFY_UNIT_WRITEBACK — PR C2: fence + every-li
     const inFlight = { ...settled, processing_status: 'processing', processing_token: 'tok-live', created_at: new Date().toISOString(), extraction_attempts: 1 };
     a = AWAITING(); mockState.existingDraft = a;
     mockState.firstQueue = [a, a, inFlight, { id: 'cust-1', address_line1: null }, inFlight, { id: 'lead-1', address: null }];
+    mockState.selectQueue = [[{ id: 'est-1', status: 'scheduled' }], [{ id: 'est-1', status: 'scheduled' }], []];
+    r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+    // The fence was still stamped; the guarded draft is unscheduled and belled for the operator.
+    expect(fenceRaw()).toBeDefined();
+    expect(unscheduleUpdates()).toHaveLength(1);
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', 'Unit number received — re-draft the estimate', expect.any(String), expect.objectContaining({ link: '/admin/estimates/est-1' }));
+    // No held draft: nothing runs and nothing bells — the live pass drafts the unit from the fence.
+    jest.clearAllMocks(); mockState.updates = [];
+    a = AWAITING(); mockState.existingDraft = a;
+    mockState.firstQueue = [a, a, inFlight, { id: 'cust-1', address_line1: null }, inFlight, { id: 'lead-1', address: null }];
     mockState.selectQueue = [[], [], []];
     r = await handleClarifyReply({ phone: '+17735550142', body: 'Apt 204' }); await r.repricePromise;
-    expect(mockMaybeDraftEstimateForCall.mock.calls[0][0].ownerProcGeneration).toBeUndefined();
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a structural unit-first draft line at the building ("Bldg 9, …") is compared on its street: guarded and superseded, not mistaken for another building', async () => {
+    await reply({ drafts: [{ id: 'est-bldg', status: 'draft', address: 'Bldg 9, 1048 Example Lakes Cir, Sarasota, FL 34232' }] });
+    expect(guardUpdates()).toHaveLength(1);
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateIds: ['est-bldg'] }));
   });
 
   test('the guarded/superseded set is limited to drafts AT the asked building: a same-call draft for another property is neither guarded nor retired; an addressless row is kept', async () => {

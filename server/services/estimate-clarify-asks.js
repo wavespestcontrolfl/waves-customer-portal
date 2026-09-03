@@ -142,10 +142,15 @@ function buildingLine(unitAskBuilding) {
   const b = unitAskBuilding || {};
   return [b.street_line_1, b.city, b.postal_code ? `FL ${b.postal_code}` : null].filter(Boolean).join(', ');
 }
+// The stored line is compared on its STREET: a unit-first line ("Bldg 9,
+// 123 Main St, …") would otherwise read as another building — the shared
+// leading-unit peel, not a parallel parser (codex r5 P1 on #3796).
 function sameBuilding(addressLine, unitAskBuilding) {
-  const line = String(addressLine || '').trim();
+  const raw = String(addressLine || '').trim();
   const asked = buildingLine(unitAskBuilding);
-  if (!line || !asked) return false;
+  if (!raw || !asked) return false;
+  const { splitUnitFirstLine } = require('../utils/address-normalizer');
+  const line = splitUnitFirstLine(raw)?.rest || raw;
   const { sameStreetAddress } = require('./estimator-engine/address-compare');
   return sameStreetAddress(line, asked);
 }
@@ -221,7 +226,8 @@ async function unitCallLinkage(trx, callLogId, { lock = false } = {}) {
   // reprocess claim is in flight; an in-flight claim owns the identity, so
   // nothing is adopted and the creators' generation fence stays legacy.
   const { callReprocessInFlight } = require('../utils/estimate-claim-sql');
-  const procGeneration = !callReprocessInFlight(row) && row.processing_generation != null
+  const reprocessInFlight = callReprocessInFlight(row);
+  const procGeneration = !reprocessInFlight && row.processing_generation != null
     ? Number(row.processing_generation) : null;
   const parse = (v) => { if (!v) return null; if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } } return v; };
   const meta = parse(row.metadata);
@@ -235,6 +241,7 @@ async function unitCallLinkage(trx, callLogId, { lock = false } = {}) {
   return {
     customerId: row.customer_id ? String(row.customer_id) : null,
     procGeneration,
+    reprocessInFlight,
     // The call's own quote signals — a legacy ask (parked before the item
     // carried them) recovers them from here.
     quotePromised: v1.quote_promised === true || svc.quote_promised === true,
@@ -417,7 +424,7 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
       customerRow = null;
     }
     if (linkage) {
-      if (redraft) redraft.procGeneration = linkage.procGeneration;
+      if (redraft) { redraft.procGeneration = linkage.procGeneration; redraft.reprocessInFlight = linkage.reprocessInFlight === true; }
       // The DURABLE call-level unit-answer fence, written under the call
       // row lock every draft creator also holds through its insert: a
       // composer that built a whole-building draft before this reply is
@@ -1352,8 +1359,12 @@ async function handleClarifyReply({ phone, body }) {
                 alreadyCorrectId: null,
                 // The call's settled processing generation, read under the
                 // call-row lock in applyUnitWriteback — the detached re-run's
-                // pass identity (codex r4 P1 on #3796).
+                // pass identity (codex r4 P1 on #3796). While a reprocess
+                // claim is IN FLIGHT there is none to adopt and the re-run is
+                // deferred (codex r5 P1): the live pass owns the call and
+                // adopts the fence itself.
                 procGeneration: null,
+                reprocessInFlight: false,
                 // The item-bound building, not the call row's rolling extraction.
                 building: freshFlags.unit_ask_building || null,
               };
@@ -1539,7 +1550,16 @@ async function handleClarifyReply({ phone, body }) {
           // fence (stamped in the locked phase) keeps a composer that never
           // saw the answer from inserting behind this run.
           const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
-          if (unitRedraft.alreadyCorrectId && !unitSupersedeIds.length) {
+          if (unitRedraft.reprocessInFlight) {
+            // A reprocess claim owns the call right now: a re-run without a
+            // pass identity would insert unfenced from pre-pass evidence
+            // and could suppress the live pass's own composer (codex r5 P1
+            // on #3796). Nothing runs here — the held rows take the
+            // operator path below, and the live pass drafts the unit (it
+            // adopts the fence stamped in the locked phase).
+            logger.info('[estimate-clarify] unit answer recorded while the call is being reprocessed — re-draft deferred to that pass', { draftId: awaiting.id, callLogId: unitRedraft.callLogId, held: unitSupersedeIds });
+            repriceOutcome = { created: false, skipped: 'call_reprocess_in_flight' };
+          } else if (unitRedraft.alreadyCorrectId && !unitSupersedeIds.length) {
             // A live draft already names the answered unit (an operator
             // corrected it after the ask went out): nothing to replace,
             // nothing to rebuild (codex r4 P1 on #3796).

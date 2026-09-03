@@ -486,6 +486,10 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     expect(unitAnswerFenceReason(FENCE, { address: 'Apt 204, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBeNull();
     expect(unitAnswerFenceReason(FENCE, { address: '#204, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBeNull();
     expect(unitAnswerFenceReason(FENCE, { address: 'Apt 9, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    // A STRUCTURAL unit-first line at the building is compared on its street — a stale "Bldg 9" is blocked, not waved through as another building (codex r5 P1).
+    expect(unitAnswerFenceReason(FENCE, { address: 'Bldg 9, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason(FENCE, { address: 'Floor 2, 1048 Example Lakes Cir, Sarasota, FL 34232' })).toBe('unit_answer_pending');
+    expect(unitAnswerFenceReason(FENCE, { address: 'Bldg 9, 5 Other Rd, Venice, FL 34285' })).toBeNull();
   });
 
   test('no address at all did not see the answer — blocked; a fence with no building blocks any unitless draft', () => {
@@ -601,9 +605,10 @@ describe('generation fence + call-lock wiring (source pins)', () => {
       expect(src(rel)).toContain("held.whereIn('id', supersedeEstimateIds)");
       expect(src(rel)).toContain('conflictingOpenEstimate(sameCallRows || [], intent.address)');
     }
-    // The detached unit re-run adopts the call's settled generation (read under the call lock).
+    // The detached unit re-run adopts the call's settled generation (read under the call lock) and is DEFERRED while a reprocess claim is in flight.
     expect(clarify).toContain('ownerProcGeneration: unitRedraft.procGeneration');
     expect(clarify.indexOf('callReprocessInFlight(row)')).toBeGreaterThan(-1);
+    expect(clarify).toContain("skipped: 'call_reprocess_in_flight'");
     const lockAt = clarify.indexOf("unitCallLinkage(trx, flags.unit_call_log_id, { lock: true })");
     const stampAt = clarify.indexOf('stampCallUnitAnswer(trx, flags.unit_call_log_id');
     expect(lockAt).toBeGreaterThan(-1);
