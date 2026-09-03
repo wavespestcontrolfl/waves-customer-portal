@@ -38,6 +38,7 @@ jest.mock('../services/content/autonomous-review-queue', () => ({
 jest.mock('../services/content/email-approvals', () => ({ EXECUTING_RECOVERY_MINUTES: 15 }));
 jest.mock('../services/service-report/delivery-queue', () => ({ STALE_CLAIM_MS: 30 * 60 * 1000 }));
 jest.mock('../services/service-report/pdf-queue', () => ({ STALE_CLAIM_MS: 30 * 60 * 1000 }));
+jest.mock('../services/call-recording-processor', () => ({ CALL_EXTRACTION_MAX_ATTEMPTS: 3 }));
 // The stall rule is the watchdog's; here it is a fixture: c1 is stalled.
 jest.mock('../services/intelligence-bar/authorization-contract', () => ({
   activityLabel: (name) => ({ send_sms: 'Send a text message' })[name] || String(name).replace(/_/g, ' '),

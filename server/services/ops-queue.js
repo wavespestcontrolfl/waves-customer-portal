@@ -23,14 +23,14 @@ const { activityLabel } = require('./intelligence-bar/authorization-contract');
 const { EXECUTING_RECOVERY_MINUTES } = require('./content/email-approvals');
 const { STALE_CLAIM_MS: DELIVERY_STALE_CLAIM_MS } = require('./service-report/delivery-queue');
 const { STALE_CLAIM_MS: PDF_STALE_CLAIM_MS } = require('./service-report/pdf-queue');
+// The processor owns the retry budget: extraction_failed under the cap is
+// re-run by processAllPending (a retry in flight), only at the cap is it
+// terminal. Read from the processor so the two can never disagree.
+const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('./call-recording-processor');
 
 const ITEM_LIMIT = 25;
 const SCAN_LIMIT = 200;
 const RECENT_DAYS = 7;
-// Same env + default as call-recording-processor: extraction_failed under
-// this cap is re-run by processAllPending (a retry in flight), only at the
-// cap is it terminal.
-const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
 
 function iso(v) {
   if (!v) return null;
