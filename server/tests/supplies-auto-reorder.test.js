@@ -12,32 +12,41 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const state = { candidates: [], existing: null, pricing: null, inserted: [], updates: [], insertThrows: false, insertConflict: false };
+const mockState = { candidates: [], existing: null, pricing: null, fresh: undefined, inserted: [], updates: [], insertThrows: false, insertConflict: false };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy']) q[m] = () => q;
+    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate']) q[m] = () => q;
     q.first = async () => {
-      if (table === 'product_restock_requests') return state.existing;
-      if (table === 'vendor_pricing') return state.pricing;
+      if (table === 'product_restock_requests') return mockState.existing;
+      if (table === 'vendor_pricing') return mockState.pricing;
+      // The locked re-read before the insert: defaults to the candidate's own
+      // stock (still low); a test sets mockState.fresh to simulate a receive /
+      // disable landing between the scan and the insert.
+      if (table === 'products_catalog') {
+        if (mockState.fresh !== undefined) return mockState.fresh;
+        const c = mockState.candidates[0];
+        return c ? { inventory_on_hand: c.inventory_on_hand, low_stock_threshold: c.low_stock_threshold, auto_reorder_enabled: true, active: true } : null;
+      }
       return null;
     };
-    q.update = async (row) => { state.updates.push({ table, row }); return 1; };
+    q.update = async (row) => { mockState.updates.push({ table, row }); return 1; };
     const returning = async () => {
-      if (state.insertThrows) throw new Error('insert boom');
-      if (state.insertConflict) return [];
-      const saved = { id: `req-${state.inserted.length + 1}`, ...row };
-      state.inserted.push(saved);
+      if (mockState.insertThrows) throw new Error('insert boom');
+      if (mockState.insertConflict) return [];
+      const saved = { id: `req-${mockState.inserted.length + 1}`, ...row };
+      mockState.inserted.push(saved);
       return [saved];
     };
     let row;
     q.insert = (r) => { row = r; return { onConflict: () => ({ ignore: () => ({ returning }) }), returning }; };
-    q.then = (onOk, onErr) => Promise.resolve(table.startsWith('products_catalog') ? state.candidates : []).then(onOk, onErr);
+    q.then = (onOk, onErr) => Promise.resolve(table.startsWith('products_catalog') ? mockState.candidates : []).then(onOk, onErr);
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(String(table)));
   dbFn.raw = (sql) => sql;
+  dbFn.transaction = async (fn) => fn(dbFn);
   return dbFn;
 });
 
@@ -50,13 +59,14 @@ const lowSign = {
 
 beforeEach(() => {
   process.env.GATE_AUTO_REORDER = 'true';
-  state.candidates = [];
-  state.existing = null;
-  state.pricing = null;
-  state.inserted = [];
-  state.updates = [];
-  state.insertThrows = false;
-  state.insertConflict = false;
+  mockState.candidates = [];
+  mockState.existing = null;
+  mockState.pricing = null;
+  mockState.fresh = undefined;
+  mockState.inserted = [];
+  mockState.updates = [];
+  mockState.insertThrows = false;
+  mockState.insertConflict = false;
 });
 afterAll(() => { delete process.env.GATE_AUTO_REORDER; });
 
@@ -70,13 +80,13 @@ test('gate off → skipped before any DB read', async () => {
 });
 
 test('low product with no open request → one auto_reorder row + one deduped bell', async () => {
-  state.candidates = [lowSign];
-  state.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/products/universal-pesticide-application-signs' };
+  mockState.candidates = [lowSign];
+  mockState.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/products/universal-pesticide-application-signs' };
   const notify = jest.fn(async () => ({}));
   const res = await runSuppliesAutoReorderSweep({ notify });
   expect(res.created).toHaveLength(1);
-  expect(state.inserted).toHaveLength(1);
-  const row = state.inserted[0];
+  expect(mockState.inserted).toHaveLength(1);
+  const row = mockState.inserted[0];
   expect(row.source).toBe('auto_reorder');
   expect(row.status).toBe('open');
   expect(row.requested_quantity).toBe(650);
@@ -94,51 +104,51 @@ test('low product with no open request → one auto_reorder row + one deduped be
 });
 
 test('an existing open request of ANY source dedupes — no row, no bell', async () => {
-  state.candidates = [lowSign];
-  state.existing = { id: 'req-manual', status: 'open', source: 'manual' };
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-manual', status: 'open', source: 'manual' };
   const notify = jest.fn(async () => ({}));
   const res = await runSuppliesAutoReorderSweep({ notify });
   expect(res.created).toHaveLength(0);
   expect(res.deduped).toEqual([{ productId: 'prod-sign', name: lowSign.name, requestId: 'req-manual' }]);
-  expect(state.inserted).toHaveLength(0);
+  expect(mockState.inserted).toHaveLength(0);
   expect(notify).not.toHaveBeenCalled();
 });
 
 test('an existing OPEN auto_reorder request re-rings its deduped bell (failed-bell retry)', async () => {
-  state.candidates = [lowSign];
-  state.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder' };
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder' };
   const notify = jest.fn(async () => ({}));
   const res = await runSuppliesAutoReorderSweep({ notify });
-  expect(state.inserted).toHaveLength(0);
+  expect(mockState.inserted).toHaveLength(0);
   expect(res.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
   expect(notify).toHaveBeenCalledTimes(1);
   expect(notify.mock.calls[0][3].dedupeKey).toBe('auto-reorder:req-auto');
 });
 
 test('vendor pricing learned after the request was raised → request refreshed + bell refreshOnDedupe', async () => {
-  state.candidates = [lowSign];
-  state.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: null, metadata: { vendorSku: null } };
-  state.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/x' };
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: null, metadata: { vendorSku: null } };
+  mockState.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/x' };
   const notify = jest.fn(async () => ({}));
   const res = await runSuppliesAutoReorderSweep({ notify });
   expect(res.refreshed).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
-  expect(state.updates).toHaveLength(1);
-  expect(JSON.parse(state.updates[0].row.metadata)).toMatchObject({ vendorSku: '127544', vendorProductUrl: 'https://gemplers.com/x' });
-  expect(state.updates[0].row.vendor).toBe('Gemplers');
+  expect(mockState.updates).toHaveLength(1);
+  expect(JSON.parse(mockState.updates[0].row.metadata)).toMatchObject({ vendorSku: '127544', vendorProductUrl: 'https://gemplers.com/x' });
+  expect(mockState.updates[0].row.vendor).toBe('Gemplers');
   expect(notify.mock.calls[0][3].refreshOnDedupe).toBe(true);
 });
 
 test('an existing ORDERED auto request does not re-ring', async () => {
-  state.candidates = [lowSign];
-  state.existing = { id: 'req-auto', status: 'ordered', source: 'auto_reorder' };
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'ordered', source: 'auto_reorder' };
   const notify = jest.fn(async () => ({}));
   await runSuppliesAutoReorderSweep({ notify });
   expect(notify).not.toHaveBeenCalled();
 });
 
 test('a concurrent auto row (insert ignored by the unique index) → deduped, no bell', async () => {
-  state.candidates = [lowSign];
-  state.insertConflict = true;
+  mockState.candidates = [lowSign];
+  mockState.insertConflict = true;
   const notify = jest.fn(async () => ({}));
   const res = await runSuppliesAutoReorderSweep({ notify });
   expect(res.created).toHaveLength(0);
@@ -146,18 +156,45 @@ test('a concurrent auto row (insert ignored by the unique index) → deduped, no
   expect(notify).not.toHaveBeenCalled();
 });
 
+test('stock received between the candidate scan and the insert → no row, no bell (locked re-read)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.fresh = { inventory_on_hand: '730', low_stock_threshold: '100', auto_reorder_enabled: true, active: true };
+  const notify = jest.fn(async () => ({}));
+  const res = await runSuppliesAutoReorderSweep({ notify });
+  expect(res.created).toHaveLength(0);
+  expect(mockState.inserted).toHaveLength(0);
+  expect(res.deduped[0]).toMatchObject({ productId: 'prod-sign', reason: 'no_longer_low' });
+  expect(notify).not.toHaveBeenCalled();
+});
+
+test('auto-reorder disabled between the candidate scan and the insert → no row', async () => {
+  mockState.candidates = [lowSign];
+  mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: false, active: true };
+  const res = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+  expect(mockState.inserted).toHaveLength(0);
+  expect(res.deduped[0]).toMatchObject({ reason: 'no_longer_low' });
+});
+
+test('the request row is written from the locked re-read, not the scan snapshot', async () => {
+  mockState.candidates = [lowSign];
+  mockState.fresh = { inventory_on_hand: '60', low_stock_threshold: '100', auto_reorder_enabled: true, active: true };
+  await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+  expect(mockState.inserted[0].current_stock).toBe(60);
+  expect(mockState.inserted[0].reason).toContain('at 60 each');
+});
+
 test('no reorder_quantity → unconfigured, no row', async () => {
-  state.candidates = [{ ...lowSign, reorder_quantity: null }];
+  mockState.candidates = [{ ...lowSign, reorder_quantity: null }];
   const notify = jest.fn(async () => ({}));
   const res = await runSuppliesAutoReorderSweep({ notify });
   expect(res.unconfigured).toEqual([{ productId: 'prod-sign', name: lowSign.name, reason: 'no_reorder_quantity' }]);
-  expect(state.inserted).toHaveLength(0);
+  expect(mockState.inserted).toHaveLength(0);
   expect(notify).not.toHaveBeenCalled();
 });
 
 test('a per-product failure is recorded and the sweep continues', async () => {
-  state.candidates = [lowSign, { ...lowSign, id: 'prod-stake', name: 'Yard sign stake' }];
-  state.insertThrows = true;
+  mockState.candidates = [lowSign, { ...lowSign, id: 'prod-stake', name: 'Yard sign stake' }];
+  mockState.insertThrows = true;
   const res = await runSuppliesAutoReorderSweep({ notify: jest.fn() });
   expect(res.errors).toHaveLength(2);
   expect(res.created).toHaveLength(0);

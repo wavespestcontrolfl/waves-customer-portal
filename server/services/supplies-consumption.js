@@ -131,6 +131,20 @@ async function consumeCompletionSupplies(db, {
     } catch (err) {
       logger.warn(`[supplies-consumption] ${product.name} failed for visit ${scheduledServiceId} (non-blocking): ${err.message}`);
       result.errors.push({ productId: product.id, message: err.message });
+      // Not retried (the closeout must never depend on a supplies write and
+      // stock is advisory) — but not silent either: one deduped bell per
+      // (product, visit) so the office adjusts the count instead of the miss
+      // hiding in a log line (Codex r3 P2).
+      try {
+        await require('./notification-service').notifyAdmin(
+          'system',
+          `Inventory: ${product.name} was not deducted for a completed visit`,
+          `Adjust the count by ${product.per_completion_usage} ${product.inventory_unit || ''} on the Inventory page. Reason: ${err.message}`,
+          { bell: true, link: '/admin/inventory', dedupeKey: `supplies-consumption-failed:${product.id}:${scheduledServiceId}`, metadata: { productId: product.id, scheduledServiceId } },
+        );
+      } catch (bellErr) {
+        logger.warn(`[supplies-consumption] failure bell not sent for ${product.name}: ${bellErr.message}`);
+      }
     }
   }
   return result;

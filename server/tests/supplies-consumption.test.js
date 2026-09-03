@@ -17,8 +17,10 @@
  *     for the same (product, visit).
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 
 const { consumeCompletionSupplies, appliesToLine } = require('../services/supplies-consumption');
+const { notifyAdmin } = require('../services/notification-service');
 
 function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false }) {
   const updates = [];
@@ -152,9 +154,29 @@ test('no inventory_on_hand → skipped, no movement', async () => {
   expect(updates).toHaveLength(0);
 });
 
-test('a thrown error is contained', async () => {
+test('a thrown error is contained — and rings ONE deduped bell so the miss is not silent', async () => {
+  notifyAdmin.mockClear();
   const { db } = fakeDb({ products: [sign], throwOnInsert: true });
   await expect(consumeCompletionSupplies(db, args)).resolves.toMatchObject({ errors: [{ productId: 'prod-sign', message: 'insert boom' }] });
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  const [category, title, , opts] = notifyAdmin.mock.calls[0];
+  expect(category).toBe('system');
+  expect(title).toContain('Sign card');
+  expect(opts.bell).toBe(true);
+  expect(opts.dedupeKey).toBe('supplies-consumption-failed:prod-sign:svc-1');
+});
+
+test('a bell failure on top of a deduction failure is still contained', async () => {
+  notifyAdmin.mockImplementationOnce(async () => { throw new Error('bell down'); });
+  const { db } = fakeDb({ products: [sign], throwOnInsert: true });
+  await expect(consumeCompletionSupplies(db, args)).resolves.toMatchObject({ errors: [{ productId: 'prod-sign' }] });
+});
+
+test('a successful deduction rings no bell', async () => {
+  notifyAdmin.mockClear();
+  const { db } = fakeDb({ products: [sign] });
+  await consumeCompletionSupplies(db, args);
+  expect(notifyAdmin).not.toHaveBeenCalled();
 });
 
 const path = require('path');

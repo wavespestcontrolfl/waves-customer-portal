@@ -21,6 +21,11 @@
  * every sweep while an auto request stays open — its dedupeKey is the
  * request id, so a bell that failed once is retried and one that landed is
  * never doubled.
+ *
+ * Staleness: the insert runs in a transaction that first re-reads the
+ * product FOR UPDATE and re-checks enabled / active / stock <= threshold, so
+ * a receive or a disable that landed after the candidate scan raises no
+ * request (result.deduped reason no_longer_low).
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -134,32 +139,46 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
         continue;
       }
 
-      const now = new Date();
-      const inserted = await conn('product_restock_requests').insert({
-        product_id: p.id,
-        status: 'open',
-        priority: 'normal',
-        requested_quantity: reorderQty,
-        unit: p.inventory_unit,
-        current_stock: onHand,
-        target_stock: threshold != null ? Number((threshold + reorderQty).toFixed(4)) : reorderQty,
-        vendor: p.vendor_name || null,
-        reason: `Auto-reorder: ${p.name} at ${onHand} ${p.inventory_unit} (low-stock threshold ${threshold} ${p.inventory_unit})`,
-        source: SOURCE,
-        created_by_name: 'Auto-reorder sweep',
-        metadata: {
-          vendorId: p.auto_reorder_vendor_id || null,
-          vendorSku: pricing?.vendor_sku || null,
-          vendorProductUrl: pricing?.vendor_product_url || null,
-          lowStockThreshold: threshold,
-        },
-        created_at: now,
-        updated_at: now,
-      })
-        .onConflict(conn.raw("(product_id) WHERE status IN ('open', 'ordered') AND source = 'auto_reorder'"))
-        .ignore()
-        .returning('*');
-      const request = inserted && inserted[0];
+      // Re-read the product under a row lock right before the insert: a
+      // receive / count correction / disable between the candidate scan and
+      // here must not raise a stale request that no later sweep would
+      // revisit (Codex r3 P2). Runs in one transaction with the insert so a
+      // concurrent receive waits on the lock rather than racing past it.
+      const request = await conn.transaction(async (trx) => {
+        const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('inventory_on_hand', 'low_stock_threshold', 'auto_reorder_enabled', 'active');
+        const freshOnHand = num(fresh?.inventory_on_hand);
+        const freshThreshold = num(fresh?.low_stock_threshold);
+        const stillLow = !!fresh && fresh.auto_reorder_enabled === true && fresh.active !== false
+          && freshOnHand != null && freshThreshold != null && freshOnHand <= freshThreshold;
+        if (!stillLow) return { stale: true };
+        const now = new Date();
+        const inserted = await trx('product_restock_requests').insert({
+          product_id: p.id,
+          status: 'open',
+          priority: 'normal',
+          requested_quantity: reorderQty,
+          unit: p.inventory_unit,
+          current_stock: freshOnHand,
+          target_stock: Number((freshThreshold + reorderQty).toFixed(4)),
+          vendor: p.vendor_name || null,
+          reason: `Auto-reorder: ${p.name} at ${freshOnHand} ${p.inventory_unit} (low-stock threshold ${freshThreshold} ${p.inventory_unit})`,
+          source: SOURCE,
+          created_by_name: 'Auto-reorder sweep',
+          metadata: {
+            vendorId: p.auto_reorder_vendor_id || null,
+            vendorSku: pricing?.vendor_sku || null,
+            vendorProductUrl: pricing?.vendor_product_url || null,
+            lowStockThreshold: freshThreshold,
+          },
+          created_at: now,
+          updated_at: now,
+        })
+          .onConflict(trx.raw("(product_id) WHERE status IN ('open', 'ordered') AND source = 'auto_reorder'"))
+          .ignore()
+          .returning('*');
+        return (inserted && inserted[0]) || null;
+      });
+      if (request?.stale) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: 'no_longer_low' }); continue; }
       if (!request) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: 'concurrent_auto_request' }); continue; }
       result.created.push({ productId: p.id, name: p.name, requestId: request.id, requestedQuantity: reorderQty, vendor: p.vendor_name || null });
 
@@ -167,7 +186,7 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
       // is not possible here: with no order adapter, a human has to click.
       // A failure here is retried by the next sweep (existing branch above).
       try {
-        await ringRestockBell({ notify, product: p, request, pricing, onHand, reorderQty });
+        await ringRestockBell({ notify, product: p, request, pricing, onHand: num(request.current_stock) ?? onHand, reorderQty });
       } catch (notifyErr) {
         logger.warn(`[auto-reorder] bell failed for ${p.name} (request ${request.id}): ${notifyErr.message}`);
       }

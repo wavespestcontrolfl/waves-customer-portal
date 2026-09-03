@@ -3199,6 +3199,12 @@ router.post('/unit-review/:productId/fix', async (req, res, next) => {
   }
 });
 
+function restockMeta(raw) {
+  if (!raw) return {};
+  if (typeof raw !== 'string') return raw;
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
+}
+
 // GET /restock-requests — product restock request queue.
 router.get('/restock-requests', async (req, res, next) => {
   try {
@@ -3245,6 +3251,10 @@ router.get('/restock-requests', async (req, res, next) => {
         inventoryUnit: row.inventory_unit,
         targetStock: row.target_stock != null ? Number(row.target_stock) : null,
         vendor: row.vendor || row.best_vendor || null,
+        // Auto-reorder requests carry the vendor SKU + product URL in
+        // metadata; the tab renders them as the order link (Codex r3 P2).
+        vendorSku: restockMeta(row.metadata).vendorSku || null,
+        vendorProductUrl: restockMeta(row.metadata).vendorProductUrl || null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,

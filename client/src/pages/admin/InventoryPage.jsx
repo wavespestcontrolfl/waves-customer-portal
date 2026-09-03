@@ -2880,7 +2880,17 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                       <div style={{ color: D.muted, fontSize: 12 }}>
                         Needed {request.neededBy || "as soon as possible"} · {request.priority}
                       </div>
-                      {request.vendor && <div style={{ color: D.muted, fontSize: 12 }}>Vendor: {request.vendor}</div>}
+                      {request.vendor && <div style={{ color: D.muted, fontSize: 12 }}>Vendor: {request.vendor}{request.vendorSku ? ` · SKU ${request.vendorSku}` : ""}</div>}
+                      {request.vendorProductUrl && (
+                        <a
+                          href={request.vendorProductUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: D.text, fontSize: 12, textDecoration: "underline" }}
+                        >
+                          Open order page ↗
+                        </a>
+                      )}
                     </td>
                     <td style={tdS}>
                       <div>{request.customerName || request.source}</div>
