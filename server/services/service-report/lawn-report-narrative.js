@@ -25,7 +25,7 @@ const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v4'; // v4: rain window rule — weekly total, never "since the last visit" (owner audit 07-30)
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v5'; // v5: schema-constrained output (jsonSchema); v4: rain window rule — weekly total, never "since the last visit" (owner audit 07-30)
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -88,21 +88,54 @@ You rewrite the customer-facing copy for a post-service LAWN report for Waves Pe
 8. Plain text only. No markdown, no emojis, no headers inside values.
 9. A product's "targets" list is what it is designed to control — NOT what was observed. Never say a pest or disease was found/observed unless the observations say so; frame targeted products as seasonal protection otherwise.
 
-## OUTPUT — JSON ONLY, exactly this shape (no prose outside it):
-{
-  "statusHeadline": "<=8 words, the one-line state for the hero",
-  "mainWatch": "one sentence: the main thing to watch (or empty if nothing)",
-  "customerAction": "one sentence: the single next step for the customer (or empty)",
-  "categories": { "<categoryKey>": "one short sentence per category key you were given" },
-  "water": "2-3 sentences explaining the water picture for this visit",
-  "mowing": "1-2 sentences on mowing height (only if mowing facts given)",
-  "treatmentSummary": "1 sentence on what was applied and why (only if products given)",
-  "insights": [ { "headline": "...", "whatWeSaw": "...", "whyItMatters": "...", "wavesAction": "...", "customerAction": "...", "nextVisitPlan": "..." } ]
+## OUTPUT
+- statusHeadline: <=8 words, the one-line state for the hero.
+- mainWatch: one sentence, the main thing to watch (empty string if nothing).
+- customerAction: one sentence, the single next step for the customer (empty string if none).
+- categories: one short sentence per diagnosis category key you were given.
+- water: 2-3 sentences explaining the water picture for this visit (empty string when no water facts).
+- mowing: 1-2 sentences on mowing height (empty string unless mowing facts were given).
+- treatmentSummary: 1 sentence on what was applied and why (empty string unless products were given).
+- insights: MUST be the same length and order as the input insights. For each, fill customerAction OR nextVisitPlan to match which the input had (leave the other "").`;
+
+// Structured-output contract (llm/call.js jsonSchema), built per visit because
+// the categories map is keyed by THIS report's diagnosis keys. mergeNarrative
+// still falls back per field on empty or banned copy.
+const INSIGHT_FIELDS = ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan'];
+function narrativeSchema(facts) {
+  const categoryKeys = (facts.diagnosis || []).map((d) => String(d.key));
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['statusHeadline', 'mainWatch', 'customerAction', 'categories', 'water', 'mowing', 'treatmentSummary', 'insights'],
+    properties: {
+      statusHeadline: { type: 'string' },
+      mainWatch: { type: 'string' },
+      customerAction: { type: 'string' },
+      categories: {
+        type: 'object',
+        additionalProperties: false,
+        required: categoryKeys,
+        properties: Object.fromEntries(categoryKeys.map((k) => [k, { type: 'string' }])),
+      },
+      water: { type: 'string' },
+      mowing: { type: 'string' },
+      treatmentSummary: { type: 'string' },
+      insights: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: INSIGHT_FIELDS,
+          properties: Object.fromEntries(INSIGHT_FIELDS.map((k) => [k, { type: 'string' }])),
+        },
+      },
+    },
+  };
 }
-The "insights" array MUST be the same length and order as the input insights. For each, fill customerAction OR nextVisitPlan to match which the input had (leave the other "").`;
 
 function buildUserMessage(facts) {
-  return `STRUCTURED FACTS for this visit (rewrite the copy from these — do not copy these words):\n\n${JSON.stringify(facts, null, 2)}\n\nReturn the JSON now.`;
+  return `STRUCTURED FACTS for this visit (rewrite the copy from these — do not copy these words):\n\n${JSON.stringify(facts, null, 2)}`;
 }
 
 // The rain figure is a past-7-days total — model output that reframes the
@@ -232,7 +265,7 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
 
   let merged = v2;
   try {
-    const res = await callModel({ system: SYSTEM_PROMPT, text: buildUserMessage(facts) });
+    const res = await callModel({ system: SYSTEM_PROMPT, text: buildUserMessage(facts), jsonSchema: narrativeSchema(facts) });
     if (res && res.ok && res.json) {
       merged = mergeNarrative(v2, res.json);
     } else {
