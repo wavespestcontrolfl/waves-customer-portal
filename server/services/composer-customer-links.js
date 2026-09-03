@@ -396,15 +396,36 @@ function decodeLinkText(body) {
 function bodyMayCarrySecureLink(body) {
   return /\/secure\//i.test(decodeLinkText(body));
 }
-// A canonical link: the portal host (exact, port included), optionally
-// schemed, NOT preceded by a hostname/URL character — so
-// "https://evil.example/portal.wavespestcontrol.com/secure/<token>" (path
-// separator) and "x.portal.wavespestcontrol.com/secure/…" (subdomain) are
-// not matches, while ordinary SMS punctuation before the link
-// ("Link:portal…", "'portal…") is (pre-push Codex P0 + P1).
-function canonicalSecureLinkRe() {
-  const host = new URL(publicPortalUrl()).host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?<![A-Za-z0-9._\\-/@])(?:https?:\\/\\/)?${host}\\/secure\\/([A-Za-z0-9_-]{16,})`, 'gi');
+// Every whitespace-delimited run of the (decoded) body that carries a
+// /secure/ path, with wrapping punctuation shed and a bare "Label:" prefix
+// dropped ("Link:portal…" is how operators type it). Each run is PARSED as
+// a URL (https:// assumed when schemeless — that is how the composer inserts
+// owned-host links) and accepted only when its hostname is exactly the
+// portal host and its pathname is exactly /secure/<token>. A substring
+// match is never enough: "https://evil.example/?next=portal…/secure/<tok>"
+// sends the bearer to evil.example (GH Codex #3812 r6 P1; earlier rounds
+// covered path-nested, subdomain and suffix look-alikes the same way).
+function secureLinkRuns(text) {
+  return String(text || '')
+    .split(/\s+/)
+    .filter((run) => /\/secure\//i.test(run))
+    .map((run) => run.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, ''))
+    // A bare label glued to the link ("Link:", "now,") is shed — but only a
+    // slash-free prefix, so an outer URL's own path/query is never cut away.
+    .map((run) => run.replace(/^[^/]*?(?=https?:\/\/)/i, ''))
+    .map((run) => (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : run.replace(/^[^/:,;]*[:,;]/, '')));
+}
+function canonicalSecureToken(run, host) {
+  let url;
+  try {
+    url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  if (url.host.toLowerCase() !== host) return null;
+  const m = /^\/secure\/([A-Za-z0-9_-]{16,})$/i.exec(url.pathname);
+  return m ? m[1] : null;
 }
 
 /**
@@ -432,16 +453,17 @@ function canonicalSecureLinkRe() {
  */
 async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
   const text = decodeLinkText(body);
-  const anySecure = [...text.matchAll(SECURE_PATH_RE)];
-  if (!anySecure.length) return { present: false };
+  if (!SECURE_PATH_RE.test(text)) return { present: false };
+  SECURE_PATH_RE.lastIndex = 0;
   const refuse = (error) => ({ present: true, ok: false, error });
-  const canonical = [...text.matchAll(canonicalSecureLinkRe())];
-  // Every /secure path in the body must be one of the canonical matches —
-  // any occurrence on another host (or nested under one) refuses the send.
-  if (canonical.length !== anySecure.length) {
-    return refuse('A /secure link in this message is not on the Waves portal — remove it before sending.');
+  const host = new URL(publicPortalUrl()).host.toLowerCase();
+  const tokens = [];
+  for (const run of secureLinkRuns(text)) {
+    const token = canonicalSecureToken(run, host);
+    if (!token) return refuse('A /secure link in this message is not on the Waves portal — remove it before sending.');
+    if (!tokens.includes(token)) tokens.push(token);
   }
-  const tokens = [...new Set(canonical.map((m) => m[1]))];
+  if (!tokens.length) return refuse('A /secure link in this message is not on the Waves portal — remove it before sending.');
   const { KIND, setupLinkIneligibility } = require('./autopay-setup-link');
   const live = [];
   for (const token of tokens) {
