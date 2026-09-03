@@ -148,7 +148,11 @@ export default function AgentModelsTab() {
     for (const s of data.selectors) {
       const next = draft[s.env];
       if (next && next !== s.current) {
-        const lanes = data.lanes.filter((l) => l.primary.selector === s.key && !l.primary.pinned).length;
+        // Blast radius = every lane a leg of which follows the selector and is
+        // not pinned away from it — fallback legs included (a FLAGSHIP change
+        // moves the report policy's backup too).
+        const follows = (leg) => leg && leg.selector === s.key && !leg.pinned;
+        const lanes = data.lanes.filter((l) => follows(l.primary) || follows(l.fallback)).length;
         byEnv.set(s.env, { env: s.env, from: s.current, to: next, label: `${s.key} selector`, lanes, restart: true });
       }
     }
