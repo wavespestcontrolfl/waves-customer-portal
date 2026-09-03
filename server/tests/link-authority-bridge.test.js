@@ -63,6 +63,8 @@ function makeDb(seed = {}) {
       async update(patch) { const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit.length; },
       insert(row) {
         const created = { id: uid(), ...row };
+        if (table === 'seo_link_placement_authorities' && rows.some((r) => r.prospect_id === row.prospect_id && r.dimension === row.dimension && r.instance_key === row.instance_key)) throw new Error('duplicate key value violates unique constraint "seo_link_placement_authorities_prospect_id_dimension_instance_key_unique"');
+        if (table === 'seo_link_placement_authorities' && rows.some((r) => r.prospect_id === row.prospect_id && r.dimension === row.dimension && r.instance_kind === row.instance_kind && r.ended_at == null)) throw new Error('duplicate key value violates unique constraint "seo_link_placement_authorities_open_instance_uniq"');
         rows.push(created);
         return { returning: async () => [{ ...created }], then: (res, rej) => Promise.resolve([{ ...created }]).then(res, rej) };
       },
@@ -313,7 +315,8 @@ describe('re-decision', () => {
     expect(r.ended).toBe(1);
     const mine = rows(db).filter((x) => x.prospect_id === pl.id);
     expect(mine.filter((x) => x.ended_at).map((x) => x.end_outcome)).toEqual(['superseded']);
-    expect(mine.filter((x) => !x.ended_at)).toHaveLength(1);
+    expect(mine.filter((x) => !x.ended_at).map((x) => x.instance_key)).toEqual(['-:2']); // next generation — the ended row keeps '-:1' under the full unique
+    expect(r.errors).toEqual([]);
     expect(placements(db).find((x) => x.id === pl.id).path_id).toBe(p.id);
   });
 });

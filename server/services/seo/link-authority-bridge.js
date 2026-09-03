@@ -165,8 +165,13 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
       out.ended += ended;
       placement.path_id = path.id;
     }
-    const open = await trx(AUTH).where({ prospect_id: placement.id }).whereNull('ended_at').select('*');
+    // ALL rows, ended ones included: the full UNIQUE (prospect, dimension,
+    // instance_key) keeps history, so a replacement instance takes the next
+    // generation (`${kind}:${n+1}`, §3.3b) — never the ended row's key.
+    const history = await trx(AUTH).where({ prospect_id: placement.id }).select('*');
+    const open = history.filter((r) => !r.ended_at);
     const key = (r) => `${r.dimension}|${r.instance_kind}`;
+    const nextGeneration = (inst) => 1 + history.filter((r) => key(r) === key(inst)).reduce((m, r) => Math.max(m, Number(String(r.instance_key).split(':').pop()) || 0), 0);
     const byKey = new Map(open.map((r) => [key(r), r]));
     const required = new Set(decision.instances.map(key));
 
@@ -177,11 +182,12 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now, out }
       const floorWaiverId = waiver ? waiver.id : null;
       if (!existing) {
         const [row] = await trx(AUTH).insert({
-          prospect_id: placement.id, dimension: inst.dimension, instance_kind: inst.instance_kind, instance_key: `${inst.instance_kind}:1`,
+          prospect_id: placement.id, dimension: inst.dimension, instance_kind: inst.instance_kind, instance_key: `${inst.instance_kind}:${nextGeneration(inst)}`,
           level: inst.level, reason: inst.reason, decision_inputs_hash: hash, path_revision: pathRevision,
           floor_waiver_id: floorWaiverId, decided_at: now, created_at: now, updated_at: now,
         }).returning('*');
         open.push(row);
+        history.push(row);
         out.rowsWritten += 1;
         continue;
       }
