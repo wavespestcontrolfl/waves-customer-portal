@@ -963,8 +963,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     let keyedService = null;
     if (requestedServiceKey) {
       if (!/^[a-z0-9_]{1,80}$/.test(requestedServiceKey)) return res.status(400).json({ error: 'Unknown service.' });
+      // The cockroach package's instant gate reads THIS process's engine
+      // constants — refresh them from pricing_config (coalesced) BEFORE the
+      // first eligibility read, or a replica whose constants are stale
+      // demotes an eligible quote / advertises a stale one. A failed refresh
+      // leaves the count unverified: quote-on-request (pre-push codex P1).
+      let displayVerified = true;
+      if (quoteServicesForKey(requestedServiceKey)?.pestInitialRoach) {
+        try { displayVerified = (await syncConstantsFromDB()) === true; } catch { displayVerified = false; }
+      }
       keyedService = await publicSelectableService(requestedServiceKey);
       if (!keyedService) return res.status(400).json({ error: 'Unknown service.' });
+      if (!displayVerified) keyedService = { ...keyedService, instant: false };
     }
     const keyedInstant = !!(keyedService && keyedService.instant && quoteServicesForKey(requestedServiceKey));
     // Keyed but not instant: no engine services — the request flows through
