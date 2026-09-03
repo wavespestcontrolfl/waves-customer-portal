@@ -237,7 +237,7 @@ function lawnMarketMonthly({ track, lawnSqFt, tier }) {
 // pa12 ≤ pa9 ≤ 0.96·pa6 / pa12 ≤ 0.92·pa6 on floored legs (service-pricing.js
 // priceLawnCare). In-code defaults disarm both; the parity run simulates an
 // overlay to exercise them (codex r14 P2).
-function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced', bermudaSuppression = false }) {
+function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced', bermudaSuppression = false, property = {}, routeDriveMinutes = null }) {
   const { LAWN_TIERS, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO, LAWN_TABLE_MAX_SQFT, LAWN_PRICING_V2 } = constants;
   const useFloor = LAWN_PRICING_V2.useLawnCostFloor === true;
   const pmm = Number(LAWN_PRICING_V2.programMinimumMonthly);
@@ -248,7 +248,7 @@ function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced', bermu
     const freq = LAWN_TIERS[t].freq;
     const marketMonthly = lawnMarketMonthly({ track, lawnSqFt, tier: t });
     const marketAnnual = Math.round(marketMonthly * 12);
-    const floorAnnual = round2(lawnCostStack({ track, lawnSqFt, visits: freq, routeDensity: LAWN_PRICING_V2.defaultRouteDensity }).annualCost / (1 - LAWN_PRICING_V2.targetCollectedMarginFloor));
+    const floorAnnual = round2(lawnCostStack({ track, lawnSqFt, visits: freq, routeDensity: LAWN_PRICING_V2.defaultRouteDensity, property, routeDriveMinutes }).annualCost / (1 - LAWN_PRICING_V2.targetCollectedMarginFloor));
     const floored = useFloor && floorAnnual > marketAnnual;
     let ann = floored ? Math.ceil(floorAnnual / freq) * freq : marketAnnual;
     if (programMinimumAnnual > 0 && ann < programMinimumAnnual) ann = Math.ceil(programMinimumAnnual / freq) * freq;
@@ -273,19 +273,44 @@ function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced', bermu
   const perApp = round2(annual / leg.freq);
   return { monthly: round2(annual / 12), annual, perApp, visits: leg.freq, marketMonthly: leg.marketMonthly, floorAnnual: leg.floorAnnual, floored: leg.floored, lifted: leg.lifted, suppressionPerApp };
 }
-// Lawn cost stack (shared package arithmetic, re-implemented here)
-function lawnCostStack({ track, lawnSqFt, visits, onSiteMinutesOverride = null, routeDensity = 'DENSE' }) {
+// Lawn cost stack (shared package arithmetic, re-implemented here).
+// Property-driven floor inputs (codex r20 P2), mirrored from
+// calcLawnAnnualCostFloorDetails / lawnComplexityMinutes as literals: landscape
+// complexity (features.complexity or landscapeComplexity: moderate +5 min,
+// complex +10), heavy shrubs (features.shrubs or shrubDensity: +5), a privacy
+// fence (fenceType / features.gate / features.accessDifficulty containing
+// "privacy": +5) add labor minutes per visit; poor or deferred maintenance and
+// high / severe / very-high pest pressure each add $5 to the per-visit callback
+// reserve; an explicit routeDriveMinutes (services.lawn or the input) replaces
+// the route-density drive minutes. Everything else is neutral.
+const lawnComplexityMinutesOf = (property = {}) => {
+  const f = property.features || {};
+  const complexity = String(f.complexity || property.landscapeComplexity || '').toLowerCase();
+  const shrubs = String(f.shrubs || property.shrubDensity || '').toLowerCase();
+  const privacy = String(property.fenceType || f.gate || f.accessDifficulty || '').toLowerCase().includes('privacy');
+  return (complexity === 'moderate' ? 5 : 0) + (complexity === 'complex' ? 10 : 0) + (shrubs === 'heavy' ? 5 : 0) + (privacy ? 5 : 0);
+};
+const lawnCallbackReserveOf = (property = {}) => {
+  const V = constants.LAWN_PRICING_V2;
+  const norm = (v) => String(v || '').toUpperCase().replace(/[\s-]+/g, '_');
+  const maintenance = norm(property.maintenanceCondition);
+  const pressure = norm(property.overallPestPressure);
+  return V.callbackReservePerVisitDefault + (['POOR', 'DEFERRED'].includes(maintenance) ? 5 : 0) + (['HIGH', 'SEVERE', 'VERY_HIGH'].includes(pressure) ? 5 : 0);
+};
+function lawnCostStack({ track, lawnSqFt, visits, onSiteMinutesOverride = null, routeDensity = 'DENSE', property = {}, routeDriveMinutes = null }) {
   const V = constants.LAWN_PRICING_V2;
   const budgets = { st_augustine: { 4: 75, 6: 103, 9: 182, 12: 225 }, bermuda: { 4: 61, 6: 93, 9: 172, 12: 226 }, zoysia: { 4: 83, 6: 124, 9: 205, 12: 219 }, bahia: { 4: 52, 6: 78, 9: 107, 12: 131 } };
   const annualBudget = (budgets[track] || budgets.st_augustine)[visits] || 100;
   const materialPerVisit = (annualBudget * (lawnSqFt / 4500)) / visits;
-  const modeledMinutes = V.laborMinutesBase + (lawnSqFt / 1000) * V.laborMinutesPer1000Sqft;
+  const complexityMinutes = lawnComplexityMinutesOf(property);
+  const modeledMinutes = V.laborMinutesBase + (lawnSqFt / 1000) * V.laborMinutesPer1000Sqft + complexityMinutes;
   const onSite = onSiteMinutesOverride ?? modeledMinutes;
-  const drive = V.routeDensityMinutes[routeDensity] ?? 5;
+  const explicitDrive = Number(routeDriveMinutes ?? property.routeDriveMinutes);
+  const drive = Number.isFinite(explicitDrive) && routeDriveMinutes !== null ? Math.max(0, explicitDrive) : (V.routeDensityMinutes[routeDensity] ?? 5);
   const laborPerVisit = (V.laborRateLoaded * (onSite + drive)) / 60;
-  const callback = V.callbackReservePerVisitDefault;
+  const callback = lawnCallbackReserveOf(property);
   const annualCost = (materialPerVisit + laborPerVisit + callback + V.equipmentReservePerVisit) * visits + V.adminAnnualDefault;
-  return { annualBudget, materialPerVisit: round2(materialPerVisit), modeledMinutes, onSiteMinutes: onSite, driveMinutes: drive, laborPerVisit: round2(laborPerVisit), annualCost: round2(annualCost) };
+  return { annualBudget, materialPerVisit: round2(materialPerVisit), modeledMinutes, complexityMinutes, onSiteMinutes: onSite, driveMinutes: drive, laborPerVisit: round2(laborPerVisit), callbackReservePerVisit: callback, annualCost: round2(annualCost) };
 }
 
 // MOSQUITO — treatable = lot − footprint − hardscape; anchors at category top edges; 500-sf steps
@@ -762,6 +787,35 @@ function runLawnMatrix() {
       }
     } finally { Object.assign(V, saved); }
   }
+  // Armed floor with the property cost inputs (codex r20 P2): complexity /
+  // heavy shrubs / privacy fence minutes, poor-maintenance and high-pressure
+  // callback reserve, and an explicit route drive time — each on the field the
+  // engine actually reads (top-level profile fields, the features object, or
+  // services.lawn.routeDriveMinutes), plus unrecognised values proven neutral.
+  // The floor must bind on at least one case or the block proves nothing.
+  const propertyCases = [
+    { name: 'complex + heavy shrubs + poor maintenance + high pressure + privacy fence', property: { landscapeComplexity: 'complex', shrubDensity: 'heavy', maintenanceCondition: 'poor', overallPestPressure: 'high', fenceType: 'privacy' } },
+    { name: 'features.complexity=moderate + features.shrubs=heavy', property: { features: { complexity: 'moderate', shrubs: 'heavy' } } },
+    { name: 'maintenance "Deferred" + pressure "very-high" (normalised)', property: { maintenanceCondition: 'Deferred', overallPestPressure: 'very-high' } },
+    { name: 'features.accessDifficulty mentions a privacy fence', property: { features: { accessDifficulty: 'privacy fence, locked gate' } } },
+    { name: 'input.routeDriveMinutes=20 (explicit drive replaces route density)', property: { routeDriveMinutes: 20 }, routeDriveMinutes: 20 },
+    { name: 'services.lawn.routeDriveMinutes=15 (service line wins)', property: {}, routeDriveMinutes: 15, lawnLine: { routeDriveMinutes: 15 } },
+    { name: 'unrecognised values are neutral', property: { landscapeComplexity: 'wild', shrubDensity: 'sparse', maintenanceCondition: 'GOOD', overallPestPressure: 'LOW', fenceType: 'chain link' } },
+  ];
+  Object.assign(V, { useLawnCostFloor: true, programMinimumMonthly: 0 });
+  let anyPropertyFloored = false;
+  try {
+    for (const pc of propertyCases) for (const sqft of [2500, 4500, 8000]) for (const tier of ['standard', 'enhanced', 'premium']) {
+      const neutral = expectLawn({ track: 'st_augustine', lawnSqFt: sqft, tier });
+      const exp = expectLawn({ track: 'st_augustine', lawnSqFt: sqft, tier, property: pc.property, routeDriveMinutes: pc.routeDriveMinutes ?? null });
+      const r = runEngine({ ...BASE, lawnSqFt: sqft, ...pc.property, services: { lawn: { track: 'st_augustine', tier, ...(pc.lawnLine || {}) } } });
+      const li = line(r.result, 'lawn_care');
+      anyPropertyFloored = anyPropertyFloored || exp.floored;
+      record(section, `[overlay floor=true min=0/mo] st_augustine ${sqft}sf ${tier} [property: ${pc.name}]`, { lawnSqFt: sqft, tier, property: pc.property, routeDriveMinutes: pc.routeDriveMinutes ?? null }, exp.perApp, li ? li.perApp : null, { extra: { annualExpected: exp.annual, annualActual: li ? li.annual : null, floorAnnual: exp.floorAnnual, neutralFloorAnnual: neutral.floorAnnual, floored: exp.floored, lifted: exp.lifted, engineBasis: li ? li.pricingBasis ?? null : null, engineError: r.ok ? null : r.error } });
+      if (li) flagIf(offBy(exp.annual, li.annual, 0.005), 'P1', section, `[overlay property] annual st_augustine ${sqft} ${tier} [${pc.name}]`, `annual ${li.annual} vs ${exp.annual}`);
+    }
+  } finally { Object.assign(V, saved); }
+  flagIf(!anyPropertyFloored, 'P1', section, '[overlay property] armed floor binds on at least one property-input case', 'no property-input case was floored — the block proves nothing');
   // Bermuda suppression add-on (codex r17 P2): gate-enabled in-process (the engine
   // reads GATE_BERMUDA_SUPPRESSION at call time through gateEnvValue), priced on
   // the St. Augustine track at every cadence, ineligible on bahia, and asserted to
@@ -1170,7 +1224,10 @@ function runSpecialtyMatrix() {
     const exp = c.palmCount > 0 && Number.isInteger(c.palmCount) ? expectPalm(c) : null;
     const r = runEngine({ ...BASE, services: { palmInjection: c } });
     const li = line(r.result, 'palm_injection');
-    flagIf(!!_refusal && !r.ok && !_refusal.test(r.error), 'P1', section, `palm ${JSON.stringify(c)} refused for the wrong reason`, `expected an error matching ${_refusal}, engine said: ${r.error}`);
+    // A declared refusal must be a THROW whose message names the reason: an
+    // engine that silently omits the palm line (r.ok with no line) is not a
+    // refusal, and record() would otherwise file it as engine_only (codex r20 P2).
+    flagIf(!!_refusal && (r.ok || !_refusal.test(r.error)), 'P1', section, `palm ${JSON.stringify(c)} not refused as declared`, r.ok ? `engine returned ok (${li ? 'priced ' + li.annual : 'no palm line'}) — expected a thrown error matching ${_refusal}` : `expected an error matching ${_refusal}, engine said: ${r.error}`);
     record(section, `palm ${JSON.stringify(c)}`, c, exp ? exp.annual : null, li ? li.annual : null, { extra: { perVisitExpected: exp ? exp.perVisit : null, perVisitActual: li ? li.perVisit : null, minimumApplied: exp ? exp.minimumApplied : null, engineError: r.ok ? null : r.error, palmSizeUsed: li ? li.palmSize : null } });
     // A tiered treatment with no palm size must be refused by the engine (fail
     // closed); pricing it silently would quote a defaulted size.
@@ -1302,13 +1359,16 @@ function runAnnualEconomics() {
   const pestMaterial = 6.67; // engine's chemCost talak 1.30 + taurus 4.87 + surfactant 0.50 (service-pricing.js pestVisitCostModel)
   const rows = [
     { key: 'pest_control', service: 'pest_control quarterly (2,000 sf)', revenuePerVisit: pestQ.perApp, visits: 4, modeledMinutes: 25, observed: RECORDED_VISIT_SPAN_MINUTES.pest_control_quarterly, materialPerVisit: pestMaterial, callbackRate: OBSERVED_PEST_CALLBACK_RATE, callbackMinutes: RECORDED_VISIT_SPAN_MINUTES.pest_re_service.median, setupFee: constants.PEST.initialFee },
-    { key: 'lawn_care', service: 'lawn_care 9x st_augustine (4,500 sf)', revenuePerVisit: lawn9.perApp, visits: 9, modeledMinutes: lawnCostModeled.modeledMinutes, driveMinutes: lawnCostModeled.driveMinutes, observed: RECORDED_VISIT_SPAN_MINUTES.lawn_care_9x, materialPerVisit: lawnCostModeled.materialPerVisit, callbackReservePerVisit: 2 },
+    // Callback reserves come from the live constants the pricers read — the
+    // lawn floor's per-visit reserve and TREE_SHRUB.callbackReservePerVisit —
+    // so a --db overlay moves the economics with the price (codex r20 P2).
+    { key: 'lawn_care', service: 'lawn_care 9x st_augustine (4,500 sf)', revenuePerVisit: lawn9.perApp, visits: 9, modeledMinutes: lawnCostModeled.modeledMinutes, driveMinutes: lawnCostModeled.driveMinutes, observed: RECORDED_VISIT_SPAN_MINUTES.lawn_care_9x, materialPerVisit: lawnCostModeled.materialPerVisit, callbackReservePerVisit: lawnCostModeled.callbackReservePerVisit },
     { key: 'mosquito', service: 'mosquito seasonal9 (8,000 sf lot)', revenuePerVisit: mosq.perVisit, visits: 9, modeledMinutes: 30, observed: null, materialPerVisit: mosq.materialPerVisit },
     // Rodent bait setup is waived by any other qualifying service, and a
     // stand-alone rodent program is Bronze — so Silver+ rows (which imply
     // another qualifier) carry no setup fee (codex r2 P2).
     { key: 'rodent_bait', service: 'rodent_bait (2,000 sf)', revenuePerVisit: rod.perVisit, visits: 4, modeledMinutes: rod.stations * 5, observed: null, materialPerVisit: rod.stations * 1.5, extraAnnual: rod.stations * 7.5, setupFee: rod.setupFee, setupStandaloneOnly: true },
-    { key: 'tree_shrub', service: 'tree_shrub 6x (1,440 sf beds, 6 trees)', revenuePerVisit: ts.perApp, visits: 6, modeledMinutes: ts.onSiteMin + 10, driveMinutes: 0, observed: null, materialPerVisit: round2(ts.materialCost / 6) },
+    { key: 'tree_shrub', service: 'tree_shrub 6x (1,440 sf beds, 6 trees)', revenuePerVisit: ts.perApp, visits: 6, modeledMinutes: ts.onSiteMin + 10, driveMinutes: 0, observed: null, materialPerVisit: round2(ts.materialCost / 6), callbackReservePerVisit: constants.TREE_SHRUB.callbackReservePerVisit || 0 },
     // Cartridge replacement + follow-up reserve per year, no per-visit bait material (plan §A1; codex r6 P1).
     { key: 'termite_bait', service: 'termite_bait monitoring (2,000 sf)', revenuePerVisit: term.perApp, visits: 4, modeledMinutes: term.stations * 5, observed: null, materialPerVisit: 0, extraAnnual: termiteAnnualCost(term.stations), setupFee: term.installPrice /* billed installation — first-year revenue includes it (codex r2 P2) */ },
   ];
@@ -1561,10 +1621,13 @@ function hardCodedRateInventory() {
 function markupVsMarginAudit() {
   // Sites that apply a MULTIPLIER (markup) rather than divide by (1 − margin). Reported, not judged: a markup is fine if labelled as one.
   return [
-    { site: 'TERMITE.installMultiplier ×1.45 on install MATERIAL only (service-pricing.js priceTermiteBait)', kind: 'markup on material', equivalentMargin: round2(1 - 1 / constants.TERMITE.installMultiplier), note: 'install labor (5 min/station × $35) is excluded from the marked-up base; reported installMargin only' },
-    { site: 'SPECIALTY.trenching.productPremiumMultiplier ×1.45 on chemical premium', kind: 'markup on incremental material', equivalentMargin: round2(1 - 1 / constants.SPECIALTY.trenching.productPremiumMultiplier), note: 'base install is $/LF, not cost-plus' },
-    { site: 'BED_BUG.heat.subcontractMarkup ×1.25 on vendor cost', kind: 'markup (correctly named)', equivalentMargin: round2(1 - 1 / constants.BED_BUG.heat.subcontractMarkup) },
-    { site: 'ONE_TIME.pest.multiplier ×2.2 on quarterly per-app', kind: 'price multiple (not cost-based)', equivalentMargin: null },
+    // Labels interpolate the LIVE value (codex r20 P2): under a --db overlay the
+    // multiplier in the label must be the one the equivalent margin was
+    // computed from, never the in-code default.
+    { site: `TERMITE.installMultiplier ×${constants.TERMITE.installMultiplier} on install MATERIAL only (service-pricing.js priceTermiteBait)`, kind: 'markup on material', equivalentMargin: round2(1 - 1 / constants.TERMITE.installMultiplier), note: `install labor (5 min/station × $${constants.GLOBAL.LABOR_RATE}) is excluded from the marked-up base; reported installMargin only` },
+    { site: `SPECIALTY.trenching.productPremiumMultiplier ×${constants.SPECIALTY.trenching.productPremiumMultiplier} on chemical premium`, kind: 'markup on incremental material', equivalentMargin: round2(1 - 1 / constants.SPECIALTY.trenching.productPremiumMultiplier), note: 'base install is $/LF, not cost-plus' },
+    { site: `BED_BUG.heat.subcontractMarkup ×${constants.BED_BUG.heat.subcontractMarkup} on vendor cost`, kind: 'markup (correctly named)', equivalentMargin: round2(1 - 1 / constants.BED_BUG.heat.subcontractMarkup) },
+    { site: `ONE_TIME.pest.multiplier ×${constants.ONE_TIME.pest.multiplier} on quarterly per-app`, kind: 'price multiple (not cost-based)', equivalentMargin: null },
     { site: 'SPECIALTY.*.marginDivisor and TREE_SHRUB.marginTarget', kind: 'margin (price = cost ÷ (1 − m)) — correct', equivalentMargin: null },
   ];
 }
