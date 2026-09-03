@@ -122,6 +122,14 @@ async function main() {
             [r.primary_property_id, r.id, r.latitude, r.longitude],
           );
           propReset = propUpd.rowCount;
+          if (propReset !== 1) {
+            // The mirror moved between selection and update: leave the
+            // customer row alone too, or the pair ends up half-reset.
+            await client.query('ROLLBACK');
+            console.log(`SKIP ${r.id}: primary property mirror changed since the dry run`);
+            skipped += 1;
+            continue;
+          }
         }
         const visitUpd = await client.query(
           `UPDATE scheduled_services
