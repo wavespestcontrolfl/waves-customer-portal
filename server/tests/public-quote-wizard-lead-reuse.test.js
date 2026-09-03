@@ -116,7 +116,10 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(block).toMatch(/if \(duplicateOfLeadId !== stored\)/);
     // The relabel is scoped to the status just read (codex r9 P1): a staff
     // transition in between wins and this public retry updates 0 rows.
-    expect(block).toMatch(/await db\('leads'\)\.where\(\{ id: lead\.id, status: lead\.status \}\)\.update\(/);
+    expect(block).toMatch(/const relabelled = await db\('leads'\)\.where\(\{ id: lead\.id, status: lead\.status \}\)\.update\(/);
+    // ...and a relabel that did not land leaves the request on the marker
+    // the row actually carries (pre-push P1 on r9).
+    expect(block).toMatch(/if \(!relabelled\) duplicateOfLeadId = stored;/);
     expect(block).toMatch(/\? \{ status: 'duplicate', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) \|\| \?::jsonb"/);
     expect(block).toMatch(/status: 'new', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) - 'duplicate_of_lead_id'"\)/);
   });

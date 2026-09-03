@@ -1776,11 +1776,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
         // Scoped to the status just read: a staff transition landing in
         // between (won / lost / contacted) wins, and this public retry
-        // updates 0 rows instead of regressing it (codex #3834 r9 P1).
+        // updates 0 rows instead of regressing it (codex #3834 r9 P1). On 0
+        // rows the request keeps the marker the row actually carries, so the
+        // attribution skip and the bell label follow the database, not the
+        // relabel that did not land.
         if (duplicateOfLeadId !== stored) {
-          await db('leads').where({ id: lead.id, status: lead.status }).update(duplicateOfLeadId
+          const relabelled = await db('leads').where({ id: lead.id, status: lead.status }).update(duplicateOfLeadId
             ? { status: 'duplicate', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }
             : { status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
+          if (!relabelled) duplicateOfLeadId = stored;
         }
       }
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
