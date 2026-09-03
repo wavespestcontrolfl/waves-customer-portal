@@ -32,7 +32,7 @@ then the only remedy is a human.
   "link_worker": { "available": true, "last_claim_at": "…", "last_report_at": null,
                    "open_leases": 1, "stale_leases": 1 },
   "verdict": "attention",
-  "reasons": [ "job:geocoder-backstop:failing", "ops:calls:failed=2", "link_worker:stale_leases=1" ]
+  "reasons": [ "job:geocoder-backstop:failing", "ops:calls:failed", "link_worker:stale_leases" ]
 }
 ```
 
@@ -43,7 +43,9 @@ then the only remedy is a human.
   Agents → Queue tab for both. A sub-read that fails says `available: false`
   and nothing else (and becomes a `<read>:unavailable` reason); `ops_queue`
   with `disabled: true` just means the Queue gate is off, which is not a reason.
-- `reasons` are stable keys. The script diffs them against the previous poll.
+- `reasons` are stable keys with **no counts inside** (one incident keeps one
+  identity while it worsens or drains). The script diffs them against the
+  previous poll and reads the current numbers from the body when it pages.
 - Off → `404 { "error": "watchdog lane disabled" }`. That is a configuration
   state, not an outage: stop and tell the operator.
 
@@ -106,7 +108,7 @@ New attention reasons (only the NEW ones; cleared ones are not announced):
 
 > ⚠️ Waves agents need attention (2 new):
 > • geocoder-backstop is failing · last success 190 min ago · 3 failures in a row
-> • ops queue lane calls: failed=2
+> • ops queue lane calls (Call processing): 2 failed row(s)
 > https://portal.wavespestcontrol.com/admin/agents?tab=queue
 
 Configuration, not an outage (HTTP 401 / 403 / 404 — the lane gate off, the

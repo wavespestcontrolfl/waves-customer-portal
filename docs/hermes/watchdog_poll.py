@@ -131,10 +131,20 @@ def describe(reason, snap):
                 return " · ".join(bits)
         return f"{name} is {state}"
     if kind == "ops":
-        _, lane, tail = reason.split(":", 2)
-        return f"ops queue lane {lane}: {tail}"
-    if reason.startswith("link_worker:stale_leases="):
-        return f"backlink worker: {reason.split('=')[1]} prospect lease(s) claimed over 2 h ago with no report"
+        _, lane, what = reason.split(":", 2)
+        if what == "unavailable":
+            return "ops queue could not be read"
+        for l in snap.get("ops_queue", {}).get("lanes", []):
+            if l.get("key") == lane:
+                if what == "error":
+                    return f"ops queue lane {lane} ({l.get('label', lane)}) failed to load"
+                return f"ops queue lane {lane} ({l.get('label', lane)}): {l.get('failed', '?')} failed row(s)"
+        return f"ops queue lane {lane}: {what}"
+    if reason == "link_worker:stale_leases":
+        n = snap.get("link_worker", {}).get("stale_leases", "?")
+        return f"backlink worker: {n} prospect lease(s) claimed over 2 h ago with no report"
+    if reason == "db:degraded":
+        return "database ping failed or timed out"
     return reason
 
 

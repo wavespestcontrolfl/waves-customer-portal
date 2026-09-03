@@ -95,10 +95,13 @@ describe('buildWatchdogSnapshot', () => {
       'db:degraded',
       'job:geocoder-backstop:failing',
       'job:old-digest:stale',
-      'ops:calls:failed=2',
+      'ops:calls:failed',
       'ops:content:error',
-      'link_worker:stale_leases=1',
+      'link_worker:stale_leases',
     ]);
+    // keys carry no counts (one incident keeps one identity); the numbers live beside them
+    expect(snap.ops_queue.lanes[0].failed).toBe(2);
+    expect(snap.link_worker.stale_leases).toBe(1);
     expect(snap.jobs.items.map((j) => j.job)).toEqual(['geocoder-backstop', 'old-digest']);
     expect(snap.jobs.items[0]).toEqual({ job: 'geocoder-backstop', state: 'failing', last_success_age_minutes: 190, consecutive_failures: 3 });
     expect(JSON.stringify(snap)).not.toContain('ECONNRESET');

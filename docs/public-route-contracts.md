@@ -583,7 +583,8 @@ unauthenticated internal route here is P0). `watchdog-worker` (GET
 `/status`, key `hermes_watchdog`, gate `GATE_HERMES_WATCHDOG`) serves the
 external agent watchdog a counts-only health snapshot — no customer data,
 no item titles, no error text (job_health.last_error is only digit-masked),
-no sub-read error messages; adding any free-text field is P0.
+no sub-read error messages; adding any free-text field is P0. `reasons` are
+count-free stable keys — a count inside a key re-pages one incident.
 Customer authentication (`server/routes/auth.js`, mounted at `/api/auth`):
 `POST /send-code`, `/verify-code`, `/refresh`, `/logout` are unauthenticated
 by definition. send-code and verify-code sit behind the `server/index.js`

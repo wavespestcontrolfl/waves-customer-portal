@@ -16,9 +16,11 @@
  * stays inside too (the Agents → Queue tab shows it); a failing sub-read
  * reports a fixed `unavailable` marker, never its message.
  *
- * `reasons` are stable string keys (job:<name>:<state>, ops:<lane>:failed=<n>,
- * db:degraded, link_worker:stale_leases=<n>, <read>:unavailable) so the Hermes side diffs them
- * against its last poll without a model call and pages only on CHANGE.
+ * `reasons` are stable string keys (job:<name>:<state>, ops:<lane>:failed,
+ * db:degraded, link_worker:stale_leases, <read>:unavailable) so the Hermes side
+ * diffs them against its last poll without a model call and pages only on
+ * CHANGE. Keys carry NO counts — a worsening or draining incident keeps one
+ * identity; the current numbers sit in the snapshot body next to it.
  *
  * Every sub-read is contained: a failing read reports `available: false` and the
  * verdict still computes from whatever succeeded (rule 6). The per-lane runtime
@@ -131,11 +133,11 @@ function judge({ database, jobs, ops_queue: ops, link_worker: lw }) {
   if (ops && ops.available) {
     for (const l of ops.lanes || []) {
       if (l.error) reasons.push(`ops:${l.key}:error`);
-      else if (l.failed > 0) reasons.push(`ops:${l.key}:failed=${l.failed}`);
+      else if (l.failed > 0) reasons.push(`ops:${l.key}:failed`);
     }
   }
   if (lw && lw.available === false) reasons.push('link_worker:unavailable');
-  if (lw && lw.stale_leases > 0) reasons.push(`link_worker:stale_leases=${lw.stale_leases}`);
+  if (lw && lw.stale_leases > 0) reasons.push('link_worker:stale_leases');
   return { verdict: reasons.length ? 'attention' : 'healthy', reasons };
 }
 
