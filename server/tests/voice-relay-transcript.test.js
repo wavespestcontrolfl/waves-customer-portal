@@ -354,7 +354,8 @@ describe('what the session records', () => {
     expect(send).toHaveBeenCalledTimes(1);
     // Agent entries carry `planned` (the full model text) beside `text` (what
     // the caller heard — rewritten on a barge-in / played-tokens event).
-    expect(convo._transcript).toEqual([{ role: 'agent', text: 'Thanks for calling Waves.', planned: 'Thanks for calling Waves.' }]);
+    expect(convo._transcript).toHaveLength(1);
+    expect(convo._transcript[0]).toMatchObject({ role: 'agent', text: 'Thanks for calling Waves.', planned: 'Thanks for calling Waves.', playedSource: 'assumed', interrupted: false });
   });
 
   test('caller turns are recorded in the serialized chain, so ordering matches the call', async () => {

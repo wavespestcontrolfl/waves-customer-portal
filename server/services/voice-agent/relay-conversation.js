@@ -460,6 +460,7 @@ class RelayConversation {
     // transcript entries, which the played-text sync below keeps honest.
     this._turnStats = [];
     this._currentTurn = null; // the turn whose model round is in flight
+    this._playing = []; // agent utterances sent and not yet known to have finished, in send order
     this._lastCallerSpeechStopAt = null; // from the clientSpeaking-end event
     this._interruptFollowupTimer = null;
     this._eventShapesSeen = new Set();
@@ -627,12 +628,17 @@ class RelayConversation {
   _recordTurn(role, text) {
     const t = String(text == null ? '' : text).trim();
     if (!t) return null;
-    const entry = role === 'agent' ? { role, text: t, planned: t } : { role, text: t };
+    // Agent entries are UTTERANCES: each one tracks its own played text and
+    // interruption (a single caller turn can emit two — a read-tool filler,
+    // then the answer — and Twilio plays and interrupts them one by one).
+    const entry = role === 'agent'
+      ? { role, text: t, planned: t, played: null, playedSource: 'assumed', interrupted: false, notPlayed: false, done: false }
+      : { role, text: t };
     this._transcript.push(entry);
     return entry;
   }
 
-  /** The turn whose speech events / played tokens are still arriving. */
+  /** The turn whose speech events (agent speaking start/end) are still arriving. */
   _speechTurn() {
     for (let i = this._turnStats.length - 1; i >= 0 && i >= this._turnStats.length - 2; i--) {
       if (this._turnStats[i].firstSendAt != null) return this._turnStats[i];
@@ -640,28 +646,67 @@ class RelayConversation {
     return null;
   }
 
-  /** Re-derive the last agent entry's stored text from what was played. */
-  _syncPlayedEntry(stat) {
-    const entry = stat.agentEntries[stat.agentEntries.length - 1];
-    if (!entry) return;
-    let heard = entry.planned;
-    if (stat.playedSource === 'twilio_event' && stat.played) heard = stat.played;
-    else if (stat.playedSource === 'interrupt_truncation' && stat.playedUtterance) heard = stat.playedUtterance;
-    entry.text = `${heard}${stat.interrupted ? ' [interrupted]' : ''}`.trim();
+  /** Re-derive one utterance's stored text from what was played. */
+  _syncPlayedEntry(entry) {
+    if (entry.notPlayed) {
+      entry.text = '[not played — caller interrupted]';
+    } else {
+      const heard = entry.played != null && entry.played !== '' ? entry.played : entry.planned;
+      entry.text = `${heard}${entry.interrupted ? ' [interrupted]' : ''}`.trim();
+    }
+    // The turn's summary source = the best evidence any of its utterances got.
+    const stat = this._turnStats[entry.turn - 1];
+    if (stat) {
+      const rank = { assumed: 0, interrupt_truncation: 1, twilio_event: 2 };
+      stat.playedSource = stat.agentEntries.reduce(
+        (best, e) => (rank[e.playedSource] > rank[best] ? e.playedSource : best), 'assumed',
+      );
+    }
   }
 
-  /** A tokens-played notification: what Twilio actually spoke to the caller. */
-  _appendPlayed(stat, piece) {
+  /** Retire every utterance still queued as playing (a new caller turn began). */
+  _drainPlaying() {
+    for (const entry of this._playing) entry.done = true;
+    this._playing = [];
+  }
+
+  /**
+   * A tokens-played notification: what Twilio actually spoke. Utterances play
+   * in send order, so the tokens belong to the FIRST unfinished utterance
+   * they fit (a prefix of its planned text); when they only fit a later one,
+   * the earlier utterances are over. Twilio's payload is undocumented: a
+   * cumulative snapshot replaces, a token appends.
+   */
+  _appendPlayed(piece) {
     const text = String(piece || '').replace(/\s+/g, ' ').trim();
     if (!text) return;
-    const prev = stat.played || '';
-    // Twilio's payload is undocumented: a cumulative snapshot replaces, a
-    // token appends (with a space unless punctuation or one is already there).
-    if (!prev || text.startsWith(prev)) stat.played = text;
-    else if (prev.endsWith(text)) stat.played = prev;
-    else stat.played = `${prev}${/^[,.;:!?]/.test(text) ? '' : ' '}${text}`;
-    stat.playedSource = 'twilio_event';
-    this._syncPlayedEntry(stat);
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const extend = (entry) => {
+      const prev = entry.played || '';
+      if (!prev || text.startsWith(prev)) return text;
+      if (prev.endsWith(text)) return prev;
+      return `${prev}${/^[,.;:!?]/.test(text) ? '' : ' '}${text}`;
+    };
+    let target = null;
+    let idx = -1;
+    for (let i = 0; i < this._playing.length; i++) {
+      if (norm(this._playing[i].planned).startsWith(norm(extend(this._playing[i])))) { target = this._playing[i]; idx = i; break; }
+    }
+    if (!target) {
+      if (!this._playing.length) return;
+      target = this._playing[0];
+      idx = 0;
+    }
+    // Utterances ahead of the matched one have finished playing.
+    for (let i = 0; i < idx; i++) this._playing[i].done = true;
+    this._playing.splice(0, idx);
+    target.played = extend(target);
+    target.playedSource = 'twilio_event';
+    this._syncPlayedEntry(target);
+    if (norm(target.played) === norm(target.planned)) {
+      target.done = true;
+      this._playing.shift();
+    }
   }
 
   /** Relay notifications the `events` attribute adds (speaker / tokens-played). */
@@ -688,11 +733,9 @@ class RelayConversation {
         if (stat && stat.agentSpeakingStartAt != null && stat.agentSpeakingEndAt == null) stat.agentSpeakingEndAt = t;
         break;
       }
-      case 'tokens_played': {
-        const stat = this._speechTurn();
-        if (stat && ev.text) this._appendPlayed(stat, ev.text);
+      case 'tokens_played':
+        if (ev.text) this._appendPlayed(ev.text);
         break;
-      }
       default:
         break;
     }
@@ -843,8 +886,12 @@ class RelayConversation {
       const stat = this._currentTurn;
       if (stat) {
         if (stat.firstSendAt == null) stat.firstSendAt = now();
-        if (entry) stat.agentEntries.push(entry);
+        if (entry) {
+          entry.turn = stat.turn;
+          stat.agentEntries.push(entry);
+        }
       }
+      if (entry) this._playing.push(entry);
       this._send(t);
     }
   }
@@ -884,6 +931,9 @@ class RelayConversation {
     // turn only if it is recent; it is consumed so no later turn reuses it.
     const stoppedAt = this._lastCallerSpeechStopAt;
     this._lastCallerSpeechStopAt = null;
+    // The caller spoke after whatever was queued: those utterances are over
+    // (a barge-in would have arrived as an interrupt frame first).
+    this._drainPlaying();
     const stat = {
       turn: this._userTurns.length,
       promptAt,
@@ -904,9 +954,7 @@ class RelayConversation {
       interruptWithoutFollowupTranscript: false,
       timedOut: false,
       partialCount: this._partialsBeforeFirstTurn || 0,
-      played: null,
-      playedUtterance: null,
-      playedSource: 'assumed',
+      playedSource: 'assumed', // best evidence across the turn's utterances
       agentEntries: [],
     };
     this._partialsBeforeFirstTurn = 0;
@@ -950,15 +998,35 @@ class RelayConversation {
     stat.interrupted = true;
     const duration = Number(detail.durationUntilInterruptMs);
     if (Number.isFinite(duration) && duration >= 0) stat.durationUntilInterruptMs = Math.round(duration);
-    // utteranceUntilInterrupt is OUR text as far as it played — the honest
-    // record of the turn unless Twilio's played-tokens events already gave a
-    // finer one.
+    // utteranceUntilInterrupt is OUR text as far as it played. It names WHICH
+    // queued utterance was cut (the first one it is a prefix of); the ones
+    // queued behind it were never played — Twilio drops the queue on a
+    // barge-in — and the record says so rather than crediting them.
     const utterance = String(detail.utteranceUntilInterrupt || '').replace(/\s+/g, ' ').trim();
-    if (stat.playedSource !== 'twilio_event' && utterance) {
-      stat.playedUtterance = utterance;
-      stat.playedSource = 'interrupt_truncation';
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    let idx = utterance
+      ? this._playing.findIndex((e) => norm(e.planned).startsWith(norm(utterance)) || norm(utterance).startsWith(norm(e.played || ' ')))
+      : -1;
+    if (idx < 0) idx = this._playing.length ? 0 : -1;
+    if (idx >= 0) {
+      const cut = this._playing[idx];
+      for (let i = 0; i < idx; i++) this._playing[i].done = true;
+      cut.interrupted = true;
+      if (cut.playedSource !== 'twilio_event' && utterance) {
+        cut.played = utterance;
+        cut.playedSource = 'interrupt_truncation';
+      }
+      cut.done = true;
+      this._syncPlayedEntry(cut);
+      for (const later of this._playing.slice(idx + 1)) {
+        later.notPlayed = true;
+        later.played = '';
+        later.playedSource = 'interrupt_truncation';
+        later.done = true;
+        this._syncPlayedEntry(later);
+      }
+      this._playing = [];
     }
-    this._syncPlayedEntry(stat);
     clearTimeout(this._interruptFollowupTimer);
     this._interruptFollowupTimer = setTimeout(() => {
       this._interruptFollowupTimer = null;

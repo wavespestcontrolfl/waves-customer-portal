@@ -22,11 +22,13 @@ function convoWithSpokenTurn({ callSid = 'CA-tel-1', ...rest } = {}) {
   const convo = new RelayConversation({ callSid, from: '+19415551234', send, ...rest });
   // Drive a caller turn without a model: _runLoop early-returns (no Anthropic
   // client in tests) after the stat is created, then the agent "speaks".
-  const stat = { turn: 1, promptAt: 1000, callerSpeechStoppedAt: null, loopStartAt: 1001, firstTokenAt: null, firstSendAt: null, agentSpeakingStartAt: null, agentSpeakingEndAt: null, modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0, effort: 'low', renderer: 'block', interrupted: false, durationUntilInterruptMs: null, interruptWithoutFollowupTranscript: false, timedOut: false, partialCount: 0, played: null, playedUtterance: null, playedSource: 'assumed', agentEntries: [] };
+  const stat = { turn: 1, promptAt: 1000, callerSpeechStoppedAt: null, loopStartAt: 1001, firstTokenAt: null, firstSendAt: null, agentSpeakingStartAt: null, agentSpeakingEndAt: null, modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0, effort: 'low', renderer: 'block', interrupted: false, durationUntilInterruptMs: null, interruptWithoutFollowupTranscript: false, timedOut: false, partialCount: 0, playedSource: 'assumed', agentEntries: [] };
   convo._turnStats.push(stat);
   convo._currentTurn = stat;
   return { convo, stat, send };
 }
+
+const agentEntries = (convo) => convo._transcript.filter((t) => t.role === 'agent');
 
 describe('classifyRelayEvent — tolerant of the undocumented payload', () => {
   test.each([
@@ -78,7 +80,7 @@ describe('per-turn stats', () => {
     convo.say('I can help with that.');
     expect(stat.firstSendAt).toBe(firstSendAt); // first send is stamped once per turn
     expect(stat.agentEntries).toHaveLength(2);
-    expect(stat.agentEntries[1]).toEqual({ role: 'agent', text: 'I can help with that.', planned: 'I can help with that.' });
+    expect(stat.agentEntries[1]).toMatchObject({ role: 'agent', text: 'I can help with that.', planned: 'I can help with that.', playedSource: 'assumed', interrupted: false, turn: 1 });
     expect(send).toHaveBeenCalledWith('I can help with that.');
   });
 
@@ -103,18 +105,47 @@ describe('per-turn stats', () => {
     convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', state: 'stopped' });
     expect(stat.agentSpeakingEndAt).toBeGreaterThanOrEqual(stat.agentSpeakingStartAt);
     expect(stat.playedSource).toBe('twilio_event');
-    expect(stat.played).toBe('Your next service is Tuesday at nine.');
-    const entry = convo._transcript.find((t) => t.role === 'agent');
+    const entry = agentEntries(convo)[0];
+    expect(entry.played).toBe('Your next service is Tuesday at nine.');
     expect(entry.text).toBe('Your next service is Tuesday at nine.');
     expect(entry.planned).toBe('Your next service is Tuesday at nine. Anything else?');
+    expect(entry.done).toBe(false); // not the whole utterance yet
   });
 
-  test('a cumulative tokens-played snapshot replaces rather than duplicates', () => {
-    const { convo, stat } = convoWithSpokenTurn();
+  test('a cumulative tokens-played snapshot replaces rather than duplicates, and a complete utterance retires', () => {
+    const { convo } = convoWithSpokenTurn();
     convo.say('Hello there, this is Sandy.');
     convo.handleRelayEvent({ type: 'tokens-played', tokens: 'Hello there,' });
     convo.handleRelayEvent({ type: 'tokens-played', tokens: 'Hello there, this is Sandy.' });
-    expect(stat.played).toBe('Hello there, this is Sandy.');
+    const entry = agentEntries(convo)[0];
+    expect(entry.played).toBe('Hello there, this is Sandy.');
+    expect(entry.done).toBe(true);
+    expect(convo._playing).toHaveLength(0);
+  });
+
+  // ⭐ ONE CALLER TURN, TWO UTTERANCES. A read-tool round speaks its filler,
+  // the tool runs, then the answer is spoken. Tokens belong to the utterance
+  // they fit, never to "the latest one".
+  test('two utterances in one turn keep their own played text', () => {
+    const { convo } = convoWithSpokenTurn();
+    convo.say('Let me check that for you.');
+    convo.say('Your next visit is Tuesday at nine.');
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'Let me check that for you.' });
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'Your next visit is' });
+    const [filler, answer] = agentEntries(convo);
+    expect(filler).toMatchObject({ text: 'Let me check that for you.', played: 'Let me check that for you.', done: true });
+    expect(answer).toMatchObject({ text: 'Your next visit is', played: 'Your next visit is', done: false });
+    expect(answer.planned).toBe('Your next visit is Tuesday at nine.');
+  });
+
+  test('tokens that only fit a LATER utterance retire the earlier ones as finished', () => {
+    const { convo } = convoWithSpokenTurn();
+    convo.say('One moment.');
+    convo.say('The office opens at eight.');
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'The office opens' });
+    const [first, second] = agentEntries(convo);
+    expect(first).toMatchObject({ text: 'One moment.', done: true, playedSource: 'assumed' });
+    expect(second).toMatchObject({ played: 'The office opens', done: false });
   });
 
   test('Flux partial prompts are counted on the turn they precede, never acted on', async () => {
@@ -138,9 +169,11 @@ describe('interrupt(detail) — the record is what the caller heard', () => {
     expect(stat.interrupted).toBe(true);
     expect(stat.durationUntilInterruptMs).toBe(1840);
     expect(stat.playedSource).toBe('interrupt_truncation');
-    const entry = convo._transcript.find((t) => t.role === 'agent');
+    const entry = agentEntries(convo)[0];
     expect(entry.text).toBe('I can get someone out Tuesday [interrupted]');
     expect(entry.planned).toBe('I can get someone out Tuesday morning, and we will send a confirmation.');
+    expect(entry).toMatchObject({ interrupted: true, done: true });
+    expect(convo._playing).toHaveLength(0);
   });
 
   test('a bare interrupt() (end()\'s own abort) records nothing', () => {
@@ -148,7 +181,7 @@ describe('interrupt(detail) — the record is what the caller heard', () => {
     convo.say('Goodbye.');
     convo.interrupt();
     expect(stat.interrupted).toBe(false);
-    expect(convo._transcript.find((t) => t.role === 'agent').text).toBe('Goodbye.');
+    expect(agentEntries(convo)[0].text).toBe('Goodbye.');
   });
 
   test('tokens-played outranks the interrupt utterance for the played text', () => {
@@ -157,7 +190,43 @@ describe('interrupt(detail) — the record is what the caller heard', () => {
     convo.handleRelayEvent({ type: 'tokens-played', tokens: 'One two' });
     convo.interrupt({ utteranceUntilInterrupt: 'One', durationUntilInterruptMs: 300 });
     expect(stat.playedSource).toBe('twilio_event');
-    expect(convo._transcript.find((t) => t.role === 'agent').text).toBe('One two [interrupted]');
+    expect(agentEntries(convo)[0].text).toBe('One two [interrupted]');
+  });
+
+  // ⭐ A BARGE-IN DROPS THE QUEUE. The filler was cut; the answer queued
+  // behind it was never played — the record must not credit it.
+  test('an interrupt during the first utterance marks the queued second one as not played', () => {
+    const { convo } = convoWithSpokenTurn();
+    convo.say('Let me check that for you.');
+    convo.say('Your next visit is Tuesday at nine.');
+    convo.interrupt({ utteranceUntilInterrupt: 'Let me check', durationUntilInterruptMs: 600 });
+    const [filler, answer] = agentEntries(convo);
+    expect(filler.text).toBe('Let me check [interrupted]');
+    expect(answer).toMatchObject({ text: '[not played — caller interrupted]', notPlayed: true, played: '', done: true });
+    expect(answer.planned).toBe('Your next visit is Tuesday at nine.');
+  });
+
+  test('an interrupt that names the SECOND utterance leaves the first intact', () => {
+    const { convo } = convoWithSpokenTurn();
+    convo.say('Let me check that for you.');
+    convo.say('Your next visit is Tuesday at nine.');
+    convo.interrupt({ utteranceUntilInterrupt: 'Your next visit', durationUntilInterruptMs: 2100 });
+    const [filler, answer] = agentEntries(convo);
+    expect(filler).toMatchObject({ text: 'Let me check that for you.', interrupted: false, done: true });
+    expect(answer.text).toBe('Your next visit [interrupted]');
+  });
+
+  test('a new caller turn retires the queue, so a later interrupt never truncates an old utterance', async () => {
+    const convo = new RelayConversation({ callSid: 'CA-q-1', from: '+19415551234', send: jest.fn() });
+    const first = await (async () => { const p = convo.handlePrompt('hello'); jest.advanceTimersByTime(1); await p; return agentEntries(convo)[0]; })();
+    expect(first).toBeDefined(); // the "unavailable" line (no model client in tests)
+    const p2 = convo.handlePrompt('one more thing');
+    jest.advanceTimersByTime(1);
+    await p2;
+    expect(first.done).toBe(true);
+    convo.interrupt({ utteranceUntilInterrupt: 'Sorry', durationUntilInterruptMs: 100 });
+    expect(first.interrupted).toBe(false);
+    expect(agentEntries(convo)[1].interrupted).toBe(true);
   });
 
   test('no caller transcript within 1.5s of a barge-in ⇒ interrupt_without_followup_transcript', async () => {
