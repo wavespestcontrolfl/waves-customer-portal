@@ -115,10 +115,13 @@ const SERVICE_OPTION_SCHEMAS = {
   flea: {
     type: 'object',
     properties: {
-      // priceFlea's only offer: the two-visit elimination package (owner
-      // ruling 2026-09-03 — the single-visit knockdown is retired, so the
-      // composer cannot ask for one). Absent → the same package.
-      offerKey: { enum: ['flea_elimination_two_visit'] },
+      // priceFlea's only offer is the two-visit elimination package (owner
+      // ruling 2026-09-03 — the single-visit knockdown is retired; the
+      // composer prompt says omit offerKey). The retired value stays in the
+      // enum ONLY so replayed/historical v2 output still validates
+      // (extraction schema changes are additive-only — AGENTS.md); priceFlea
+      // prices such a request as the package and routes it to review.
+      offerKey: { enum: ['flea_knockdown_single', 'flea_elimination_two_visit'] },
       // fleaComplexity is the key the engine reads off services.flea
       // (estimate-engine's flea block); normalizeFleaComplexity silently
       // defaults anything else to 'light' (cheapest) — same
