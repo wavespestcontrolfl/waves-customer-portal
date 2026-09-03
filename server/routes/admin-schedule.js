@@ -4659,37 +4659,15 @@ function duplicateSeriesConflictBody(existingSeries) {
   };
 }
 
-// Whether a scheduled visit has a completion record. FK first, then the
-// legacy soft-join: visits completed before migration 20260427000007 have
-// service_records rows with a NULL scheduled_service_id, matched the way
-// job-costing's resolveServiceRecord does — (customer_id, service_date,
-// service_type) — including its ambiguity rule: the legacy match only
-// counts when exactly ONE unlinked record and exactly ONE completed visit
-// share the tuple, otherwise two same-day visits would both read as closed
-// off a single record and one owed closeout would hide (pre-push P0).
-// Ambiguous tuples fall through to "no record", i.e. still owed — the
-// fail-closed direction. Without the fallback every pre-migration
-// completion would read as status-only and be offered a "Closeout owed"
-// resume that re-runs /complete (Codex #3799 r2 P0). Shared by the day and
-// week feeds so both surfaces agree.
-const HAS_SERVICE_RECORD_SQL = `EXISTS (
-  SELECT 1 FROM service_records sr
-  WHERE sr.scheduled_service_id = scheduled_services.id
-     OR (sr.scheduled_service_id IS NULL
-         AND sr.customer_id = scheduled_services.customer_id
-         AND sr.service_date = scheduled_services.scheduled_date
-         AND sr.service_type = scheduled_services.service_type
-         AND (SELECT count(*) FROM service_records sr2
-               WHERE sr2.scheduled_service_id IS NULL
-                 AND sr2.customer_id = scheduled_services.customer_id
-                 AND sr2.service_date = scheduled_services.scheduled_date
-                 AND sr2.service_type = scheduled_services.service_type) = 1
-         AND (SELECT count(*) FROM scheduled_services ss2
-               WHERE ss2.customer_id = scheduled_services.customer_id
-                 AND ss2.scheduled_date = scheduled_services.scheduled_date
-                 AND ss2.service_type = scheduled_services.service_type
-                 AND ss2.status = 'completed') = 1)
-) as has_service_record`;
+// Whether a scheduled visit has a completion record — FK only. Records
+// completed before 20260427000007 carried a NULL backlink; migration
+// 20260903000040 heals every uniquely-resolvable one (the same (customer_id,
+// service_date, service_type) resolution job-costing's resolveServiceRecord
+// applies at runtime), so a soft-join here would only re-derive what the
+// backlink now says and drift from Billing Recovery's FK join (Codex #3799
+// r2/r3). Ambiguous legacy tuples stay NULL and read as owed — fail-closed.
+// Shared by the day, week, and list feeds so every surface agrees.
+const HAS_SERVICE_RECORD_SQL = 'EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id) as has_service_record';
 
 // POST /api/admin/schedule — create new service
 router.post('/', requireAdmin, async (req, res, next) => {
@@ -6444,6 +6422,9 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.customer_id',
         'scheduled_services.scheduled_date', 'scheduled_services.service_type',
         'scheduled_services.status', 'scheduled_services.window_start', 'scheduled_services.window_end',
+        // The List view routes an owed closeout into CompletionPanel off this
+        // row (Codex #3799 r3) — same flag as the day / week feeds.
+        db.raw(HAS_SERVICE_RECORD_SQL),
         'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot', 'scheduled_services.estimated_price',
         'scheduled_services.primary_line_price',
         'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.prepaid_at',
@@ -6489,6 +6470,7 @@ router.get('/list', async (req, res, next) => {
       // visit's second service line.
       serviceTypeRaw: s.service_type,
       status: s.status,
+      has_service_record: s.has_service_record === true,
       windowStart: s.window_start,
       windowEnd: s.window_end,
       estimatedDuration: s.estimated_duration_minutes || 30,

@@ -124,30 +124,6 @@ export function completedVisitOwesCompletion(service) {
   return service?.has_service_record === false || completionResumeOwed(service?.id);
 }
 
-// The stop card's status badge: a completed visit that still owes its
-// closeout (resume marker or status-only completion) reads "Closeout owed"
-// in the alert tone instead of a plain "Completed" — the tech's only cue
-// after a reload that the visit still needs a tap (the marker never
-// auto-opens the panel). Same predicate the tap-to-open path uses, so the
-// badge and the reopen decision cannot disagree.
-// A consolidated multi-service stop renders its first row and carries the
-// rest in _multiServices; the closeout owed may belong to a secondary row,
-// so the card's badge and its Resume action look at every member (Codex
-// #3799 r2 P2). Returns the owed member, or null.
-export function owedStopMember(service) {
-  const members = Array.isArray(service?._multiServices) && service._multiServices.length
-    ? service._multiServices
-    : [service];
-  return members.find((member) => completedVisitOwesCompletion(member)) || null;
-}
-
-export function stopStatusBadge(service) {
-  if (owedStopMember(service)) {
-    return { tone: "alert", label: CLOSEOUT_OWED_LABEL };
-  }
-  const status = String(service?.status || "").toLowerCase();
-  return { tone: statusTone(status), label: statusLabel(status) };
-}
 
 function shouldOpenMobileCompletion(service) {
   const status = String(service?.status || "").toLowerCase();
@@ -319,8 +295,6 @@ function groupMultiServiceStops(services) {
 }
 
 // Status → Badge tone. completed/skipped = strong/alert; in-flight = neutral; pending = neutral.
-export const CLOSEOUT_OWED_LABEL = "Closeout owed";
-
 function statusTone(status) {
   if (status === "completed") return "strong";
   if (status === "skipped") return "alert";
@@ -416,11 +390,6 @@ function ServiceCardV2({
   const zoneColor =
     zoneColors?.[service.zone] || service.zoneColor || "#18181B";
   const status = service.status;
-  // Computed once: the owed row may be a completed SECONDARY behind a
-  // pending / in-flight primary (groupMultiServiceStops never requires equal
-  // statuses), so the resume action must not hang off the primary's status
-  // (pre-push Codex P1).
-  const owedMember = owedStopMember(service);
   const isLawn = detectServiceCategory(service.serviceType) === "lawn";
   const dimmed = status === "completed" || status === "skipped";
 
@@ -541,8 +510,8 @@ function ServiceCardV2({
             {service.windowDisplay || ""}
           </span>{" "}
         </div>{" "}
-        <Badge dot tone={stopStatusBadge(service).tone}>
-          {stopStatusBadge(service).label}
+        <Badge dot tone={statusTone(status)}>
+          {statusLabel(status)}
         </Badge>{" "}
       </div>
       {/* Customer name + badges */}
@@ -865,19 +834,7 @@ function ServiceCardV2({
             </div>{" "}
           </>
         )}
-        {owedMember ? (
-          // The closeout is still owed (resume marker / status-only
-          // completion): the card must offer the resume, not just wear the
-          // badge — same handler the mobile list and day grid route through
-          // (pre-push Codex P1). On a consolidated stop the owed member may
-          // be a secondary row behind a not-yet-completed primary, so the
-          // gate and the action both use that row.
-          <Button size="sm" onClick={() => onComplete(owedMember)}>
-            Resume Closeout
-          </Button>
-        ) : (
-          status === "completed" && <Badge tone="strong">Completed</Badge>
-        )}
+        {status === "completed" && <Badge tone="strong">Completed</Badge>}
         {status === "completed" && service.customerId && (
           <Button
             size="sm"
@@ -1724,13 +1681,14 @@ export default function DispatchPageV2({
   // (handleCompleteSubmit) and the panel's status-poll resolution
   // (onCompletionResult, codex P1 #3187 r11) — both must flip the status,
   // invalidate the mobile week cache, and stage the payment handoff.
-  const applyCompletionResult = useCallback(
-    (serviceId, r, body) => {
+  // The visit is completed AND now has its service record — the same-key
+  // result and the cross-key callback both land here. Flipping the cached
+  // day-payload flag is what stops completedVisitOwesCompletion from
+  // offering a resume the server would now refuse (Codex #3799 r2/r3 P2);
+  // the resume marker is cleared by the panel itself on success.
+  const markVisitClosedOut = useCallback(
+    (serviceId) => {
       handleStatusChange(serviceId, "completed");
-      // A status-only completion just gained its service record: flip the
-      // cached day-payload flag so completedVisitOwesCompletion stops
-      // offering a resume the server would now refuse (Codex #3799 r2 P2).
-      // The resume marker is cleared by the panel itself on success.
       setData((prev) => {
         if (!prev) return prev;
         return {
@@ -1740,6 +1698,13 @@ export default function DispatchPageV2({
           ),
         };
       });
+    },
+    [handleStatusChange],
+  );
+
+  const applyCompletionResult = useCallback(
+    (serviceId, r, body) => {
+      markVisitClosedOut(serviceId);
       // The mobile week list serves rows from its own cached /week payload —
       // completion was the one terminal transition that never invalidated
       // it, leaving the completed stop tappable for a duplicate /complete
@@ -2377,8 +2342,13 @@ export default function DispatchPageV2({
       {viewMode === "list" && (
         <ScheduleListView
           technicians={data?.technicians || []}
+          owesCompletion={completedVisitOwesCompletion}
           onEdit={(svc) => {
-            if (isMobile) {
+            // An owed closeout resumes through the completion panel on every
+            // surface, the list included (Codex #3799 r3).
+            if (completedVisitOwesCompletion(svc)) {
+              handleComplete(svc);
+            } else if (isMobile) {
               setDetailService(svc);
             } else {
               setEditingService(svc);
@@ -2713,7 +2683,7 @@ export default function DispatchPageV2({
             // idempotency key, so handleCompleteSubmit never resolved —
             // run its non-payment bookkeeping (the invoice payload only
             // travels on the same-key response, so no payment handoff).
-            handleStatusChange(serviceId, "completed");
+            markVisitClosedOut(serviceId);
             setScheduleRefreshKey((k) => k + 1);
           }}
           onCompletionResult={(serviceId, r) =>

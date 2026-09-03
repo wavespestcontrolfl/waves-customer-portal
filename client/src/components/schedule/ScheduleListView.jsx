@@ -36,7 +36,7 @@ const STATUS_LABELS = {
   on_site: 'On Site', completed: 'Completed', skipped: 'Skipped', cancelled: 'Cancelled',
 };
 
-export default function ScheduleListView({ technicians = [], onEdit, onRefresh }) {
+export default function ScheduleListView({ technicians = [], onEdit, onRefresh, owesCompletion }) {
   const [services, setServices] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -460,9 +460,15 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
                   <td className={cn(tdClass, 'u-nums')}>{fmtTime(s.windowStart)}{s.windowEnd ? `–${fmtTime(s.windowEnd)}` : ''}</td>
                   <td className={tdClass}>{s.technicianName || <span className="text-zinc-400">—</span>}</td>
                   <td className={tdClass}>
-                    <Badge tone={s.status === 'completed' ? 'neutral' : s.status === 'cancelled' || s.status === 'skipped' ? 'alert' : 'strong'}>
-                      {STATUS_LABELS[s.status] || s.status}
-                    </Badge>
+                    {owesCompletion?.(s) ? (
+                      // Completed but the closeout (invoice / report / text) is
+                      // still owed — the row's edit action resumes it.
+                      <Badge tone="alert">Closeout owed</Badge>
+                    ) : (
+                      <Badge tone={s.status === 'completed' ? 'neutral' : s.status === 'cancelled' || s.status === 'skipped' ? 'alert' : 'strong'}>
+                        {STATUS_LABELS[s.status] || s.status}
+                      </Badge>
+                    )}
                   </td>
                   <td className={tdClass}>
                     {s.prepaidAmount > 0 ? (
