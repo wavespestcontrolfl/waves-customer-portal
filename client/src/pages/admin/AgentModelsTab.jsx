@@ -69,11 +69,6 @@ const UNAVAILABLE_REASON = {
   fetch_failed: "unreachable",
 };
 
-function fmtRate(rate) {
-  if (!rate) return null;
-  return `$${rate.in} in / $${rate.out} out per 1M`;
-}
-
 function modelLabel(catalog, id) {
   if (!id) return "—";
   return catalog[id]?.label || id;
@@ -373,7 +368,7 @@ export default function AgentModelsTab() {
       ...prev,
       // Offered only for the modality it was found for; a text-selector find
       // must not surface in a vision picker later in the session.
-      [model.id]: { label: model.label || model.id, provider: model.provider, caps: [find?.accepts?.cap || "text"], rate: null, status: "current", discovered: true },
+      [model.id]: { label: model.label || model.id, provider: model.provider, caps: [find?.accepts?.cap || "text"], status: "current", discovered: true },
     }));
     envs.forEach((env) => setDraftValue(env, model.id));
     setFind(null);
@@ -483,7 +478,6 @@ export default function AgentModelsTab() {
                             <span className="text-11 text-ink-tertiary u-nums">
                               {m.id}
                               {info?.status === "legacy" ? " · legacy" : ""}
-                              {fmtRate(info?.rate) ? ` · ${fmtRate(info.rate)}` : ""}
                             </span>
                           </div>
                         </div>
@@ -840,8 +834,6 @@ export default function AgentModelsTab() {
         <DialogBody className="flex flex-col gap-3">
           <ul className="m-0 flex list-none flex-col gap-2 p-0">
             {changes.map((c) => {
-              const fromRate = fmtRate(catalog[c.from]?.rate);
-              const toRate = fmtRate(catalog[c.to]?.rate);
               return (
                 <li key={c.env} className="flex flex-col gap-0.5 text-13">
                   <span className="text-zinc-900">
@@ -854,11 +846,6 @@ export default function AgentModelsTab() {
                   {c.lockedLanes?.length > 0 && (
                     <span className="text-11 text-alert-fg">
                       Also moves locked lanes that follow this selector by design: {c.lockedLanes.join(", ")}.
-                    </span>
-                  )}
-                  {(fromRate || toRate) && (
-                    <span className="text-11 text-ink-secondary u-nums">
-                      List rate: {fromRate || "—"} → {toRate || "—"}
                     </span>
                   )}
                 </li>
@@ -876,8 +863,8 @@ export default function AgentModelsTab() {
             {envBlock}
           </pre>
           <p className="m-0 text-11 text-ink-tertiary">
-            List rates are published per-1M-token prices as of {data.ratesAsOf}; they are not volume-weighted and exclude
-            cached input, images and audio.
+            Cost impact is not shown yet: provider APIs publish no prices, so a weekly pull into a price table is the next
+            PR.
           </p>
         </DialogBody>
         <DialogFooter>
@@ -989,7 +976,7 @@ function FindModelDialog({ target, onClose, onPick }) {
             Not searched: {unavailable.map((u) => `${PROVIDER_LABEL[u.provider] || u.provider} (${UNAVAILABLE_REASON[u.reason] || u.reason})`).join(", ")}.
           </div>
         )}
-        {capUnverified && results?.length > 0 && (
+        {capUnverified && (results?.length > 0 || newest?.some((g) => g.items.length > 0)) && (
           <div className="text-12 text-alert-fg" role="alert">
             This selector needs image input. Provider lists don't say whether a model accepts images, so only pick one you know
             does — a text-only model here breaks the photo lanes after restart.

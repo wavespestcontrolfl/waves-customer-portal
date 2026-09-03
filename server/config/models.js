@@ -169,30 +169,29 @@ const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || 'veo-3.1-
 // Every model id the admin switchboard may OFFER, with the metadata the
 // picker needs. Lives here so all model ids stay in the registry (the
 // domain-rules check fails on a `claude-*` literal anywhere else).
-// Models the picker may offer. `rate` = published list price per 1M tokens
-// (in / out, USD) as of RATES_AS_OF from the owner's model comparison —
-// shown as a relative signal only, never volume-weighted. null = not
-// verified; leave it null rather than guess. `status`: current | legacy |
-// unavailable (no adapter — listed so the option can be shown disabled).
+// Models the picker may offer. No prices here on purpose (owner 2026-09-03:
+// prices are pulled weekly into a table, never hand-typed). `status`:
+// current | legacy | unavailable (no adapter — listed so the option can be
+// shown disabled).
 const MODEL_CATALOG = {
-  'claude-opus-5': { label: 'Claude Opus 5', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 5, out: 25 }, status: 'current' },
-  'claude-opus-4-8': { label: 'Claude Opus 4.8', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 5, out: 25 }, status: 'legacy' },
-  'claude-sonnet-5': { label: 'Claude Sonnet 5', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 2, out: 10 }, status: 'current' },
+  'claude-opus-5': { label: 'Claude Opus 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  'claude-opus-4-8': { label: 'Claude Opus 4.8', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy' },
+  'claude-sonnet-5': { label: 'Claude Sonnet 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
   // Fable's thinking blocks + refusal semantics are handled only by
   // services/llm/deep.js, so only DEEP / EXTREME selectors may take it.
-  'claude-fable-5-1': { label: 'Claude Fable 5.1', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 10, out: 50 }, status: 'current', requires: 'deep' },
-  'claude-fable-5': { label: 'Claude Fable 5', provider: 'anthropic', caps: ['text', 'vision'], rate: null, status: 'legacy', requires: 'deep' },
-  'claude-haiku-4-5-20251001': { label: 'Claude Haiku 4.5', provider: 'anthropic', caps: ['text', 'vision'], rate: { in: 1, out: 5 }, status: 'current' },
-  'gpt-5.6-sol': { label: 'GPT-5.6 Sol', provider: 'openai', caps: ['text', 'vision'], rate: { in: 4, out: 20 }, status: 'current' },
-  'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], rate: { in: 2, out: 12 }, status: 'current' },
-  'gpt-5.6-luna': { label: 'GPT-5.6 Luna', provider: 'openai', caps: ['text', 'vision'], rate: { in: 0.2, out: 1.2 }, status: 'current' },
-  'gpt-5.5': { label: 'GPT-5.5', provider: 'openai', caps: ['text', 'vision'], rate: null, status: 'current' },
-  'gpt-5-mini': { label: 'GPT-5 mini', provider: 'openai', caps: ['text', 'vision'], rate: null, status: 'current' },
-  'gemini-3.8-flash': { label: 'Gemini 3.8 Flash', provider: 'gemini', caps: ['text', 'vision'], rate: { in: 0.75, out: 3.75 }, status: 'current' },
-  'gemini-3.5-flash': { label: 'Gemini 3.5 Flash', provider: 'gemini', caps: ['text', 'vision'], rate: null, status: 'current' },
-  'gemini-2.5-pro': { label: 'Gemini 2.5 Pro', provider: 'gemini', caps: ['text', 'vision'], rate: null, status: 'legacy' },
-  'gemini-2.5-flash': { label: 'Gemini 2.5 Flash', provider: 'gemini', caps: ['text', 'vision'], rate: null, status: 'legacy' },
-  'muse-spark-1.3': { label: 'Muse Spark 1.3', provider: 'unknown', caps: ['text'], rate: null, status: 'unavailable' },
+  'claude-fable-5-1': { label: 'Claude Fable 5.1', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep' },
+  'claude-fable-5': { label: 'Claude Fable 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy', requires: 'deep' },
+  'claude-haiku-4-5-20251001': { label: 'Claude Haiku 4.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5.6-sol': { label: 'GPT-5.6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5.6-luna': { label: 'GPT-5.6 Luna', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5.5': { label: 'GPT-5.5', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5-mini': { label: 'GPT-5 mini', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gemini-3.8-flash': { label: 'Gemini 3.8 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
+  'gemini-3.5-flash': { label: 'Gemini 3.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
+  'gemini-2.5-pro': { label: 'Gemini 2.5 Pro', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
+  'gemini-2.5-flash': { label: 'Gemini 2.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
+  'muse-spark-1.3': { label: 'Muse Spark 1.3', provider: 'unknown', caps: ['text'], status: 'unavailable' },
 };
 
 // Per-feature routes: { provider, model }. services/llm/call.js#dispatch switches

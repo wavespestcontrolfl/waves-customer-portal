@@ -96,6 +96,31 @@ describe('model-switchboard', () => {
     expect(MODELS.OPENAI_SMS_DRAFT).toBe(process.env.MODEL_OPENAI_SMS_DRAFT || MODELS.OPENAI_FAST);
   });
 
+  it('call extraction follows CALL_EXTRACTION_PROVIDER like the processor does (fallback flips)', () => {
+    const prev = process.env.CALL_EXTRACTION_PROVIDER;
+    try {
+      delete process.env.CALL_EXTRACTION_PROVIDER;
+      jest.resetModules();
+      let lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'call_extraction');
+      expect(lane.primary.provider).toBe('openai');
+      expect(lane.fallback.model).toBe(MODELS.CALL_EXTRACTION_ANTHROPIC);
+
+      process.env.CALL_EXTRACTION_PROVIDER = 'anthropic';
+      jest.resetModules();
+      lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'call_extraction');
+      expect(lane.primary.model).toBe(MODELS.CALL_EXTRACTION_ANTHROPIC);
+      expect(lane.fallback.provider).toBe('openai');
+
+      process.env.CALL_EXTRACTION_PROVIDER = 'gemini';
+      jest.resetModules();
+      lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'call_extraction');
+      expect(lane.primary.provider).toBe('gemini');
+      expect(lane.fallback.model).toBe(MODELS.CALL_EXTRACTION_ANTHROPIC);
+    } finally {
+      if (prev === undefined) delete process.env.CALL_EXTRACTION_PROVIDER; else process.env.CALL_EXTRACTION_PROVIDER = prev;
+    }
+  });
+
   it('locks the lanes a generic picker must not move', () => {
     const { lanes, selectors } = sb.getSwitchboard();
     for (const id of ['call_extraction', 'transcription', 'embeddings', 'image_gen', 'mentions_prober']) {

@@ -53,6 +53,14 @@ function patternsFor(ref, isFallback) {
 }
 
 function missing(sources, ref, isFallback) {
+  if (ref.kind === 'switch') {
+    // The provider env must be read, and every leg must be attributable.
+    const out = [];
+    const pin = new RegExp(`process\\.env\\.${esc(ref.env)}\\b`);
+    if (!sources.some((src) => pin.test(src))) out.push(String(pin));
+    for (const [prov, leg] of Object.entries(ref.legs)) out.push(...missing(sources, leg, isFallback).map((m) => `${prov} leg: ${m}`));
+    return out;
+  }
   // Env refs need BOTH the pin and (literal | base ref); the others need any
   // one pattern. Represent that as "every group must match some file".
   const groups = ref.kind === 'env'

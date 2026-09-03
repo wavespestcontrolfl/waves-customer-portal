@@ -18,8 +18,6 @@ const MODELS = require('../config/models');
 // place — AGENTS.md model-ID rule); this module only resolves against it.
 const { MODEL_CATALOG } = MODELS;
 
-const RATES_AS_OF = '2026-09-02';
-
 // Provider from a model id — the same prefix rule the picker filters on.
 function providerOf(id) {
   if (!id) return 'unknown';
@@ -34,7 +32,7 @@ function providerOf(id) {
 // embeddings, image/video generation) still need a label + provider.
 function catalogEntry(id) {
   if (MODEL_CATALOG[id]) return MODEL_CATALOG[id];
-  return { label: id, provider: providerOf(id), caps: [], rate: null, status: 'current' };
+  return { label: id, provider: providerOf(id), caps: [], status: 'current' };
 }
 
 // ── Registry selectors ────────────────────────────────────────────────
@@ -113,6 +111,12 @@ const R = (route) => ({ kind: 'route', key: route });
 const P = (policy, leg) => ({ kind: 'policy', key: policy, leg });
 const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live });
 const D = (env, literal, opts = {}) => ({ kind: 'env', env, literal, live: !!opts.live, accepts: opts.accepts });
+//   S(providerEnv, legs) provider switch, exactly as call-recording-processor.js
+//                      and call-research-miner.js build their route: primary =
+//                      legs[process.env[providerEnv] || 'openai']; fallback =
+//                      legs.openai when the primary is anthropic, else legs.anthropic.
+//                      A lane whose primary is S() derives its fallback from it.
+const S = (providerEnv, legs) => ({ kind: 'switch', env: providerEnv, legs });
 
 const POLICIES = [
   { key: 'fastText', label: 'Fast text', description: 'Classification, tagging, intent, sentiment — short JSON' },
@@ -270,8 +274,12 @@ const LANES = [
   L('agent_assistant', 'Customer assistant (managed)', 'ai-assistant/managed-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: LOCK.agents('Anthropic Managed Agents') }),
 
   // ── Specialized / locked ──
-  L('call_extraction', 'Call extraction V2', 'call-recording-processor.js', 'locked', D('CALL_EXTRACTION_MODEL', 'gpt-5.6-sol'), T('CALL_EXTRACTION_ANTHROPIC'), { inbound: true, lock: LOCK.benchmark('25-call bake-off 2026-07-18 · run a new bake-off to move it'), note: 'provider via CALL_EXTRACTION_PROVIDER' }),
-  L('call_research', 'Call-research corpus miner', 'call-research-miner.js', 'locked', D('CALL_RESEARCH_MODEL', 'gpt-5.6-sol'), T('CALL_RESEARCH_ANTHROPIC'), { inbound: true, lock: LOCK.benchmark('7-arm bake-off 2026-07-18') }),
+  L('call_extraction', 'Call extraction V2', 'call-recording-processor.js', 'locked',
+    S('CALL_EXTRACTION_PROVIDER', { openai: D('CALL_EXTRACTION_MODEL', 'gpt-5.6-sol'), anthropic: T('CALL_EXTRACTION_ANTHROPIC'), gemini: D('GEMINI_EXTRACTION_MODEL', 'gemini-2.5-pro') }),
+    null, { inbound: true, lock: LOCK.benchmark('25-call bake-off 2026-07-18 · run a new bake-off to move it'), note: 'CALL_EXTRACTION_PROVIDER=openai|anthropic|gemini picks the primary; kill = gemini' }),
+  L('call_research', 'Call-research corpus miner', 'call-research-miner.js', 'locked',
+    S('CALL_RESEARCH_PROVIDER', { openai: D('CALL_RESEARCH_MODEL', 'gpt-5.6-sol'), anthropic: E('CALL_RESEARCH_MODEL', T('CALL_RESEARCH_ANTHROPIC')) }),
+    null, { inbound: true, lock: LOCK.benchmark('7-arm bake-off 2026-07-18'), note: 'CALL_RESEARCH_PROVIDER=openai|anthropic picks the primary' }),
   L('transcription', 'Call transcription (primary + long-call verifier)', 'call-recording-processor.js', 'locked', D('OPENAI_TRANSCRIPTION_MODEL', 'gpt-4o-transcribe-diarize'), D('GEMINI_TRANSCRIPTION_MODEL', 'gemini-3.5-flash'), { inbound: true, lock: LOCK.provider('audio pipeline with its own validation') }),
   L('transcript_label', 'Transcript speaker relabeling', 'call-recording-processor.js', 'locked', D('OPENAI_TRANSCRIPT_LABEL_MODEL', 'gpt-5-mini'), null, { lock: LOCK.provider('audio pipeline') }),
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
@@ -365,12 +373,26 @@ function withProvider(leg) {
   return { ...leg, provider: providerOf(leg.model) };
 }
 
+// Provider switch → { primary, fallback } the way the two call sites do it.
+function resolveSwitch(ref) {
+  const raw = process.env[ref.env];
+  const provider = raw && ref.legs[raw] ? raw : 'openai';
+  const primary = resolveRef(ref.legs[provider]);
+  const fallbackRef = provider === 'anthropic' ? ref.legs.openai : ref.legs.anthropic;
+  const fallback = resolveRef(fallbackRef);
+  const tag = (leg) => ({ ...leg, via: `${ref.env}=${provider}${raw ? '' : ' (default)'} → ${leg.via}` });
+  return { primary: tag(primary), fallback: fallback ? tag(fallback) : null };
+}
+
 function getSwitchboard() {
   const selectors = resolveSelectors();
   const byKey = Object.fromEntries(selectors.map((s) => [s.key, s]));
   const lanes = LANES.map((lane) => {
-    const primary = withProvider(resolveRef(lane.primary));
-    const fallback = withProvider(resolveRef(lane.fallback));
+    const legs = lane.primary.kind === 'switch'
+      ? resolveSwitch(lane.primary)
+      : { primary: resolveRef(lane.primary), fallback: resolveRef(lane.fallback) };
+    const primary = withProvider(legs.primary);
+    const fallback = withProvider(legs.fallback);
     if (primary.selector && byKey[primary.selector] && !primary.pinned) byKey[primary.selector].laneCount += 1;
     return {
       id: lane.id,
@@ -397,7 +419,6 @@ function getSwitchboard() {
   }
   return {
     generatedAt: new Date().toISOString(),
-    ratesAsOf: RATES_AS_OF,
     models,
     selectors,
     policies: POLICIES,
