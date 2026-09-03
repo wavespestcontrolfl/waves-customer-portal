@@ -285,6 +285,11 @@ describe('model-switchboard', () => {
     // FLAGSHIP feeds image payloads (satellite, property lookup v2): the
     // picker must require vision, so a text-only find cannot be drafted.
     expect(selectors.find((s) => s.key === 'FLAGSHIP').accepts.cap).toBe('vision');
+    // OPENAI_BALANCED is the OpenAI leg of ROUTES.visionAnalysis (vision-delta, admin dispatch send images).
+    expect(selectors.find((s) => s.key === 'OPENAI_BALANCED').accepts.cap).toBe('vision');
+    // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity — two lanes, two backups.
+    expect(lanes.find((l) => l.id === 'response_drafter').fallback.model).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback.model);
+    expect(lanes.find((l) => l.id === 'response_drafter_high_stakes').fallback.model).toBe(MODELS.TEXT_POLICIES.highStakes.fallback.model);
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
     expect(deepSafe).toEqual(['DEEP', 'EXTREME']);
     for (const id of Object.keys(sb.MODEL_CATALOG).filter((k) => /fable|mythos/.test(k))) {

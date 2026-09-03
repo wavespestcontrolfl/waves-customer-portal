@@ -63,7 +63,7 @@ const SELECTORS = [
   { key: 'CALL_EXTRACTION_ANTHROPIC', env: 'MODEL_CALL_EXTRACTION_ANTHROPIC', description: 'Call extraction Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 25-call bake-off route; run a new bake-off to move it' } },
   { key: 'CALL_RESEARCH_ANTHROPIC', env: 'MODEL_CALL_RESEARCH_ANTHROPIC', description: 'Call-research miner Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 7-arm bake-off route' } },
   { key: 'OPENAI_REPORT_WRITER', env: 'MODEL_OPENAI_REPORT_WRITER', description: 'Reports + high-stakes backup (Sol)', accepts: { providers: ['openai'], cap: 'text' } },
-  { key: 'OPENAI_BALANCED', env: 'MODEL_OPENAI_BALANCED', description: 'Q&A + customer-copy backup (Terra)', accepts: { providers: ['openai'], cap: 'text' } },
+  { key: 'OPENAI_BALANCED', env: 'MODEL_OPENAI_BALANCED', description: 'Q&A + customer-copy backup; OpenAI leg of the vision route (Terra)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_FAST', env: 'MODEL_OPENAI_FAST', description: 'Cheap structured classification (Luna)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_SMS_DRAFT', env: 'MODEL_OPENAI_SMS_DRAFT', description: 'Sealed-eval Luna leg (follows OPENAI_FAST unless set)', derivesFrom: 'OPENAI_FAST', accepts: { providers: ['openai'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'GEMINI_VISION_BEST', env: 'MODEL_GEMINI_VISION', description: 'Gemini leg of the photo lanes', accepts: { providers: ['gemini'], cap: 'vision' } },
@@ -243,7 +243,10 @@ const LANES = [
   L('sms_save_sale', 'SMS draft · save-the-sale', 'sms-shadow-drafter.js', 'voice', R('smsDraftSaveSale'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_tone', 'SMS tone rewrite', 'routes/admin-communications.js', 'voice', R('smsToneRewrite'), P('customerCopy', 'fallback'), { inbound: true }),
   L('sms_suggest', 'SMS draft suggestion (comms panel)', 'routes/admin-communications.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
-  L('response_drafter', 'SMS reply drafter (auto / high-stakes split)', 'response-drafter.js', 'voice', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true, note: 'routine intents ride customerCopy' }),
+  // response-drafter.js picks the policy per intent: cancellations, complaints
+  // and high-severity flags ride highStakes; everything else rides customerCopy.
+  L('response_drafter', 'SMS reply drafter · routine', 'response-drafter.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
+  L('response_drafter_high_stakes', 'SMS reply drafter · cancel / complaint / high severity', 'response-drafter.js', 'voice', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('estimate_followup', 'Estimate-conversion follow-up SMS', 'estimate-conversion-agent.js, sms-shadow-drafter.js', 'voice', R('smsDraftDefault'), P('highStakes', 'fallback'), { inbound: true, note: 'delegates to the SMS drafter' }),
   // Health probes: one tiny billed call per SMS draft route at boot and every
   // six hours (scheduler.js). No fallback by design — the canary exists to
@@ -372,6 +375,7 @@ const LANE_AREA = {
   sms_tone: 'sms',
   sms_suggest: 'sms',
   response_drafter: 'sms',
+  response_drafter_high_stakes: 'sms',
   estimate_followup: 'sms',
   sms_intent: 'sms',
   contact_correction: 'sms',
@@ -495,7 +499,8 @@ const LANE_DESCRIBE = {
   sms_canary_save_sale: 'Checks every six hours that the save-the-sale SMS drafting route still answers',
   sms_tone: 'Rewrites a staff text in the Waves voice',
   sms_suggest: 'Suggests a reply inside the comms panel',
-  response_drafter: 'Drafts replies, splitting routine from high-stakes',
+  response_drafter: 'Drafts replies to routine texts',
+  response_drafter_high_stakes: 'Drafts replies to cancellations, complaints and high-severity texts',
   estimate_followup: 'Follows up on a quote by text',
   sms_intent: 'Works out what an inbound text is asking for',
   contact_correction: 'Pulls corrected names, emails and addresses out of texts',
@@ -617,7 +622,7 @@ const LANE_DESCRIBE = {
 //   verified  a deterministic checker gates the output (report safe-copy gate,
 //             estimator floors, transcription validation)
 //   unchecked nothing but the owner notices
-const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
+const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "response_drafter_high_stakes", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
 // fact_check_gate is NOT verified: fact-check-gate.js accepts any truthy JSON
 // and treats a missing findings array as "no findings", so `{}` passes.
 const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);

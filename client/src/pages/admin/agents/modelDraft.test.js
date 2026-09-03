@@ -91,6 +91,23 @@ describe("computeChanges", () => {
     expect(computeChanges({ data: plain, draft: d2, selectorDraft: resolve(plain, d2).selectorDraft })[0].lockedLanes).toEqual(["Deep audit"]);
   });
 
+  it("a shared unset env is a hold only when every follower already runs the target", () => {
+    const data = makeData();
+    // Two photo lanes share GEMINI_SHARED (unset). Lane A already runs m2 via
+    // its selector; lane B sits on its literal default m1.
+    data.lanes[1].primary = { model: "m2", selector: "FLAGSHIP", pinEnv: "GEMINI_SHARED", pinned: false, unpinnedModel: "m2", accepts: text(["anthropic"]), live: false };
+    data.lanes[3].primary = { model: "m1", selector: null, pinEnv: "GEMINI_SHARED", pinned: false, unpinnedModel: "m1", accepts: text(["anthropic"]), live: false };
+    const draft = { GEMINI_SHARED: "m2" };
+    const changes = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ env: "GEMINI_SHARED", hold: false, to: "m2", lanes: 2, sources: ["m2", "m1"] });
+    expect(changes[0].label).toBe("GEMINI_SHARED (SMS draft, Report copy)");
+    // Both already on m2 → a true hold.
+    data.lanes[3].primary = { ...data.lanes[3].primary, model: "m2", unpinnedModel: "m1" };
+    const held = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
+    expect(held[0]).toMatchObject({ hold: true, from: "m2", to: "m2" });
+  });
+
   it("a registration-locked managed agent never rides a selector change", () => {
     const data = makeData();
     data.lanes[4].lock = { kind: "registration", label: "Registered agent", detail: "re-register to move it" };

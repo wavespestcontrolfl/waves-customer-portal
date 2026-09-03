@@ -151,7 +151,9 @@ export function computeChanges({ data, draft, selectorDraft }) {
       const destinations = unpin ? [...new Set(sharing.map((x) => baseAfterDraft(legOf(x))))] : [next];
       const sources = [...new Set(sharing.map((x) => legOf(x).model))];
       if (!unpin && sharing.every((x) => next === baseAfterDraft(legOf(x)) && !legOf(x).pinned)) continue;
-      const hold = !unpin && !leg.pinned && next === leg.model;
+      // A hold keeps EVERY follower where it is; if any sharing lane sits on a
+      // different model today, setting the env moves that lane.
+      const hold = !unpin && sharing.every((x) => !legOf(x).pinned && next === legOf(x).model);
       const label = hold
         ? `${l.name} held at its current model (locked; it would otherwise follow ${leg.selector})`
         : sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.primary ? "" : " · backup"}`;
