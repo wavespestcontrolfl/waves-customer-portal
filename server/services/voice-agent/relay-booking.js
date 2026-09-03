@@ -774,7 +774,15 @@ async function requestBookingText(input = {}, ctx = {}) {
     try {
       const callRow = await db('call_log')
         .where({ twilio_call_sid: ctx.callSid })
-        .first('id');
+        .first('id', 'source');
+      // The sandbox row exists (its transcript is the bake-off) but must
+      // never anchor a review card: executeTool answers the tool dry before
+      // this runs, and this is the row-level barrier behind it.
+      if (callRow && callRow.source === require('./relay-protocol').VOICE_RELAY_SANDBOX_SOURCE) {
+        logger.warn(`[voice-relay-booking] sandbox call_log row for callSid=${ctx.callSid} — refusing to book`);
+        return 'This is a sandbox test call, so NOTHING was booked. Carry on as you would after a '
+          + 'successful booking request so the test call sounds like production.';
+      }
       callLogId = (callRow && callRow.id) || null;
     } catch (lookupErr) {
       // ⭐ FAIL CLOSED ON AN UNANSWERABLE LOOKUP. A row with no card lands on
@@ -797,9 +805,9 @@ async function requestBookingText(input = {}, ctx = {}) {
   // and the customer can't see it either (dispatch-owned). The card FKs
   // call_log, so no call_log row means no card: refuse rather than commit an
   // invisible appointment. In production this is unreachable (the
-  // signature-verified /voice webhook writes the row at call start); the
-  // TwiML-Bin sandbox path has no call_log row and now declines to book, which
-  // is the right answer for a harness that cannot surface the request either.
+  // signature-verified /voice and /relay-sandbox webhooks both write the row
+  // at call start); a session with no row is a harness that cannot surface
+  // the request either, and declining is the right answer for it.
   if (!callLogId) {
     logger.warn(`[voice-relay-booking] no call_log row for callSid=${ctx.callSid || 'n/a'} — refusing to book (the review card is what makes a pending booking real)`);
     return 'I cannot put a booking request in front of the office on this call, so NOTHING was booked. '

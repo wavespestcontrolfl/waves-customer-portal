@@ -42,11 +42,20 @@ describe('classifyRelayEvent — tolerant of the undocumented payload', () => {
     [{ type: 'info', name: 'clientSpeakingStarted' }, 'caller_speaking_start'],
     [{ type: 'tokens-played', tokens: 'Waves, this is Sandy.' }, 'tokens_played'],
     [{ type: 'info', name: 'tokensPlayed', playedText: 'How can I help' }, 'tokens_played'],
+    [{ type: 'info', name: 'tokensPlayed', value: 'How can I help' }, 'tokens_played'],
     [{ type: 'something-new', foo: 'bar' }, 'unknown'],
     [null, 'unknown'],
     ['nope', 'unknown'],
   ])('%j ⇒ %s', (frame, kind) => {
     expect(classifyRelayEvent(frame).kind).toBe(kind);
+  });
+
+  test("Twilio's documented info envelope — the label in `name`, the text in `value` (codex r1 P1)", () => {
+    const ev = classifyRelayEvent({ type: 'info', name: 'tokensPlayed', value: 'Waves, this is Sandy.' });
+    expect(ev).toEqual({ kind: 'tokens_played', shape: 'info:name,type,value', text: 'Waves, this is Sandy.' });
+    // The label is read from label fields only — played TEXT mentioning a
+    // token does not make an unrelated frame a tokens-played event.
+    expect(classifyRelayEvent({ type: 'info', name: 'somethingElse', value: 'played a token' }).kind).toBe('unknown');
   });
 
   test('the shape names keys only — never values', () => {

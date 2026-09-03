@@ -429,8 +429,16 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null }) {
+  constructor({ callSid, sessionKey, sessionGeneration, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false }) {
     this.callSid = callSid || null;
+    // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
+    // row's source (never the setup frame): the transcript, latency record and
+    // version stamps land on the sandbox row exactly as in production — that
+    // record IS the bake-off — but every tool that would write outside that
+    // row (lead, re-service ticket, booking) is answered without running, and
+    // the hangup capture floor stays down. A profile test or a stranger
+    // dialling the test number can never create dispatch work.
+    this.sandbox = sandbox === true;
     // The upgrade token's nonce — the per-session key the CallSid claim is
     // owned by, so a fresh-token reconnect can reclaim the live call — and
     // its expiry, the monotonic generation a takeover must beat.
@@ -1005,7 +1013,7 @@ class RelayConversation {
     const utterance = String(detail.utteranceUntilInterrupt || '').replace(/\s+/g, ' ').trim();
     const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
     let idx = utterance
-      ? this._playing.findIndex((e) => norm(e.planned).startsWith(norm(utterance)) || norm(utterance).startsWith(norm(e.played || ' ')))
+      ? this._playing.findIndex((e) => norm(e.planned).startsWith(norm(utterance)) || (e.played != null && e.played !== '' && norm(utterance).startsWith(norm(e.played))))
       : -1;
     if (idx < 0) idx = this._playing.length ? 0 : -1;
     if (idx >= 0) {
@@ -1104,6 +1112,8 @@ class RelayConversation {
       // only showed on the normal path).
       to: this.to,
       callSid: this.callSid,
+      // Dry-run flag for the write tools (see the constructor).
+      sandbox: this.sandbox,
       // The claim-owner nonce — every WRITE transaction re-proves ownership
       // against it INSIDE the transaction (the supersession fences outside
       // are check-then-act; the in-trx check is the atomic one). LIVE getter,
@@ -1264,8 +1274,9 @@ class RelayConversation {
    * not keep answering from its frozen KNOWN CALLER block, running tools, or
    * writing the call record at close. Tri-state: a CLAIMED session (verified
    * — verification implies the claim won) requires a PROVEN read matching its
-   * own nonce and fails CLOSED on unprovable; an unclaimed session (the
-   * sandbox path has no call_log row) is out only on a proven foreign owner.
+   * own nonce and fails CLOSED on unprovable; an unclaimed session (one
+   * whose call_log row never vouched for its ANI) is out only on a proven
+   * foreign owner.
    */
   async _sessionSuperseded() {
     if (!this.sessionKey || !this.callSid) return false;
@@ -1591,8 +1602,8 @@ class RelayConversation {
     // stale duration; stamp the FINAL completed status + the AI-handled leg
     // duration + outcome here (mirroring the /agent-fallback path) so these
     // calls don't linger as ringing/no-answer/null, then resync the unified
-    // message row. Keyed by CallSid — a no-op (0 rows) for the TwiML-Bin
-    // sandbox path, which has no call_log row.
+    // message row. Keyed by CallSid — a no-op (0 rows) when no call_log row
+    // exists for the session (a call answered outside the signed webhooks).
     if (this.callSid && !supersededAtClose) {
       try {
         // RACE: end() runs on EVERY WebSocket close, including a relay failure
@@ -1660,8 +1671,9 @@ class RelayConversation {
           });
         // LOUD on a dropped audit record: 0 rows with a real transcript means
         // either the voicemail guard fired (a genuinely failed relay leg) or
-        // there is no call_log row for this CallSid (the TwiML-Bin sandbox
-        // path). Either way the conversation is not recoverable, so say so.
+        // there is no call_log row for this CallSid (a call answered outside
+        // the signed webhooks). Either way the conversation is not
+        // recoverable, so say so.
         if (transcriptUpdate && !updated) {
           logger.error(
             `[voice-relay] transcript NOT persisted callSid=${this.callSid} (0 rows: voicemail-guard or missing call_log row) `
@@ -1726,6 +1738,11 @@ class RelayConversation {
     // matching capture_lead in relay-tools.
     const callerPhone = toE164(this.from || '');
     if (this.leadCaptured || !isLikelyE164(callerPhone)) return;
+    // A sandbox call ends with no lead BY DESIGN (its call_log row is the artifact).
+    if (this.sandbox) {
+      logger.info(`[voice-relay] capture-floor skipped — sandbox call callSid=${this.callSid}`);
+      return;
+    }
     // ⭐ A STILL-RUNNING capture_lead OUTRANKS THE FLOOR. The drain above is
     // BOUNDED, so a wedged write can outlive it — and createLeadFromExtraction
     // is not idempotent on callSid, so starting a second one here is exactly

@@ -76,7 +76,6 @@ describe('the shipped profiles', () => {
       expect(profile).not.toBeNull();
       expect(profile.id).toBe(id);
       expect(profile.attrs.events).toBe('speaker-events tokens-played');
-      expect(['block', 'clause']).toContain(profile.renderer);
     }
   });
 

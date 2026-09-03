@@ -1514,8 +1514,11 @@ router.post('/relay-complete', async (req, res) => {
 // source='voice_relay_sandbox', so the relay session's transcript, latency
 // summary and version stamps land through the SAME end() reconcile a
 // production call uses — and every call reader (calls tab, unified inbox,
-// self-audits) excludes the source. The lead/booking writes the relay makes
-// are the sandbox's Phase 0 behaviour and are unchanged.
+// KPIs, corpus miners, self-audits) excludes the source through
+// relay-protocol.whereNotSandboxCall. The session itself is a DRY RUN: the ws
+// upgrade proves the source from this row and the relay answers its write
+// tools (lead, re-service, booking) without running them — a test call, or
+// a stranger dialling the test number, can never create dispatch work.
 //
 // Cell selection: a two-digit DTMF code inside the first three seconds picks
 // a relay profile (relay-profiles SANDBOX_CELLS; '99' = raw

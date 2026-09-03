@@ -5,6 +5,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { cacheRoute } = require('../utils/route-cache');
+const { whereNotSandboxCall } = require('../services/voice-agent/relay-protocol');
 const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
@@ -897,6 +898,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     let inboundCalls = 0, callToBooking = null;
     try {
       const cc = await db('call_log').where('direction', 'inbound')
+        .modify((qb) => whereNotSandboxCall(qb)) // voice-agent bake-off calls are not customers
         .modify((qb) => applyETTimestampWindow(qb, 'created_at', start, todayStr))
         .count('* as n').first();
       inboundCalls = parseInt(cc?.n || 0, 10);
@@ -1960,6 +1962,7 @@ router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
       // attribution panel. Keep the seed row for registry purposes and
       // drop it from the dashboard instead.
       .where((qb) => qb.where('s.is_active', true).orWhereNull('s.is_active'))
+      .modify((qb) => whereNotSandboxCall(qb, 'c.source'))
       .modify((qb) => applyETTimestampWindow(qb, 'c.created_at', win.from, win.to))
       .select(
         db.raw("COALESCE(s.name, 'Unmapped — ' || c.to_phone) as name"),

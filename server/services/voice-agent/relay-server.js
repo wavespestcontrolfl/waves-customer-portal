@@ -25,6 +25,7 @@
 const logger = require('../logger');
 const {
   RELAY_WS_PATH, parsePrompt, isRelayEnabled, maskPhone, verifyCallToken, CALL_TOKEN_TTL_MS,
+  VOICE_RELAY_SANDBOX_SOURCE,
 } = require('./relay-protocol');
 
 // VOICE_RELAY_ENABLED check lives in relay-protocol (single source of truth,
@@ -197,12 +198,17 @@ function attachVoiceRelay(httpServer) {
       // An unreadable source still rejects (fail closed, the burn's
       // envelope); the read is idempotent so the ordering is safe.
       let collectionsCall = false;
+      let sandboxCall = false;
       try {
         const db = require('../../models/db');
         const row = await db('call_log')
           .where({ twilio_call_sid: callSid })
           .first('source');
         collectionsCall = Boolean(row && row.source === 'collections_voice');
+        // The sandbox number's calls persist like any inbound call (their
+        // transcript / latency record IS the bake-off); the session that
+        // answers them must write nothing else — see RelayConversation.sandbox.
+        sandboxCall = Boolean(row && row.source === VOICE_RELAY_SANDBOX_SOURCE);
       } catch (e) {
         logger.warn(`[voice-relay] rejected ws upgrade: source resolution failed callSid=${callSid}: ${e.message}`);
         try { socket.destroy(); } catch { /* socket already gone */ }
@@ -215,6 +221,7 @@ function attachVoiceRelay(httpServer) {
         return;
       }
       req.authenticatedCollectionsCall = collectionsCall;
+      req.authenticatedSandboxCall = sandboxCall;
       // ⭐ THE AUTHENTICATED CallSid RIDES WITH THE SOCKET. The token was
       // verified against THIS CallSid, and the setup frame that follows is
       // unverified input: honouring the frame's own callSid would let a valid
@@ -249,6 +256,8 @@ function attachVoiceRelay(httpServer) {
     // Resolved at UPGRADE time from the call_log row (gh prb-r11) — the
     // routing truth for the setup frame, never the frame's own label.
     const authenticatedCollectionsCall = Boolean(req && req.authenticatedCollectionsCall);
+    // Same upgrade-time proof: a sandbox session runs its write tools dry.
+    const authenticatedSandboxCall = Boolean(req && req.authenticatedSandboxCall);
     const relaySessionKey = (req && req.relaySessionKey) || null;
     const relaySessionGeneration = (req && req.relaySessionGeneration) || null;
 
@@ -389,6 +398,8 @@ function attachVoiceRelay(httpServer) {
             // them on the <Parameter>s); nothing acts on them.
             relayProfileId: typeof p.relay_profile === 'string' ? p.relay_profile : null,
             ttsVoice: typeof p.tts_voice === 'string' ? p.tts_voice : null,
+            // Proven from the call_log row at upgrade — never the frame.
+            sandbox: authenticatedSandboxCall,
             send,
             endSession,
           });

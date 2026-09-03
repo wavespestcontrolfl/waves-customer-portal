@@ -65,59 +65,46 @@ const HINTS_DEFAULT = 'default';
 // application-side estimate only.
 const EVENTS_ALL = 'speaker-events tokens-played';
 
-// Renderer selection rides the profile (consumed by the streaming renderer
-// when it ships; 'block' = today's one-frame-per-turn behaviour).
-const RENDERERS = Object.freeze(['block', 'clause']);
-
 const RELAY_PROFILES = Object.freeze({
   nova_baseline_v1: {
     attrs: { speechModel: 'nova-3-general', events: EVENTS_ALL },
-    renderer: 'block',
   },
   nova_hints_v1: {
     attrs: { speechModel: 'nova-3-general', hints: HINTS_DEFAULT, events: EVENTS_ALL },
-    renderer: 'block',
   },
   flux_balanced_v1: {
     attrs: { speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL },
-    renderer: 'block',
   },
   flux_fast_v1: {
     attrs: { speechModel: 'flux', eotThreshold: '0.6', hints: HINTS_DEFAULT, events: EVENTS_ALL },
-    renderer: 'block',
   },
   flux_noise_resistant_v1: {
     attrs: {
       speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
       ignoreBackchannel: 'true', interruptSensitivity: 'medium',
     },
-    renderer: 'block',
   },
   flux_reporting_v1: {
     attrs: {
       speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
       reportInputDuringAgentSpeech: 'speech',
     },
-    renderer: 'block',
   },
   flux_smartformat_off_v1: {
     attrs: {
       speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
       deepgramSmartFormat: 'false',
     },
-    renderer: 'block',
   },
   flux_tts_normalization_v1: {
     attrs: {
       speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
       elevenlabsTextNormalization: 'on',
     },
-    renderer: 'block',
   },
   // Sandbox only: counts Flux partial prompts (the loop still drops them).
   flux_partials_probe_v1: {
     attrs: { speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL, partialPrompts: 'true' },
-    renderer: 'block',
     sandboxOnly: true,
   },
 });
@@ -164,7 +151,7 @@ function validateRelayAttrs(input) {
   return { ok: true, attrs };
 }
 
-/** Resolve a profile id to `{ id, attrs, renderer, sandboxOnly }`, or null. */
+/** Resolve a profile id to `{ id, attrs, sandboxOnly }`, or null. */
 function resolveRelayProfile(id) {
   const key = String(id || '').trim();
   const profile = Object.prototype.hasOwnProperty.call(RELAY_PROFILES, key) ? RELAY_PROFILES[key] : null;
@@ -179,7 +166,6 @@ function resolveRelayProfile(id) {
   return {
     id: key,
     attrs: checked.attrs,
-    renderer: RENDERERS.includes(profile.renderer) ? profile.renderer : 'block',
     sandboxOnly: profile.sandboxOnly === true,
   };
 }

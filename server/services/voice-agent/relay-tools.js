@@ -36,6 +36,15 @@ const { toE164, isLikelyE164 } = require('../../utils/phone');
 
 const LEAD_QUALITIES = ['hot', 'warm', 'cold', 'spam'];
 
+// ⭐ THE TOOLS A SANDBOX CALL NEVER RUNS. Everything that writes outside the
+// call's own call_log row — a lead (and the owner alert, do-not-contact stamp
+// and estimate surfacing that ride on it), a re-service ticket, a booking
+// request. Gated HERE, ahead of every branch, so a new write tool cannot be
+// added without deciding whether a test call may run it. The model is told to
+// carry on as if the write landed so the test call still sounds like
+// production — which is what a profile bake-off is measuring.
+const SANDBOX_DRY_RUN_TOOLS = new Set(['capture_lead', 'request_reservice', 'request_booking']);
+
 const TOOLS = [
   {
     name: 'capture_lead',
@@ -596,6 +605,11 @@ function callerAttested(ctx = {}) {
  */
 async function executeTool(name, input = {}, ctx = {}) {
   try {
+    if (ctx.sandbox === true && SANDBOX_DRY_RUN_TOOLS.has(name)) {
+      logger.info(`[voice-relay] ${name} DRY RUN — sandbox call, nothing written callSid=${ctx.callSid || 'n/a'}`);
+      return `Sandbox test call: ${name} was NOT run and nothing was written (no lead, no ticket, no booking). `
+        + 'Carry on exactly as you would after it succeeded so the test call sounds like production.';
+    }
     if (name === 'request_booking') {
       // Both gates re-checked inside (fail closed, defense in depth); the
       // body re-validates the slot through the live availability engine and
@@ -1496,4 +1510,4 @@ async function executeTool(name, input = {}, ctx = {}) {
   }
 }
 
-module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier };
+module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier };

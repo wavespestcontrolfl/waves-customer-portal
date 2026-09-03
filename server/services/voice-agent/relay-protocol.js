@@ -324,7 +324,11 @@ const AGENT_SPEAKER_RE = /agent[\s_-]?speak/i;
 const CALLER_SPEAKER_RE = /(?:client|caller|user)[\s_-]?speak/i;
 const START_RE = /\b(?:start|started|starting|begin|began|speaking|true)\b/i;
 const END_RE = /\b(?:stop|stopped|end|ended|finish|finished|silent|silence|false)\b/i;
-const PLAYED_KEY_RE = /^(?:[a-z]+\.)?(?:token|tokens|text|played|playedText|tokensPlayed|playedTokens)$/i;
+const PLAYED_KEY_RE = /^(?:[a-z]+\.)?(?:token|tokens|text|value|played|playedText|tokensPlayed|playedTokens)$/i;
+// Keys whose VALUE labels the event (Twilio's documented tokensPlayed
+// envelope is `{ type: 'info', name: 'tokensPlayed', value: '…' }` — the
+// label rides `name`, not a key, so the key-only shape never sees it).
+const LABEL_KEY_RE = /^(?:[a-z]+\.)?(?:name|event|kind)$/i;
 
 /**
  * Classify a frame produced by the `events` attribute. Returns
@@ -361,13 +365,25 @@ function classifyRelayEvent(frame) {
     const ended = END_RE.test(directional) && !START_RE.test(directional);
     return { kind: `${agent ? 'agent' : 'caller'}_speaking_${ended ? 'end' : 'start'}`, shape, text: null };
   }
-  if (/token|played/i.test(shape)) {
+  const playedFrame = /token|played/i.test(shape)
+    || fields.some(([k, v]) => LABEL_KEY_RE.test(k) && /token|played/i.test(v));
+  if (playedFrame) {
     const played = fields.filter(([k]) => PLAYED_KEY_RE.test(k)).map(([, v]) => v).filter((v) => v.trim());
     if (played.length) {
       return { kind: 'tokens_played', shape, text: played.sort((a, b) => b.length - a.length)[0] };
     }
   }
   return { kind: 'unknown', shape, text: null };
+}
+
+/**
+ * Knex modifier: drop voice-agent sandbox calls (the dead GA# test number)
+ * from a call_log query. Every call metric and inbox that counts inbound
+ * calls applies it — a profile bake-off persists each test as an ordinary
+ * inbound row, and those rows must never reach a KPI.
+ */
+function whereNotSandboxCall(qb, column = 'source') {
+  return qb.whereRaw("COALESCE(??, '') <> ?", [column, VOICE_RELAY_SANDBOX_SOURCE]);
 }
 
 // A relay profile may tune the relay, never re-point or re-voice it.
@@ -470,6 +486,7 @@ function buildRelayTwiML({
 module.exports = {
   RELAY_WS_PATH,
   VOICE_RELAY_SANDBOX_SOURCE,
+  whereNotSandboxCall,
   RELAY_FAILED_OUTCOME,
   RELAY_TERMINAL_OUTCOMES,
   KNOWN_FRAME_TYPES,
