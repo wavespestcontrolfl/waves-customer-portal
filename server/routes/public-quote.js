@@ -875,6 +875,18 @@ async function sendQuoteRequestEmail({
 // The service keys /calculate accepts in its `services` map — hoisted to
 // module scope (and exported) so the public MCP `how_to_request_quote` tool
 // documents the exact same list instead of a divergent copy.
+// Manual-quote reasons that park a RESIDENTIAL quote pending a property
+// confirmation (lot / turf / unit). They share the customer-facing
+// "outdoor area needs a quick confirmation" copy and must not be labelled
+// commercial in the office bell (GH codex P2 on #3839).
+const RESIDENTIAL_VERIFICATION_REASONS = new Set([
+  'lot_size_requires_verification',
+  'mosquito_treatable_area_unverified',
+  'unit_in_multi_unit_building',
+  'low_confidence_turf_requires_field_verification',
+  'unknown_grass_type_priced_st_augustine',
+]);
+
 const PUBLIC_QUOTE_SERVICE_KEYS = [
   'pest', 'oneTimePest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
   'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
@@ -1086,13 +1098,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // public confirmed value like 1e100 would overflow the integer column
     // and fail the insert, dropping the quote's customer linkage (codex
     // P1). Synthetic fallbacks still persist as null.
-    // Direct-API requests keep their legacy persistence too (GH codex P1
-    // r7): the documented contract sends lotSqFt without lotSizeConfirmed,
-    // and those callers' customer-provided lot always reached
-    // customers.lot_sqft. Wizard requests persist only server-measured or
-    // confirmed values — their posted field carries the synthetic seed.
-    const persistLotSource = realLotSqFt
-      ?? (!wizardShaped && Number(lotSqFt) > 0 ? Number(lotSqFt) : null);
+    // Only a MEASURED or CONFIRMED lot reaches customers.lot_sqft on every
+    // channel. The direct-API legacy leg (an unconfirmed posted lotSqFt
+    // persisted as the customer's lot) is gone: customer-pricing-ai reads
+    // customers.lot_sqft as a trusted measurement and prices mosquito from
+    // it without lotSizeMeasured:false, so persisting the value the quote
+    // just refused to price would have re-surfaced it as a one-tap
+    // cross-sell price (GH codex P1 on #3839). customers has no lot
+    // provenance column, so the unverified value is simply not promoted.
+    const persistLotSource = realLotSqFt;
     const persistLotSqFt = persistLotSource != null
       ? Math.round(Math.max(500, Math.min(LOT_CAP, persistLotSource)))
       : null;
@@ -2361,7 +2375,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         quoteRequired
           ? (quoteRequiredReason === 'quote_on_request'
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
-            : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
+            : RESIDENTIAL_VERIFICATION_REASONS.has(quoteRequiredReason)
+              ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
+              : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
             : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`,
@@ -2686,7 +2702,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Lawn pricing depends on your treatable turf area, and we could not measure it reliably from records alone — the Waves team will confirm it and send your exact price shortly.'
           : quoteRequiredReason === 'unknown_grass_type_priced_st_augustine'
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
-          : quoteRequiredReason === 'lot_size_requires_verification'
+          : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
           : lowConfidenceForcesSiteQuote && !manualQuoteLine
             ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
