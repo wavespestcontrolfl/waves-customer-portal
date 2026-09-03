@@ -844,7 +844,17 @@ function ServiceCardV2({
             </div>{" "}
           </>
         )}
-        {status === "completed" && <Badge tone="strong">Completed</Badge>}
+        {status === "completed" && completedVisitOwesCompletion(service) ? (
+          // The closeout is still owed (resume marker / status-only
+          // completion): the card must offer the resume, not just wear the
+          // badge — same handler the mobile list and day grid route through
+          // (pre-push Codex P1).
+          <Button size="sm" onClick={() => onComplete(service)}>
+            Resume Closeout
+          </Button>
+        ) : (
+          status === "completed" && <Badge tone="strong">Completed</Badge>
+        )}
         {status === "completed" && service.customerId && (
           <Button
             size="sm"
