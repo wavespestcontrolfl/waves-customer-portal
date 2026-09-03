@@ -135,7 +135,12 @@ function nextAction({ commitments, disposition, v2, reviewStatus }) {
   if (reviewStatus === 'open' || reviewStatus === 'in_progress') {
     return { action: 'Clear the review card for this call', kind: 'review', owner: 'office', due_at: null, basis: 'review_open' };
   }
-  const recommended = v2?.recommended_disposition || disposition || null;
+  // The PERSISTED disposition is the rules layer's final word
+  // (decideDisposition can override the model — a known customer's
+  // complaint escalates whatever V2 recommended); the model's
+  // recommendation is advisory and only fills in when nothing was stamped
+  // (Codex #3738 r17 P1).
+  const recommended = disposition || v2?.recommended_disposition || null;
   const map = {
     estimate_send: 'Send the estimate',
     callback_task_created: 'Call the customer back',
@@ -144,7 +149,7 @@ function nextAction({ commitments, disposition, v2, reviewStatus }) {
     lead_response_flow_triggered: 'Watch the lead-response follow-up',
   };
   if (recommended && map[recommended]) {
-    return { action: map[recommended], kind: recommended, owner: recommended === 'complaint_escalated' ? 'owner' : 'office', due_at: null, basis: 'disposition' };
+    return { action: map[recommended], kind: recommended, owner: recommended === 'complaint_escalated' ? 'owner' : 'office', due_at: null, basis: disposition ? 'disposition' : 'recommended_disposition' };
   }
   return null;
 }

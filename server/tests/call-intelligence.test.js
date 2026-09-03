@@ -77,6 +77,9 @@ describe('buildCallIntelligence', () => {
     expect(view.next_action).toMatchObject({ commitment_id: 'c1', owner: 'office', basis: 'office_added' });
     expect(nextAction({ commitments: [], disposition: null, v2: V2, reviewStatus: 'open' })).toMatchObject({ kind: 'review' });
     expect(nextAction({ commitments: [], disposition: 'estimate_send', v2: null, reviewStatus: null })).toMatchObject({ kind: 'estimate_send', basis: 'disposition' });
+    // The rules layer's persisted disposition outranks the model's recommendation; the model fills in only when nothing was stamped (codex gh-r17 P1).
+    expect(nextAction({ commitments: [], disposition: 'complaint_escalated', v2: { recommended_disposition: 'estimate_send' }, reviewStatus: null })).toMatchObject({ kind: 'complaint_escalated', owner: 'owner', basis: 'disposition' });
+    expect(nextAction({ commitments: [], disposition: null, v2: { recommended_disposition: 'estimate_send' }, reviewStatus: null })).toMatchObject({ kind: 'estimate_send', basis: 'recommended_disposition' });
     expect(nextAction({ commitments: [], disposition: null, v2: null, reviewStatus: null })).toBeNull();
   });
 

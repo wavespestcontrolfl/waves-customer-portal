@@ -92,6 +92,7 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
     'Caller: Hi, I have ants in the kitchen and wanted a price.',
     "Agent: I'll get you a written estimate tonight, it is about a hundred forty nine.",
     'Caller: Thursday at ten works. Call me back tomorrow at nine.',
+    'Agent: Sure, someone will call you back tomorrow at nine.',
     'Agent: We come back around the twentieth for the follow-up.',
   ].join('\n');
   const derive = (args) => deriveCommitmentsFromExtraction({ transcript, ...args });
@@ -111,6 +112,7 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
       { field_path: '/service_request/quoted_price_usd', quote: 'about a hundred forty nine', speaker: 'agent', transcript_offset_ms: null },
       { field_path: '/scheduling/confirmed_start_at', quote: 'Thursday at ten works', speaker: 'caller', transcript_offset_ms: null },
       { field_path: '/scheduling/callback_window_start', quote: 'call me back tomorrow at nine', speaker: 'caller', transcript_offset_ms: null },
+      { field_path: '/scheduling/callback_window_start', quote: 'someone will call you back tomorrow at nine', speaker: 'agent', transcript_offset_ms: null },
       { field_path: '/scheduling/follow_up_start_at', quote: 'we come back around the twentieth', speaker: 'agent', transcript_offset_ms: null },
     ],
   };
@@ -156,6 +158,16 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
     const unpinned = derive({ v2: timeOnly }).find((i) => i.kind === 'callback');
     expect(unpinned).toMatchObject({ due_at: null, due_basis: null, origin: 'v2:scheduling.callback_window_start' });
     expect(unpinned.description).toContain('asked for 09:00');
+  });
+
+  test('a callback the caller asked for is a promise only once the agent accepted it: caller-only evidence seeds nothing, and so does the disposition alone (codex gh-r17 P1)', () => {
+    const callerOnly = { ...v2, evidence: v2.evidence.filter((e) => !(e.field_path === '/scheduling/callback_window_start' && e.speaker === 'agent')) };
+    expect(derive({ v2: callerOnly }).find((i) => i.kind === 'callback')).toBeUndefined();
+    const dispositionOnly = { scheduling: {}, service_request: {}, recommended_disposition: 'callback_task_created', evidence: [{ field_path: '/scheduling/callback_window_start', quote: 'call me back tomorrow at nine', speaker: 'caller', transcript_offset_ms: null }] };
+    expect(derive({ v2: dispositionOnly })).toEqual([]);
+    // The agent's acceptance carries it (and is the evidence).
+    const cb = derive({ v2 }).find((i) => i.kind === 'callback');
+    expect(cb.evidence.some((e) => e.speaker === 'agent')).toBe(true);
   });
 
   test('nothing is seeded from an empty or non-committal extraction', () => {

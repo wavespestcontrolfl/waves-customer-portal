@@ -264,9 +264,14 @@ function deriveCommitmentsFromExtraction({ v2 = null, transcript = '', callStart
   // "we will text you the details" is left to the model pass, which needs
   // verbatim evidence to record it.
 
-  // A window the caller named is a callback promise even when it cannot be
-  // pinned to an instant (no call start to date a bare time) — the promise
-  // then carries the implicit deadline instead of a stated one.
+  // A window the caller named is a callback promise only once the AGENT
+  // accepted it: the seed needs a grounded agent quote among its evidence
+  // (owner 'agent', like every other Waves seed) — a caller's request
+  // alone is not an obligation Waves took on (Codex #3738 r17 P1); an
+  // agent line V2 did not pin is left to the model pass, which grounds it
+  // the same way. The promise is recorded even when it cannot be pinned
+  // to an instant (no call start to date a bare time) — it then carries
+  // the implicit deadline instead of a stated one.
   const callbackAsked = sched.callback_window_start != null && String(sched.callback_window_start).trim() !== '';
   const callbackWindow = callbackDueAt(sched.callback_window_start, callStartedAt);
   if (callbackAsked || v2?.recommended_disposition === 'callback_task_created') {
@@ -285,7 +290,7 @@ function deriveCommitmentsFromExtraction({ v2 = null, transcript = '', callStart
       confidence: typeof conf.scheduling_window === 'number' ? conf.scheduling_window : null,
       evidence: evidenceFor(v2, ['/scheduling/callback_window_start', '/scheduling/callback_window_end']),
       origin: callbackAsked ? 'v2:scheduling.callback_window_start' : 'v2:recommended_disposition',
-    });
+    }, 'agent');
   }
 
   if (sched.follow_up_mentioned === true) {
