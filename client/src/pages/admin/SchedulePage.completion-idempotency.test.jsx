@@ -5,6 +5,7 @@ import {
   SIDE_EFFECTS_GIVE_UP_MESSAGE,
   completionCrossKeyCompleted,
   completionPreferencesNeedDraft,
+  completionResumeOwedError,
   completionReconcilePrompt,
   completionReviewSuppressionReason,
   completionSideEffectsRetryPlan,
@@ -360,5 +361,30 @@ describe("completion status-poll plan", () => {
     expect(completionStatusPlan({ state: "surprise" })).toBe("wait");
     expect(completionStatusPlan({})).toBe("wait");
     expect(completionStatusPlan(null)).toBe("wait");
+  });
+});
+
+// The route's committed-but-not-finalized 503s all owe a resume: the panel
+// must set the durable reopen marker and pin the committed body for every
+// one of them, not just the original invoice-mint code (codex P1 #3745 r3 —
+// service_report_token_mint_failed fell to the generic error path).
+describe("completionResumeOwedError", () => {
+  it("recognises every committed-but-not-finalized 503 the route emits", () => {
+    for (const code of [
+      "backfill_invoice_mint_failed",
+      "service_report_token_mint_failed",
+      "completion_sms_send_failed",
+    ]) {
+      expect(completionResumeOwedError({ status: 503, code })).toBe(true);
+    }
+  });
+
+  it("leaves every other error to the existing handlers", () => {
+    // Same code on another status is not the committed-but-not-finalized contract.
+    expect(completionResumeOwedError({ status: 500, code: "completion_sms_send_failed" })).toBe(false);
+    expect(completionResumeOwedError({ status: 409, code: "completion_side_effects_running" })).toBe(false);
+    expect(completionResumeOwedError({ status: 409, code: "completion_resume_payload_mismatch" })).toBe(false);
+    expect(completionResumeOwedError({ status: 500, message: "boom" })).toBe(false);
+    expect(completionResumeOwedError(null)).toBe(false);
   });
 });
