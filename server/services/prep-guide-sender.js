@@ -27,6 +27,7 @@ const { resolveProjectEmailRecipient, ensureServicePrepToken, markServicePrepSen
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -72,6 +73,17 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
       .whereIn('customer_id', ids)
       .whereRaw('LOWER(service_type) LIKE ?', [`%${serviceKeyword}%`])
       .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
+      // A call-created follow-up still pending and never customer-confirmed
+      // is dispatch-owned: its tentative date is hidden from the customer
+      // schedule and every other visit-backed link until the office
+      // confirms it, so neither the guide email's "Service date" nor a prep
+      // page may present it either — the same null-safe predicate
+      // /api/schedule uses (GH Codex #3844 r5 P1).
+      .where((qb) => qb
+        .whereNull('source_action')
+        .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+        .orWhereNot('status', 'pending')
+        .orWhere('customer_confirmed', true))
       // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
       // midnight ET "today's" visit would fall before the UTC date and the
       // email would say "To be confirmed" despite a real upcoming appointment.

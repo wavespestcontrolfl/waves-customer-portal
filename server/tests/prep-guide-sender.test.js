@@ -241,6 +241,26 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
   });
 
+  test('nextUpcomingVisit hides a dispatch-owned pending booking — the customer schedule\'s own null-safe predicate (GH Codex #3844 r5 P1)', async () => {
+    const { nextUpcomingVisit } = require('../services/prep-guide-sender');
+    const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+    let visitsQuery = null;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') { visitsQuery = scheduledQuery(); return visitsQuery; }
+      return customersQuery();
+    });
+    upcomingVisitRow = { id: 'svc-9', scheduled_date: '2026-09-20' };
+    expect(await nextUpcomingVisit('cust-1', 'flea')).toEqual(upcomingVisitRow);
+    const predicate = visitsQuery.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    expect(predicate).toBeInstanceOf(Function);
+    const qb = { whereNull: jest.fn(() => qb), orWhereNotIn: jest.fn(() => qb), orWhereNot: jest.fn(() => qb), orWhere: jest.fn(() => qb) };
+    predicate(qb);
+    expect(qb.whereNull).toHaveBeenCalledWith('source_action');
+    expect(qb.orWhereNotIn).toHaveBeenCalledWith('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
+    expect(qb.orWhereNot).toHaveBeenCalledWith('status', 'pending');
+    expect(qb.orWhere).toHaveBeenCalledWith('customer_confirmed', true);
+  });
+
   test('no upcoming visit → prep_url stays the portal visits tab', async () => {
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
 

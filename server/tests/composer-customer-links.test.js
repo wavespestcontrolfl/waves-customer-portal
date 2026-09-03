@@ -953,7 +953,12 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
   test('an appointment page link (branded short form of kind appointment, or the long /appointment form) is immediate-only', async () => {
     mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'appointment' } }) };
     expect(await immediateOnlyLinkSendCheck('Everything about your visit: wavespest.co/l/Ab12cD')).toEqual({ present: true, label: 'Appointment page' });
-    expect(mockBuilders.short_codes.where).toHaveBeenCalledWith({ code: 'Ab12cD' });
+    // Codes are stored lower-case and the public resolver lowercases before
+    // its lookup — a pasted mixed-case code is the same working link and must
+    // be judged, not missed (GH Codex #3844 r5 P1).
+    expect(mockBuilders.short_codes.where).toHaveBeenCalledWith({ code: 'ab12cd' });
+    expect(await immediateOnlyLinkSendCheck('Everything about your visit: WAVESPEST.CO/L/AB12CD')).toEqual({ present: true, label: 'Appointment page' });
+    expect(mockBuilders.short_codes.where).toHaveBeenLastCalledWith({ code: 'ab12cd' });
     mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'estimate' } }) };
     expect(await immediateOnlyLinkSendCheck('See it: wavespest.co/l/Ab12cD')).toEqual({ present: false });
     expect(await immediateOnlyLinkSendCheck('portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Appointment page' });
@@ -1100,9 +1105,10 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
     });
 
-    test('the branded short form resolves through short_codes → scheduled_services', async () => {
-      wireAccount({ shortRow: { code: 'Ab12cD', kind: 'appointment', entity_type: 'scheduled_services', entity_id: 'v1' } });
+    test('the branded short form resolves through short_codes → scheduled_services, the code lower-cased as the public resolver does (GH Codex #3844 r5 P1)', async () => {
+      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', entity_type: 'scheduled_services', entity_id: 'v1' } });
       expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      expect(mockBuilders.short_codes.where).toHaveBeenCalledWith({ code: 'ab12cd' });
       expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ id: 'v1' });
     });
 

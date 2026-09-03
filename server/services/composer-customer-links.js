@@ -641,7 +641,10 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
 
 // {short}/l/<code> runs → their short_codes rows. The composer inserts the
 // branded short form of appointment and service-report links; the long
-// forms are judged alongside.
+// forms are judged alongside. Codes are stored and resolved lower-case
+// (public-shortlinks lowercases before its lookup), so a pasted upper- or
+// mixed-case code — still a working link — is looked up the same way, or
+// it would slip every fence and send-time check (GH Codex #3844 r5 P1).
 async function shortCodeRows(runs) {
   const shortRuns = linkRuns(runs, /\/l\//i);
   if (!shortRuns.length) return [];
@@ -650,7 +653,7 @@ async function shortCodeRows(runs) {
   for (const run of shortRuns) {
     const code = canonicalPortalToken(run, shortHost, /^\/l\/([A-Za-z0-9_-]+)$/i);
     if (!code) continue;
-    const row = await db('short_codes').where({ code }).first('code', 'kind', 'entity_type', 'entity_id');
+    const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'entity_type', 'entity_id');
     if (row) rows.push(row);
   }
   return rows;
@@ -714,113 +717,129 @@ async function immediateOnlyLinkSendCheck(body) {
  * the route trusts a customer id — be that customer. FAIL CLOSED on any
  * miss. { ok: true } when nothing applies or all checks out; `statements`
  * rides back with every verified statement id so a real send can stamp
- * finalized → sent (markStatementsSent).
+ * finalized → sent (markStatementsSent). One function per link kind below;
+ * bearerLinkSendCheck is the composition.
  */
-async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
-  const runs = decodedRuns(body);
-  const host = new URL(publicPortalUrl()).host.toLowerCase();
-  const refuse = (error) => ({ ok: false, error });
-  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-  const owned = async (customerId, label) => {
-    const owner = await db('customers').where({ id: customerId }).first('id', 'phone');
-    const ownerLast10 = last10(owner?.phone);
-    if (!ownerLast10 || ownerLast10 !== String(toLast10 || '')) {
-      return refuse(`This ${label} belongs to a different customer — remove it before sending.`);
-    }
-    if (trustedCustomerId !== undefined && String(trustedCustomerId || '') !== String(customerId)) {
-      return refuse(`Pick this customer from the search dropdown before sending a ${label}.`);
-    }
-    return null;
-  };
+// One check per link kind (GH Codex #3844 r5 P2 — the seam was one
+// 40-branch function); the shared parts are the parsed runs, the canonical
+// host and the two binding rules below.
+const refuseSend = (error) => ({ ok: false, error });
+const digitsLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
 
-  const statements = [];
-  // Prep guide pages: the page shows the customer's name and address and
-  // 404s once the token expires or its guide loses its active version —
-  // the public route's own predicates (resolvePrepSource, loadTemplateByKey),
-  // re-run at the send (GH Codex #3844 r3 P2).
-  for (const run of linkRuns(runs, /\/prep\//i)) {
-    const token = canonicalPortalToken(run, host, /^\/prep\/([a-f0-9]{32})$/i);
-    if (!token) return refuse('A prep guide link in this message is not on the Waves portal — remove it before sending.');
-    const source = await require('../routes/prep-public').resolvePrepSource(token);
-    if (!source) return refuse('This prep guide link has expired — remove it and insert a fresh one.');
-    const loaded = await require('./email-template-library').loadTemplateByKey(source.templateKey);
-    if (!loaded?.activeVersion) return refuse('This prep guide has no active version in Email Templates — remove the prep link before sending.');
-    // A page with no customer owner still shows a service address — nothing
-    // can bind it to a recipient, so it never rides an SMS (pre-push Codex P0).
-    if (!source.customerId) return refuse('This prep guide page has no customer on file — remove the prep link before sending.');
-    const bad = await owned(source.customerId, 'prep guide link');
-    if (bad) return bad;
+// Per-ROW binding: the row's customer must own the recipient number and —
+// when the route trusts a customer id — be that customer.
+async function ownedByRecipient({ toLast10, trustedCustomerId }, customerId, label) {
+  const owner = await db('customers').where({ id: customerId }).first('id', 'phone');
+  const ownerLast10 = digitsLast10(owner?.phone);
+  if (!ownerLast10 || ownerLast10 !== toLast10) {
+    return refuseSend(`This ${label} belongs to a different customer — remove it before sending.`);
   }
-
-  for (const run of linkRuns(runs, /\/pay\/statement\//i)) {
-    const token = canonicalPortalToken(run, host, /^\/pay\/statement\/([0-9a-f]{64})$/i);
-    if (!token) return refuse('A statement link in this message is not on the Waves portal — remove it before sending.');
-    if (!require('../config/feature-gates').isEnabled('payerStatements')) {
-      return refuse('Payer statements are switched off (GATE_PAYER_STATEMENTS) — remove the statement link before sending.');
-    }
-    const { isPayableStatementStatus } = require('./payer-statement-settle');
-    const stmt = await db('payer_statements').where({ token }).first('id', 'payer_id', 'status');
-    if (!stmt || !isPayableStatementStatus(stmt.status)) {
-      return refuse('This statement link is no longer payable — remove it and insert a fresh one.');
-    }
-    const payer = await db('payers').where({ id: stmt.payer_id, active: true }).first('id', 'ap_phone');
-    if (!payer || !last10(payer.ap_phone) || last10(payer.ap_phone) !== String(toLast10 || '')) {
-      return refuse("This statement link only goes to the payer's AP phone on file — remove it before sending.");
-    }
-    if (!statements.includes(stmt.id)) statements.push(stmt.id);
+  if (trustedCustomerId !== undefined && String(trustedCustomerId || '') !== String(customerId)) {
+    return refuseSend(`Pick this customer from the search dropdown before sending a ${label}.`);
   }
+  return null;
+}
 
-  const shortRows = await shortCodeRows(runs);
-  if (appointmentLinkPresent(runs, host, shortRows) && process.env.GATE_APPOINTMENT_PAGE !== 'true') {
-    return refuse('Appointment pages are switched off (GATE_APPOINTMENT_PAGE) — remove the appointment link before sending.');
-  }
-
-  // Appointment pages and service reports are ACCOUNT-scoped — their
-  // /customer-link rows search the whole account, a household shares its
-  // visits and reports — so the bar is the recipient's account rather than
-  // one row: the target must still resolve, its customer must be on an
-  // account the recipient number is on file for, and the trusted customer
-  // (when the route has one) must be on that account too. The client-side
-  // recipient-change strip is not authoritative (pre-push Codex P0).
+// Per-ACCOUNT binding for the account-scoped kinds (appointment page,
+// service report — a household shares its visits and reports): the target's
+// customer must be on an account the recipient number is on file for, and
+// the trusted customer (when the route has one) on that account too. The
+// client-side recipient-change strip is not authoritative (pre-push Codex
+// P0). Returns the binder; the recipient's accounts are read once per send.
+function recipientAccountBinder({ toLast10, trustedCustomerId }) {
   const accountKey = (c) => String(c.account_id || c.id);
   let recipientAccounts = null;
-  const onRecipientAccount = async (customerId, label) => {
+  return async (customerId, label) => {
     if (!recipientAccounts) {
       const rows = await db('customers')
         .whereNull('deleted_at')
-        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(toLast10 || '')])
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [toLast10])
         .select('id', 'account_id');
       recipientAccounts = new Set(rows.map(accountKey));
     }
     const row = customerId ? await db('customers').where({ id: customerId }).first('id', 'account_id') : null;
     if (!row || !recipientAccounts.has(accountKey(row))) {
-      return refuse(`This ${label} belongs to a different customer — remove it before sending.`);
+      return refuseSend(`This ${label} belongs to a different customer — remove it before sending.`);
     }
     if (trustedCustomerId) {
       const trusted = await db('customers').where({ id: trustedCustomerId }).first('id', 'account_id');
       if (!trusted || accountKey(trusted) !== accountKey(row)) {
-        return refuse(`This ${label} is not the selected customer's — remove it before sending.`);
+        return refuseSend(`This ${label} is not the selected customer's — remove it before sending.`);
       }
     }
     return null;
   };
+}
 
+// Prep guide pages: the page shows the customer's name and address and 404s
+// once the token expires or its guide loses its active version — the public
+// route's own predicates (resolvePrepSource, loadTemplateByKey), re-run at
+// the send (GH Codex #3844 r3 P2).
+async function checkPrepLinks(ctx) {
+  for (const run of linkRuns(ctx.runs, /\/prep\//i)) {
+    const token = canonicalPortalToken(run, ctx.host, /^\/prep\/([a-f0-9]{32})$/i);
+    if (!token) return refuseSend('A prep guide link in this message is not on the Waves portal — remove it before sending.');
+    const source = await require('../routes/prep-public').resolvePrepSource(token);
+    if (!source) return refuseSend('This prep guide link has expired — remove it and insert a fresh one.');
+    const loaded = await require('./email-template-library').loadTemplateByKey(source.templateKey);
+    if (!loaded?.activeVersion) return refuseSend('This prep guide has no active version in Email Templates — remove the prep link before sending.');
+    // A page with no customer owner still shows a service address — nothing
+    // can bind it to a recipient, so it never rides an SMS (pre-push Codex P0).
+    if (!source.customerId) return refuseSend('This prep guide page has no customer on file — remove the prep link before sending.');
+    const bad = await ownedByRecipient(ctx, source.customerId, 'prep guide link');
+    if (bad) return bad;
+  }
+  return null;
+}
+
+// Statement pay links: the gate, a payable row, and the ACTIVE payer's AP
+// phone as the recipient (a statement is the payer's, never a customer's).
+// Every verified statement id lands in `statements`.
+async function checkStatementLinks(ctx, statements) {
+  for (const run of linkRuns(ctx.runs, /\/pay\/statement\//i)) {
+    const token = canonicalPortalToken(run, ctx.host, /^\/pay\/statement\/([0-9a-f]{64})$/i);
+    if (!token) return refuseSend('A statement link in this message is not on the Waves portal — remove it before sending.');
+    if (!require('../config/feature-gates').isEnabled('payerStatements')) {
+      return refuseSend('Payer statements are switched off (GATE_PAYER_STATEMENTS) — remove the statement link before sending.');
+    }
+    const { isPayableStatementStatus } = require('./payer-statement-settle');
+    const stmt = await db('payer_statements').where({ token }).first('id', 'payer_id', 'status');
+    if (!stmt || !isPayableStatementStatus(stmt.status)) {
+      return refuseSend('This statement link is no longer payable — remove it and insert a fresh one.');
+    }
+    const payer = await db('payers').where({ id: stmt.payer_id, active: true }).first('id', 'ap_phone');
+    if (!payer || !digitsLast10(payer.ap_phone) || digitsLast10(payer.ap_phone) !== ctx.toLast10) {
+      return refuseSend("This statement link only goes to the payer's AP phone on file — remove it before sending.");
+    }
+    if (!statements.includes(stmt.id)) statements.push(stmt.id);
+  }
+  return null;
+}
+
+// Appointment pages (long form by reschedule_token, or the branded short
+// form): the visit must still resolve and bind to the recipient's account.
+async function checkAppointmentLinks(ctx, shortRows, onRecipientAccount) {
   const visitById = async (where) => db('scheduled_services').where(where).first('id', 'customer_id');
-  for (const run of linkRuns(runs, /\/appointment\//i)) {
-    const token = canonicalPortalToken(run, host, APPOINTMENT_TOKEN_RE);
-    if (!token) return refuse('An appointment link in this message is not on the Waves portal — remove it before sending.');
-    const visit = await visitById({ reschedule_token: token });
-    if (!visit) return refuse('This appointment link no longer resolves — remove it and insert a fresh one.');
-    const bad = await onRecipientAccount(visit.customer_id, 'appointment link');
+  const bind = async (visit) => {
+    if (!visit) return refuseSend('This appointment link no longer resolves — remove it and insert a fresh one.');
+    return onRecipientAccount(visit.customer_id, 'appointment link');
+  };
+  for (const run of linkRuns(ctx.runs, /\/appointment\//i)) {
+    const token = canonicalPortalToken(run, ctx.host, APPOINTMENT_TOKEN_RE);
+    if (!token) return refuseSend('An appointment link in this message is not on the Waves portal — remove it before sending.');
+    const bad = await bind(await visitById({ reschedule_token: token }));
     if (bad) return bad;
   }
   for (const row of shortRows.filter((r) => r.kind === 'appointment')) {
-    const visit = row.entity_type === 'scheduled_services' && row.entity_id ? await visitById({ id: row.entity_id }) : null;
-    if (!visit) return refuse('This appointment link no longer resolves — remove it and insert a fresh one.');
-    const bad = await onRecipientAccount(visit.customer_id, 'appointment link');
+    const bad = await bind(row.entity_type === 'scheduled_services' && row.entity_id ? await visitById({ id: row.entity_id }) : null);
     if (bad) return bad;
   }
+  return null;
+}
 
+// Service reports (long form by report_view_token, or the short form): the
+// builder's own public predicate re-run, then the account binding.
+async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
   const { suppressedTypedReport } = require('../routes/reports-public');
   const publicReport = async (where) => {
     const record = await db('service_records')
@@ -830,21 +849,48 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
       .first('id', 'customer_id', 'structured_notes');
     return record && !suppressedTypedReport(record) ? record : null;
   };
-  for (const run of linkRuns(runs, /\/report\//i)) {
-    const token = canonicalPortalToken(run, host, REPORT_TOKEN_RE);
-    if (!token) return refuse('A service report link in this message is not on the Waves portal — remove it before sending.');
-    const record = await publicReport({ report_view_token: token });
-    if (!record) return refuse('This service report is no longer viewable — remove the link before sending.');
-    const bad = await onRecipientAccount(record.customer_id, 'service report link');
+  const bind = async (record) => {
+    if (!record) return refuseSend('This service report is no longer viewable — remove the link before sending.');
+    return onRecipientAccount(record.customer_id, 'service report link');
+  };
+  for (const run of linkRuns(ctx.runs, /\/report\//i)) {
+    const token = canonicalPortalToken(run, ctx.host, REPORT_TOKEN_RE);
+    if (!token) return refuseSend('A service report link in this message is not on the Waves portal — remove it before sending.');
+    const bad = await bind(await publicReport({ report_view_token: token }));
     if (bad) return bad;
   }
   for (const row of shortRows.filter((r) => r.kind === 'service_report')) {
-    const record = row.entity_type === 'service_records' && row.entity_id ? await publicReport({ id: row.entity_id }) : null;
-    if (!record) return refuse('This service report is no longer viewable — remove the link before sending.');
-    const bad = await onRecipientAccount(record.customer_id, 'service report link');
+    const bad = await bind(row.entity_type === 'service_records' && row.entity_id ? await publicReport({ id: row.entity_id }) : null);
     if (bad) return bad;
   }
+  return null;
+}
 
+// The account-scoped kinds together: the appointment gate is re-read at the
+// send (every /appointment route 404s the moment it is off — r2 P1), then
+// each kind binds to the recipient's account.
+async function checkAccountBoundLinks(ctx) {
+  const shortRows = await shortCodeRows(ctx.runs);
+  if (appointmentLinkPresent(ctx.runs, ctx.host, shortRows) && process.env.GATE_APPOINTMENT_PAGE !== 'true') {
+    return refuseSend('Appointment pages are switched off (GATE_APPOINTMENT_PAGE) — remove the appointment link before sending.');
+  }
+  const onRecipientAccount = recipientAccountBinder(ctx);
+  return (await checkAppointmentLinks(ctx, shortRows, onRecipientAccount))
+    || checkReportLinks(ctx, shortRows, onRecipientAccount);
+}
+
+async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
+  const ctx = {
+    runs: decodedRuns(body),
+    host: new URL(publicPortalUrl()).host.toLowerCase(),
+    toLast10: String(toLast10 || ''),
+    trustedCustomerId,
+  };
+  const statements = [];
+  const refusal = (await checkPrepLinks(ctx))
+    || (await checkStatementLinks(ctx, statements))
+    || (await checkAccountBoundLinks(ctx));
+  if (refusal) return refusal;
   return { ok: true, ...(statements.length ? { statements } : {}) };
 }
 
