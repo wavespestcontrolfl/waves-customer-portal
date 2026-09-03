@@ -15318,8 +15318,10 @@ const CallRecordingProcessor = {
           }
         }
       }
-      if (written > 0 && finalStatus === 'processed' && customerLanded) {
-        // A customer that landed on this pass repairs an earlier
+      if (written > 0 && finalStatus === 'processed' && (customerLanded || !customerExpected)) {
+        // A customer that landed on this pass — or a pass that determined
+        // none is required (a non-customer call nature, a reclassified
+        // voicemail/spam; Codex #3736 r17 P2) — repairs an earlier
         // customer_creation_failed: its card resolves, and the review flag
         // clears only when no other open card still needs a person.
         const repaired = await trx('triage_items')

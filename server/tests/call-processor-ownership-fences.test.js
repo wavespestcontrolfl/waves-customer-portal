@@ -153,9 +153,9 @@ describe('processRecording call_log writes are ownership-fenced', () => {
   });
 
   test('a customer that lands on a later pass resolves the customer_creation_failed card and clears review only when nothing else is open', () => {
-    const at = body.indexOf("if (written > 0 && finalStatus === 'processed' && customerLanded) {");
+    const at = body.indexOf("if (written > 0 && finalStatus === 'processed' && (customerLanded || !customerExpected)) {");
     expect(at).toBeGreaterThan(-1);
-    const site = body.slice(at, at + 900);
+    const site = body.slice(at, at + 1200);
     expect(site).toContain("reason_code: 'customer_creation_failed'");
     expect(site).toContain("resolution_note: 'Customer landed on a later pass'");
     expect(site).toContain(".whereNotExists(trx('triage_items')");
