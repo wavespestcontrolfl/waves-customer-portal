@@ -2916,8 +2916,15 @@ function countyAttestedSmallResidential(rc) {
 // reclassification (a record can read BOTH multifamily and retail).
 const COMMERCIAL_USE_RE = /(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/;
 
+// The mixed-use veto reads SPECIFIC uses only: the generic "commercial"
+// token is how listings and zoning label an apartment complex itself
+// ("Commercial Apartments", "C-2" zoning on a rental building), and vetoing
+// on it would re-commercialize the exact tenant quote the unit lane exists
+// for (pre-push codex P1 r5). Office/retail/industrial/etc. still veto.
+const COMMERCIAL_USE_VETO_RE = /(office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|plaza|storefront|shop|government|municipal)/;
+
 function recordCommercialUseSignal(rc) {
-  return COMMERCIAL_USE_RE.test(commercialSignalText(commercialSignalRecord(rc), {}));
+  return COMMERCIAL_USE_VETO_RE.test(commercialSignalText(commercialSignalRecord(rc), {}));
 }
 
 function detectCategory(rc, ai = {}) {

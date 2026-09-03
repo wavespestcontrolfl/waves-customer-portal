@@ -1318,6 +1318,15 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     expect(profile.residentialUnitLookup).toBeNull();
   });
 
+  test('unit address on a record labeled "Commercial Apartments" is still one residential unit (generic token is not a use)', () => {
+    const profile = buildEnrichedProfile(
+      rentalComplexRecord({ propertyType: 'Commercial Apartments', _raw: { zoning: 'C-2 Commercial' }, _source: 'county' }),
+      null, null, null, null, null, unit,
+    );
+    expect(profile.isCommercial).toBe(false);
+    expect(profile.propertyType).toBe('Condo');
+  });
+
   test('unit address with a structured satellite COMMERCIAL read stays commercial', () => {
     const profile = buildEnrichedProfile(
       rentalComplexRecord(), { propertyUse: 'COMMERCIAL' }, null, null, null, null, unit,
