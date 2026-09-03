@@ -585,7 +585,9 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     expect(src('../services/estimator-engine/index.js')).toContain('if (context && !context.error && !unitLineOverride) {');
     // The admin revision lifts only the marker it observed on the row it wrote.
     const route = src('../routes/admin-estimates.js');
-    expect(route).toContain("clearEstimateRepricePending(estimate.id, undefined, { attempt: observedEngine.reprice_attempt || '' })");
+    expect(route).toContain('clearEstimateRepricePending(estimate.id, undefined, { attempt: observedRepriceAttempt })');
+    const persistence = src('../services/admin-estimate-persistence.js');
+    expect(persistence).toMatch(/REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS = \[[^\]]*'reprice_pending_at',\s*'reprice_attempt',/);
     const lockAt = clarify.indexOf("unitCallLinkage(trx, flags.unit_call_log_id, { lock: true })");
     const stampAt = clarify.indexOf('stampCallUnitAnswer(trx, flags.unit_call_log_id');
     expect(lockAt).toBeGreaterThan(-1);

@@ -789,7 +789,7 @@ router.put('/:id', async (req, res, next) => {
     // the builder can confirm a server reprice with the operator BEFORE the
     // edit publishes to the customer's live link.
     const dryRun = req.body?.dryRun === true;
-    const { estimate, memberLinkageWarning, pricingFallbackReason } = await reviseAdminEstimate({
+    const { estimate, memberLinkageWarning, pricingFallbackReason, observedRepriceAttempt } = await reviseAdminEstimate({
       estimateId: req.params.id,
       body: req.body,
       technicianId: req.technicianId,
@@ -800,18 +800,15 @@ router.put('/:id', async (req, res, next) => {
       logger.info(`[estimates] Revised estimate ${estimate.id} in place (status ${estimate.status})`);
       // An operator revision IS the explicit price correction a pending
       // re-price waits for — lift the stale-price send guard, but ONLY the
-      // marker the revision observed (the attempt token on the row it
-      // wrote): a clarify reply that stamped a NEWER attempt after the
-      // revision committed was never priced in and keeps its guard (codex
-      // r2 P1 on #3796). No marker on the written row = nothing to lift.
-      let observedEngine = null;
-      try {
-        const written = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
-        observedEngine = written?.estimatorEngine || null;
-      } catch { observedEngine = null; }
-      if (observedEngine?.reprice_pending_at) {
+      // marker the revision observed BEFORE recomputing its prices: a
+      // clarify reply that stamped a NEWER attempt after that pre-read
+      // (mid-computation or after commit) was never priced in and keeps
+      // its guard — the locked row's marker survives the rewrite for
+      // exactly this (codex r2 P1 on #3796). No marker observed = nothing
+      // to lift.
+      if (observedRepriceAttempt !== null && observedRepriceAttempt !== undefined) {
         await require('../services/estimate-clarify-asks')
-          .clearEstimateRepricePending(estimate.id, undefined, { attempt: observedEngine.reprice_attempt || '' })
+          .clearEstimateRepricePending(estimate.id, undefined, { attempt: observedRepriceAttempt })
           .catch((err) => logger.warn(`[estimates] reprice guard clear failed for ${estimate.id}: ${err.message}`));
       }
       notifyPricingFallbackAfterCommit(estimate, pricingFallbackReason);

@@ -2514,6 +2514,14 @@ const REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS = [
   'invalidation_pending_reason',
   'invalidation_pending_generation',
   'identity_conflict',
+  // The clarify re-price guard (estimate-clarify-asks): a reply can stamp
+  // it between this revision's pre-read and its row lock, and a wholesale
+  // rewrite that dropped it would let the whole-building draft go out
+  // unpriced. The LOCKED row's marker survives; the route lifts only the
+  // attempt the revision observed BEFORE recomputation (pre-push codex P1
+  // on #3796).
+  'reprice_pending_at',
+  'reprice_attempt',
 ];
 
 // Revise an existing estimate in place: same body + pricing pipeline as
@@ -2957,7 +2965,15 @@ async function reviseAdminEstimate({
   try {
     require('./estimate-slot-availability').invalidateEstimate(estimate.id);
   } catch { /* best-effort */ }
-  return { estimate: updated, memberLinkageWarning, pricingFallbackReason: pricingOut.fallbackReason || null };
+  // The re-price marker this revision OBSERVED before recomputing — the
+  // only one its prices can claim to incorporate. null = none observed.
+  let observedRepriceAttempt = null;
+  try {
+    const preData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
+    const preEngine = preData?.estimatorEngine || {};
+    if (preEngine.reprice_pending_at) observedRepriceAttempt = String(preEngine.reprice_attempt || '');
+  } catch { observedRepriceAttempt = null; }
+  return { estimate: updated, memberLinkageWarning, pricingFallbackReason: pricingOut.fallbackReason || null, observedRepriceAttempt };
 }
 
 module.exports = {
