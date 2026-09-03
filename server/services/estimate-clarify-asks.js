@@ -360,7 +360,7 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
   // never be given a second unit (codex r6 P1 on #3796), while a structural
   // component alone ("Bldg 9, …") still lacks the apartment (pre-push
   // codex P1 on #3804).
-  const { dwellingUnitOnLine, normalizeLeadAddress } = require('../utils/address-normalizer');
+  const { dwellingUnitOnLine, normalizeLeadAddress, splitUnitFirstLine, structuralUnitPart } = require('../utils/address-normalizer');
   const { leadId, customerId } = targets;
   // Lock order: CUSTOMER row first, then the lead — the Customer 360
   // address edit takes customer → leads (customer-address-fanout), and the
@@ -421,7 +421,15 @@ async function applyUnitWriteback(trx, { unitLine, flags, targets, askDraftId = 
       await trx('leads').where({ id: leadId }).whereNull('deleted_at').update({ address: formatted.fullAddress });
       out.lead = 'filled';
     } else if (leadRow && !dwellingUnitOnLine(leadAddress) && sameBuildingForWrite(leadAddress, building)) {
-      const formatted = normalizeLeadAddress({ raw: leadAddress, line2: unitLine });
+      // A unit-first line ("Bldg 9, 1048 Example Lakes Cir, Sarasota, …") is
+      // rebuilt from its PEELED street — normalizeLeadAddress would read
+      // "Bldg 9" as the street and the street as the city — with the
+      // structural component kept beside the replied dwelling unit
+      // (codex r4 P1 on #3804).
+      const peeled = splitUnitFirstLine(leadAddress);
+      const formatted = peeled
+        ? normalizeLeadAddress({ raw: peeled.rest, line2: [structuralUnitPart(peeled.unit), unitLine].filter(Boolean).join(' ') })
+        : normalizeLeadAddress({ raw: leadAddress, line2: unitLine });
       await trx('leads').where({ id: leadId }).whereNull('deleted_at').update({ address: formatted.fullAddress || `${leadAddress}, ${unitLine}` });
       out.lead = 'unit_added';
     } else if (leadRow) {
@@ -1300,8 +1308,14 @@ async function handleClarifyReply({ phone, body }) {
       // until the replacement lands (repricePendingActive — time-boxed so
       // a process restart can never strand a draft).
       let repriceGuarded = false;
+      // A reply answering BOTH the unit and the bedroom count re-uses the
+      // unit hold's attempt token: the bedroom re-run's supersede target is
+      // excluded by id, but the call's other held drafts are excluded by
+      // this token — a fresh one would make them duplicate_call_draft and
+      // the corrected unit-and-bedroom replacement would never insert
+      // (codex r4 P2 on #3804).
       const repriceAttempt = recorded.includes('bedroom_count') && lockedEstimateId
-        ? require('crypto').randomUUID()
+        ? (unitHold?.attempt || require('crypto').randomUUID())
         : null;
       if (repriceAttempt) {
         repriceGuarded = await setEstimateRepricePending(trx, lockedEstimateId, new Date().toISOString(), repriceAttempt);

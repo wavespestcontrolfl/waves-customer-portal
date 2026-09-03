@@ -95,6 +95,16 @@ describe('resolveEstimateDeclineGuard — linkage-invalidation fail-closed (PR #
       .toEqual({ ok: true });
   });
 
+  it('a clarify re-price hold refuses the decline with the accept path\'s 409 — a held row must not become a full-rendering stale terminal (codex r4 P1 on #3804)', () => {
+    const held = JSON.stringify({ estimatorEngine: { reprice_pending_at: '2026-09-03T12:00:00Z', reprice_attempt: 'att-1' } });
+    for (const status of ['sending', 'sent', 'viewed']) {
+      expect(resolveEstimateDeclineGuard({ status, expires_at: FUTURE, estimate_data: held }))
+        .toEqual({ ok: false, status: 409, error: 'This estimate is being re-priced — please try again in a few minutes' });
+    }
+    // The pre-read path without estimate_data keeps its answer (the UPDATE carries the predicate).
+    expect(resolveEstimateDeclineGuard({ status: 'sent', expires_at: FUTURE })).toEqual({ ok: true });
+  });
+
   it('accepts published estimates, incl. a mid-send row with no expiry yet', () => {
     expect(isEstimateAcceptActive({ status: 'sent', expires_at: FUTURE })).toBe(true);
     expect(isEstimateAcceptActive({ status: 'viewed', expires_at: FUTURE })).toBe(true);

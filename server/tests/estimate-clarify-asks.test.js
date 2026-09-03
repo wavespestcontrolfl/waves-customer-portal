@@ -1927,8 +1927,9 @@ describe('unit hold (GATE_CLARIFY_UNIT_WRITEBACK — PR C2a: call-row fence + ev
     await reply({ leadRow: { id: 'lead-1', address: 'Bldg 9, 1048 Example Lakes Cir, Sarasota, FL 34232' } });
     const lead = mockState.updates.find((u) => u.table === 'leads');
     expect(lead).toBeDefined();
-    expect(lead.payload.address).toMatch(/Apt 204/);
-    expect(lead.payload.address).toMatch(/Bldg 9/);
+    // Rebuilt from the PEELED street: the unpeeled parse read "Bldg 9" as the
+    // street and dropped Sarasota (codex r4 P1 on #3804).
+    expect(lead.payload.address).toBe('1048 Example Lakes Cir, Bldg 9 Apt 204, Sarasota, FL 34232');
     expect(stamps().at(-1).unit_writeback.lead).toBe('unit_added');
   });
 

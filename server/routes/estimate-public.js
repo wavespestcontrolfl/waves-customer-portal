@@ -8,7 +8,7 @@ const { createDefaultCustomerRows } = require('../services/customer-default-rows
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
 // shared with the admin routes so every whole-blob write applies the same
 // rule (dependency-free module: partial test mocks can't blank a guard).
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -8564,6 +8564,11 @@ async function handleEstimateView(req, res, next) {
       || estimate.archived_at
       || estimate.status === 'send_failed'
       || estimateLinkageInvalidated(estimate)
+      // A clarify re-price hold (isEstimateCustomerViewable parity): a
+      // V1/holdback link opened while the hold sits on a 'sending' row
+      // would otherwise render the stale whole-building quote (codex r4
+      // P1 on #3804).
+      || require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)
       // The DURABLE call-side verdict too (codex P1, PR #3304 GH r9):
       // when the estimate-side marker could not be written, the block
       // lives on the CALL — and this page would otherwise keep serving a
@@ -16284,6 +16289,10 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
         .whereNull('archived_at')
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+        // …and the clarify re-price hold (codex r4 P1 on #3804): a hold
+        // stamped between the pre-read and this write parks the decline
+        // on the guard's 409 via the re-read below.
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         .update({
           status: 'declined',
@@ -18218,6 +18227,16 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   // itself carries matching marker predicates for the TOCTOU window.
   if (estimate.estimate_data !== undefined && estimateLinkageInvalidated(estimate)) {
     return { ok: false, status: 404, error: 'Estimate not found' };
+  }
+  // A clarify re-price hold refuses the decline the way accept refuses it
+  // (same 409 + copy): a browser that loaded the estimate before the hold
+  // landed would otherwise flip the held row to 'declined' — a terminal
+  // that renders again in full at the stale price and can no longer be
+  // corrected. Checked BEFORE alreadyDeclined so the order matches the
+  // UPDATE's predicate (codex r4 P1 on #3804).
+  if (estimate.estimate_data !== undefined
+    && require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) {
+    return { ok: false, status: 409, error: 'This estimate is being re-priced — please try again in a few minutes' };
   }
   if (estimate.status === 'declined') {
     return { ok: true, alreadyDeclined: true };

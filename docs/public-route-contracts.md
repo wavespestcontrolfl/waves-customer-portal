@@ -544,6 +544,22 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+A clarify RE-PRICE HOLD (`estimate_data.estimatorEngine.reprice_pending_at`
+non-empty — stamped by `estimate-clarify-asks` when a customer's unit or
+bedroom reply proves the row's address or dollars stale; lifted only by the
+operator's revision / proposal save or by the replacement draft's supersede
+archive) takes the row out of the customer surface whatever its status:
+the GET view (React `/data`, the legacy SSR page, `/pdf`, the slots
+routes, every `isEstimateCustomerViewable` consumer) answers the same
+generic 404 as an unknown token, and the two writes refuse with 409
+`{ error: 'This estimate is being re-priced — please try again in a few
+minutes' }` — `/accept` inside its locked read, `/decline` at the
+guard AND on the UPDATE's own predicate (a hold landing between the two
+parks the decline on that 409, never a stale 'declined' terminal). A
+group's held siblings are skipped at preflight, claim and publication;
+a held ANCHOR parks as `send_failed`. No enumeration signal: the hold
+is unobservable from outside beyond the accept/decline 409, which a held
+row can only reach through a link that went out before the hold.
 `/select-tier` refuses any tier above the tier the ENGINE wrote for the
 estimate's qualifying services (400 `tier_not_available_for_current_services`
 + `maxTier`; downgrades stay allowed): the ceiling is the last opt-out

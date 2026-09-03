@@ -611,13 +611,23 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // The ANCHOR's final publication honors the hold too: three predicates (claim, sibling publish,
     // anchor finalize) and the held anchor parks as send_failed (codex r3 P1 on #3804).
     expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(3);
+    // The customer DECLINE carries the hold predicate on its UPDATE too, and its guard answers the
+    // accept path's 409; the legacy SSR renderer checks the hold beside the linkage markers (codex r4 P1).
+    const pub = src('../routes/estimate-public.js');
+    expect((pub.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(1);
+    expect(pub).toContain("return { ok: false, status: 409, error: 'This estimate is being re-priced — please try again in a few minutes' };");
+    expect(pub.indexOf('|| estimateLinkageInvalidated(estimate)\n      // A clarify re-price hold (isEstimateCustomerViewable parity)')).toBeGreaterThan(-1);
     expect(route).toContain("update({ status: 'send_failed', last_send_error: 'reprice_pending', scheduled_at: null, updated_at: db.fn.now() })");
     // The proposal save judges the EDITABLE proposal address.
     expect(route).toContain("unitHoldSatisfied(trx, nextEngine.callLogId || null, normalized?.propertyAddress || locked.address)");
-    // The rows one clarify hold marked never block an adopted-answer replacement (both creators).
+    // The rows one clarify hold marked never block the reply's replacement (both creators) — keyed on
+    // the attempt token alone, and a combined unit+bedroom reply shares the unit hold's token with the
+    // bedroom re-run (codex r4 P2 on #3804).
     for (const rel of ['../services/estimator-engine/draft-builder.js', '../services/estimator-engine/commercial-proposal.js']) {
-      expect(src(rel)).toContain("context?.supersedeReason === 'unit_answer_adopted' && context?.supersedeAttempt");
+      expect(src(rel)).toContain("if (context?.supersedeAttempt) {");
+      expect(src(rel)).not.toContain("context?.supersedeReason === 'unit_answer_adopted' && context?.supersedeAttempt");
     }
+    expect(src('../services/estimate-clarify-asks.js')).toContain("? (unitHold?.attempt || require('crypto').randomUUID())");
     // A force-reprocess whose adopted answer meets the held whole-building draft supersedes it.
     expect(engine).toContain("context.supersedeReason = 'unit_answer_adopted';");
     expect(engine).toContain('sameStreetAddress(splitUnitFirstLine(own)?.rest || own, buildingLine)');
