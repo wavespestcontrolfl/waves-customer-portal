@@ -123,7 +123,9 @@ async function recipientReview(q, email) {
     }
   }
   const kind = exact.length ? 'customer' : shared.length ? 'ambiguous' : 'clear';
-  const matched = kind === 'customer' ? exact : shared;
+  // deterministic: the queries carry no ORDER BY, and the hash the owner acknowledges must equal the one the locked send recomputes
+  const bySourceId = (a, b) => (a.source < b.source ? -1 : a.source > b.source ? 1 : String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0);
+  const matched = (kind === 'customer' ? exact : shared).slice().sort(bySourceId);
   return { kind, recipient, matched, lookup_hash: sha256({ recipient, kind, matched }) };
 }
 

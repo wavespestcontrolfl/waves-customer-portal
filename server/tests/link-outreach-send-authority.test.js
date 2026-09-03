@@ -284,6 +284,10 @@ describe('the nightly auto-send (§6.4)', () => {
     const inline = scenario({ policy: AUTO_POLICY });
     await nightly(inline.db, { autoSend: false, send });
     expect(send).not.toHaveBeenCalled();
+    // the default is OFF: an admin's manual job (no autoSend option) never sends — only the scheduler opts in
+    const manual = scenario({ policy: AUTO_POLICY });
+    expect((await bridge.runAuthorityBridge(manual.db, { now: NOW, exclusive: (k, fn) => fn(), notify: jest.fn(), send })).autoSend).toBeUndefined();
+    expect(send).not.toHaveBeenCalled();
     isEnabled.mockImplementation((g) => g !== 'linkProspectOutreach');
     const gated = scenario({ policy: AUTO_POLICY });
     expect((await nightly(gated.db, { autoSend: true, send })).autoSend).toBeUndefined();

@@ -110,6 +110,14 @@ describe('recipientReview (§13)', () => {
     const other = await M.recipientReview(seed({ customers: [shared] }), 'editor@bradentonherald.com');
     expect(other.lookup_hash).not.toBe(r.lookup_hash);
   });
+  test('the lookup hash is independent of the row order the queries return', async () => {
+    const a = customer({ id: 'c-a', email: 'ads@bradentonherald.com' });
+    const b = customer({ id: 'c-b', email: 'sales@bradentonherald.com' });
+    const one = await M.recipientReview(seed({ customers: [a, b] }), 'editor@bradentonherald.com');
+    const two = await M.recipientReview(seed({ customers: [b, a] }), 'editor@bradentonherald.com');
+    expect(one.lookup_hash).toBe(two.lookup_hash);
+    expect(one.matched.map((m) => m.id)).toEqual(['c-a', 'c-b']);
+  });
   test('a lookup failure throws — the caller fails closed', async () => {
     const db = seed();
     db._beforeResolve = (table) => { if (table === 'leads') throw new Error('connection reset'); };

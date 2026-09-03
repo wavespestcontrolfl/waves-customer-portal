@@ -45,7 +45,8 @@
  * drafted, unleased `prospect` row is handed to the sender in 'auto' mode —
  * the sender re-validates everything under its own lock (gate, policy cap,
  * customer exclusion, the authority row) and stops the batch at the cap. An
- * inline run (an owner's click) never sends: autoSend is false there.
+ * inline run (an owner's click) and an admin's manual job never send: only the
+ * scheduler's nightly call opts in (autoSend: true; the default is false).
  */
 
 const { isEnabled } = require('../../config/feature-gates');
@@ -602,7 +603,7 @@ function aggregateState(placements) {
  */
 async function runAuthorityBridge(db, {
   limit = DEFAULT_LIMIT, dryRun = false, domainIds = null, now: fixedNow = null,
-  exclusive = defaultExclusive, notify = defaultNotify, autoSend = true, send = defaultSend,
+  exclusive = defaultExclusive, notify = defaultNotify, autoSend = false, send = defaultSend,
 } = {}) {
   const now = fixedNow || new Date();
   const gated = !isEnabled('linkAuthority');
