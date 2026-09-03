@@ -8,7 +8,7 @@
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST } = require('../services/pricing-engine/constants');
 const { _internals, PUBLIC_QUOTE_SERVICE_KEYS } = require('../routes/public-quote');
-const { quoteServicesForKey, PUBLIC_INSTANT_QUOTE_KEYS, COCKROACH_PACKAGE_VISITS, cockroachPackageDisplayCurrent } = require('../services/public-services-menu');
+const { quoteServicesForKey, PUBLIC_INSTANT_QUOTE_KEYS, COCKROACH_PACKAGE_VISITS } = require('../services/public-services-menu');
 const { buildPublicQuoteServiceInterest, buildCompactPublicQuoteServiceInterest, derivePerApplication, isManualQuoteLine, estimateBlocksSelfBookLink, keyedLeadLabel, dropKeyedOnlyServices } = _internals;
 
 const BASE_PROPERTY = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005 };
@@ -94,19 +94,6 @@ describe('cockroach_control as a public instant quote', () => {
     // The block is the roach line itself, not a quote-required / handoff flag.
     expect(estimateBlocksSelfBookLink({ lineItems: [{ service: 'pest_initial_roach', price: 250 }] })).toBe(true);
     expect(estimateBlocksSelfBookLink({ lineItems: [{ service: 'mosquito', price: 250 }] })).toBe(false);
-  });
-  test('the live display-count gate the route re-checks before the engine follows the mutable constants (codex r2 P1)', () => {
-    const original = PEST.pestInitialRoach.display.regular_standalone;
-    expect(cockroachPackageDisplayCurrent()).toBe(true);
-    try {
-      PEST.pestInitialRoach.display.regular_standalone = { ...original, treatments: 3 };
-      expect(cockroachPackageDisplayCurrent()).toBe(false);
-      PEST.pestInitialRoach.display.regular_standalone = { name: original.name };
-      expect(cockroachPackageDisplayCurrent()).toBe(false);
-    } finally {
-      PEST.pestInitialRoach.display.regular_standalone = original;
-    }
-    expect(cockroachPackageDisplayCurrent()).toBe(true);
   });
   test('the keyed input freezes the promised count and the catalog identity — a later display edit cannot change what the draft regenerates (codex r3 P1 ×2)', () => {
     const frozen = { pestInitialRoach: { roachType: 'regular', packageTreatments: COCKROACH_PACKAGE_VISITS, catalogServiceKey: 'cockroach_control' } };

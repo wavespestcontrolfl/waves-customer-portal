@@ -12,12 +12,6 @@
  * its own reviewed product copy keyed by service_key (pre-push codex P1).
  */
 const db = require('../models/db');
-// Live (db-bridge merged) pricing display config — the treatment count the
-// cockroach estimate line advertises.
-// Required as a module (not destructured) so the menu builder's resync is
-// the engine's live export — tests stub it.
-const pricingEngine = require('./pricing-engine');
-const pricingConstants = pricingEngine.constants;
 
 const FAMILY_LABELS = {
   pest_control: 'Pest Control',
@@ -161,21 +155,29 @@ function expectedCadenceForRequest(request) {
 // still say two, or the instant quote advertises a package the obligation
 // does not deliver (pre-push codex P1; codex #3842 r1 P1).
 const COCKROACH_PACKAGE_VISITS = 2;
-// Live-count half of the gate. The admin pricing-config save resyncs the
-// mutable constants at any time, so /calculate re-reads the row through
-// publicSelectableService (and therefore this predicate) immediately before
-// generateEstimate — a resync that lands during its awaited lookups cannot
-// render a count the obligation does not deliver (codex #3842 r2 P1).
-function cockroachPackageDisplayCurrent() {
-  return Number(pricingConstants.PEST?.pestInitialRoach?.display?.regular_standalone?.treatments) === COCKROACH_PACKAGE_VISITS;
+// The count the customer is promised is FROZEN into the engine input at
+// quote time (public-quote); this gate only decides whether the package is
+// advertised instant. Its second authority is the persisted
+// pricing_config row itself — read directly, never this process's engine
+// constants (which only the admin save's own worker resyncs, and which a
+// full resync per public request would be too expensive to refresh —
+// codex #3842 r3–r5). Absent / unreadable ⇒ unverified ⇒ not instant.
+async function cockroachPackageCountVerified(conn = db) {
+  try {
+    if (!(await conn.schema.hasTable('pricing_config'))) return false;
+    const row = await conn('pricing_config').where({ config_key: 'pest_base' }).first('data');
+    if (!row) return false;
+    const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+    return Number(data?.initial_roach?.display?.regular_standalone?.treatments) === COCKROACH_PACKAGE_VISITS;
+  } catch {
+    return false;
+  }
 }
 function requestMatchesCatalogRow(serviceKey, row) {
   const request = PUBLIC_QUOTE_REQUESTS[serviceKey];
   if (!request || !row) return false;
   if (request.pestInitialRoach) {
-    return row.billing_type !== 'recurring'
-      && Number(row.visits_per_year) === COCKROACH_PACKAGE_VISITS
-      && cockroachPackageDisplayCurrent();
+    return row.billing_type !== 'recurring' && Number(row.visits_per_year) === COCKROACH_PACKAGE_VISITS;
   }
   const expected = expectedCadenceForRequest(request);
   if (expected == null) return row.billing_type !== 'recurring';
@@ -201,12 +203,12 @@ function mergeKeyedRequestOptions(request, bodyServices) {
 function termiteRentalGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
 }
-// `displayVerified: false` = this process could not refresh pricing_config
-// before building the menu; the cockroach package's second authority is
-// then unverified and its row is advertised quote-on-request (fail closed).
-function instantForRow(row, { displayVerified = true } = {}) {
+// `packageCountVerified` = cockroachPackageCountVerified() as read by the
+// caller for this request/menu build; false (or omitted) keeps the cockroach
+// package quote-on-request (fail closed) — every other row ignores it.
+function instantForRow(row, { packageCountVerified = false } = {}) {
   if (!PUBLIC_INSTANT_QUOTE_KEYS.has(row.service_key) || !requestMatchesCatalogRow(row.service_key, row)) return false;
-  if (PUBLIC_QUOTE_REQUESTS[row.service_key]?.pestInitialRoach && displayVerified === false) return false;
+  if (PUBLIC_QUOTE_REQUESTS[row.service_key]?.pestInitialRoach && packageCountVerified !== true) return false;
   if (row.service_key === 'termite_bait' && !termiteRentalGateOn()) return false;
   return true;
 }
@@ -242,18 +244,12 @@ async function loadPublicServicesMenu(conn = db) {
     .where({ is_active: true, is_archived: false, public_quote_selectable: true })
     .orderBy([{ column: 'category' }, { column: 'sort_order' }, { column: 'name' }])
     .select('service_key', 'name', 'category', 'billing_type', 'frequency', 'visits_per_year');
-  // The cockroach package's live display count lives in THIS process's
-  // engine constants, which only the admin save's own worker resyncs — pull
-  // pricing_config in (coalesced) before advertising, and fail closed for
-  // that row when the refresh did not land (pre-push codex P1, replicas).
-  // Bounded by the bridge's 60s window: this is an unauthenticated GET, and
-  // an unconditional full resync per request would queue database-wide
-  // refreshes behind the global sync queue (codex #3842 r5 P1).
-  let displayVerified = true;
-  if (rows.some((r) => PUBLIC_QUOTE_REQUESTS[r.service_key]?.pestInitialRoach) && pricingEngine.needsSync()) {
-    try { displayVerified = (await pricingEngine.syncConstantsFromDB()) === true; } catch { displayVerified = false; }
-  }
-  return rows.map((row) => menuItem(row, { displayVerified }));
+  // One targeted read of the persisted count per menu build (only when the
+  // catalog carries the package row).
+  const packageCountVerified = rows.some((r) => PUBLIC_QUOTE_REQUESTS[r.service_key]?.pestInitialRoach)
+    ? await cockroachPackageCountVerified(conn)
+    : false;
+  return rows.map((row) => menuItem(row, { packageCountVerified }));
 }
 
 // The catalog row a lead-supplied key names — ONLY when it is a product a
@@ -289,7 +285,10 @@ async function publicSelectableService(serviceKey, conn = db) {
     if (!selectable && !FORMERLY_PUBLIC_KEYS.has(serviceKey)) return null;
     // booking_enabled rides along so /calculate never mints a self-book slot
     // for a product the Service Library has turned off (GH codex #3585).
-    return { service_key: row.service_key, name: row.name, instant: selectable && instantForRow(row), booking_enabled: row.booking_enabled !== false };
+    // The cockroach package's persisted count is read HERE, so the route's
+    // pre-engine re-call of this function re-verifies both authorities.
+    const packageCountVerified = PUBLIC_QUOTE_REQUESTS[serviceKey]?.pestInitialRoach ? await cockroachPackageCountVerified(conn) : false;
+    return { service_key: row.service_key, name: row.name, instant: selectable && instantForRow(row, { packageCountVerified }), booking_enabled: row.booking_enabled !== false };
   } catch {
     // Fail closed to a prose-only lead: a keyed lead must never be created
     // from an unverified key, and a catalog read failure must not fail intake.
@@ -302,4 +301,4 @@ async function isPublicSelectableServiceKey(serviceKey, conn = db) {
 }
 
 module.exports = {
-  COCKROACH_PACKAGE_VISITS, cockroachPackageDisplayCurrent, LAWN_TRACKS, loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS };
+  COCKROACH_PACKAGE_VISITS, cockroachPackageCountVerified, LAWN_TRACKS, loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS };

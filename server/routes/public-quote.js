@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { COCKROACH_PACKAGE_VISITS, publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
 const logger = require('../services/logger');
-const { generateEstimate, normalizeRoachType, syncConstantsFromDB, needsSync, constants: pricingConstants } = require('../services/pricing-engine');
+const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
@@ -963,21 +963,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     let keyedService = null;
     if (requestedServiceKey) {
       if (!/^[a-z0-9_]{1,80}$/.test(requestedServiceKey)) return res.status(400).json({ error: 'Unknown service.' });
-      // The cockroach package's instant gate reads THIS process's engine
-      // constants — refresh them from pricing_config (coalesced) BEFORE the
-      // first eligibility read, or a replica whose constants are stale
-      // demotes an eligible quote / advertises a stale one. A failed refresh
-      // leaves the count unverified: quote-on-request (pre-push codex P1).
-      // Bounded by the bridge's own 60s window (needsSync) — a full resync
-      // per request would let an unauthenticated caller queue database-wide
-      // refreshes (codex #3842 r5 P1).
-      let displayVerified = true;
-      if (quoteServicesForKey(requestedServiceKey)?.pestInitialRoach && needsSync()) {
-        try { displayVerified = (await syncConstantsFromDB()) === true; } catch { displayVerified = false; }
-      }
+      // publicSelectableService reads BOTH of the cockroach package's
+      // authorities from the database (catalog row + persisted display
+      // count) — never this process's engine constants.
       keyedService = await publicSelectableService(requestedServiceKey);
       if (!keyedService) return res.status(400).json({ error: 'Unknown service.' });
-      if (!displayVerified) keyedService = { ...keyedService, instant: false };
     }
     const keyedInstant = !!(keyedService && keyedService.instant && quoteServicesForKey(requestedServiceKey));
     // Keyed but not instant: no engine services — the request flows through
@@ -1571,14 +1561,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // pull the pricing_config row into THIS worker first (coalesced,
       // one read) so a replica cannot pass the gate on a stale count
       // (codex #3842 r3 P1).
-      // The bridge resolves FALSE (constants restored to their last good
-      // state) rather than throwing on a failed read — an unrefreshed
-      // count is unverified, so the gate fails closed (codex #3842 r4 P0).
-      let resynced = true;
-      if (engineInput.services?.pestInitialRoach && needsSync()) {
-        try { resynced = (await syncConstantsFromDB()) === true; } catch (syncErr) { resynced = false; logger.warn(`[public-quote] pricing-config resync before the cockroach gate failed: ${syncErr.message}`); }
-      }
-      const fresh = resynced ? await publicSelectableService(requestedServiceKey) : null;
+      const fresh = await publicSelectableService(requestedServiceKey);
       if (!fresh?.instant) {
         keyedQuoteOnRequest = true;
         services = {};
