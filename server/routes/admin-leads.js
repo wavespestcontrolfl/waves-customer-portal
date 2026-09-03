@@ -225,11 +225,14 @@ router.get('/analytics/overview', async (req, res, next) => {
     // Non-engaged rows (spam, cancelled, and the wizard's auto-filed
     // 'duplicate' repeats — public-quote.js) are not prospects: they must
     // not inflate the total or dilute the conversion rate (codex #3834 r6).
+    // A repeat that later took a win keeps its ancestry marker and is
+    // excluded by the marker too (pre-push P1 on r13).
     const leads = await db('leads')
       .whereNull('deleted_at')
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)
-      .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES);
+      .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
+      .whereRaw("COALESCE(extracted_data->>'duplicate_of_lead_id', '') = ''");
 
     const total = leads.length;
     const won = leads.filter(l => l.status === 'won').length;
@@ -291,6 +294,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     const recentResponded = await db('leads')
       .whereNull('deleted_at')
       .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
+      .whereRaw("COALESCE(extracted_data->>'duplicate_of_lead_id', '') = ''")
       .whereNotNull('response_time_minutes')
       .whereNotNull('first_contact_at')
       .whereRaw(

@@ -14,6 +14,7 @@ jest.mock('../models/db', () => {
       whereNull(...args) { mockWhereCalls.push([table, 'whereNull', ...args]); return builder; },
       whereIn(...args) { mockWhereCalls.push([table, 'whereIn', args[0]]); return builder; },
       whereNotIn(...args) { mockWhereCalls.push([table, 'whereNotIn', ...args]); return builder; },
+      whereRaw(...args) { mockWhereCalls.push([table, 'whereRaw', ...args]); return builder; },
       modify(fn) { fn(builder); return builder; },
       first: async () => (Array.isArray(rows) ? (rows[0] ?? null) : (rows ?? null)),
       select: async () => (Array.isArray(rows) ? rows : []),
@@ -82,6 +83,8 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     await calculateSourceROI('src-1', start, end);
     const statusExclusion = mockWhereCalls.find((c) => c[0] === 'leads' && c[1] === 'whereNotIn' && c[2] === 'status');
     expect(statusExclusion).toBeTruthy();
+    // A converted repeat keeps its ancestry marker: excluded by the marker too (pre-push r13).
+    expect(mockWhereCalls.some((c) => c[0] === 'leads' && c[1] === 'whereRaw' && /duplicate_of_lead_id/.test(c[2]))).toBe(true);
     expect(statusExclusion[3]).toEqual(expect.arrayContaining(['duplicate', 'spam', 'cancelled']));
   });
 
