@@ -151,7 +151,7 @@ const BRIEF_SCHEMA = {
       additionalProperties: false,
       required: ['propertyType', 'footprintSqft', 'units', 'buildings', 'landUse'],
       properties: {
-        propertyType: { type: 'string' },
+        propertyType: { type: ['string', 'null'], description: 'null when the facts do not establish it' },
         footprintSqft: { type: ['number', 'null'] },
         units: { type: ['number', 'null'] },
         buildings: { type: ['number', 'null'] },

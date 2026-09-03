@@ -24,7 +24,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { ANSWER_KEYS } = require('./job-applications');
 
-const PROMPT_VERSION = 2;
+const PROMPT_VERSION = 3; // 3 = provider-enforced SCREEN_SCHEMA (was prompt-only JSON)
 const RECOMMENDATIONS = ['strong', 'possible', 'weak'];
 
 const SCREEN_SYSTEM_PROMPT = `You are screening job applications for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
