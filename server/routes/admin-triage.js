@@ -70,9 +70,13 @@ router.get('/', async (req, res) => {
     // Optional narrowing to one customer's calls — the estimate tool reads
     // the linked customer's open address-review cards (an owed unit number)
     // so the property panel can say the address is still being confirmed.
-    // Malformed ids are ignored (full list), never 400: the inbox itself
-    // never sends one.
-    const customerId = UUID_RE.test(String(req.query.customer_id || '')) ? String(req.query.customer_id) : null;
+    // A malformed id is a 400, never a silent fall-through to EVERY
+    // customer's cards (pre-push codex P1).
+    const rawCustomerId = req.query.customer_id == null ? '' : String(req.query.customer_id);
+    if (rawCustomerId && !UUID_RE.test(rawCustomerId)) {
+      return res.status(400).json({ error: 'customer_id must be a UUID' });
+    }
+    const customerId = rawCustomerId || null;
 
     const items = await db('triage_items')
       .leftJoin('call_log', 'triage_items.call_log_id', 'call_log.id')
