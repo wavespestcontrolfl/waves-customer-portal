@@ -128,6 +128,12 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(singleHero).not.toMatch(/follow-up/);
     const twoHero = oneTimeOnlyIntelligenceCopy([{ service: 'flea_package', label: 'Flea Elimination Package', amount: 350, visits: 2, exteriorStatus: 'priced' }]).hero.sub;
     expect(twoHero).toMatch(/^Interior and yard treatment priced from your home, with the follow-up built in/);
+    // Scope comes from every row of the key, not whichever row is first.
+    const dupHero = oneTimeOnlyIntelligenceCopy([
+      { service: 'flea_package', label: 'Flea Elimination Package — exterior', amount: 95, exteriorStatus: 'not_included' },
+      { service: 'flea_package', label: 'Flea Elimination Package', amount: 350, visits: 2, exteriorStatus: 'priced' },
+    ]).hero.sub;
+    expect(dupHero).toBe(twoHero);
   });
 
   test('wasp: physical removal is promised only when the removal add-on was priced', () => {

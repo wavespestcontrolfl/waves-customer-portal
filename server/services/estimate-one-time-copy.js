@@ -233,10 +233,14 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
   const [key] = [...keys];
   const entry = key ? PACK[key] : null;
   if (!entry || !entry.hero) return null;
-  const visits = Number(rows[0].visits) || (key === 'flea' && String(rows[0].offerKey || '').includes('two_visit') ? 2 : 0);
+  // Scope from EVERY row of the key, never an arbitrary first row (codex
+  // pre-push P1): the largest visit count, and exterior priced if any row
+  // says so.
+  const visits = rows.reduce((max, row) => Math.max(max,
+    Number(row.visits) || (key === 'flea' && String(row.offerKey || '').includes('two_visit') ? 2 : 0)), 0);
   // Flea hero subline follows the priced scope: exterior only when priced,
   // "follow-up built in" only on the two-visit package (codex pre-push P1).
-  const fleaExteriorPriced = ['priced', 'requires_confirmation'].includes(String(rows[0].exteriorStatus || ''));
+  const fleaExteriorPriced = rows.some((row) => ['priced', 'requires_confirmation'].includes(String(row.exteriorStatus || '')));
   const heroSub = key === 'flea'
     ? entry.hero.sub
       .replace('{Scope}', fleaExteriorPriced ? 'Interior and yard' : 'Interior')
