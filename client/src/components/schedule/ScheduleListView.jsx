@@ -36,7 +36,7 @@ const STATUS_LABELS = {
   on_site: 'On Site', completed: 'Completed', skipped: 'Skipped', cancelled: 'Cancelled',
 };
 
-export default function ScheduleListView({ technicians = [], onEdit, onRefresh, owesCompletion, refreshKey = 0 }) {
+export default function ScheduleListView({ technicians = [], onEdit, onRefresh }) {
   const [services, setServices] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -110,9 +110,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
       setTotal(data.total || 0);
     } catch { setServices([]); setTotal(0); }
     setLoading(false);
-    // refreshKey: the parent bumps it after a completion so an owed row's
-    // badge / routing clear without a reload (the list owns its own cache).
-  }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page, refreshKey]);
+  }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page]);
 
   useEffect(() => { fetchList(); }, [fetchList]);
 
@@ -462,15 +460,9 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
                   <td className={cn(tdClass, 'u-nums')}>{fmtTime(s.windowStart)}{s.windowEnd ? `–${fmtTime(s.windowEnd)}` : ''}</td>
                   <td className={tdClass}>{s.technicianName || <span className="text-zinc-400">—</span>}</td>
                   <td className={tdClass}>
-                    {owesCompletion?.(s) ? (
-                      // Completed but the closeout (invoice / report / text) is
-                      // still owed — the row's edit action resumes it.
-                      <Badge tone="alert">Closeout owed</Badge>
-                    ) : (
-                      <Badge tone={s.status === 'completed' ? 'neutral' : s.status === 'cancelled' || s.status === 'skipped' ? 'alert' : 'strong'}>
-                        {STATUS_LABELS[s.status] || s.status}
-                      </Badge>
-                    )}
+                    <Badge tone={s.status === 'completed' ? 'neutral' : s.status === 'cancelled' || s.status === 'skipped' ? 'alert' : 'strong'}>
+                      {STATUS_LABELS[s.status] || s.status}
+                    </Badge>
                   </td>
                   <td className={tdClass}>
                     {s.prepaidAmount > 0 ? (

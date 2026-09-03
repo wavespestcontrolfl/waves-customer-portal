@@ -116,12 +116,28 @@ const PRE_SERVICE_STATUSES = new Set(["pending", "confirmed", "rescheduled"]);
 // Recovery deep-links these rows here via ?completeService=.
 export function completedVisitOwesCompletion(service) {
   if (String(service?.status || "").toLowerCase() !== "completed") return false;
+  // The durable resume marker wins: it is only ever set by CompletionPanel's
+  // own committed submit, so a committed side-effect chain owes its replay
+  // regardless of how the project heuristics classify the row (a cut-over
+  // typed visit with a leftover linked project and a failed profile lookup
+  // would otherwise lose its resume — Codex #3799 r5).
+  if (completionResumeMarked(service)) return true;
   // A completed project-backed visit is closed by definition — handleComplete
   // refuses it (projectCompletionIsClosed) and CompletionPanel never owns
-  // it, so advertising a closeout it cannot resume would be a dead cue
-  // (Codex #3799 r1).
+  // it, so a status-only reopen would be a dead end (Codex #3799 r1).
   if (projectCompletionIsClosed(service)) return false;
-  return service?.has_service_record === false || completionResumeOwed(service?.id);
+  return service?.has_service_record === false;
+}
+
+// The "Closeout owed" cue on the dispatch surfaces (mobile list, day grid,
+// 5-day / week grid) keys on the resume marker ONLY: a completed visit whose
+// committed closeout still owes a side effect on THIS device after a 503 —
+// the #3783 scenario. Status-only completions (has_service_record === false,
+// the Billing Recovery backlog) keep their existing tap-to-open path but are
+// deliberately not badged here; that population needs its own lane.
+export function completionResumeMarked(service) {
+  if (String(service?.status || "").toLowerCase() !== "completed") return false;
+  return completionResumeOwed(service?.id);
 }
 
 
@@ -1681,30 +1697,9 @@ export default function DispatchPageV2({
   // (handleCompleteSubmit) and the panel's status-poll resolution
   // (onCompletionResult, codex P1 #3187 r11) — both must flip the status,
   // invalidate the mobile week cache, and stage the payment handoff.
-  // The visit is completed AND now has its service record — the same-key
-  // result and the cross-key callback both land here. Flipping the cached
-  // day-payload flag is what stops completedVisitOwesCompletion from
-  // offering a resume the server would now refuse (Codex #3799 r2/r3 P2);
-  // the resume marker is cleared by the panel itself on success.
-  const markVisitClosedOut = useCallback(
-    (serviceId) => {
-      handleStatusChange(serviceId, "completed");
-      setData((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          services: prev.services.map((s) =>
-            s.id === serviceId ? { ...s, has_service_record: true } : s,
-          ),
-        };
-      });
-    },
-    [handleStatusChange],
-  );
-
   const applyCompletionResult = useCallback(
     (serviceId, r, body) => {
-      markVisitClosedOut(serviceId);
+      handleStatusChange(serviceId, "completed");
       // The mobile week list serves rows from its own cached /week payload —
       // completion was the one terminal transition that never invalidated
       // it, leaving the completed stop tappable for a duplicate /complete
@@ -2253,7 +2248,7 @@ export default function DispatchPageV2({
           date={date}
           refreshKey={scheduleRefreshKey}
           technicians={technicians}
-          owesCompletion={completedVisitOwesCompletion}
+          owesCompletion={completionResumeMarked}
           onRefresh={() => setScheduleRefreshKey((key) => key + 1)}
           onEdit={(svc) => {
             if (shouldOpenMobileCompletion(svc)) {
@@ -2273,11 +2268,11 @@ export default function DispatchPageV2({
           selectedDate={date}
           hideUnassignedRail={false}
           refreshKey={scheduleRefreshKey}
-          owesCompletion={completedVisitOwesCompletion}
+          owesCompletion={completionResumeMarked}
           onEdit={(svc) => {
-            // Owed closeouts resume through the completion panel, same as
-            // the day grid and the mobile list (pre-push Codex P1).
-            if (completedVisitOwesCompletion(svc)) {
+            // A row wearing the "Closeout owed" chip resumes through the
+            // completion panel, same as the day grid and the mobile list.
+            if (completionResumeMarked(svc)) {
               handleComplete(svc);
             } else {
               setEditingService(svc);
@@ -2304,11 +2299,11 @@ export default function DispatchPageV2({
           selectedDate={date}
           hideUnassignedRail={isMobile}
           refreshKey={scheduleRefreshKey}
-          owesCompletion={completedVisitOwesCompletion}
+          owesCompletion={completionResumeMarked}
           onEdit={(svc) => {
-            // Owed closeouts resume through the completion panel, same as
-            // the day grid and the mobile list (pre-push Codex P1).
-            if (completedVisitOwesCompletion(svc)) {
+            // A row wearing the "Closeout owed" chip resumes through the
+            // completion panel, same as the day grid and the mobile list.
+            if (completionResumeMarked(svc)) {
               handleComplete(svc);
             } else {
               setEditingService(svc);
@@ -2342,14 +2337,8 @@ export default function DispatchPageV2({
       {viewMode === "list" && (
         <ScheduleListView
           technicians={data?.technicians || []}
-          refreshKey={scheduleRefreshKey}
-          owesCompletion={completedVisitOwesCompletion}
           onEdit={(svc) => {
-            // An owed closeout resumes through the completion panel on every
-            // surface, the list included (Codex #3799 r3).
-            if (completedVisitOwesCompletion(svc)) {
-              handleComplete(svc);
-            } else if (isMobile) {
+            if (isMobile) {
               setDetailService(svc);
             } else {
               setEditingService(svc);
@@ -2612,12 +2601,12 @@ export default function DispatchPageV2({
               date={date}
               services={services}
               technicians={technicians}
-              owesCompletion={completedVisitOwesCompletion}
+              owesCompletion={completionResumeMarked}
               onEdit={(svc) => {
                 // A block wearing the "Closeout owed" chip must open the
                 // completion panel (resume), not the appointment editor —
-                // same routing the mobile list uses (pre-push Codex P1).
-                if (completedVisitOwesCompletion(svc)) {
+                // same routing the mobile list uses.
+                if (completionResumeMarked(svc)) {
                   handleComplete(svc);
                 } else {
                   setEditingService(svc);
@@ -2649,7 +2638,7 @@ export default function DispatchPageV2({
               services={services}
               rainChance={typeof safeData.rainChance === "number" ? safeData.rainChance : null}
               technicians={technicians}
-              owesCompletion={completedVisitOwesCompletion}
+              owesCompletion={completionResumeMarked}
               onRefresh={() => fetchSchedule(date)}
               onEdit={(svc) => {
                 if (shouldOpenMobileCompletion(svc)) {
@@ -2684,7 +2673,7 @@ export default function DispatchPageV2({
             // idempotency key, so handleCompleteSubmit never resolved —
             // run its non-payment bookkeeping (the invoice payload only
             // travels on the same-key response, so no payment handoff).
-            markVisitClosedOut(serviceId);
+            handleStatusChange(serviceId, "completed");
             setScheduleRefreshKey((k) => k + 1);
           }}
           onCompletionResult={(serviceId, r) =>

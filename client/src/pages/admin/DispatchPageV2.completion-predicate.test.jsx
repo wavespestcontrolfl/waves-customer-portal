@@ -10,7 +10,7 @@ vi.mock("./SchedulePage", () => ({
   completionResumeOwed: (id) => id === "svc-resume",
 }));
 
-import { completedVisitOwesCompletion } from "./DispatchPageV2";
+import { completedVisitOwesCompletion, completionResumeMarked } from "./DispatchPageV2";
 
 describe("completedVisitOwesCompletion", () => {
   it("opens completion for a completed visit with NO service record (status-only completion)", () => {
@@ -34,14 +34,24 @@ describe("completedVisitOwesCompletion", () => {
 
 
 describe("completedVisitOwesCompletion — project-backed visits", () => {
-  it("never flags a completed project-backed visit, even with the marker or no service record", () => {
+  it("never reopens a completed project-backed visit on the status-only path", () => {
     const projectBacked = { completionProfile: { projectBacked: true } };
-    expect(completedVisitOwesCompletion({ id: "svc-resume", status: "completed", has_service_record: true, ...projectBacked })).toBe(false);
     expect(completedVisitOwesCompletion({ id: "svc-1", status: "completed", has_service_record: false, ...projectBacked })).toBe(false);
     expect(completedVisitOwesCompletion({ id: "svc-1", status: "completed", has_service_record: false, linkedProject: { id: "proj-1" } })).toBe(false);
   });
+  it("lets the durable resume marker win over the project fallback", () => {
+    expect(completedVisitOwesCompletion({ id: "svc-resume", status: "completed", has_service_record: true, linkedProject: { id: "proj-1" }, completionProfileLookupFailed: true })).toBe(true);
+  });
   it("keeps flagging a typed (non-project) profile", () => {
     expect(completedVisitOwesCompletion({ id: "svc-1", status: "completed", has_service_record: false, completionProfile: { projectBacked: false } })).toBe(true);
+  });
+});
+
+describe("completionResumeMarked — the badge predicate", () => {
+  it("is the resume marker only: not a status-only completion, not a non-completed visit", () => {
+    expect(completionResumeMarked({ id: "svc-resume", status: "completed", has_service_record: true })).toBe(true);
+    expect(completionResumeMarked({ id: "svc-1", status: "completed", has_service_record: false })).toBe(false);
+    expect(completionResumeMarked({ id: "svc-resume", status: "on_site" })).toBe(false);
   });
 });
 

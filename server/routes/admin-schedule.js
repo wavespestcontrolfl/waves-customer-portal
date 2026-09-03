@@ -55,7 +55,6 @@ const {
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
-const { hasServiceRecordSql } = require('../services/service-record-presence');
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
@@ -3558,7 +3557,7 @@ router.get('/', async (req, res, next) => {
         // 'completed' row (historical PUT /status completions) has none and
         // is what Billing Recovery deep-links here to finish through
         // CompletionPanel (fail-closed: readers require === false).
-        db.raw(HAS_SERVICE_RECORD_SQL),
+        db.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id) as has_service_record'),
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
@@ -4092,10 +4091,6 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.service_id',
           'scheduled_services.is_callback',
           'scheduled_services.service_type', 'scheduled_services.status',
-          // Same completion-record flag the day endpoint serializes: the
-          // mobile week list opens completion straight off these rows and
-          // its "Closeout owed" badge keys off it (Codex #3799 r1).
-          db.raw(HAS_SERVICE_RECORD_SQL),
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
           'scheduled_services.estimated_price',
@@ -4330,7 +4325,6 @@ router.get('/week', async (req, res, next) => {
           // "Tree & Shrub Care", which would drop every lawn target.
           serviceTypeRaw: s.service_type,
           serviceCategory: detectServiceCategory(svcType),
-          has_service_record: s.has_service_record === true,
           ...(() => {
             // Primary and add-ons stay SEPARATE through traceFeedFields
             // (codex P1 r7) — same reason as the day feed.
@@ -4659,13 +4653,6 @@ function duplicateSeriesConflictBody(existingSeries) {
     })),
   };
 }
-
-// Whether a scheduled visit has a completion record: FK backlink OR a
-// pre-FK legacy row matched by tuple — see service-record-presence.js for
-// why an ambiguous legacy match must still count as "has a record" (a
-// resume would mint a second record). Shared by the day, week, and list
-// feeds; Billing Recovery uses the same helper for its status-only leak.
-const HAS_SERVICE_RECORD_SQL = `${hasServiceRecordSql('scheduled_services')} as has_service_record`;
 
 // POST /api/admin/schedule — create new service
 router.post('/', requireAdmin, async (req, res, next) => {
@@ -6420,12 +6407,6 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.customer_id',
         'scheduled_services.scheduled_date', 'scheduled_services.service_type',
         'scheduled_services.status', 'scheduled_services.window_start', 'scheduled_services.window_end',
-        // The List view routes an owed closeout into CompletionPanel off this
-        // row (Codex #3799 r3) — same flag as the day / week feeds. service_id
-        // is the identity evidence the completion-profile resolver reads
-        // (with service_key_snapshot / is_recurring, already selected).
-        'scheduled_services.service_id',
-        db.raw(HAS_SERVICE_RECORD_SQL),
         'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot', 'scheduled_services.estimated_price',
         'scheduled_services.primary_line_price',
         'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.prepaid_at',
@@ -6458,11 +6439,6 @@ router.get('/list', async (req, res, next) => {
     // knows the full visit composition (primary + add-ons) and edits totals
     // correctly rather than rebasing the visit price down to the primary line.
     const listAddonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
-    // Same project-completion context the day / week feeds attach: the
-    // client's owed-closeout predicate needs completionProfile / linkedProject
-    // to keep a completed project-backed visit OUT of the "Closeout owed"
-    // cue (handleComplete refuses those) — pre-push Codex P1 on #3799.
-    const listProjectContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
     const mapped = services.map(s => ({
       id: s.id,
@@ -6476,16 +6452,6 @@ router.get('/list', async (req, res, next) => {
       // visit's second service line.
       serviceTypeRaw: s.service_type,
       status: s.status,
-      has_service_record: s.has_service_record === true,
-      // The FULL completion context the day / week feeds carry: CompletionPanel
-      // enters typed mode only with findingsSchema (+ companionSchemas), or
-      // /complete rejects the recovery with typed_findings_required (r4 P1).
-      completionProfile: listProjectContextByServiceId.get(s.id)?.completionProfile || null,
-      inspectionCreditAvailable: listProjectContextByServiceId.get(s.id)?.inspectionCreditAvailable === true,
-      completionProfileLookupFailed: listProjectContextByServiceId.get(s.id)?.completionProfileLookupFailed === true,
-      findingsSchema: listProjectContextByServiceId.get(s.id)?.findingsSchema || null,
-      companionSchemas: listProjectContextByServiceId.get(s.id)?.companionSchemas || null,
-      linkedProject: listProjectContextByServiceId.get(s.id)?.linkedProject || null,
       windowStart: s.window_start,
       windowEnd: s.window_end,
       estimatedDuration: s.estimated_duration_minutes || 30,
