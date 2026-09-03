@@ -471,6 +471,22 @@ describe('autopayLinkSendCheck (delivery seam)', () => {
     expect(r.ok).toBe(false);
   });
 
+  test.each([
+    ['colon', 'Link:portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY'],
+    ['quote', 'Here "portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY"'],
+    ['comma', 'now,https://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY'],
+  ])('ordinary punctuation before a canonical link (%s) is accepted', async (_label, body) => {
+    wire({ row: live });
+    expect((await autopayLinkSendCheck(body, '9415550184')).ok).toBe(true);
+  });
+
+  test('a subdomain look-alike is not a Waves link', async () => {
+    wire({ row: live });
+    const r = await autopayLinkSendCheck('x.portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY', '9415550184');
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/not on the Waves portal/);
+  });
+
   test('the scheme-stripped form the composer inserts is accepted', async () => {
     wire({ row: live });
     const r = await autopayLinkSendCheck('Set it up here: portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY', '9415550184');

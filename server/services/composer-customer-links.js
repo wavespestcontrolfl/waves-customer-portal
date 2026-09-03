@@ -377,13 +377,15 @@ async function buildAutopaySetupLink(customerId) {
 // Case-insensitive: the React route is not case-sensitive, so /Secure/<tok>
 // still opens the page and must still be judged (GH Codex #3812 r4 P1).
 const SECURE_PATH_RE = /\/secure\/([A-Za-z0-9_-]{16,})/gi;
-// A canonical link: the portal host (exact, port included) preceded by a
-// scheme or a token boundary — never by a path separator, so
-// "https://evil.example/portal.wavespestcontrol.com/secure/<token>" is not
-// a match (pre-push Codex P0: a suffix check is not a host check).
+// A canonical link: the portal host (exact, port included), optionally
+// schemed, NOT preceded by a hostname/URL character — so
+// "https://evil.example/portal.wavespestcontrol.com/secure/<token>" (path
+// separator) and "x.portal.wavespestcontrol.com/secure/…" (subdomain) are
+// not matches, while ordinary SMS punctuation before the link
+// ("Link:portal…", "'portal…") is (pre-push Codex P0 + P1).
 function canonicalSecureLinkRe() {
   const host = new URL(publicPortalUrl()).host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|[\\s(<\\[])(?:https?:\\/\\/)?${host}\\/secure\\/([A-Za-z0-9_-]{16,})`, 'gi');
+  return new RegExp(`(?<![A-Za-z0-9._\\-/@])(?:https?:\\/\\/)?${host}\\/secure\\/([A-Za-z0-9_-]{16,})`, 'gi');
 }
 
 /**
