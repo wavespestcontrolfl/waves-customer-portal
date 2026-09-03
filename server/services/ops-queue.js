@@ -202,7 +202,9 @@ async function laneCallProcessing() {
       href: '/admin/communications#tab=calls',
     };
   });
-  return finish(items, { truncated: [...capped(failedRows, 'failed'), ...capped(live, 'parked', 'pending'), ...capped(retryRows, 'pending')] });
+  // The extraction_failed scan feeds BOTH statuses (under-cap rows inside the
+  // fence classify as pending retries), so a capped scan floors both counts.
+  return finish(items, { truncated: [...capped(failedRows, 'failed', 'pending'), ...capped(live, 'parked', 'pending'), ...capped(retryRows, 'pending')] });
 }
 
 async function laneContentParks() {

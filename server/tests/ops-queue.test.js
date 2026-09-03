@@ -211,6 +211,24 @@ describe('getOpsQueue scan cap', () => {
     expect(q.totals.truncated).toBe(true);
     expect(q.totals.truncatedStatuses).toEqual(['parked']); // failed / pending stay exact in the tab
   });
+
+  test('a capped extraction_failed scan floors pending AND failed — the scan feeds both statuses', async () => {
+    for (const k of Object.keys(fixtures)) delete fixtures[k];
+    mockJobHealth.mockResolvedValue({ jobs: [] });
+    mockReviewItems.mockResolvedValue({ items: [], counts: {} });
+    // Half under the retry cap inside the creation fence (pending retries),
+    // half at the cap (terminal) — one scan, two statuses.
+    fixtures.call_log = Array.from({ length: 200 }, (_, i) => ({
+      id: `cf-${i}`, from_phone: '+15550001000', direction: 'inbound', processing_status: 'extraction_failed',
+      extraction_attempts: i % 2 ? 1 : 3, created_at: ago(30 + i), updated_at: ago(i),
+    }));
+    const q = await getOpsQueue();
+    const calls = q.lanes.find((l) => l.key === 'calls');
+    expect(calls.truncated).toBe(true);
+    expect(calls.truncatedStatuses).toEqual(expect.arrayContaining(['failed', 'pending']));
+    expect(calls.pending).toBeGreaterThan(0);
+    expect(calls.failed).toBeGreaterThan(0);
+  });
 });
 
 describe('GET /api/admin/agents/queue', () => {
