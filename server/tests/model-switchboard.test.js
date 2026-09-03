@@ -126,6 +126,8 @@ describe('model-switchboard', () => {
     expect(lanes.find((l) => l.id === 'fact_check_gate').continuity).toBe('unchecked');
     // turf-height-ocr.js reconciles the consensus against the tech's manual reading and parks divergences as `discrepancy`.
     expect(turf.continuity).toBe('verified');
+    // The gauge photo is technician-uploaded content → per-lane approval, never bulk-eligible.
+    expect(turf.inbound).toBe(true);
   });
 
   it('reflects an env override as the running model and as a pin', () => {

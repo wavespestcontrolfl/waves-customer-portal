@@ -1528,6 +1528,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           customerUpdates.active = true;
           customerUpdates.churned_at = null;
           customerUpdates.churn_reason = null;
+          customerUpdates.churn_episode_id = null;
         }
         if (Object.keys(customerUpdates).length) {
           await trx('customers').where({ id: customerId }).update(customerUpdates);

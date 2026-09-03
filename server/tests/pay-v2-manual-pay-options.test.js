@@ -274,3 +274,25 @@ describe('GET /pay/:token manualPayOptions', () => {
     }
   });
 });
+
+// GATE_PAY_PAGE_FAQ — the FAQ accordion flag rides the same GET payload.
+// Off ⇒ key ABSENT (byte-identical payload); on ⇒ `payFaq: true`, nothing
+// else changes (no new data, no money).
+describe('GET /pay/:token payFaq (GATE_PAY_PAGE_FAQ)', () => {
+  const gates = require('../config/feature-gates').gates;
+  afterEach(() => { delete gates.payPageFaq; });
+
+  test('gate off ⇒ key absent', async () => {
+    const { body } = await getPayPage(invoiceData());
+    expect(Object.prototype.hasOwnProperty.call(body, 'payFaq')).toBe(false);
+  });
+
+  test('gate on ⇒ payFaq: true and the rest of the payload is unchanged', async () => {
+    const { body: off } = await getPayPage(invoiceData());
+    gates.payPageFaq = true;
+    const { body: on } = await getPayPage(invoiceData());
+    expect(on.payFaq).toBe(true);
+    const { payFaq, ...rest } = on;
+    expect(rest).toEqual(off);
+  });
+});

@@ -691,6 +691,52 @@ async function adminCoverageBoundaryInForce(customerId) {
   return boundaries.some((r) => new Date(r.created_at).getTime() >= churnedAt - 60 * 60 * 1000);
 }
 
+// The dedupe identity for a decided prepaid term's end-of-coverage side
+// effects (dated termite task, end-of-term confirmation): the TERM and the
+// CHURN EPISODE — customers.churn_episode_id, minted by the processor on
+// the first churn of an episode and cleared by every reactivation path
+// that clears churned_at. The ordinary path takes the id the processor
+// just returned and stamps it on the request (metadata.cancel_plan) and
+// the case snapshot; a repair reads the REQUEST's own stamp, so an
+// acceptance processed in an earlier episode keeps that episode's keys and
+// one never processed under any episode (or opened before this shipped)
+// has no stamp → no term key → request-keyed dedupe, exactly as before.
+// The confirmation leg also carries the coverage BOUNDARY: an admin
+// correcting term_end and repeating the cancel must re-tell the customer
+// the new date, not dedupe against the old one (the dated task carries its
+// date in its own key).
+const termEpisodeOf = (term, episodeId, boundary) => (term && episodeId
+  ? { termId: term.id, episodeKey: String(episodeId), boundary: dateOnly(boundary) || dateOnly(term.term_end) || null }
+  : null);
+const termEpisodeSendArgs = (episode) => ({
+  prepayTermId: episode ? episode.termId : null,
+  termEpisodeKey: episode ? `${episode.episodeKey}:${episode.boundary || 'no-boundary'}` : null,
+});
+const termEpisodeRaiseArgs = (episode) => (episode ? { termId: episode.termId, episodeKey: episode.episodeKey } : {});
+// Durable retry state: the episode the processor churned this request
+// under. Written BEFORE the term-keyed side effects so a repair after a
+// lost response finds it. Returns whether the stamp stands; on a failed
+// write the caller keys this run's side effects on the REQUEST instead
+// (the identity its repair will also resolve to), so the pair can never
+// double-fire — a term key this run alone knew would let the repair send
+// again under the request key.
+async function stampRequestEpisode(requestRow, episodeId) {
+  const meta = requestCancelPlanMeta(requestRow) || {};
+  if (String(meta.churnEpisodeId || '') === String(episodeId)) return true;
+  const next = { ...meta, churnEpisodeId: String(episodeId) };
+  try {
+    await db('service_requests').where({ id: requestRow.id }).update({
+      metadata: JSON.stringify({ cancel_plan: next }),
+      updated_at: new Date(),
+    });
+    requestRow.metadata = JSON.stringify({ cancel_plan: next });
+    return true;
+  } catch (metaErr) {
+    logger.warn(`[admin-cancellation] churn episode stamp failed for request ${requestRow.id}: ${metaErr.message}`);
+    return false;
+  }
+}
+
 // The request-scoped history note the processor stamps on every visit this
 // request cancels — the immutable retry marker (never the editable reason).
 const historyNoteFor = (requestId) => `Admin cancellation request ${requestId}`;
@@ -739,6 +785,10 @@ async function ratchetAcceptedChoices(requestRow, input, fallbackScope) {
       metadata: JSON.stringify({ cancel_plan: next }),
       updated_at: new Date(),
     });
+    // The row object is the base every later metadata write on this run
+    // merges into (the episode stamp) — a stale copy would silently revert
+    // the waiver/opt-out just persisted.
+    requestRow.metadata = JSON.stringify({ cancel_plan: next });
   } catch (metaErr) {
     logger.warn(`[admin-cancellation] ${Object.keys(ratchet).join('/')} ratchet failed for request ${requestRow.id}: ${metaErr.message}`);
   }
@@ -1216,26 +1266,56 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       prior = hit ? hit.c : null;
       if (hit) priorSnap = hit.snap;
       // The echo is only for RETRIES of that run — proven by its acceptance
-      // being still open, or resolved within the echo window (codex r16
-      // P0). A historical case whose acceptance closed long ago must not
-      // swallow a NEW cancellation: a re-won-back account with the same
-      // decided term still current would read "cancelled" while billing
-      // stays live. No provable tie → fall through and process fresh (the
-      // decided term reads 'decision_already_recorded'; the refund recounts
-      // from the live rows).
+      // being still OPEN (the run owes follow-ups; its repair identity is
+      // the request's own stamp + snapshot boundary), or RESOLVED with the
+      // SAME IDENTITY: the customer is still churned, in the churn episode
+      // that run recorded, and the coverage boundary it told the customer
+      // still stands. A historical case, a won-back account cancelling the
+      // same still-current term (even inside a day — the live account would
+      // otherwise stay billable behind the echo), or an office correction
+      // of term_end (the customer must be re-told the new date; the dated
+      // task carries it in its key and #3767 retires the stale one) is a
+      // NEW cancellation: fall through and process fresh (the decided term
+      // reads 'decision_already_recorded'; the refund recounts from the
+      // live rows). The echo also stays BOUNDED to the 24h lost-response
+      // window: identity narrows it, never extends it — staff can add
+      // visits or a recurrence to a still-churned account, and a later
+      // cancellation on the same term must reach the processor for them,
+      // not a days-old echo. A resolved run with no episode stamp
+      // (pre-episode, or a stamp that failed) has only the window + the
+      // churned row as its identity.
       if (prior) {
         let tied = false;
         let openTie = false;
         try {
           const priorReq = prior.service_request_id
-            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
+            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'metadata')
             : null;
           openTie = !!priorReq && priorReq.status === 'new';
-          tied = openTie
-            || (!!priorReq && priorReq.status === 'resolved'
-              && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000);
+          let resolvedTie = false;
+          if (!openTie && priorReq && priorReq.status === 'resolved'
+            && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000) {
+            const live = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churn_episode_id');
+            const stillChurned = !!live && live.pipeline_stage === 'churned';
+            const stamped = (requestCancelPlanMeta(priorReq) || {}).churnEpisodeId || null;
+            const sameEpisode = !stamped || String((live && live.churn_episode_id) || '') === String(stamped);
+            // Boundary compared only when both sides carry one (a legacy
+            // snapshot without effectiveOn has no date to contradict).
+            const priorBoundary = priorSnap && priorSnap.effectiveOn ? String(priorSnap.effectiveOn) : null;
+            const sameBoundary = !prepayPlan.keepThrough || !priorBoundary || priorBoundary === prepayPlan.keepThrough;
+            resolvedTie = stillChurned && sameEpisode && sameBoundary;
+            if (!resolvedTie) {
+              logger.info(`[admin-cancellation] resolved case ${prior.id} is not this run's identity (churned=${stillChurned} episode=${sameEpisode} boundary=${sameBoundary})`);
+            }
+          }
+          tied = openTie || resolvedTie;
         } catch (tieErr) {
+          // Fail CLOSED: unable to tell a retry from a new cancellation, the
+          // run must not open a second request/case and re-run the
+          // processor on a guess — same posture as the acceptance lookup.
           logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
+          throw new CancelPlanError(503, 'acceptance_check_unavailable',
+            'Could not confirm whether this cancellation was already processed. Try again in a moment.');
         }
         if (!tied) {
           logger.info(`[admin-cancellation] case ${prior.id} has no live acceptance — treating this as a NEW cancellation, not a retry`);
@@ -1258,6 +1338,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         }
       }
     } catch (dupErr) {
+      // The latch's own fail-closed verdict (acceptance_check_unavailable)
+      // must surface, not degrade into a guessed fresh run.
+      if (dupErr instanceof CancelPlanError) throw dupErr;
       logger.warn(`[admin-cancellation] duplicate-case lookup failed for ${customerId}: ${dupErr.message}`);
     }
     // The destructive inverse is REFUSED: after end_now_refund the paid
@@ -1363,10 +1446,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             // this the stale error echoes forever and the office never
             // gets its pull instruction.
             const datedTermite = priorSnap.effectiveDate === 'end_of_coverage';
+            // The repair's identity is the REQUEST's own episode stamp and the
+            // snapshot's boundary (the date the resend renders), never the
+            // customer's current stamp or a term_end corrected since.
+            const repairMeta = requestCancelPlanMeta(reqRow);
+            const repairEpisode = termEpisodeOf(term, repairMeta && repairMeta.churnEpisodeId, datedTermite ? priorSnap.effectiveOn : null);
             if (hasTermiteErr && (!datedTermite || priorSnap.effectiveOn)) {
               try {
                 const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
-                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: datedTermite ? priorSnap.effectiveOn : null });
+                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: datedTermite ? priorSnap.effectiveOn : null, ...termEpisodeRaiseArgs(repairEpisode) });
                 promotedErrors = promotedErrors.filter((e) => e !== 'termite_retrieval_task');
               } catch (termiteErr) {
                 logger.warn(`[admin-cancellation] deferred termite retrieval repair failed for request ${reqRow.id}: ${termiteErr.message}`);
@@ -1395,6 +1483,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
                 effectiveAt: priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.effectiveOn
                   ? `${priorSnap.effectiveOn}T12:00:00-04:00` : null,
                 keptThrough: priorSnap.effectiveDate === 'end_of_coverage',
+                ...termEpisodeSendArgs(repairEpisode),
                 entryPoint: 'admin_cancel_plan',
                 identityTrustLevel: 'admin_operator',
               });
@@ -1911,12 +2000,22 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // that did not end. Skipped on a conflict/failed disposition: that run
   // is already partial (belled), and the repair retry re-runs the
   // processor, which re-derives the pending task from live rows.
+  // The episode the processor churned this request under — stamped on the
+  // request BEFORE the term-keyed side effects, and carried on the case.
+  // A stamp that did not persist is NOT a run error: this run simply stays
+  // request-keyed (the identity its repair resolves to as well, so nothing
+  // double-fires) and closes on that identity. The only cost is that a
+  // repeat commit on the same term after the 24h latch could re-tell the
+  // customer — logged by stampRequestEpisode, never a parked acceptance a
+  // later win-back cancel would keep reusing.
+  const episodeStamped = !!(result && result.churnEpisodeId) && await stampRequestEpisode(request, result.churnEpisodeId);
+  const termEpisode = episodeStamped ? termEpisodeOf(term, result.churnEpisodeId, prepayPlan.keepThrough || null) : null;
   if (result && result.termiteRetrievalPending) {
     if (processed && ['ends_at_term', 'ended_now', 'decision_already_recorded'].includes(termOutcome)) {
       try {
         const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
         await raiseTermiteRetrievalTask(customerId, request.id,
-          { retrieveAfter: result.termiteRetrievalPending.retrieveAfter });
+          { retrieveAfter: result.termiteRetrievalPending.retrieveAfter, ...termEpisodeRaiseArgs(termEpisode) });
       } catch (termiteErr) {
         errors.push('termite_retrieval_task');
         logger.error(`[admin-cancellation] deferred termite retrieval task failed for request ${request.id}: ${termiteErr.message}`);
@@ -1948,6 +2047,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       ? (carriedPrepay.proposedRefund && !carriedPrepay.refund ? { proposedRefund: carriedPrepay.proposedRefund } : {})
       : (refundFacts && !refundRecorded ? { proposedRefund: refundFacts } : {})),
     sendConfirmation: input.sendConfirmation,
+    ...(result && result.churnEpisodeId ? { churnEpisodeId: String(result.churnEpisodeId) } : {}),
     tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
     monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
     billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
@@ -1990,6 +2090,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // "upcoming visits are off the calendar" copy would be false, so the
       // senders switch to the end-of-term wording.
       keptThrough: !!prepayPlan.keepThrough,
+      // The end-of-term confirmation is sent once per (TERM, churn episode),
+      // not per request — see termEpisodeOf.
+      ...termEpisodeSendArgs(termEpisode),
       entryPoint: 'admin_cancel_plan',
       identityTrustLevel: 'admin_operator',
     });

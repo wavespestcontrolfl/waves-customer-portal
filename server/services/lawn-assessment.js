@@ -8,8 +8,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { anthropicCreateWithSamplingRetry } = require('./llm/call');
 const MODELS = require('../config/models');
+const { anthropicText } = require('./llm/call');
 const { normalizeGrassType } = require('./lawn-grass-context');
 
 // Coerce a model's grass_type to a canonical key, or null when it can't tell
@@ -148,10 +148,9 @@ async function callClaudeVision(base64Image, mimeType, context = {}) {
 
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropicCreateWithSamplingRetry(anthropic, {
+    const response = await anthropic.messages.create({
       model: MODELS.VISION,
       max_tokens: 500,
-      temperature: 0.2, // match Gemini's 0.2 — keeps Claude's scoring repeatable across re-runs
       messages: [{
         role: 'user',
         content: [
@@ -161,7 +160,7 @@ async function callClaudeVision(base64Image, mimeType, context = {}) {
       }],
     });
 
-    const text = response.content?.[0]?.text;
+    const text = anthropicText(response);
     if (!text) { logger.warn('[lawn-assessment] Claude returned empty content'); return null; }
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
     parsed.overwatering_signal = strictBool(parsed.overwatering_signal);

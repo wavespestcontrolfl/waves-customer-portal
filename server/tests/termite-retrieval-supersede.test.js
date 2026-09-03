@@ -198,3 +198,31 @@ test('a FAILED retire on a DATED raise throws too', async () => {
   await expect(raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' })).rejects.toThrow(/could not be superseded/);
   expect(mockNotifyAdmin).not.toHaveBeenCalled();
 });
+
+test('with a term AND an episode the task is keyed on (term, episode, class[, date]) — the same instruction across requests dedupes, dated and immediate stay distinct', async () => {
+  mockTables.notifications = [];
+  await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: 'ep-1' });
+  await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: 'ep-1' });
+  await raiseTermiteRetrievalTask('c1', 'req-2', { retrieveAfter: null, termId: 'term-1', episodeKey: 'ep-1' });
+  const keys = mockNotifyAdmin.mock.calls.map((c) => c[3].dedupeKey);
+  expect(keys).toEqual([
+    'termite_station_retrieval:term:term-1:ep-1:dated:2027-02-28',
+    'termite_station_retrieval:term:term-1:ep-1:dated:2027-02-28',
+    'termite_station_retrieval:term:term-1:ep-1:immediate',
+  ]);
+  expect(mockNotifyAdmin.mock.calls[0][3].metadata).toEqual(expect.objectContaining({ requestId: 'req-1', termId: 'term-1', churnEpisode: 'ep-1', retrieveAfter: '2027-02-28' }));
+  // A new episode on the same term is a new key.
+  await raiseTermiteRetrievalTask('c1', 'req-3', { retrieveAfter: '2027-02-28', termId: 'term-1', episodeKey: 'ep-2' });
+  expect(mockNotifyAdmin.mock.calls[3][3].dedupeKey).toBe('termite_station_retrieval:term:term-1:ep-2:dated:2027-02-28');
+});
+
+test('a term WITHOUT an episode (or no term) keeps the per-request key', async () => {
+  mockTables.notifications = [];
+  await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28', termId: 'term-1' });
+  await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: null, episodeKey: 'ep-1' });
+  await raiseTermiteRetrievalTask('c1', null, { retrieveAfter: null });
+  expect(mockNotifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual([
+    'termite_station_retrieval:c1:req-1', 'termite_station_retrieval:c1:req-1', 'termite_station_retrieval:c1:no-request',
+  ]);
+  expect(mockNotifyAdmin.mock.calls[0][3].metadata).not.toHaveProperty('termId');
+});

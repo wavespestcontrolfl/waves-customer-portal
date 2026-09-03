@@ -510,9 +510,15 @@ async function fetchBackfillCandidates(limit, offset = 0, { callRecovery } = {})
   // and a retained address of a deleted account must never reach paid
   // external lookup providers.
   const { CUSTOMER_STAGES } = require('./customer-stages');
+  // Recovery mode also covers call-created PROSPECTS: the call lane and
+  // the clarify unit reply persist them as new_lead and were already
+  // authorized to buy their lookups at insert time, so a crash before the
+  // in-memory enqueue must not strand them (codex r3 P2 on #3788). The
+  // backfill lane keeps the live-customer predicate.
+  const stages = callRecovery ? [...CUSTOMER_STAGES, 'new_lead'] : CUSTOMER_STAGES;
   const q = db('customer_properties as cp')
     .join('customers as c', 'c.id', 'cp.customer_id')
-    .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
+    .whereIn('c.pipeline_stage', stages)
     .where('c.active', true)
     .whereNull('c.deleted_at')
     .where('cp.active', true)
@@ -564,7 +570,11 @@ async function fetchBackfillCandidates(limit, offset = 0, { callRecovery } = {})
     .limit(limit)
     .offset(offset);
   if (callRecovery) {
-    q.where('cp.source', 'call_pipeline')
+    // Both automated call-side sources: the pipeline's own inserts and the
+    // clarify unit reply's (its only enqueue is in-memory after commit, so
+    // a crash in that window would otherwise strand the row unenriched
+    // whenever the backfill gate is off — codex r1 P2 on #3788).
+    q.whereIn('cp.source', ['call_pipeline', 'clarify_unit_reply'])
       .whereRaw(`cp.created_at > NOW() - INTERVAL '${CALL_TIME_RECOVERY_WINDOW_DAYS} days'`);
   }
   return q;

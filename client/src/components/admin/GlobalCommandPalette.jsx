@@ -24,6 +24,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
 import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
+import ToolActivityList from "./ToolActivityList";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 import { formatETDateTime } from "../../lib/timezone";
 
@@ -304,6 +305,8 @@ function GlobalCommandPalette(_props, ref) {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
   const [pendingActions, setPendingActions] = useState([]);
+  // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
+  const [toolActivity, setToolActivity] = useState([]);
   const [conversationHistory, setConversationHistory] = useState([]);
   // Server-persisted thread id (GATE_IB_THREADS). Null = ephemeral/new chat;
   // the id is set from query responses and from resume-on-open.
@@ -420,6 +423,7 @@ function GlobalCommandPalette(_props, ref) {
       setConversationHistory([]);
       setResponse(null);
       setPendingActions([]);
+      setToolActivity([]);
       // Detach any persisted thread too — /query evaluates the gate at call
       // time, so a threadId can exist even after the availability probe
       // failed; appending a fresh conversation to it would corrupt the
@@ -442,6 +446,7 @@ function GlobalCommandPalette(_props, ref) {
     setThreadId(thread.id);
     threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
     setPendingActions([]);
+    setToolActivity([]);
     try { localStorage.removeItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
     const lastAssistant = [...hist].reverse().find((t) => t.role === "assistant");
     setResponse(
@@ -522,6 +527,7 @@ function GlobalCommandPalette(_props, ref) {
       setLoading(true);
       setResponse(null);
       setPendingActions([]);
+      setToolActivity([]);
       saveRecent(q);
       setRecents(loadRecents());
 
@@ -549,6 +555,7 @@ function GlobalCommandPalette(_props, ref) {
         if (threadEpochRef.current === epoch) {
           setResponse(data.response);
           setPendingActions(data.pendingActions || []);
+          setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
           setConversationHistory(data.conversationHistory || []);
           if (data.threadId) {
             setThreadId(data.threadId);
@@ -628,6 +635,7 @@ function GlobalCommandPalette(_props, ref) {
     setConversationHistory([]);
     setResponse(null);
     setPendingActions([]);
+    setToolActivity([]);
     setPrompt("");
     setThreadId(null);
     threadSeqRef.current = null;
@@ -682,6 +690,7 @@ function GlobalCommandPalette(_props, ref) {
         loading={loading}
         response={response}
         pendingActions={pendingActions}
+        toolActivity={toolActivity}
         recents={recents}
         quickActions={quickActions}
         contextLabel={contextLabel}
@@ -969,6 +978,7 @@ function GlobalCommandPalette(_props, ref) {
         {response && !loading && !showThreads && (
           <div style={{ flex: 1, overflow: "auto", padding: "14px 18px" }}>
             {" "}
+            <ToolActivityList items={toolActivity} variant="dark" />
             <div
               style={{
                 fontSize: 13,
@@ -1112,6 +1122,7 @@ function MobileSheet({
   loading,
   response,
   pendingActions,
+  toolActivity,
   recents,
   quickActions,
   contextLabel,
@@ -1399,6 +1410,9 @@ function MobileSheet({
             </div>
           )}
 
+          {response && !loading && !showThreads && (
+            <ToolActivityList items={toolActivity} variant="light" />
+          )}
           {response && !loading && !showThreads && (
             <div
               style={{

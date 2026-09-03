@@ -1,0 +1,246 @@
+// Two processing attempts against ONE recording, on a real Postgres.
+//
+// The claim is a conditional UPDATE whose predicates are raw SQL
+// (reclaimableClaim / CURRENT_BEAT); a mocked builder cannot evaluate them,
+// so this suite drives the REAL processRecording twice concurrently against
+// a real call_log row. The recording download is stubbed to Twilio's
+// "still propagating" 404, so the pass runs the whole claim → download →
+// release path without any provider key, and every assertion is about the
+// row: exactly one attempt holds the claim, the loser is refused, the
+// winner releases the row untouched, and a worker holding a superseded
+// token cannot write.
+//
+// Runs only with DATABASE_URL (repo convention — CI's DB-gated step sets it
+// against the migrated database; the main jest step does not). Fixtures are
+// fictitious: 555-01xx numbers, fake SIDs, no transcript text.
+const SKIP = !process.env.DATABASE_URL;
+const maybeDescribe = SKIP ? describe.skip : describe;
+
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const SID = 'CA' + '7'.repeat(30) + 'c1';
+const SID_STALE = 'CA' + '7'.repeat(30) + 'c2';
+const SID_QUIET = 'CA' + '7'.repeat(30) + 'c3';
+const REC = 'RE' + '7'.repeat(32);
+const RECORDING_URL = `https://api.twilio.com/2010-04-01/Accounts/ACfixture/Recordings/${REC}.mp3`;
+
+maybeDescribe('processRecording claim concurrency (live Postgres)', () => {
+  let db;
+  let processor;
+  let fetchSpy;
+  const rowIds = [];
+
+  async function insertCall(sid, overrides = {}) {
+    const [row] = await db('call_log').insert({
+      twilio_call_sid: sid,
+      direction: 'inbound',
+      from_phone: '+15555550123',
+      to_phone: '+15555550100',
+      status: 'completed',
+      duration_seconds: 60,
+      recording_sid: REC,
+      recording_url: RECORDING_URL,
+      recording_duration_seconds: 60,
+      transcription_status: 'pending',
+      processing_status: null,
+      metadata: JSON.stringify({ source: 'voice_webhook', fixture: 'claim-concurrency' }),
+      ...overrides,
+    }).returning('id');
+    rowIds.push(row.id);
+    return row.id;
+  }
+
+  const readRow = (sid) => db('call_log').where({ twilio_call_sid: sid }).first();
+
+  beforeAll(async () => {
+    db = require('../models/db');
+    processor = require('../services/call-recording-processor');
+    // Twilio CDN not propagated yet: every download 404s, which the
+    // processor maps to a "recording not ready" release (no status stamp,
+    // no attempt counter). No provider is ever reached.
+    fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response('not found', { status: 404 }));
+    await db('call_log').whereIn('twilio_call_sid', [SID, SID_STALE, SID_QUIET]).del();
+  });
+
+  afterAll(async () => {
+    fetchSpy.mockRestore();
+    if (rowIds.length) await db('call_log').whereIn('id', rowIds).del();
+    await db.destroy();
+  });
+
+  test('two concurrent attempts: exactly one claims, the other is refused, the row is released untouched', async () => {
+    await insertCall(SID);
+    // Hold the (stubbed) download open so the two passes genuinely overlap:
+    // an instant 404 let the first pass claim AND release before the second
+    // pass reached its claim, which then legitimately claimed in sequence —
+    // that is not the race this test exists to prove.
+    fetchSpy.mockImplementationOnce(() => new Promise((resolve) => {
+      setTimeout(() => resolve(new Response('not found', { status: 404 })), 600);
+    }));
+    const [a, b] = await Promise.all([
+      processor.processRecording(SID),
+      new Promise((resolve) => setTimeout(resolve, 150)).then(() => processor.processRecording(SID)),
+    ]);
+    const reasons = [a.reason, b.reason].sort();
+    expect(reasons).toEqual(['already_processing', 'recording_not_ready']);
+    expect(a.success).toBe(false);
+    expect(b.success).toBe(false);
+
+    const row = await readRow(SID);
+    // The winner released the claim with the pre-claim status restored: no
+    // terminal stamp, no attempt burned, token cleared, one generation used.
+    expect(row.processing_status).toBeNull();
+    expect(row.processing_token).toBeNull();
+    expect(Number(row.processing_generation)).toBe(1);
+    expect(Number(row.extraction_attempts || 0)).toBe(0);
+    expect(row.transcription).toBeNull();
+    expect(row.recording_url).toBe(RECORDING_URL);
+    // The download was attempted exactly once — the refused attempt never
+    // reached the provider leg.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('a claim whose heartbeat stopped is reclaimed; the superseded worker\'s fenced write matches no rows', async () => {
+    fetchSpy.mockClear();
+    const staleToken = 'deadbeef'.repeat(4);
+    const twelveMinutesAgo = new Date(Date.now() - 12 * 60 * 1000);
+    await insertCall(SID_STALE, {
+      processing_status: 'processing',
+      processing_token: staleToken,
+      processing_generation: 3,
+      processing_started_at: twelveMinutesAgo,
+      processing_heartbeat_at: twelveMinutesAgo,
+    });
+
+    const result = await processor.processRecording(SID_STALE);
+    expect(result.reason).toBe('recording_not_ready');
+
+    const row = await readRow(SID_STALE);
+    expect(Number(row.processing_generation)).toBe(4);
+    expect(row.processing_token).toBeNull();
+    // A phantom in-flight marker is not restored: the pre-claim status was
+    // 'processing' (a dead pass), which maps to NULL so the row re-enters
+    // the sweep instead of blocking for another stale window.
+    expect(row.processing_status).toBeNull();
+
+    // The dead worker wakes up and tries to finalize with its old token.
+    const staleWrite = await db('call_log')
+      .where({ id: row.id })
+      .where('processing_token', staleToken)
+      .update({ processing_status: 'processed', transcription: 'stale text' });
+    expect(staleWrite).toBe(0);
+    const after = await readRow(SID_STALE);
+    expect(after.processing_status).toBeNull();
+    expect(after.transcription).toBeNull();
+  });
+
+  test('the checkpoint SQL honours an operator customer link present on the row — including an explicit unlink', async () => {
+    // The exact expression the Step-4 checkpoint writes; proven against
+    // Postgres because a mocked builder cannot evaluate it.
+    const expression = () => db.raw(
+      "CASE WHEN jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')"
+      + " THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE ?::uuid END",
+      ['11111111-2222-4333-8444-555555555555'],
+    );
+    const SID_LINK = 'CA' + '7'.repeat(30) + 'c4';
+    const id = await insertCall(SID_LINK, { customer_id: null, metadata: JSON.stringify({ customer_link_override: { customer_id: null, by: 'tech-fixture' } }) });
+    // Explicit unlink wins over the pass's resolved customer.
+    await db('call_log').where({ id }).update({ customer_id: expression() });
+    expect((await readRow(SID_LINK)).customer_id).toBeNull();
+    // A link to a specific customer wins too (a real row is required by the FK).
+    const [cust] = await db('customers').insert({ first_name: 'Fixture', phone: '+15555550199' }).returning('id');
+    try {
+      await db('call_log').where({ id }).update({ metadata: JSON.stringify({ customer_link_override: { customer_id: cust.id } }) });
+      await db('call_log').where({ id }).update({ customer_id: expression() });
+      expect((await readRow(SID_LINK)).customer_id).toBe(cust.id);
+      // No override: the pass's own resolution is written.
+      await db('call_log').where({ id }).update({ metadata: JSON.stringify({}) });
+      await db('call_log').where({ id }).update({ customer_id: db.raw(
+        "CASE WHEN jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')"
+        + " THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE ?::uuid END",
+        [cust.id],
+      ) });
+      expect((await readRow(SID_LINK)).customer_id).toBe(cust.id);
+    } finally {
+      await db('call_log').where({ id }).update({ customer_id: null });
+      await db('customers').where({ id: cust.id }).del();
+    }
+  });
+
+  test('the timeline unique-index migration dedupes pre-existing duplicates (keeping the earliest) before it indexes', async () => {
+    const migration = require('../models/migrations/20260901000011_customer_interactions_call_unique');
+    const [cust] = await db('customers').insert({ first_name: 'Dedupe', phone: '+15555550197' }).returning('id');
+    const callLogId = '88888888-7777-4666-8555-444444444444';
+    try {
+      await migration.down(db);
+      const t0 = new Date(Date.now() - 60000);
+      await db('customer_interactions').insert([
+        { customer_id: cust.id, interaction_type: 'call', subject: 'first', metadata: JSON.stringify({ call_log_id: callLogId }), created_at: t0 },
+        { customer_id: cust.id, interaction_type: 'call', subject: 'later copy', metadata: JSON.stringify({ call_log_id: callLogId }), created_at: new Date(t0.getTime() + 1000) },
+        { customer_id: cust.id, interaction_type: 'note', subject: 'note stays', metadata: JSON.stringify({ call_log_id: callLogId }), created_at: t0 },
+      ]);
+      await migration.up(db);
+      const rows = await db('customer_interactions').where({ customer_id: cust.id }).orderBy('subject');
+      expect(rows.map((r) => r.subject)).toEqual(['first', 'note stays']);
+      expect((await db('pg_indexes').where({ indexname: 'customer_interactions_call_log_unique' })).length).toBe(1);
+    } finally {
+      await db('customer_interactions').where({ customer_id: cust.id }).del();
+      await db('customers').where({ id: cust.id }).del();
+      // Whatever happened above, leave the schema as the migration chain expects.
+      await migration.up(db);
+    }
+  });
+
+  test('the customer timeline insert is exactly-once per call under the partial unique index', async () => {
+    const [cust] = await db('customers').insert({ first_name: 'Timeline', phone: '+15555550198' }).returning('id');
+    const callLogId = '99999999-8888-4777-8666-555555555555';
+    const insert = () => db('customer_interactions').insert({
+      customer_id: cust.id,
+      interaction_type: 'call',
+      subject: 'Inbound call — fixture',
+      body: 'fixture',
+      metadata: JSON.stringify({ call_log_id: callLogId, processing_generation: 1 }),
+    })
+      .onConflict(db.raw("((metadata ->> 'call_log_id')) WHERE interaction_type = 'call' AND metadata ->> 'call_log_id' IS NOT NULL"))
+      .ignore();
+    try {
+      await Promise.all([insert(), insert(), insert()]);
+      const rows = await db('customer_interactions').where({ customer_id: cust.id }).whereRaw("metadata ->> 'call_log_id' = ?", [callLogId]);
+      expect(rows).toHaveLength(1);
+      // Other interaction types with the same key are not constrained.
+      await db('customer_interactions').insert({ customer_id: cust.id, interaction_type: 'note', subject: 'x', metadata: JSON.stringify({ call_log_id: callLogId }) });
+      expect(await db('customer_interactions').where({ customer_id: cust.id })).toHaveLength(2);
+    } finally {
+      await db('customer_interactions').where({ customer_id: cust.id }).del();
+      await db('customers').where({ id: cust.id }).del();
+    }
+  });
+
+  test('a claim that is still beating is honoured by an automatic pass and taken over only by an operator after the short quiet window', async () => {
+    fetchSpy.mockClear();
+    const liveToken = 'feedface'.repeat(4);
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    await insertCall(SID_QUIET, {
+      processing_status: 'processing',
+      processing_token: liveToken,
+      processing_generation: 1,
+      processing_started_at: new Date(Date.now() - 6 * 60 * 1000),
+      // Last beat five minutes ago: inside the 10-minute automatic window,
+      // outside the 3-minute operator window.
+      processing_heartbeat_at: fiveMinutesAgo,
+    });
+
+    const automatic = await processor.processRecording(SID_QUIET);
+    expect(automatic).toEqual({
+      success: false, skipped: true, reason: 'already_processing', retryAfterMinutes: 10,
+    });
+    expect((await readRow(SID_QUIET)).processing_token).toBe(liveToken);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    const operator = await processor.processRecording(SID_QUIET, { operator: true });
+    expect(operator.reason).toBe('recording_not_ready');
+    const row = await readRow(SID_QUIET);
+    expect(row.processing_token).toBeNull();
+    expect(Number(row.processing_generation)).toBe(2);
+  });
+});

@@ -38,6 +38,7 @@ import CallTranscriptSync, {
   parseTranscriptSegments,
   segmentsMatchTranscript,
 } from "../../components/admin/CallTranscriptSync";
+import CallIntelligencePanel from "../../components/admin/CallIntelligencePanel";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
 
@@ -58,6 +59,51 @@ const PROCESS_RESULT_CLASS = {
   failed: "text-alert-fg",
 };
 const ADMIN_BRIDGE_PHONE_KEYS = new Set(["9415993489"]);
+
+// The server grounds commitment evidence with call-commitments.js
+// normalizeForMatch (lower-case; every run of non-alphanumerics is one
+// space). Mirror it here with a map from each normalized character back to
+// its offset in the original text, so a quote the server accepted always
+// finds its words in the transcript — a missing apostrophe or comma used to
+// leave the Jump action pointing at nothing.
+function normalizeWithOffsets(text) {
+  const src = String(text);
+  let norm = "";
+  const offsets = [];
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i].toLowerCase();
+    if (ch.length === 1 && /[a-z0-9]/.test(ch)) {
+      norm += ch;
+      offsets.push(i);
+    } else if (norm.length && norm[norm.length - 1] !== " ") {
+      norm += " ";
+      offsets.push(i);
+    }
+  }
+  return { norm, offsets };
+}
+
+// Wrap the first normalized occurrence of `quote` in a <mark> so the
+// evidence jump lands on the words. Plain text when there is no match.
+export function renderTranscriptWithHighlight(text, quote, id) {
+  if (!quote || !text) return text;
+  const q = normalizeWithOffsets(quote).norm.trim();
+  if (!q) return text;
+  const { norm, offsets } = normalizeWithOffsets(text);
+  const at = norm.indexOf(q);
+  if (at < 0) return text;
+  const start = offsets[at];
+  const end = offsets[at + q.length - 1] + 1;
+  return (
+    <>
+      {text.slice(0, start)}
+      <mark id={`call-transcript-mark-${id}`} className="not-italic bg-zinc-200 text-ink-primary rounded-xs px-0.5">
+        {text.slice(start, end)}
+      </mark>
+      {text.slice(end)}
+    </>
+  );
+}
 
 function phoneKey(value) {
   const digits = String(value || "").replace(/\D/g, "");
@@ -289,6 +335,14 @@ export default function CallLogTabV2() {
   const navigate = useNavigate();
   const [calls, setCalls] = useState([]);
   const [routeCalibration, setRouteCalibration] = useState(null);
+  // The processing pipeline's live state (GET /admin/call-recordings/stats):
+  // what is running, what is stuck, what failed and will retry, what waits on
+  // the office — readable here instead of a SQL console.
+  const [pipeline, setPipeline] = useState(null);
+  // Play-from-evidence: the intelligence panel names a moment (a quote's
+  // diarized start_ms); the call's audio seeks there and plays through the
+  // player's shared seekTo(seconds) handle (same handle the synced-transcript
+  // work uses), so there is one seek path, not a parallel one.
   const [loading, setLoading] = useState(true);
   const [callTo, setCallTo] = useState("");
   const [callToSearch, setCallToSearch] = useState("");
@@ -375,6 +429,67 @@ export default function CallLogTabV2() {
     }
     return map;
   }, [calls, transcriptSyncEnabled]);
+  // Evidence "Jump": the intelligence panel hands a verbatim quote to the
+  // transcript, which opens and marks it so the office can check a promise
+  // against the words in seconds instead of replaying the audio.
+  const [transcriptHighlights, setTranscriptHighlights] = useState(() => new Map());
+  // Deep link from the Owed tab (#tab=calls&call=<id>): open that call's
+  // intelligence panel and scroll to it once the list has rendered.
+  const [focusCallId, setFocusCallId] = useState(() => {
+    try { return new URLSearchParams(window.location.hash.replace(/^#/, "")).get("call") || null; } catch { return null; }
+  });
+  useEffect(() => {
+    const onHash = () => {
+      try { setFocusCallId(new URLSearchParams(window.location.hash.replace(/^#/, "")).get("call") || null); } catch { setFocusCallId(null); }
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  useEffect(() => {
+    if (!focusCallId) return;
+    const el = document.getElementById(`call-intel-${focusCallId}`);
+    if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [focusCallId, calls]);
+  // A deep-linked call outside the loaded window (older than the default
+  // 365 days, or past the newest 200) is fetched by exact id and pinned to
+  // the top of the list so the link never opens an empty tab. One attempt
+  // per id: a call the server says is missing stays missing rather than
+  // refetching on every render. A FAILED request (transport, 5xx) is not a
+  // missing call: the latch is released and the failure shown with a
+  // retry, so the link is not silently empty until the tab remounts.
+  const pinnedFetchRef = useRef(null);
+  const [pinnedError, setPinnedError] = useState(null);
+  const [pinnedRetry, setPinnedRetry] = useState(0);
+  useEffect(() => {
+    // No focus (hash cleared): nothing pinned, and no stale failure either.
+    if (!focusCallId) { setPinnedError(null); return; }
+    if (loading) return;
+    if (calls.some((c) => c.id === focusCallId)) return;
+    if (pinnedFetchRef.current === focusCallId) return;
+    pinnedFetchRef.current = focusCallId;
+    setPinnedError(null);
+    adminFetch(`/ai/admin/calls?id=${encodeURIComponent(focusCallId)}`)
+      .then((d) => {
+        const pinned = d?.calls?.[0];
+        if (!pinned) return;
+        setCalls((prev) => (prev.some((c) => c.id === pinned.id) ? prev : [pinned, ...prev]));
+      })
+      .catch((err) => {
+        // A failure belongs to the request's own focus: after the hash moved
+        // on, an obsolete rejection must not release the latch or paint an
+        // error over the call now in focus (Codex #3725 r19 P3).
+        if (pinnedFetchRef.current !== focusCallId) return;
+        pinnedFetchRef.current = null;
+        setPinnedError(err?.message || "Could not load the linked call.");
+      });
+  }, [focusCallId, calls, loading, pinnedRetry]);
+  const jumpToQuote = (id, quote) => {
+    setTranscriptHighlights((prev) => new Map(prev).set(id, quote));
+    setExpandedTranscripts((prev) => new Set(prev).add(id));
+    setTimeout(() => {
+      document.getElementById(`call-transcript-mark-${id}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 0);
+  };
 
   const loadCalls = (search = "") => {
     const q = search
@@ -385,15 +500,20 @@ export default function CallLogTabV2() {
     return Promise.allSettled([
       adminFetch(`/ai/admin/calls${q}`),
       adminFetch("/ai/admin/calls/route-calibration?days=30"),
+      adminFetch("/admin/call-recordings/stats"),
     ])
-      .then(([callsResult, calibrationResult]) => {
+      .then(([callsResult, calibrationResult, statsResult]) => {
         if (seq !== loadSeqRef.current) return; // superseded
         if (callsResult.status !== "fulfilled") throw callsResult.reason;
         const d = callsResult.value;
         setCalls(d.calls || []);
         setTranscriptSyncEnabled(d.transcript_sync_enabled === true);
+        pinnedFetchRef.current = null;
         if (calibrationResult.status === "fulfilled") {
           setRouteCalibration(calibrationResult.value);
+        }
+        if (statsResult.status === "fulfilled" && statsResult.value && typeof statsResult.value === "object") {
+          setPipeline(statsResult.value);
         }
         setLoading(false);
       })
@@ -733,6 +853,12 @@ export default function CallLogTabV2() {
 
   return (
     <div className="flex min-w-0 max-w-full flex-col gap-4 overflow-x-hidden">
+      {pinnedError && (
+        <div role="alert" className="flex flex-wrap items-center gap-2 text-14 md:text-12 text-alert-fg">
+          <span>{pinnedError}</span>
+          <Button size="sm" variant="ghost" onClick={() => setPinnedRetry((n) => n + 1)}>Retry</Button>
+        </div>
+      )}
       {/* Stats filter bar — desktop only */}
       <div className="hidden md:flex gap-2 flex-wrap">
         {" "}
@@ -960,6 +1086,34 @@ export default function CallLogTabV2() {
               ))}
             </div>{" "}
           </CardBody>{" "}
+        </Card>
+      )}
+      {pipeline && (
+        <Card>
+          <CardBody>
+            <div className="flex items-center gap-3 flex-wrap text-13 md:text-12 text-ink-secondary" data-testid="pipeline-health">
+              <span className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary">Pipeline</span>
+              <span><span className="font-mono u-nums text-ink-primary">{Number(pipeline.processing) || 0}</span> processing</span>
+              {/* Named for what the counter measures — claims whose heartbeat
+                  went quiet — not the watchdog's wider "stalled" (which also
+                  counts old NULL/pending rows); Codex #3733 P2. */}
+              <span className={Number(pipeline.stalledClaims) > 0 ? "text-amber-700" : ""}><span className="font-mono u-nums">{Number(pipeline.stalledClaims) || 0}</span> stale claims</span>
+              <span className={Number(pipeline.failed) > 0 ? "text-amber-700" : ""}><span className="font-mono u-nums">{Number(pipeline.failed) || 0}</span> failed ({Number(pipeline.retrying) || 0} retrying)</span>
+              <span><span className="font-mono u-nums text-ink-primary">{Number(pipeline.reviewOpen) || 0}</span> in review</span>
+              <span><span className="font-mono u-nums text-ink-primary">{Number(pipeline.parkedRecordings) || 0}</span> parked recordings</span>
+              {/* Mirrors the stall watchdog's eligibility: the metric counts
+                  a row still carrying audio AND a PAN-quarantined call whose
+                  masked transcript is still processable but has no audio (the
+                  r18 change). "with audio" would overclaim the quarantined
+                  case, so the label just says "unfinished" (Codex #3733 P2). */}
+              {pipeline.oldestUnfinishedMinutes != null && (
+                <span className={Number(pipeline.oldestUnfinishedMinutes) > 30 ? "text-amber-700" : ""}>oldest unfinished <span className="font-mono u-nums">{Math.round(Number(pipeline.oldestUnfinishedMinutes))}</span> min</span>
+              )}
+              {pipeline.p50PassMs7d != null && (
+                <span>p50 pass <span className="font-mono u-nums">{Math.round(Number(pipeline.p50PassMs7d) / 1000)}</span> s (7d)</span>
+              )}
+            </div>
+          </CardBody>
         </Card>
       )}
       {routeCalibration && (
@@ -1517,12 +1671,20 @@ export default function CallLogTabV2() {
                               </div>
                             ) : (
                               <div className="px-2 pb-2 text-14 md:text-12 text-ink-secondary italic leading-relaxed">
-                                "{open ? shown : preview}"
+                                "{renderTranscriptWithHighlight(open ? shown : preview, open ? transcriptHighlights.get(c.id) : null, c.id)}"
                               </div>
                             )}{" "}
                           </div>
                         );
                       })()}
+                    <CallIntelligencePanel
+                      callId={c.id}
+                      defaultOpen={focusCallId === c.id}
+                      onJumpToQuote={c.transcription ? (quote) => jumpToQuote(c.id, quote) : null}
+                      onPlayAt={c.recording_available ? (ms) => playerRefs.current.get(c.id)?.seekTo(ms / 1000) : null}
+                      onCallChanged={() => loadCalls(callLogSearch.trim())}
+                      refreshKey={[c.processing_status, c.processing_generation, c.updated_at].map((v) => v ?? "").join("|")}
+                    />
                   </div>
                 );
               })}

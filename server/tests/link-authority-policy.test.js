@@ -364,3 +364,69 @@ describe('levels agree with the registry enum', () => {
     for (const l of Object.values(P.LEVELS)) expect(R.AUTHORITY_LEVELS).toContain(l);
   });
 });
+
+describe('decision-inputs hash (§3.6b — per dimension + shared floors)', () => {
+  const ctx = () => ({ path: paid({ legal_attestation: true, legal_terms_hash: HASH }), domain: domain(), policy: defaults() });
+  test('stable under key order and identical objects', () => {
+    const a = ctx();
+    const b = { ...ctx(), path: Object.fromEntries(Object.entries(a.path).reverse()) };
+    for (const d of ['payment', 'communication', 'execution']) expect(P.decisionInputsHash(d, a)).toBe(P.decisionInputsHash(d, b));
+  });
+  test('a price change moves the payment hash only; a submission_url change moves execution only', () => {
+    const a = ctx();
+    const price = { ...a, path: { ...a.path, estimated_cost_cents: 9999 } };
+    expect(P.decisionInputsHash('payment', price)).not.toBe(P.decisionInputsHash('payment', a));
+    expect(P.decisionInputsHash('communication', price)).toBe(P.decisionInputsHash('communication', a));
+    expect(P.decisionInputsHash('execution', price)).toBe(P.decisionInputsHash('execution', a));
+    const url = { ...a, path: { ...a.path, submission_url: 'https://x.example/other' } };
+    expect(P.decisionInputsHash('execution', url)).not.toBe(P.decisionInputsHash('execution', a));
+    expect(P.decisionInputsHash('payment', url)).toBe(P.decisionInputsHash('payment', a));
+  });
+  test('the instance key is part of EVERY dimension\'s hash: generation 2 never hashes like generation 1', () => {
+    const a = { ...ctx(), instanceKey: '-:1' };
+    const b = { ...a, instanceKey: '-:2' };
+    for (const d of ['payment', 'communication', 'execution']) {
+      expect(P.decisionInputs(d, a)).toMatchObject({ instance_key: '-:1' });
+      expect(P.decisionInputsHash(d, a)).not.toBe(P.decisionInputsHash(d, b));
+    }
+    expect(P.decisionInputs('payment', ctx())).toMatchObject({ instance_key: null });
+  });
+  test('the currency attestation (id on the path + the immutable row hash via ctx.attestation) is a PAYMENT input only', () => {
+    const a = ctx();
+    expect(P.decisionInputs('payment', a)).toMatchObject({ currency_attestation_id: null, currency_attestation_hash: null });
+    const withId = { ...a, path: { ...a.path, currency_attestation_id: 'att-1' } };
+    const withHash = { ...withId, attestation: { hash: 'h'.repeat(64) } };
+    expect(P.decisionInputs('payment', withHash)).toMatchObject({ currency_attestation_id: 'att-1', currency_attestation_hash: 'h'.repeat(64) });
+    expect(P.decisionInputsHash('payment', withId)).not.toBe(P.decisionInputsHash('payment', a));
+    expect(P.decisionInputsHash('payment', withHash)).not.toBe(P.decisionInputsHash('payment', withId));
+    for (const d of ['communication', 'execution']) expect(P.decisionInputsHash(d, withHash)).toBe(P.decisionInputsHash(d, a));
+  });
+  test('legal_terms_hash moves EVERY dimension (§3.3b: all three revisions bump on a terms change)', () => {
+    const a = ctx();
+    const b = { ...a, path: { ...a.path, legal_terms_hash: 'b'.repeat(64) } };
+    for (const d of ['payment', 'communication', 'execution']) expect(P.decisionInputsHash(d, b)).not.toBe(P.decisionInputsHash(d, a));
+  });
+  test('a moved floor or floor policy value moves every dimension and the floors hash; an unrelated policy field moves nothing', () => {
+    const a = ctx();
+    const spam = { ...a, domain: { ...a.domain, spam_score: 9 } };
+    const floor = { ...a, policy: { ...a.policy, min_score: 70 } };
+    const other = { ...a, policy: { ...a.policy, auto_outreach_daily_cap: 10 } };
+    for (const d of ['payment', 'communication', 'execution']) {
+      expect(P.decisionInputsHash(d, spam)).not.toBe(P.decisionInputsHash(d, a));
+      expect(P.decisionInputsHash(d, floor)).not.toBe(P.decisionInputsHash(d, a));
+      expect(P.decisionInputsHash(d, other)).toBe(P.decisionInputsHash(d, a));
+    }
+    expect(P.floorInputsHash(spam)).not.toBe(P.floorInputsHash(a));
+    expect(P.floorInputsHash(floor)).not.toBe(P.floorInputsHash(a));
+    expect(P.floorInputsHash(other)).toBe(P.floorInputsHash(a));
+    expect(P.floorInputsHash({ ...a, path: { ...a.path, estimated_cost_cents: 1 } })).toBe(P.floorInputsHash(a));
+  });
+  test('every DIMENSION_INPUT_FIELDS field is present in decisionInputs (null when the path lacks it)', () => {
+    for (const [d, fields] of Object.entries(P.DIMENSION_INPUT_FIELDS)) {
+      const inputs = P.decisionInputs(d, { path: {}, domain: {}, policy: defaults() });
+      for (const f of fields) expect(inputs).toHaveProperty(f, null);
+      expect(inputs.floors).toEqual(expect.objectContaining({ min_score: 60 }));
+    }
+    expect(() => P.decisionInputs('nope', {})).toThrow(/unknown authority dimension/);
+  });
+});

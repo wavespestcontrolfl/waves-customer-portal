@@ -302,7 +302,24 @@ function NowLine() {
   );
 }
 
-function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect, routeOrder, accent }) {
+// Completed visit whose closeout (invoice / report / completion text) is
+// still owed — the dispatch page's owesCompletion predicate decides; this
+// is the only visible cue on the grid that the visit still needs a resume.
+function CloseoutOwedChip({ onClick }) {
+  const className = 'inline-flex items-center h-4 px-1 rounded-xs bg-alert-bg text-alert-fg text-10 font-medium uppercase tracking-label whitespace-nowrap';
+  if (onClick) {
+    // All-day strip: the stop's own button opens the customer profile, so
+    // the chip carries the resume action itself (Codex #3799 r1).
+    return (
+      <button type="button" onClick={onClick} className={cn(className, 'u-focus-ring')} title="Resume closeout">
+        Closeout owed
+      </button>
+    );
+  }
+  return <span className={className}>Closeout owed</span>;
+}
+
+function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -467,6 +484,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         >
           {service.customerName || 'Unassigned'}
         </button>
+        {owesCompletion?.(service) && <CloseoutOwedChip />}
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && effectiveHeight >= SLOT_HEIGHT * 2 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
@@ -553,7 +571,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
+function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -669,7 +687,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
                 onEdit={onEdit}
                 onProtocol={onProtocol}
                 onTreatmentPlan={onTreatmentPlan}
-                onViewAudit={onViewAudit}
+                onViewAudit={onViewAudit} owesCompletion={owesCompletion}
                 onViewCustomer={onViewCustomer}
                 onResize={onResize}
                 isSelected={selection?.has(svc.id)}
@@ -717,7 +735,7 @@ function TimeAxis() {
   );
 }
 
-function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer }) {
+function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion }) {
   if (services.length === 0) return null;
   return (
     <div
@@ -742,6 +760,7 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
           >
             {svc.customerName || 'Unassigned'} · {serviceDisplayName(svc)}
           </button>
+          {owesCompletion?.(svc) && <CloseoutOwedChip onClick={() => onEdit?.(svc)} />}
           {isLawnService(svc) && onTreatmentPlan && (
             <button
               type="button"
@@ -784,7 +803,7 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
   );
 }
 
-function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect }) {
+function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -834,6 +853,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
       >
         {service.customerName || 'Unassigned'}
       </button>
+      {owesCompletion?.(service) && <div className="mt-0.5"><CloseoutOwedChip /></div>}
       {serviceDisplayName(service) && (
         <div className="truncate opacity-90">{serviceDisplayName(service)}</div>
       )}
@@ -883,7 +903,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
   );
 }
 
-function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, selection, onToggleSelect }) {
+function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, selection, onToggleSelect }) {
   const [open, setOpen] = useState(true);
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
@@ -942,7 +962,7 @@ function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewA
                 onEdit={onEdit}
                 onProtocol={onProtocol}
                 onTreatmentPlan={onTreatmentPlan}
-                onViewAudit={onViewAudit}
+                onViewAudit={onViewAudit} owesCompletion={owesCompletion}
                 onViewCustomer={onViewCustomer}
                 isSelected={selection?.has(svc.id)}
                 onToggleSelect={onToggleSelect}
@@ -1031,6 +1051,7 @@ export default function TimeGridDay({
   onProtocol,
   onTreatmentPlan,
   onViewAudit,
+  owesCompletion,
   onViewCustomer,
   onChange,
   onCreateSlot,
@@ -1415,7 +1436,7 @@ export default function TimeGridDay({
       style={{ border: '1px solid #E4E4E7' }}
     >
       {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
-      <AllDayStrip services={allDay} onEdit={onEdit} onProtocol={onProtocol} onTreatmentPlan={onTreatmentPlan} onViewAudit={onViewAudit} onViewCustomer={onViewCustomer} />
+      <AllDayStrip services={allDay} onEdit={onEdit} onProtocol={onProtocol} onTreatmentPlan={onTreatmentPlan} onViewAudit={onViewAudit} owesCompletion={owesCompletion} onViewCustomer={onViewCustomer} />
       {selection.size > 0 && (
         <BulkActionBar
           count={selection.size}
@@ -1445,7 +1466,7 @@ export default function TimeGridDay({
               onEdit={onEdit}
               onProtocol={onProtocol}
               onTreatmentPlan={onTreatmentPlan}
-              onViewAudit={onViewAudit}
+              onViewAudit={onViewAudit} owesCompletion={owesCompletion}
               onViewCustomer={onViewCustomer}
               selection={selection}
               onToggleSelect={toggleSelection}
@@ -1467,7 +1488,7 @@ export default function TimeGridDay({
                     onEdit={onEdit}
                     onProtocol={onProtocol}
                     onTreatmentPlan={onTreatmentPlan}
-                    onViewAudit={onViewAudit}
+                    onViewAudit={onViewAudit} owesCompletion={owesCompletion}
                     onViewCustomer={onViewCustomer}
                     onCreateSlot={onCreateSlot ? handleCreateSlot : undefined}
                     onResize={handleResize}

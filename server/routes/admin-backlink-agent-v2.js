@@ -309,6 +309,10 @@ const REGISTRY_JOBS = Object.freeze({
       .catch((err) => logger.error(`[link-investigator] admin run failed: ${err.message}`));
     return Promise.resolve({ started: true });
   },
+  // Step 4 (PR 2a): the authority bridge — decisions + parks only, no network,
+  // fast enough to run inline. Gated by GATE_LINK_AUTHORITY inside the service
+  // (reports `gated: true` when off); a held lease reports `skipped`.
+  authority: (opts) => require('../services/seo/link-authority-bridge').runAuthorityBridge(db, { dryRun: opts.dryRun, ...(opts.limit ? { limit: opts.limit } : {}) }),
 });
 router.post('/registry/jobs/:job', async (req, res, next) => {
   try {
@@ -389,6 +393,9 @@ router.patch('/registry/:id', async (req, res, next) => {
     if (!domain) return res.status(404).json({ error: 'not found' });
     const now = new Date();
     const patch = { agent_state: nextState, updated_at: now };
+    // who rejected: the authority bridge lifts only its OWN rejections once the
+    // inputs improve; the owner's stands until Reopen / Watch clears the marker
+    patch.rejected_by = action === 'reject' ? 'owner' : null;
     patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
     // A manual Watch starts a LONG-TERM watch generation exactly like the
     // investigator's own parks: the probe-coverage mask resets, so the

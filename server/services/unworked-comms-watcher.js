@@ -122,6 +122,12 @@ async function loadCallbackCalls(cutoff = new Date()) {
       -- (call-extraction-v1 prompt) and drives visit creation — a booked
       -- call carrying it is scheduled work, not an unworked callback.
       AND c.disposition = 'callback_task_created'
+      -- Callbacks are NOT handed off to the Owed lane (unlike promised
+      -- estimates): this digest pages the SAME evening a callback goes
+      -- unworked, and the commitments watchdog only rings the next morning
+      -- (7:20am ET, after the call day's midnight deadline). Handing them
+      -- over would lose the same-day alert (Codex #3725 r8). The Owed queue
+      -- still tracks the callback row; the morning bell is the escalation.
       -- Not yet due (codex r37): an explicitly agreed future callback
       -- time (scheduling.follow_up_start_at) is scheduled work, not an
       -- unworked obligation, until that time arrives.

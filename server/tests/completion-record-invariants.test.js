@@ -119,6 +119,20 @@ describe('PREDICATES registry', () => {
     // in the grace-window marker, never in the sibling evidence clause.
     const evidenceClause = comms.slice(comms.indexOf('SELECT 1 FROM service_records sib'));
     expect(evidenceClause).not.toContain('recap_sms_sent_at');
+    // A SUCCESSFUL pest-recap text writes none of the markers above (no
+    // completionSmsStatus, no service_recaps row); its provider-confirmed
+    // messaging_audit_log row, keyed to the sibling record, is the evidence
+    // (#3746 codex P2 r8). Sent = provider sent_at with no block code.
+    expect(evidenceClause).toContain('SELECT 1 FROM messaging_audit_log a');
+    expect(evidenceClause).toContain("WHERE a.audience = 'customer' AND a.purpose = 'service_completion'");
+    expect(evidenceClause).toContain("AND a.channel = 'sms'");
+    expect(evidenceClause).toContain("AND a.metadata->>'original_message_type' = 'pest_recap'");
+    expect(evidenceClause).toContain("AND a.metadata->>'service_record_id' = sib.id::text");
+    expect(evidenceClause).toContain('AND a.sent_at IS NOT NULL AND a.blocked_code IS NULL');
+    // Synthetic success ids (gate-blocked / template-disabled / owner-silence)
+    // also carry sent_at: only a real Twilio SM/MM id or a push-routed
+    // (proven device delivery) send is evidence (#3771 codex P1 r1).
+    expect(evidenceClause).toContain("AND (a.provider_message_id ~ '^(SM|MM)' OR a.provider = 'push'))");
   });
 
   test('duplicates are counted within ONE completion rail; cross-rail siblings are supported history', () => {

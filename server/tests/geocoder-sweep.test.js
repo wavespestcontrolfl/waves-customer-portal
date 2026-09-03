@@ -68,7 +68,9 @@ function installDb({ listRows, customersById }) {
 function mockGoogle(status, location) {
   global.fetch = jest.fn(async () => ({
     json: async () => (status === 'OK'
-      ? { status: 'OK', results: [{ geometry: { location } }] }
+      // A street-level rooftop hit — the shape the reject guard accepts; the
+      // guard's own rejections are covered in geocoder-reject-guard.test.js.
+      ? { status: 'OK', results: [{ types: ['street_address'], geometry: { location, location_type: 'ROOFTOP' } }] }
       : { status, results: [] }),
   }));
 }

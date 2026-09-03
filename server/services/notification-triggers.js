@@ -219,6 +219,24 @@ const TRIGGER_REGISTRY = {
       link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
     }),
   },
+  // Written directly by call-commitments-watchdog (notifyAdmin with its own
+  // per-commitment per-ET-day dedupeKey and bell: true — the 'alert'
+  // category is silenced under the bell policy and a pager must page);
+  // registered here so the persisted rows are tech-visible: the Owed tab is
+  // staff-wide and the people who work it must see its overdue bell. `build`
+  // is the shape the watchdog writes, for triggerNotification parity.
+  call_commitment_overdue: {
+    techVisible: true,
+    label: 'Promise to a caller is overdue',
+    category: 'alert',
+    priority: 'high',
+    group: 'Communication',
+    build: (p) => ({
+      title: p.count > 1 ? `${p.count} promises to callers are overdue` : 'A promise to a caller is overdue',
+      body: p.summary || 'Open the Owed tab to mark it done or dismiss it.',
+      link: '/admin/communications#tab=owed',
+    }),
+  },
   // Fired by call-recording-processor (GATE_VOICEMAIL_CALLBACK_ALERT) for a
   // voicemail with concrete service intent that did NOT take the workable
   // lead path — usually an existing customer asking for service. Without
@@ -324,6 +342,43 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Service report PDF could not be generated',
       body: `The PDF for ${p.customerName || 'a customer'}'s service report${p.serviceLabel ? ` (${p.serviceLabel})` : ''} failed to render after ${p.attempts || 'multiple'} attempts${p.errorMessage ? ` — ${p.errorMessage}` : ''}. The report link still works; re-render to restore the PDF.`,
+      link: p.link || '/admin/dispatch',
+    }),
+  },
+  // Fired by the completion route when the public report token could not be
+  // minted for a report-v1 visit. The completion text is WITHHELD on this
+  // path (it would otherwise say "your report is ready" and link the portal
+  // home), so the customer has heard nothing until an admin re-completes or
+  // re-sends.
+  service_report_token_mint_failed: {
+    // Tech-visible: links to a day-to-day surface (reports) a field tech works in.
+    techVisible: true,
+    label: 'Service report link could not be minted',
+    category: 'system',
+    priority: 'high',
+    group: 'Alerts',
+    build: (p) => ({
+      title: 'Service report link unavailable — completion text withheld',
+      body: `${p.customerName || 'A customer'}'s service report link could not be created${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.errorMessage ? ` — ${p.errorMessage}` : ''}. No "report ready" text was sent; the closeout is held for retry — retry it from the tech portal.`,
+      link: p.link || '/admin/dispatch',
+    }),
+  },
+  // Fired by the completion route when the completion SMS itself failed at
+  // the provider (or threw). The route is a ONE-SHOT sender — nothing retries
+  // a failed completion text — so without this bell a customer who never got
+  // their report/pay-link text is indistinguishable from one who did.
+  completion_sms_failed: {
+    // Tech-visible: links to a day-to-day surface (reports) a field tech works in.
+    techVisible: true,
+    label: 'Completion text failed to send',
+    category: 'system',
+    priority: 'high',
+    group: 'Alerts',
+    build: (p) => ({
+      title: 'Completion text not delivered',
+      body: `${p.customerName || 'A customer'} did not receive their completion text${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.smsType ? ` [${p.smsType}]` : ''}${p.errorClass ? ` — ${p.errorClass}` : ''}${p.errorMessage ? `: ${p.errorMessage}` : ''}. ${p.resumable === false
+        ? 'The closeout finalized without it; retrying the closeout will not re-send — fix the cause first (a bad number on file, an inactive template).'
+        : 'Nothing retries it automatically; the closeout is held for retry — retry it from the tech portal.'}`,
       link: p.link || '/admin/dispatch',
     }),
   },
@@ -714,6 +769,11 @@ function pushTagFor(triggerKey, payload = {}) {
     // Per-application tag: two applications arriving before the owner opens
     // notifications must not collapse into one push (same-tag replacement).
     return `waves-new_job_application-${payload.applicationId || 'unknown-application'}`;
+  }
+  if (triggerKey === 'service_report_token_mint_failed' || triggerKey === 'completion_sms_failed') {
+    // Per-service-record tag: an outage that fails several completions must
+    // not let later customers' banners silently replace earlier ones.
+    return `waves-${triggerKey}-${payload.serviceRecordId || 'unknown-record'}`;
   }
   return `waves-${triggerKey}`;
 }

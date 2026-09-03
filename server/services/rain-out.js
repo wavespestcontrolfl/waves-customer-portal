@@ -1085,7 +1085,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
   // (the on-the-hour one-hour block), not the visit's stored span: a 2h
   // stored window would hide bookable options and a sub-hour one would
   // offer slots the commit then SLOT_TAKENs (codex P2).
-  const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain', { probeSpanMinutes: 60 });
+  const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain', { probeSpanMinutes: 60, travelGap: true });
 
   // Rain badges — best effort, never blocking. Customer coords first,
   // falling back to nothing (options render without percentages).

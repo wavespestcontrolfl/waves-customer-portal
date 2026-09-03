@@ -4619,6 +4619,7 @@ const EstimateConverter = {
           // still counted as churned by churned_at-based queries (e.g. MRR trend).
           churned_at: null,
           churn_reason: null,
+          churn_episode_id: null,
         };
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE this
     // customers-row write, preserving the #3011 customer-row →

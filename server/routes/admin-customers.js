@@ -10,7 +10,7 @@ const logger = require('../services/logger');
 const { stageLifecycleStamps } = require('../services/customer-stages');
 const { etDateString } = require('../utils/datetime-et');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
-const { findCustomersAtAddress } = require('../services/customer-address-match');
+const { findCustomersAtAddress, rankByContact } = require('../services/customer-address-match');
 const { recordAuditEvent } = require('../services/audit-log');
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
@@ -2995,7 +2995,10 @@ router.post('/at-address', async (req, res, next) => {
     const address = String(req.body?.address || '').trim();
     const exclude = req.body?.excludeCustomerId ? String(req.body.excludeCustomerId) : null;
     if (address.length < 6) return res.json({ customers: [] });
-    const rows = await findCustomersAtAddress(db, address, { excludeCustomerId: exclude });
+    const found = await findCustomersAtAddress(db, address, { excludeCustomerId: exclude });
+    // Typed phone/email (lead prefill, or entered before lookup) picks the
+    // household member the operator means — that row leads the list.
+    const rows = rankByContact(found, { phone: req.body?.phone, email: req.body?.email });
     res.json({
       customers: rows.map((c) => ({
         id: c.id,
@@ -3010,6 +3013,7 @@ router.post('/at-address', async (req, res, next) => {
         // comma-separates line2, so a first-comma split would drop the unit).
         streetLine: [c.address_line1, c.address_line2].filter(Boolean).join(" "),
         matchedVia: c.matchedVia,
+        contactMatch: c.contactMatch,
       })),
     });
   } catch (err) { next(err); }

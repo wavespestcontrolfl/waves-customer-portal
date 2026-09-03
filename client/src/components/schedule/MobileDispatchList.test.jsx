@@ -80,3 +80,34 @@ describe('MobileDispatchList technician workflow', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Tech En Route' })).not.toBeInTheDocument());
   });
 });
+
+describe('MobileDispatchList closeout-owed badge', () => {
+  it('flags a completed stop that still owes its closeout, per the dispatch predicate', () => {
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const owed = { ...SERVICE, id: 'svc-owed', status: 'completed', technicianId: 'tech-1' };
+    const done = { ...SERVICE, id: 'svc-done', customerName: 'Done Customer', status: 'completed', technicianId: 'tech-1' };
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[owed, done]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        owesCompletion={(svc) => svc.id === 'svc-owed'}
+      />,
+    );
+    expect(screen.getAllByText('Closeout owed')).toHaveLength(1);
+  });
+
+  it('shows no badge when the page passes no predicate', () => {
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[{ ...SERVICE, status: 'completed', technicianId: 'tech-1' }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.queryByText('Closeout owed')).not.toBeInTheDocument();
+  });
+});

@@ -1167,6 +1167,15 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const tsKnobs = require('./estimate-tree-shrub-knob-replay')
       .treeShrubKnobSignalForReplay(estimateData);
     if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
+    // v4.8 palm provenance (pre-push r2 P0): a translator-based replay of a
+    // persisted engineRequest whose stored T&S line priced no service-line
+    // palms must not adopt the new property-palm promotion — same
+    // stored-result evidence rule as the pest curve above. Declared replays
+    // only: on a browser-posted save the operator just regenerated the
+    // preview under the new translator and sees the price.
+    if (source === 'ENGINE_REQUEST') {
+      require('./estimate-tree-shrub-knob-replay').applyTreeShrubPalmReplay(v1Input, estimateData);
+    }
     // Commercial account-minimum replay (codex #3432 r2 P0): a pre-disarm
     // commercial estimate stored at its era's minimum must keep its quoted
     // price through this authoritative recompute too (membership-lapse

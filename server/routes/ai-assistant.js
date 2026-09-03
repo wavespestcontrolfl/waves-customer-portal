@@ -357,8 +357,15 @@ router.post('/admin/conversations/:id/reply', adminAuthenticate, requireTechOrAd
 // GET /api/ai/admin/calls — call history
 router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
-    const { days = 30, limit = 50, search } = req.query;
+    const { days = 30, limit = 50, search, id } = req.query;
     const searchTerm = typeof search === 'string' ? search.trim() : '';
+    // Exact-id read (the Owed queue deep link pins a call that is outside the
+    // default window): same joins and route decoration as the list, no age
+    // bound, no search. A non-UUID id is a 400 rather than a Postgres error.
+    const exactId = typeof id === 'string' ? id.trim() : '';
+    if (exactId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(exactId)) {
+      return res.status(400).json({ error: 'id must be a UUID' });
+    }
 
     let q = db('call_log as cl')
       .leftJoin('customers as c', 'cl.customer_id', 'c.id')
@@ -371,7 +378,9 @@ router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, re
       )
       .orderBy('cl.created_at', 'desc');
 
-    if (!searchTerm) {
+    if (exactId) {
+      q = q.where('cl.id', exactId);
+    } else if (!searchTerm) {
       const since = new Date(Date.now() - parseInt(days) * 86400000);
       q = q.where('cl.created_at', '>', since);
     } else {
@@ -386,7 +395,7 @@ router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, re
       );
     }
 
-    const effectiveLimit = searchTerm ? Math.max(parseInt(limit), 1000) : parseInt(limit);
+    const effectiveLimit = exactId ? 1 : searchTerm ? Math.max(parseInt(limit), 1000) : parseInt(limit);
     const calls = await q.limit(effectiveLimit);
     const callIds = calls.map((call) => call.id).filter(Boolean);
     const routeDecisionByCall = new Map();

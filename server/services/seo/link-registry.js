@@ -86,6 +86,31 @@ const AUTHORITY_LEVELS = Object.freeze([
   'OWNER_MEMBERSHIP', 'OWNER_LEGAL', 'OWNER_HUMAN_STEP', 'DENY', 'INVALID',
   'OWNER_INPUT_REQUIRED',
 ]);
+// §6.3 — most restrictive first. The placement's `authority` column is the
+// most severe level across its OPEN rows (display only; claims read the rows).
+const LEVEL_SEVERITY = Object.freeze([
+  'INVALID', 'DENY', 'OWNER_INPUT_REQUIRED', 'OWNER_MANUAL_PAYMENT', 'OWNER_HUMAN_STEP', 'OWNER_LEGAL',
+  'OWNER_MEMBERSHIP', 'OWNER_PAYMENT', 'OWNER_ACCOUNT', 'OWNER_OUTREACH', 'OWNER_FREE',
+  'AUTO_PAID_WITHIN_POLICY', 'AUTO_OUTREACH', 'AUTO_ACCOUNT', 'AUTO_FREE',
+]);
+// §3.3b instance kinds persisted explicitly ('-' initial, 'terms' accept_terms,
+// 'followup'); a renewal's kind is its renewal_period_key (YYYY or YYYY-MM).
+const INSTANCE_KINDS = Object.freeze(['-', 'terms', 'followup']);
+const RENEWAL_KIND_RE = /^[0-9]{4}(-[0-9]{2})?$/;
+const SATISFIED_REASONS = Object.freeze(['sent', 'placed', 'charged', 'manual_charged', 'no_payment_required', 'human_step_done', 'group_purchase']);
+const END_OUTCOMES = Object.freeze(['failed', 'skipped', 'not_sent', 'voided', 'superseded', 'terms_changed', 'lost', 'human_step_done', 'path_failed_after_charge', 'path_failed_after_free', 'free_checkout_failed', 'captcha']);
+// §3.6b approvals
+const APPROVAL_DECISIONS = Object.freeze(['approved', 'rejected', 'watch']);
+const APPROVAL_ACTIONS = Object.freeze(['acquire', 'accept_terms', 'purchase', 'renewal', 'outreach_send', 'outreach_followup']);
+const ACTIONS_BY_DIMENSION = Object.freeze({
+  execution: Object.freeze(['acquire', 'accept_terms']),
+  payment: Object.freeze(['purchase', 'renewal']),
+  communication: Object.freeze(['outreach_send', 'outreach_followup']),
+});
+// the OWNER_* levels an approval row can grant — never OVERRIDE (a waiver is
+// its own table), MANUAL_PAYMENT (paid outside the system) or INPUT_REQUIRED
+// (a price entry is an input, not an approval)
+const APPROVABLE_LEVELS = Object.freeze(['OWNER_FREE', 'OWNER_ACCOUNT', 'OWNER_OUTREACH', 'OWNER_PAYMENT', 'OWNER_MEMBERSHIP', 'OWNER_LEGAL', 'OWNER_HUMAN_STEP']);
 
 // §4 step 1 — hosts that are references to opportunities or our own, never a
 // target. Dropped by intake (not parked). Subdomains match too.
@@ -402,6 +427,10 @@ const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'link_type',
 // never moves (a send may still be executing, or needs human
 // reconciliation) — it keeps the retired path, which nothing can claim.
 const OUTREACH_LOCKED = new Set(['sending', 'sent', 'send_error']);
+// a placement the mover REFUSES to move: a locked send state or a sent stamp —
+// the conversation belongs to the path it was claimed on (exported so the
+// bridge's selection can treat such a row as pinned in place)
+const isOutreachLocked = (row) => OUTREACH_LOCKED.has(row.outreach_status) || Boolean(row.outreach_sent_at);
 const PLACEMENT_MOVE_COLUMNS = ['id', 'path_id', 'link_type', 'outreach_status', 'outreach_sent_at', 'outreach_send_token', 'leased_path_revision'];
 
 /**
@@ -432,7 +461,7 @@ function movePatch(row, target, now, { syncUrl = false } = {}) {
   // signup lane: a send may be executing against the path it was claimed
   // on, or the row awaits human reconciliation; the retired path stays
   // (nothing can claim it) and the attempt/send stays attributed to it
-  if (OUTREACH_LOCKED.has(row.outreach_status) || row.outreach_sent_at) return null;
+  if (isOutreachLocked(row)) return null;
   // The transition CONSUMES the lease stamp: a same-path reconcile at release
   // fires once per lease, never again on every later release or operator
   // draft of the same (now settled) row.
@@ -468,6 +497,14 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
   if (successor && successor.id && Array.isArray(pathIds)) {
     if (!pathIds.length) return 0;
     const rows = await q('seo_link_prospects').whereIn('path_id', pathIds).whereNull('claimed_at').select(...PLACEMENT_MOVE_COLUMNS);
+    return moveRows(rows || [], successor);
+  }
+  if (successor && successor.id && Array.isArray(prospectIds)) {
+    // exactly THESE unleased placements onto `successor` (the bridge's re-rank
+    // to a still-live best path: only the rows inside the new lane's shape
+    // follow; a sibling on the same old path stays put)
+    if (!prospectIds.length) return 0;
+    const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').forUpdate().select(...PLACEMENT_MOVE_COLUMNS);
     return moveRows(rows || [], successor);
   }
   if (!Array.isArray(prospectIds) || !prospectIds.length) return 0;
@@ -556,9 +593,11 @@ module.exports = {
   LINK_SOURCES, AGENT_STATES, DISCOVERY_PRIORITIES, ACQUISITION_TYPES, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES,
   EXPECTED_REL, EXPECTED_INDEXABILITY, EXPECTED_PERSISTENCE, RENEWAL_PERIODS, PATH_LINK_TYPES, CURRENCIES, FEE_SCOPES,
   ATTEMPT_PROVIDERS, ATTEMPT_ACTIONS, ATTEMPT_OUTCOMES, AUTHORITY_DIMENSIONS, AUTHORITY_LEVELS,
+  LEVEL_SEVERITY, INSTANCE_KINDS, RENEWAL_KIND_RE, SATISFIED_REASONS, END_OUTCOMES,
+  APPROVAL_DECISIONS, APPROVAL_ACTIONS, ACTIONS_BY_DIMENSION, APPROVABLE_LEVELS,
   INTAKE_ITEM_STATES, INTAKE_DROP_REASONS, normalizeRawUrl, intakeItemKey,
   NEVER_TARGET_HOSTS, isNeverTargetHost,
-  mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, isStandingConfidence, normalizeSubmissionUrl, pathKey,
+  mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, isStandingConfidence, normalizeSubmissionUrl, pathKey, movePatch, isOutreachLocked,
   acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,
   settleRetiredPlacements,
 };

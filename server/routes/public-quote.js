@@ -1636,11 +1636,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // provenance and the text-back one-shot stamp survive this stage, same
         // rule as the attach in public-property-lookup.js. CASE keeps the
         // ownership-predicated UPDATE atomic (no read-then-write).
-        // The replace branch carries forward additional_properties captured at
-        // the property-lookup stage (jsonb_strip_nulls drops the key when the
-        // prior row had none); a value in THIS stage's snapshot wins the merge.
+        // The replace branch carries forward additional_properties and the
+        // declared timeline captured at the property-lookup stage
+        // (jsonb_strip_nulls drops a key the prior row never had); a value in
+        // THIS stage's snapshot wins the merge.
         extracted_data: db.raw(
-          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
+          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
           [extractedData, extractedData]
         ),
         updated_at: new Date(),

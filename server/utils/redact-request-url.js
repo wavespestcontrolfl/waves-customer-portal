@@ -7,6 +7,11 @@ const REDACTED = '[REDACTED]';
  */
 function isSensitiveQueryKey(key) {
   const normalized = String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  // Free-text lookup parameters carry whatever the operator typed — street
+  // addresses, phone numbers, names, emails (/api/admin/customers?search=,
+  // the address-keyed lookups). PII in request logs is an AGENTS.md P1;
+  // the log keeps the path and every other parameter.
+  if (['search', 'q', 'query', 'address'].includes(normalized)) return true;
   return ['auth', 'jwt', 'code', 'key', 'nonce', 'otp', 'session', 'sessionid', 'ticket'].includes(normalized)
     || normalized.includes('token')
     || normalized.includes('authorization')

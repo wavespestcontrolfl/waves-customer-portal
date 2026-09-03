@@ -47,6 +47,10 @@ function providerBudgetMs() {
   // aggregate deadline on the same budget — plus the single address
   // validation that deadline can already have in flight when it expires.
   const addressValidation = envMs('GOOGLE_ADDRESS_TIMEOUT_MS', 30000);
+  // NOT counted: the commitments model pass (services/call-commitments.js).
+  // It runs after finalization has cleared processing_token, so it cannot
+  // extend a held claim — counting it would only delay stale-claim takeover
+  // and the stall bell. Only work done while the claim is held belongs here.
   return download + (3 * transcription) + (2 * label) + (6 * extraction) + addressValidation + DEFAULT_FALLBACK_BUDGET_MS;
 }
 

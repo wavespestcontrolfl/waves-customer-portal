@@ -110,6 +110,13 @@ CI against the migrated DB; warnings block):
   so the probe is typed correctly). Tools that write rows or send anything
   MUST be flagged `sideEffects: true` in manual-contracts.js (or
   `_sideEffects` on the tool) so smoke never fires them.
+- **Inline gate metadata must be underscore-prefixed** (`_contracts`,
+  `_sideEffects`, `_sonnetBacked`). The route strips `_`-keys via
+  `apiToolDefinition` at the single `anthropic.messages.create` call site;
+  any other extra key on a tool definition is a 400 from the API and a 500
+  for every IB query (prod outage 2026-09-03, `search_ib_history` behind
+  `GATE_IB_THREADS` — route suites mock the SDK, so only the
+  `admin-intelligence-bar-tool-definitions` suite catches it).
 - **Response shape**: return a JSON-serializable, non-empty plain object —
   never a bare Knex builder or scalar.
 - Wrap uncertain tables/columns in try/catch and declare them

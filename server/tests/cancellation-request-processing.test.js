@@ -158,6 +158,7 @@ jest.mock('../models/db', () => {
       // so live-row family resolution yields scope_not_owned — exactly the
       // post-first-attempt state the repair-only retry runs from.
       leftJoin() { return q; },
+      forUpdate() { return q; },
       whereIn(col, vals) { conds.push((r) => (vals instanceof Set ? vals.has(r[col]) : vals.includes(r[col]))); return q; },
       whereNotIn(col, vals) { conds.push((r) => !vals.includes(r[col])); return q; },
       whereRaw(sql) {

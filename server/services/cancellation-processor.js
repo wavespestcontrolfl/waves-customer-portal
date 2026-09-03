@@ -3,6 +3,7 @@ const logger = require('./logger');
 const trackTransitions = require('./track-transitions');
 const { transitionJobStatus } = require('./job-status');
 const { etDateString } = require('../utils/datetime-et');
+const { randomUUID } = require('crypto');
 const { gateEnvValue } = require('../config/feature-gates');
 
 // customers.churn_reason is varchar(30) — keep this at/under 30 chars.
@@ -79,15 +80,30 @@ async function rentedTermiteStationState(customerId) {
   return { rented, flaggedRental };
 }
 
-async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null } = {}) {
+async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null, termId = null, episodeKey = null } = {}) {
   const { rented, flaggedRental } = await rentedTermiteStationState(customerId);
   if (!rented.length && !flaggedRental) return { raised: false, reason: 'no_rented_stations' };
   const NotificationService = require('./notification-service');
   const count = rented.length;
-  // Keyed per cancellation EVENT (request), not per customer: retries of
-  // the same request stay idempotent, while a restored customer who later
-  // cancels another rental program gets a fresh task.
-  const dedupeKey = `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`;
+  // Keyed on (PREPAID TERM, CHURN EPISODE, class) when a term governs the
+  // cancel: the admin duplicate latch only echoes a prior run for 24h, so a
+  // repeat end-of-coverage commit on the same decided term after that opens
+  // a NEW request — a request-keyed task would hand staff a second dated
+  // instruction for the same stations (same rule as the refund task,
+  // prepay_refund:term:<id>). The episode (customers.churn_episode_id,
+  // carried on the request) keeps a WON-BACK customer who later cancels the
+  // same still-current term from being silenced by the first episode's row.
+  // Dated and immediate classes stay distinct (an end_at_term →
+  // end_now_refund transition must still raise "pull now"), and the dated
+  // class carries its boundary (a corrected coverage end is a new
+  // instruction). No term / no episode (portal path, non-prepaid admin
+  // cancel, unanchored churn) keeps the per-EVENT key: retries of the same
+  // request stay idempotent, while a restored customer who later cancels
+  // another rental program gets a fresh task.
+  const termKeyed = !!(termId && episodeKey);
+  const dedupeKey = termKeyed
+    ? `termite_station_retrieval:term:${termId}:${episodeKey}:${retrieveAfter ? `dated:${retrieveAfter}` : 'immediate'}`
+    : `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`;
   let raised = null;
   // Staff hold at most ONE open retrieval instruction per account. Before
   // this raise, every earlier UNREAD retrieval row for the customer is
@@ -214,7 +230,12 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
         // date on the same request) rewrites the standing row and surfaces
         // it unread again; identical content stays a plain dedupe.
         refreshOnDedupe: true,
-        metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental, ...(requestId ? { requestId } : {}), ...(retrieveAfter ? { retrieveAfter } : {}) },
+        metadata: {
+          kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental,
+          ...(requestId ? { requestId } : {}),
+          ...(termKeyed ? { termId, churnEpisode: episodeKey } : {}),
+          ...(retrieveAfter ? { retrieveAfter } : {}),
+        },
         trx,
       }
     );
@@ -782,14 +803,40 @@ async function processCancellationRequest({
   let churned = false;
   let termiteRetrievalPending = null;
   let wasChurnedStage = false;
+  // The churn EPISODE (customers.churn_episode_id): minted here on the
+  // first churn of an episode (no stamp on the row), reused on a repeat
+  // run, cleared by every reactivation path that clears churned_at. The
+  // caller keys the term's end-of-coverage side effects on it — never on
+  // churned_at/stage inference.
+  let churnEpisodeId = null;
   // A scoped cancel never churns the account — the customer keeps the
   // families that stay; their billing wind-down happens per family below.
   if (!scoped) try {
-    const customer = await db('customers')
-      .where({ id: customerId })
-      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode');
-    if (customer) {
+    // Every churn fact — whether this is a repeat churn, the episode, the
+    // churn stamps, the MRR snapshot — is derived from the row AS LOCKED,
+    // never from an earlier unlocked read: a concurrent cancel must not
+    // mint a second episode from the same unstamped row, and a concurrent
+    // reactivation that cleared the stamps must not have this run follow a
+    // stale repeat-churn branch (writing 'churned' without restoring
+    // churned_at) or reuse an obsolete episode without writing it back.
+    // The returned identity always equals customers.churn_episode_id as
+    // committed. Returns false when the row does not exist.
+    const gated = gateEnvValue('GATE_CANCEL_FLOW_V2');
+    const churnWrite = async (trx) => {
+      const customer = await trx('customers')
+        .where({ id: customerId })
+        .forUpdate()
+        .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode', 'churn_episode_id');
+      if (!customer) return false;
       wasChurnedStage = customer.pipeline_stage === 'churned';
+      // A stored episode is REUSED only while the row is still churned. A
+      // promotion to a live stage that never cleared the stamp (tier
+      // alignment in self-booking-plan-sync promotes a booked churned member
+      // to active_customer without touching churn_episode_id) is a win-back
+      // all the same: this cancel is a NEW episode, or its end-of-term side
+      // effects would dedupe against the earlier churn's.
+      const reuseEpisode = wasChurnedStage && !!customer.churn_episode_id;
+      churnEpisodeId = reuseEpisode ? customer.churn_episode_id : randomUUID();
       const now = new Date();
       const update = {
         active: false,
@@ -801,6 +848,7 @@ async function processCancellationRequest({
         autopay_enabled: false,
         next_charge_date: null,
         updated_at: now,
+        ...(reuseEpisode ? {} : { churn_episode_id: churnEpisodeId }),
       };
       // Preserve the original churn timestamp/reason if already churned.
       if (!wasChurnedStage) {
@@ -837,29 +885,9 @@ async function processCancellationRequest({
       // ledger failure must fail the churn write (→ 'churn' error → office
       // review alert), never be swallowed. Dark: gate off → byte-identical
       // to H0.
-      // Both saved payment METHODS (StripeService.charge() picks the default
-      // by payment_methods.autopay_enabled alone) and any armed
-      // failed-payment retry (the ladder does not check active/churn) are
-      // independent charge rails and belong to the same wind-down.
-      const disarmPaymentRails = async (dbh) => {
-        await dbh('payment_methods')
-          .where({ customer_id: customerId })
-          .update({ autopay_enabled: false });
-        await dbh('payments')
-          .where({ customer_id: customerId, status: 'failed' })
-          .whereNull('superseded_by_payment_id')
-          .whereNotNull('next_retry_at')
-          .update({ next_retry_at: null });
-      };
-
-      if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
-        // PR E: the ENTIRE billing wind-down — customer flags/tier clear,
-        // authoritative ledger reset, payment-method disable, retry disarm —
-        // is ONE transaction. All-or-nothing is what makes the abort below
-        // sound: on a throw here, nothing persisted and the account is
-        // exactly as it was. The advisory ledger reset (gate off for
-        // GATE_PLAN_RATE_LEDGER) runs after commit and only warns — an
-        // advisory hiccup must never take the committed wind-down back.
+      if (gated) {
+        // PR E (GATE_CANCEL_FLOW_V2): the tier/rate wind-down (see the
+        // transaction below for the all-or-nothing rule).
         update.waveguard_tier = null;
         update.waveguard_tier_source = null;
         update.monthly_rate = null;
@@ -869,36 +897,66 @@ async function processCancellationRequest({
         if (wasChurnedStage && customer.churn_mrr == null && Number(customer.monthly_rate) > 0) {
           update.churn_mrr = Number(customer.monthly_rate);
         }
-        // Per-application lane fields (billing_mode + per_application_fee)
-        // are NOT cleared here: they are the live price for unsettled work
-        // (an in-progress visit, or a completed-but-uninvoiced application),
-        // and any pre-check would race a pending→en_route transition. They
-        // are cleared AFTER the visit sweep by one atomic conditional UPDATE
-        // (see the gated block near the end of this function).
-        const { resetLedgerToScalar } = require('./plan-rate-ledger');
-        await db.transaction(async (trx) => {
-          // Rung 6 before the customers row lock: this transaction rewrites
-          // the plan ledger and tier, the writes the scoped wind-down and
-          // every booking/ledger writer serialize on.
-          await lockCustomerComms(trx, customerId);
-          await trx('customers').where({ id: customerId }).update(update);
-          // The ledger clear is atomic with the wind-down REGARDLESS of the
-          // ledger-read gate (codex r48): rows left behind while the gate
-          // is off become authoritative the moment it flips, resurrecting
-          // the cancelled rate on a win-back. A failure here rolls the
-          // whole wind-down back and the gated abort below stops the run
-          // BEFORE any service is swept — nothing is left half-done.
-          await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
-          await disarmPaymentRails(trx);
-        });
-      } else {
-        // Legacy (H0) path, byte-identical: sequential writes, and on failure
-        // the catch below records 'churn' and CONTINUES like H0 did.
-        await db('customers').where({ id: customerId }).update(update);
-        await disarmPaymentRails(db);
       }
+      await trx('customers').where({ id: customerId }).update(update);
+      return true;
+    };
+    // Both saved payment METHODS (StripeService.charge() picks the default
+    // by payment_methods.autopay_enabled alone) and any armed
+    // failed-payment retry (the ladder does not check active/churn) are
+    // independent charge rails and belong to the same wind-down.
+    const disarmPaymentRails = async (dbh) => {
+      await dbh('payment_methods')
+        .where({ customer_id: customerId })
+        .update({ autopay_enabled: false });
+      await dbh('payments')
+        .where({ customer_id: customerId, status: 'failed' })
+        .whereNull('superseded_by_payment_id')
+        .whereNotNull('next_retry_at')
+        .update({ next_retry_at: null });
+    };
 
-      churned = true;
+    if (gated) {
+      // PR E: the ENTIRE billing wind-down — customer flags/tier clear,
+      // authoritative ledger reset, payment-method disable, retry disarm —
+      // is ONE transaction. All-or-nothing is what makes the abort below
+      // sound: on a throw here, nothing persisted and the account is
+      // exactly as it was. The advisory ledger reset (gate off for
+      // GATE_PLAN_RATE_LEDGER) runs after commit and only warns — an
+      // advisory hiccup must never take the committed wind-down back.
+      // Per-application lane fields (billing_mode + per_application_fee)
+      // are NOT cleared here: they are the live price for unsettled work
+      // (an in-progress visit, or a completed-but-uninvoiced application),
+      // and any pre-check would race a pending→en_route transition. They
+      // are cleared AFTER the visit sweep by one atomic conditional UPDATE
+      // (see the gated block near the end of this function).
+      const { resetLedgerToScalar } = require('./plan-rate-ledger');
+      await db.transaction(async (trx) => {
+        // Rung 6 before the customers row lock: this transaction rewrites
+        // the plan ledger and tier, the writes the scoped wind-down and
+        // every booking/ledger writer serialize on.
+        await lockCustomerComms(trx, customerId);
+        if (!(await churnWrite(trx))) return;
+        // The ledger clear is atomic with the wind-down REGARDLESS of the
+        // ledger-read gate (codex r48): rows left behind while the gate
+        // is off become authoritative the moment it flips, resurrecting
+        // the cancelled rate on a win-back. A failure here rolls the
+        // whole wind-down back and the gated abort below stops the run
+        // BEFORE any service is swept — nothing is left half-done.
+        await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
+        await disarmPaymentRails(trx);
+        churned = true;
+      });
+    } else {
+      // Legacy (H0) path: sequential writes, and on failure the catch
+      // below records 'churn' and CONTINUES like H0 did. The customers
+      // write is the one statement it always was, now under the row lock
+      // (no rung 6: this transaction takes no other lock, so it cannot sit
+      // in a cycle with the writers that do).
+      if (await db.transaction(churnWrite)) {
+        await disarmPaymentRails(db);
+        churned = true;
+      }
     }
   } catch (err) {
     errors.push('churn');
@@ -1538,6 +1596,7 @@ async function processCancellationRequest({
     // record was lost reconstructs the pull count from it.
     repairedCount: repairs.length,
     termiteRetrievalPending,
+    churnEpisodeId: churned ? churnEpisodeId : null,
     // C3 facts the caller records on the case: what was kept, and whether
     // the requested waiver was CONFIRMED by every applicable fee rail —
     // never the raw request while a fee may still charge.

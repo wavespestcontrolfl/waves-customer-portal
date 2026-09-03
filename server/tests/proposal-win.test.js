@@ -456,6 +456,7 @@ describe('promoteLinkedCustomerForProposalWin', () => {
       active: true,
       churned_at: null,
       churn_reason: null,
+      churn_episode_id: null,
     });
     expect(ops.updates[0]).not.toHaveProperty('member_since'); // original start preserved
   });

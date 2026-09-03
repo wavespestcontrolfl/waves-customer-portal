@@ -10,7 +10,8 @@ const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
-const { findConflictingVisits, acquireOccupancyLock } = require('./scheduling/occupancy');
+const { findConflictingVisits, acquireOccupancyLock, listOccupiedWindows } = require('./scheduling/occupancy');
+const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
@@ -99,7 +100,10 @@ async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingI
 
 class AvailabilityEngine {
 
-  async getAvailableSlots(city, estimateId) {
+  // opts.customerId: the booking's customer when no estimate links it (AI
+  // assistant check_availability with the session customer) — gives the
+  // travel-gap mirror the same pin confirmBooking measures with.
+  async getAvailableSlots(city, estimateId, opts = {}) {
     // 1. Resolve city → zone
     const zone = await this.resolveZone(city);
     if (!zone) return { zone: null, days: [], message: `No service zone found for ${city}` };
@@ -130,6 +134,48 @@ class AvailabilityEngine {
       etDateString(addETDays(today, config.advance_days_min)),
       etDateString(addETDays(today, config.advance_days_max)),
     );
+
+    // Travel-gap mirror (GATE_SLOT_TRAVEL_GAP): confirmBooking's commit probe
+    // runs the tech-blind, coordinate-aware findConflictingVisits `travel`
+    // predicate over EVERY stop that day, while this builder's occupied set
+    // is zone-scoped and buffer-only — an out-of-zone stop adjacent to a
+    // quoted slot would make the commit reject the exact option just
+    // offered (offer/commit dead end). Gate on: one range read of every
+    // occupying row with guarded coords + the same pin the commit measures
+    // with (customers.latitude/longitude via opts.customerId, else the
+    // estimate's customer; neither → buffer-only, never a skipped check;
+    // lead-response quotes have no customer row and no booking tool). Gate off:
+    // no extra statements. Soft-degrade like /book's mirror: a failed read
+    // serves unfiltered and the commit gate keeps correctness.
+    let travelMirror = null;
+    if (travelGapEnabled()) {
+      try {
+        const rows = await listOccupiedWindows({
+          dateFrom: etDateString(addETDays(today, config.advance_days_min)),
+          dateTo: etDateString(addETDays(today, config.advance_days_max)),
+          withCoords: true,
+        });
+        const byDate = new Map();
+        for (const row of rows) {
+          if (!byDate.has(row.date)) byDate.set(row.date, []);
+          byDate.get(row.date).push(row);
+        }
+        let pin = { lat: null, lng: null };
+        let pinCustomerId = opts.customerId || null;
+        if (!pinCustomerId && estimateId) {
+          const est = await db('estimates').where('id', estimateId).first('customer_id');
+          pinCustomerId = est?.customer_id || null;
+        }
+        if (pinCustomerId) {
+          const cust = await db('customers').where('id', pinCustomerId).first('latitude', 'longitude');
+          pin = { lat: cust?.latitude ?? null, lng: cust?.longitude ?? null };
+        }
+        travelMirror = { byDate, pin };
+      } catch (mirrorErr) {
+        logger.warn(`[availability] travel-gap mirror unavailable — serving unfiltered slots: ${mirrorErr.message}`);
+        travelMirror = null;
+      }
+    }
 
     for (let i = config.advance_days_min; i <= config.advance_days_max; i++) {
       // ET calendar math — toISOString() reads the UTC date (already tomorrow
@@ -203,8 +249,15 @@ class AvailabilityEngine {
       // Sort occupied by start time
       occupied.sort((a, b) => a.start - b.start);
 
-      // Find gaps
-      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer);
+      // Find gaps. Travel-gap mirror (see above): drop what the commit probe
+      // would 409 — BEFORE findGaps' four-slot cap, so a dense day's later
+      // valid gap is not hidden behind four rejected ones (r4 P2).
+      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, travelMirror
+        ? (g) => !violatesTravelGap(
+          { startMin: g.start, endMin: g.end, ...travelMirror.pin },
+          travelMirror.byDate.get(dateStr) || [],
+        )
+        : null);
 
       if (slots.length > 0) {
         days.push({
@@ -227,8 +280,19 @@ class AvailabilityEngine {
     return { zone: zone.zone_name, days };
   }
 
-  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer) {
+  // accept(slot) → false drops a candidate before the four-per-day cap; the
+  // gap then advances an hour at a time so a long zone-local hole still
+  // yields its first ACCEPTED hour (an out-of-zone stop can reject 9:00 while
+  // 12:00 in the same hole is fine — r5 P2).
+  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null) {
     const slots = [];
+    const offer = (gapStart, gapEnd) => {
+      for (let start = gapStart; gapEnd - start >= slotDuration; start += 60) {
+        const slot = { start, end: start + slotDuration };
+        if (!accept || accept(slot)) { slots.push(slot); return; }
+        if (!accept) return;
+      }
+    };
     let cursor = dayStart;
 
     // Round minutes-since-midnight UP to the next clean hour. Customer-
@@ -242,17 +306,12 @@ class AvailabilityEngine {
       const gapStart = roundUpToHour(cursor + buffer);
       const gapEnd = block.start - buffer;
 
-      if (gapEnd - gapStart >= slotDuration) {
-        slots.push({ start: gapStart, end: gapStart + slotDuration });
-      }
+      offer(gapStart, gapEnd);
       cursor = Math.max(cursor, block.end);
     }
 
     // Gap after the last occupied block — same clean-hour rule.
-    const finalStart = roundUpToHour(cursor + buffer);
-    if (dayEnd - finalStart >= slotDuration) {
-      slots.push({ start: finalStart, end: finalStart + slotDuration });
-    }
+    offer(roundUpToHour(cursor + buffer), dayEnd);
 
     return slots.slice(0, 4); // max 4 slots per day
   }
@@ -377,6 +436,11 @@ class AvailabilityEngine {
       // address/contact, retry against live state instead of committing a
       // visit whose dispatch/reminders resolve against the cleared row.
       await lockCustomerComms(trx, customerId);
+      // The travel-gap probe's pin, read BEHIND the fence: a background
+      // geocode can fill customers.latitude/longitude between the pre-fence
+      // read and the lock, and the coordinates are deliberately outside the
+      // freshness fingerprint (r5 P2).
+      let bookingPin = { lat: customer.latitude ?? null, lng: customer.longitude ?? null };
       {
         const AVAIL_FINGERPRINT_COLS = [
           'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
@@ -387,10 +451,11 @@ class AvailabilityEngine {
         ];
         const fp = (r) => AVAIL_FINGERPRINT_COLS.map((c) => r?.[c] || '').join('|');
         const freshAvailCustomer = await trx('customers')
-          .where({ id: customerId }).first(...AVAIL_FINGERPRINT_COLS);
+          .where({ id: customerId }).first(...AVAIL_FINGERPRINT_COLS, 'latitude', 'longitude');
         if (!freshAvailCustomer || fp(freshAvailCustomer) !== fp(preFenceAvailCustomer)) {
           throw bookingError('Your account details just changed — please refresh and book again.', 'CUSTOMER_CHANGED_RETRY');
         }
+        bookingPin = { lat: freshAvailCustomer.latitude ?? null, lng: freshAvailCustomer.longitude ?? null };
         // Estimate linkage revalidates under the fence too (r36): a
         // journaled estimate a merge-undo just returned no longer belongs
         // to this customer — the self-booking row would link the restored
@@ -507,6 +572,10 @@ class AvailabilityEngine {
         windowStart: startTime,
         windowEnd: endTime,
         excludeServiceIds: occupancyExcludes,
+        // Travel gap (GATE_SLOT_TRAVEL_GAP): the customer's pin from the
+        // fenced re-read; the zone engine's offers are city-only, so this
+        // is the only drive check.
+        travel: bookingPin,
       });
       if (occupancyClash.length) {
         throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');

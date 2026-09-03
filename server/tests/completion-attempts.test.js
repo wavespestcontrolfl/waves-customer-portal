@@ -540,7 +540,7 @@ describe('completion attempts', () => {
       requestHash: 'hash-1',
     }, knex);
 
-    expect(result).toEqual({ action: 'resume', attempt: claimed, serviceRecordId: 'record-1' });
+    expect(result).toEqual({ action: 'resume', attempt: claimed, serviceRecordId: 'record-1', releasedForResume: true });
     expect(knex.calls[1].op.whereIn).toEqual({
       col: 'status',
       values: ['side_effects_pending', 'side_effects_running'],
@@ -595,7 +595,7 @@ describe('completion attempts', () => {
       requestHash: 'hash-1',
     }, knex);
 
-    expect(result).toEqual({ action: 'resume', attempt: claimed, serviceRecordId: 'record-1' });
+    expect(result).toEqual({ action: 'resume', attempt: claimed, serviceRecordId: 'record-1', releasedForResume: false });
     expect(knex.calls[2].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'side_effects_running' });
     expect(knex.calls[2].op.andWhereArgs[0]).toBe('updated_at');
     expect(knex.calls[2].op.updatePayload.status).toBe('side_effects_running');
@@ -812,7 +812,7 @@ describe('completion attempts', () => {
         idempotencyKey: 'key-1',
         requestHash: retryHash,
       }, knex);
-      expect(resumed).toEqual({ action: 'resume', attempt: claimed, serviceRecordId: 'record-1' });
+      expect(resumed).toEqual({ action: 'resume', attempt: claimed, serviceRecordId: 'record-1', releasedForResume: true });
     })();
   });
 });

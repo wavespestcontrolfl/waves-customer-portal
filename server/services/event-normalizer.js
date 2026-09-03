@@ -221,7 +221,9 @@ async function normalizeRow(row) {
   if (row.venue_address && (row.geo_lat == null || row.geo_lng == null)) {
     geocodeAttempted = true;
     geocodeCalled = true;
-    const geo = await geocodeAddress(row.venue_address);
+    // A venue is a place, not a customer's front door: skip the
+    // service-address guard so a Tampa-area point of interest still resolves.
+    const geo = await geocodeAddress(row.venue_address, { serviceAddress: false });
     if (geo) {
       updates.geo_lat = geo.lat;
       updates.geo_lng = geo.lng;

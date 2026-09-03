@@ -164,7 +164,10 @@ describe('drive-time estimator', () => {
       expect(src).not.toMatch(/const\s+ROAD_FACTOR\s*=/);
       expect(src).not.toMatch(/const\s+AVG_MPH\s*=/);
       expect(src).not.toMatch(/function\s+milesToDriveMinutes/);
-      expect(src).toMatch(/milesToDriveMinutes.*require\('\.\.\/route-optimizer'\)|require\('\.\.\/route-optimizer'\)/);
+      // find-time imports route-optimizer's model through auto-dispatch/geo's
+      // driveMin (the one coordinate-glue over that model) — either path is
+      // the shared estimator; a private constant set is what this forbids.
+      expect(src).toMatch(/require\('\.\.\/route-optimizer'\)|require\('\.\.\/auto-dispatch\/geo'\)/);
     });
 
     // Both consumers wrap the SAME model function (asserted by identity above),

@@ -2254,6 +2254,34 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect(body).not.toContain('markCompletionAttemptSucceeded');
     });
 
+    test('a LIVE (non-required) mint failure bells the office once per visit after the non-blocking log — never a silent unbilled completion', () => {
+      const catchBlock = source.match(/\} catch \(invErr\) \{([\s\S]*?)\n {6}\}\n {4}\} else if \(preMintedInvoice\) \{/);
+      const body = catchBlock[1];
+      const nonBlockingAt = body.indexOf('Auto-invoice failed (non-blocking)');
+      const bellAt = body.indexOf("notifyAdmin(");
+      expect(bellAt).toBeGreaterThan(nonBlockingAt);
+      expect(body).toContain("dedupeKey: `live_invoice_mint_failed:${svc.id}`,");
+      expect(body).toContain('bell: true,');
+      expect(body).toContain("link: `/admin/customers/${svc.customer_id}`,");
+      // A committed invoice row + a later failure is a RECONCILE bell, never a "create another" instruction (GH r1 P1).
+      expect(body).toContain("dedupeKey: `live_invoice_postmint_failed:${svc.id}`,");
+      // Lock + rescan + wording + insert in ONE transaction (GH r2 P1): a mint by another writer after the failed one released its lock must flip the wording, never leave a "create it" bell beside a live invoice.
+      expect(body).toMatch(/const bell = await db\.transaction\(async \(trx\) => \{\s*\n\s*await acquireScheduledInvoiceMintLock\(trx, svc\.id\);\s*\n\s*const liveNow = invoice\?\.id\s*\n\s*\? invoice\s*\n\s*: await completionSuppressorInvoiceLookup\(trx, \{ scheduled_service_id: svc\.id \}\);/);
+      expect(body).toMatch(/return liveNow\?\.id\s*\n\s*\? NotificationService\.notifyAdmin\(/);
+      expect((body.match(/\n\s*trx,\n/g) || []).length).toBe(2); // both bells dedupe + insert on the lock's transaction
+      expect(body).toContain('do NOT create a second invoice');
+      // No amount in either bell — the base amount is not the mint's total (GH r1 P1).
+      expect(body).not.toContain('expectedAmountCents');
+      expect(body).not.toMatch(/\$\$\{Number\(mintInvoiceAmount/);
+      // The SMS path runs after the bell, so the copy never claims delivery (GH r1 P2).
+      expect(body).not.toContain('received the report-only text');
+      // Fail-soft: the bell's own failure is logged, never thrown into a committed completion.
+      expect(body).toMatch(/catch \(bellErr\) \{\s*\n\s*logger\.error\(/);
+      // The bell sits AFTER the required-mint 503 return, so a backfill/required shape still fail-closes and never double-reports.
+      const returnAt = body.indexOf('return res.status(503).json({');
+      expect(bellAt).toBeGreaterThan(returnAt);
+    });
+
     test('a no-op release answers with the REAL retry horizon, echoed from the stale-window constant (Codex P1, fix round 8)', () => {
       const catchBlock = source.match(/\} catch \(invErr\) \{([\s\S]*?)\n {6}\}\n {4}\} else if \(preMintedInvoice\) \{/);
       const body = catchBlock[1];
