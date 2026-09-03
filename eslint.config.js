@@ -17,9 +17,11 @@
 const globals = require('globals');
 const react = require('eslint-plugin-react');
 
-// Structural warnings (see header). Source blocks only — test files and
-// fixtures are exempt: a describe() body with many cases is not a decision
-// tree, and the counter would just teach people to split suites.
+// Structural warnings (see header). Every production block (server, shared,
+// scripts, ops, packages, client/src, client/public, video) — test files,
+// test setup and __fixtures__ modules are exempt: a describe() body with
+// many cases or a fixture builder is not a decision tree, and the counter
+// would just teach people to split suites.
 const QUALITY_WARN = {
   complexity: ['warn', { max: 20 }],
   'max-depth': ['warn', 4],
@@ -56,7 +58,7 @@ module.exports = [
   // Server, scripts, ops, packages — CommonJS on Node. (video/ is NOT here:
   // its package.json has "type": "module", so its .js files are ESM.)
   {
-    files: ['server/**/*.js', 'scripts/**/*.js', 'ops/**/*.js', 'packages/**/*.js', '*.js'],
+    files: ['server/**/*.js', 'scripts/**/*.js', 'ops/**/*.js', 'packages/**/*.js', 'shared/**/*.js', '*.js'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'commonjs',
@@ -69,7 +71,7 @@ module.exports = [
   // matching block, so client/** is excluded here rather than relying on
   // the later vitest block to win).
   {
-    files: ['**/*.test.js', '**/tests/**/*.js', '**/contract-tests/**/*.js', '**/__mocks__/**/*.js'],
+    files: ['**/*.test.js', '**/tests/**/*.js', '**/contract-tests/**/*.js', '**/__mocks__/**/*.js', '**/__fixtures__/**/*.js'],
     ignores: ['client/**'],
     languageOptions: {
       ecmaVersion: 'latest',
@@ -118,7 +120,7 @@ module.exports = [
       sourceType: 'script',
       globals: { ...globals.serviceworker },
     },
-    rules: ERRORS_ONLY,
+    rules: SOURCE_RULES,
   },
   // Page-side public scripts (push helper) — ESM in the browser. No worker
   // globals, so `clients`/`importScripts` can't slip into page code.
@@ -130,7 +132,7 @@ module.exports = [
       sourceType: 'module',
       globals: { ...globals.browser },
     },
-    rules: ERRORS_ONLY,
+    rules: SOURCE_RULES,
   },
   // Video workspace Node entries — package "type": "module", so .js and
   // .mjs are both ESM. nodeBuiltin only: `require`/`module.exports`/
@@ -143,7 +145,7 @@ module.exports = [
       sourceType: 'module',
       globals: { ...globals.nodeBuiltin },
     },
-    rules: ERRORS_ONLY,
+    rules: SOURCE_RULES,
   },
   // Remotion compositions — rendered in headless Chrome.
   {
@@ -156,7 +158,7 @@ module.exports = [
       globals: { ...globals.browser },
     },
     rules: {
-      ...ERRORS_ONLY,
+      ...SOURCE_RULES,
       'react/jsx-uses-vars': 'error',
       'react/jsx-uses-react': 'error',
     },
@@ -188,7 +190,7 @@ module.exports = [
   // No jest/vitest globals whitelisted, so a test that forgets its imports
   // or reaches for `jest.fn()` trips no-undef instead of failing at runtime.
   {
-    files: ['client/src/**/*.test.{js,jsx}', 'client/src/test-setup.js'],
+    files: ['client/src/**/*.test.{js,jsx}', 'client/src/test-setup.js', 'client/src/**/__fixtures__/**/*.{js,jsx}'],
     plugins: { react },
     languageOptions: {
       ecmaVersion: 'latest',
