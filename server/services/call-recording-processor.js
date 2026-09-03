@@ -8304,7 +8304,14 @@ const CallRecordingProcessor = {
                   flag,
                   extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                   severity: 'advisory',
-                  extraPayload: (isAddressFlag && addressRecovery?.attempted) ? {
+                  // The surname card's filing-time names include the merged
+                  // V1 extraction's — what backfillCustomerFromAppointmentContact
+                  // writes onto the record. The shadow bridge files this card
+                  // from the same merged extraction the enforce site does, so
+                  // it stamps the same snapshot (codex r19 P1).
+                  extraPayload: flag === 'missing_last_name' ? {
+                    heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
+                  } : (isAddressFlag && addressRecovery?.attempted) ? {
                     address_as_heard: rawStreetBeforeAdopt,
                     address_recovered: flag === 'address_recovered' ? extracted.address_line1 : null,
                     address_candidates: addressRecovery.candidates || [],

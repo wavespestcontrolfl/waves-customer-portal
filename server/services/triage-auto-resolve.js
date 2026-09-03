@@ -684,8 +684,14 @@ function cardConfirmedUnbooked(item, ev) {
 // (codex r18 P1). Null when the card predates the snapshot.
 function heardNames(item) {
   const payload = parseMaybeJson(item.payload);
-  const snaps = [payload?.heard_name, payload?.heard_name_v1].filter((s) => s && typeof s === 'object');
-  if (!snaps.length) return null;
+  // The merged V1 names are the ones the surname backfill writes from: a
+  // card carrying only the V2 caller (filed by an insert site that passed
+  // no V1 snapshot) cannot separate a backfilled surname from an
+  // independent one — fail closed, as a pre-snapshot card does (codex r19
+  // P1).
+  const v1 = payload?.heard_name_v1;
+  if (!v1 || typeof v1 !== 'object') return null;
+  const snaps = [payload?.heard_name, v1].filter((s) => s && typeof s === 'object');
   const pick = (key) => snaps.map((s) => String(s[key] || '').trim().toLowerCase()).filter(Boolean);
   return { first: pick('first_name'), last: pick('last_name') };
 }
@@ -1039,41 +1045,74 @@ function bookingCoversRequest(item, mine, { singleProperty, places }) {
   return coveredByDistinct(categories, pool, (v) => `${v.service_type || ''} ${v.service_category_snapshot || ''}`);
 }
 
-// The service words an estimate carries: the service families the shared
-// line reader infers (estimate-service-lines — the one reader of every
-// pricing-engine shape), the raw names of its recurring / one-time lines,
-// the engine's per-service input flags (svcFlea, svcRoach, ...), and its
-// service_interest. Never estimate_text — the rendered document's
-// boilerplate names services it does not price — and never the category
-// column, which is RESIDENTIAL / COMMERCIAL.
-function estimateWords(row) {
+// The priced LINES an estimate carries, each with its own service words
+// and cadence — a delivered quote is judged line by line: distinct
+// requested services need distinct priced lines, and the line answering a
+// service must carry the asked cadence (codex r19 P1 ×2). Typed lines come
+// from the engine result's lists: recurring.services → recurring; the
+// one-time lists → one-time, except an item included ON the program, which
+// is priced into the recurring plan and quotes no standalone job;
+// commercial lineItems → recurring, and a manual-quote line prices nothing;
+// palm injection → recurring. Words per line: its own name fields plus the
+// service family the shared line reader's text patterns assign them. An
+// estimate with NO typed lines (a legacy or manual row) is ONE line — its
+// service_interest, the families the shared reader infers from its inputs
+// and text, and the engine's svc* input flags — at the cadence its totals
+// columns show. Never estimate_text (the rendered document's boilerplate
+// names services it does not price), never the category column
+// (RESIDENTIAL / COMMERCIAL), and never an input flag beside typed lines
+// (the flag selects a service; only a line prices it).
+function estimateLines(row) {
   const { inferEstimateServiceLines, serviceKeysFromText, SERVICE_LINE_LABELS, parseEstimateData } = require('./estimate-service-lines');
-  const words = [row.service_interest];
-  const family = (key) => { if (key && key !== 'unknown') words.push(key, SERVICE_LINE_LABELS[key]); };
-  for (const line of inferEstimateServiceLines(row)) family(line.key);
+  const familyOf = (names) => serviceKeysFromText(...names).flatMap((k) => (k && k !== 'unknown' ? [k, SERVICE_LINE_LABELS[k]] : []));
+  const namesOf = (e) => [e.service, e.serviceKey, e.service_key, e.name, e.label, e.detail, e.det].filter((w) => typeof w === 'string');
   const data = parseEstimateData(row.estimate_data) || {};
-  const entries = [];
+  const lines = [];
+  const seen = new Set();
+  // One line per priced entry; the same entry persisted under both result
+  // roots is one line, not two (the line reader's identity rule).
+  const add = (e, names, cadence) => {
+    const identity = [...names, e?.price ?? e?.amount ?? e?.total ?? e?.mo ?? e?.monthly ?? '', cadence.recurring].join('|');
+    if (seen.has(identity)) return;
+    seen.add(identity);
+    lines.push({ words: [...names, ...familyOf(names)].join(' '), ...cadence });
+  };
+  const RECURRING = { recurring: true, oneTime: false };
+  const ONE_TIME = { recurring: false, oneTime: true };
   for (const root of [data.result, data.engineResult]) {
     if (!root || typeof root !== 'object') continue;
-    for (const list of [root.recurring?.services, root.oneTime?.items, root.oneTime?.specItems, root.specItems, root.lineItems]) {
-      if (Array.isArray(list)) entries.push(...list);
+    for (const e of (Array.isArray(root.recurring?.services) ? root.recurring.services : [])) {
+      if (e && typeof e === 'object') add(e, namesOf(e), RECURRING);
+    }
+    for (const list of [root.oneTime?.items, root.oneTime?.specItems, root.specItems]) {
+      for (const e of (Array.isArray(list) ? list : [])) {
+        if (e && typeof e === 'object') add(e, namesOf(e), (e.onProg === true || e.includedOnProgram === true) ? RECURRING : ONE_TIME);
+      }
+    }
+    for (const e of (Array.isArray(root.lineItems) ? root.lineItems : [])) {
+      if (e && typeof e === 'object' && e.quoteRequired !== true && e.requiresManualReview !== true) add(e, namesOf(e), RECURRING);
+    }
+    const injection = root.results?.injection || root.injection || {};
+    if (Number(injection.mo ?? injection.monthly ?? root.recurring?.palmInjectionMo ?? root.recurring?.palm_injection_mo) > 0) {
+      add(injection, ['palm_injection', SERVICE_LINE_LABELS.palm_injection], RECURRING);
     }
   }
-  const names = [];
-  for (const e of entries) {
-    if (e && typeof e === 'object') names.push(e.service, e.serviceKey, e.service_key, e.name, e.label, e.detail, e.det);
+  if (lines.length) return lines;
+  const words = [row.service_interest];
+  for (const line of inferEstimateServiceLines(row)) {
+    if (line.key && line.key !== 'unknown') words.push(line.key, SERVICE_LINE_LABELS[line.key]);
   }
-  words.push(...names);
-  // The line reader classifies one-time lines only beside commercial ones;
-  // a one-time-only estimate (a flea treatment) still belongs to a family.
-  for (const key of serviceKeysFromText(...names)) family(key);
   for (const inputs of [data.inputs, data.engineInputs]) {
     if (!inputs || typeof inputs !== 'object') continue;
     for (const [k, v] of Object.entries(inputs)) {
       if (k.startsWith('svc') && v) words.push(k.slice(3).replace(/([a-z])([A-Z])/g, '$1 $2'));
     }
   }
-  return words.filter((w) => typeof w === 'string').join(' ');
+  return [{
+    words: words.filter((w) => typeof w === 'string').join(' '),
+    recurring: Number(row.monthly_total) > 0 || Number(row.annual_total) > 0,
+    oneTime: Number(row.onetime_total) > 0,
+  }];
 }
 
 // An estimate as the address-bearing record the booking rules understand:
@@ -1094,41 +1133,24 @@ function estimateAsVisit(row) {
 
 // Does a delivered estimate keep the quote THIS card recorded? Every
 // requested service (the primary narrowed by the specific one, each
-// secondary) must be priced by the estimate or a sibling in its group, and
-// the estimate itself must price the address the ask named — the on-file
-// one when it named none. A card with no quote_scope (filed before the
+// secondary) must be priced by its OWN line — of the estimate or of a
+// sibling in its group — at the cadence the ask carries, and each such
+// estimate must price the address the ask named (the on-file one when it
+// named none). Cadence is the booking arm's rule (cadenceMatches), applied
+// to the line that answers the service: a recurring-plan ask needs a
+// recurring line pricing THAT service (a one-time pest job beside a
+// recurring lawn program is not a recurring pest quote), an explicit
+// one-time ask a one-time line, any other intent a line at either cadence,
+// and a snapshot with no intent nothing (codex r18 + r19 P1). Distinct
+// requirements need distinct lines, exactly as bookings do — one flea line
+// does not answer a flea treatment AND a separately requested general-pest
+// quote (codex r19 P1). A card with no quote_scope (filed before the
 // snapshot existed) has no ask to cover, so nothing qualifies.
-// Does an estimate price a recurring program / a one-time job? Read from
-// the engine result's line lists and the totals columns — an estimate can
-// carry both.
-function hasRecurringLines(row) {
-  const data = parseMaybeJson(row.estimate_data) || {};
-  const listed = [data.result, data.engineResult].some((r) => Array.isArray(r?.recurring?.services) && r.recurring.services.length > 0);
-  return listed || Number(row.monthly_total) > 0 || Number(row.annual_total) > 0;
-}
-function hasOneTimeLines(row) {
-  const data = parseMaybeJson(row.estimate_data) || {};
-  const listed = [data.result, data.engineResult].some((r) => [r?.oneTime?.items, r?.oneTime?.specItems, r?.specItems].some((l) => Array.isArray(l) && l.length > 0));
-  return listed || Number(row.onetime_total) > 0;
-}
-
-// The cadence the card's ask carries, against what the delivered estimates
-// price — the booking arm's rule (cadenceMatches) for estimates: a
-// recurring-plan ask is kept only by an estimate pricing a recurring
-// program, an explicit one-time ask only by one pricing a one-time job,
-// any other intent by either, and a snapshot with no intent by nothing
-// (codex r18 P1).
-function estimateCadenceMatches(item, priced) {
-  const intent = requestAsk(item)?.requested_service_intent;
-  if (typeof intent !== 'string' || !intent) return false;
-  if (intent === 'recurring_membership_inquiry') return priced.some(hasRecurringLines);
-  if (intent === 'preventative_one_time') return priced.some(hasOneTimeLines);
-  return priced.length > 0;
-}
-
 function estimateCoversAsk(item, row, siblings = []) {
   const requirements = requestedServiceTokens(item);
   if (!requirements.length) return false;
+  const intent = requestAsk(item)?.requested_service_intent;
+  if (typeof intent !== 'string' || !intent) return false;
   // Every service must be priced AT the asked address: a sibling pricing
   // the other property in a multi-property proposal covers nothing here
   // (codex r18 P1), and the cited estimate itself must be at the address.
@@ -1137,10 +1159,11 @@ function estimateCoversAsk(item, row, siblings = []) {
     return Boolean(visit) && bookingAtRequestedAddress(item, visit, new Map());
   };
   if (!atAsk(row)) return false;
-  const priced = [row, ...siblings.filter(atAsk)];
-  const words = priced.map(estimateWords).join(' ');
-  if (!requirements.every((tokens) => serviceTypeMatches(words, tokens))) return false;
-  return estimateCadenceMatches(item, priced);
+  const atCadence = intent === RECURRING_INTENT ? (l) => l.recurring
+    : intent === ONE_TIME_INTENT ? (l) => l.oneTime
+      : (l) => l.recurring || l.oneTime;
+  const lines = [row, ...siblings.filter(atAsk)].flatMap(estimateLines).filter(atCadence);
+  return coveredByDistinct(requirements, lines, (l) => l.words);
 }
 
 // Bookings and completed visits for the not_confirmed / address arms.

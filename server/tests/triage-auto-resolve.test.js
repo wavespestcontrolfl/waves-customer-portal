@@ -195,9 +195,13 @@ describe('moot-condition resolves', () => {
   test('missing_last_name resolves once a PRE-EXISTING customer has a last name', () => {
     const d = classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', ...heardV1('Pat', null) }), noBookings, { now: NOW });
     expect(d).toEqual({ action: 'resolve', rule: 'name_moot' });
-    // The V2 caller snapshot is read the same way.
-    expect(classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', payload: { heard_name: { first_name: 'Pat', last_name: null } } }), noBookings, { now: NOW }))
+    // The V2 caller snapshot is read beside it — never ALONE: the merged V1
+    // names are what the surname backfill writes from, so a card carrying
+    // only the V2 caller (an insert site that passed no V1 snapshot) keeps
+    // its human verdict (codex r19 P1).
+    expect(classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', payload: { heard_name: { first_name: 'Pat', last_name: null }, heard_name_v1: { first_name: 'Pat', last_name: null } } }), noBookings, { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'name_moot' });
+    expect(classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', payload: { heard_name: { first_name: 'Pat', last_name: null } } }), noBookings, { now: NOW })).toBeNull();
   });
 
   test('a customer born from the call never moots its own surname card (V1-merged surname is not independent evidence)', () => {
@@ -218,7 +222,7 @@ describe('moot-condition resolves', () => {
     }), noBookings, { now: NOW })).toBeNull();
     expect(classifyTriageItem(item({
       reason_code: 'missing_last_name', customer_last_name: 'Sample',
-      payload: { heard_name: { first_name: 'Pat', last_name: 'Sample' } },
+      payload: { heard_name: { first_name: 'Pat', last_name: 'Sample' }, heard_name_v1: { first_name: 'Pat', last_name: null } },
     }), noBookings, { now: NOW })).toBeNull();
     // A card filed before the snapshot existed carries no filing-time
     // names: the rolling extraction columns are NOT consulted (a reprocess
@@ -532,39 +536,65 @@ describe('evidence helpers', () => {
     expect(flea.every((tokens) => serviceTypeMatches('Flea Treatment pest_control', tokens))).toBe(true);
   });
 
-  test('a delivered estimate keeps the quote only when it prices every requested service at the asked address', () => {
+  test('a delivered estimate keeps the quote only when distinct priced lines, at the asked cadence, cover every requested service at the asked address', () => {
     const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
     const base = { call_log_id: 'call-1', call_customer_id: 'cust-1', customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205' };
     const card = (scope) => item({ ...base, reason_code: 'quote_promised', payload: { quote_scope: { requested_service_categories: ['pest_general', 'lawn_care'], requested_specific_service: 'Flea Treatment', requested_service_intent: 'preventative_one_time', requested_address: none, ...scope } } });
-    const est = (over) => ({ id: 'e1', service_interest: null, address: '77 Oak Street, Bradenton, FL 34205', estimate_data: { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }], grandTotal: 100 }, oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } } }, ...over });
+    // The engine's typed lines: a recurring pest program, a one-time flea
+    // treatment and a one-time lawn treatment.
+    const est = (over) => ({ id: 'e1', service_interest: null, address: '77 Oak Street, Bradenton, FL 34205', estimate_data: { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }], grandTotal: 40 }, oneTime: { items: [{ service: 'Flea Treatment', price: 150 }, { service: 'One-Time Lawn Treatment', price: 90 }] } } }, ...over });
     expect(estimateCoversAsk(card({}), est({}))).toBe(true);
-    // A generic pest estimate is not the flea treatment — unless the
-    // engine's own input flag says the flea program was priced; a service
-    // the estimate lacks counts when a sibling in its group prices it.
-    const generic = { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }] } } };
+    // A generic pest program is not the flea treatment, and the engine's
+    // input flag beside typed lines selects a service without pricing it.
+    const generic = { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }] }, oneTime: { items: [{ service: 'One-Time Lawn Treatment', price: 90 }] } } };
     expect(estimateCoversAsk(card({}), est({ estimate_data: generic }))).toBe(false);
-    expect(estimateCoversAsk(card({}), est({ estimate_data: { ...generic, inputs: { svcFlea: true } }, onetime_total: 150 }))).toBe(true);
+    expect(estimateCoversAsk(card({}), est({ estimate_data: { ...generic, inputs: { svcFlea: true } }, onetime_total: 240 }))).toBe(false);
+    // A legacy row with no typed lines is ONE line — service_interest, the
+    // reader's families and the svc* flags — at the cadence its totals show.
+    const legacy = (over) => est({ estimate_data: {}, service_interest: 'Flea Treatment', onetime_total: 150, ...over });
+    const fleaOnly = card({ requested_service_categories: ['pest_general'] });
+    expect(estimateCoversAsk(fleaOnly, legacy({}))).toBe(true);
+    expect(estimateCoversAsk(fleaOnly, legacy({ onetime_total: null, monthly_total: 40 }))).toBe(false);
+    expect(estimateCoversAsk(fleaOnly, legacy({ estimate_data: { inputs: { svcFlea: true } }, service_interest: 'Pest Control' }))).toBe(true);
+    // ...and one line answers one service: the lawn ask needs a sibling.
+    expect(estimateCoversAsk(card({}), legacy({}))).toBe(false);
+    // A service the estimate lacks counts when a sibling in its group prices
+    // it — at the asked address (codex r18 P1) and at the asked cadence.
     const partial = est({ estimate_data: { result: { oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } } } });
     expect(estimateCoversAsk(card({}), partial)).toBe(false);
-    const lawnSibling = (over) => ({ id: 'e2', service_interest: 'Lawn Care', estimate_data: {}, address: '77 Oak Street, Bradenton, FL 34205', ...over });
+    const lawnSibling = (over) => ({ id: 'e2', service_interest: 'Lawn Care', estimate_data: {}, onetime_total: 90, address: '77 Oak Street, Bradenton, FL 34205', ...over });
     expect(estimateCoversAsk(card({}), partial, [lawnSibling({})])).toBe(true);
-    // A sibling pricing the OTHER property of a multi-property proposal
-    // covers nothing at the asked address (codex r18 P1).
     expect(estimateCoversAsk(card({}), partial, [lawnSibling({ address: '5 Pine Ave, Sarasota, FL 34236' })])).toBe(false);
     expect(estimateCoversAsk(card({}), partial, [lawnSibling({ address: null })])).toBe(false);
-    // Cadence follows the ask: a recurring-plan ask needs a recurring
-    // program priced, an explicit one-time ask a one-time job, any other
-    // intent either, and a snapshot with no intent nothing (codex r18 P1).
-    const plan = { requested_service_intent: 'recurring_membership_inquiry' };
+    expect(estimateCoversAsk(card({}), partial, [lawnSibling({ onetime_total: null })])).toBe(false);
+    // Cadence binds to the LINE answering the service (codex r19 P1): a
+    // recurring-plan ask for pest is not kept by a one-time pest job beside
+    // a recurring lawn program; an explicit one-time ask is.
+    const plan = { requested_service_categories: ['pest_general'], requested_specific_service: null, requested_service_intent: 'recurring_membership_inquiry' };
+    const mixed = est({ estimate_data: { result: { recurring: { services: [{ name: 'Lawn Care Program', mo: 60 }] }, oneTime: { items: [{ service: 'One-Time Pest Treatment', price: 120 }] } } } });
+    expect(estimateCoversAsk(card(plan), mixed)).toBe(false);
     expect(estimateCoversAsk(card(plan), est({}))).toBe(true);
-    const oneTimeOnly = est({ estimate_data: { result: { oneTime: { items: [{ service: 'Flea Treatment' }, { service: 'Lawn Care Program' }] } } } });
-    expect(estimateCoversAsk(card(plan), oneTimeOnly)).toBe(false);
-    expect(estimateCoversAsk(card({}), oneTimeOnly)).toBe(true);
-    const recurringOnly = est({ estimate_data: { result: { recurring: { services: [{ name: 'Flea Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }] } } } });
-    expect(estimateCoversAsk(card({}), recurringOnly)).toBe(false);
-    expect(estimateCoversAsk(card({}), est({ estimate_data: recurringOnly.estimate_data, onetime_total: 150 }))).toBe(true);
-    expect(estimateCoversAsk(card({ requested_service_intent: 'active_infestation_treatment' }), recurringOnly)).toBe(true);
+    const oneTimePest = { ...plan, requested_service_intent: 'preventative_one_time' };
+    expect(estimateCoversAsk(card(oneTimePest), mixed)).toBe(true);
+    expect(estimateCoversAsk(card(oneTimePest), est({ estimate_data: generic }))).toBe(false);
+    // Any other intent takes either cadence; a snapshot with no intent nothing.
+    expect(estimateCoversAsk(card({ ...plan, requested_service_intent: 'active_infestation_treatment' }), mixed)).toBe(true);
     expect(estimateCoversAsk(card({ requested_service_intent: null }), est({}))).toBe(false);
+    // An item included ON the program is priced into the recurring plan: it
+    // quotes no standalone one-time job.
+    const onProgram = est({ estimate_data: { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }] }, oneTime: { specItems: [{ name: 'Wasp/Bee', price: 0, det: 'Included on program', onProg: true }] } } } });
+    const wasp = (intent) => card({ requested_service_categories: ['pest_general'], requested_specific_service: 'Wasp', requested_service_intent: intent });
+    expect(estimateCoversAsk(wasp('preventative_one_time'), onProgram)).toBe(false);
+    expect(estimateCoversAsk(wasp('recurring_membership_inquiry'), onProgram)).toBe(true);
+    // Distinct requirements need distinct lines (codex r19 P1): a flea
+    // treatment AND a separately requested general-pest quote are not both
+    // answered by the one flea line, and the same entry persisted under both
+    // result roots is one line, not two.
+    const two = card({ requested_service_categories: ['pest_general', 'pest_general'] });
+    expect(estimateCoversAsk(two, partial)).toBe(false);
+    expect(estimateCoversAsk(two, est({ estimate_data: { result: { oneTime: { items: [{ service: 'Flea Treatment', price: 150 }, { service: 'General Pest Treatment', price: 120 }] } } } }))).toBe(true);
+    const dup = { oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } };
+    expect(estimateCoversAsk(two, est({ estimate_data: { result: dup, engineResult: dup } }))).toBe(false);
     // Another address, a street with no locality, or no address at all;
     // the property row it prices stands in for a missing address column.
     expect(estimateCoversAsk(card({}), est({ address: '5 Pine Ave, Sarasota, FL 34236' }))).toBe(false);
