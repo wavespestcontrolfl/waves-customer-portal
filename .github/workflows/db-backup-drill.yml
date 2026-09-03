@@ -102,6 +102,12 @@ jobs:
         run: |
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y --no-install-recommends postgresql-client-18
+          # The runner ships a Postgres 16 server, so pg_wrapper resolves a
+          # bare `pg_dump` to 16 and it refuses the 18.x source ("server
+          # version mismatch", run 33796798271). Put the 18 binaries first.
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+          export PATH=/usr/lib/postgresql/18/bin:$PATH
+          pg_dump --version | grep -q ' 18\.' || { echo "::error::pg_dump is not 18.x: $(pg_dump --version)"; exit 1; }
           pg_dump --version
           pg_restore --version
 
