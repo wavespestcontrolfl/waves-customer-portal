@@ -6423,7 +6423,10 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.scheduled_date', 'scheduled_services.service_type',
         'scheduled_services.status', 'scheduled_services.window_start', 'scheduled_services.window_end',
         // The List view routes an owed closeout into CompletionPanel off this
-        // row (Codex #3799 r3) — same flag as the day / week feeds.
+        // row (Codex #3799 r3) — same flag as the day / week feeds. service_id
+        // is the identity evidence the completion-profile resolver reads
+        // (with service_key_snapshot / is_recurring, already selected).
+        'scheduled_services.service_id',
         db.raw(HAS_SERVICE_RECORD_SQL),
         'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot', 'scheduled_services.estimated_price',
         'scheduled_services.primary_line_price',
@@ -6457,6 +6460,11 @@ router.get('/list', async (req, res, next) => {
     // knows the full visit composition (primary + add-ons) and edits totals
     // correctly rather than rebasing the visit price down to the primary line.
     const listAddonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+    // Same project-completion context the day / week feeds attach: the
+    // client's owed-closeout predicate needs completionProfile / linkedProject
+    // to keep a completed project-backed visit OUT of the "Closeout owed"
+    // cue (handleComplete refuses those) — pre-push Codex P1 on #3799.
+    const listProjectContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
     const mapped = services.map(s => ({
       id: s.id,
@@ -6471,6 +6479,8 @@ router.get('/list', async (req, res, next) => {
       serviceTypeRaw: s.service_type,
       status: s.status,
       has_service_record: s.has_service_record === true,
+      completionProfile: listProjectContextByServiceId.get(s.id)?.completionProfile || null,
+      linkedProject: listProjectContextByServiceId.get(s.id)?.linkedProject || null,
       windowStart: s.window_start,
       windowEnd: s.window_end,
       estimatedDuration: s.estimated_duration_minutes || 30,
