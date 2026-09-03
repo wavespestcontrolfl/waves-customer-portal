@@ -443,6 +443,16 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('/sms refuses a contract signing link whose token matches no live contract (rotated or expired) — fail closed before sending', async () => {
+      wireAutopayDb({ row: null });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { customerId: 'cust-A', body: 'Please sign: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/contract signing link is expired or no longer live/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
     test('schedule-sms refuses a body carrying a contract signing link — the same immediate-only fence', async () => {
       wireAutopayDb({ row: null });
       await withServer(async (baseUrl) => {

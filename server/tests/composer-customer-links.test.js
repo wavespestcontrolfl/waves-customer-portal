@@ -1034,3 +1034,76 @@ describe('expiringLinkSendCheck (schedule + draft fence)', () => {
     expect(await expiringLinkSendCheck(`Checklist: portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: false });
   });
 });
+
+describe('bearerLinkSendCheck (immediate-send seam for contract + visit card links)', () => {
+  const { bearerLinkSendCheck } = require('../services/composer-customer-links');
+  const { hashContractToken } = jest.requireActual('../services/contracts');
+  const TOKEN = 'abcDEF123_-xyz789QWERTY';
+  const CONTRACT_BODY = `Please sign: portal.wavespestcontrol.com/contract/${TOKEN}`;
+  const live = { id: 'k1', customer_id: 'c1', status: 'sent', share_token_expires_at: new Date(Date.now() + 86400e3) };
+
+  function wire({ contract = live, owner = { id: 'c1', phone: '+1 (941) 555-0100' }, card = null } = {}) {
+    const contracts = chainBuilder({ firstRow: contract });
+    mockBuilders = {
+      customer_contracts: contracts,
+      customers: chainBuilder({ firstRow: owner }),
+      appointment_card_requests: chainBuilder({ firstRow: card }),
+    };
+    return contracts;
+  }
+
+  test('nothing applies → ok', async () => {
+    wire();
+    expect(await bearerLinkSendCheck('Hi there, see you Tuesday.', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+  });
+
+  test('a live contract link owned by the recipient passes; the lookup is by token HASH', async () => {
+    const contracts = wire();
+    expect(await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    expect(contracts.where).toHaveBeenCalledWith({ share_token_hash: hashContractToken(TOKEN) });
+  });
+
+  test.each([
+    ['rotated/unknown token', null],
+    ['signed contract', { ...live, status: 'signed' }],
+    ['expired window', { ...live, share_token_expires_at: new Date(Date.now() - 1000) }],
+  ])('%s → refuses as no longer live', async (_label, contract) => {
+    wire({ contract });
+    const r = await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: 'c1' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/expired or no longer live/);
+  });
+
+  test('a contract link sent to a phone that is not the contract customer\'s refuses', async () => {
+    wire({ owner: { id: 'c1', phone: '+19415550100' } });
+    const r = await bearerLinkSendCheck(CONTRACT_BODY, '5551234567', { trustedCustomerId: 'c1' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/different customer/);
+  });
+
+  test('a send without the owner as the trusted customer refuses (the link must ride the owner policy)', async () => {
+    wire();
+    const r = await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: null });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/search dropdown/);
+  });
+
+  test('a non-canonical contract host refuses outright', async () => {
+    wire();
+    const r = await bearerLinkSendCheck(`https://evil.example/?next=portal.wavespestcontrol.com/contract/${TOKEN}`, '9415550100', { trustedCustomerId: 'c1' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/not on the Waves portal/);
+  });
+
+  test('a visit-lane /secure link: pending + owner passes, a completed row refuses, a customer-kind row is left to the Auto Pay seam', async () => {
+    const secure = `Secure your visit: portal.wavespestcontrol.com/secure/${TOKEN}`;
+    wire({ card: { id: 'r1', kind: 'visit', status: 'pending', customer_id: 'c1' } });
+    expect(await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    wire({ card: { id: 'r1', kind: 'visit', status: 'completed', customer_id: 'c1' } });
+    expect((await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer live/);
+    wire({ card: { id: 'r1', kind: 'visit', status: 'pending', customer_id: 'c1' }, owner: { id: 'c1', phone: '+15550000000' } });
+    expect((await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/different customer/);
+    wire({ card: { id: 'r1', kind: 'customer', status: 'pending', customer_id: 'c9' } });
+    expect(await bearerLinkSendCheck(secure, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+  });
+});

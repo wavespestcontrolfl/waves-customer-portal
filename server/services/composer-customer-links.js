@@ -648,6 +648,65 @@ async function expiringLinkSendCheck(body) {
   return { present: false };
 }
 
+/**
+ * Immediate-send seam for the other per-row bearers the composer inserts
+ * (pre-push Codex P0 on the step-2 rows — the same protection the Auto Pay
+ * seam gives /secure customer-kind links): a stale tab or a direct API
+ * call must not deliver a signable contract or a payment-adjacent visit
+ * card link to another phone, after rotation, or after expiry.
+ *   contract  — /contract/<token>: the token's hash must match a live,
+ *               unexpired, non-terminal customer_contracts row (a rotated
+ *               or expired link matches nothing → refuse).
+ *   card      — /secure/<token> visit-lane rows (kind 'visit'; the Auto Pay
+ *               seam judges kind 'customer'): status must still be pending.
+ * For both, the row's customer must own the recipient number, and — when
+ * the route trusts a customer id — be that customer. FAIL CLOSED on any
+ * miss. { ok: true } when nothing applies or everything checks out.
+ */
+async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
+  const runs = decodedRuns(body);
+  const host = new URL(publicPortalUrl()).host.toLowerCase();
+  const refuse = (error) => ({ ok: false, error });
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const owned = async (customerId, label) => {
+    const owner = await db('customers').where({ id: customerId }).first('id', 'phone');
+    const ownerLast10 = last10(owner?.phone);
+    if (!ownerLast10 || ownerLast10 !== String(toLast10 || '')) {
+      return refuse(`This ${label} belongs to a different customer — remove it before sending.`);
+    }
+    if (trustedCustomerId !== undefined && String(trustedCustomerId || '') !== String(customerId)) {
+      return refuse(`Pick this customer from the search dropdown before sending a ${label}.`);
+    }
+    return null;
+  };
+
+  for (const run of linkRuns(runs, /\/contract\//i)) {
+    const token = canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i);
+    if (!token) return refuse('A contract link in this message is not on the Waves portal — remove it before sending.');
+    const { hashContractToken } = require('./contracts');
+    const row = await db('customer_contracts')
+      .where({ share_token_hash: hashContractToken(token) })
+      .first('id', 'customer_id', 'status', 'share_token_expires_at');
+    const dead = !row
+      || ['signed', 'cancelled', 'voided', 'expired'].includes(String(row.status || '').toLowerCase())
+      || (row.share_token_expires_at && new Date(row.share_token_expires_at).getTime() <= Date.now());
+    if (dead) return refuse('This contract signing link is expired or no longer live — remove it and insert a fresh one.');
+    const bad = await owned(row.customer_id, 'contract signing link');
+    if (bad) return bad;
+  }
+
+  for (const run of secureLinkRuns(runs)) {
+    const token = canonicalSecureToken(run, host);
+    if (!token) continue; // the Auto Pay seam already refused a non-canonical /secure run
+    const row = await db('appointment_card_requests').where({ token }).first('id', 'kind', 'status', 'customer_id');
+    if (!row || row.kind !== 'visit') continue; // unknown → the Auto Pay seam's verdict; customer-kind → its own
+    if (row.status !== 'pending') return refuse('This card request link is no longer live — remove it and insert a fresh one.');
+    const bad = await owned(row.customer_id, 'card request link');
+    if (bad) return bad;
+  }
+  return { ok: true };
+}
+
 // ---------------------------------------------------------------------------
 // Step 2 rows (Adam's rulings 2026-09-03): appointment page, card request,
 // prep guide, latest service report, contract signing, payer statement.
@@ -945,6 +1004,7 @@ module.exports = {
   buildAutopaySetupLink,
   autopayLinkSendCheck,
   expiringLinkSendCheck,
+  bearerLinkSendCheck,
   buildAppointmentPageLink,
   CARD_REQUEST_SKIP_REASONS,
   buildCardRequestLink,

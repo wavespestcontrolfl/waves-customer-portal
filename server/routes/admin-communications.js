@@ -437,6 +437,16 @@ router.post('/sms', async (req, res, next) => {
       logger.warn(`[communications] Auto Pay link pre-send check failed — aborting send: ${autopayErr.message}`);
       return abortUnsent(503, 'Could not verify the inserted Auto Pay setup link — try again in a moment.');
     }
+    // The other per-row bearers (contract signing, visit-lane card request):
+    // liveness + recipient ownership NOW, fail closed — same bar as above.
+    try {
+      const { bearerLinkSendCheck } = require('../services/composer-customer-links');
+      const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), { trustedCustomerId: trustedCustomerId || null });
+      if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
+    } catch (bearerErr) {
+      logger.warn(`[communications] bearer link pre-send check failed — aborting send: ${bearerErr.message}`);
+      return abortUnsent(503, 'Could not verify a customer link in this message — try again in a moment.');
+    }
 
     if (reviewRequestId) {
       try {
