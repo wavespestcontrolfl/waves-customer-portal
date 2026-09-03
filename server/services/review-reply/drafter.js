@@ -654,9 +654,11 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     // "Adam's" is the allowed name in the possessive.
     const w = pn[2].toLowerCase().replace(/'s?$/, '');
     if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || BRAND_WORDS.has(w)) continue;
-    // A sentence-initial inflection of the reviewer's own word ("Ants" for
-    // "ant problems") is sourced, unless that word is also a known name.
-    if (sentenceInitial && !COMMON_FIRST_NAMES.has(w) && !knownNames.has(w)) {
+    // A sentence-initial inflection of the reviewer's own word ("Ants are"
+    // for "ant problems") is sourced when an ordinary-word follower proves
+    // the syntax — "Fields did a great job" is a surname even if the review
+    // mentioned a field — and the word is not itself a known name.
+    if (sentenceInitial && !COMMON_FIRST_NAMES.has(w) && !knownNames.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) {
       const ws = stemOf(w);
       if (ws.length >= 3 && [...reviewWords].some((rw) => stemOf(rw) === ws)) continue;
     }

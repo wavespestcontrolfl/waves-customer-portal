@@ -746,7 +746,11 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(Drafter.verifyReplyText(good("Hi Dana, Kevin's name comes up a lot, and the ants are gone from your kitchen."), grounding())).toBe('unlisted_name');
     const g = grounding({ text: 'Adam was on-time, professional, super helpful in helping me with my ant problems.', mentionedTechNames: ['Adam'], topics: ['technician'] });
     g.allow.names = ['Dana', 'Adam'];
-    expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam was on time. Ants can be stubborn, so we will keep at it.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam was on time. Ants are stubborn, so we will keep at it.'), g)).toBeNull();
+    // The inflection pass still needs an ordinary-word follower (GitHub r3): a surname that inflects a review word is a name.
+    const gfld = grounding({ text: 'Marcus treated the field behind the house and the ants are gone.' });
+    expect(Drafter.verifyReplyText(good('Hi Dana, glad the ants are gone. Fields did a great job alongside Marcus.'), gfld)).toBe('unlisted_name');
+    expect(Drafter.verifyReplyText(good('Hi Dana, glad the ants are gone. Fields are tough in this heat, and Marcus knows it.'), gfld)).toBeNull();
     expect(Drafter.verifyReplyText(good('Hi Dana, glad Adam helped. Someone will pass your note along to him.'), g)).toBeNull();
     // An inflection that is also a known name still needs provenance.
     const gb = grounding({ text: 'Marcus and the whole team got the ants out of the kitchen.', forbiddenNames: ['Teams'] });
