@@ -98,7 +98,15 @@ fi
 # Cluster globals first: roles and role memberships (no passwords). Roles that
 # already exist on the target (postgres, the app user on Railway) are fine;
 # any other error is real.
-errs=$(psql "$target" -f "$dir/globals.sql" 2>&1 >/dev/null | grep -E 'ERROR' | grep -v 'already exists' || true)
+# pg_dumpall 16+ records each membership as `GRANT a TO b ... GRANTED BY postgres;`.
+# Postgres only accepts a recorded grantor that is the bootstrap superuser or
+# holds ADMIN OPTION on the role, so on any target whose bootstrap superuser is
+# not named postgres (the drill container's is `drill`) the grant is refused:
+# "permission denied to grant privileges as role postgres" (run 33797902708).
+# Who granted a membership is irrelevant to recovery; the restoring superuser
+# becomes the grantor.
+errs=$(sed -E 's/ GRANTED BY "?[A-Za-z0-9_]+"?;/;/' "$dir/globals.sql" \
+  | psql "$target" -f - 2>&1 >/dev/null | grep -E 'ERROR' | grep -v 'already exists' || true)
 [ -z "$errs" ] || { echo "globals.sql failed:" >&2; echo "$errs" >&2; exit 1; }
 
 # The dump was taken with --no-owner but WITH privileges, so the grants to
