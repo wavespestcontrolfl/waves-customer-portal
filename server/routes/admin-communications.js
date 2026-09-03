@@ -608,6 +608,25 @@ router.post('/sms', async (req, res, next) => {
     // already happened — a stranded 'sending' claim is reconciled by
     // claimInlineForSend on the next attempt (repaired to sent from the
     // outbound log, or released once the provider confirms nothing left).
+    // Composer-carried Auto Pay links: stamp sent_at after a REAL provider
+    // send, exactly as the service's own SMS path does (sent_at only —
+    // updated_at is the completion lease token; a row that left 'pending'
+    // meanwhile is left alone). Fail-soft: the text is already out
+    // (pre-push Codex P1 on #3812).
+    if (autopayLinkTokens && result?.sent) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        if (isRealProviderSend(result)) {
+          await db('appointment_card_requests')
+            .whereIn('token', autopayLinkTokens)
+            .where({ status: 'pending' })
+            .whereNull('sent_at')
+            .update({ sent_at: new Date() });
+        }
+      } catch (stampErr) {
+        logger.warn(`[communications] Auto Pay link sent_at stamp failed (text already sent): ${stampErr.message}`);
+      }
+    }
     if (claimedReviewRequestId) {
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');

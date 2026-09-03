@@ -398,9 +398,12 @@ describe('admin communications SMS route', () => {
         if (table === 'sms_templates') first.mockResolvedValue({ is_active: true });
         else if (table === 'customers') first.mockResolvedValue(owner);
         const select = jest.fn(async () => (table === 'appointment_card_requests' && row ? [{ token: 'abcDEF123_-xyz789QWERTY', ...row }] : []));
-        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select };
+        const update = jest.fn(async (payload) => { stamps.push({ table, payload }); return 1; });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select, update };
       });
     }
+    const stamps = [];
+    beforeEach(() => { stamps.length = 0; });
     const send = (baseUrl, extra = { customerId: 'cust-A' }) => fetch(`${baseUrl}/admin/communications/sms`, {
       method: 'POST',
       headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
@@ -419,6 +422,11 @@ describe('admin communications SMS route', () => {
             autopay_setup_tokens: ['abcDEF123_-xyz789QWERTY'],
           }),
         }));
+        // The durable request records the send — sent_at only, never
+        // updated_at (the completion lease token).
+        const stamp = stamps.find((s) => s.table === 'appointment_card_requests');
+        expect(stamp).toBeTruthy();
+        expect(Object.keys(stamp.payload)).toEqual(['sent_at']);
       });
     });
 
