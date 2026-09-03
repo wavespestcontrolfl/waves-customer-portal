@@ -56,7 +56,12 @@ describe('get_report_engagement', () => {
     // A portal view or an event that predates every send is pre-send
     // engagement, not a response to the report we sent.
     expect(sql).toMatch(/AND sre\.occurred_at >= rpt\.first_sent_at/);
-    expect(sql).toMatch(/FILTER \(WHERE rpt\.report_viewed_at >= rpt\.first_sent_at\)\)::int AS opened/);
+    // An open is the FIRST post-send view from either signal. The first-view
+    // stamp is immutable, so on its own a pre-send view would hide every
+    // later real open (pre-push Codex P1).
+    expect(sql).toMatch(/MIN\(sre\.occurred_at\) FILTER \(WHERE sre\.event_name = 'service_report_viewed'\) AS first_view_event_at/);
+    expect(sql).toMatch(/LEAST\(\s*CASE WHEN rpt\.report_viewed_at >= rpt\.first_sent_at THEN rpt\.report_viewed_at END,\s*act\.first_view_event_at\s*\) AS first_open_at/);
+    expect(sql).toMatch(/FILTER \(WHERE opn\.first_open_at IS NOT NULL\)\)::int AS opened/);
     expect(sql).not.toMatch(/report_viewed_at IS NOT NULL/);
   });
 

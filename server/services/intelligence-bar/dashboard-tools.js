@@ -899,9 +899,13 @@ async function getServiceMix(input) {
 // deliberately not used — the public token endpoint accepts those names, so
 // a token holder could forge a send. Non-v1 completions text a generic
 // portal link and stamp the same SMS status, so the cohort is filtered to
-// report_template_version = service_report_v1. Opens are the first-view
-// stamp; in-report actions are distinct records with the (customer-written)
-// event.
+// report_template_version = service_report_v1. An open is the FIRST view at
+// or after the first send, from either signal: the immutable first-view
+// stamp (report_viewed_at) when it falls after the send, or the page-load
+// service_report_viewed event (customer-only — the client never fires it for
+// a staff token). The stamp alone would hide every later real open once a
+// pre-send view had claimed it. In-report actions are distinct records with
+// the (customer-written) event.
 const REPORT_ACTION_EVENTS = [
   'pdf_downloaded',
   'photo_opened',
@@ -931,8 +935,11 @@ async function getReportEngagement(input = {}) {
   const actionFlags = REPORT_ACTION_EVENTS
     .map((name) => `BOOL_OR(sre.event_name = '${name}') AS ${name}`)
     .join(',\n           ');
+  const actionPassthrough = REPORT_ACTION_EVENTS
+    .map((name) => `act.${name}`)
+    .join(',\n             ');
   const actionCounts = REPORT_ACTION_EVENTS
-    .map((name) => `(COUNT(*) FILTER (WHERE act.${name}))::int AS ${name}`)
+    .map((name) => `(COUNT(*) FILTER (WHERE opn.${name}))::int AS ${name}`)
     .join(',\n           ');
   const actionList = REPORT_ACTION_EVENTS.map((name) => `'${name}'`).join(', ');
 
@@ -973,24 +980,35 @@ async function getReportEngagement(input = {}) {
     ),
     acts AS (
       SELECT sre.service_record_id,
+           MIN(sre.occurred_at) FILTER (WHERE sre.event_name = 'service_report_viewed') AS first_view_event_at,
            ${actionFlags}
       FROM service_report_events sre
       JOIN cohort rpt ON rpt.id = sre.service_record_id
-      WHERE sre.event_name IN (${actionList})
+      WHERE sre.event_name IN ('service_report_viewed', ${actionList})
         AND sre.occurred_at >= rpt.first_sent_at
       GROUP BY sre.service_record_id
+    ),
+    opens AS (
+      SELECT rpt.service_line,
+             rpt.first_sent_at,
+             LEAST(
+               CASE WHEN rpt.report_viewed_at >= rpt.first_sent_at THEN rpt.report_viewed_at END,
+               act.first_view_event_at
+             ) AS first_open_at,
+             ${actionPassthrough}
+      FROM cohort rpt
+      LEFT JOIN acts act ON act.service_record_id = rpt.id
     )
-    SELECT rpt.service_line,
-           GROUPING(rpt.service_line) AS is_total,
+    SELECT opn.service_line,
+           GROUPING(opn.service_line) AS is_total,
            COUNT(*)::int AS sent,
-           (COUNT(*) FILTER (WHERE rpt.report_viewed_at >= rpt.first_sent_at))::int AS opened,
+           (COUNT(*) FILTER (WHERE opn.first_open_at IS NOT NULL))::int AS opened,
            percentile_cont(0.5) WITHIN GROUP (
-             ORDER BY EXTRACT(EPOCH FROM (rpt.report_viewed_at - rpt.first_sent_at)) / 60.0
-           ) FILTER (WHERE rpt.report_viewed_at >= rpt.first_sent_at) AS median_minutes_to_open,
+             ORDER BY EXTRACT(EPOCH FROM (opn.first_open_at - opn.first_sent_at)) / 60.0
+           ) FILTER (WHERE opn.first_open_at IS NOT NULL) AS median_minutes_to_open,
            ${actionCounts}
-    FROM cohort rpt
-    LEFT JOIN acts act ON act.service_record_id = rpt.id
-    GROUP BY ROLLUP (rpt.service_line)
+    FROM opens opn
+    GROUP BY ROLLUP (opn.service_line)
     ORDER BY is_total DESC, sent DESC
   `, [fromTs, toTs]);
 
@@ -1015,7 +1033,7 @@ async function getReportEngagement(input = {}) {
     total: totalRow ? shape(totalRow) : shape({ sent: 0, opened: 0 }),
     by_service_line: byLine.map((r) => ({ service_line: r.service_line, ...shape(r) })),
     notes: [
-      'opened = the report link was first viewed at or after the first send. Staff previews with a staff JWT and portal static views never stamp, but a staff download through the plain customer PDF link does (that link cannot carry the staff JWT), so a small share of opens can be internal QA. A view that predates every send is not counted.',
+      'opened = the report was first viewed at or after the first send, per the customer-only page-load event or the first-view stamp. Staff previews with a staff JWT and portal static views never count, but a staff download through the plain customer PDF link stamps the first view (that link cannot carry the staff JWT), so a small share of opens can be internal QA. A view that predates every send does not count, and does not hide a later real open.',
       'median_minutes_to_open is over those post-send first opens',
       'action counts are distinct reports with at least one such event at or after the first send (pdf_downloaded shares the staff-download caveat above)',
       "service_line 'unknown' = records completed before the line was stamped on the record",
