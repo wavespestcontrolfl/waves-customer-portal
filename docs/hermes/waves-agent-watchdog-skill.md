@@ -23,6 +23,9 @@ then the only remedy is a human.
   "environment": "production",
   "uptime_s": 86400,
   "database": { "ok": true, "latency_ms": 4 },
+  "scheduler": { "available": true, "heartbeat_job": "hermes-watchdog-liveness",
+                 "last_tick_at": "2026-09-03T14:05:00.000Z", "age_minutes": 5,
+                 "silent_after_minutes": 60, "ok": true },
   "jobs": { "available": true, "total": 61, "unhealthy": 1,
             "items": [ { "job": "geocoder-backstop", "state": "failing",
                          "last_success_age_minutes": 190, "consecutive_failures": 3 } ] },
@@ -36,6 +39,10 @@ then the only remedy is a human.
 }
 ```
 
+- `scheduler` is the prompt heartbeat: the portal's own 23-min liveness cron
+  ticks whether or not the lane gate is on, so `ok: false` (`scheduler:silent`)
+  means the portal process is up but its crons are not running — the case the
+  job classifier below would take eight days to notice.
 - `jobs.items` lists only unhealthy crons (`failing` / `stuck` / `stale`) — the
   same classifier the portal's Agents → Queue tab and the Intelligence Bar use.
 - `ops_queue` is **counts only**. Item titles never cross the wire (customer

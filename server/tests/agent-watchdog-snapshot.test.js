@@ -32,7 +32,7 @@ const logger = require('../services/logger');
 const { isDatabaseReady } = require('../utils/db-health');
 const { getScheduledJobHealth } = require('../services/intelligence-bar/job-health-tools');
 const { getOpsQueue } = require('../services/ops-queue');
-const { buildWatchdogSnapshot, _test } = require('../services/agent-watchdog-snapshot');
+const { buildWatchdogSnapshot, _test, SCHEDULER_HEARTBEAT_JOB } = require('../services/agent-watchdog-snapshot');
 
 const healthyJobs = () => ({
   total: 2, unhealthy: 0,
@@ -54,6 +54,7 @@ beforeEach(() => {
   getOpsQueue.mockResolvedValue(quietQueue());
   dbTables.seo_link_worker_requests = { at: '2026-09-03T10:00:00.000Z' };
   dbTables.seo_link_prospects = { n: '0' };
+  dbTables.job_health = { job_name: SCHEDULER_HEARTBEAT_JOB, last_started_at: new Date(Date.now() - 5 * 60000) };
 });
 
 describe('buildWatchdogSnapshot', () => {
@@ -63,6 +64,7 @@ describe('buildWatchdogSnapshot', () => {
     expect(snap.reasons).toEqual([]);
     expect(snap.database).toEqual({ ok: true, latency_ms: expect.any(Number) });
     expect(snap.jobs).toEqual({ available: true, total: 2, unhealthy: 0, items: [] });
+    expect(snap.scheduler).toMatchObject({ available: true, heartbeat_job: SCHEDULER_HEARTBEAT_JOB, age_minutes: 5, ok: true });
     expect(snap.ops_queue.lanes[0]).toEqual({ key: 'calls', label: 'Call processing', pending: 3, parked: 4, failed: 0, error: false });
     expect(snap.ops_queue.disabled).toBe(false);
     expect(JSON.stringify(snap)).not.toContain('Jane Customer');
@@ -140,9 +142,29 @@ describe('buildWatchdogSnapshot', () => {
     expect(snap.database.ok).toBe(true);
   });
 
+  test('a scheduler whose heartbeat job last ticked over an hour ago is silent — even though every job still classifies healthy', async () => {
+    dbTables.job_health = { job_name: SCHEDULER_HEARTBEAT_JOB, last_started_at: new Date(Date.now() - 90 * 60000) };
+    const snap = await buildWatchdogSnapshot();
+    expect(snap.jobs.unhealthy).toBe(0);
+    expect(snap.scheduler).toMatchObject({ ok: false, age_minutes: 90 });
+    expect(snap.reasons).toEqual(['scheduler:silent']);
+    expect(snap.verdict).toBe('attention');
+  });
+
+  test('no heartbeat row yet: a warming process is ok, a long-running one is silent', async () => {
+    dbTables.job_health = undefined;
+    const uptime = jest.spyOn(process, 'uptime');
+    uptime.mockReturnValue(120);
+    expect((await buildWatchdogSnapshot()).scheduler).toMatchObject({ ok: true, last_tick_at: null });
+    uptime.mockReturnValue(4 * 3600);
+    expect((await buildWatchdogSnapshot()).reasons).toEqual(['scheduler:silent']);
+    uptime.mockRestore();
+  });
+
   test('judge is pure and order-stable', () => {
     const r = _test.judge({
       database: { ok: true },
+      scheduler: { available: true, ok: true },
       jobs: { available: true, items: [{ job: 'x', state: 'stuck' }] },
       ops_queue: { available: true, lanes: [{ key: 'ib', failed: 0 }] },
       link_worker: { available: true, stale_leases: 0 },

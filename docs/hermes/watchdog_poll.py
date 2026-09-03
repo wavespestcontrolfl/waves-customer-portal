@@ -136,10 +136,18 @@ def describe(reason, snap):
                     bits.append(f"{j['consecutive_failures']} failures in a row")
                 return " · ".join(bits)
         return f"{name} is {state}"
+    if reason == "scheduler:silent":
+        s = snap.get("scheduler", {})
+        age = s.get("age_minutes")
+        when = f"{age} min ago" if age is not None else "never"
+        return f"portal scheduler silent — heartbeat job last ticked {when} (limit {s.get('silent_after_minutes', '?')} min); crons are not running"
+    if reason.endswith(":unavailable"):
+        return f"{reason.split(':', 1)[0]} could not be read on the portal"
     if kind == "ops":
-        _, lane, what = reason.split(":", 2)
-        if what == "unavailable":
-            return "ops queue could not be read"
+        parts = reason.split(":", 2)
+        if len(parts) != 3:
+            return reason
+        _, lane, what = parts
         for l in snap.get("ops_queue", {}).get("lanes", []):
             if l.get("key") == lane:
                 if what == "error":
@@ -152,6 +160,14 @@ def describe(reason, snap):
     if reason == "db:degraded":
         return "database ping failed or timed out"
     return reason
+
+
+def safe_describe(reason, snap):
+    # One odd key must never abort the page — the raw key is always a valid line.
+    try:
+        return describe(reason, snap)
+    except Exception:  # noqa: BLE001
+        return reason
 
 
 def main():
@@ -198,7 +214,7 @@ def main():
         new = [r for r in reasons if r not in state["last_reasons"]]
         if snap.get("verdict") == "attention" and new:
             lines = [f"⚠️ Waves agents need attention ({len(new)} new):"]
-            lines += [f"• {describe(r, snap)}" for r in new]
+            lines += [f"• {safe_describe(r, snap)}" for r in new]
             lines.append(QUEUE_LINK)
             out.append("\n".join(lines))
             state["last_paged_at"] = now_iso()

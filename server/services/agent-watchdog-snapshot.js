@@ -7,6 +7,11 @@
  * scheduler silent. Everything it needs to judge that is already recorded:
  *   - job_health (advisory-locked crons) through the SAME classifier the Ops
  *     queue and the IB job-health tool use, so the three can never disagree;
+ *   - a prompt scheduler heartbeat: the hermes-watchdog-liveness cron ticks
+ *     every 23 min under runExclusive (gate or no gate — the gate is read
+ *     inside), so its job_health row's last_started_at says whether the
+ *     scheduler is alive NOW; the shared classifier's stale floor is 8 days,
+ *     far too slow for the "scheduler silent" case this watchdog exists for;
  *   - the ops queue's per-lane pending / parked / failed counts;
  *   - the link-worker audit + prospect leases (Hermes's own claim → report loop).
  *
@@ -17,7 +22,7 @@
  * reports a fixed `unavailable` marker, never its message.
  *
  * `reasons` are stable string keys (job:<name>:<state>, ops:<lane>:failed,
- * db:degraded, link_worker:stale_leases, <read>:unavailable) so the Hermes side
+ * db:degraded, scheduler:silent, link_worker:stale_leases, <read>:unavailable) so the Hermes side
  * diffs them against its last poll without a model call and pages only on
  * CHANGE. Keys carry NO counts — a worsening or draining incident keeps one
  * identity; the current numbers sit in the snapshot body next to it.
@@ -43,6 +48,11 @@ const STALE_LEASE_HOURS = 2;
 
 const ATTENTION_JOB_STATES = new Set(['failing', 'stuck', 'stale']);
 
+// The scheduler heartbeat job (scheduler.js '*/23 * * * *') and how late its
+// tick may run before the scheduler counts as silent: two periods plus slack.
+const SCHEDULER_HEARTBEAT_JOB = 'hermes-watchdog-liveness';
+const SCHEDULER_SILENT_AFTER_MINUTES = 60;
+
 // A failed read reports ONLY that it is unavailable. The message is not
 // logged either — SQL/provider errors echo bound customer data (names, emails,
 // phone numbers), and the underlying reader logs its own failure. Only the
@@ -59,6 +69,23 @@ async function readDatabase() {
   const started = Date.now();
   const ok = await isDatabaseReady(db);
   return { ok, latency_ms: Date.now() - started };
+}
+
+// A fresh deployment has no row until the first tick; give the process one
+// silence window before a missing row counts as a dead scheduler.
+async function readScheduler() {
+  const row = await db('job_health').where({ job_name: SCHEDULER_HEARTBEAT_JOB }).first();
+  const lastTick = row && row.last_started_at ? new Date(row.last_started_at) : null;
+  const ageMinutes = lastTick ? Math.round((Date.now() - lastTick.getTime()) / 60000) : null;
+  const warming = !lastTick && process.uptime() < SCHEDULER_SILENT_AFTER_MINUTES * 60;
+  return {
+    available: true,
+    heartbeat_job: SCHEDULER_HEARTBEAT_JOB,
+    last_tick_at: lastTick ? lastTick.toISOString() : null,
+    age_minutes: ageMinutes,
+    silent_after_minutes: SCHEDULER_SILENT_AFTER_MINUTES,
+    ok: warming || (ageMinutes !== null && ageMinutes <= SCHEDULER_SILENT_AFTER_MINUTES),
+  };
 }
 
 async function readJobs() {
@@ -125,9 +152,11 @@ async function readLinkWorker() {
 }
 
 // Pure: derives verdict + reasons from the four reads. Exported for tests.
-function judge({ database, jobs, ops_queue: ops, link_worker: lw }) {
+function judge({ database, scheduler, jobs, ops_queue: ops, link_worker: lw }) {
   const reasons = [];
   if (database && database.ok === false) reasons.push('db:degraded');
+  if (scheduler && scheduler.available === false) reasons.push('scheduler:unavailable');
+  else if (scheduler && scheduler.ok === false) reasons.push('scheduler:silent');
   if (jobs && jobs.available === false) reasons.push('jobs:unavailable');
   for (const j of (jobs && jobs.items) || []) reasons.push(`job:${j.job}:${j.state}`);
   if (ops && ops.available === false && !ops.disabled) reasons.push('ops:unavailable');
@@ -143,13 +172,14 @@ function judge({ database, jobs, ops_queue: ops, link_worker: lw }) {
 }
 
 async function buildWatchdogSnapshot() {
-  const [database, jobs, opsQueue, linkWorker] = await Promise.all([
+  const [database, scheduler, jobs, opsQueue, linkWorker] = await Promise.all([
     contain('database', readDatabase, { ok: false, latency_ms: null }),
+    contain('scheduler', readScheduler, { heartbeat_job: SCHEDULER_HEARTBEAT_JOB, last_tick_at: null, age_minutes: null, silent_after_minutes: SCHEDULER_SILENT_AFTER_MINUTES, ok: false }),
     contain('jobs', readJobs, { total: 0, unhealthy: 0, items: [] }),
     contain('ops_queue', readOpsQueue, { disabled: false, pending: 0, parked: 0, failed: 0, lanes: [] }),
     contain('link_worker', readLinkWorker, { last_claim_at: null, last_report_at: null, open_leases: 0, stale_leases: 0 }),
   ]);
-  const parts = { database, jobs, ops_queue: opsQueue, link_worker: linkWorker };
+  const parts = { database, scheduler, jobs, ops_queue: opsQueue, link_worker: linkWorker };
   return {
     observed_at: new Date().toISOString(),
     environment: config.nodeEnv,
@@ -159,5 +189,5 @@ async function buildWatchdogSnapshot() {
   };
 }
 
-module.exports = { buildWatchdogSnapshot, STALE_LEASE_HOURS };
-module.exports._test = { judge, readOpsQueue, readLinkWorker };
+module.exports = { buildWatchdogSnapshot, STALE_LEASE_HOURS, SCHEDULER_HEARTBEAT_JOB, SCHEDULER_SILENT_AFTER_MINUTES };
+module.exports._test = { judge, readOpsQueue, readLinkWorker, readScheduler };
