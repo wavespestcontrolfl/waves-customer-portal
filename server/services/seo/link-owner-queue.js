@@ -112,6 +112,13 @@ async function bestEffortBridge(run, db, opts) {
   }
 }
 
+// the investigator's evidence JSON (string or object) and the agreement URL the owner reads (§3.6b: frozen
+// with every approval whose path carries a legal attestation, payment included)
+function investigationOf(path) {
+  try { return typeof path?.investigation === 'string' ? JSON.parse(path.investigation) : path?.investigation || null; } catch { return null; }
+}
+const legalTermsUrlOf = (path) => { const inv = investigationOf(path); return inv && inv.legal_terms_url ? inv.legal_terms_url : null; };
+
 const pathRevisionFor = (path, dimension) => Number(path[`revision_${dimension}`] ?? path.revision ?? 1);
 const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
 
@@ -152,8 +159,6 @@ async function listOwnerQueue(db) {
     const d = domainById.get(p.domain_id);
     const path = pathById.get(p.path_id) || pathById.get(d.best_path_id) || null;
     const onBestPath = Boolean(path && path.id === d.best_path_id);
-    let investigation = null;
-    try { investigation = typeof path?.investigation === 'string' ? JSON.parse(path.investigation) : path?.investigation || null; } catch { investigation = null; }
     const shared = Boolean(path && path.fee_scope === 'account_wide' && p.payment_group_id);
     const mine = rows.filter((r) => r.prospect_id === p.id).map((r) => {
       const whyNot = onBestPath ? whyNotApprovable(r) : 'placement is not on the domain\'s current best path — the nightly bridge rotates it';
@@ -176,7 +181,14 @@ async function listOwnerQueue(db) {
         expected_rel: path.expected_rel, confidence: path.confidence, payment_required: path.payment_required, estimated_cost_cents: path.estimated_cost_cents,
         renewal_cost_cents: path.renewal_cost_cents, renewal_period: path.renewal_period, currency: path.currency, fee_scope: path.fee_scope,
         account_required: path.account_required, legal_attestation: path.legal_attestation, legal_terms_hash: path.legal_terms_hash,
-        legal_terms_url: investigation && investigation.legal_terms_url ? investigation.legal_terms_url : null,
+        legal_terms_url: legalTermsUrlOf(path),
+        // the recipient a payment approval freezes (§3.6b: the COMPLETE canonical binding) — the owner must see it
+        merchant_binding: path.payment_required && path.merchant_binding && typeof path.merchant_binding === 'object' ? {
+          checkout_origin: path.merchant_binding.checkout_origin || null,
+          processor_host: path.merchant_binding.processor && path.merchant_binding.processor.host ? path.merchant_binding.processor.host : null,
+          merchant_account_id: path.merchant_binding.processor && path.merchant_binding.processor.merchant_account_id ? path.merchant_binding.processor.merchant_account_id : null,
+          issuer_merchant_descriptor: path.merchant_binding.issuer_merchant_descriptor || null,
+        } : null,
         agent_completable: path.agent_completable, execution_after_send: path.execution_after_send,
       } : null,
       // Reject / Watch apply while the domain is still the owner's to decide; once a sibling is approved or in flight
@@ -249,11 +261,9 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     const action = actionFor(row);
     const actionHash = action === 'accept_terms' ? path.legal_terms_hash : action === 'renewal' ? row.instance_kind : null;
     const snapshot = { ...P.decisionInputs(row.dimension, ctx), ...(note ? { note: String(note).slice(0, 2000) } : {}) };
-    if (action === 'accept_terms') {
-      let investigation = null;
-      try { investigation = typeof path.investigation === 'string' ? JSON.parse(path.investigation) : path.investigation; } catch { investigation = null; }
-      snapshot.legal_terms_url = investigation && investigation.legal_terms_url ? investigation.legal_terms_url : null;
-    }
+    // the exact agreement the owner read travels with EVERY approval on an attested path — the acceptance and the
+    // payment it accompanies alike (§3.6b), never only the accept_terms instance
+    if (action === 'accept_terms' || path.legal_attestation === true) snapshot.legal_terms_url = legalTermsUrlOf(path);
     // account-wide fee (§3.3): ONE approval, its prospect_id = the group anchor, attached to every sibling
     // payment row carrying the same instance / level / hash (the hash has no placement-specific field)
     const shared = money && path.fee_scope === 'account_wide' && placement.payment_group_id;
@@ -313,7 +323,7 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     const approvals = [];
     for (const r of audited) {
       const path = pathById.get(r.path_id);
-      const snapshot = path ? P.decisionInputs(r.dimension, { path, domain, policy, score: domain.score, instanceKey: r.instance_key }) : { dimension: r.dimension, instance_key: r.instance_key };
+      const snapshot = path ? { ...P.decisionInputs(r.dimension, { path, domain, policy, score: domain.score, instanceKey: r.instance_key }), ...(path.legal_attestation === true ? { legal_terms_url: legalTermsUrlOf(path) } : {}) } : { dimension: r.dimension, instance_key: r.instance_key };
       const [a] = await trx('seo_link_approvals').insert({
         prospect_id: r.prospect_id, path_id: r.path_id, path_revision: r.path_revision, decision_inputs_hash: r.decision_inputs_hash,
         money_action: r.dimension === 'payment', decision, authority: r.level, approved_amount_cents: null, max_payable_cents: null,

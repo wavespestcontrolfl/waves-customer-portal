@@ -84,6 +84,8 @@ describe('listOwnerQueue', () => {
     const c = cards[0];
     expect(c.domain).toMatchObject({ id: d.id, domain: 'example.org', competitors_linked: 3, agent_state: 'qualified' });
     expect(c.path).toMatchObject({ on_best_path: true, acquisition_type: 'paid_listing', estimated_cost_cents: 4500, currency: 'USD', fee_scope: 'per_location' });
+    // the recipient the payment approval will freeze is on the card
+    expect(c.path.merchant_binding).toEqual({ checkout_origin: 'https://example.org', processor_host: 'checkout.stripe.com', merchant_account_id: 'acct_1', issuer_merchant_descriptor: null });
     expect(c.d30_confidence).toBeNull();
     expect(c.price_tolerance_cents).toBe(0);
     const byDim = Object.fromEntries(c.rows.map((r) => [r.dimension, r]));
@@ -283,6 +285,17 @@ describe('approveRow', () => {
     expect(staleRow.approval_id).toBeUndefined();
     expect(leasedRow.approval_id).toBeUndefined();
     expect(p.id).toBe(pay.path_id);
+  });
+
+  test('a payment approval on an attested path freezes the agreement url too (never only accept_terms)', async () => {
+    const { db } = await parked({ make: paidPath, path: { legal_attestation: true, legal_terms_hash: HASH, investigation: JSON.stringify({ legal_terms_url: 'https://example.org/terms' }) } });
+    const pay = openRows(db, 'payment')[0];
+    const r = await Q.approveRow(db, { authorityId: pay.id, actor: ACTOR, approvedAmountCents: 4500, now: NOW, bridge: inline });
+    expect(r.approval.terms_snapshot).toMatchObject({ legal_attestation: true, legal_terms_hash: HASH, legal_terms_url: 'https://example.org/terms', merchant_binding: expect.objectContaining({ checkout_origin: 'https://example.org' }) });
+    // and the audit rows of a Reject carry it as well
+    const { db: db2, d: d2 } = await parked({ make: paidPath, path: { legal_attestation: true, legal_terms_hash: HASH, investigation: JSON.stringify({ legal_terms_url: 'https://example.org/terms' }) } });
+    await Q.decideDomain(db2, { domainId: d2.id, decision: 'rejected', actor: ACTOR, now: NOW });
+    expect(approvals(db2).every((a) => a.terms_snapshot.legal_terms_url === 'https://example.org/terms')).toBe(true);
   });
 
   test('accept_terms binds the agreement hash; the row and its terms url land in the snapshot', async () => {

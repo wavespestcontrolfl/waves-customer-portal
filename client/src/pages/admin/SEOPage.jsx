@@ -3572,6 +3572,13 @@ function OwnerQueuePanel() {
                     </a>
                   </>
                 )}
+                {p.payment_required && (
+                  <span style={{ fontFamily: MONO }}>
+                    {p.merchant_binding
+                      ? ` · pays ${p.merchant_binding.merchant_account_id || "?"} via ${p.merchant_binding.processor_host || "?"} at ${p.merchant_binding.checkout_origin || "?"}${p.merchant_binding.issuer_merchant_descriptor ? ` (${p.merchant_binding.issuer_merchant_descriptor})` : ""}`
+                      : " · no resolvable merchant — manual settlement only"}
+                  </span>
+                )}
                 {p.legal_attestation && (
                   <>
                     {" · "}
