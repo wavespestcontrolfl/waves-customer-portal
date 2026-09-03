@@ -102,7 +102,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   // 'late_sibling' / 'delivered_sibling' ask for pest + lawn, the stamped
   // estimate prices pest, and a group sibling prices lawn — added after the
   // handoff (never delivered) or published with it (codex r18 P1).
-  async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin, deliveredAgeMin = estimateAgeMin, estimateOwner = 'call', firstSendAccept = false, estimateScope = 'ask' }) {
+  async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin, deliveredAgeMin = estimateAgeMin, deliveredStamp = null, estimateOwner = 'call', firstSendAccept = false, estimateScope = 'ask' }) {
     const { customerId } = await seedCustomer(sid.slice(-2));
     const ownerId = estimateOwner === 'other' ? (await seedCustomer(`${sid.slice(-2)}x`)).customerId : customerId;
     const callAt = new Date(Date.now() - (cardAgeMin + 5) * 60000);
@@ -128,7 +128,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
       accepted_at: firstSendAccept ? new Date(Date.now() - estimateAgeMin * 60000) : null,
       estimate_data: JSON.stringify({
         estimatorEngine: { callLogId: String(call.id) },
-        ...(deliveredAgeMin === null ? {} : { deliveryState: { lastDeliveredAt: new Date(Date.now() - deliveredAgeMin * 60000).toISOString() } }),
+        ...(deliveredStamp ? { deliveryState: { lastDeliveredAt: deliveredStamp } } : deliveredAgeMin === null ? {} : { deliveryState: { lastDeliveredAt: new Date(Date.now() - deliveredAgeMin * 60000).toISOString() } }),
       }),
     }).returning('id');
     ids.estimates.push(est.id);
@@ -227,6 +227,9 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const otherAddress = await seedQuoteCall(SID.replace(/e2$/, 'q7'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'other_address' });
     const lateSibling = await seedQuoteCall(SID.replace(/e2$/, 'q8'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'late_sibling' });
     const deliveredSibling = await seedQuoteCall(SID.replace(/e2$/, 'q9'), { cardAgeMin: 60, estimateAgeMin: 10, estimateScope: 'delivered_sibling' });
+    // A hand-edited delivery stamp is no witness — and must not abort the
+    // batch query that carries every other card's proof (pre-push hook P1).
+    const malformed = await seedQuoteCall(SID.replace(/e2$/, 'q0'), { cardAgeMin: 60, estimateAgeMin: 10, deliveredStamp: 'yesterday afternoon' });
     const result = await sweep.runTriageAutoResolve({ now: new Date() });
     expect(result.skipped).toBe(false);
     const closed = await db('triage_items').where({ id: fresh.cardId }).first();
@@ -241,6 +244,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     // published with the anchor was (codex r18 P1).
     expect((await db('triage_items').where({ id: lateSibling.cardId }).first()).status).toBe('open');
     expect((await db('triage_items').where({ id: deliveredSibling.cardId }).first()).status).toBe('resolved');
+    expect((await db('triage_items').where({ id: malformed.cardId }).first()).status).toBe('open');
     const open = await db('triage_items').where({ id: stale.cardId }).first();
     expect(open.status).toBe('open');
     const suppressedCard = await db('triage_items').where({ id: suppressed.cardId }).first();
