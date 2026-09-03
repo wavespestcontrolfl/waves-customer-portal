@@ -398,6 +398,24 @@ describe('re-decision', () => {
     expect(domainState(db)).toBe('ready_to_acquire');
     expect(d.id).toBeTruthy();
   });
+  test('a communication instance whose send is in flight is PINNED at the claimed authority: a concurrent run never rewrites it (the reconcile settles it)', async () => {
+    const { db } = scenario({ make: outreachPath });
+    await run(db);
+    const [pl] = placements(db);
+    const comm = rows(db).find((x) => x.prospect_id === pl.id && x.dimension === 'communication');
+    expect(comm).toBeTruthy();
+    for (const outreach_status of ['sending', 'send_error']) {
+      // the claim granted AUTO_OUTREACH and took the draft (no longer `drafted`): a re-review here would read it unclean
+      Object.assign(comm, { level: 'AUTO_OUTREACH', decided_at: EARLIER, approval_id: null });
+      Object.assign(pl, { status: 'prospect', parked_from_status: null, outreach_status, outreach_subject: null, outreach_body: null, updated_at: new Date(NOW.getTime() + 1000) });
+      Object.assign(db._tables.seo_link_policy[0], { updated_at: new Date(NOW.getTime() + 2000) });
+      await run(db, { now: new Date(NOW.getTime() + 60000) });
+      const after = rows(db).find((x) => x.id === comm.id);
+      expect(after).toMatchObject({ level: 'AUTO_OUTREACH', decided_at: EARLIER });
+      expect(after.ended_at).toBeFalsy();
+      expect(placements(db).find((x) => x.id === pl.id)).toMatchObject({ status: 'prospect', outreach_status });
+    }
+  });
   test('a stale row is selected through the stale scan even when the domain is no longer qualified', async () => {
     const { db } = scenario({ policy: { auto_free_acquisition: true } });
     await run(db);

@@ -404,6 +404,14 @@ describe('one conversation per inbox (§13)', () => {
       Object.assign(other, { status });
       expect(await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' })).toBeNull();
     }
+    // … unless the send is still AMBIGUOUS (in flight / errored before the Sent-folder reconcile): Gmail may have
+    // delivered it, so a status advanced by hand does not release the inbox until the reconcile settles the outcome
+    for (const outreach_status of Outreach.AMBIGUOUS_SEND_STATUSES) {
+      Object.assign(other, { status: 'watching', outreach_status, conversation_closed_at: NOW });
+      expect((await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' }))?.id).toBe(other.id);
+    }
+    Object.assign(other, { status: 'lost', outreach_status: 'sent', conversation_closed_at: null });
+    expect(await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' })).toBeNull();
     // an ACTIVE conversation (contacted, the pitch out) holds the inbox …
     Object.assign(other, { status: 'contacted' });
     expect((await Outreach.inboxConflict(s.db, { recipient: 'editor@example.org' }))?.id).toBe(other.id);

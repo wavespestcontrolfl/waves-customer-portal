@@ -44,7 +44,10 @@ const { OUTREACH_TYPES, isValidEmail } = require('./link-prospect-worker');
 // a conversation is OVER once the placement reached its outcome — won (placed / live / indexed), watched, lost or
 // rejected — or carries the closure stamp; a `sent` pitch on a completed placement holds no inbox
 const CONVERSATION_CLOSED_STATUSES = Object.freeze(['placed', 'live', 'indexed', 'watching', 'lost', 'rejected']);
-const conversationClosed = (row) => Boolean(row.conversation_closed_at) || CONVERSATION_CLOSED_STATUSES.includes(row.status);
+// — EXCEPT while a send is ambiguous (in flight or errored before Sent-folder reconciliation): Gmail may have delivered
+// the pitch, so the inbox stays held whatever the status reads until the reconcile settles the outcome
+const conversationClosed = (row) => !M.AMBIGUOUS_SEND_STATUSES.includes(row.outreach_status)
+  && (Boolean(row.conversation_closed_at) || CONVERSATION_CLOSED_STATUSES.includes(row.status));
 const CONVERSATION_OPEN = (row) => !conversationClosed(row) && (
   ['contacted', 'negotiating'].includes(row.status)
   || (row.status === 'awaiting_owner' && ['contacted', 'negotiating'].includes(row.parked_from_status))
@@ -731,4 +734,5 @@ module.exports = {
   SENDABLE_STATUSES,
   CONVERSATION_CLOSED_STATUSES,
   conversationOpen: CONVERSATION_OPEN,
+  AMBIGUOUS_SEND_STATUSES: M.AMBIGUOUS_SEND_STATUSES,
 };

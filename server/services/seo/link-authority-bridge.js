@@ -471,6 +471,11 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
         continue;
       }
       if (existing.satisfied_at) continue; // done — never re-decided
+      // a communication instance whose send is in flight (claimed `sending`, or errored before the Sent-folder reconcile)
+      // is PINNED at the authority the claim was granted under: the draft is no longer `drafted` (so a re-review here
+      // would read it unclean and rewrite AUTO → OWNER on a row `finalizeSend` then satisfies by id, no owner click
+      // taken) — the reconcile settles it, not a concurrent bridge run
+      if (inst.dimension === 'communication' && M.AMBIGUOUS_SEND_STATUSES.includes(placement.outreach_status)) continue;
       const inputsMoved = existing.level !== inst.level || existing.decision_inputs_hash !== hash || Number(existing.path_revision) !== Number(pathRevision);
       const changed = inputsMoved || (existing.floor_waiver_id || null) !== floorWaiverId || existing.reason !== inst.reason;
       if (!changed && ts(existing.decided_at) >= Math.max(staleAfter, ts(placement.updated_at))) continue;
