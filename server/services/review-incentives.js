@@ -702,10 +702,14 @@ async function searchAttributionCandidates(options = {}) {
   const search = String(options.q || '').trim();
   const fallbackName = String(review.reviewer_name || '').trim();
   const terms = search || fallbackName;
+  // Fetch a bounded superset so the recent-service ranking below sees every
+  // plausible name match before the page is cut (pre-push P1 r3), then slice
+  // to the caller's limit.
+  const SCAN_MULTIPLE = 5;
   let query = conn('customers')
     .where({ active: true })
     .orderBy('last_name', 'asc')
-    .limit(limit)
+    .limit(Math.min(50, limit * SCAN_MULTIPLE))
     .select(
       'id',
       'first_name',
@@ -784,6 +788,7 @@ async function searchAttributionCandidates(options = {}) {
   const head = pinned >= 0 ? candidates.splice(pinned, 1) : [];
   candidates.sort((a, b) => Number(b.services.length > 0) - Number(a.services.length > 0));
   candidates.unshift(...head);
+  candidates.splice(limit);
 
   // Click-time correlation: customers whose tracked review-link click landed
   // near this review's timestamp. Rendered as a separate "likely reviewers"

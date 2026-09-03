@@ -817,6 +817,12 @@ describe('review incentives', () => {
     conn.__state.rows.google_reviews[0].link_source = 'click_auto';
     const pinned = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
     expect(pinned.candidates.map((c) => c.id)).toEqual(['customer-blake', 'customer-john']);
+    // The service ranking sees a superset before the page is cut: with
+    // limit 1 the serviced customer still wins over the alphabetical first.
+    conn.__state.rows.google_reviews[0].customer_id = null;
+    conn.__state.rows.google_reviews[0].link_source = null;
+    const paged = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn, limit: 1 });
+    expect(paged.candidates.map((c) => c.id)).toEqual(['customer-john']);
   });
 
   test('candidate search and manual attribution reject removed reviews', async () => {
