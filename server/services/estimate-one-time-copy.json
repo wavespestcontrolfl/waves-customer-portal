@@ -185,7 +185,8 @@
       "eyebrow": "Your rodent exclusion",
       "h1": "Hello {first}, your rodent exclusion quote is ready!",
       "sub": "Every entry point sealed with the right material, priced from your home’s roofline and access points — approve online and pick a day. Licensed & insured."
-    }
+    },
+    "screeningBullet": "Vent screening on dryer, attic, gable, and soffit vents"
   },
   "rodent_trapping": {
     "outcome": "The fastest way to drop an active interior population — we set, monitor, and clear traps until the activity stops.",
@@ -230,7 +231,7 @@
   "termite_foam": {
     "outcome": "A targeted treatment at the exact spot termites are active — not a whole-house job you don't need.",
     "includes": [
-      "Drill-and-foam application into the active gallery and void — the foam expands to reach where a liquid can't",
+      "Foam application into the active gallery and void — the foam expands to reach where a liquid can’t, drilled only where access requires it",
       "Inspection of the treatment area for live activity and conducive conditions",
       "Treatment area photographed and documented in your service report",
       "Treatment recommendations if activity is found elsewhere — never a surprise upsell"
@@ -352,7 +353,7 @@
     "includes": [
       "In-ground stations installed around the whole structure at the spacing your system specifies",
       "Always-on monitoring — not just at scheduled visits",
-      "Automatic bait switch when termites hit a station",
+      "Stations install with bait already in place — cartridges are replaced when consumption or condition meets label criteria",
       "Annual inspection and renewal pricing built in",
       "Coordination with real-estate WDO inspections when you need them"
     ],
@@ -415,10 +416,9 @@
     "debrisBullet": "Removal and disposal of thatch debris"
   },
   "top_dressing": {
-    "outcome": "A thin layer of compost or sand that levels the turf, adds organic matter, and breaks down thatch over time.",
+    "outcome": "A thin layer of sand spread across the lawn that levels uneven turf and breaks down thatch over time.",
     "includes": [
-      "Compost or sand matched to the goal — leveling or feeding",
-      "Even distribution at the right depth",
+      "Sand top dressing spread evenly at the depth you chose",
       "Coordinated with dethatching for maximum effect",
       "Watering and mowing recommendations afterward"
     ],
@@ -427,7 +427,7 @@
     "hero": {
       "eyebrow": "Your lawn top dressing",
       "h1": "Hello {first}, your lawn top dressing quote is ready!",
-      "sub": "Compost or sand spread evenly across the measured turf — approve online and pick a day. Licensed & insured."
+      "sub": "Sand spread evenly across the measured turf — approve online and pick a day. Licensed & insured."
     }
   },
   "palm_injection": {

@@ -136,9 +136,11 @@ function rowVisits(item = {}, key = null) {
   const stored = Number(item.visits) || 0;
   if (stored > 0) return stored;
   if (key === 'flea' && String(item.offerKey || '').includes('two_visit')) return 2;
-  const label = [item.name, item.label, item.displayName].filter(Boolean).join(' ');
-  const m = /(\d+)\s*[- ]?visit/i.exec(label);
-  return m ? Number(m[1]) || 0 : 0;
+  const label = [item.name, item.label, item.displayName, item.detail, item.det].filter(Boolean).join(' ');
+  const m = /\b(\d+|one|two|three|four)\s*[- ]?visit/i.exec(label);
+  if (!m) return 0;
+  const words = { one: 1, two: 2, three: 3, four: 4 };
+  return Number(m[1]) || words[m[1].toLowerCase()] || 0;
 }
 
 function bedBugMethod(item = {}) {
@@ -216,6 +218,11 @@ function resolveOneTimeServiceCopy(item = {}) {
   // bullet rides only when the row says it is included (codex #3823 r3 P1).
   if (key === 'dethatching' && item.debrisRemovalIncluded !== true) {
     lines = lines.filter((line) => line !== entry.debrisBullet);
+  }
+  // Exclusion: vent screening is a priced option — the bullet rides only a
+  // row that says it was included (codex #3823 r5 P1).
+  if (key === 'rodent_exclusion' && item.includesScreening !== true) {
+    lines = lines.filter((line) => line !== entry.screeningBullet);
   }
   // Rodent inspection: the fee credit carries the row's configured window
   // (creditableWithinDays); no window on the row ⇒ no credit promise.

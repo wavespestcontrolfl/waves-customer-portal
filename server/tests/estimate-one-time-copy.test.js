@@ -103,6 +103,8 @@ describe('resolveOneTimeServiceCopy', () => {
     // A legacy row with no visits field reads the count from its label.
     const legacyThree = resolveOneTimeServiceCopy({ name: 'German Roach Cleanout — 3 Visit Program', price: 450 });
     expect(legacyThree.outcome).toMatch(/Three targeted visits/);
+    // …or from a word-number detail ("Two visits").
+    expect(resolveOneTimeServiceCopy({ service: 'german_roach', name: 'German Roach Cleanout', price: 350, detail: 'Two visits' }).outcome).toMatch(/Two targeted visits/);
     expect(oneTimeOnlyIntelligenceCopy([{ name: 'German Roach Cleanout — 3 Visit Program', price: 450 }]).hero.sub).toMatch(/^Three targeted visits/);
     const three = resolveOneTimeServiceCopy(roach3);
     expect(three.outcome).toMatch(/Three targeted visits/);
@@ -178,6 +180,14 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(noWindow.includes.join(' ')).not.toMatch(/credited/);
   });
 
+  test('exclusion: vent screening is promised only when priced (flag, or the legacy "+screening" detail via the normalizer)', () => {
+    const screened = resolveOneTimeServiceCopy({ service: 'exclusion_v2', label: 'Full Rodent Exclusion', includesScreening: true });
+    expect(screened.includes).toContain('Vent screening on dryer, attic, gable, and soffit vents');
+    const bare = resolveOneTimeServiceCopy({ service: 'exclusion_v2', label: 'Full Rodent Exclusion', includesScreening: false });
+    expect(bare.includes).not.toContain('Vent screening on dryer, attic, gable, and soffit vents');
+    expect(resolveOneTimeServiceCopy({ service: 'rodent_exclusion', label: 'Rodent Exclusion' }).includes).not.toContain('Vent screening on dryer, attic, gable, and soffit vents');
+  });
+
   test('sanitation never promises insulation replacement; termite bait spacing is system-neutral', () => {
     expect(resolveOneTimeServiceCopy({ service: 'rodent_sanitation', label: 'Rodent Sanitation' }).includes.join(' ')).not.toMatch(/insulation/i);
     expect(resolveOneTimeServiceCopy({ service: 'termite_bait', label: 'Termite Bait Station Installation' }).includes.join(' ')).not.toMatch(/8–10 feet/);
@@ -201,6 +211,7 @@ describe('resolveOneTimeServiceCopy', () => {
         { service: 'wasp', name: 'Wasp Nest Treatment', price: 225, pricingBreakdown: { subtotal: 225, removal: 75 } },
         { service: 'dethatching', name: 'Lawn Dethatching', price: 300, debrisRemovalIncluded: false, cleanupLevel: 'none' },
         { service: 'rodent_inspection', name: 'Rodent Inspection', price: 149, creditableWithinDays: 14 },
+        { service: 'exclusion_v2', name: 'Full Rodent Exclusion', price: 895, includesScreening: true },
       ],
       total: { oneTime: 1975, monthly: 0, annual: 0 },
     });
@@ -211,6 +222,7 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(byService.wasp.nestRemovalSelected).toBe(true);
     expect(byService.dethatching.debrisRemovalIncluded).toBe(false);
     expect(byService.rodent_inspection.creditableWithinDays).toBe(14);
+    expect(byService.exclusion_v2.includesScreening).toBe(true);
   });
 
   test('bed bug: the treatment-method bullet leads and follows the priced method', () => {

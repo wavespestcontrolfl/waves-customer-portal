@@ -16817,6 +16817,7 @@ function oneTimeItemsForRender(estResult, estData) {
     warrantyTier: row.warrantyTier || null,
     debrisRemovalIncluded: row.debrisRemovalIncluded === true,
     creditableWithinDays: row.creditableWithinDays || null,
+    includesScreening: row.includesScreening === true,
   }));
 }
 
@@ -17268,6 +17269,7 @@ function normalizeOneTimeBreakdown(estData) {
         warrantyEligible: item.warrantyEligible === true,
         debrisRemovalIncluded: item.debrisRemovalIncluded === true,
         creditableWithinDays: Number(item.creditableWithinDays) > 0 ? Number(item.creditableWithinDays) : null,
+        includesScreening: item.includesScreening === true || /\+screening\b/.test(String(item.detail || item.det || '')),
       });
     }
   };

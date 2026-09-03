@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
 import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
@@ -149,6 +150,15 @@ function manualDiscountPerInterval(frequency = {}, intervalMonths = 1) {
 // first paint; the count is the hook.
 export function RowInclusions({ items, collapsible = false }) {
   const [open, setOpen] = useState(false);
+  // Browser print keeps whatever is on screen: expand before the print
+  // dialog so a collapsed list does not drop the inclusions from the printed
+  // estimate (codex #3823 r5 P2; same flushSync pattern as LawnProgramCalendar).
+  useEffect(() => {
+    if (!collapsible) return undefined;
+    const onBeforePrint = () => flushSync(() => setOpen(true));
+    window.addEventListener('beforeprint', onBeforePrint);
+    return () => window.removeEventListener('beforeprint', onBeforePrint);
+  }, [collapsible]);
   const list = (
     <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 8 }}>
       {items.map((item) => (

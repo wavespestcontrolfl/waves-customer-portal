@@ -8781,6 +8781,9 @@ function calculateExclusionPrice(config = {}) {
     estimatedPoints, tier,
     estimatedHours: Math.round(laborMinutes / 60 * 10) / 10,
     multiVisit: laborMinutes > 240,
+    // Sold-scope flag the customer estimate's copy pack reads (codex #3823
+    // r5 P1): vent screening is promised only when it was priced.
+    includesScreening: includesScreening === true,
   };
 }
 
