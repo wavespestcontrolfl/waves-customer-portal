@@ -1329,6 +1329,8 @@ function describeCancelFeeRule({ code, feeAmount, windowHours, start = null, now
       return rule(false, 'A card is saved, but no late-cancel fee was agreed for this visit, so nothing will be charged.');
     case 'payer_billed':
       return rule(false, 'A card is saved, but a third-party payer is billed for this visit, so the homeowner\'s card will not be charged.');
+    case 'hold_parked':
+      return rule(false, 'The saved card hold for this visit is parked — it follows the customer\'s rebooked visit — so this cancel charges nothing.');
     case 'card_hold_lane':
       return rule(false, 'This visit\'s fee is handled by the estimate card hold, not the appointment card — this cancel starts no new charge; check the hold\'s status on the visit.');
     case 'fee_settled':
@@ -1842,6 +1844,12 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
   // Every exit carries the operator-facing rule (code + sentence) so the
   // cancel card can say whether the card WILL be charged and why.
   const describe = (code, extra = {}) => describeCancelFeeRule({ code, feeAmount, windowHours, now, anchorAt: hold.held_at, onFailure: 'release', ...extra });
+  // A parked hold (status still 'held', parked_at set) follows the rebooked
+  // visit: handleCardHoldCancellation returns already_parked without
+  // charging, so the preview must not run the window math and promise a
+  // charge (pre-push Codex P1). Decided before the rail gate — parking is
+  // durable state, not a fee decision.
+  if (hold.parked_at) return { held: true, feeApplies: false, feeAmount, parked: true, rule: describe('hold_parked') };
   // Rail OFF (ONE_TIME_CARD_HOLD kill switch) with a historical held row:
   // no fee can be collected, so nothing below may report one — including
   // the fee-may-apply posture of a FAILED time lookup, which would make the

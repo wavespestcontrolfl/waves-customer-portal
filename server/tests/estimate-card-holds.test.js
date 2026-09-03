@@ -773,6 +773,13 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     // Stubbed ET formatters (see the datetime-et mock) — the shape is what's under test.
     expect(res.rule.text).toBe('A card is saved and the visit starts Monday, July 13, 2026 at 9:00 AM, within the 24-hour late-cancel window. The $49 late-cancel fee will be charged — rule: cancellations within 24 hours of the visit.');
   });
+  it('parked hold → never a charge prompt, matching the handler\'s already_parked (no window math)', async () => {
+    stubDb({ ...holdRow, parked_at: new Date('2026-07-05T12:00:00Z') });
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z')); // would be in-window
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: false, parked: true, rule: { code: 'hold_parked', willCharge: false } });
+    expect(mockApptTime).not.toHaveBeenCalled();
+  });
   it('held + start days out → free cancel, and the rule says why in plain words', async () => {
     stubDb(holdRow);
     mockApptTime.mockResolvedValue(new Date('2026-07-13T18:00:00Z'));
