@@ -74,8 +74,8 @@ const dispatch = require('../services/procurement/order-dispatch');
 const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', GATE_AUTO_ORDER_SITEONE: 'true', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
 const baseRequest = () => ({ id: 'req-1', product_id: 'prod-sticker', status: 'open', source: 'auto_reorder', requested_quantity: '500', unit: 'each', metadata: { vendorId: 'vend-sm', vendorSku: '4242' } });
 const stickerMule = { id: 'vend-sm', name: 'Sticker Mule', code: 25, active: true };
-const sticker = { id: 'prod-sticker', name: 'Yard sign sticker', active: true, auto_reorder_enabled: true, inventory_on_hand: '40', low_stock_threshold: '100' };
-const talstar = { id: 'prod-chem', name: 'Talstar', active: true, auto_reorder_enabled: true, inventory_on_hand: '20', low_stock_threshold: '64' };
+const sticker = { id: 'prod-sticker', name: 'Yard sign sticker', active: true, auto_reorder_enabled: true, inventory_on_hand: '40', low_stock_threshold: '100', auto_reorder_vendor_id: 'vend-sm', reorder_quantity: '500', inventory_unit: 'each' };
+const talstar = { id: 'prod-chem', name: 'Talstar', active: true, auto_reorder_enabled: true, inventory_on_hand: '20', low_stock_threshold: '64', auto_reorder_vendor_id: 'vend-s1', reorder_quantity: '256', inventory_unit: 'fl_oz' };
 
 function mockAdapter(overrides = {}) {
   return { key: 'stickermule', preSubmitTotal: 'vendor', bindingQuote: jest.fn(async () => ({ cents: 31400, source: 'order SM-0' })), place: jest.fn(async () => ({ externalOrderNumber: 'SM-1', amountCents: 31400, response: { ok: 1 }, evidence: { itemId: 4242 } })), ...overrides };
@@ -239,7 +239,7 @@ test('SiteOne with no eligible price row parks no_price even when the catalog ca
 test('an unreadable pack size parks no_pack_size — never a raw inventory amount in the cart (r1 P1)', async () => {
   mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
   mockState.request = { ...baseRequest(), requested_quantity: '128', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
-  mockState.product = talstar;
+  mockState.product = { ...talstar, reorder_quantity: '128' };
   mockState.pricing = { vendor_sku: 'S1-77', quantity: null };
   const place = jest.fn();
   const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, place });
@@ -271,6 +271,11 @@ test.each([
   ['auto_reorder_disabled', { auto_reorder_enabled: false }],
   ['stock_no_longer_low', { inventory_on_hand: '150' }],
   ['stock_untracked', { inventory_on_hand: null }],
+  // The request's cached vendor / quantity is NOT the configuration the
+  // money is spent on — the product's current row is (pre-push P0).
+  ['vendor_changed', { auto_reorder_vendor_id: 'vend-other' }],
+  ['quantity_changed', { reorder_quantity: '750' }],
+  ['quantity_changed', { inventory_unit: 'fl_oz' }],
 ])('claim re-checks eligibility: %s → request cancelled, no claim, no bell (r1 P1)', async (reason, patch) => {
   mockState.product = { ...sticker, ...patch };
   const a = mockAdapter();
@@ -280,7 +285,21 @@ test.each([
   expect(notify).not.toHaveBeenCalled();
   const cancel = mockState.updates.find((u) => u.table === 'product_restock_requests').row;
   expect(cancel.status).toBe('cancelled');
+  expect(cancel.closed_at).toBeInstanceOf(Date);
   expect(JSON.parse(cancel.metadata)).toMatchObject({ vendorId: 'vend-sm', autoOrderCancelled: reason });
+});
+
+test('master gate off: the run still re-rings pending bells and recovers stale placing rows, places nothing (pre-push P0)', async () => {
+  process.env.GATE_AUTO_ORDER = 'false';
+  mockState.pendingBells = [{ id: 'ledger-p', evidence: { bell: { title: 'Auto-order needs review: x', body: 'y' } }, request_id: 'req-p', product_name: 'x', vendor_name: 'v' }];
+  mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), request_id: 'req-old', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
+  const a = mockAdapter();
+  const r = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } });
+  expect(r).toMatchObject({ skipped: 'gated', results: [], recovered: ['ledger-old'], bells: { rung: ['ledger-p'], pending: [] } });
+  expect(a.place).not.toHaveBeenCalled();
+  expect(mockState.ledgerRows).toHaveLength(0);
+  expect(notify).toHaveBeenCalledTimes(2);
+  expect(mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status).row).toMatchObject({ status: 'needs_review' });
 });
 
 test('canAutoOrder mirrors gates + adapter map + vendor active', async () => {

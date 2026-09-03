@@ -905,19 +905,23 @@ function initScheduledJobs() {
   // overlap must not raise the same request twice.
   // =========================================================================
   cron.schedule('10 6 * * *', async () => {
-    if (!gateEnvValue('GATE_AUTO_REORDER')) return;
-    logger.info('Running: Supplies auto-reorder sweep');
-    try {
-      await runExclusive('supplies-auto-reorder', () =>
-        require('./procurement/auto-reorder').runSuppliesAutoReorderSweep());
-    } catch (err) {
-      logger.error(`Supplies auto-reorder sweep failed: ${err.message}`);
+    if (gateEnvValue('GATE_AUTO_REORDER')) {
+      logger.info('Running: Supplies auto-reorder sweep');
+      try {
+        await runExclusive('supplies-auto-reorder', () =>
+          require('./procurement/auto-reorder').runSuppliesAutoReorderSweep());
+      } catch (err) {
+        logger.error(`Supplies auto-reorder sweep failed: ${err.message}`);
+      }
     }
     // Order dispatch (PR 2): places the requests the sweep just raised, for
-    // vendors with an adapter, under the env spend caps. GATE_AUTO_ORDER +
-    // per-vendor gates are re-read inside; kill = unset. Own lock: a failed
-    // order goes red on ITS job_health row, not the sweep's.
-    if (!gateEnvValue('GATE_AUTO_ORDER')) return;
+    // vendors with an adapter, under the env spend caps. Invoked on EVERY
+    // tick, gates or not: GATE_AUTO_ORDER + per-vendor gates are re-read
+    // inside and govern NEW orders only (kill = unset), while the run always
+    // reconciles first — a 'placing' claim the dispatcher died on, or a park
+    // whose bell never landed, is a possibly-submitted order that a flipped
+    // switch must not hide. Own lock: a failed order goes red on ITS
+    // job_health row, not the sweep's.
     try {
       await runExclusive('vendor-order-dispatch', () =>
         require('./procurement/order-dispatch').runVendorOrderDispatch());

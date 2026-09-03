@@ -7,7 +7,11 @@
  * (SiteOne → browser bot, Sticker Mule → reorder API) and no ledger row:
  *
  *   1. Gates, at CALL time: GATE_AUTO_ORDER AND the vendor's gate
- *      (GATE_AUTO_ORDER_STICKERMULE / GATE_AUTO_ORDER_SITEONE). Unset = kill.
+ *      (GATE_AUTO_ORDER_STICKERMULE / GATE_AUTO_ORDER_SITEONE). Unset = kill
+ *      for NEW orders only: reconciliation (stale 'placing' claims, bells
+ *      that never landed) runs on every tick regardless, because an order
+ *      that may already have been submitted does not stop existing when the
+ *      switch is flipped (pre-push P0).
  *   2. CLAIM: insert vendor_orders (status 'placing') BEFORE any outbound
  *      call. restock_request_id is UNIQUE, so a request is dispatched at most
  *      once ever — a deploy overlap sees the row and skips. The claim
@@ -16,7 +20,11 @@
  *      stock still at or under the threshold. A request the current catalog
  *      no longer authorizes (a receive landed, automation was turned off, the
  *      product was retired) is CANCELLED with the reason in its metadata and
- *      never claimed (Codex r1 P1): the need is gone, no bell.
+ *      never claimed (Codex r1 P1): the need is gone, no bell. The same
+ *      goes for a request whose vendor or quantity/unit no longer match the
+ *      product's auto_reorder_vendor_id / reorder_quantity / inventory_unit
+ *      (pre-push P0): money is never spent on a superseded configuration —
+ *      the request is cancelled and the next sweep raises a current one.
  *   3. Binding total BEFORE anything is sent. The eligible vendor_pricing
  *      row (active, approved, unexpired) supplies the vendor SKU for EVERY
  *      adapter — SiteOne included, even though its money comes from checkout
@@ -345,14 +353,22 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
     // the product retired. Ordering on that request is buying stock nobody
     // asked for — withdraw it instead, reason on the row, no bell (the
     // owner's own action or a receive made it moot). (Codex r1 P1)
-    const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold');
+    const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit');
     if (!product) return { skipped: 'no_product' };
     const onHand = num(product.inventory_on_hand);
     const threshold = num(product.low_stock_threshold);
+    // The request's cached vendor + quantity must still be the product's
+    // CURRENT configuration: an edit since the sweep (new vendor, new
+    // reorder quantity or unit) supersedes the request, it does not travel
+    // with it.
+    const configChanged = (product.auto_reorder_vendor_id || null) !== vendor.id ? 'vendor_changed'
+      : num(product.reorder_quantity) !== num(request.requested_quantity) || normalizeInventoryUnit(product.inventory_unit) !== normalizeInventoryUnit(request.unit) ? 'quantity_changed'
+        : null;
     const ineligible = product.active === false ? 'product_inactive'
       : product.auto_reorder_enabled !== true ? 'auto_reorder_disabled'
         : onHand == null || threshold == null ? 'stock_untracked'
-          : onHand > threshold ? 'stock_no_longer_low' : null;
+          : onHand > threshold ? 'stock_no_longer_low'
+            : configChanged;
     if (ineligible) {
       await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({
         status: 'cancelled',
@@ -536,12 +552,15 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
 }
 
 async function runVendorOrderDispatch({ conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
-  if (!gateEnvValue(GATE)) return { skipped: 'gated', results: [] };
-  // Bells first: a park whose bell never sent (last run, or a stale-placing
-  // recovery below) is the one outcome that must not wait another day.
+  // Reconciliation runs BEFORE and REGARDLESS of the gate: a 'placing' claim
+  // the dispatcher died on, or a park whose bell never sent, is an order that
+  // may already exist at the vendor — killing the lane must surface it, not
+  // bury it (pre-push P0). Bells first: the one outcome that must not wait
+  // another day.
   const bells = await reringPendingBells({ conn, notify });
   const recovered = await recoverStalePlacing({ conn, notify, now });
-  const rows = await findDispatchable(conn);
+  const gated = !gateEnvValue(GATE);
+  const rows = gated ? [] : await findDispatchable(conn);
   const results = [];
   let runLevelError = null;
   for (const row of rows) {
@@ -564,7 +583,7 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
   // An undelivered bell is a parked order nobody knows about: red until it lands.
   if (bellsPending.length) problems.push(`${bellsPending.length} bell(s) not delivered, re-rung next run (ledger ${bellsPending.join(', ')})`);
   if (problems.length) throw new Error(`vendor order dispatch: ${problems.join('; ')}`);
-  return { results, recovered: recovered.recovered, bells };
+  return { ...(gated ? { skipped: 'gated' } : {}), results, recovered: recovered.recovered, bells };
 }
 
 module.exports = {
