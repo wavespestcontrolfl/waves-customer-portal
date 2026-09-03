@@ -31,7 +31,7 @@ const APPROVAL_DECISIONS = ['approved', 'rejected', 'watch'];
 const APPROVAL_ACTIONS = ['acquire', 'accept_terms', 'purchase', 'renewal', 'outreach_send', 'outreach_followup'];
 const APPROVABLE_LEVELS = ['OWNER_FREE', 'OWNER_ACCOUNT', 'OWNER_OUTREACH', 'OWNER_PAYMENT', 'OWNER_MEMBERSHIP', 'OWNER_LEGAL', 'OWNER_HUMAN_STEP'];
 const SATISFIED_REASONS = ['sent', 'placed', 'charged', 'manual_charged', 'no_payment_required', 'human_step_done', 'group_purchase'];
-const END_OUTCOMES = ['failed', 'skipped', 'not_sent', 'voided', 'superseded', 'terms_changed', 'lost', 'human_step_done', 'path_failed_after_charge', 'path_failed_after_free'];
+const END_OUTCOMES = ['failed', 'skipped', 'not_sent', 'voided', 'superseded', 'terms_changed', 'lost', 'human_step_done', 'path_failed_after_charge', 'path_failed_after_free', 'free_checkout_failed', 'captcha'];
 
 const quoted = (arr) => arr.map((v) => `'${v}'`).join(', ');
 const check = (table, name, expr) => `ALTER TABLE ${table} ADD CONSTRAINT ${name} CHECK (${expr})`;
@@ -122,6 +122,8 @@ exports.up = async function up(knex) {
     await knex.raw(check(AUTH, 'seo_link_placement_authorities_ended_check', '(ended_at IS NULL) = (end_outcome IS NULL)'));
     await knex.raw(check(AUTH, 'seo_link_placement_authorities_end_outcome_check', inSet('end_outcome', END_OUTCOMES, { nullable: true })));
     await knex.raw(check(AUTH, 'seo_link_placement_authorities_accepted_terms_check', "accepted_terms_hash IS NULL OR dimension = 'execution'"));
+    // the kind IS the key's `${kind}` half — the partial unique below indexes it, so a writer cannot drift the two apart
+    await knex.raw(check(AUTH, 'seo_link_placement_authorities_instance_kind_check', "instance_kind = split_part(instance_key, ':', 1)"));
     await knex.raw(`ALTER TABLE ${AUTH} ADD CONSTRAINT seo_link_placement_authorities_approval_id_fkey FOREIGN KEY (approval_id) REFERENCES seo_link_approvals(id) ON DELETE SET NULL`);
     await knex.raw(`ALTER TABLE ${AUTH} ADD CONSTRAINT seo_link_placement_authorities_floor_waiver_id_fkey FOREIGN KEY (floor_waiver_id) REFERENCES seo_link_floor_waivers(id) ON DELETE SET NULL`);
   }
@@ -155,7 +157,7 @@ exports.down = async function down(knex) {
     await knex.schema.alterTable(AUTH, (t) => { t.dropColumn('path_id'); });
   }
   if (await knex.schema.hasColumn(AUTH, 'instance_kind')) {
-    for (const c of ['satisfied_check', 'satisfied_reason_check', 'ended_check', 'end_outcome_check', 'accepted_terms_check', 'approval_id_fkey', 'floor_waiver_id_fkey']) {
+    for (const c of ['satisfied_check', 'satisfied_reason_check', 'ended_check', 'end_outcome_check', 'accepted_terms_check', 'instance_kind_check', 'approval_id_fkey', 'floor_waiver_id_fkey']) {
       await knex.raw(`ALTER TABLE ${AUTH} DROP CONSTRAINT IF EXISTS seo_link_placement_authorities_${c}`);
     }
     await knex.schema.alterTable(AUTH, (t) => {

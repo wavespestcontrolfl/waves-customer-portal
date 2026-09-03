@@ -382,6 +382,15 @@ describe('decision-inputs hash (§3.6b — per dimension + shared floors)', () =
     expect(P.decisionInputsHash('execution', url)).not.toBe(P.decisionInputsHash('execution', a));
     expect(P.decisionInputsHash('payment', url)).toBe(P.decisionInputsHash('payment', a));
   });
+  test('the instance key is part of EVERY dimension\'s hash: generation 2 never hashes like generation 1', () => {
+    const a = { ...ctx(), instanceKey: '-:1' };
+    const b = { ...a, instanceKey: '-:2' };
+    for (const d of ['payment', 'communication', 'execution']) {
+      expect(P.decisionInputs(d, a)).toMatchObject({ instance_key: '-:1' });
+      expect(P.decisionInputsHash(d, a)).not.toBe(P.decisionInputsHash(d, b));
+    }
+    expect(P.decisionInputs('payment', ctx())).toMatchObject({ instance_key: null });
+  });
   test('the currency attestation (id on the path + the immutable row hash via ctx.attestation) is a PAYMENT input only', () => {
     const a = ctx();
     expect(P.decisionInputs('payment', a)).toMatchObject({ currency_attestation_id: null, currency_attestation_hash: null });

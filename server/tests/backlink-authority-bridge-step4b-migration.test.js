@@ -87,9 +87,12 @@ describe('up()', () => {
     expect(auth).toEqual(['instance_kind', 'reason', 'satisfied_reason', 'ended_at', 'end_outcome', 'accepted_terms_hash', 'path_id']);
     expect(knex._raws.some((r) => r.includes("split_part(instance_key, ':', 1)"))).toBe(true);
     expect(knex._raws.some((r) => r.includes('SET path_id = p.path_id FROM seo_link_prospects p WHERE p.id = a.prospect_id AND a.path_id IS NULL'))).toBe(true);
-    for (const name of ['satisfied_check', 'satisfied_reason_check', 'ended_check', 'end_outcome_check', 'accepted_terms_check', 'approval_id_fkey', 'floor_waiver_id_fkey']) {
+    for (const name of ['satisfied_check', 'satisfied_reason_check', 'ended_check', 'end_outcome_check', 'accepted_terms_check', 'instance_kind_check', 'approval_id_fkey', 'floor_waiver_id_fkey']) {
       expect(knex._raws.some((r) => r.includes(`seo_link_placement_authorities_${name}`))).toBe(true);
     }
+    expect(knex._raws.find((r) => r.includes('seo_link_placement_authorities_instance_kind_check'))).toContain("instance_kind = split_part(instance_key, ':', 1)");
+    // the backfill runs BEFORE the kind CHECK is added
+    expect(knex._raws.findIndex((r) => r.includes("SET instance_kind = split_part"))).toBeLessThan(knex._raws.findIndex((r) => r.includes('instance_kind_check')));
     expect(knex._raws.find((r) => r.includes('seo_link_placement_authorities_satisfied_check'))).toContain('(satisfied_at IS NULL) = (satisfied_reason IS NULL)');
     expect(knex._raws.some((r) => r.includes('CREATE UNIQUE INDEX IF NOT EXISTS seo_link_placement_authorities_open_instance_uniq') && r.includes('(prospect_id, dimension, instance_kind) WHERE ended_at IS NULL'))).toBe(true);
     expect(knex._altered.seo_link_prospects.map((c) => c.args[0])).toEqual(['payment_group_id', ['payment_group_id']]);
@@ -110,7 +113,7 @@ describe('down()', () => {
     await migration.down(knex);
     expect(knex._altered.seo_link_prospects.map((c) => c.args[0])).toEqual(['payment_group_id']);
     expect(knex._raws.some((r) => r.includes('DROP INDEX IF EXISTS seo_link_placement_authorities_open_instance_uniq'))).toBe(true);
-    expect(knex._raws.filter((r) => r.includes('DROP CONSTRAINT IF EXISTS seo_link_placement_authorities_'))).toHaveLength(7);
+    expect(knex._raws.filter((r) => r.includes('DROP CONSTRAINT IF EXISTS seo_link_placement_authorities_'))).toHaveLength(8);
     expect(knex._altered.seo_link_placement_authorities.map((c) => c.args[0])).toEqual(['path_id', 'instance_kind', 'reason', 'satisfied_reason', 'ended_at', 'end_outcome', 'accepted_terms_hash']);
     expect(knex._dropped).toEqual(['seo_link_approvals', 'seo_link_floor_waivers']);
   });
