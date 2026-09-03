@@ -75,16 +75,18 @@ function withStore(mode, fallback, run) {
   });
 }
 
-export function putCompletionResumeBody(serviceId, body) {
+// Rows are { body, storedAt }: storedAt lets the prune below leave a row
+// alone while its marker write may still be in flight in another tab.
+export function putCompletionResumeBody(serviceId, body, now = Date.now()) {
   if (!serviceId || !body || typeof body !== "object") return Promise.resolve(false);
-  return withStore("readwrite", false, (store) => store.put(body, String(serviceId)))
+  return withStore("readwrite", false, (store) => store.put({ body, storedAt: now }, String(serviceId)))
     .then((result) => result !== false);
 }
 
 export function getCompletionResumeBody(serviceId) {
   if (!serviceId) return Promise.resolve(null);
   return withStore("readonly", null, (store) => store.get(String(serviceId)))
-    .then((body) => (body && typeof body === "object" ? body : null));
+    .then((row) => (row && typeof row.body === "object" && row.body ? row.body : null));
 }
 
 export function deleteCompletionResumeBody(serviceId) {
@@ -93,17 +95,31 @@ export function deleteCompletionResumeBody(serviceId) {
     .then((result) => result !== false);
 }
 
+// A row younger than this is never pruned: persistCompletionResumeOwed
+// writes the body and THEN the marker, so a sibling tab mounting a panel
+// in between would otherwise see an un-owed row and delete it, leaving the
+// marker-without-body state the store exists to prevent (Codex r4 P2).
+// Far longer than the write→marker gap; far shorter than a real orphan's
+// life (it is pruned by the next mount after the window).
+export const PRUNE_GRACE_MS = 5 * 60 * 1000;
+
 // Removes every stored body whose marker is gone. The success paths clear
 // the marker synchronously but the body delete is asynchronous, so a page
 // killed in between leaves an unreachable multi-megabyte row behind; run
 // once when a completion panel mounts so those rows never accumulate
 // (Codex r3 P2). `isOwed(serviceId)` is the marker predicate.
-export function pruneCompletionResumeBodies(isOwed) {
+export function pruneCompletionResumeBodies(isOwed, now = Date.now()) {
+  const rowFor = (key) => withStore("readonly", null, (store) => store.get(key));
   return withStore("readonly", [], (store) => store.getAllKeys())
     .then((keys) => Promise.all(
       (Array.isArray(keys) ? keys : [])
-        .filter((key) => !isOwed(String(key)))
-        .map((key) => deleteCompletionResumeBody(key)),
+        .map((key) => String(key))
+        .filter((key) => !isOwed(key))
+        .map((key) => rowFor(key).then((row) => (
+          row && now - Number(row.storedAt || 0) < PRUNE_GRACE_MS
+            ? false
+            : deleteCompletionResumeBody(key)
+        ))),
     ))
     .then((results) => results.filter(Boolean).length);
 }

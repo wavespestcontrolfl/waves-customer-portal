@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   deleteCompletionResumeBody,
+  PRUNE_GRACE_MS,
   getCompletionResumeBody,
   pruneCompletionResumeBodies,
   putCompletionResumeBody,
@@ -98,13 +99,23 @@ describe("persistCompletionResumeOwed / restore / clear (marker + body)", () => 
     expect(await restoreCompletionResumeBody("svc-1")).toBeNull();
   });
 
-  it("prune deletes bodies whose marker is gone and keeps owed ones", async () => {
-    await persistCompletionResumeOwed("svc-owed", committedBody());
-    await putCompletionResumeBody("svc-orphan", committedBody());
+  it("prune deletes aged bodies whose marker is gone and keeps owed ones", async () => {
+    const past = Date.now() - PRUNE_GRACE_MS - 1000;
+    await putCompletionResumeBody("svc-owed", committedBody(), past);
+    localStorage.setItem("waves_completion_resume_owed_svc-owed", "1");
+    await putCompletionResumeBody("svc-orphan", committedBody(), past);
     expect(await pruneCompletionResumeBodies(completionResumeOwed)).toBe(1);
     expect(await getCompletionResumeBody("svc-orphan")).toBeNull();
     expect(await getCompletionResumeBody("svc-owed")).not.toBeNull();
     expect(await pruneCompletionResumeBodies(() => false)).toBe(1);
+  });
+
+  it("prune leaves a freshly written body alone — its marker may still be in flight in another tab", async () => {
+    await putCompletionResumeBody("svc-fresh", committedBody());
+    expect(await pruneCompletionResumeBodies(() => false)).toBe(0);
+    expect(await getCompletionResumeBody("svc-fresh")).not.toBeNull();
+    // Past the grace window the same un-owed row is an orphan.
+    expect(await pruneCompletionResumeBodies(() => false, Date.now() + PRUNE_GRACE_MS + 1)).toBe(1);
   });
 
   it("clear removes both the marker and the body", async () => {
