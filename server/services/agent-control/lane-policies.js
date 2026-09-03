@@ -216,7 +216,9 @@ const LANE_RUNTIME = {
   // ── Managed agents (sessions) ──
   agent_bi: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', expected_cadence: 'weekly', ...AGENT_SESSION },
   agent_lead: { side_effect_class: 'customer_visible', ledger: 'session', fallback_class: 'interactive', eval_family: 'long_running_agent', maturity: 'M3', ...AGENT_SESSION },
-  agent_content: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', ...AGENT_SESSION },
+  // irreversible_external: distribute_to_social → SocialMedia.publishToAll
+  // posts straight to the platforms (content-agent-tools.js) — Codex r2.
+  agent_content: { side_effect_class: 'irreversible_external', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', ...AGENT_SESSION },
   agent_meta: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', ...AGENT_SESSION },
   agent_backlink: { side_effect_class: 'internal_write', ledger: 'session', fallback_class: 'offline', eval_family: 'long_running_agent', ...AGENT_SESSION },
   agent_assistant: { side_effect_class: 'customer_visible', ledger: 'session', fallback_class: 'interactive', eval_family: 'long_running_agent', maturity: 'M3', ...AGENT_SESSION },
