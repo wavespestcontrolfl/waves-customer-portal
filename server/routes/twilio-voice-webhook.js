@@ -350,6 +350,10 @@ async function parkAdditionalRecording(row, extra) {
         ),
       });
     if (appended > 0) {
+      // The call is under review the moment its card exists: review_status
+      // is the aggregate the dashboard counts (AGENTS.md; Codex #3736 r15
+      // P2), set in the same transaction as the card.
+      await trx('call_log').where({ id: row.id }).update({ review_status: 'open' });
       // One open card per call: a SECOND parked recording rides the open
       // card's payload (parked_recording_sids) instead of vanishing behind
       // the conflict target, so the office sees every recording it can adopt.
@@ -1641,6 +1645,14 @@ router.post('/recording-status', async (req, res) => {
       let updated = 0;
       let matchedSid = null;
       let attach = null;
+      // A duplicate delivery for a row in a SETTLED state schedules no pass
+      // (Codex #3736 r15 P1): the non-force dedup guard skips only
+      // 'processed', so a Twilio at-least-once retry of a parked SID would
+      // re-run extraction — customer, lead, booking, messaging work — on a
+      // voicemail / spam / *_failed row that was deliberately left there.
+      // Only a row still awaiting a pass gets the duplicate-recovery attempt.
+      const RETRYABLE_STATUSES = new Set([null, 'extraction_failed', 'no_transcription']);
+      let duplicateOfSettledRow = false;
       // Decide against what the row holds, write with that decision fenced
       // in, and if the fence refused (a competing callback attached first,
       // or a pass claimed the row after the read) re-read and decide AGAIN
@@ -1668,6 +1680,7 @@ router.post('/recording-status', async (req, res) => {
           // nothing new but files the review card if the first delivery
           // lost it.
           if (attach.reason === 'already_parked') await park(targetRow, 'retry');
+          duplicateOfSettledRow = !RETRYABLE_STATUSES.has(targetRow.processing_status || null);
           matchedSid = targetRow.twilio_call_sid;
           logger.info(`[recording-status] duplicate delivery of ${maskSid(RecordingSid)} for ${maskSid(matchedSid)} — row untouched`);
           break;
@@ -1987,7 +2000,9 @@ router.post('/recording-status', async (req, res) => {
       // post-cutover call on 2026-07-28).
       if (matchedSid) {
         queueVoiceMessageSync(matchedSid);
-        try {
+        if (duplicateOfSettledRow) {
+          logger.info(`[recording-status] duplicate delivery for ${maskSid(matchedSid)} on a settled row — no pass scheduled`);
+        } else try {
           const processor = require('../services/call-recording-processor');
           const earlyDelayMs = Number(process.env.CALL_PROC_EARLY_PROCESS_DELAY_MS) || 2 * 60 * 1000;
           const fallbackDelayMs = 10 * 60 * 1000;
@@ -2088,7 +2103,7 @@ router.post('/transcription', async (req, res) => {
             transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
             transcription_provider: 'twilio_builtin',
             transcription_model: null,
-            transcription_metadata: JSON.stringify(await CallProc.withPanStamps(targetRow.id, {
+            transcription_metadata: CallProc.transcriptionMetadataWrite({
               provider: 'twilio_builtin',
               source: 'twilio_transcription_webhook',
               transcription_status: TranscriptionStatus || null,
@@ -2099,7 +2114,7 @@ router.post('/transcription', async (req, res) => {
               // below — or a concurrent /recording-status callback — must
               // still see a durable pan_detected on the row.
               ...panStamp,
-            })),
+            }),
             updated_at: new Date(),
           };
           // The precedence is re-checked IN the write: a provider transcript

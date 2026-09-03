@@ -110,6 +110,17 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(after.indexOf(".update({ review_status: null });")).toBeGreaterThan(after.indexOf("resolution_note: `Adopted ${adopted} processed` });"));
   });
 
+  test('every provenance write goes through the SQL-side quarantine carry; the read-merge-write helper is gone (codex #3736 gh-r15 P1)', () => {
+    expect(source).not.toContain('withPanStamps');
+    expect((source.match(/transcription_metadata: transcriptionMetadataWrite\(/g) || []).length).toBe(3);
+    expect(source).toContain('const rejectionMeta = transcriptionMetadataWrite({ ...priorMeta, transcription_rejected: true');
+    const webhook = fs.readFileSync(require.resolve('../routes/twilio-voice-webhook'), 'utf8');
+    expect(webhook).not.toContain('withPanStamps');
+    expect(webhook).toContain('transcription_metadata: CallProc.transcriptionMetadataWrite({');
+    // The PAN sweep derives a SID from a listed entry's URL.
+    expect(source).toContain("const parkedSid = entry?.recording_sid || sidFromRecordingUrl(entry?.recording_url);");
+  });
+
   test('the post-claim refresh reloads the stamps a swap clears, and the timeline insert locks the claim row in its fence (codex #3736 gh-r14)', () => {
     const at = body.indexOf("const claimedRow = await db('call_log').where({ id: call.id }).first(");
     expect(at).toBeGreaterThan(-1);

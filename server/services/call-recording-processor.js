@@ -486,28 +486,37 @@ async function deleteRecordingAtTwilio(sid) {
 // reads it to retry). Atomic on the current array — an entry landing
 // between the read and this write is kept, not overwritten. `list` is one
 // of RECORDING_LISTS (a constant, never input).
-async function tombstoneListedRecording(callId, list, sid, deleted) {
+// `match` names the entry: { recording_sid } normally; { recording_url } for
+// a legacy entry that never had a SID (Codex #3736 r15 P1).
+async function tombstoneListedRecording(callId, list, match, deleted) {
   if (!RECORDING_LISTS.includes(list)) throw new Error(`unknown recording list ${list}`);
+  const key = match && match.recording_sid ? 'recording_sid' : 'recording_url';
+  const value = match ? match[key] : null;
+  if (!value) throw new Error('tombstoneListedRecording: a recording_sid or recording_url is required');
   await db('call_log')
     .where({ id: callId })
-    .whereRaw(`COALESCE(metadata -> '${list}', '[]'::jsonb) @> ?::jsonb`, [JSON.stringify([{ recording_sid: sid }])])
+    .whereRaw(`COALESCE(metadata -> '${list}', '[]'::jsonb) @> ?::jsonb`, [JSON.stringify([{ [key]: value }])])
     .update({
       metadata: db.raw(
         `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${list}}',`
-        + " (SELECT COALESCE(jsonb_agg(CASE WHEN e ->> 'recording_sid' = ? THEN e || ?::jsonb ELSE e END), '[]'::jsonb)"
+        + ` (SELECT COALESCE(jsonb_agg(CASE WHEN e ->> '${key}' = ? THEN e || ?::jsonb ELSE e END), '[]'::jsonb)`
         + ` FROM jsonb_array_elements(COALESCE(metadata -> '${list}', '[]'::jsonb)) e), true)`,
-        [sid, JSON.stringify({ recording_url: null, quarantined_at: new Date().toISOString(), delete_pending: !deleted })],
+        [value, JSON.stringify({ recording_url: null, quarantined_at: new Date().toISOString(), delete_pending: !deleted })],
       ),
       updated_at: new Date(),
     });
 }
 
+// Twilio recording URLs carry the SID (…/Recordings/RE…); a legacy row or
+// listed entry that stored only the URL still names a deletable recording.
+function sidFromRecordingUrl(url) {
+  return (url && (String(url).match(/\/Recordings\/(RE[a-f0-9]{32})/i) || [])[1]) || null;
+}
+
 async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {}) {
   if (!call?.id) return { quarantined: false };
   const recordingUrl = call.recording_url || null;
-  const sid = call.recording_sid
-    || (recordingUrl && (recordingUrl.match(/\/Recordings\/(RE[a-f0-9]{32})/i) || [])[1])
-    || null;
+  const sid = call.recording_sid || sidFromRecordingUrl(recordingUrl);
   const twilioDeleted = sid ? await deleteRecordingAtTwilio(sid) : false;
   let alreadyQuarantined = false;
   let listedEntries = [];
@@ -619,14 +628,27 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
   // while a delete is still owed, which the recovery sweep reads to retry.
   const parked = { deleted: 0, pending: 0 };
   for (const { list, entry } of listedEntries) {
-    const parkedSid = entry?.recording_sid;
-    if (!parkedSid) continue;
+    // A legacy entry with no SID still names audio (Codex #3736 r15 P1):
+    // derive the SID from its URL; with neither there is nothing Twilio can
+    // delete by id — strip the reference so no reader can play it, and owe
+    // nothing (there is no retry that could ever succeed).
+    const parkedSid = entry?.recording_sid || sidFromRecordingUrl(entry?.recording_url);
+    if (!parkedSid) {
+      if (entry?.recording_url) {
+        logger.warn(`[call-proc] PAN quarantine: listed recording on call ${call.id} has a URL but no SID — reference stripped, nothing deletable`);
+        try { await tombstoneListedRecording(call.id, list, { recording_url: entry.recording_url }, true); } catch (err) {
+          logger.error(`[call-proc] PAN quarantine: SID-less entry strip failed for call ${call.id}: ${err.message}`);
+          parked.pending += 1;
+        }
+      }
+      continue;
+    }
     let deleted;
     if (parkedSid === sid) deleted = twilioDeleted;
     else if (entry.recording_url == null && entry.delete_pending !== true) continue; // already gone
     else deleted = await deleteRecordingAtTwilio(parkedSid);
     try {
-      await tombstoneListedRecording(call.id, list, parkedSid, deleted);
+      await tombstoneListedRecording(call.id, list, entry.recording_sid ? { recording_sid: parkedSid } : { recording_url: entry.recording_url }, deleted);
     } catch (err) {
       logger.error(`[call-proc] PAN quarantine: parked-entry strip failed for call ${call.id}: ${err.message}`);
       deleted = false;
@@ -703,57 +725,34 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
   return { quarantined: true, twilioDeleted, alreadyQuarantined, parked };
 }
 
-// PAN-quarantine stamps are DURABLE (Codex #2676 round-9 P1): the recovery
-// sweep and the recording-status webhook key off
-// transcription_metadata.pan_detected, so any later metadata overwrite
-// (fallback provenance, the implausible-rejection sentinel) must carry the
-// stamps forward — a provider-return quarantine followed by a Twilio
-// fallback write would otherwise erase the stamp and let a delayed
-// callback reattach the card audio. Read-merge just before the write; on a
-// read failure the metadata is written as-is (quarantine re-runs are
-// idempotent and re-stamp on the next touch).
-async function withPanStamps(callId, metadata) {
-  const out = { ...(metadata || {}) };
-  try {
-    const row = await db('call_log').where({ id: callId }).first('transcription_metadata');
-    const raw = row?.transcription_metadata;
-    let prior = {};
-    try {
-      prior = typeof raw === 'string' ? JSON.parse(raw) : (raw && typeof raw === 'object' ? raw : {});
-    } catch { prior = {}; }
-    if (prior.pan_detected === true) {
-      out.pan_detected = true;
-      if (prior.recording_quarantined === true) out.recording_quarantined = true;
-      if (prior.quarantine_source && !out.quarantine_source) out.quarantine_source = prior.quarantine_source;
-      if (prior.pan_count && !out.pan_count) out.pan_count = prior.pan_count;
-      // The retry SID and the notify marker are load-bearing (round-14 P1):
-      // dropping quarantine_recording_sid on a later provenance write
-      // leaves recovery with nothing to retry a failed Twilio delete
-      // against, and dropping pan_notified re-fires the office alert.
-      if (prior.quarantine_recording_sid && !out.quarantine_recording_sid) out.quarantine_recording_sid = prior.quarantine_recording_sid;
-      if (Array.isArray(prior.quarantine_owed_sids) && prior.quarantine_owed_sids.length && !out.quarantine_owed_sids) out.quarantine_owed_sids = prior.quarantine_owed_sids;
-      // An owed SID IS incomplete work (Codex #3736 r13 P1): a listed
-      // recording whose Twilio delete and tombstone both failed is still at
-      // Twilio, and a provenance write that only saw the primary's delete
-      // succeed would otherwise present the quarantine as complete. Only the
-      // helper's own sweep clears the array, on a successful delete.
-      if (Array.isArray(out.quarantine_owed_sids) && out.quarantine_owed_sids.length) out.recording_quarantined = false;
-      if (prior.pan_notified === true) out.pan_notified = true;
-      // The unread-lists flag is the INCOMPLETE marker recovery selects on
-      // (Codex #3736 r5 P1): a provenance write landing right after a
-      // failed list read must carry it — and must not present the
-      // quarantine as complete while lists that may still hold audio are
-      // unread. The helper's own list sweep is the only thing that clears
-      // it, on a successful re-read.
-      if (prior.quarantine_lists_unread === true) {
-        out.quarantine_lists_unread = true;
-        out.recording_quarantined = false;
-      }
-    }
-  } catch (err) {
-    logger.warn(`[call-proc] pan-stamp merge failed for call ${callId}: ${err.message}`);
-  }
-  return out;
+// PAN-quarantine stamps are DURABLE (Codex #2676 round-9 P1) and live ONLY
+// in SQL (Codex #3736 r15 P1): the recovery sweep and the recording-status
+// webhook key off transcription_metadata.pan_detected and the incomplete
+// markers (owed SIDs, unread lists), and the quarantine helper writes those
+// with one-key merges. A provenance write (provider result, Twilio fallback,
+// the implausible-rejection sentinel) REPLACES its own keys — but must carry
+// the row's quarantine keys across in the SAME statement: a read-merge-write
+// let a debt recorded between the read and the write be erased, and the
+// recovery query then saw a complete or unstamped quarantine while card
+// audio was still at Twilio. The caller's own pan_detected / pan_count /
+// quarantine_source (a fallback heal pending) still apply; the state keys
+// are stripped from the patch — the helper alone writes them, and a
+// caller's stale copy (a rejection write spreads metadata it read earlier)
+// must never clobber a debt recorded since.
+const QUARANTINE_META_KEYS = Object.freeze([
+  'pan_detected', 'pan_count', 'quarantine_source',
+  'recording_quarantined', 'quarantine_recording_sid', 'quarantine_owed_sids', 'pan_notified', 'quarantine_lists_unread',
+]);
+const QUARANTINE_STATE_KEYS = Object.freeze([
+  'recording_quarantined', 'quarantine_recording_sid', 'quarantine_owed_sids', 'pan_notified', 'quarantine_lists_unread',
+]);
+function transcriptionMetadataWrite(metadata, conn = db) {
+  const patch = { ...(metadata || {}) };
+  for (const key of QUARANTINE_STATE_KEYS) delete patch[key];
+  return conn.raw(
+    `(SELECT COALESCE(jsonb_object_agg(k, v), '{}'::jsonb) FROM jsonb_each(COALESCE(transcription_metadata, '{}'::jsonb)) AS q(k, v) WHERE k IN (${QUARANTINE_META_KEYS.map(() => '?').join(', ')})) || ?::jsonb`,
+    [...QUARANTINE_META_KEYS, JSON.stringify(patch)],
+  );
 }
 
 // Spoken-content length only: strip diarization speaker labels and collapse
@@ -6874,7 +6873,7 @@ const CallRecordingProcessor = {
           transcription_status: 'completed',
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: transcriptionProvenance.model,
-          transcription_metadata: JSON.stringify(await withPanStamps(call.id, transcriptionProvenance.metadata)),
+          transcription_metadata: transcriptionMetadataWrite(transcriptionProvenance.metadata),
           updated_at: new Date(),
         };
         if (result.structuredSegments || contactPassTranscript) {
@@ -6979,12 +6978,12 @@ const CallRecordingProcessor = {
           ...(structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
-          transcription_metadata: JSON.stringify(await withPanStamps(call.id, {
+          transcription_metadata: transcriptionMetadataWrite({
             ...transcriptionProvenance.metadata,
             ...(fallbackScrub.count + structuredScrub.count > 0
               ? { pan_detected: true, pan_count: fallbackScrub.count + structuredScrub.count, quarantine_source: 'fallback_heal_pending' }
               : {}),
-          })),
+          }),
           updated_at: new Date(),
         });
         if (fallbackStored === 0) return abandonToPeer('the Twilio fallback transcript write');
@@ -7012,12 +7011,12 @@ const CallRecordingProcessor = {
           ...(cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
-          transcription_metadata: JSON.stringify(await withPanStamps(call.id, {
+          transcription_metadata: transcriptionMetadataWrite({
             ...transcriptionProvenance.metadata,
             ...(cachedScrub.count + cachedStructuredScrub.count > 0
               ? { pan_detected: true, pan_count: cachedScrub.count + cachedStructuredScrub.count, quarantine_source: 'fallback_heal_pending' }
               : {}),
-          })),
+          }),
           updated_at: new Date(),
         });
         if (cachedStored === 0) return abandonToPeer('the cached Twilio transcript write');
@@ -7068,7 +7067,7 @@ const CallRecordingProcessor = {
       // data loss, since a retry recreates only a stage='lead' row. A
       // 0-row terminal write throws inside the transaction so the retire
       // and stamp clear roll back with it.
-      const rejectionMeta = JSON.stringify(await withPanStamps(call.id, { ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps }));
+      const rejectionMeta = transcriptionMetadataWrite({ ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps });
       const rejectionStampSettled = await db.transaction(async (trx) => {
         const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
         if (!settled) return false;
@@ -16355,7 +16354,8 @@ CallRecordingProcessor.transcribeRecording = transcribeRecording;
 CallRecordingProcessor.isImplausibleTranscript = isImplausibleTranscript;
 CallRecordingProcessor.quarantineCardRecording = quarantineCardRecording;
 CallRecordingProcessor.scrubStructuredTranscript = scrubStructuredTranscript;
-CallRecordingProcessor.withPanStamps = withPanStamps;
+CallRecordingProcessor.transcriptionMetadataWrite = transcriptionMetadataWrite;
+CallRecordingProcessor.QUARANTINE_META_KEYS = QUARANTINE_META_KEYS;
 CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 
 // Routing contract shared with the OFFLINE AUDITS (NOT test-only): the

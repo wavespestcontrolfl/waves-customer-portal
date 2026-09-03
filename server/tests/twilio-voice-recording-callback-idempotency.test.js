@@ -21,7 +21,7 @@ jest.mock('../services/call-recording-processor', () => ({
   processRecording: jest.fn(() => Promise.resolve({ success: true })),
   recoverRecordingForCall: jest.fn(() => Promise.resolve()),
   quarantineCardRecording: jest.fn(() => Promise.resolve()),
-  withPanStamps: jest.fn(async (_id, meta) => ({ ...meta })),
+  transcriptionMetadataWrite: jest.fn((meta) => JSON.stringify(meta)),
 }));
 jest.mock('../models/db', () => jest.fn());
 
@@ -310,10 +310,11 @@ describe('POST /recording-status', () => {
     tables.call_log.push({ ...before });
     await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1 }));
     expect(tables.call_log[0]).toEqual(before);
-    // The idempotent processing attempt is still scheduled — it is what
-    // recovers a first delivery whose timers a deploy wiped.
-    jest.advanceTimersByTime(2 * 60 * 1000 + 5);
-    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+    // A processed row is settled: no pass is scheduled for a duplicate (the
+    // dedup guard would skip it anyway; a settled voicemail/spam/failed row
+    // it would NOT — see the settled-row test below, codex gh-r15 P1).
+    jest.advanceTimersByTime(15 * 60 * 1000);
+    expect(processor.processRecording).not.toHaveBeenCalled();
   });
 
   test('a DIFFERENT recording after processing finished is parked, the transcript keeps its recording, a review card is filed', async () => {
@@ -333,6 +334,8 @@ describe('POST /recording-status', () => {
     });
     expect(tables.triage_items).toHaveLength(1);
     expect(tables.triage_items[0]).toMatchObject({ call_log_id: 'c1', reason_code: 'additional_recording', severity: 'advisory', status: 'open' });
+    // The call is under review the moment its card exists (r15 P2).
+    expect(row.review_status).toBe('open');
     // buildTriageItem serializes the payload for the jsonb column.
     expect(JSON.parse(tables.triage_items[0].payload)).toMatchObject({ recording_sid: REC_2, kept_recording_sid: REC_1 });
     // Nothing is auto-processed against a recording the row does not carry.
@@ -477,6 +480,21 @@ describe('POST /recording-status', () => {
     await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
     expect(tables.triage_items.find((t) => t.id === 't-addr').status).toBe('resolved');
     expect(tables.call_log[0].review_status).toBeNull();
+  });
+
+  test('a duplicate delivery for a settled row (voicemail) schedules no pass; one for a row still awaiting a pass does (codex #3736 gh-r15 P1)', async () => {
+    tables.call_log.push({
+      id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 45,
+      processing_status: 'voicemail', transcription_status: 'completed', transcription: 'Agent: fixture line.', metadata: { source: 'voice_webhook' },
+    });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1, RecordingDuration: '45' }));
+    jest.advanceTimersByTime(15 * 60 * 1000);
+    expect(processor.processRecording).not.toHaveBeenCalled();
+    // The same duplicate on a row whose first pass was lost is what recovers it.
+    tables.call_log[0].processing_status = null;
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1, RecordingDuration: '45' }));
+    jest.advanceTimersByTime(15 * 60 * 1000);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
   });
 
   test('a duplicate delivery WITHOUT ParentCallSid (voicemail on the parent) writes nothing and never takes the Studio-recovery insert path', async () => {

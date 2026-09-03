@@ -302,26 +302,44 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(String(flag[0])).toContain('"recording_quarantined": false');
   });
 
-  test('a provenance write after a failed list read carries quarantine_lists_unread forward and keeps the quarantine INCOMPLETE (codex #3736 gh-r5)', async () => {
+  test('a provenance write carries the row\'s quarantine keys across IN SQL and never writes the state keys itself (codex #3736 gh-r5, gh-r13, gh-r15)', async () => {
     const processor = require('../services/call-recording-processor');
-    db.__state.call = { transcription_metadata: { pan_detected: true, pan_notified: true, recording_quarantined: false, quarantine_lists_unread: true } };
-    const out = await processor.withPanStamps('c-unread', { provider: 'openai', recording_quarantined: true });
-    expect(out.pan_detected).toBe(true);
-    expect(out.quarantine_lists_unread).toBe(true);
-    expect(out.recording_quarantined).toBe(false);
-    // Without the flag the stamp merge is unchanged: a complete quarantine stays complete.
-    db.__state.call = { transcription_metadata: { pan_detected: true, recording_quarantined: true } };
-    const complete = await processor.withPanStamps('c-complete', { provider: 'openai' });
-    expect(complete.recording_quarantined).toBe(true);
-    expect(complete.quarantine_lists_unread).toBeUndefined();
+    db.raw.mockClear();
+    // A caller's stale copy of the state keys (a rejection write spreads
+    // metadata it read earlier) is stripped; its own pan keys apply.
+    processor.transcriptionMetadataWrite({ provider: 'openai', recording_quarantined: true, quarantine_owed_sids: [], pan_notified: true, quarantine_lists_unread: false, pan_detected: true, pan_count: 2, quarantine_source: 'fallback_heal_pending' });
+    const [sql, bindings] = db.raw.mock.calls[0];
+    // The row's quarantine keys are read and merged in the SAME statement…
+    expect(String(sql)).toContain("FROM jsonb_each(COALESCE(transcription_metadata, '{}'::jsonb)) AS q(k, v) WHERE k IN (");
+    expect(String(sql)).toMatch(/\) \|\| \?::jsonb$/);
+    expect(bindings.slice(0, -1)).toEqual(expect.arrayContaining(['pan_detected', 'recording_quarantined', 'quarantine_owed_sids', 'pan_notified', 'quarantine_lists_unread', 'quarantine_recording_sid']));
+    // …and the patch carries provenance + the caller's pan keys only.
+    expect(JSON.parse(bindings[bindings.length - 1])).toEqual({ provider: 'openai', pan_detected: true, pan_count: 2, quarantine_source: 'fallback_heal_pending' });
   });
 
-  test('a provenance write that carries owed SIDs forward keeps the quarantine INCOMPLETE — the primary\'s delete alone never completes it (codex #3736 gh-r13)', async () => {
+  test('a listed recording with no SID is deleted by the SID in its URL, and one with neither is stripped without an unpayable debt (codex #3736 gh-r15)', async () => {
     const processor = require('../services/call-recording-processor');
-    db.__state.call = { transcription_metadata: { pan_detected: true, pan_notified: true, recording_quarantined: false, quarantine_owed_sids: ['REparked000000000000000000000001'] } };
-    const out = await processor.withPanStamps('c-owed', { provider: 'openai', recording_quarantined: true });
-    expect(out.quarantine_owed_sids).toEqual(['REparked000000000000000000000001']);
-    expect(out.recording_quarantined).toBe(false);
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    recordingsSpy.mockClear();
+    db.raw.mockClear();
+    const FROM_URL = 'RE' + 'f'.repeat(30) + '15';
+    db.__state.call = {
+      id: 'c-sidless', recording_url: null, recording_sid: null,
+      metadata: { superseded_recordings: [
+        { recording_sid: null, recording_url: `https://api.twilio.com/2010-04-01/Accounts/AC1/Recordings/${FROM_URL}.mp3` },
+        { recording_sid: null, recording_url: 'https://cdn.example.test/legacy-audio.mp3' },
+      ] },
+      transcription_metadata: { pan_detected: true, pan_notified: true },
+    };
+    const out = await processor.quarantineCardRecording(db.__state.call, { source: 'transcript_scrub' });
+    expect(out.quarantined).toBe(true);
+    // The SID derived from the URL is deleted at Twilio and its entry tombstoned by URL.
+    expect(recordingsSpy).toHaveBeenCalledWith(FROM_URL);
+    const tombstones = db.raw.mock.calls.filter(([sql]) => String(sql).includes("'{superseded_recordings}'"));
+    expect(tombstones.some(([sql, b]) => String(sql).includes("e ->> 'recording_url' = ?") && b[0].includes(FROM_URL) && JSON.parse(b[1]).delete_pending === false)).toBe(true);
+    // The URL-only entry is stripped, complete (nothing Twilio could delete by id).
+    expect(tombstones.some(([, b]) => b[0] === 'https://cdn.example.test/legacy-audio.mp3' && JSON.parse(b[1]).delete_pending === false)).toBe(true);
+    expect(out.parked).toEqual({ deleted: 1, pending: 0 });
   });
 
   test('a transcript-only PAN call with no recording anywhere completes on the first pass instead of being reselected forever (codex #3736 gh-r11)', async () => {
