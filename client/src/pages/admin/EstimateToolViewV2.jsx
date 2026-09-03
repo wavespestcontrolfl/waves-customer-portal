@@ -3238,6 +3238,11 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }
 
+  // Unlink is offered only where a save can actually honor it: the revise
+  // PUT keeps the row's customer_id (codex #3768 r1), and a grouped sibling
+  // must share the anchor's customer or the save 400s (codex #3768 r3).
+  const canUnlink = !editMode?.id && !groupAnchorId;
+
   // Drops the linked customer but keeps the typed contact fields, so a wrong
   // link (address suggestion, deep link, or a mis-click) is one tap to undo.
   function unlinkCustomer() {
@@ -6147,7 +6152,7 @@ export default function EstimateToolViewV2({
                       ? " · 15% loyalty discount applied"
                       : ""}
                   </span>
-                  {!editMode?.id && (
+                  {canUnlink && (
                     <button
                       type="button"
                       onClick={unlinkCustomer}
@@ -6161,10 +6166,8 @@ export default function EstimateToolViewV2({
               {/* ID-only linked state: the customer-record deep link seeds
                   form.customerId with no match object. The estimate IS linked
                   (lookup skips suggestions, save carries the id), so the
-                  operator needs the same Unlink here. Not in edit mode — the
-                  revise PUT keeps the row's customer_id regardless (codex
-                  #3768 r1). */}
-              {!existingCustomerMatch && form.customerId && !editMode?.id && (
+                  operator needs the same Unlink here (see canUnlink). */}
+              {!existingCustomerMatch && form.customerId && canUnlink && (
                 <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900 flex items-center gap-2">
                   <span className="flex-1 min-w-0">
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
