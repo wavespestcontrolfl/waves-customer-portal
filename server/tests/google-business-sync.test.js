@@ -498,6 +498,65 @@ describe('Google Business review sync', () => {
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
   });
 
+  test('a breaker-trip partial store and its Places fallback count each review once (codex r6 P2)', async () => {
+    const reviews = Array.from({ length: 6 }, (_, i) => ({
+      name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
+    }));
+    // The two rows the GBP store lands before the trip (calls 2 and 4 →
+    // rev-1 and rev-3), as the sample will find them: GBP-linked, same content.
+    for (const i of [1, 3]) {
+      db.__state.rows.google_reviews.push({
+        id: `stored-${i + 1}`,
+        google_review_id: `accounts/1/locations/2/reviews/rev-${i}`,
+        gbp_review_name: `accounts/1/locations/2/reviews/rev-${i}`,
+        location_id: 'bradenton',
+        reviewer_name: `Reviewer ${i}`,
+        star_rating: 5,
+        review_text: 'ok',
+        review_created_at: '2026-05-14T01:22:29Z',
+      });
+    }
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        // The sample carries both stored reviews plus one the GBP loop never reached.
+        return { json: async () => ({ status: 'OK', result: { reviews: [
+          { author_name: 'Reviewer 1', rating: 5, text: 'ok', time: 1778721749 },
+          { author_name: 'Reviewer 3', rating: 5, text: 'ok', time: 1778721749 },
+          { author_name: 'Reviewer Fresh', rating: 5, text: 'new', time: 1778800000 },
+        ] } }) };
+      }
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews });
+    });
+    let calls = 0;
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockImplementation(async () => {
+      calls++;
+      if (calls === 2 || calls === 4) return { id: `stored-${calls}`, inserted: calls === 2 };
+      throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    });
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const unlinked = jest.spyOn(service, '_notifyUnlinkedReview').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation');
+
+    const result = await service.syncAllReviews();
+
+    expect(upsert).toHaveBeenCalledTimes(5);
+    expect(reconcile).not.toHaveBeenCalled();
+    // The fallback received the partial store's row ids and still updated those rows.
+    expect(places).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), 'maps-key', expect.any(Array), expect.any(Array), new Set(['stored-2', 'stored-4']));
+    await expect(places.mock.results[0].value).resolves.toEqual({ synced: 3, new: 1, alreadyCounted: 2 });
+    expect(db.__state.updates.filter((u) => u.table === 'google_reviews' && ['stored-2', 'stored-4'].includes(u.id)).length).toBeGreaterThanOrEqual(2);
+    // 2 stored by GBP + 1 the sample alone carried = 3, never 2 + 3.
+    expect(result.synced).toBe(3);
+    expect(result.new).toBe(2);
+    expect(result.sources).toEqual({ bradenton: 'places_fallback' });
+    expect(db.__state.rows.google_reviews.filter((r) => r.reviewer_name !== '_stats')).toHaveLength(3);
+    upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); unlinked.mockRestore(); places.mockRestore();
+  });
+
   test('a real post-write connection failure is tagged systemic on the result; a row-specific one is only a side-effect error', async () => {
     const run = async (err) => {
       const result = { id: 'r1', inserted: false };

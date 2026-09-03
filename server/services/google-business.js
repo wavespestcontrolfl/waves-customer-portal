@@ -1164,8 +1164,12 @@ class GoogleBusinessService {
     return { rating: googleRating, totalReviews: googleTotalReviews };
   }
 
-  async _syncPlacesReviewSampleForLocation(loc, googleKey, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null) {
-    if (!loc.googlePlaceId || !googleKey) return { synced: 0, new: 0 };
+  // `countedRowIds`: review row ids a breaker-tripped GBP store of this
+  // same location already counted as synced — the sample commonly carries
+  // those same recent reviews, so its updates to them still land but are
+  // reported in `alreadyCounted`, not counted twice (codex r6 P2).
+  async _syncPlacesReviewSampleForLocation(loc, googleKey, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null, countedRowIds = null) {
+    if (!loc.googlePlaceId || !googleKey) return { synced: 0, new: 0, alreadyCounted: 0 };
     // Ordering token for the reinstatement clear below — a removal stamp
     // written after this fetch began is newer information than this sample.
     const sampleSyncStart = new Date();
@@ -1174,7 +1178,7 @@ class GoogleBusinessService {
     const data = await res.json();
     if (data.status !== 'OK') throw new Error(`Places API: ${data.status}`);
     const reviews = data.result?.reviews || [];
-    let synced = 0, newCount = 0;
+    let synced = 0, newCount = 0, alreadyCounted = 0;
     for (const review of reviews) {
       const googleId = `places_${loc.googlePlaceId}_${review.time}`;
       let existing = await db('google_reviews').where({ google_review_id: googleId }).first();
@@ -1439,9 +1443,10 @@ class GoogleBusinessService {
           await this._notifyUnlinkedReview(notifyRow);
         }
       }
+      if (existing && countedRowIds && countedRowIds.has(existing.id)) alreadyCounted++;
       synced++;
     }
-    return { synced, new: newCount };
+    return { synced, new: newCount, alreadyCounted };
   }
 
   // =========================================================================
@@ -1500,6 +1505,7 @@ class GoogleBusinessService {
 
         let usedGbp = false;
         let gbpFailure = null;
+        let partialStoredIds = null;
         const locSyncStart = new Date();
         if (loc.googleLocationResourceName && await this._getClient(loc.id)) {
           try {
@@ -1541,6 +1547,7 @@ class GoogleBusinessService {
               totalNew += gbpErr.partial.inserted;
               totalSynced += gbpErr.partial.stored;
               errors.push(...gbpErr.partial.errors.map((e) => ({ location: loc.name, ...e })));
+              partialStoredIds = gbpErr.partial.storedIds;
             }
             // A breaker trip is a database-write failure: the pull itself
             // succeeded, so the alert and the health line must say so instead
@@ -1570,9 +1577,11 @@ class GoogleBusinessService {
             await this._notifyDegradedSync(loc, gbpFailure || 'no_client');
           }
           if (GOOGLE_KEY) {
-            const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked, locRestored);
+            const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked, locRestored, partialStoredIds);
             pulledCounts[loc.id] = sample.synced;
-            totalSynced += sample.synced;
+            // Rows the breaker-tripped GBP store already counted are updated
+            // by the sample but not counted again (codex r6 P2).
+            totalSynced += sample.synced - (sample.alreadyCounted || 0);
             totalNew += sample.new;
             sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
             logger.info(`[gbp] Synced ${sample.synced} review sample rows for ${loc.name} via Places API fallback`);
@@ -1840,6 +1849,7 @@ class GoogleBusinessService {
   async _storeGbpFeed(loc, reviews, locSyncStart, pendingUnlinked, locRestored) {
     const errors = [];
     const rowFailures = [];
+    const storedIds = new Set();
     let inserted = 0;
     // Counted for the whole run, not adjacently: under intermittent pool
     // saturation one success between timeouts must not reset the budget
@@ -1855,9 +1865,11 @@ class GoogleBusinessService {
       const abort = new Error(`${systemicFailures} review rows failed on connection-class errors this run — aborting the location (${stored} stored; last: ${err.message})`);
       // Rows stored before the trip are durable — hand the counts to the
       // caller so the run log and the manual sync response report them
-      // (codex r3 P2). `breaker` routes the alert to the database-write
-      // class, not the pull-failure one (codex r5 P2).
-      abort.partial = { stored, inserted, errors };
+      // (codex r3 P2), and their row ids so the Places fallback does not
+      // count the same reviews a second time (codex r6 P2). `breaker`
+      // routes the alert to the database-write class, not the pull-failure
+      // one (codex r5 P2).
+      abort.partial = { stored, inserted, errors, storedIds };
       abort.breaker = true;
       throw abort;
     };
@@ -1867,6 +1879,7 @@ class GoogleBusinessService {
       try {
         const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked, locRestored);
         if (result.inserted) inserted++;
+        if (result.id != null) storedIds.add(result.id);
         // Stored, but a post-write side effect failed: the row is synced
         // (no reconcile exclusion, no degraded alert) — it joins errors so
         // the run is not reported clean (pre-push audit r3).
