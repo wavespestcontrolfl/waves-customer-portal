@@ -201,7 +201,7 @@ describe('triage surfacing', () => {
   });
 
   test('scheduling-shaped cards carry the captured window fields and a filing-time service snapshot', () => {
-    const withService = { ...extraction, service_request: { ...(extraction.service_request || {}), primary_service_category: 'pest_control', secondary_categories: ['mosquito_control', null], specific_service_name: ' Flea Treatment ', service_intent: 'preventative_one_time' } };
+    const withService = { ...extraction, scheduling: { ...(extraction.scheduling || {}), blackout_dates: ['2026-07-15', null, ''] }, service_request: { ...(extraction.service_request || {}), primary_service_category: 'pest_control', secondary_categories: ['mosquito_control', null], specific_service_name: ' Flea Treatment ', service_intent: 'preventative_one_time' } };
     const item = buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction: withService });
     const payload = JSON.parse(item.payload);
     expect(payload.scheduling_window).toEqual({
@@ -214,6 +214,7 @@ describe('triage surfacing', () => {
       requested_date_range_start: '2026-07-14',
       requested_date_range_end: '2026-07-14',
       preferred_time_of_day: 'morning',
+      blackout_dates: ['2026-07-15'],
       callback_window_start: null,
       callback_window_end: null,
       scheduling_notes_raw: 'first slot of the day',

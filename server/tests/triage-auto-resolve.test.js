@@ -579,6 +579,14 @@ describe('evidence helpers', () => {
     // active-infestation ask by either; a snapshot with no intent by nothing.
     expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30' }), [booking({ is_recurring: true })], ctx)).toBe(false);
     expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30' }), [booking({ is_recurring: false })], ctx)).toBe(true);
+    // A day the caller excluded from the range is not answered by a booking
+    // on it; the other days in the range still are; a booking with no date
+    // cannot prove it avoided the excluded day (codex r16 P1).
+    const skipping = card({ requested_date_range_start: '2026-07-28', requested_date_range_end: '2026-07-30', blackout_dates: ['2026-07-29'] });
+    expect(bookingCoversRequest(skipping, [booking({ scheduled_date: '2026-07-29' })], ctx)).toBe(false);
+    expect(bookingCoversRequest(skipping, [booking({ scheduled_date: '2026-07-30' })], ctx)).toBe(true);
+    expect(bookingCoversRequest(skipping, [booking({ scheduled_date: '2026-07-28' })], ctx)).toBe(true);
+    expect(bookingCoversRequest(skipping, [booking({ scheduled_date: null })], ctx)).toBe(false);
     const infestation = card({ requested_date_range_start: '2026-07-30', requested_service_intent: 'active_infestation_treatment' });
     expect(bookingCoversRequest(infestation, [booking({ is_recurring: true })], ctx)).toBe(true);
     expect(bookingCoversRequest(infestation, [booking({})], ctx)).toBe(true);

@@ -343,6 +343,10 @@ function buildTriageItem({
       requested_date_range_start: s.requested_date_range_start ?? null,
       requested_date_range_end: s.requested_date_range_end ?? null,
       preferred_time_of_day: s.preferred_time_of_day ?? null,
+      // Days the caller EXCLUDED from the requested range ("Tuesday to
+      // Thursday, not Wednesday"): a booking on one does not answer the ask
+      // (codex r16 P1).
+      blackout_dates: Array.isArray(s.blackout_dates) ? s.blackout_dates.filter((d) => typeof d === 'string' && d.trim()) : [],
       callback_window_start: s.callback_window_start ?? null,
       callback_window_end: s.callback_window_end ?? null,
       scheduling_notes_raw: s.scheduling_notes_raw ?? null,

@@ -441,6 +441,13 @@ function requestedWindow(item) {
   return end >= start ? { start, end } : { start: end, end: start };
 }
 
+// The ET days the caller excluded from the requested range, as snapshotted
+// at filing. A booking on one of them is not the appointment asked for.
+function blackoutDays(item) {
+  const raw = parseMaybeJson(item.payload)?.scheduling_window?.blackout_dates;
+  return new Set((Array.isArray(raw) ? raw : []).filter((d) => toDate(d)).map((d) => etCalendarDayOf(d)));
+}
+
 function phoneDigits(value) {
   const digits = String(value || '').replace(/\D/g, '');
   return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
@@ -985,13 +992,17 @@ function bookingCoversRequest(item, mine, { multiProperty, places }) {
   // CONFIRMED call binds the agreed hour too, not merely its day: another
   // booking that afternoon is not the appointment the caller confirmed,
   // and a row with no window_start cannot prove the hour. A REQUESTED ask
-  // with a morning / afternoon / evening preference binds that band.
+  // with a morning / afternoon / evening preference binds that band, and a
+  // day the caller excluded from the range is never answered by a booking
+  // on it (a row with no date cannot prove it avoided one).
   const window = requestedWindow(item);
   const hour = confirmedWallClock(item);
+  const blackout = blackoutDays(item);
   const inAsk = (v) => {
     if (!cadenceMatches(item, v)) return false;
     if (hour && String(v.window_start || '').slice(0, 5) !== hour) return false;
     if (!hour && !timeOfDayMatches(item, v)) return false;
+    if (blackout.size && (!toDate(v.scheduled_date) || blackout.has(etCalendarDayOf(v.scheduled_date)))) return false;
     if (!window) return true;
     if (!toDate(v.scheduled_date)) return false;
     const day = etCalendarDayOf(v.scheduled_date);
