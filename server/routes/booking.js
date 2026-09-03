@@ -3775,6 +3775,14 @@ async function createSelfBooking(payload = {}) {
               windowStart: row.window_start,
               windowEnd: row.window_end,
               excludeServiceIds: sweepExcludeIds,
+              // Travel gap (GATE_SLOT_TRAVEL_GAP): the follow-up's own
+              // stamped pin (the seeder copies the parent's lat/lng), else
+              // the booking pin the parent commit measured with — the
+              // mirrored guard every commit surface carries (pre-push P1).
+              travel: {
+                lat: Number.isFinite(Number(row.lat)) ? Number(row.lat) : (Number.isFinite(offerLat) ? offerLat : null),
+                lng: Number.isFinite(Number(row.lng)) ? Number(row.lng) : (Number.isFinite(offerLng) ? offerLng : null),
+              },
             });
             if (clashes.length > 0) {
               // Demote the colliding occurrence to the documented

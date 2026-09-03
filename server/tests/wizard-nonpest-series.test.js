@@ -490,6 +490,10 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/require\('\.\.\/services\/scheduling\/occupancy'\)/);
     expect(booking).toMatch(/findConflictingVisits\(\{\s*\n\s*db: trx,/);
     expect(booking).toMatch(/office to place/);
+    // Travel gap (GATE_SLOT_TRAVEL_GAP, pre-push P1): the seeded sweep is a
+    // commit surface too — it must carry the follow-up's pin like the
+    // parent commit does, or a follow-up lands inside a neighbour's drive.
+    expect(booking).toMatch(/excludeServiceIds: sweepExcludeIds,[\s\S]{0,600}travel: \{\s*\n\s*lat: Number\.isFinite\(Number\(row\.lat\)\)/);
   });
 
   test('activation takes rung-1 occupancy locks BEFORE the comms/row locks, from the pre-computed plan', () => {
