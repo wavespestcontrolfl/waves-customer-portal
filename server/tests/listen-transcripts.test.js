@@ -32,6 +32,7 @@ describe('transcript readers', () => {
     expect(strip('  <system-reminder>only harness</system-reminder>  ')).toBe('');
     expect(strip('<command-name>/foo</command-name><command-message>bar</command-message>keep me')).toBe('keep me');
     expect(strip('prose then <system-reminder>truncated line with no close')).toBe('prose then');
+    expect(strip('ran it:\n<local-command-stdout>DATABASE_URL=postgres://secret</local-command-stdout>\n<local-command-stderr>x</local-command-stderr>')).toBe('ran it:');
   });
 
   test('the --hours window applies per turn, not per file: older turns in a recently touched session are dropped, unstamped lines fail closed', () => {
@@ -47,7 +48,9 @@ describe('transcript readers', () => {
 
   test('codex: user + assistant + agent_message only, developer instructions skipped', () => {
     const turns = _internals.readCodexTranscript(FIX('listen-codex-session.jsonl'));
+    // The fixture records the assistant message twice (agent_message + response_item) — one turn survives.
     expect(turns.map((t) => t.role)).toEqual(['user', 'assistant']);
+    expect(turns.filter((t) => t.role === 'assistant')).toHaveLength(1);
     expect(turns.map((t) => t.text).join(' ')).not.toContain('You are Codex');
   });
 });
@@ -158,12 +161,17 @@ describe('targeting filters', () => {
     expect(_internals.targetingViolation(base)).toBeNull();
   });
 
+  test('operational door-to-door (condo inspections) passes — the canonical guard, not a blanket regex, decides', () => {
+    expect(_internals.targetingViolation({ ...base, outline: ['Door-to-door inspections for a condo association', 'What the tech checks'] })).toBeNull();
+  });
+
   test.each([
     ['near_me_phrasing', { working_title: 'Lawn care near me in Sarasota' }],
     ['out_of_footprint_geo', { working_title: 'Brown patches in Tampa lawns', slug: '/lawn-care/brown-patches-tampa/', city: null }],
     ['out_of_footprint_geo', { working_title: 'Brown patches in Lakeland lawns', slug: '/lawn-care/brown-patches-lakeland/', city: null }],
     ['statewide_only', { working_title: 'Brown patches in Florida lawns', slug: '/lawn-care/brown-patches-florida/', city: null, thesis: 'Nitrogen plus rain invites fungus.', outline: ['What you see'], primary_kw: 'brown patches florida', secondary_kws: [] }],
     ['banned_topic', { outline: ['Why our door-to-door reps say this'] }],
+    ['banned_topic', { thesis: 'We go door to door selling termite plans.' }],
     ['banned_topic', { thesis: 'We offer structural fumigation for drywood termites.' }],
     ['reentry_safety_claim', { thesis: 'Our pet-safe fungicide fixes it.' }],
     ['reentry_safety_claim', { thesis: 'This pesticide is completely safe for the whole family.' }],

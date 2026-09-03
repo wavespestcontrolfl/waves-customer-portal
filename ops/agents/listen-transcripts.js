@@ -123,11 +123,16 @@ function inWindow(entry, sinceMs) {
 // injected context and file-derived material the privacy contract says
 // never leaves the Mac, so they are stripped wherever they appear and a
 // block that was only harness text is dropped (Codex r4 P1).
-const HARNESS_BLOCK_RE = /<system-reminder>[\s\S]*?<\/system-reminder>|<(command-[a-z-]+)>[\s\S]*?<\/\1>/g;
+// Tag families the harness writes into a text block: <system-reminder>,
+// <command-name>/<command-message>/…, and the <local-command-stdout>/
+// <local-command-stderr>/… family a shell escape's output lands in (Codex r5).
+const HARNESS_TAG = 'system-reminder|(?:local-)?command-[a-z-]+';
+const HARNESS_BLOCK_RE = new RegExp(`<(${HARNESS_TAG})>[\\s\\S]*?</\\1>`, 'g');
+const HARNESS_OPEN_RE = new RegExp(`<(?:${HARNESS_TAG})>[\\s\\S]*$`);
 function stripHarnessBlocks(text) {
   let out = String(text || '').replace(HARNESS_BLOCK_RE, ' ');
   // An unterminated block (truncated line) is dropped to its end.
-  out = out.replace(/<system-reminder>[\s\S]*$|<command-[a-z-]+>[\s\S]*$/, ' ');
+  out = out.replace(HARNESS_OPEN_RE, ' ');
   return out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
@@ -173,13 +178,20 @@ function readCodexTranscript(file, { sinceMs = 0 } = {}) {
     try { o = JSON.parse(line); } catch (_) { continue; }
     if (!inWindow(o, sinceMs)) continue;
     const p = o.payload || {};
+    // A completed assistant message is recorded twice in a normal rollout
+    // (event_msg/agent_message, then an identical response_item/message);
+    // keep one copy, whichever representation the session carries (Codex r5).
     if (o.type === 'response_item' && p.type === 'message' && (p.role === 'user' || p.role === 'assistant')) {
-      for (const t of textBlocks(p.content)) turns.push({ role: p.role, text: t });
+      for (const t of textBlocks(p.content)) pushTurn(p.role, t);
     } else if (o.type === 'event_msg' && p.type === 'agent_message' && typeof p.message === 'string') {
-      turns.push({ role: 'assistant', text: p.message });
+      pushTurn('assistant', p.message);
     }
   }
   return turns;
+  function pushTurn(role, text) {
+    if (role === 'assistant' && turns.some((t) => t.role === 'assistant' && t.text === text)) return;
+    turns.push({ role, text });
+  }
 }
 
 function collectTurns({ hours, now = Date.now() }) {
@@ -244,7 +256,6 @@ Return ONLY JSON: {"ideas":[{"working_title":string,"slug":string,"city":string|
 
 const PINNED_SLUG_RE = /^\/(pest-control|lawn-care|tree-shrub|mosquito)\/[a-z0-9-]+\/$/;
 const NEAR_ME_RE = /\bnear me\b|\bnearby\b/i;
-const DOOR_TO_DOOR_RE = /door[\s-]to[\s-]door/i;
 const SOURCE_HOSTS = ['edis.ifas.ufl.edu', 'gardeningsolutions.ifas.ufl.edu', 'entnemdept.ufl.edu', 'epa.gov', 'fdacs.gov', 'cdc.gov'];
 const PULL_INSTRUCTION_RE = /^pull the current uf\/ifas edis publication\b/i;
 // The canonical gates the engine applies pre-draft / at publish — reused here
@@ -280,7 +291,10 @@ function targetingViolation(idea) {
   // (Codex r3 P2).
   if (!PINNED_SLUG_RE.test(slug)) return 'slug_shape';
   if (NEAR_ME_RE.test(text)) return 'near_me_phrasing';
-  if (DOOR_TO_DOOR_RE.test(text) || bannedTopicFinding(text)) return 'banned_topic';
+  // Door-to-door is judged by the canonical guard alone: it blocks selling /
+  // solicitation and deliberately permits operational meanings (condo
+  // door-to-door inspections) a blanket regex rejected (Codex r5 P1).
+  if (bannedTopicFinding(text)) return 'banned_topic';
   // Framing parts only (title / slug / keyword) — an outline may MENTION
   // Tampa educationally; the post may not be built around it.
   // The city is a semantic field the writer is bound to ("City: Tampa"), so
@@ -457,7 +471,10 @@ async function seedFlags(db, briefs, { index }) {
       title: b.working_title,
       already_queued: row ? row.status : null,
       prior_run_reviewable: !!(row && reviewableRuns.has(row.id)),
-      title_in_queue: !row && queuedTitles.has(titles[i]),
+      // A same-title ACTIVE row under another dedupe key blocks a fresh seed
+      // AND a revival of a terminal row (Codex r5 P2); an active row that IS
+      // this brief is already reported through already_queued.
+      title_in_queue: queuedTitles.has(titles[i]) && !(row && !TERMINAL_QUEUE_STATUSES.has(row.status)),
       live_corpus_block: liveCorpusVerdict(b, index),
     };
   });
