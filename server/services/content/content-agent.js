@@ -229,7 +229,7 @@ const ContentAgent = {
       failure = err;
       throw err;
     } finally {
-      void recordSessionUsage({ laneId: 'agent_content', sessionId, agentId: CONTENT_AGENT_ID, model: CONTENT_AGENT_CONFIG.model, startedAt: startTime, failure });
+      await recordSessionUsage({ laneId: 'agent_content', sessionId, agentId: CONTENT_AGENT_ID, model: CONTENT_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
 
     const durationMs = Date.now() - startTime;

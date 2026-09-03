@@ -323,7 +323,7 @@ const BacklinkStrategyAgent = {
       failure = err;
       throw err;
     } finally {
-      void recordSessionUsage({ laneId: 'agent_backlink', sessionId, agentId: BACKLINK_STRATEGY_AGENT_ID, model: BACKLINK_STRATEGY_AGENT_CONFIG.model, startedAt: startTime, failure });
+      await recordSessionUsage({ laneId: 'agent_backlink', sessionId, agentId: BACKLINK_STRATEGY_AGENT_ID, model: BACKLINK_STRATEGY_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
 
     const durationSeconds = Math.round((Date.now() - startTime) / 1000);

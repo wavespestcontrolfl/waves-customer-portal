@@ -134,7 +134,7 @@ const BIAgent = {
       failure = err;
       throw err;
     } finally {
-      void recordSessionUsage({ laneId: 'agent_bi', sessionId, agentId: BI_AGENT_ID, model: BI_AGENT_CONFIG.model, startedAt: startTime, failure });
+      await recordSessionUsage({ laneId: 'agent_bi', sessionId, agentId: BI_AGENT_ID, model: BI_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
 
     const durationSeconds = Math.round((Date.now() - startTime) / 1000);

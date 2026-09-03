@@ -480,7 +480,9 @@ async function upsertSessionRow(row) {
  * One row_kind='session' row per Managed Agents session, from the session's
  * own usage block (GET /v1/sessions/{id}). Called by the six agent runners in
  * their `finally` once the SSE loop ends (however it ends); never throws into
- * them. Re-recording the same session id updates its row (see
+ * them. The one-shot runners AWAIT it, so a preview / CLI process that exits
+ * after the run cannot lose the row; the customer assistant fires it without
+ * waiting (a reply must not wait on the usage GET). Re-recording the same session id updates its row (see
  * upsertSessionRow). `latency_ms` is the wall time since `startedAt`, taken
  * BEFORE the usage GET so a slow or timed-out fetch is never billed as agent
  * latency: the run for one-shot runners, the longest turn for the assistant.

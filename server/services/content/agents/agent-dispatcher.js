@@ -217,8 +217,9 @@ class AgentDispatcher {
     // every exit from here on — a failed initial message, a streaming
     // failure or timeout, a session that never emitted a draft, and success
     // all consumed (or reserved) tokens — carrying this exit's outcome.
-    // Upserted by session id, so calling it twice is safe.
-    const recordSession = (failure = null) => void recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0, failure });
+    // Upserted by session id, so calling it twice is safe. Awaited (it never
+    // throws) so a preview / CLI process cannot exit before the row lands.
+    const recordSession = (failure = null) => recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0, failure });
 
     // Post the initial input to the session. Schema mirrors the
     // live Managed Agents contract used by lead-response-agent.js:
@@ -235,7 +236,7 @@ class AgentDispatcher {
       // Session state (lint options, attempts) was registered above — a
       // transient initial-message failure must not leak it into the
       // process-global maps.
-      recordSession(err.code || 'initial_message_failed');
+      await recordSession(err.code || 'initial_message_failed');
       clearDraft(sessionId);
       return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId, agent_id: route.agent_id };
     }
@@ -244,7 +245,7 @@ class AgentDispatcher {
     try {
       await this._streamAndExecute(sessionId, sessionTimeoutMs);
     } catch (err) {
-      recordSession(err.code || 'streaming_failed');
+      await recordSession(err.code || 'streaming_failed');
       const partial = getDraft(sessionId);
       clearDraft(sessionId);
       return {
@@ -260,7 +261,7 @@ class AgentDispatcher {
     const draft = getDraft(sessionId);
     // `missing_draft` classifies as incomplete — the agent answered but not
     // in the shape it was told to.
-    recordSession(draft ? null : 'missing_draft');
+    await recordSession(draft ? null : 'missing_draft');
     // Captured BEFORE clearDraft — clearing drops the session's checked-route
     // set alongside the draft.
     const checkedExistingRoutes = getCheckedRoutes(sessionId);

@@ -228,6 +228,10 @@ class ManagedAssistant {
       // recorder updates that session's single row in place (latency = this
       // turn). Runs on the error path too — a turn that threw mid-stream
       // still consumed tokens, and marks the session row failed for good.
+      // Fire-and-forget ON PURPOSE (the recorder never throws): the
+      // customer's reply must not wait on a usage GET — up to 15 s on a slow
+      // provider — and this server process is long-lived, unlike the
+      // one-shot runners, which await it.
       if (sessionId) void recordSessionUsage({ laneId: 'agent_assistant', sessionId, agentId: MANAGED_AGENT_ID, model: AGENT_CONFIG.model, startedAt: turnStartedAt, failure });
     }
   }

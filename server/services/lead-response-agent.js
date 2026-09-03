@@ -327,7 +327,7 @@ const LeadResponseAgent = {
       // usage, written however the session ends — a stream that throws still
       // consumed tokens — carrying this runner's own outcome. No session id =
       // nothing was created, nothing to bill.
-      if (sessionId) void recordSessionUsage({ laneId: 'agent_lead', sessionId, agentId: LEAD_AGENT_ID, model: LEAD_RESPONSE_AGENT_CONFIG.model, startedAt: startTime, failure });
+      if (sessionId) await recordSessionUsage({ laneId: 'agent_lead', sessionId, agentId: LEAD_AGENT_ID, model: LEAD_RESPONSE_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
   },
 };
