@@ -284,16 +284,20 @@ function extractUsage(provider, data) {
   return out;
 }
 
-// The ledger's write path: one row, resolves the new id (null when the DB
+// Run a ledger write and resolve the row id it produced (null when the DB
 // says no). Separate from insertRow because the trace writer needs the id
 // back and the heartbeat/chain path must keep its exact mocked shape.
+async function writtenId(query) {
+  const rows = typeof query.returning === 'function' ? await query.returning('id') : await query;
+  const first = Array.isArray(rows) ? rows[0] : rows;
+  const id = first && typeof first === 'object' ? first.id : first;
+  return Number.isFinite(Number(id)) ? Number(id) : null;
+}
+
+// The ledger's write path for call rows: one row, resolves the new id.
 async function insertLedgerRow(row) {
   try {
-    const query = require('../models/db')('llm_dispatch_log').insert(row);
-    const rows = typeof query.returning === 'function' ? await query.returning('id') : await query;
-    const first = Array.isArray(rows) ? rows[0] : rows;
-    const id = first && typeof first === 'object' ? first.id : first;
-    return Number.isFinite(Number(id)) ? Number(id) : null;
+    return await writtenId(require('../models/db')('llm_dispatch_log').insert(row));
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] ledger insert failed: ${err.message}`);
     return null;
@@ -382,29 +386,38 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
   return value;
 }
 
-// One row per session, keyed by the session id in provider_ref. The customer
-// assistant re-records after EVERY turn of its long-lived session with the
-// session's cumulative usage, so an existing row is updated in place — a sum
-// over session rows never counts a session twice, and a runner's finally can
-// re-bill safely.
+// One row per session, keyed by the session id in provider_ref (unique
+// partial index llm_dispatch_log_session_ref_uidx, migration 000010). The
+// customer assistant re-records after EVERY turn of its long-lived session
+// with cumulative usage, and two turns can overlap, so the write is ONE
+// atomic INSERT … ON CONFLICT: the token counters keep the GREATEST snapshot
+// (cumulative counts only grow, so a stale snapshot can never lower them),
+// status and latency take the latest write. A runner's finally re-bills
+// safely; a sum over session rows never counts a session twice.
 async function upsertSessionRow(row) {
-  let existing;
   try {
-    existing = await require('../models/db')('llm_dispatch_log').where({ row_kind: 'session', provider_ref: row.provider_ref }).first('id');
+    const db = require('../models/db');
+    const greatest = (col) => db.raw(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
+    const latest = (col) => db.raw(`EXCLUDED.${col}`);
+    return await writtenId(db('llm_dispatch_log')
+      .insert(row)
+      .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
+      .merge({
+        ok: latest('ok'),
+        error_code: latest('error_code'),
+        error_class: latest('error_class'),
+        latency_ms: latest('latency_ms'),
+        served_model: db.raw('COALESCE(EXCLUDED.served_model, llm_dispatch_log.served_model)'),
+        input_tokens: greatest('input_tokens'),
+        cached_input_tokens: greatest('cached_input_tokens'),
+        cache_write_tokens: greatest('cache_write_tokens'),
+        output_tokens: greatest('output_tokens'),
+        reasoning_tokens: greatest('reasoning_tokens'),
+      }));
   } catch (err) {
-    logger.debug(`[llm-dispatch-metrics] session row lookup failed: ${err.message}`);
+    logger.debug(`[llm-dispatch-metrics] session upsert failed: ${err.message}`);
     return null;
   }
-  if (existing && existing.id != null) {
-    try {
-      await require('../models/db')('llm_dispatch_log').where({ id: existing.id }).update(row);
-      return Number(existing.id);
-    } catch (err) {
-      logger.debug(`[llm-dispatch-metrics] session row update failed: ${err.message}`);
-      return null;
-    }
-  }
-  return insertLedgerRow(row);
 }
 
 /**

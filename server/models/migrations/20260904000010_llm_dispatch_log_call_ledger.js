@@ -53,6 +53,11 @@ const INDEXES = [
   ['llm_dispatch_log_run_idx', `CREATE INDEX IF NOT EXISTS llm_dispatch_log_run_idx ON ${TABLE} (run_id) WHERE run_id IS NOT NULL`],
   ['llm_dispatch_log_chain_idx', `CREATE INDEX IF NOT EXISTS llm_dispatch_log_chain_idx ON ${TABLE} (chain_id) WHERE chain_id IS NOT NULL`],
   ['llm_dispatch_log_row_kind_created_idx', `CREATE INDEX IF NOT EXISTS llm_dispatch_log_row_kind_created_idx ON ${TABLE} (row_kind, created_at)`],
+  // One row per Managed Agents session: provider_ref holds the session id and
+  // the recorder upserts on it (INSERT … ON CONFLICT), so overlapping turns of
+  // one long-lived session can never produce two rows. Partial: call rows keep
+  // provider message ids in the same column and are not unique.
+  ['llm_dispatch_log_session_ref_uidx', `CREATE UNIQUE INDEX IF NOT EXISTS llm_dispatch_log_session_ref_uidx ON ${TABLE} (provider_ref) WHERE row_kind = 'session'`],
 ];
 
 exports.up = async function up(knex) {

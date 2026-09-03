@@ -8,12 +8,14 @@
 // with the chain row dispatchWithFallback writes.
 
 const mockInsert = jest.fn();
-// The session recorder looks its row up by session id before writing.
-const mockFirst = jest.fn(() => Promise.resolve(undefined));
-const mockUpdate = jest.fn(() => Promise.resolve(1));
+// The session recorder writes insert(...).onConflict(target).merge(updates).returning('id').
+const mockMerge = jest.fn();
 const mockDb = jest.fn((table) => ({
-  insert: (row) => mockInsert(table, row),
-  where: (...args) => ({ first: () => mockFirst(table, ...args), update: (row) => mockUpdate(table, row) }),
+  insert: (row) => {
+    const p = mockInsert(table, row);
+    p.onConflict = (target) => ({ merge: (updates) => { mockMerge(table, target, updates); return { returning: p.returning }; } });
+    return p;
+  },
 }));
 jest.mock('../models/db', () => {
   const db = (...args) => mockDb(...args);
@@ -82,9 +84,7 @@ describe('llm call ledger', () => {
     jest.resetModules();
     mockInsert.mockReset();
     mockInsert.mockImplementation(() => insertResolving());
-    mockFirst.mockReset();
-    mockFirst.mockImplementation(() => Promise.resolve(undefined));
-    mockUpdate.mockClear();
+    mockMerge.mockClear();
     mockDb.mockClear();
     mockAnthropicCreate.mockReset();
     process.env = { ...ORIGINAL_ENV, GATE_LLM_CALL_LEDGER: 'true', OPENAI_API_KEY: 'k', GEMINI_API_KEY: 'k', ANTHROPIC_API_KEY: 'k' };
@@ -360,17 +360,20 @@ describe('llm call ledger', () => {
       await expect(metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's2' })).resolves.toBeNull();
     });
 
-    it('re-records a multi-turn session IN PLACE — one row per session id carrying the cumulative usage', async () => {
-      global.fetch = fetchJson({ id: 'sess_2', status: 'idle', usage: { input_tokens: 100, output_tokens: 10 } });
-      const { metrics } = load();
-      const first = await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_2' });
-      expect(typeof first).toBe('number');
-      mockFirst.mockResolvedValueOnce({ id: first });
+    it('writes ONE atomic upsert keyed by session id — counters keep the greatest snapshot, status the latest', async () => {
       global.fetch = fetchJson({ id: 'sess_2', status: 'idle', usage: { input_tokens: 250, output_tokens: 40 } });
-      await expect(metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_2' })).resolves.toBe(first);
-      expect(ledgerRows()).toHaveLength(1);
-      expect(mockFirst).toHaveBeenLastCalledWith('llm_dispatch_log', { row_kind: 'session', provider_ref: 'sess_2' });
-      expect(mockUpdate).toHaveBeenCalledWith('llm_dispatch_log', expect.objectContaining({ row_kind: 'session', provider_ref: 'sess_2', input_tokens: 250, output_tokens: 40 }));
+      const { metrics } = load();
+      await expect(metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_2' })).resolves.toEqual(expect.any(Number));
+      expect(mockMerge).toHaveBeenCalledTimes(1);
+      const [table, target, updates] = mockMerge.mock.calls[0];
+      expect(table).toBe('llm_dispatch_log');
+      expect(String(target)).toBe("(provider_ref) WHERE row_kind = 'session'");
+      for (const col of ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens']) {
+        expect(String(updates[col])).toBe(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
+      }
+      for (const col of ['ok', 'error_code', 'error_class', 'latency_ms']) expect(String(updates[col])).toBe(`EXCLUDED.${col}`);
+      // the first write's identity and context stay: nothing else is merged
+      expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
     });
 
     it('is a no-op while the gate is off', async () => {

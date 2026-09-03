@@ -17,7 +17,7 @@ const CALL_COLUMNS = [
   'error_class', 'error_code', 'prompt_version', 'provider_ref', 'work_item_id', 'run_id', 'attempt_id', 'step_id',
   'trace_id', 'span_id', 'parent_span_id',
 ];
-const INDEXES = ['llm_dispatch_log_lane_created_idx', 'llm_dispatch_log_run_idx', 'llm_dispatch_log_chain_idx', 'llm_dispatch_log_row_kind_created_idx'];
+const INDEXES = ['llm_dispatch_log_lane_created_idx', 'llm_dispatch_log_run_idx', 'llm_dispatch_log_chain_idx', 'llm_dispatch_log_row_kind_created_idx', 'llm_dispatch_log_session_ref_uidx'];
 
 describeOrSkip('llm call ledger schema', () => {
   let knex;
@@ -29,6 +29,8 @@ describeOrSkip('llm call ledger schema', () => {
 
   afterAll(async () => {
     if (knex) await knex.destroy();
+    // the recorder under test opened the app's own pool
+    try { await require('../models/db').destroy(); } catch { /* never opened */ }
   });
 
   test('llm_dispatch_log gains the per-call ledger columns; row_kind defaults to chain', async () => {
@@ -66,6 +68,38 @@ describeOrSkip('llm call ledger schema', () => {
     await knex('llm_dispatch_log').where({ id: callId }).del();
     const left = await knex('llm_call_traces').where({ call_id: callId }).count({ n: '*' }).first();
     expect(Number(left.n)).toBe(0);
+  });
+
+  test('session rows are unique per session id and the recorder upserts them atomically — greatest counters, latest status', async () => {
+    // The mocked ledger test can only assert the statement's SHAPE; this proves
+    // the raw partial-index conflict target and the GREATEST merge on Postgres.
+    const originalFetch = global.fetch;
+    const originalGate = process.env.GATE_LLM_CALL_LEDGER;
+    process.env.GATE_LLM_CALL_LEDGER = 'true';
+    const session = (input, output, status = 'idle') => jest.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ id: 'schema_sess', status, model: 'served-m', usage: { input_tokens: input, output_tokens: output } }),
+    }));
+    const { recordSessionUsage } = require('../services/llm-dispatch-metrics');
+    try {
+      global.fetch = session(100, 10);
+      const first = await recordSessionUsage({ laneId: 'schema_test', sessionId: 'schema_sess', model: 'm' });
+      expect(typeof first).toBe('number');
+      global.fetch = session(250, 40);
+      await expect(recordSessionUsage({ laneId: 'schema_test', sessionId: 'schema_sess', model: 'm' })).resolves.toBe(first);
+      // a stale, smaller snapshot landing late must not lower the counters, but its status is the latest word
+      global.fetch = session(120, 12, 'terminated');
+      await expect(recordSessionUsage({ laneId: 'schema_test', sessionId: 'schema_sess', model: 'm' })).resolves.toBe(first);
+      const rows = await knex('llm_dispatch_log').where({ row_kind: 'session', provider_ref: 'schema_sess' });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: first, input_tokens: 250, output_tokens: 40, ok: false, error_code: 'session_terminated', served_model: 'served-m' });
+      await expect(knex('llm_dispatch_log').insert({ policy: 'x', ok: true, row_kind: 'session', provider_ref: 'schema_sess' })).rejects.toThrow(/duplicate key|unique/i);
+      // call rows are NOT unique on provider_ref
+      await knex('llm_dispatch_log').insert([{ policy: 'x', ok: true, row_kind: 'call', provider_ref: 'schema_sess' }, { policy: 'x', ok: true, row_kind: 'call', provider_ref: 'schema_sess' }]);
+    } finally {
+      global.fetch = originalFetch;
+      if (originalGate === undefined) delete process.env.GATE_LLM_CALL_LEDGER; else process.env.GATE_LLM_CALL_LEDGER = originalGate;
+      await knex('llm_dispatch_log').where({ provider_ref: 'schema_sess' }).del();
+    }
   });
 
   test('a chain-era insert (no row_kind) still lands as a chain row', async () => {
