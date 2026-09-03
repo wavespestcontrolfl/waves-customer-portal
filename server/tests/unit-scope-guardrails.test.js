@@ -1794,6 +1794,13 @@ describe('residentialUnitLookupVerdict — the manual lookup honors a unit addre
       expect(residentialUnitLookupVerdict({
         ...apartmentVerdict, address: 'Unit 7, 1048 Example Lakes Cir, Sarasota, FL 34232',
       })).toBe(true);
+      // Punctuated designators, the way staff actually type them (codex r3 P1).
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, address: '1048 Example Lakes Cir Apt. 204, Sarasota, FL 34232',
+      })).toBe(true);
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, address: '1048 Example Lakes Cir, Unit. 7, Sarasota, FL 34232',
+      })).toBe(true);
       expect(residentialUnitLookupVerdict({
         ...apartmentVerdict, commercialSubtype: 'hoa_common_area_residential',
       })).toBe(true);
@@ -1827,6 +1834,9 @@ describe('residentialUnitLookupVerdict — the manual lookup honors a unit addre
       })).toBe(false);
       expect(residentialUnitLookupVerdict({
         ...apartmentVerdict, address: '1048 Example Lakes Cir Ste 4, Sarasota, FL 34232',
+      })).toBe(false);
+      expect(residentialUnitLookupVerdict({
+        ...apartmentVerdict, address: '1048 Example Lakes Cir Ste. 4, Sarasota, FL 34232',
       })).toBe(false);
       // A unit count with a commercial-use subtype is not neutral.
       expect(residentialUnitLookupVerdict({

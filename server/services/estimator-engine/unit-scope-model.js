@@ -502,6 +502,7 @@ function residentialMultifamilyVerdict({ commercialSubtype, commercialDetectionS
  * for dimensions and flags.
  */
 const SUITE_DESIGNATOR_RE = /\b(?:ste|suite)\.?\s*#?\s*[\w-]+/i;
+const DESIGNATOR_PERIOD_RE = /\b(apt|apartment|unit|ste|suite)\./gi;
 
 function residentialUnitLookupVerdict({
   address, category, commercialSubtype, commercialDetectionSource,
@@ -509,13 +510,17 @@ function residentialUnitLookupVerdict({
 }) {
   if (!unitScopeGuardrailsEnabled()) return false;
   if (String(category || '').toUpperCase() !== 'COMMERCIAL') return false;
-  if (!address || !shadowPrivate.hasSubpremiseSignal({ address: String(address) })) return false;
+  // Staff type "Apt. 204" / "Ste. 4" as often as the bare designator; the
+  // dwelling regexes read the unpunctuated form, so strip the period the
+  // way the lookup's own address parser does (codex r3 P1).
+  const normalizedAddress = String(address || '').replace(DESIGNATOR_PERIOD_RE, '$1');
+  if (!normalizedAddress || !shadowPrivate.hasSubpremiseSignal({ address: normalizedAddress })) return false;
   // hasSubpremiseSignal accepts Suite/Ste (an office suite is a subpremise
   // for scope purposes), but a SUITE is not a dwelling: "Suite 200" on a
   // mixed-use building whose whole-property verdict reads multifamily is a
   // business tenant, and pricing it residential is the opposite error
   // (pre-push codex P1). Apt / Unit / Apartment / #<n> only.
-  if (SUITE_DESIGNATOR_RE.test(String(address))) return false;
+  if (SUITE_DESIGNATOR_RE.test(normalizedAddress)) return false;
   // Vision looked at THIS parcel and read a commercial USE — the record's
   // multifamily string does not outrank it (the subtype resolver checks
   // apartment/multifamily text before the structured signal, so the
