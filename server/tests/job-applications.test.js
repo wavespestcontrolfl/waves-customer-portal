@@ -235,10 +235,12 @@ describe('new_job_application bell', () => {
       .sort();
     expect(techVisible).toEqual([
       'appointment_reschedule_intent',
+      'completion_sms_failed',
       'customer_voicemail_callback',
       'job_complete',
       'service_report_delivery_failed',
       'service_report_pdf_failed',
+      'service_report_token_mint_failed',
       'sms_reply',
       'twilio_failure',
     ]);

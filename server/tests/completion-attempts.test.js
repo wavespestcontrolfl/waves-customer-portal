@@ -904,3 +904,21 @@ describe('completionStatusForService (lightweight side-effects poll)', () => {
     expect(await completionStatusForService({ serviceId: 's1' }, empty)).toEqual({ state: 'none' });
   });
 });
+
+// #3745 r4: completionPhotos bind the PRE-commit composite but not the
+// post-commit resume core — the committed record owns the uploads, and the
+// client cannot persist 1.5 MB × 5 data URLs across a reload.
+test('completionPhotos bind pre-commit but not the post-commit resume core (#3745 r4)', () => {
+  const base = { serviceType: 'lawn', notes: 'x' };
+  const withPhotos = hashCompletionRequest({ ...base, completionPhotos: [{ data: 'data:image/jpeg;base64,AAAA' }] });
+  const noPhotos = hashCompletionRequest(base);
+  const emptyPhotos = hashCompletionRequest({ ...base, completionPhotos: [] });
+  // Pre-commit: the composite still refuses a same-key retry that swaps photos.
+  expect(withPhotos).not.toBe(noPhotos);
+  expect(requestHashMatches(withPhotos, noPhotos)).toBe(false);
+  // Post-commit resume: a replay that omits the photos still matches.
+  expect(coreHashSegment(withPhotos)).toBe(coreHashSegment(noPhotos));
+  expect(resumeHashMatches(withPhotos, noPhotos)).toBe(true);
+  // Omitted and empty are the same request.
+  expect(emptyPhotos).toBe(noPhotos);
+});

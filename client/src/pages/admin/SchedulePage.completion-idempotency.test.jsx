@@ -1,10 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   CROSS_KEY_COMPLETED_MESSAGE,
   SIDE_EFFECTS_GIVE_UP_MESSAGE,
   completionCrossKeyCompleted,
   completionPreferencesNeedDraft,
+  completionResumeBodyForStorage,
+  completionResumeOwedBodyKey,
+  completionResumeOwedError,
+  clearCompletionResumeOwed,
+  persistCompletionResumeOwed,
+  restoreCompletionResumeOwedBody,
   completionReconcilePrompt,
   completionReviewSuppressionReason,
   completionSideEffectsRetryPlan,
@@ -360,5 +366,113 @@ describe("completion status-poll plan", () => {
     expect(completionStatusPlan({ state: "surprise" })).toBe("wait");
     expect(completionStatusPlan({})).toBe("wait");
     expect(completionStatusPlan(null)).toBe("wait");
+  });
+});
+
+// The route's committed-but-not-finalized 503s all owe a resume: the panel
+// must set the durable reopen marker and pin the committed body for every
+// one of them, not just the original invoice-mint code (codex P1 #3745 r3 —
+// service_report_token_mint_failed fell to the generic error path).
+describe("completionResumeOwedError", () => {
+  it("recognises every committed-but-not-finalized 503 the route emits", () => {
+    for (const code of [
+      "backfill_invoice_mint_failed",
+      "service_report_token_mint_failed",
+      "completion_sms_send_failed",
+    ]) {
+      expect(completionResumeOwedError({ status: 503, code })).toBe(true);
+    }
+  });
+
+  it("leaves every other error to the existing handlers", () => {
+    // Same code on another status is not the committed-but-not-finalized contract.
+    expect(completionResumeOwedError({ status: 500, code: "completion_sms_send_failed" })).toBe(false);
+    expect(completionResumeOwedError({ status: 409, code: "completion_side_effects_running" })).toBe(false);
+    expect(completionResumeOwedError({ status: 409, code: "completion_resume_payload_mismatch" })).toBe(false);
+    expect(completionResumeOwedError({ status: 500, message: "boom" })).toBe(false);
+    expect(completionResumeOwedError(null)).toBe(false);
+  });
+});
+
+// A committed-but-not-finalized 503 must survive a reload with its BODY, not
+// just a boolean: a rebuilt body 409s completion_resume_payload_mismatch and
+// the handler then drops the marker with the text still unsent (codex P1
+// #3745 r4). Photos are stripped (quota) — the server's resume hash tolerates
+// their absence.
+describe("committed-body persistence for resume-owed visits", () => {
+  function stubStorage(overrides = {}) {
+    const map = new Map();
+    const stub = {
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+      setItem: (k, v) => map.set(k, String(v)),
+      removeItem: (k) => map.delete(k),
+      ...overrides,
+    };
+    vi.stubGlobal("localStorage", stub);
+    return map;
+  }
+
+  it("strips completionPhotos and keeps every other field", () => {
+    const body = { a: 1, completionPhotos: [{ data: "data:image/jpeg;base64,xxx" }], idempotencyKey: "k" };
+    expect(completionResumeBodyForStorage(body)).toEqual({ a: 1, idempotencyKey: "k" });
+    expect(completionResumeBodyForStorage(null)).toBeNull();
+  });
+
+  it("persists marker + photo-less body together and restores the body only while the marker is set", () => {
+    const map = stubStorage();
+    try {
+      persistCompletionResumeOwed("svc-1", { a: 1, completionPhotos: [{ data: "big" }] });
+      expect(map.get("waves_completion_resume_owed_svc-1")).toBe("1");
+      expect(JSON.parse(map.get(completionResumeOwedBodyKey("svc-1")))).toEqual({ a: 1 });
+      expect(restoreCompletionResumeOwedBody("svc-1")).toEqual({ a: 1 });
+      // No marker → no body, even if a stale body row lingers.
+      map.delete("waves_completion_resume_owed_svc-1");
+      expect(restoreCompletionResumeOwedBody("svc-1")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the committed idempotencyKey in the persisted body — the panel seeds both refs from ONE snapshot", () => {
+    // The reopened panel restores completionIdempotencyKeyRef from this key
+    // so the POST replay and the /completion-status poll agree; a fresh key
+    // would read the original attempt as succeeded_other_key.
+    const map = stubStorage();
+    try {
+      persistCompletionResumeOwed("svc-k", { a: 1, idempotencyKey: "key-123", completionPhotos: [{ data: "x" }] });
+      expect(restoreCompletionResumeOwedBody("svc-k")).toEqual({ a: 1, idempotencyKey: "key-123" });
+      expect(map.size).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("clears both keys together", () => {
+    const map = stubStorage();
+    try {
+      persistCompletionResumeOwed("svc-2", { a: 1 });
+      clearCompletionResumeOwed("svc-2");
+      expect(map.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("a body write that hits the quota leaves the marker alone (today's behavior)", () => {
+    const map = new Map();
+    stubStorage({
+      setItem: (k, v) => {
+        if (k.endsWith(":body")) throw new Error("QuotaExceededError");
+        map.set(k, String(v));
+      },
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+    });
+    try {
+      persistCompletionResumeOwed("svc-3", { a: 1 });
+      expect(map.get("waves_completion_resume_owed_svc-3")).toBe("1");
+      expect(restoreCompletionResumeOwedBody("svc-3")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
