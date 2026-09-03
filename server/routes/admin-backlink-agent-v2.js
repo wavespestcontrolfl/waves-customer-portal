@@ -11,6 +11,7 @@ const { SIGNUP_TYPES } = require('../services/seo/link-prospect-worker');
 const linkPolicy = require('../services/seo/link-authority-policy');
 const { REGISTRY_ACTIONS, applyRegistryAction } = require('../services/seo/link-registry');
 const ownerQueue = require('../services/seo/link-owner-queue');
+const M = require('../services/seo/link-outreach-mandate');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -625,9 +626,17 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // recipient-level lock + predicate the send claim takes (plan §13), so no two writers open the same inbox
       const opensConversation = 'status' in patch && ['contacted', 'negotiating'].includes(patch.status) && !['contacted', 'negotiating'].includes(current.status);
       if (opensConversation) {
-        const withRecipient = await trx('seo_link_prospects').where({ id: current.id }).first('outreach_to_email');
-        const open = withRecipient && withRecipient.outreach_to_email ? await require('../services/seo/link-prospect-outreach').inboxConflict(trx, { recipient: withRecipient.outreach_to_email, excludeId: current.id }) : null;
-        if (open) return { inbox: open };
+        // the same lock ORDER as the send claim (inbox advisory lock → row lock): the recipient read before the locks
+        // is re-read under the row lock — re-addressed meanwhile means the inbox locked is not this row's; refuse
+        const Outreach = require('../services/seo/link-prospect-outreach');
+        const before = await trx('seo_link_prospects').where({ id: current.id }).first('outreach_to_email');
+        const recipient = before && before.outreach_to_email;
+        if (recipient) {
+          const open = await Outreach.inboxConflict(trx, { recipient, excludeId: current.id });
+          if (open) return { inbox: open };
+          const locked = await trx('seo_link_prospects').where({ id: current.id }).forUpdate().first('outreach_to_email');
+          if (!locked || M.normalizeEmail(locked.outreach_to_email) !== M.normalizeEmail(recipient)) return { readdressed: true };
+        }
       }
       // A target_page edit is a placement move: under the same domain lock,
       // refuse if another row already represents (domain, page) under ANY
@@ -647,6 +656,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     });
     if (result.missing) return res.status(404).json({ error: 'prospect not found' });
     if (result.inFlight) return res.status(409).json({ error: `domain already has a prospect in active outreach (${result.inFlight.status}${result.inFlight.target_page ? ` for ${result.inFlight.target_page}` : ''}) — one conversation per inbox`, id: result.inFlight.id });
+    if (result.readdressed) return res.status(409).json({ error: 'the prospect was re-addressed while you edited it — reload and retry' });
     if (result.inbox) return res.status(409).json({ error: `another placement already has a conversation with this recipient (${result.inbox.status}${result.inbox.outreach_status ? ` / ${result.inbox.outreach_status}` : ''}) — one conversation per inbox`, id: result.inbox.id });
     if (result.taken) return res.status(409).json({ error: `another prospect already represents this domain + target page (${result.taken.status})`, id: result.taken.id });
     res.json({ prospect: result.row });
@@ -709,7 +719,6 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     );
     const sentToday = await Outreach.dailySendCount();
     // §6.4 / §13 — what the owner sees before Approve & send: the draft review and the recipient match to acknowledge
-    const M = require('../services/seo/link-outreach-mandate');
     let byEmail = null; let reviewError = null;
     try { byEmail = await M.reviewByEmail(db, items.map((p) => p.outreach_to_email)); } catch (err) { reviewError = err.message; } // one batch for the whole list
     for (const p of items) {
