@@ -5,7 +5,7 @@
 // building; a typed address with no unit still matches every unit there.
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 
-const { findCustomersAtAddress, _private } = require('../services/customer-address-match');
+const { findCustomersAtAddress, rankByContact, _private } = require('../services/customer-address-match');
 
 const ROW = (id, line1, line2 = null, extra = {}) => ({
   id, account_id: null, first_name: `F${id}`, last_name: 'Doe', phone: null, email: null,
@@ -99,5 +99,27 @@ describe('findCustomersAtAddress', () => {
     expect(await findCustomersAtAddress(db, 'Palm Ave, Venice')).toEqual([]);
     expect(await findCustomersAtAddress(db, '')).toEqual([]);
     expect(db.calls).toEqual([]);
+  });
+
+  describe('rankByContact', () => {
+    const rows = [
+      ROW('amy', '4315 Fence Row Ct', null, { phone: '+13168210389', email: 'amy@example.com' }),
+      ROW('tom', '4315 Fence Row Ct', null, { phone: '+13169905400', email: 'tom@example.com' }),
+    ];
+    it('puts the phone match first, tagged, and leaves the rest in query order', () => {
+      const out = rankByContact(rows, { phone: '(316) 990-5400' });
+      expect(out.map((r) => [r.id, r.contactMatch])).toEqual([['tom', 'phone'], ['amy', null]]);
+    });
+    it('falls back to an exact email match', () => {
+      const out = rankByContact(rows, { email: ' TOM@example.com ' });
+      expect(out.map((r) => [r.id, r.contactMatch])).toEqual([['tom', 'email'], ['amy', null]]);
+    });
+    it('with nothing typed, nobody is tagged and order is unchanged', () => {
+      const out = rankByContact(rows, {});
+      expect(out.map((r) => [r.id, r.contactMatch])).toEqual([['amy', null], ['tom', null]]);
+    });
+    it('a partial phone never matches', () => {
+      expect(rankByContact(rows, { phone: '5400' }).every((r) => r.contactMatch === null)).toBe(true);
+    });
   });
 });

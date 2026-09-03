@@ -4072,7 +4072,13 @@ export default function EstimateToolViewV2({
           const custR = await fetch("/api/admin/customers/at-address", {
             method: "POST",
             headers: authHeaders,
-            body: JSON.stringify({ address }),
+            // Typed/prefilled contact ranks the matching household member
+            // first (server tags it contactMatch).
+            body: JSON.stringify({
+              address,
+              phone: form.customerPhone || null,
+              email: form.customerEmail || null,
+            }),
             signal: lookupController.signal,
           });
           if (custR.ok) {
@@ -6205,6 +6211,12 @@ export default function EstimateToolViewV2({
                           <div className="flex-1 min-w-0">
                             <div className="text-14 text-zinc-900 font-medium truncate">
                               {name}
+                              {c.contactMatch === "phone" && (
+                                <span className="font-normal text-zinc-500"> · phone matches</span>
+                              )}
+                              {c.contactMatch === "email" && (
+                                <span className="font-normal text-zinc-500"> · email matches</span>
+                              )}
                             </div>
                             <div className="text-14 text-ink-secondary truncate">
                               {[
