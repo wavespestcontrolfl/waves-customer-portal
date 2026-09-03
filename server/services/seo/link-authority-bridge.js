@@ -599,4 +599,4 @@ async function runAuthorityBridge(db, {
   return out;
 }
 
-module.exports = { runAuthorityBridge, aggregateState, annotateApprovals, LOCK_KEY, HOMEPAGE, RUN_LIMIT_MAX, DEFAULT_LIMIT };
+module.exports = { runAuthorityBridge, aggregateState, annotateApprovals, invalidateApprovals, LOCK_KEY, HOMEPAGE, RUN_LIMIT_MAX, DEFAULT_LIMIT };

@@ -482,6 +482,26 @@ describe('decideDomain (Reject / Watch)', () => {
     expect(approvals(db2)[0].terms_snapshot.card).toBeUndefined();
   });
 
+  test('reject after an approval whose bridge run was gated: the approval is invalidated and audited, and a Reopen brings the card back UNAPPROVED', async () => {
+    const { db, d } = await parked();
+    const gated = async () => ({ gated: true, skipped: 'gated', selected: 0, decided: 0, parked: 0, released: 0, aggregateChanges: 0, errors: [] });
+    const row = openRows(db)[0];
+    const a = await Q.approveRow(db, { authorityId: row.id, actor: ACTOR, now: NOW, bridge: gated });
+    expect(domainState(db)).toBe('qualified'); // the gated run moved nothing — the card still offers Reject / Watch
+    const r = await Q.decideDomain(db, { domainId: d.id, decision: 'rejected', actor: ACTOR, now: LATER });
+    expect(r).toMatchObject({ agent_state: 'rejected', invalidated: 1, audited: N });
+    expect(approvals(db).find((x) => x.id === a.approval.id)).toMatchObject({ invalidated_at: LATER, invalidated_reason: expect.stringMatching(/owner rejected/) });
+    expect(approvals(db).filter((x) => x.decision === 'rejected' && x.prospect_id === row.prospect_id)).toHaveLength(1);
+    // Reopen: the same rows come back as cards, the row no longer reads as approved and the bridge releases nothing
+    storedDomain(db).agent_state = 'qualified';
+    storedDomain(db).rejected_by = null;
+    const n = await nightly(db, { now: LATER2 });
+    expect(n.released).toBe(0);
+    expect(placements(db).every((p) => p.status === 'awaiting_owner')).toBe(true);
+    const card = (await Q.listOwnerQueue(db)).cards.find((c) => c.placement.id === row.prospect_id);
+    expect(card.rows.find((x) => x.id === row.id)).toMatchObject({ approved: false, approvable: true });
+  });
+
   test('watch: watching + a 30-day recheck, audit rows decision=watch', async () => {
     const { db, d } = await parked();
     const r = await Q.decideDomain(db, { domainId: d.id, decision: 'watch', actor: ACTOR, now: NOW });

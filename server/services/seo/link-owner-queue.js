@@ -388,7 +388,12 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     const placements = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'path_id', 'status');
     const ids = placements.map((p) => p.id);
     const open = ids.length ? await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at')) : [];
-    const audited = open.filter((r) => R.APPROVABLE_LEVELS.includes(r.level) && !r.approved);
+    // every owner-level row is audited, the already-approved ones included: a Reject / Watch is the owner's LATER word
+    // on the domain, so an approval whose bridge run was gated or lease-held (the placement still parked) is invalidated
+    // here — otherwise a Reopen or the watch re-investigation would let the bridge release that authorization without a
+    // fresh click. The bridge's own invalidation is the ONE writer of invalidated_at on approvals.
+    const audited = open.filter((r) => R.APPROVABLE_LEVELS.includes(r.level));
+    const invalidated = await require('./link-authority-bridge').invalidateApprovals(trx, audited.filter((r) => r.approved), `owner ${decision === 'watch' ? 'watches' : 'rejected'} the domain`, now);
     const pathIds = [...new Set(audited.map((r) => r.path_id).filter(Boolean))];
     const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
     const pathById = new Map(paths.map((p) => [p.id, p]));
@@ -419,7 +424,7 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     const applied = await R.applyRegistryAction(trx, domain, action, now);
     if (!applied.updated) refuse(409, 'the domain moved to a lane-owned state meanwhile — refresh the queue');
     if (ids.length) await trx('seo_link_prospects').whereIn('id', ids).update({ updated_at: now });
-    return { domainId: domain.id, domain: domain.domain, agent_state: applied.nextState, watch_recheck_at: applied.watchRecheckAt, audited: approvals.length, placements: ids.length };
+    return { domainId: domain.id, domain: domain.domain, agent_state: applied.nextState, watch_recheck_at: applied.watchRecheckAt, audited: approvals.length, invalidated, placements: ids.length };
   });
 }
 
