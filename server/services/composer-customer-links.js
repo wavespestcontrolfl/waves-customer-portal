@@ -617,8 +617,8 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
 // scheduler and draft approve/revise dispatch straight into
 // sendCustomerMessage). So every per-row bearer that seam judges is
 // immediate-only: a contract signing link (time-boxed, rotates), a visit-
-// lane card request, a payer statement pay link, and a prep page when its
-// row carries an expiry. Presence-only — the callers (/schedule-sms, draft
+// lane card request, a payer statement pay link, and a prep page (bound to
+// the recipient at /sms alone). Presence-only — the callers (/schedule-sms, draft
 // approve/revise) refuse on any hit. Canonical portal host + path only,
 // like the Auto Pay seam: a look-alike host is not a Waves bearer and is
 // simply not this seam's business. Customer-kind /secure links are the
@@ -631,13 +631,12 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
     applies: async () => true,
   },
   {
+    // Every prep page — the page shows the customer's name and address and
+    // only /sms binds it to the recipient (pre-push Codex P0), expiry or not.
     label: 'Prep guide',
     fragment: /\/prep\//i,
     token: (run, host) => canonicalPortalToken(run, host, /^\/prep\/([a-f0-9]{32})$/i),
-    applies: async (token) => {
-      const row = await db('scheduled_services').where({ prep_token: token }).first('prep_expires_at');
-      return !!row?.prep_expires_at;
-    },
+    applies: async () => true,
   },
   {
     label: 'Statement pay',
@@ -1186,6 +1185,8 @@ async function buildPrepGuideLink(customerIds) {
   return {
     url,
     line: `Your prep checklist for the upcoming ${config.label} is here: ${url}\n\n`,
+    // Immediate sends only — /sms binds the page to the recipient.
+    immediateOnly: true,
     prep: { pestType, label: config.label, scheduledDate: dateOnly(visit.scheduled_date) },
     expiresAt: visit.prep_expires_at || null,
   };

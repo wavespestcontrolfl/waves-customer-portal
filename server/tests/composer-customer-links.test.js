@@ -1094,12 +1094,11 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await expiringLinkSendCheck('Nothing to see')).toEqual({ present: false });
   });
 
-  test('a prep link is present only when its row carries an expiry', async () => {
-    mockBuilders = { scheduled_services: chainBuilder({ firstRow: { prep_expires_at: '2026-10-01T00:00:00Z' } }) };
+  test('every canonical prep link is immediate-only, expiry or not — only /sms binds the page to the recipient (pre-push Codex P0)', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
     expect(await expiringLinkSendCheck(`Checklist: portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: true, label: 'Prep guide' });
-    expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ prep_token: PREP });
-    mockBuilders = { scheduled_services: chainBuilder({ firstRow: { prep_expires_at: null } }) };
-    expect(await expiringLinkSendCheck(`Checklist: portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: false });
+    expect(mockDb).not.toHaveBeenCalledWith('scheduled_services');
+    expect(await expiringLinkSendCheck(`portal.wavespestcontrol.com.evil.example/prep/${PREP}`)).toEqual({ present: false });
   });
 });
 
