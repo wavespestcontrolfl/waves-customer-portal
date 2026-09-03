@@ -321,6 +321,13 @@ describe('sendOutreach under the contract', () => {
     expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto' })).ok).toBe(true);
     expect(placement(s.db)).toMatchObject({ status: 'contacted', conversation_closed_at: null });
   });
+  test('an attested path whose agreement is not viewable (no terms url in the evidence) sends nothing — the board\'s direct send refuses like the queue\'s Approve', async () => {
+    const s = scenario({ path: { legal_attestation: true, legal_terms_hash: 'a'.repeat(64) } });
+    await nightly(s.db);
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/not viewable/) });
+    expect(approvals(s.db)).toHaveLength(0);
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+  });
   test('GATE_LINK_AUTHORITY off: the shipped owner click stands alone (no rows, no approval); an automatic send is refused', async () => {
     isEnabled.mockImplementation((g) => g !== 'linkAuthority');
     const s = scenario();
@@ -473,6 +480,17 @@ describe('submit-first outreach paths (execution_after_send=false)', () => {
     Object.assign(placement(s.db), { status: 'prospect', parked_from_status: null });
     expect((await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).ok).toBe(true);
   });
+  test('the flag orders nothing on a path with NO acquire step (no account, not a content submission): the nightly sends it and the owner may too', async () => {
+    const s = scenario({ policy: AUTO_POLICY, path: { execution_after_send: false, account_required: false } });
+    expect(s.db._tables.seo_link_placement_authorities.some((x) => x.dimension === 'execution')).toBe(false);
+    const send = jest.fn(async () => ({ ok: true }));
+    const r = await nightly(s.db, { autoSend: true, send });
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ prospectId: s.row.id, mode: 'auto' }));
+    expect(r.autoSend).toMatchObject({ attempted: 1, sent: 1 });
+    const o = scenario({ path: { execution_after_send: false, account_required: false } });
+    await nightly(o.db);
+    expect((await Outreach.sendOutreach({ prospectId: o.row.id, approvedBy: 'Adam' })).ok).toBe(true);
+  });
 });
 
 describe('the owner resolving an ambiguous recipient on an AUTO_OUTREACH row', () => {
@@ -505,6 +523,13 @@ describe('reconcileSendError', () => {
     expect(r.ok).toBe(true);
     expect(commRow(s.db)).toMatchObject({ satisfied_reason: 'sent' });
     expect(a.consumed_at).toBeTruthy();
+  });
+  test("'requeue' on a row whose lifecycle moved on is refused: the draft would be listed nowhere and sent by nothing", async () => {
+    const s = scenario();
+    await nightly(s.db);
+    Object.assign(placement(s.db), { status: 'watching', outreach_status: 'send_error', outreach_send_token: null });
+    expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'requeue', approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_requeueable' });
+    expect(placement(s.db)).toMatchObject({ status: 'watching', outreach_status: 'send_error' });
   });
   test("'sent' on a row whose lifecycle the admin already advanced by hand keeps that lifecycle (the send stamp settles, the inbox is released); a row still awaiting one opens it (→ contacted)", async () => {
     const s = scenario();
@@ -592,7 +617,7 @@ describe('the nightly auto-send (§6.4)', () => {
   test('a backlog of older submit-first drafts does not starve the send-first drafts behind it: the batch is filled after they are excluded', async () => {
     const db = makeDb({ seo_link_domains: [], seo_link_acquisition_paths: [], seo_link_prospects: [], seo_link_placement_authorities: [], seo_link_policy: [policyRow()] });
     const seedDraft = (i, after) => {
-      const d = domainRow({ domain: `d${i}.org` }); const p = outreachPath(d, { execution_after_send: after }); d.best_path_id = p.id;
+      const d = domainRow({ domain: `d${i}.org` }); const p = outreachPath(d, { execution_after_send: after, account_required: !after }); d.best_path_id = p.id; // submit-first = the flag AND an acquire step
       const row = draftedRow(d, p, { target_domain: d.domain, outreach_to_email: `editor@${d.domain}`, updated_at: new Date(EARLIER.getTime() + i * 1000) });
       db._tables.seo_link_domains.push(d); db._tables.seo_link_acquisition_paths.push(p); db._tables.seo_link_prospects.push(row);
       db._tables.seo_link_placement_authorities.push({ id: uid(), prospect_id: row.id, path_id: p.id, dimension: 'communication', instance_kind: '-', instance_key: '-', level: 'AUTO_OUTREACH', ended_at: null, satisfied_at: null, approval_id: null });

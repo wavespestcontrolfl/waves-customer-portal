@@ -790,7 +790,7 @@ router.post('/prospects/:id/outreach/reconcile', requireAdmin, async (req, res, 
       prospectId: req.params.id, outcome: req.body?.outcome, approvedBy: req.technician?.name || 'admin',
     });
     if (!result.ok) {
-      const status = { not_found: 404, not_reconcilable: 409, send_in_flight: 409 }[result.code] || 400;
+      const status = { not_found: 404, not_reconcilable: 409, not_requeueable: 409, send_in_flight: 409 }[result.code] || 400;
       return res.status(status).json(result);
     }
     res.json(result);

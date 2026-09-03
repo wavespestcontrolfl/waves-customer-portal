@@ -81,7 +81,7 @@ const CONVERSED_STATUSES = Object.freeze(['contacted', 'negotiating']);
 const PLACED_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
 const durableSend = (placement, path) => Boolean(placement.outreach_sent_at || placement.outreach_status === 'sent')
   || CONVERSED_STATUSES.includes(placement.status)
-  || (PLACED_STATUSES.includes(placement.status) && path.execution_after_send !== false);
+  || (PLACED_STATUSES.includes(placement.status) && !P.submitFirst(path));
 
 const isOwner = (l) => typeof l === 'string' && l.startsWith('OWNER_');
 const isAuto = (l) => typeof l === 'string' && l.startsWith('AUTO_');
@@ -160,7 +160,7 @@ async function autoSendDecided(db, { send, now }) {
   // a SUBMIT-FIRST path (execution_after_send=false) sends its pitch only after the acquisition — never from here.
   // Its drafts are excluded BEFORE the batch limit: a backlog of them at the head of the ordering would otherwise
   // fill every batch and starve the send-first drafts behind it on every nightly run.
-  const sendFirst = new Set((await db('seo_link_acquisition_paths').whereIn('id', [...new Set(rows.map((r) => r.path_id).filter(Boolean))]).select('id', 'execution_after_send')).filter((x) => x.execution_after_send !== false).map((x) => x.id));
+  const sendFirst = new Set((await db('seo_link_acquisition_paths').whereIn('id', [...new Set(rows.map((r) => r.path_id).filter(Boolean))]).select('id', 'acquisition_type', 'account_required', 'execution_after_send')).filter((x) => !P.submitFirst(x)).map((x) => x.id));
   const decidedPath = new Map(rows.filter((r) => sendFirst.has(r.path_id)).map((r) => [r.prospect_id, r.path_id]));
   if (!decidedPath.size) return out;
   const batch = await db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...sendFirst]).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').orderBy('updated_at', 'asc').limit(AUTO_SEND_BATCH).select('id', 'path_id', 'updated_at');
@@ -185,7 +185,7 @@ async function autoSendDecided(db, { send, now }) {
 // stands: satisfying only its communication instance would clear the park with that decision still open.
 async function openOwnerHold(trx, { placement, path, exceptRowId }) {
   const rows = await annotateApprovals(trx, (await trx(AUTH).where({ prospect_id: placement.id }).whereNull('ended_at')).filter((r) => r.id !== exceptRowId));
-  const lane = { outreach: true, sendFirst: path.execution_after_send !== false };
+  const lane = { outreach: true, sendFirst: !P.submitFirst(path) };
   return rows.find((r) => !authorized(r) && isOwner(r.level) && !deferred(r, lane)) || null;
 }
 
@@ -243,7 +243,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   const staleAfter = Math.max(ts(policyUpdatedAt), ts(domain.updated_at), ts(path.updated_at), waiver ? ts(waiverRow.approved_at) : 0);
 
   const outreachPath = OUTREACH_ACQUISITION_TYPES.includes(path.acquisition_type);
-  const lane = { outreach: outreachPath, sendFirst: outreachPath && path.execution_after_send !== false };
+  const lane = { outreach: outreachPath, sendFirst: outreachPath && !P.submitFirst(path) };
 
   // the lane's shape, and the domain's placements outside it (the other lane's
   // keys after a re-rank); a settled payment on an off-shape row means the
@@ -568,8 +568,8 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     const others = all.filter((p) => !seen.has(p.id));
     const otherRows = others.length ? await annotateApprovals(trx, await trx(AUTH).whereIn('prospect_id', others.map((p) => p.id)).whereNull('ended_at').select('*')) : [];
     const otherPathIds = [...new Set(others.map((p) => p.path_id).filter(Boolean))];
-    const otherPaths = otherPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', otherPathIds).select('id', 'acquisition_type', 'execution_after_send') : [];
-    const laneById = new Map(otherPaths.map((p) => { const outreach = OUTREACH_ACQUISITION_TYPES.includes(p.acquisition_type); return [p.id, { outreach, sendFirst: outreach && p.execution_after_send !== false }]; }));
+    const otherPaths = otherPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', otherPathIds).select('id', 'acquisition_type', 'account_required', 'execution_after_send') : [];
+    const laneById = new Map(otherPaths.map((p) => { const outreach = OUTREACH_ACQUISITION_TYPES.includes(p.acquisition_type); return [p.id, { outreach, sendFirst: outreach && !P.submitFirst(p) }]; }));
     // an off-shape row (the other lane's keys) is INERT in the aggregate except for a live/indexed link it already won:
     // its workflow status cannot progress (no authority) and must not hold the domain at acquiring / qualified
     for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), ...(laneById.get(p.path_id) || { outreach: false, sendFirst: false }), claimed_at: p.claimed_at || null, offShape: !shape.has(p.location_key) });

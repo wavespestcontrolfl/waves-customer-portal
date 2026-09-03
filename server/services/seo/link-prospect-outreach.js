@@ -535,7 +535,7 @@ function domainRefusal(domain, path) {
 // sends while the execution instance is open. (The LATE SEND itself, on the Judge-owned placed row, arrives with the
 // acquire claim that can produce that row — PR 4; until then no submit-first placement can reach it.)
 async function submitStepOwed(trx, { placement, path }) {
-  if (path.execution_after_send !== false) return false;
+  if (!P.submitFirst(path)) return false; // the flag on a path with no acquire step orders nothing
   const exec = await trx(AUTH).where({ prospect_id: placement.id, dimension: 'execution', instance_kind: '-' }).whereNull('ended_at').first('id', 'satisfied_at');
   return !exec || !exec.satisfied_at;
 }
@@ -561,6 +561,9 @@ async function openSendInstance(trx, { placement, path, policy }) {
   const revision = Number(path.revision_communication ?? path.revision ?? 1);
   if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== revision) return { ok: false, code: 'not_authorized', error: 'the send inputs changed since the authority was decided — the nightly bridge re-decides it' };
   if (path.terms_accepted_by_send === true) return { ok: false, code: 'not_authorized', error: 'sending this pitch accepts the publisher\'s terms — the co-transactional terms acceptance is not available yet' };
+  // an attested path whose agreement the owner cannot open authorizes nothing — the queue's Approve refuses the same
+  // way (link-owner-queue), and the board's direct send is not the way around it
+  if (path.legal_attestation === true && !require('./link-owner-queue').legalTermsUrlOf(path)) return { ok: false, code: 'not_authorized', error: 'the agreement is not viewable (no terms url in the evidence) — re-investigate before sending' };
   if (row.level === P.LEVELS.AUTO_OUTREACH && !stillAutoOutreach(row, ctx)) return { ok: false, code: 'not_authorized', error: 'the outreach policy moved since the automatic decision — the nightly bridge re-decides it' };
   if (await submitStepOwed(trx, { placement, path })) return { ok: false, code: 'not_authorized', error: 'submit-first path: the pitch follows the publisher\'s form / account step, which has not completed' };
   return { ok: true, row, ctx, hash, revision };
@@ -681,6 +684,9 @@ async function reconcileSendError({ prospectId, outcome, approvedBy = 'admin' })
   const staleSending = st === 'sending' && Date.now() - updatedMs >= STALE_SENDING_MS;
   if (st === 'sending' && !staleSending) return { ok: false, code: 'send_in_flight' };
   if (st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable' };
+  // a re-queued draft is listed by the pending queue and accepted by the sender only on a row still awaiting its
+  // conversation: a row moved on by hand (watching / lost / placed …) would take a draft nothing lists or sends
+  if (outcome === 'requeue' && !SENDABLE_STATUSES.includes(prospect.status)) return { ok: false, code: 'not_requeueable', error: `the placement has moved on (${prospect.status}) — a re-queued draft would be listed nowhere and sent by nothing; move it back to prospect first, or settle the send as sent` };
 
   const now = new Date();
   const note = outcome === 'sent'

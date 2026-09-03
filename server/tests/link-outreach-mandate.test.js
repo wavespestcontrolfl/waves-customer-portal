@@ -28,6 +28,7 @@ describe('classifyDraft', () => {
     ['a reduced rate', 'a reduced rate for your readers', ['discount']],
     ['reciprocity without the word link', "If you include us, we'll promote your website on ours", ['reciprocal_promise']],
     ['a mention in return', 'we will mention you in our newsletter', ['reciprocal_promise']],
+    ['hosting their content in return', "If you include Waves Pest Control in your guide, we'll publish your guest post on our blog", ['reciprocal_promise']],
     ['a discount', 'your readers get 20% off their first treatment', ['discount']],
     ['a free service', 'a free inspection for your staff', ['discount']],
     ['a guarantee', 'we guarantee results', ['guarantee']],

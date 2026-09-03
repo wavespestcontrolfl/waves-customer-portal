@@ -272,6 +272,12 @@ function requiredInstances(path) {
   return out;
 }
 
+// A SUBMIT-FIRST outreach path (§6.4 / §7): the pitch follows the publisher's acquire step — so the flag matters only
+// where that step EXISTS. An outreach path with no `execution:-` instance (no account, not a content submission) has
+// nothing to submit first and sends like any send-first path whatever `execution_after_send` reads.
+const submitFirst = (path) => OUTREACH_ACQUISITION_TYPES.includes(path.acquisition_type) && path.execution_after_send === false
+  && requiredInstances(path).some((i) => i.dimension === 'execution' && i.instance_kind === '-');
+
 // Number(null) is 0 and Number('') is 0: a missing signal must read as NaN,
 // never as a passing zero.
 const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
@@ -406,6 +412,6 @@ module.exports = {
   POLICY_FIELDS, POLICY_FIELD_NAMES, LEVELS, PG_INT_MAX, MEMBERSHIP_TYPES, BOOLEAN_FLAGS,
   DEFAULT_OUTREACH_DAILY_CAP, outreachDailyCeiling,
   normalizePolicyRow, applyEnvTightening, loadPolicy, updatePolicy, parseField,
-  requiredInstances, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
+  requiredInstances, submitFirst, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
   DIMENSION_INPUT_FIELDS, floorInputs, floorInputsHash, decisionInputs, decisionInputsHash,
 };
