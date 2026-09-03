@@ -358,6 +358,37 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
   const commercialIdentity = [primary?.engineKey, primary?.key, primary?.serviceKey, primary?.service_key, primary?.name, primary?.label, primary?.displayName]
     .filter(Boolean).join(' ');
   if (primary?.commercial || /commercial/i.test(commercialIdentity)) return null;
+  // A VERIFIED catalog key frozen on the line by a keyed public quote
+  // (the standalone cockroach package: cockroach_control's engine key
+  // pest_initial_roach is deliberately NOT in any row's engine_keys — the
+  // count is configuration-dependent for other callers, see
+  // 20260825000011 — so containment could never name the package row and
+  // the visit would fall to the generic profile, never scheduling the
+  // included second treatment). Exact key, same exactly-one rule, and NO
+  // fall-through to containment on a miss: the key named a product the
+  // catalog no longer carries, and a guessed identity is worse than none
+  // (codex #3842 r3 P1). Resolved WITHOUT an is_active filter: the key was
+  // verified selectable when the quote was made, and a row staff archive
+  // between the quote and the acceptance still names the product the
+  // customer was promised — dropping the identity there would silently
+  // lose the included second treatment (pre-push codex P0).
+  const catalogKey = String(primary?.catalogServiceKey || '').trim();
+  if (catalogKey) {
+    let byKey = null;
+    try {
+      await conn.transaction(async (sp) => {
+        const rows = await sp('services')
+          .where({ service_key: catalogKey })
+          .limit(2)
+          .select('id', 'name', 'service_key');
+        if (rows.length === 1) byKey = rows[0];
+        else if (rows.length > 1) logger.error(`[slot-reservation] catalog key "${catalogKey}" names MULTIPLE active rows — refusing to stamp service_id`);
+      });
+    } catch (err) {
+      logger.warn(`[slot-reservation] catalog lookup failed for catalog key "${catalogKey}": ${err.message}`);
+    }
+    return byKey;
+  }
   const isOneTime = serviceProfile?.serviceMode === 'one_time';
   const cadenceKey = cadenceCatalogKeyForProfile(primary, isOneTime);
   // The four cadence-family category keys intentionally span MULTIPLE
