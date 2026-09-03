@@ -58,7 +58,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
 
   // confirmedHour: the card's snapshot CONFIRMED that ET hour on the
   // requested day; bookingWindowStart / recurringBooking shape the booking.
-  async function seedCall(sid, { cardAgeMin, bookingAgeMin, bookingStatus = 'confirmed', bookingDayOffset = 2, categories = ['pest_control'], intent = 'preventative_one_time', confirmedHour = null, bookingWindowStart = null, recurringBooking = false }) {
+  async function seedCall(sid, { cardAgeMin, bookingAgeMin, bookingStatus = 'confirmed', bookingDayOffset = 2, categories = ['pest_control'], intent = 'preventative_one_time', confirmedHour = null, bookingWindowStart = null, recurringBooking = false, preferredTimeOfDay = null }) {
     const { customerId, propertyId } = await seedCustomer(sid.slice(-2));
     const callAt = new Date(Date.now() - (cardAgeMin + 5) * 60000);
     const [call] = await db('call_log').insert({
@@ -76,7 +76,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
       payload: JSON.stringify({ flag: 'not_confirmed', scheduling_window: {
         status: confirmedHour ? 'confirmed' : 'requested',
         confirmed_start_at: confirmedHour ? `${requestedDay}T${confirmedHour}:00:00-04:00` : null,
-        requested_date_range_start: requestedDay, requested_service_categories: categories, requested_service_intent: intent,
+        requested_date_range_start: requestedDay, requested_service_categories: categories, requested_service_intent: intent, preferred_time_of_day: preferredTimeOfDay,
         requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 },
       } }),
     }).returning('id');
@@ -181,12 +181,15 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     expect(foreignCard.status).toBe('open');
   });
 
-  test('a CONFIRMED call closes only on a booking at the confirmed hour; a recurring-plan ask only on a recurring series', async () => {
+  test('a CONFIRMED call closes only on a booking at the confirmed hour; a recurring-plan ask only on a recurring series; a requested morning only in the morning', async () => {
     const atHour = await seedCall(SID.replace(/e2$/, 'h1'), { cardAgeMin: 60, bookingAgeMin: 10, confirmedHour: '10', bookingWindowStart: '10:00:00' });
     const offHour = await seedCall(SID.replace(/e2$/, 'h2'), { cardAgeMin: 60, bookingAgeMin: 10, confirmedHour: '10', bookingWindowStart: '14:00:00' });
     const noHour = await seedCall(SID.replace(/e2$/, 'h3'), { cardAgeMin: 60, bookingAgeMin: 10, confirmedHour: '10' });
     const planOneTime = await seedCall(SID.replace(/e2$/, 'h4'), { cardAgeMin: 60, bookingAgeMin: 10, intent: 'recurring_membership_inquiry' });
     const planSeries = await seedCall(SID.replace(/e2$/, 'h5'), { cardAgeMin: 60, bookingAgeMin: 10, intent: 'recurring_membership_inquiry', recurringBooking: true });
+    // A requested-morning ask: answered by a morning slot, not an afternoon one.
+    const morningOk = await seedCall(SID.replace(/e2$/, 'h6'), { cardAgeMin: 60, bookingAgeMin: 10, preferredTimeOfDay: 'morning', bookingWindowStart: '09:00:00' });
+    const morningMiss = await seedCall(SID.replace(/e2$/, 'h7'), { cardAgeMin: 60, bookingAgeMin: 10, preferredTimeOfDay: 'morning', bookingWindowStart: '14:00:00' });
     const result = await sweep.runTriageAutoResolve({ now: new Date() });
     expect(result.skipped).toBe(false);
     const statusOf = async (c) => (await db('triage_items').where({ id: c.cardId }).first('status')).status;
@@ -195,6 +198,8 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     expect(await statusOf(noHour)).toBe('open');
     expect(await statusOf(planOneTime)).toBe('open');
     expect(await statusOf(planSeries)).toBe('resolved');
+    expect(await statusOf(morningOk)).toBe('resolved');
+    expect(await statusOf(morningMiss)).toBe('open');
   });
 
   test('booking after the card on the requested day resolves it as auto; a pre-card, skipped, or off-day booking leaves it open', async () => {

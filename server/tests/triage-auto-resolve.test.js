@@ -579,6 +579,29 @@ describe('evidence helpers', () => {
     expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30', requested_service_intent: undefined }), [booking({})], ctx)).toBe(false);
   });
 
+  test('a requested morning / afternoon / evening preference binds the booking’s band; any / unspecified / none bind nothing', () => {
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    const base = { call_log_id: 'call-1', call_customer_id: 'cust-1', customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205' };
+    const places = new Map([['p1', { customer_id: 'cust-1', key: '77oakstreet', unit: '', city: 'Bradenton', zip: '34205' }]]);
+    const ctx = { multiProperty: false, places };
+    const later = new Date(new Date(FRESH).getTime() + 3600 * 1000).toISOString();
+    const booking = (over) => ({ id: 'b1', source_call_log_id: 'call-1', parent_service_id: null, status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-07-30', window_start: null, time_window: null, created_at: later, service_address_line1: '77 Oak Street', service_address_city: 'Bradenton', service_address_zip: '34205', ...over });
+    const card = (preferred_time_of_day) => item({ ...base, reason_code: 'not_confirmed', created_at: FRESH, payload: { scheduling_window: { status: 'requested', requested_date_range_start: '2026-07-30', requested_service_categories: ['pest_control'], requested_service_intent: 'preventative_one_time', requested_address: none, preferred_time_of_day } } });
+    // Tuesday morning is not answered by Tuesday afternoon, nor by a row
+    // with no clock at all; the legacy time_window band counts.
+    expect(bookingCoversRequest(card('morning'), [booking({ window_start: '09:00:00' })], ctx)).toBe(true);
+    expect(bookingCoversRequest(card('morning'), [booking({ window_start: '14:00:00' })], ctx)).toBe(false);
+    expect(bookingCoversRequest(card('morning'), [booking({})], ctx)).toBe(false);
+    expect(bookingCoversRequest(card('morning'), [booking({ time_window: 'morning' })], ctx)).toBe(true);
+    expect(bookingCoversRequest(card('afternoon'), [booking({ window_start: '12:00:00' })], ctx)).toBe(true);
+    expect(bookingCoversRequest(card('afternoon'), [booking({ window_start: '17:00:00' })], ctx)).toBe(false);
+    expect(bookingCoversRequest(card('evening'), [booking({ window_start: '17:30:00' })], ctx)).toBe(true);
+    for (const pref of ['any', 'unspecified', null, undefined]) {
+      expect(bookingCoversRequest(card(pref), [booking({ window_start: '14:00:00' })], ctx)).toBe(true);
+      expect(bookingCoversRequest(card(pref), [booking({})], ctx)).toBe(true);
+    }
+  });
+
   test('requestedWindow is ET calendar days: confirmed start first, then the requested range, null without either', () => {
     expect(requestedWindow(item({ payload: { scheduling_window: { confirmed_start_at: '2026-08-04T14:00:00Z' } } }))).toEqual({ start: '2026-08-04', end: '2026-08-04' });
     // 01:00Z is still the previous ET evening.

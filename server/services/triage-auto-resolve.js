@@ -382,6 +382,29 @@ function confirmedWall(item) {
 }
 const confirmedWallClock = (item) => confirmedWall(item)?.slice(11, 16) || null;
 
+// The part of day a booking lands in, from its window_start or its legacy
+// time_window band — the bands route-reorder and the IB booking tool
+// already define (morning 08:00–12:00, afternoon 12:00–17:00, evening
+// after). Null when the row carries no clock at all.
+function bookingPartOfDay(visit) {
+  const band = String(visit.time_window || '').trim().toLowerCase();
+  const start = visit.window_start ? String(visit.window_start).slice(0, 5) : (band === 'morning' ? '08:00' : band === 'afternoon' ? '12:00' : null);
+  if (!start || !/^\d{2}:\d{2}$/.test(start)) return null;
+  const hour = Number(start.slice(0, 2));
+  return hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
+}
+
+// Does the booking honor the time of day the card snapshotted? A morning /
+// afternoon / evening preference is part of the ask: a Tuesday-afternoon
+// booking does not answer "Tuesday morning". 'any' / 'unspecified' /
+// null bind nothing. A row with no clock cannot prove the preference.
+const TIME_OF_DAY_BANDS = new Set(['morning', 'afternoon', 'evening']);
+function timeOfDayMatches(item, visit) {
+  const pref = parseMaybeJson(item.payload)?.scheduling_window?.preferred_time_of_day;
+  if (!TIME_OF_DAY_BANDS.has(pref)) return true;
+  return bookingPartOfDay(visit) === pref;
+}
+
 // Does a booking's cadence answer the card's snapshotted service intent? A
 // recurring-plan ask is answered only by a recurring series — a one-time
 // visit in the same category is not the plan the caller asked for. Every
@@ -939,12 +962,14 @@ function bookingCoversRequest(item, mine, { multiProperty, places }) {
   // close the original ask. A card that asked for no date binds none. A
   // CONFIRMED call binds the agreed hour too, not merely its day: another
   // booking that afternoon is not the appointment the caller confirmed,
-  // and a row with no window_start cannot prove the hour.
+  // and a row with no window_start cannot prove the hour. A REQUESTED ask
+  // with a morning / afternoon / evening preference binds that band.
   const window = requestedWindow(item);
   const hour = confirmedWallClock(item);
   const inAsk = (v) => {
     if (!cadenceMatches(item, v)) return false;
     if (hour && String(v.window_start || '').slice(0, 5) !== hour) return false;
+    if (!hour && !timeOfDayMatches(item, v)) return false;
     if (!window) return true;
     if (!toDate(v.scheduled_date)) return false;
     const day = etCalendarDayOf(v.scheduled_date);
@@ -992,7 +1017,7 @@ async function loadVisitEvidence(conn, items, flag) {
     .whereIn('status', [...LIVE_BOOKING_STATUSES])
     .orderBy('id', 'asc')
     .select('id', 'customer_id', 'source_call_log_id', 'parent_service_id', 'status', 'service_type', 'service_category_snapshot', 'scheduled_date',
-      'window_start', 'is_recurring', 'created_at', 'completed_at', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip', 'property_id');
+      'window_start', 'time_window', 'is_recurring', 'created_at', 'completed_at', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip', 'property_id');
   // Indexed once — the backlog is cards × a customer's own visits, not
   // cards × every fetched visit.
   const visitsByCustomer = new Map();
