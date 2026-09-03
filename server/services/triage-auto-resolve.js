@@ -844,10 +844,16 @@ async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
   // ACTIVE rows only — the uniqueness customer-properties'
   // soleActivePropertyId defines; an inactive historical duplicate does
   // not make an account multi-property.
-  const propRows = await conn('customer_properties')
+  // Held under the apply transaction like the visit rows: the property
+  // count and address keys decide both arms, and a property writer takes
+  // no triage lock — a row added or edited in the gap lands after us.
+  const propQ = conn('customer_properties')
     .whereIn('customer_id', customerIds)
     .where('active', true)
+    .orderBy('id', 'asc')
     .select('id', 'customer_id', 'address_line1', 'address_line2', 'city', 'zip');
+  if (lock) propQ.forUpdate();
+  const propRows = await propQ;
   const places = new Map();
   const activeCount = new Map();
   for (const r of propRows) {
