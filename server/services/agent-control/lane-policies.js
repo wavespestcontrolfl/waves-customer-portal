@@ -201,8 +201,9 @@ const LANE_RUNTIME = {
   image_gen: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, expected_duration_ms: 180_000 },
   video_gen: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'video', fallback_class: 'offline', eval_family: null, ...LONG_BATCH },
   events: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M3', ...LONG_BATCH },
-  // events_editorial (main 2026-09-03): curation + normalizing copy on the two-provider contentDraft policy; cron batch, writes the curated rows the events lane autopublishes — same M3 trail.
-  events_editorial: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
+  // events_editorial (main 2026-09-03): curation + normalizing copy on the two-provider contentDraft policy; cron batch.
+  // customer_visible: curation can flip events_raw.admin_status to approved, making model-selected events publishable with no human (pre-push P1).
+  events_editorial: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
   ads_advisor: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null },
 
   // ── Intelligence Bar & knowledge ──
