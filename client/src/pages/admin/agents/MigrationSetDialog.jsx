@@ -24,9 +24,15 @@ export default function MigrationSetDialog({ data, catalog, onClose, onDraft }) 
   const [picking, setPicking] = useState(false);
 
   const inUse = useMemo(() => modelsInUse(data), [data]);
-  // A target found through live search is not in the catalog yet; without an
-  // entry every env would be "blocked: unknown model".
-  const withTarget = useMemo(() => (target && !catalog[target.id] ? { ...catalog, [target.id]: discoveredEntry(target, null, target.caps) } : catalog), [catalog, target]);
+  // A target found through live search is not in the catalog yet — or is
+  // there only as an id the server knows from an env override, with unknown
+  // caps. Either way, without a real entry every env would be blocked
+  // ("unknown model" / "no text support").
+  const withTarget = useMemo(() => {
+    const prior = target && catalog[target.id];
+    if (!target || (prior && prior.caps?.length)) return catalog;
+    return { ...catalog, [target.id]: discoveredEntry(target, prior || null, target.caps) };
+  }, [catalog, target]);
   const set = useMemo(() => buildMigrationSet({ data, catalog: withTarget, fromId, toId: target?.id || null }), [data, withTarget, fromId, target]);
 
   // The target search spans every provider / modality the source's envs can

@@ -226,12 +226,19 @@ export function buildMigrationSet({ data, catalog, fromId, toId }) {
       if (GROUP_RANK[g] > GROUP_RANK[group]) group = g;
       if (g !== "eligible") reasons.add(why);
     }
+    // An UNSET shared env whose other followers sit on a different default:
+    // setting it moves them too, so the owner reviews it — never a bulk move.
+    if (entry.collateral?.length) {
+      if (GROUP_RANK.approval > GROUP_RANK[group]) group = "approval";
+      reasons.add(`also moves ${entry.collateral.map((c) => c.lane.name).join(", ")} off ${[...new Set(entry.collateral.map((c) => modelLabel(catalog, c.model)))].join(", ")}`);
+    }
     const bad = toId ? incompatibility(entry.accepts, target) : null;
     if (bad) {
       group = "blocked";
       reasons.add(bad);
     }
-    groups[group].push({ ...entry, reasons: [...reasons] });
+    const { collateral, ...rest } = entry;
+    groups[group].push({ ...rest, reasons: [...reasons] });
   };
   const seen = new Set();
   for (const s of data.selectors || []) {
@@ -256,13 +263,14 @@ export function buildMigrationSet({ data, catalog, fromId, toId }) {
       if (!leg.pinned && leg.selector) continue;
       seen.add(leg.pinEnv);
       const lanes = data.lanes.filter((x) => legsOf(x).some((g) => g.pinEnv === leg.pinEnv));
+      const collateral = lanes.flatMap((x) => legsOf(x).filter((g) => g.pinEnv === leg.pinEnv && g.model !== fromId).map((g) => ({ lane: x, model: g.model })));
       const label = lanes.length > 1 ? `${lanes.length} lanes on one pin` : `${l.name}${leg === l.primary ? "" : " · backup"}`;
       // A pin that belongs to a locked lane is the lock itself.
       if (lanes.every((x) => x.lock)) {
         groups.blocked.push({ env: leg.pinEnv, kind: "pin", label, lanes, accepts: leg.accepts, reasons: [l.lock?.label || "locked"] });
         continue;
       }
-      push({ env: leg.pinEnv, kind: "pin", label, lanes, accepts: leg.accepts });
+      push({ env: leg.pinEnv, kind: "pin", label, lanes, accepts: leg.accepts, collateral });
     }
   }
   return groups;
