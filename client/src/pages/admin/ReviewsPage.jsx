@@ -1824,6 +1824,7 @@ function ReviewIncentivesPanel() {
                                         >
                                           Tapped link {candidate.clickOffsetLabel}
                                           {candidate.locationMatch ? " | same location" : ""}
+                                          {candidate.nameMatch ? " | last name matches" : ""}
                                         </span>
                                       }
                                     />

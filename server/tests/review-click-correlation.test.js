@@ -2,7 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const logger = require('../services/logger');
-const { findLikelyReviewers, findConfidentClickMatch, describeClickOffset } = require('../services/review-click-correlation');
+const { findLikelyReviewers, findConfidentClickMatch, describeClickOffset, reviewerLastNameToken, AUTO_LINK_NEAR_MS, AUTO_LINK_FAR_MS } = require('../services/review-click-correlation');
 
 const REVIEW_AT = '2026-08-07T18:00:00.000Z';
 
@@ -218,6 +218,7 @@ describe('findConfidentClickMatch', () => {
       clickedAt: '2026-08-07T17:30:00.000Z',
       clickOffsetMs: 30 * 60000,
       clickOffsetLabel: '30m before',
+      rung: 'sole_click',
     });
   });
 
@@ -321,5 +322,103 @@ describe('findConfidentClickMatch', () => {
         clickRow({ redirected_at: new Date(Date.parse(REVIEW_AT) - (i + 1) * 60000).toISOString() })),
     });
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+});
+
+describe('reviewerLastNameToken', () => {
+  test('takes the final token, lowercased and de-accented; one-token names offer no surname', () => {
+    expect(reviewerLastNameToken('slim berry')).toBe('berry');
+    expect(reviewerLastNameToken('José Muñoz-Pérez')).toBe('munoz-perez');
+    expect(reviewerLastNameToken('SunshineGal88')).toBeNull();
+    expect(reviewerLastNameToken('Dana B.')).toBeNull();
+    expect(reviewerLastNameToken('')).toBeNull();
+  });
+});
+
+describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)', () => {
+  // The prod case: John Berry tapped the Aug 18 email link 45s before
+  // "slim berry" posted at the same location; Chris Whitney had tapped a
+  // Bradenton link 39h earlier. Sole-clicker refuses; the surname decides.
+  const REVIEW = { review_created_at: REVIEW_AT, location_id: 'bradenton', reviewer_name: 'slim berry' };
+  const berry = (over = {}) => clickRow({
+    customer_id: 'cust-berry', first_name: 'John', last_name: 'Berry',
+    redirected_at: '2026-08-07T17:59:15.000Z', // 45s before
+    ...over,
+  });
+  const other = (over = {}) => clickRow({
+    customer_id: 'cust-whitney', first_name: 'Chris', last_name: 'Whitney',
+    redirected_at: '2026-08-06T03:00:00.000Z', // 39h before
+    ...over,
+  });
+
+  test('links the one surname-matching clicker even with a second clicker in the window', async () => {
+    const conn = makeConn({ clickRows: [berry(), other()] });
+    const match = await findConfidentClickMatch(REVIEW, { conn });
+    expect(match).toMatchObject({ customerId: 'cust-berry', clickOffsetLabel: '1m before', rung: 'click_name' });
+  });
+
+  test('accepts a legacy (pre-migration) pair when the surname corroborates', async () => {
+    const conn = makeConn({ clickRows: [berry({ last_redirected_at: null, last_google_location: null }), other()] });
+    expect((await findConfidentClickMatch(REVIEW, { conn }))?.rung).toBe('click_name');
+  });
+
+  test('refuses two same-surname clickers (neither minutes-vs-hours apart) — a human decides', async () => {
+    const conn = makeConn({ clickRows: [berry(), berry({ customer_id: 'cust-berry-2', first_name: 'Blake', redirected_at: '2026-08-07T16:00:00.000Z' })] });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
+  test('refuses a surname match whose pair is stamped with a DIFFERENT location', async () => {
+    const conn = makeConn({ clickRows: [berry({ google_location: 'parrish', last_google_location: 'parrish' }), other()] });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
+  test('the shared bar still applies: after-review, over 12h, flagged, or inactive surname matches refuse', async () => {
+    for (const over of [
+      { redirected_at: '2026-08-07T18:30:00.000Z' }, // after
+      { redirected_at: '2026-08-07T05:00:00.000Z' }, // 13h before
+      { has_left_google_review: true },
+      { active: null },
+    ]) {
+      const conn = makeConn({ clickRows: [berry(over), other()] });
+      expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+    }
+  });
+
+  test('a one-token display name never name-matches; ranks surname matches first in suggestions', async () => {
+    const conn = makeConn({ clickRows: [other({ redirected_at: '2026-08-07T17:58:00.000Z' }), berry()] });
+    expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'SunshineGal88' }, { conn })).toBeNull();
+    const list = await findLikelyReviewers(REVIEW, { conn });
+    expect(list.map((c) => [c.customerId, c.nameMatch])).toEqual([['cust-berry', true], ['cust-whitney', false]]);
+  });
+});
+
+describe('findConfidentClickMatch — click_near rung (owner ruling 2026-09-03)', () => {
+  const REVIEW = { review_created_at: REVIEW_AT, location_id: 'bradenton', reviewer_name: 'SunshineGal88' };
+  const near = (over = {}) => clickRow({ customer_id: 'cust-near', redirected_at: '2026-08-07T17:59:15.000Z', ...over }); // 45s before
+  const far = (over = {}) => clickRow({ customer_id: 'cust-far', last_name: 'Far', redirected_at: '2026-08-06T03:00:00.000Z', ...over }); // 39h before
+
+  test('links a click 45s before when the only other clicker is 39h earlier', async () => {
+    expect(AUTO_LINK_NEAR_MS).toBe(10 * 60 * 1000);
+    expect(AUTO_LINK_FAR_MS).toBe(6 * 3600 * 1000);
+    const match = await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [near(), far()] }) });
+    expect(match).toMatchObject({ customerId: 'cust-near', rung: 'click_near' });
+  });
+
+  test('refuses when another clicker is inside the far bound (2h earlier), linked or not', async () => {
+    expect(await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [near(), far({ redirected_at: '2026-08-07T16:00:00.000Z' })] }) })).toBeNull();
+    expect(await findConfidentClickMatch(REVIEW, {
+      conn: makeConn({ clickRows: [near(), far({ redirected_at: '2026-08-07T16:00:00.000Z' })], linkedRows: [{ customer_id: 'cust-far' }] }),
+    })).toBeNull();
+  });
+
+  test('refuses when the nearest click is 30m out, a legacy pair, or a linked customer', async () => {
+    expect(await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [near({ redirected_at: '2026-08-07T17:30:00.000Z' }), far()] }) })).toBeNull();
+    expect(await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [near({ last_redirected_at: null, last_google_location: null }), far()] }) })).toBeNull();
+    expect(await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [near(), far()], linkedRows: [{ customer_id: 'cust-near' }] }) })).toBeNull();
+  });
+
+  test('a click after the review is not competition, but neither is it the nearest', async () => {
+    const conn = makeConn({ clickRows: [near(), far({ redirected_at: '2026-08-07T18:05:00.000Z' })] });
+    expect((await findConfidentClickMatch(REVIEW, { conn }))?.rung).toBe('click_near');
   });
 });

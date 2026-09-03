@@ -89,7 +89,8 @@ function createDbMock(initialRows = {}) {
       limitValue: null,
       where(arg, op, value) {
         if (typeof arg === 'function') {
-          arg(this);
+          // knex binds the builder as `this` AND passes it — callbacks use either.
+          arg.call(this, this);
           return this;
         }
         if (arg && typeof arg === 'object') {
@@ -105,6 +106,9 @@ function createDbMock(initialRows = {}) {
         return this;
       },
       orWhere() { return this; },
+      whereILike() { return this; },
+      orWhereILike() { return this; },
+      orWhereRaw() { return this; },
       whereNot(column, value) { this.notEquals.push([column, value]); return this; },
       whereIn(column, values) { this.ins.push([column, values]); return this; },
       whereNotNull(column) { this.notNull.push(column); return this; },
@@ -771,6 +775,41 @@ describe('review incentives', () => {
       periodEnd: new Date().toISOString(),
     });
     expect(dashboard.summary.confirmedGoogleReviews).toBe(1);
+  });
+
+  test('candidate search: a customer with a recent service leads a name-only match without one (owner ruling 2026-09-03)', async () => {
+    const daysAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-blake', first_name: 'Blake', last_name: 'Berry', active: true },
+        { id: 'customer-john', first_name: 'John', last_name: 'Berry', active: true },
+      ],
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-john',
+        technician_id: 'tech-1',
+        service_date: daysAgo(17).slice(0, 10),
+      }],
+      technicians: [{ id: 'tech-1', name: 'Adam' }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: null,
+        reviewer_name: 'slim berry',
+        star_rating: 5,
+        review_created_at: daysAgo(10),
+        location_id: 'bradenton',
+        google_review_id: 'accounts/1/locations/2/reviews/berry',
+      }],
+    });
+
+    const result = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    // Blake sorts first alphabetically by first name within the surname; the
+    // recent service moves John ahead.
+    expect(result.candidates.map((c) => [c.id, c.services.length > 0])).toEqual([
+      ['customer-john', true],
+      ['customer-blake', false],
+    ]);
+    expect(result.likelyReviewers).toEqual([]);
   });
 
   test('candidate search and manual attribution reject removed reviews', async () => {

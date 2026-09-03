@@ -1683,6 +1683,7 @@ describe('Google Business review sync', () => {
       clickedAt: '2026-05-25T11:58:00.000Z',
       clickOffsetMs: 2 * 60000,
       clickOffsetLabel: '2m before',
+      rung: 'sole_click',
     };
 
     function feedWithUnmatchedReview() {
@@ -1727,6 +1728,30 @@ describe('Google Business review sync', () => {
       expect(notifs).toHaveLength(1);
       expect(notifs[0].title).toContain('Auto-linked');
       expect(notifs[0].body).toContain('2m before');
+      expect(notifs[0].body).toContain('only click in the window');
+    });
+
+    test('a click_name match links with link_source click_auto and says why in the bell', async () => {
+      process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
+      jest.doMock('../services/review-click-correlation', () => ({
+        AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
+        findConfidentClickMatch: jest.fn(async () => ({ ...CONFIDENT_MATCH, rung: 'click_name' })),
+        findLikelyReviewers: jest.fn(async () => []),
+      }));
+      db.__state.rows.customers.push({
+        id: 'cust-clicker', first_name: 'Jane', last_name: 'Doe',
+        has_left_google_review: false, review_marked_at: null,
+      });
+      feedWithUnmatchedReview();
+
+      await service.syncAllReviews();
+
+      const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-click');
+      expect(review.customer_id).toBe('cust-clicker');
+      expect(review.link_source).toBe('click_auto');
+      const notifs = (db.__state.rows.notifications || []).filter(n => n.category === 'review');
+      expect(notifs).toHaveLength(1);
+      expect(notifs[0].body).toContain("last name matches");
     });
 
     test('gate OFF: even a confident match stays a manual-queue notification, no link', async () => {

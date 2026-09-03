@@ -722,11 +722,17 @@ async function searchAttributionCandidates(options = {}) {
   if (terms) {
     const like = `%${terms}%`;
     const likeLower = `%${terms.toLowerCase()}%`;
+    // A two-token Google display name ("slim berry") rarely equals the
+    // customer record ("John Berry"): the surname alone is also a hit
+    // (owner ruling 2026-09-03).
+    const { reviewerLastNameToken } = require('./review-click-correlation');
+    const lastToken = reviewerLastNameToken(terms);
     query = query.where(function searchCustomers() {
       this.whereILike('first_name', like)
         .orWhereILike('last_name', like)
-        .orWhereRaw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE ?", [likeLower])
-        .orWhereILike('phone', like)
+        .orWhereRaw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE ?", [likeLower]);
+      if (lastToken) this.orWhereRaw('LOWER(last_name) = ?', [lastToken]);
+      this.orWhereILike('phone', like)
         .orWhereILike('email', like)
         .orWhereILike('address_line1', like)
         .orWhereILike('city', like);
@@ -771,6 +777,13 @@ async function searchAttributionCandidates(options = {}) {
       services,
     });
   }
+  // A customer with a recent service near the review leads the list
+  // (proximity to service — owner ruling 2026-09-03); the linked-customer
+  // pin above stays first. Stable sort keeps the name order within tiers.
+  const pinned = review.customer_id ? candidates.findIndex((c) => String(c.id) === String(review.customer_id)) : -1;
+  const head = pinned === 0 ? candidates.splice(0, 1) : [];
+  candidates.sort((a, b) => Number(b.services.length > 0) - Number(a.services.length > 0));
+  candidates.unshift(...head);
 
   // Click-time correlation: customers whose tracked review-link click landed
   // near this review's timestamp. Rendered as a separate "likely reviewers"
@@ -800,6 +813,7 @@ async function searchAttributionCandidates(options = {}) {
       clickedBeforeReview: l.clickedBeforeReview,
       locationMatch: l.locationMatch,
       alreadyFlagged: l.alreadyFlagged,
+      nameMatch: l.nameMatch === true,
     });
   }
 

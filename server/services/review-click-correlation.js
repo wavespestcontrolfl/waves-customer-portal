@@ -27,6 +27,29 @@ const DEFAULT_LIMIT = 5;
 const SCAN_LIMIT = 200;
 
 /**
+ * A surname token for matching: lowercased, diacritics stripped, punctuation
+ * trimmed. null when nothing usable remains (under 2 letters).
+ */
+function normalizeNameToken(value) {
+  const token = String(value || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z'-]/g, '');
+  return token.length >= 2 ? token : null;
+}
+
+/**
+ * The last name a Google display name carries — its final whitespace token
+ * ("slim berry" → "berry"). A one-token display name ("SunshineGal88")
+ * offers no surname and returns null.
+ */
+function reviewerLastNameToken(reviewerName) {
+  const tokens = String(reviewerName || '').trim().split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null;
+  return normalizeNameToken(tokens[tokens.length - 1]);
+}
+
+/**
  * Human label for a click-to-review offset, e.g. "23m before" / "3h 10m after".
  * Positive offsetMs = the click preceded the review.
  */
@@ -55,14 +78,15 @@ function describeClickOffset(offsetMs) {
  *   addressLine2: string|null, city: string|null, state: string|null,
  *   zip: string|null, clickedAt: string, clickOffsetMs: number,
  *   clickOffsetLabel: string, clickedBeforeReview: boolean,
- *   locationMatch: boolean|null, alreadyFlagged: boolean
- * }>>} nearest-click-first; [] on missing/invalid review timestamp or any
+ *   locationMatch: boolean|null, alreadyFlagged: boolean, nameMatch: boolean
+ * }>>} surname matches first, then nearest-click-first; [] on missing/invalid review timestamp or any
  * query error (suggestions are best-effort and must never break a caller).
  */
 async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _meta = null } = {}) {
   const reviewAtRaw = review?.review_created_at;
   const reviewAt = reviewAtRaw ? new Date(reviewAtRaw) : null;
   if (!reviewAt || Number.isNaN(reviewAt.getTime())) return [];
+  const reviewerLast = reviewerLastNameToken(review?.reviewer_name);
 
   try {
     const windowStart = new Date(reviewAt.getTime() - WINDOW_BEFORE_HOURS * 3600 * 1000);
@@ -207,13 +231,7 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       _meta.scanTruncated = clicks.length >= SCAN_LIMIT;
     }
 
-    // A customer already linked to a synced review is attributed — excluded
-    // from the SUGGESTION list so it only holds open questions (codex #3264).
-    return [...byCustomer.values()]
-      .filter(({ row }) => !linked.has(row.customer_id))
-      .sort((a, b) => Math.abs(a.clickOffsetMs) - Math.abs(b.clickOffsetMs))
-      .slice(0, Math.max(1, limit))
-      .map(({ row, clickedAt, clickOffsetMs, pairLoc, pairTrusted }) => ({
+    const toCandidate = ({ row, clickedAt, clickOffsetMs, pairLoc, pairTrusted }) => ({
         customerId: row.customer_id,
         firstName: row.first_name || null,
         lastName: row.last_name || null,
@@ -241,7 +259,23 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         // auto-link — the confirmation UI's candidate search requires
         // active=true, so a null-active link would be unconfirmable.
         customerActive: row.active === true,
-      }));
+        // The reviewer's display-name surname equals this customer's last
+        // name (owner ruling 2026-09-03: the matcher weighs the last name).
+        nameMatch: Boolean(reviewerLast) && normalizeNameToken(row.last_name) === reviewerLast,
+      });
+    const all = [...byCustomer.values()].map(toCandidate);
+    // Every clicker in the window, linked ones included — the confident
+    // matcher's proximity rung needs each competing click's offset, not
+    // just the count.
+    if (_meta) _meta.allCandidates = all;
+
+    // A customer already linked to a synced review is attributed — excluded
+    // from the SUGGESTION list so it only holds open questions (codex #3264).
+    // Surname matches lead; within a tier the nearest click wins.
+    return all
+      .filter((c) => !linked.has(c.customerId))
+      .sort((a, b) => Number(b.nameMatch) - Number(a.nameMatch) || Math.abs(a.clickOffsetMs) - Math.abs(b.clickOffsetMs))
+      .slice(0, Math.max(1, limit));
   } catch (err) {
     // ID-only logging (AGENTS.md) — no names in plaintext logs.
     logger.warn(`[review-click-correlation] likely-reviewer lookup failed: ${err.message}`);
@@ -254,15 +288,23 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
 // The suggestion list above tolerates ambiguity because a person reads it.
 // Auto-linking tolerates none: a wrong link suppresses that customer's future
 // review asks and can enroll them in a thank-you sequence. So the bar is
-// deliberately higher than "nearest click":
-//   - EXACTLY ONE candidate customer in the whole correlation window (a
-//     second clicker anywhere in the 72h window — even location-unstamped —
-//     means a human decides);
-//   - the click's stamped GBP location MATCHES the review's (null = legacy
-//     unstamped click = not confident);
-//   - the click landed BEFORE the review, within a tight window (people tap
-//     the link, then write — prod evidence: 2min and ~3h gaps).
+// deliberately higher than "nearest click". Three rungs, each on its own
+// enough (owner rulings 2026-09-03), all requiring an active, unflagged
+// customer whose click landed BEFORE the review within a tight window
+// (people tap the link, then write — prod evidence: 45s, 2min and ~3h gaps):
+//   sole_click — EXACTLY ONE clicker in the whole 72h window (even a
+//     location-unstamped second clicker means a human decides) AND a
+//     post-migration location pair that MATCHES the review's;
+//   click_name — exactly one in-window clicker whose last name equals the
+//     reviewer's display-name surname. The surname is the corroboration
+//     the post-migration stamp stands in for, so a legacy pair qualifies;
+//     a pair stamped with a DIFFERENT location still refuses;
+//   click_near — the nearest click is within minutes of the review, its
+//     pair is trusted and location-matched, and every other clicker in the
+//     window (linked ones included) is hours away or after the review.
 const AUTO_LINK_MAX_BEFORE_MS = 12 * 3600 * 1000;
+const AUTO_LINK_NEAR_MS = 10 * 60 * 1000;
+const AUTO_LINK_FAR_MS = 6 * 3600 * 1000;
 
 /**
  * Decide whether click evidence alone is strong enough to link an unlinked
@@ -270,50 +312,77 @@ const AUTO_LINK_MAX_BEFORE_MS = 12 * 3600 * 1000;
  *
  * @param {{review_created_at?: string|Date, location_id?: string}} review
  * @param {{conn?: object}} [options]
- * @returns {Promise<{customerId: string, clickedAt: string, clickOffsetMs: number, clickOffsetLabel: string}|null>}
+ * @returns {Promise<{customerId: string, clickedAt: string, clickOffsetMs: number, clickOffsetLabel: string, rung: 'sole_click'|'click_name'|'click_near'}|null>}
  *   null on any ambiguity or error — auto-link must fail toward the manual
  *   queue, never toward a guess.
  */
 async function findConfidentClickMatch(review, { conn = db } = {}) {
   try {
     // SCAN_LIMIT bounds the underlying query; a limit above it returns every
-    // deduped candidate, which the sole-candidate check needs.
+    // deduped candidate, which the rungs below need.
     const meta = {};
     const candidates = await findLikelyReviewers(review, { conn, limit: SCAN_LIMIT, _meta: meta });
-    if (candidates.length !== 1) return null;
-    // Sole clicker must hold over the RAW window — including clickers the
-    // suggestion list excludes as already-attributed (their click may aim at
-    // a different location's profile). Anything else is ambiguity, and a
-    // scan that hit its row cap can't prove the window held no one else
+    if (!candidates.length) return null;
+    // A scan that hit its row cap can't prove what else the window held
     // (pre-push P1 r3) — fail closed toward the manual queue.
-    if (meta.distinctClickers !== 1) return null;
     if (meta.scanTruncated) return null;
-    const only = candidates[0];
-    // Already marked as having reviewed (manual mark, no linked row): the
-    // auto-link would add nothing they don't have, and a later re-match
-    // correction would clear a flag the auto-link never set (GH codex #3483
-    // r1 P2). Their review stays a manual-queue question.
-    if (only.alreadyFlagged) return null;
-    // Inactive customer: the confirmation UI's candidate search only offers
-    // active customers, so this link could never be human-confirmed and
-    // would sit click_auto forever (GH codex #3483 r5) — manual queue.
-    if (only.customerActive === false) return null;
-    // Untrusted timestamp/location pair (legacy drift — GH codex r5): the
-    // evidence may pair a click time with a location it never routed to.
-    if (only.pairTrusted !== true) return null;
-    if (only.locationMatch !== true) return null;
-    if (!only.clickedBeforeReview) return null;
-    if (only.clickOffsetMs > AUTO_LINK_MAX_BEFORE_MS) return null;
-    return {
-      customerId: only.customerId,
-      clickedAt: only.clickedAt,
-      clickOffsetMs: only.clickOffsetMs,
-      clickOffsetLabel: only.clickOffsetLabel,
-    };
+    // Shared bar for every rung:
+    // - already marked as having reviewed (manual mark, no linked row): the
+    //   auto-link would add nothing and a later re-match correction would
+    //   clear a flag the auto-link never set (GH codex #3483 r1 P2);
+    // - inactive customer: the confirmation UI's candidate search only
+    //   offers active customers, so the link could never be human-confirmed
+    //   (GH codex #3483 r5);
+    // - the click came AFTER the review, or more than 12h before it.
+    const eligible = (c) => c.alreadyFlagged !== true
+      && c.customerActive === true
+      && c.clickedBeforeReview === true
+      && c.clickOffsetMs <= AUTO_LINK_MAX_BEFORE_MS;
+    const decision = (c, rung) => ({
+      customerId: c.customerId,
+      clickedAt: c.clickedAt,
+      clickOffsetMs: c.clickOffsetMs,
+      clickOffsetLabel: c.clickOffsetLabel,
+      rung,
+    });
+
+    // sole_click — the sole-clicker check holds over the RAW window,
+    // including clickers the suggestion list hides as already-attributed
+    // (their click may aim at a different location's profile). Location
+    // must be the trusted post-migration pair (null = legacy = not confident).
+    if (candidates.length === 1 && meta.distinctClickers === 1) {
+      const only = candidates[0];
+      if (eligible(only) && only.pairTrusted === true && only.locationMatch === true) return decision(only, 'sole_click');
+    }
+
+    // click_name — exactly one in-window clicker carries the reviewer's
+    // surname. Two same-surname clickers = a human decides. A legacy pair
+    // is fine (the surname corroborates); a pair stamped with a different
+    // location is not.
+    const named = candidates.filter((c) => c.nameMatch === true);
+    if (named.length === 1 && eligible(named[0]) && named[0].locationMatch !== false) {
+      return decision(named[0], 'click_name');
+    }
+
+    // click_near — the nearest click is minutes before the review and every
+    // other clicker in the window (linked ones included) is hours away or
+    // after it. The nearest must itself be an unlinked, trusted,
+    // location-matched candidate.
+    const all = meta.allCandidates || [];
+    const before = all.filter((c) => c.clickOffsetMs >= 0).sort((a, b) => a.clickOffsetMs - b.clickOffsetMs);
+    const nearest = before[0];
+    if (!nearest || nearest.clickOffsetMs > AUTO_LINK_NEAR_MS) return null;
+    const near = candidates.find((c) => c.customerId === nearest.customerId);
+    if (!near || near.clickOffsetMs !== nearest.clickOffsetMs) return null;
+    if (!eligible(near) || near.pairTrusted !== true || near.locationMatch !== true) return null;
+    const crowded = all.some((c) => c.customerId !== near.customerId
+      && c.clickOffsetMs >= 0 && c.clickOffsetMs < AUTO_LINK_FAR_MS);
+    if (crowded) return null;
+    return decision(near, 'click_near');
   } catch (err) {
     logger.warn(`[review-click-correlation] confident-match lookup failed: ${err.message}`);
     return null;
   }
 }
 
-module.exports = { findLikelyReviewers, findConfidentClickMatch, describeClickOffset, AUTO_LINK_MAX_BEFORE_MS };
+module.exports = { findLikelyReviewers, findConfidentClickMatch, describeClickOffset, reviewerLastNameToken, AUTO_LINK_MAX_BEFORE_MS, AUTO_LINK_NEAR_MS, AUTO_LINK_FAR_MS };

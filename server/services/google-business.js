@@ -711,7 +711,7 @@ class GoogleBusinessService {
           await db('activity_log').insert({
             customer_id: result.match.customerId,
             action: 'review_auto_marked',
-            description: 'Click auto-link — marked "already left a Google review"; review asks stop pending human confirm in Reviews.',
+            description: `Click auto-link (${result.match.rung || 'sole_click'}) — marked "already left a Google review"; review asks stop pending human confirm in Reviews.`,
           });
         } catch { /* audit only */ }
         return result;
@@ -723,10 +723,14 @@ class GoogleBusinessService {
       // match is one glance + one manual re-match away, not silent.
       try {
         const stars = Number(row.star_rating) || 0;
+        const why = {
+          click_name: "the reviewer's last name matches this customer; other clicks in the window were other names",
+          click_near: 'the only click within minutes of the review; the next-nearest click was hours earlier',
+        }[match.rung] || 'only click in the window, same location';
         await NotificationService.notifyAdmin(
           'review',
           `Auto-linked Google review from ${row.reviewer_name || 'Anonymous'}`,
-          `${stars}-star review was linked by click tracking: the customer tapped their review link ${match.clickOffsetLabel} this review posted (only click in the window, same location). Wrong match? Re-match it in Reviews.`,
+          `${stars}-star review was linked by click tracking: the customer tapped their review link ${match.clickOffsetLabel} this review posted (${why}). Wrong match? Re-match it in Reviews.`,
           {
             link: '/admin/reviews',
             metadata: {
@@ -735,12 +739,13 @@ class GoogleBusinessService {
               clickedAt: match.clickedAt,
               clickOffsetLabel: match.clickOffsetLabel,
               reason: 'click_auto_link',
+              rung: match.rung || 'sole_click',
             },
           },
         );
       } catch { /* best-effort — the link itself already stands */ }
       // ID-only logging (AGENTS.md) — reviewer display names are PII.
-      logger.info(`[gbp] Click auto-link: review ${row.google_review_id} → customer ${match.customerId} (${match.clickOffsetLabel})`);
+      logger.info(`[gbp] Click auto-link (${match.rung || 'sole_click'}): review ${row.google_review_id} → customer ${match.customerId} (${match.clickOffsetLabel})`);
       return true;
     } catch (err) {
       logger.warn(`[gbp] Click auto-link failed: ${err.message}`);
