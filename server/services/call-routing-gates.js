@@ -360,6 +360,12 @@ function buildTriageItem({
       requested_specific_service: typeof extraction?.service_request?.specific_service_name === 'string' && extraction.service_request.specific_service_name.trim()
         ? extraction.service_request.specific_service_name.trim()
         : null,
+      // The cadence the caller asked for: a recurring-plan inquiry and a
+      // one-time request both reduce to the same category, and a one-time
+      // booking must never answer the plan ask.
+      requested_service_intent: typeof extraction?.service_request?.service_intent === 'string' && extraction.service_request.service_intent
+        ? extraction.service_request.service_intent
+        : null,
       // Filing-time snapshot of WHERE the caller asked for service, for the
       // same reason: the sweep's same-customer booking arm applies only
       // when the ask named no address or exactly the on-file one.

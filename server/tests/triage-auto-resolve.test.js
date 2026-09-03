@@ -6,6 +6,13 @@
 // gate-off no-op. Fixtures synthetic.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The confirmed-hour reading lazy-loads the processor's wall-clock helper.
+jest.mock('../config/twilio-numbers', () => ({
+  isInternalNumber: jest.fn(() => false),
+  isOwnedNumber: jest.fn(() => false),
+  findByNumber: jest.fn(() => null),
+  getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
+}));
 
 const {
   runTriageAutoResolve,
@@ -510,7 +517,7 @@ describe('evidence helpers', () => {
   test('direct bookings are bound to the address the card asked for: on-file when none was named, the named address otherwise', () => {
     const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
     const base = { call_log_id: 'call-1', call_customer_id: 'cust-1', customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205' };
-    const card = (requested_address) => item({ ...base, reason_code: 'not_confirmed', created_at: FRESH, payload: { scheduling_window: { requested_date_range_start: '2026-07-30', requested_service_categories: ['pest_control'], requested_address } } });
+    const card = (requested_address) => item({ ...base, reason_code: 'not_confirmed', created_at: FRESH, payload: { scheduling_window: { requested_date_range_start: '2026-07-30', requested_service_categories: ['pest_control'], requested_service_intent: 'preventative_one_time', requested_address } } });
     const places = new Map([['p1', { customer_id: 'cust-1', key: '77oakstreet', unit: '', city: 'Bradenton', zip: '34205' }]]);
     const later = new Date(new Date(FRESH).getTime() + 3600 * 1000).toISOString();
     const booking = (over) => ({ id: 'b1', source_call_log_id: 'call-1', parent_service_id: null, status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-07-30', created_at: later, ...over });
@@ -541,6 +548,35 @@ describe('evidence helpers', () => {
     // that moved only the date) does not either.
     expect(bookingCoversRequest(card(none), [{ ...atOnFile, scheduled_date: '2026-08-02' }], { multiProperty: false, places })).toBe(false);
     expect(bookingCoversRequest(card(named), [atOther], { multiProperty: true, places })).toBe(true);
+  });
+
+  test('a CONFIRMED call is answered only by a booking at the confirmed ET hour; a recurring-plan ask only by a recurring series', () => {
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    const base = { call_log_id: 'call-1', call_customer_id: 'cust-1', customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205' };
+    const places = new Map([['p1', { customer_id: 'cust-1', key: '77oakstreet', unit: '', city: 'Bradenton', zip: '34205' }]]);
+    const ctx = { multiProperty: false, places };
+    const later = new Date(new Date(FRESH).getTime() + 3600 * 1000).toISOString();
+    const booking = (over) => ({ id: 'b1', source_call_log_id: 'call-1', parent_service_id: null, status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-07-30', window_start: '10:00:00', created_at: later, service_address_line1: '77 Oak Street', service_address_city: 'Bradenton', service_address_zip: '34205', ...over });
+    const card = (window) => item({ ...base, reason_code: 'caller_not_authorized', created_at: FRESH, payload: { scheduling_window: { requested_service_categories: ['pest_control'], requested_service_intent: 'preventative_one_time', requested_address: none, ...window } } });
+    const confirmed = card({ status: 'confirmed', confirmed_start_at: '2026-07-30T10:00:00-04:00' });
+    expect(bookingCoversRequest(confirmed, [booking({})], ctx)).toBe(true);
+    // Another booking that day at a different hour is not the appointment
+    // the caller confirmed; a row with no window_start cannot prove the hour.
+    expect(bookingCoversRequest(confirmed, [booking({ window_start: '14:00:00' })], ctx)).toBe(false);
+    expect(bookingCoversRequest(confirmed, [booking({ window_start: null })], ctx)).toBe(false);
+    // A UTC-encoded confirmed start is rendered in ET (14:00Z = 10:00 EDT).
+    expect(bookingCoversRequest(card({ status: 'confirmed', confirmed_start_at: '2026-07-30T14:00:00Z' }), [booking({})], ctx)).toBe(true);
+    // A day-only ask binds no hour.
+    expect(bookingCoversRequest(card({ status: 'requested', requested_date_range_start: '2026-07-30' }), [booking({ window_start: '14:00:00' })], ctx)).toBe(true);
+    // Cadence: a recurring-plan ask is not answered by a one-time visit in
+    // the same category, only by a recurring series; a one-time ask is
+    // still answered by a series (it delivers the visit); a snapshot with
+    // no intent at all binds nothing.
+    const plan = card({ requested_date_range_start: '2026-07-30', requested_service_intent: 'recurring_membership_inquiry' });
+    expect(bookingCoversRequest(plan, [booking({})], ctx)).toBe(false);
+    expect(bookingCoversRequest(plan, [booking({ is_recurring: true })], ctx)).toBe(true);
+    expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30' }), [booking({ is_recurring: true })], ctx)).toBe(true);
+    expect(bookingCoversRequest(card({ requested_date_range_start: '2026-07-30', requested_service_intent: undefined }), [booking({})], ctx)).toBe(false);
   });
 
   test('requestedWindow is ET calendar days: confirmed start first, then the requested range, null without either', () => {

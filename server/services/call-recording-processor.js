@@ -16469,4 +16469,11 @@ CallRecordingProcessor.resolveCallBookingPropertyLinkage = resolveCallBookingPro
 // or default can never split "retryable" from "failed" across surfaces.
 CallRecordingProcessor.CALL_EXTRACTION_MAX_ATTEMPTS = CALL_EXTRACTION_MAX_ATTEMPTS;
 
+// Production contract for the TRIAGE AUTO-RESOLVE sweep (NOT test-only): a
+// confirmed card is answered only by a booking at the ET wall-clock hour the
+// call agreed, and the sweep must read that hour with the exact rendering
+// the booking path wrote window_start from — a second implementation of the
+// ET-offset-vs-instant rule would drift from it.
+CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
+
 module.exports = CallRecordingProcessor;

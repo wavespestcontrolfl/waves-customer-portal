@@ -838,8 +838,23 @@ const mintedByCall = (lead, probe) => {
   return Boolean(started && created && !Number.isNaN(started.getTime()) && !Number.isNaN(created.getTime()) && created >= started);
 };
 
-// probes: [{ key, callId, twilioCallSid, callStartedAt, after }] — one per
-// card, with its own boundary. Returns Map key → the EARLIEST qualifying
+// An estimate's owner must agree with the call it is proof for: a relink
+// (admin-call-recordings) moves the call and its call-created lead to the
+// new customer but leaves the estimates behind, so a stamp alone would let
+// customer A's estimate keep a promise made to customer B. An owned
+// estimate must be owned by the call's customer; an unowned one (commercial
+// proposals carry only customer_phone) must carry the caller's number when
+// the call is linked, and contradicts nothing when the call is unlinked too.
+const ownerAgrees = (row, probe) => {
+  if (row.customer_id) return Boolean(probe.customerId) && String(row.customer_id) === String(probe.customerId);
+  if (!probe.customerId) return true;
+  const caller = phoneDigits(probe.phone);
+  return Boolean(caller) && phoneDigits(row.customer_phone) === caller;
+};
+
+// probes: [{ key, callId, twilioCallSid, callStartedAt, customerId, phone,
+// after }] — one per card, with its own boundary and the call's CURRENT
+// customer / caller number. Returns Map key → the EARLIEST qualifying
 // direct proof.
 async function directEstimatesSentAfter(conn, probes) {
   const out = new Map();
@@ -852,12 +867,13 @@ async function directEstimatesSentAfter(conn, probes) {
   }
   const minAfter = new Date(Math.min(...probes.map((p) => new Date(p.after).getTime())));
   const cols = [
-    ...HANDOFF_COLS(conn), "source",
+    ...HANDOFF_COLS(conn), "source", "customer_id", "customer_phone",
     conn.raw("estimate_data #>> '{estimatorEngine,callLogId}' as stamped_call_id"),
     conn.raw("estimate_data ->> 'lead_id' as mirror_lead_id"),
   ];
   const consider = (callId, row, basis) => {
     for (const p of probesByCall.get(String(callId)) || []) {
+      if (!ownerAgrees(row, p)) continue;
       const at = witnessAt(row, new Date(p.after));
       if (!at) continue;
       const cur = out.get(p.key);
@@ -922,7 +938,7 @@ async function resolveFulfillment(conn, commitment, call) {
     case "send_estimate": {
       // Direct: the shared primitive above (estimator stamp; lead FK or
       // public-quote mirror on a lead this call minted).
-      const probe = { key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at, after };
+      const probe = { key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at, customerId, phone, after };
       const direct = (await directEstimatesSentAfter(conn, [probe])).get("call");
       if (direct) return direct;
       // A REUSED earlier call's lead — reached through the lead_id /

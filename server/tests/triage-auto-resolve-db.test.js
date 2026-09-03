@@ -56,7 +56,9 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     await db.destroy();
   });
 
-  async function seedCall(sid, { cardAgeMin, bookingAgeMin, bookingStatus = 'confirmed', bookingDayOffset = 2, categories = ['pest_control'] }) {
+  // confirmedHour: the card's snapshot CONFIRMED that ET hour on the
+  // requested day; bookingWindowStart / recurringBooking shape the booking.
+  async function seedCall(sid, { cardAgeMin, bookingAgeMin, bookingStatus = 'confirmed', bookingDayOffset = 2, categories = ['pest_control'], intent = 'preventative_one_time', confirmedHour = null, bookingWindowStart = null, recurringBooking = false }) {
     const { customerId, propertyId } = await seedCustomer(sid.slice(-2));
     const callAt = new Date(Date.now() - (cardAgeMin + 5) * 60000);
     const [call] = await db('call_log').insert({
@@ -71,11 +73,17 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const [card] = await db('triage_items').insert({
       call_log_id: call.id, category: 'time_ambiguous', severity: 'blocking', reason_code: 'not_confirmed',
       status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
-      payload: JSON.stringify({ flag: 'not_confirmed', scheduling_window: { status: 'requested', requested_date_range_start: requestedDay, requested_service_categories: categories, requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 } } }),
+      payload: JSON.stringify({ flag: 'not_confirmed', scheduling_window: {
+        status: confirmedHour ? 'confirmed' : 'requested',
+        confirmed_start_at: confirmedHour ? `${requestedDay}T${confirmedHour}:00:00-04:00` : null,
+        requested_date_range_start: requestedDay, requested_service_categories: categories, requested_service_intent: intent,
+        requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 },
+      } }),
     }).returning('id');
     const [visit] = await db('scheduled_services').insert({
       customer_id: customerId, property_id: propertyId, service_type: 'Quarterly Pest Control', status: bookingStatus,
       scheduled_date: new Date(Date.now() + bookingDayOffset * 86400000).toISOString().slice(0, 10),
+      window_start: bookingWindowStart, is_recurring: recurringBooking,
       created_at: new Date(Date.now() - bookingAgeMin * 60000),
     }).returning('id');
     ids.visits.push(visit.id);
@@ -84,8 +92,11 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
 
   // quote_promised: a card + an estimate stamped with the call's id
   // (estimator provenance), sent at the given age.
-  async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin, deliveredAgeMin = estimateAgeMin }) {
+  // estimateOwner 'other': the stamped estimate belongs to a different
+  // customer (the shape a relink leaves behind).
+  async function seedQuoteCall(sid, { cardAgeMin, estimateAgeMin, deliveredAgeMin = estimateAgeMin, estimateOwner = 'call' }) {
     const { customerId } = await seedCustomer(sid.slice(-2));
+    const ownerId = estimateOwner === 'other' ? (await seedCustomer(`${sid.slice(-2)}x`)).customerId : customerId;
     const callAt = new Date(Date.now() - (cardAgeMin + 5) * 60000);
     const [call] = await db('call_log').insert({
       twilio_call_sid: sid, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
@@ -100,7 +111,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
       payload: JSON.stringify({ flag: 'quote_promised' }),
     }).returning('id');
     const [est] = await db('estimates').insert({
-      customer_id: customerId, status: 'sent', sent_at: new Date(Date.now() - estimateAgeMin * 60000),
+      customer_id: ownerId, status: 'sent', sent_at: new Date(Date.now() - estimateAgeMin * 60000),
       estimate_data: JSON.stringify({
         estimatorEngine: { callLogId: String(call.id) },
         ...(deliveredAgeMin === null ? {} : { deliveryState: { lastDeliveredAt: new Date(Date.now() - deliveredAgeMin * 60000).toISOString() } }),
@@ -149,10 +160,11 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     expect(open.status).toBe('open');
   });
 
-  test('quote_promised resolves on a call-stamped estimate DELIVERED after the card — not one sent before it, nor a suppressed send', async () => {
+  test('quote_promised resolves on a call-stamped estimate DELIVERED after the card — not one sent before it, a suppressed send, or another customer\'s estimate', async () => {
     const fresh = await seedQuoteCall(SID.replace(/e2$/, 'q1'), { cardAgeMin: 60, estimateAgeMin: 10 });
     const stale = await seedQuoteCall(SID.replace(/e2$/, 'q2'), { cardAgeMin: 10, estimateAgeMin: 60 });
     const suppressed = await seedQuoteCall(SID.replace(/e2$/, 'q3'), { cardAgeMin: 60, estimateAgeMin: 10, deliveredAgeMin: null });
+    const foreign = await seedQuoteCall(SID.replace(/e2$/, 'q4'), { cardAgeMin: 60, estimateAgeMin: 10, estimateOwner: 'other' });
     const result = await sweep.runTriageAutoResolve({ now: new Date() });
     expect(result.skipped).toBe(false);
     const closed = await db('triage_items').where({ id: fresh.cardId }).first();
@@ -163,6 +175,26 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     expect(open.status).toBe('open');
     const suppressedCard = await db('triage_items').where({ id: suppressed.cardId }).first();
     expect(suppressedCard.status).toBe('open');
+    // Stamped with this call but owned by another customer (a relink moved
+    // the call, not the estimate): not this customer's proof.
+    const foreignCard = await db('triage_items').where({ id: foreign.cardId }).first();
+    expect(foreignCard.status).toBe('open');
+  });
+
+  test('a CONFIRMED call closes only on a booking at the confirmed hour; a recurring-plan ask only on a recurring series', async () => {
+    const atHour = await seedCall(SID.replace(/e2$/, 'h1'), { cardAgeMin: 60, bookingAgeMin: 10, confirmedHour: '10', bookingWindowStart: '10:00:00' });
+    const offHour = await seedCall(SID.replace(/e2$/, 'h2'), { cardAgeMin: 60, bookingAgeMin: 10, confirmedHour: '10', bookingWindowStart: '14:00:00' });
+    const noHour = await seedCall(SID.replace(/e2$/, 'h3'), { cardAgeMin: 60, bookingAgeMin: 10, confirmedHour: '10' });
+    const planOneTime = await seedCall(SID.replace(/e2$/, 'h4'), { cardAgeMin: 60, bookingAgeMin: 10, intent: 'recurring_membership_inquiry' });
+    const planSeries = await seedCall(SID.replace(/e2$/, 'h5'), { cardAgeMin: 60, bookingAgeMin: 10, intent: 'recurring_membership_inquiry', recurringBooking: true });
+    const result = await sweep.runTriageAutoResolve({ now: new Date() });
+    expect(result.skipped).toBe(false);
+    const statusOf = async (c) => (await db('triage_items').where({ id: c.cardId }).first('status')).status;
+    expect(await statusOf(atHour)).toBe('resolved');
+    expect(await statusOf(offHour)).toBe('open');
+    expect(await statusOf(noHour)).toBe('open');
+    expect(await statusOf(planOneTime)).toBe('open');
+    expect(await statusOf(planSeries)).toBe('resolved');
   });
 
   test('booking after the card on the requested day resolves it as auto; a pre-card, skipped, or off-day booking leaves it open', async () => {

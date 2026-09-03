@@ -520,6 +520,19 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       ]);
       expect(out.get('a')).toMatchObject({ record_id: est.id, strength: 'direct' });
       expect(out.get('b')).toMatchObject({ record_id: est.id, strength: 'direct' });
+      // Owned by a customer neither (unlinked) call is linked to — the shape
+      // a relink leaves behind — it is no longer either call's proof; the
+      // call's own customer keeps it.
+      const [stranger] = await db('customers').insert({ first_name: 'Stranger', phone: '+15555550199' }).returning('id');
+      cleanup.customerIds.push(stranger.id);
+      await db('estimates').where({ id: est.id }).update({ customer_id: stranger.id });
+      const probes = [
+        { key: 'a', callId: call.id, twilioCallSid: SID, callStartedAt: call.created_at, after },
+        { key: 'b', callId: call2.id, twilioCallSid: sid2, callStartedAt: call.created_at, customerId: stranger.id, after },
+      ];
+      const owned = await cc.directEstimatesSentAfter(db, probes);
+      expect(owned.get('a')).toBeUndefined();
+      expect(owned.get('b')).toMatchObject({ record_id: est.id, strength: 'direct' });
     } finally {
       await db('leads').whereIn('id', [leadA.id, leadB.id]).del();
       await db('estimates').where({ id: est.id }).del();

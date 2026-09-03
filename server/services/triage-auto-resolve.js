@@ -366,6 +366,31 @@ function serviceTypeMatches(serviceText, requestedTokens) {
   return requestedTokens.every((t) => words.has(t));
 }
 
+// The ET wall-clock start ('HH:MM') the call CONFIRMED, from the card's
+// snapshot — null when the snapshot carries no clock time. The same reading
+// the processor books window_start from (v2IsoToEtWallClock: an ET offset is
+// the agreed wall clock verbatim, any other encoding is an instant rendered
+// in ET), so the hour compares to what that booking path wrote.
+function confirmedWallClock(item) {
+  const raw = parseMaybeJson(item.payload)?.scheduling_window?.confirmed_start_at;
+  if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)) return null;
+  const { v2IsoToEtWallClock } = require('./call-recording-processor');
+  const wall = v2IsoToEtWallClock(raw);
+  return wall ? wall.slice(11, 16) : null;
+}
+
+// Does a booking's cadence answer the card's snapshotted service intent? A
+// recurring-plan ask is answered only by a recurring series — a one-time
+// visit in the same category is not the plan the caller asked for. Every
+// other intent is answered by any booking (a series still delivers the
+// one-time visit). A snapshot without the intent binds nothing: fail closed.
+const RECURRING_INTENT = 'recurring_membership_inquiry';
+function cadenceMatches(item, visit) {
+  const intent = parseMaybeJson(item.payload)?.scheduling_window?.requested_service_intent;
+  if (intent == null) return false;
+  return intent !== RECURRING_INTENT || visit.is_recurring === true;
+}
+
 // The calendar days (ET, YYYY-MM-DD) the caller asked for, from the card's
 // scheduling payload. Inclusive; a single requested date is a one-day window.
 function requestedWindow(item) {
@@ -773,7 +798,10 @@ const cardBoundary = (item) => new Date(Math.max(
 // quote_promised → an estimate DIRECTLY linked to this call, delivered
 // after the CARD (call-commitments' batched direct routes — three queries
 // for the whole backlog, each card its own boundary; association-strength
-// matches — same customer, unlinked — are ignored on purpose).
+// matches — same customer, unlinked — are ignored on purpose). The proof
+// must also belong to the call's CURRENT customer (or, unowned, carry the
+// caller's number): a relink moves the call and its lead but not the
+// estimates, and the old customer's estimate proves nothing to the new one.
 async function loadEstimateEvidence(conn, items, flag) {
   const quoteItems = items.filter((i) => i.reason_code === 'quote_promised');
   if (!quoteItems.length) return;
@@ -784,6 +812,8 @@ async function loadEstimateEvidence(conn, items, flag) {
       callId: item.call_log_id,
       twilioCallSid: item.call_twilio_call_sid,
       callStartedAt: item.call_created_at,
+      customerId: item.call_customer_id || null,
+      phone: callerPhone(item),
       after: cardBoundary(item),
     })));
     for (const item of quoteItems) {
@@ -799,7 +829,7 @@ async function loadEstimateEvidence(conn, items, flag) {
 // delivery alone only proves some mailbox exists) with a message SENT
 // after the card (an older message opened later proves nothing about
 // this call's capture), and never bounced/complained.
-async function loadEmailEvidence(conn, items, flag, { lock = false } = {}) {
+async function loadEmailEvidence(conn, items, flag) {
   // Bound to the CUSTOMER the call is linked to: an address can be
   // duplicated across customers (or used by a test send), and another
   // recipient's open answers nothing about this caller's read-back. A card
@@ -808,11 +838,7 @@ async function loadEmailEvidence(conn, items, flag, { lock = false } = {}) {
   const emailsByItem = new Map(emailItems.map((i) => [i.id, capturedEmails(i)]));
   const allEmails = [...new Set([...emailsByItem.values()].flat())];
   if (!allEmails.length) return;
-  // Under the apply transaction the qualifying message rows are held until
-  // commit: a delayed hard-bounce landing in the gap blocks behind us and
-  // the next sweep sees the bounce, instead of the card closing and the
-  // first-touch ledger releasing the hold to a bounced address.
-  const q = conn('email_messages')
+  const rows = await conn('email_messages')
     .where('recipient_type', 'customer')
     .whereIn('recipient_id', [...new Set(emailItems.map((i) => String(i.call_customer_id)))])
     .whereRaw('LOWER(recipient_email_snapshot) IN (' + allEmails.map(() => '?').join(', ') + ')', allEmails)
@@ -825,8 +851,6 @@ async function loadEmailEvidence(conn, items, flag, { lock = false } = {}) {
     })
     .orderBy('id', 'asc')
     .select('recipient_id', 'recipient_email_snapshot', 'sent_at', 'opened_at', 'clicked_at');
-  if (lock) q.forUpdate();
-  const rows = await q;
   for (const item of emailItems) {
     const mine = new Set(emailsByItem.get(item.id));
     const hit = rows.some((r) => String(r.recipient_id) === String(item.call_customer_id)
@@ -906,26 +930,30 @@ function bookingCoversRequest(item, mine, { multiProperty, places }) {
   const parents = mine.filter((v) => !v.parent_service_id && strictlyAfter(v.created_at, item.created_at));
   // The requested days bind every booking, this call's own included — a
   // reprocess that moved only the date and minted a new booking must not
-  // close the original ask. A card that asked for no date binds none.
+  // close the original ask. A card that asked for no date binds none. A
+  // CONFIRMED call binds the agreed hour too, not merely its day: another
+  // booking that afternoon is not the appointment the caller confirmed,
+  // and a row with no window_start cannot prove the hour.
   const window = requestedWindow(item);
-  const inWindow = (v) => {
+  const hour = confirmedWallClock(item);
+  const inAsk = (v) => {
+    if (!cadenceMatches(item, v)) return false;
+    if (hour && String(v.window_start || '').slice(0, 5) !== hour) return false;
     if (!window) return true;
     if (!toDate(v.scheduled_date)) return false;
     const day = etCalendarDayOf(v.scheduled_date);
     return day >= window.start && day <= window.end;
   };
-  const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && inWindow(v) && bookingAtRequestedAddress(item, v, places));
+  const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && inAsk(v) && bookingAtRequestedAddress(item, v, places));
   let pool = direct;
   if (!multiProperty && requestedAddressIsOnFile(item) && window) {
-    pool = pool.concat(parents.filter((v) => inWindow(v) && visitAtOnFileAddress(item, v, places)));
+    pool = pool.concat(parents.filter((v) => inAsk(v) && visitAtOnFileAddress(item, v, places)));
   }
   return categories.every((tokens) => pool.some((v) => serviceTypeMatches(`${v.service_type || ''} ${v.service_category_snapshot || ''}`, tokens)));
 }
 
-// Bookings and completed visits for the not_confirmed / address arms. With
-// `lock`, the scheduled_services rows are held FOR UPDATE until commit,
-// the same contract loadBookedCallIds applies.
-async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
+// Bookings and completed visits for the not_confirmed / address arms.
+async function loadVisitEvidence(conn, items, flag) {
   // not_confirmed cards, address cards, and every card whose call CONFIRMED
   // an appointment (the confirmed-unbooked guard is answered only by a
   // booking matching the card's snapshotted ask).
@@ -936,16 +964,11 @@ async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
   // ACTIVE rows only — the uniqueness customer-properties'
   // soleActivePropertyId defines; an inactive historical duplicate does
   // not make an account multi-property.
-  // Held under the apply transaction like the visit rows: the property
-  // count and address keys decide both arms, and a property writer takes
-  // no triage lock — a row added or edited in the gap lands after us.
-  const propQ = conn('customer_properties')
+  const propRows = await conn('customer_properties')
     .whereIn('customer_id', customerIds)
     .where('active', true)
     .orderBy('id', 'asc')
     .select('id', 'customer_id', 'address_line1', 'address_line2', 'city', 'zip');
-  if (lock) propQ.forUpdate();
-  const propRows = await propQ;
   const places = new Map();
   const activeCount = new Map();
   for (const r of propRows) {
@@ -958,14 +981,12 @@ async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
   // or did happen. cancelled / rescheduled / skipped / no_show rows prove
   // nothing. Children stay in: a completed follow-up child IS a visit at
   // the address (the booking arm filters parents itself).
-  const q = conn('scheduled_services')
+  const visits = await conn('scheduled_services')
     .whereIn('customer_id', customerIds)
     .whereIn('status', [...LIVE_BOOKING_STATUSES])
     .orderBy('id', 'asc')
     .select('id', 'customer_id', 'source_call_log_id', 'parent_service_id', 'status', 'service_type', 'service_category_snapshot', 'scheduled_date',
-      'created_at', 'completed_at', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip', 'property_id');
-  if (lock) q.forUpdate();
-  const visits = await q;
+      'window_start', 'is_recurring', 'created_at', 'completed_at', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip', 'property_id');
   // Indexed once — the backlog is cards × a customer's own visits, not
   // cards × every fetched visit.
   const visitsByCustomer = new Map();
@@ -995,7 +1016,7 @@ async function loadVisitEvidence(conn, items, flag, { lock = false } = {}) {
 
 // Per-item proof map for the evidence rules — the four arms above over the
 // open evidence-coded cards. Empty when the evidence gate is off.
-async function loadEvidence(conn, items, { lock = false } = {}) {
+async function loadEvidence(conn, items) {
   const evidence = new Map();
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('triageAutoResolveEvidence')) return evidence;
@@ -1007,9 +1028,9 @@ async function loadEvidence(conn, items, { lock = false } = {}) {
     evidence.set(id, cur);
   };
   await loadEstimateEvidence(conn, candidates, flag);
-  await loadEmailEvidence(conn, candidates, flag, { lock });
+  await loadEmailEvidence(conn, candidates, flag);
   await loadContactEvidence(conn, candidates, flag);
-  await loadVisitEvidence(conn, candidates, flag, { lock });
+  await loadVisitEvidence(conn, candidates, flag);
   return evidence;
 }
 
@@ -1019,20 +1040,15 @@ async function sweep({ now = new Date() } = {}) {
   // Booking provenance (live source-linked rows only — the canonical
   // lookup's predicates: no cancelled/rescheduled rows, no follow-up
   // children) feeds the confirmed-unbooked address guard.
-  const loadBookedCallIds = async (conn, callIds, { lock = false } = {}) => {
+  const loadBookedCallIds = async (conn, callIds) => {
     const set = new Set();
     if (!callIds.length) return set;
-    const q = conn('scheduled_services')
+    const booked = await conn('scheduled_services')
       .whereIn('source_call_log_id', callIds)
       .whereNull('parent_service_id')
       .whereNotIn('status', ['cancelled', 'rescheduled'])
       .orderBy('id', 'asc')
       .select('source_call_log_id');
-    // Under the apply transaction the qualifying booking rows are HELD until
-    // commit — a scheduling writer cancelling one blocks and lands after us,
-    // where the booking-miss watchdog picks up the newly-unbooked state.
-    if (lock) q.forUpdate();
-    const booked = await q;
     for (const b of booked) set.add(b.source_call_log_id);
     return set;
   };
@@ -1062,28 +1078,28 @@ async function sweep({ now = new Date() } = {}) {
   let callsSynced = 0;
   const itemCallById = new Map(applied.map((d) => [d.item.id, d.item.call_log_id]));
   await db.transaction(async (trx) => {
-    // Lock ORDER: customer rows FIRST, then the per-call advisory locks,
-    // then the row pre-locks — the same order property-role staging and
-    // the Customer 360 save use (customer row, then lockTriageCall), so the
-    // sweep can never sit on a call lock waiting for a customer row a
-    // staging worker holds while it waits for our call lock. The customer
-    // rows are held because the contact arm's phone-slot check and the
-    // address/surname guards read them and contact saves take no triage
-    // lock — a removal committing in the gap blocks behind us instead of
-    // the card closing on a number no longer on file. The call→customer
-    // link can move in the gap; a fresh row naming a customer we do not
-    // hold is dropped (fails closed to the next sweep) rather than locked
-    // out of order.
-    const lockedCustomers = new Set(applied.map((d) => d.item.call_customer_id).filter(Boolean).map(String));
-    if (lockedCustomers.size) {
-      await trx('customers').whereIn('id', [...lockedCustomers].sort()).orderBy('id', 'asc').forUpdate().select('id');
-    }
-    // Per-call ADVISORY locks next (sorted), then the row pre-locks — the
-    // shared lockTriageCall contract with admin-triage's transitionCore and
-    // verdict writers. Ordering our own row locks was not enough: the admin
-    // verdict's bulk UPDATE acquires siblings in planner order, so only a
-    // common per-call lock taken by BOTH writers before any card write
-    // removes the deadlock and the interleaved-count aggregate race.
+    // Per-call ADVISORY locks first (sorted), then the triage-row pre-locks
+    // — the shared lockTriageCall contract with admin-triage's
+    // transitionCore and verdict writers. Ordering our own row locks was
+    // not enough: the admin verdict's bulk UPDATE acquires siblings in
+    // planner order, so only a common per-call lock taken by BOTH writers
+    // before any card write removes the deadlock and the interleaved-count
+    // aggregate race.
+    //
+    // NO other row class is held. The evidence rows (customers, properties,
+    // email_messages, scheduled_services, call_log) are re-read fresh below
+    // but never FOR UPDATE: there is no verified global lock order across
+    // the schedule and customer routes (property-role staging takes
+    // customer → call; the on-site prepay switch takes visit → customer),
+    // and every row class this sweep once held produced a new AB-BA
+    // deadlock against an existing writer (#3811 r9, r12). The ACCEPTED
+    // race is the gap between that fresh re-read and the CAS write, inside
+    // one nightly job: a contact removal, property edit, bounce,
+    // cancellation, or relink committing in those milliseconds is not
+    // seen, and its worst case is one card closed as 'auto' that a human
+    // would have kept — visible on the Resolved tab's Auto-closed filter
+    // and reversible by reopening the card. Do not re-add row locks here
+    // without a verified global order.
     const allCallIds = [...new Set(applied.map((d) => d.item.call_log_id))].sort();
     for (const callLogId of allCallIds) {
       await lockTriageCall(trx, callLogId);
@@ -1094,28 +1110,17 @@ async function sweep({ now = new Date() } = {}) {
         .orderBy('id', 'asc')
         .forUpdate()
         .select('id');
-      // The call rows too: the admin relink route moves call_log.customer_id
-      // (holding the target customer, never lockTriageCall), and the fresh
-      // reload below must read the link this transaction will commit
-      // against — not one that changes between the read and the write.
-      await trx('call_log')
-        .whereIn('id', allCallIds)
-        .orderBy('id', 'asc')
-        .forUpdate()
-        .select('id');
     }
-    // Re-verify every decision UNDER the locks from FRESH evidence — the
-    // pre-lock classification is a candidate list, not a verdict. Both the
+    // Re-verify every decision UNDER the call locks from FRESH evidence —
+    // the pre-lock classification is a candidate list, not a verdict. The
     // joined card/call/customer rows (a customer soft-deleted, demoted, or
-    // stripped of the address/surname in the gap must re-arm its guards)
-    // and booking provenance (rows held FOR UPDATE until commit, so
-    // scheduling writers serialize behind us) are reloaded inside the
-    // transaction.
-    const freshRows = (await loadCandidateItems(trx, applied.map((d) => d.item.id)))
-      .filter((r) => !r.call_customer_id || lockedCustomers.has(String(r.call_customer_id)));
+    // stripped of the address/surname since the scan must re-arm its
+    // guards), booking provenance, and the evidence arms are all reloaded
+    // inside the transaction.
+    const freshRows = await loadCandidateItems(trx, applied.map((d) => d.item.id));
     const freshById = new Map(freshRows.map((r) => [r.id, r]));
-    const freshBookedCallIds = await loadBookedCallIds(trx, allCallIds, { lock: true });
-    const freshEvidence = await loadEvidence(trx, freshRows, { lock: true });
+    const freshBookedCallIds = await loadBookedCallIds(trx, allCallIds);
+    const freshEvidence = await loadEvidence(trx, freshRows);
     const reverified = applied.filter((d) => {
       const fresh = freshById.get(d.item.id);
       if (!fresh) return false; // no longer open — lost the race
