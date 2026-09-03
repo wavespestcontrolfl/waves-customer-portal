@@ -6099,6 +6099,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             if (retryResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
             if (await linkCreatedRowsToEstimate()) {
               await retireRodentSetupStampAfterAcceptance(retryResult);
+              await stampCreatedRowsFromEstimateProperty();
             } else {
               logger.error(`[schedule] FIX: estimate ${linkedEstimateId} accepted (overlap fallback) but the appointment link could not be written — setup stamp KEPT as provenance; relink the series and retire the stamp (or it double-bills at first completion)`);
             }

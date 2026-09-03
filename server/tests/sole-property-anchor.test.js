@@ -136,6 +136,11 @@ describe('every spawned-row writer anchors the sole property', () => {
     // scoped to the created rows.
     expect(src).toContain('if (await linkCreatedRowsToEstimate()) {\n          await retireRodentSetupStampAfterAcceptance(acceptResult);\n          await stampCreatedRowsFromEstimateProperty();');
     expect(src).toContain(".update({ source_estimate_id: linkedEstimateId });\n        await stampCreatedRowsFromEstimateProperty();");
+    // The annual-prepay overlap fallback links the same rows (pre-push r6 P1).
+    expect(src).toContain('if (await linkCreatedRowsToEstimate()) {\n              await retireRodentSetupStampAfterAcceptance(retryResult);\n              await stampCreatedRowsFromEstimateProperty();');
+    // Every durable link is followed by the stamp.
+    const links = src.match(/if \(await linkCreatedRowsToEstimate\(\)\) \{\n\s*await retireRodentSetupStampAfterAcceptance\(\w+\);\n\s*await stampCreatedRowsFromEstimateProperty\(\);/g) || [];
+    expect(links.length).toBe((src.match(/await linkCreatedRowsToEstimate\(\)/g) || []).length);
     expect(src).toMatch(/linkAcceptedEstimateProperty\(\{\s*estimateId: linkedEstimateId,\s*customerId,\s*onlyServiceIds: createdAppointments\.map\(\(a\) => a\.id\),/);
   });
 });
