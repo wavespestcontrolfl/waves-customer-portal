@@ -213,6 +213,7 @@ describe('convertCallLeadOnPhoneBooking', () => {
       active: true,
       churned_at: null,
       churn_reason: null,
+      churn_episode_id: null,
     });
     // A lead's intake member_since is overwritten with today's ET date.
     expect(custUpdate.payload.member_since).toMatch(/^\d{4}-\d{2}-\d{2}$/);
@@ -245,6 +246,7 @@ describe('convertCallLeadOnPhoneBooking', () => {
       member_since: '2024-05-01',
       active: true,
       churned_at: null,
+      churn_episode_id: null,
     });
   });
 
