@@ -23,13 +23,14 @@ export const movesOnEnv = (lane) => lane.lock?.kind !== "registration";
 
 // Catalog entry for a model picked through live search / the newest list.
 // Keeps whatever the catalog already knew (caps, deep-only); a fresh find is
-// offered only for the modality it was found for.
+// offered only for the modality (or, for a migration set, the modalities) it
+// was found for.
 export function discoveredEntry(model, prior, cap) {
   return {
     ...(prior || {}),
     label: model.label || model.id,
     provider: model.provider,
-    caps: prior?.caps?.length ? prior.caps : [cap || "text"],
+    caps: prior?.caps?.length ? prior.caps : [].concat(cap || "text"),
     status: "current",
     discovered: !prior || !!prior.discovered,
     ...(model.requiresDeep || prior?.requires === "deep" ? { requires: "deep" } : {}),
@@ -144,16 +145,22 @@ export function computeChanges({ data, draft, selectorDraft }) {
       const unpin = next === UNPIN;
       const sharing = data.lanes.filter((x) => legsOf(x).some((g) => g.pinEnv === env));
       const legOf = (x) => legsOf(x).find((g) => g.pinEnv === env);
-      // Unpinning a shared env can land its lanes on different models.
+      // Unpinning a shared env can land its lanes on different models — and
+      // an UNSET shared env's lanes may sit on different models today (one on
+      // its selector, one on a literal default), so setting it moves them all.
       const destinations = unpin ? [...new Set(sharing.map((x) => baseAfterDraft(legOf(x))))] : [next];
+      const sources = [...new Set(sharing.map((x) => legOf(x).model))];
       if (!unpin && sharing.every((x) => next === baseAfterDraft(legOf(x)) && !legOf(x).pinned)) continue;
-      const hold = !unpin && !leg.pinned && next === leg.model;
+      // A hold keeps EVERY follower where it is; if any sharing lane sits on a
+      // different model today, setting the env moves that lane.
+      const hold = !unpin && sharing.every((x) => !legOf(x).pinned && next === legOf(x).model);
       const label = hold
         ? `${l.name} held at its current model (locked; it would otherwise follow ${leg.selector})`
         : sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.primary ? "" : " · backup"}`;
       byEnv.set(env, {
         env,
         from: leg.model,
+        sources,
         to: destinations[0],
         destinations,
         unpin,
@@ -173,6 +180,7 @@ export function computeChanges({ data, draft, selectorDraft }) {
 }
 
 export const destinationLabel = (change, catalog) => (change.destinations || [change.to]).map((id) => modelLabel(catalog, id)).join(" / ");
+export const sourceLabel = (change, catalog) => (change.sources || [change.from]).map((id) => modelLabel(catalog, id)).join(" / ");
 
 // Unpins are deletions: Railway has no "unset" syntax, so the line is an
 // instruction rather than an assignment.
@@ -225,12 +233,19 @@ export function buildMigrationSet({ data, catalog, fromId, toId }) {
       if (GROUP_RANK[g] > GROUP_RANK[group]) group = g;
       if (g !== "eligible") reasons.add(why);
     }
+    // An UNSET shared env whose other followers sit on a different default:
+    // setting it moves them too, so the owner reviews it — never a bulk move.
+    if (entry.collateral?.length) {
+      if (GROUP_RANK.approval > GROUP_RANK[group]) group = "approval";
+      reasons.add(`also moves ${entry.collateral.map((c) => c.lane.name).join(", ")} off ${[...new Set(entry.collateral.map((c) => modelLabel(catalog, c.model)))].join(", ")}`);
+    }
     const bad = toId ? incompatibility(entry.accepts, target) : null;
     if (bad) {
       group = "blocked";
       reasons.add(bad);
     }
-    groups[group].push({ ...entry, reasons: [...reasons] });
+    const { collateral, ...rest } = entry;
+    groups[group].push({ ...rest, reasons: [...reasons] });
   };
   const seen = new Set();
   for (const s of data.selectors || []) {
@@ -245,6 +260,14 @@ export function buildMigrationSet({ data, catalog, fromId, toId }) {
     }
     push({ env: s.env, kind: "selector", label: `${s.key} selector`, lanes, accepts: s.accepts });
   }
+  // A leg the code hardcodes (no env, no selector) cannot move at all — it is
+  // listed as blocked so "everything on X" really is everything.
+  for (const l of data.lanes) {
+    for (const leg of legsOf(l)) {
+      if (leg.model !== fromId || leg.pinEnv || leg.selector) continue;
+      groups.blocked.push({ env: null, kind: "fixed", label: `${l.name}${leg === l.primary ? "" : " · backup"}`, lanes: [l], accepts: leg.accepts, reasons: ["fixed in code"] });
+    }
+  }
   // Per-lane envs: set pins, plus unset envs whose code default is the source
   // (LAWN_WRITER_MODEL unset → gpt-5.5 still moves by setting it). An unset
   // env over a SELECTOR is not listed — that leg moves through its selector.
@@ -255,13 +278,14 @@ export function buildMigrationSet({ data, catalog, fromId, toId }) {
       if (!leg.pinned && leg.selector) continue;
       seen.add(leg.pinEnv);
       const lanes = data.lanes.filter((x) => legsOf(x).some((g) => g.pinEnv === leg.pinEnv));
+      const collateral = lanes.flatMap((x) => legsOf(x).filter((g) => g.pinEnv === leg.pinEnv && g.model !== fromId).map((g) => ({ lane: x, model: g.model })));
       const label = lanes.length > 1 ? `${lanes.length} lanes on one pin` : `${l.name}${leg === l.primary ? "" : " · backup"}`;
       // A pin that belongs to a locked lane is the lock itself.
       if (lanes.every((x) => x.lock)) {
         groups.blocked.push({ env: leg.pinEnv, kind: "pin", label, lanes, accepts: leg.accepts, reasons: [l.lock?.label || "locked"] });
         continue;
       }
-      push({ env: leg.pinEnv, kind: "pin", label, lanes, accepts: leg.accepts });
+      push({ env: leg.pinEnv, kind: "pin", label, lanes, accepts: leg.accepts, collateral });
     }
   }
   return groups;

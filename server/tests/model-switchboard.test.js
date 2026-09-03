@@ -122,6 +122,10 @@ describe('model-switchboard', () => {
     expect(lanes.find((l) => l.id === 'sms_canary_save_sale').primary.model).toBe(MODELS.ROUTES.smsDraftSaveSale.model);
     // lead triage maps the JSON without validating it → nothing catches a regression.
     expect(lanes.find((l) => l.id === 'lead_triage').continuity).toBe('unchecked');
+    // The fact-check gate passes `{}` (missing findings = none), so nothing deterministic catches a regression.
+    expect(lanes.find((l) => l.id === 'fact_check_gate').continuity).toBe('unchecked');
+    // turf-height-ocr.js reconciles the consensus against the tech's manual reading and parks divergences as `discrepancy`.
+    expect(turf.continuity).toBe('verified');
   });
 
   it('reflects an env override as the running model and as a pin', () => {
@@ -195,6 +199,13 @@ describe('model-switchboard', () => {
     expect(sat.also.map((a) => a.pinEnv)).toEqual(['OPENAI_VISION_MODEL']);
     expect(sat.also[0].provider).toBe('openai');
     expect(lanes.find((l) => l.id === 'property_trio').also[0].pinEnv).toBe('OPENAI_PROPERTY_MODEL');
+    // The caption read and the treatment-zone map are sequential ladders in
+    // execution order (Gemini → prior Gemini → Claude), not fan-outs.
+    for (const id of ['tech_caption_vision', 'treatment_zone']) {
+      const ladder = lanes.find((l) => l.id === id);
+      expect({ id, fanout: ladder.fanout, primary: ladder.primary.provider, fallback: ladder.fallback.selector, retry: ladder.retry.selector })
+        .toEqual({ id, fanout: false, primary: 'gemini', fallback: 'GEMINI_VISION_FALLBACK', retry: 'VISION' });
+    }
   });
 
   it('an uncatalogued Fable id configured through env keeps the deep-only restriction', () => {
@@ -231,6 +242,25 @@ describe('model-switchboard', () => {
     }
   });
 
+  it('the image lane resolves BLOG_IMAGE_PROVIDER as a chain: first valid slug, literal when none is valid', () => {
+    const prev = process.env.BLOG_IMAGE_PROVIDER;
+    try {
+      process.env.BLOG_IMAGE_PROVIDER = 'gemini-image-best, gpt-image-2';
+      jest.resetModules();
+      let lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
+      expect(lane.primary.model).toBe(MODELS.GEMINI_IMAGE_BEST);
+      expect(lane.primary.provider).toBe('gemini');
+      expect(lane.primary.setEnv).toBe('BLOG_IMAGE_PROVIDER');
+
+      process.env.BLOG_IMAGE_PROVIDER = 'not-a-provider';
+      jest.resetModules();
+      lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
+      expect(lane.primary.model).toBe('gpt-image-2');
+    } finally {
+      if (prev === undefined) delete process.env.BLOG_IMAGE_PROVIDER; else process.env.BLOG_IMAGE_PROVIDER = prev;
+    }
+  });
+
   it('locks the lanes a generic picker must not move', () => {
     const { lanes, selectors } = sb.getSwitchboard();
     for (const id of ['call_extraction', 'transcription', 'embeddings', 'image_gen', 'mentions_prober']) {
@@ -255,6 +285,11 @@ describe('model-switchboard', () => {
     // FLAGSHIP feeds image payloads (satellite, property lookup v2): the
     // picker must require vision, so a text-only find cannot be drafted.
     expect(selectors.find((s) => s.key === 'FLAGSHIP').accepts.cap).toBe('vision');
+    // OPENAI_BALANCED is the OpenAI leg of ROUTES.visionAnalysis (vision-delta, admin dispatch send images).
+    expect(selectors.find((s) => s.key === 'OPENAI_BALANCED').accepts.cap).toBe('vision');
+    // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity — two lanes, two backups.
+    expect(lanes.find((l) => l.id === 'response_drafter').fallback.model).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback.model);
+    expect(lanes.find((l) => l.id === 'response_drafter_high_stakes').fallback.model).toBe(MODELS.TEXT_POLICIES.highStakes.fallback.model);
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
     expect(deepSafe).toEqual(['DEEP', 'EXTREME']);
     for (const id of Object.keys(sb.MODEL_CATALOG).filter((k) => /fable|mythos/.test(k))) {

@@ -6,7 +6,7 @@ import { useHubParams } from "./agents/hubParams";
 import LaneModelCard from "./agents/LaneModelCard";
 import MigrationSetDialog from "./agents/MigrationSetDialog";
 import PickModelDialog from "./agents/PickModelDialog";
-import { UNPIN, computeChanges, destinationLabel, discoveredEntry, effectiveLegFor, envBlockOf, envForLeg as envForLegIn, holdsFor, legsOf, modelLabel, movesOnEnv, selectorDraftFor, selectorUnpinnedModel } from "./agents/modelDraft";
+import { UNPIN, computeChanges, destinationLabel, discoveredEntry, sourceLabel, effectiveLegFor, envBlockOf, envForLeg as envForLegIn, holdsFor, legsOf, modelLabel, movesOnEnv, selectorDraftFor, selectorUnpinnedModel } from "./agents/modelDraft";
 
 // Agents → Models: one card per AI lane, grouped by product area (the area
 // strip in the hub header filters them), each with a plain-English line, the
@@ -49,7 +49,10 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   // Picker dialog target: { envs, accepts, title, subtitle, current, canUnpin, unpinLabel }.
   const [find, setFind] = useState(null);
   const [migrating, setMigrating] = useState(false);
-  const [pickProblem, setPickProblem] = useState(null);
+  // env → model label for drafts whose provider check could not run here
+  // (no key on this server). Per env: cleared only when THAT draft is
+  // replaced or discarded, so an earlier unverified line keeps its warning.
+  const [unverified, setUnverified] = useState({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -92,7 +95,10 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   const uncheckedMoving = data ? data.lanes.filter((l) => laneChanged(l) && l.continuity === "unchecked").length : 0;
   // Moving lanes with nothing to degrade to: a model that passes the probe can
   // still reject the lane's request shape, and these fail rather than fall back.
-  const noBackupMoving = data ? data.lanes.filter((l) => laneChanged(l) && !l.fallback).map((l) => l.name) : [];
+  // A moving lane is covered only by a backup that is NOT itself moving: when
+  // the drafted model is the backup, a bad id there means the lane fails the
+  // moment the primary does.
+  const noBackupMoving = data ? data.lanes.filter((l) => laneChanged(l) && (!l.fallback || effectiveLeg(l.fallback) !== l.fallback.model)).map((l) => l.name) : [];
 
   // Inbound-content lanes that a change lands on Gemini (the adapter folds the
   // system prompt into the user turn — no instruction boundary yet).
@@ -104,13 +110,35 @@ export default function AgentModelsTab({ setRefreshHandler }) {
       .map((l) => l.name);
   }, [data, laneChanged, effectiveLeg, catalog]);
 
-  const setDraftValue = (env, value) => {
+  const setDraftValue = (env, value, unverifiedLabel = null) => {
     setDraft((prev) => {
       const next = { ...prev };
       if (value) next[env] = value;
       else delete next[env];
       return next;
     });
+    setUnverified((prev) => {
+      const next = { ...prev };
+      if (value && unverifiedLabel) next[env] = unverifiedLabel;
+      else delete next[env];
+      return next;
+    });
+  };
+  const unverifiedDrafts = Object.entries(unverified).filter(([env]) => draft[env]).map(([env, label]) => `${label} (${env})`).join(", ");
+  // Discarding a selector draft also drops the holds it generated (a locked
+  // follower pinned at its current model), so a hold never outlives the
+  // change it was meant to accompany — the locked card has no discard of its own.
+  const discardEnv = (env) => {
+    setDraftValue(env, "");
+    const selector = (data?.selectors || []).find((s) => s.env === env);
+    if (!selector) return;
+    for (const [pinEnv, current] of Object.entries(holdsFor(data, selector.key))) {
+      if (draft[pinEnv] === current) setDraftValue(pinEnv, "");
+    }
+  };
+  const discardAll = () => {
+    setDraft({});
+    setUnverified({});
   };
 
   // Open the picker for a leg. The dialog probes the pick before it lands.
@@ -141,12 +169,10 @@ export default function AgentModelsTab({ setRefreshHandler }) {
   };
 
   const onFound = (envs, model) => {
-    setPickProblem(null);
     if (model.id !== UNPIN) {
       setDiscovered((prev) => ({ ...prev, [model.id]: discoveredEntry(model, prev[model.id] || catalog[model.id], model.cap || find?.accepts?.cap) }));
     }
-    if (model.unverified) setPickProblem(`${model.label || model.id} drafted UNVERIFIED: the provider check could not run on this server. Confirm the id is enabled for the prod account before applying.`);
-    envs.forEach((env) => setDraftValue(env, model.id));
+    envs.forEach((env) => setDraftValue(env, model.id, model.unverified ? model.label || model.id : null));
     // A locked lane that follows a drafted selector through its own unset env
     // is held where it is (the hold is a pin line in the env block).
     for (const env of envs) {
@@ -219,9 +245,9 @@ export default function AgentModelsTab({ setRefreshHandler }) {
           Move a model…
         </Button>
       </div>
-      {pickProblem && (
+      {unverifiedDrafts.length > 0 && (
         <div className="text-14 text-alert-fg" role="alert">
-          {pickProblem}
+          Drafted UNVERIFIED — the provider check could not run on this server: {unverifiedDrafts}. Confirm each id is enabled for the prod account before applying.
         </div>
       )}
 
@@ -263,7 +289,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
                     open={!!openLanes[l.id]}
                     onToggle={() => toggle(setOpenLanes, l.id)}
                     onPick={openPicker}
-                    onDiscard={(env) => setDraftValue(env, "")}
+                    onDiscard={discardEnv}
                   />
                 ))}
               </div>
@@ -286,7 +312,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
               {uncheckedMoving > 0 ? ` · ${uncheckedMoving} unchecked` : ""}
             </span>
             <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => setDraft({})}>
+              <Button size="sm" variant="secondary" onClick={discardAll}>
                 Discard
               </Button>
               <Button size="sm" onClick={() => setReview(true)}>
@@ -307,6 +333,11 @@ export default function AgentModelsTab({ setRefreshHandler }) {
               ? " Every moving lane keeps its backup, so a bad model id degrades to the backup instead of failing."
               : ""}
           </p>
+          {unverifiedDrafts.length > 0 && (
+            <div className="mt-2 text-13 text-alert-fg" role="alert">
+              Unverified on this server: {unverifiedDrafts}.
+            </div>
+          )}
           {noBackupMoving.length > 0 && (
             <div className="mt-2 text-13 text-alert-fg" role="alert">
               No backup for {noBackupMoving.join(", ")}: if the new model rejects this lane's requests, the lane fails instead of degrading.
@@ -318,7 +349,7 @@ export default function AgentModelsTab({ setRefreshHandler }) {
             {changes.map((c) => (
               <li key={c.env} className="flex flex-col gap-0.5 text-13">
                 <span className="text-zinc-900">
-                  <span className="font-medium">{c.label}</span>: {c.hold ? `stays ${modelLabel(catalog, c.from)}` : `${modelLabel(catalog, c.from)} → ${destinationLabel(c, catalog)}`}
+                  <span className="font-medium">{c.label}</span>: {c.hold ? `stays ${modelLabel(catalog, c.from)}` : `${sourceLabel(c, catalog)} → ${destinationLabel(c, catalog)}`}
                   {c.unpin ? " · delete the variable" : ""}
                   {c.destinations?.length > 1 ? " · differs by lane" : ""}
                   {c.lanes > 1 ? ` · ${c.lanes} lanes` : ""}

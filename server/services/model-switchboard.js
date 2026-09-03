@@ -63,7 +63,7 @@ const SELECTORS = [
   { key: 'CALL_EXTRACTION_ANTHROPIC', env: 'MODEL_CALL_EXTRACTION_ANTHROPIC', description: 'Call extraction Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 25-call bake-off route; run a new bake-off to move it' } },
   { key: 'CALL_RESEARCH_ANTHROPIC', env: 'MODEL_CALL_RESEARCH_ANTHROPIC', description: 'Call-research miner Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 7-arm bake-off route' } },
   { key: 'OPENAI_REPORT_WRITER', env: 'MODEL_OPENAI_REPORT_WRITER', description: 'Reports + high-stakes backup (Sol)', accepts: { providers: ['openai'], cap: 'text' } },
-  { key: 'OPENAI_BALANCED', env: 'MODEL_OPENAI_BALANCED', description: 'Q&A + customer-copy backup (Terra)', accepts: { providers: ['openai'], cap: 'text' } },
+  { key: 'OPENAI_BALANCED', env: 'MODEL_OPENAI_BALANCED', description: 'Q&A + customer-copy backup; OpenAI leg of the vision route (Terra)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_FAST', env: 'MODEL_OPENAI_FAST', description: 'Cheap structured classification (Luna)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_SMS_DRAFT', env: 'MODEL_OPENAI_SMS_DRAFT', description: 'Sealed-eval Luna leg (follows OPENAI_FAST unless set)', derivesFrom: 'OPENAI_FAST', accepts: { providers: ['openai'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'GEMINI_VISION_BEST', env: 'MODEL_GEMINI_VISION', description: 'Gemini leg of the photo lanes', accepts: { providers: ['gemini'], cap: 'vision' } },
@@ -120,7 +120,11 @@ const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live }
 // D(env | [env, ...aliases], literal): the call site reads the first set var
 // in order (satellite: OPENAI_VISION_MODEL || OPENAI_MODEL || 'gpt-5-mini').
 // The composer writes the FIRST (specific) name; aliases only report.
-const D = (env, literal, opts = {}) => ({ kind: 'env', env, literal, live: !!opts.live, accepts: opts.accepts });
+//   opts.parse(value)  when the env value is not a bare model id (the image
+//                      chain "gpt-image-2,gemini-image-best"): returns the
+//                      model id the call site actually runs first, or null to
+//                      fall back to the literal exactly as the call site does.
+const D = (env, literal, opts = {}) => ({ kind: 'env', env, literal, live: !!opts.live, accepts: opts.accepts, parse: opts.parse || null });
 //   S(providerEnv, legs) provider switch, exactly as call-recording-processor.js
 //                      and call-research-miner.js build their route: primary =
 //                      legs[process.env[providerEnv] || 'openai']; fallback =
@@ -160,10 +164,22 @@ const LOCK = {
 };
 const AGENT_LOCK = LOCK.registration('Anthropic Managed Agents · model set at registration; re-register to move it');
 
-// Lane extras: `retry` = the availability retry of the fallback leg (the photo
-// lanes re-run Gemini on GEMINI_VISION_FALLBACK); `also` = further legs that
-// run IN PARALLEL with the primary (the fan-outs' OpenAI arm). Both resolve
-// like any ref and count in the Models-in-use view and the change preview.
+// BLOG_IMAGE_PROVIDER is a comma-separated provider chain, not a model id:
+// the first VALID slug is what the generator tries first (an all-invalid
+// value falls back to its default chain, hence null → the literal). Lazy
+// require: image-generator pulls in fetch + logger at load.
+function firstImageChainModel(value) {
+  const { parseChain, MODEL_MAP } = require('./content/image-generator')._internals;
+  const [first] = parseChain(value);
+  return first ? MODEL_MAP[first].model : null;
+}
+
+// Lane extras: `retry` = the leg tried after the fallback leg (the fan-out
+// photo lanes re-run Gemini on GEMINI_VISION_FALLBACK; the sequential caption
+// ladder reaches Claude only after both Gemini rungs); `also` = further legs
+// that run IN PARALLEL with the primary (the fan-outs' OpenAI arm). Both
+// resolve like any ref and count in the Models-in-use view and the change
+// preview. Without `fanout`, primary → fallback → retry IS the execution order.
 const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by six photo lanes';
 // `inbound: true` = the lane's prompt carries customer or third-party content
 // (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
@@ -201,8 +217,12 @@ const LANES = [
   L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
   L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
   L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: SHARED_GEMINI_PIN }),
+  // Sequential ladder like the caption read: Gemini, then the prior Gemini,
+  // then Claude VISION only when both miss (treatment-zone-suggest.js attempts).
+  L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { inbound: true, retry: T('VISION'), note: SHARED_GEMINI_PIN }),
+  // Sequential ladder, not a fan-out: analyzePhoto tries Gemini, then the
+  // prior Gemini, and reaches Claude VISION only when both miss.
+  L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { retry: T('VISION'), note: SHARED_GEMINI_PIN }),
   L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'three legs in parallel · owner ruling 2026-09-02: one Gemini model — not yet coded' }),
   L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), D('GEMINI_PROPERTY_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
   L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), D('GEMINI_VISION_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })] }),
@@ -223,7 +243,10 @@ const LANES = [
   L('sms_save_sale', 'SMS draft · save-the-sale', 'sms-shadow-drafter.js', 'voice', R('smsDraftSaveSale'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_tone', 'SMS tone rewrite', 'routes/admin-communications.js', 'voice', R('smsToneRewrite'), P('customerCopy', 'fallback'), { inbound: true }),
   L('sms_suggest', 'SMS draft suggestion (comms panel)', 'routes/admin-communications.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
-  L('response_drafter', 'SMS reply drafter (auto / high-stakes split)', 'response-drafter.js', 'voice', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true, note: 'routine intents ride customerCopy' }),
+  // response-drafter.js picks the policy per intent: cancellations, complaints
+  // and high-severity flags ride highStakes; everything else rides customerCopy.
+  L('response_drafter', 'SMS reply drafter · routine', 'response-drafter.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
+  L('response_drafter_high_stakes', 'SMS reply drafter · cancel / complaint / high severity', 'response-drafter.js', 'voice', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('estimate_followup', 'Estimate-conversion follow-up SMS', 'estimate-conversion-agent.js, sms-shadow-drafter.js', 'voice', R('smsDraftDefault'), P('highStakes', 'fallback'), { inbound: true, note: 'delegates to the SMS drafter' }),
   // Health probes: one tiny billed call per SMS draft route at boot and every
   // six hours (scheduler.js). No fallback by design — the canary exists to
@@ -320,7 +343,7 @@ const LANES = [
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
-  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' } }), T('GEMINI_IMAGE_BEST'), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'chain: gpt-image-2 → gpt-image-1.5 → gpt-image-1 → GEMINI_IMAGE_BEST → GEMINI_IMAGE_STABLE' }),
+  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), T('GEMINI_IMAGE_BEST'), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'chain: gpt-image-2 → gpt-image-1.5 → gpt-image-1 → GEMINI_IMAGE_BEST → GEMINI_IMAGE_STABLE' }),
   L('video_gen', 'Reels video generation', 'content/video-generator.js', 'locked', T('GEMINI_VIDEO_FAST'), T('GEMINI_VIDEO_QUALITY'), { lock: LOCK.provider('video chain') }),
   L('mentions_prober', 'LLM mentions prober (Claude, OpenAI, Gemini, Perplexity arms)', 'seo/llm-mention-prober.js', 'locked', E('MODEL_MENTIONS', T('WORKHORSE'), { live: true }), null, { lock: LOCK.measurement('each engine is probed directly; a fallback would falsify the measurement'), note: 'OPENAI_MENTIONS_MODEL gpt-4o-search-preview · GEMINI_MENTIONS_MODEL gemini-2.5-flash · PERPLEXITY_MENTIONS_MODEL sonar' }),
   L('sealed_eval', 'SMS sealed-eval exam legs', 'sms-sealed-eval.js', 'locked', T('SMS_SONNET'), T('OPENAI_REPORT_WRITER'), { lock: LOCK.measurement('frozen exam; Gemini / Luna / Opus / Fable measurement legs too') }),
@@ -352,6 +375,7 @@ const LANE_AREA = {
   sms_tone: 'sms',
   sms_suggest: 'sms',
   response_drafter: 'sms',
+  response_drafter_high_stakes: 'sms',
   estimate_followup: 'sms',
   sms_intent: 'sms',
   contact_correction: 'sms',
@@ -475,7 +499,8 @@ const LANE_DESCRIBE = {
   sms_canary_save_sale: 'Checks every six hours that the save-the-sale SMS drafting route still answers',
   sms_tone: 'Rewrites a staff text in the Waves voice',
   sms_suggest: 'Suggests a reply inside the comms panel',
-  response_drafter: 'Drafts replies, splitting routine from high-stakes',
+  response_drafter: 'Drafts replies to routine texts',
+  response_drafter_high_stakes: 'Drafts replies to cancellations, complaints and high-severity texts',
   estimate_followup: 'Follows up on a quote by text',
   sms_intent: 'Works out what an inbound text is asking for',
   contact_correction: 'Pulls corrected names, emails and addresses out of texts',
@@ -597,8 +622,10 @@ const LANE_DESCRIBE = {
 //   verified  a deterministic checker gates the output (report safe-copy gate,
 //             estimator floors, transcription validation)
 //   unchecked nothing but the owner notices
-const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
-const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "fact_check_gate", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative"]);
+const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "response_drafter_high_stakes", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
+// fact_check_gate is NOT verified: fact-check-gate.js accepts any truthy JSON
+// and treats a missing findings array as "no findings", so `{}` passes.
+const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
 
 // ── Resolution ────────────────────────────────────────────────────────
 function firstSetEnv(names) {
@@ -683,7 +710,8 @@ function resolveRef(ref) {
       // first name); `afterUnpin` is the next lower-priority alias still set.
       const afterUnpin = setName ? names.slice(names.indexOf(setName) + 1).map((n) => process.env[n]).find(Boolean) || null : null;
       if (ref.literal !== undefined) {
-        const model = (setName && process.env[setName]) || ref.literal;
+        const raw = (setName && process.env[setName]) || null;
+        const model = (raw && (ref.parse ? ref.parse(raw) : raw)) || ref.literal;
         const via = setName ? `${setName}${setName !== primaryName ? ' (alias)' : ''}` : `${primaryName} (code default)`;
         return { model, selector: null, via, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
       }

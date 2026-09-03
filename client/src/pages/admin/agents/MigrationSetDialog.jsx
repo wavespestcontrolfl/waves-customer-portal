@@ -24,19 +24,37 @@ export default function MigrationSetDialog({ data, catalog, onClose, onDraft }) 
   const [picking, setPicking] = useState(false);
 
   const inUse = useMemo(() => modelsInUse(data), [data]);
-  // A target found through live search is not in the catalog yet; without an
-  // entry every env would be "blocked: unknown model".
-  const withTarget = useMemo(() => (target && !catalog[target.id] ? { ...catalog, [target.id]: discoveredEntry(target, null, target.cap) } : catalog), [catalog, target]);
+  // A target found through live search is not in the catalog yet — or is
+  // there only as an id the server knows from an env override, with unknown
+  // caps. Either way, without a real entry every env would be blocked
+  // ("unknown model" / "no text support").
+  const withTarget = useMemo(() => {
+    const prior = target && catalog[target.id];
+    if (!target || (prior && prior.caps?.length)) return catalog;
+    return { ...catalog, [target.id]: discoveredEntry(target, prior || null, target.caps) };
+  }, [catalog, target]);
   const set = useMemo(() => buildMigrationSet({ data, catalog: withTarget, fromId, toId: target?.id || null }), [data, withTarget, fromId, target]);
 
   // The target search spans every provider / modality the source's envs can
-  // take; per-env compatibility then lands in the "Cannot move" group.
+  // take, and the picker offers a model that fits ANY of the envs' distinct
+  // requirements (`any`); per-env compatibility then sorts the rest into the
+  // "Cannot move" group. `deep` is true when any env may take a deep-only
+  // model (its ordinary siblings stay blocked); `cap` drives the live search
+  // (vision when any env needs images) and `caps` is what a fresh find is
+  // recorded as able to do — every vision model in the catalog also reads text.
   const accepts = useMemo(() => {
     if (!fromId) return null;
     const all = [...set.eligible, ...set.shadow, ...set.approval, ...set.blocked].map((e) => e.accepts).filter(Boolean);
     const providers = [...new Set(all.flatMap((a) => a.providers))];
-    const caps = new Set(all.map((a) => a.cap));
-    return { providers: providers.length ? providers : [catalog[fromId]?.provider].filter(Boolean), cap: caps.has("vision") ? "vision" : [...caps][0] || "text", deep: all.length > 0 && all.every((a) => a.deep) };
+    const caps = [...new Set(all.map((a) => a.cap))];
+    const any = [...new Map(all.map((a) => [JSON.stringify([a.providers, a.cap, !!a.deep]), a])).values()];
+    return {
+      providers: providers.length ? providers : [catalog[fromId]?.provider].filter(Boolean),
+      cap: caps.includes("vision") ? "vision" : caps[0] || "text",
+      caps: caps.length ? caps : ["text"],
+      deep: all.some((a) => a.deep),
+      ...(any.length > 1 ? { any } : {}),
+    };
   }, [fromId, set, catalog]);
 
   if (picking && accepts) {
@@ -46,7 +64,7 @@ export default function MigrationSetDialog({ data, catalog, onClose, onDraft }) 
         catalog={catalog}
         onClose={() => setPicking(false)}
         onPick={(model) => {
-          setTarget({ ...model, cap: accepts.cap });
+          setTarget({ ...model, caps: accepts.caps });
           setPicking(false);
         }}
       />
@@ -108,7 +126,7 @@ export default function MigrationSetDialog({ data, catalog, onClose, onDraft }) 
                 {envCount(g.key) > 0 && (
                   <ul className="m-0 flex list-none flex-col divide-y divide-zinc-200 border-hairline border-zinc-200 p-0">
                     {set[g.key].map((e) => (
-                      <li key={e.env} className="flex flex-col gap-0.5 px-3 py-2 text-13">
+                      <li key={e.env || `fixed:${e.label}`} className="flex flex-col gap-0.5 px-3 py-2 text-13">
                         <span className="text-zinc-900">
                           {e.lanes.length === 1 ? e.lanes[0].name : `${e.lanes.length} lanes`}
                           {e.kind === "selector" && e.lanes.length > 1 ? " sharing one setting" : ""}

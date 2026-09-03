@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { UNPIN, buildMigrationSet, computeChanges, discoveredEntry, effectiveLegFor, envBlockOf, holdsFor, modelsInUse, selectorDraftFor } from "./modelDraft";
+import { UNPIN, buildMigrationSet, computeChanges, discoveredEntry, effectiveLegFor, envBlockOf, holdsFor, modelsInUse, selectorDraftFor, sourceLabel } from "./modelDraft";
 import { CATALOG, makeData } from "./modelDraft.fixture";
+
+const text = (providers) => ({ providers, cap: "text", deep: false });
 
 const resolve = (data, draft) => {
   const byKey = Object.fromEntries(data.selectors.map((s) => [s.key, s]));
@@ -89,6 +91,23 @@ describe("computeChanges", () => {
     expect(computeChanges({ data: plain, draft: d2, selectorDraft: resolve(plain, d2).selectorDraft })[0].lockedLanes).toEqual(["Deep audit"]);
   });
 
+  it("a shared unset env is a hold only when every follower already runs the target", () => {
+    const data = makeData();
+    // Two photo lanes share GEMINI_SHARED (unset). Lane A already runs m2 via
+    // its selector; lane B sits on its literal default m1.
+    data.lanes[1].primary = { model: "m2", selector: "FLAGSHIP", pinEnv: "GEMINI_SHARED", pinned: false, unpinnedModel: "m2", accepts: text(["anthropic"]), live: false };
+    data.lanes[3].primary = { model: "m1", selector: null, pinEnv: "GEMINI_SHARED", pinned: false, unpinnedModel: "m1", accepts: text(["anthropic"]), live: false };
+    const draft = { GEMINI_SHARED: "m2" };
+    const changes = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ env: "GEMINI_SHARED", hold: false, to: "m2", lanes: 2, sources: ["m2", "m1"] });
+    expect(changes[0].label).toBe("GEMINI_SHARED (SMS draft, Report copy)");
+    // Both already on m2 → a true hold.
+    data.lanes[3].primary = { ...data.lanes[3].primary, model: "m2", unpinnedModel: "m1" };
+    const held = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
+    expect(held[0]).toMatchObject({ hold: true, from: "m2", to: "m2" });
+  });
+
   it("a registration-locked managed agent never rides a selector change", () => {
     const data = makeData();
     data.lanes[4].lock = { kind: "registration", label: "Registered agent", detail: "re-register to move it" };
@@ -96,6 +115,19 @@ describe("computeChanges", () => {
     const changes = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
     expect(changes[0]).toMatchObject({ lanes: 2, lockedLanes: [] });
     expect(changes[0].laneNames).toEqual(["SMS intent", "SMS draft"]);
+  });
+});
+
+describe("computeChanges · shared unset pin", () => {
+  it("names every model the shared env currently moves, not just the first lane's", () => {
+    const data = makeData();
+    const report = data.lanes.find((l) => l.id === "report_copy");
+    report.primary = { ...report.primary, selector: null, pinned: false, setEnv: null };
+    data.lanes.push({ id: "wdo_history", name: "WDO history", describe: "Prior history", area: "reports", continuity: "verified", inbound: false, lock: null, fanout: false, applies: "restart", primary: { model: "m3", selector: null, pinEnv: "PIN_REPORT", setEnv: null, pinned: false, unpinnedModel: "m3", accepts: { providers: ["anthropic", "openai"], cap: "text", deep: false }, live: false }, fallback: null, retry: null, also: [] });
+    const draft = { PIN_REPORT: "m2" };
+    const [c] = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
+    expect(c).toMatchObject({ env: "PIN_REPORT", from: "m1", sources: ["m1", "m3"], to: "m2", lanes: 2 });
+    expect(sourceLabel(c, CATALOG)).toBe("Claude Opus 4.8 / GPT-5.6 Terra");
   });
 });
 
@@ -131,6 +163,26 @@ describe("buildMigrationSet", () => {
     expect(set.blocked.find((e) => e.env === "PIN_REPORT").reasons).toContain("no text support");
   });
 
+  it("an unset shared pin whose other follower sits on a different default needs review, not a bulk move", () => {
+    const data = makeData();
+    const report = data.lanes.find((l) => l.id === "report_copy");
+    report.primary = { ...report.primary, selector: null, pinned: false, setEnv: null }; // PIN_REPORT unset, code default m1
+    data.lanes.push({ id: "wdo_history", name: "WDO history", describe: "Prior history", area: "reports", continuity: "verified", inbound: false, lock: null, fanout: false, applies: "restart", primary: { model: "m3", selector: null, pinEnv: "PIN_REPORT", setEnv: null, pinned: false, unpinnedModel: "m3", accepts: { providers: ["anthropic", "openai"], cap: "text", deep: false }, live: false }, fallback: null, retry: null, also: [] });
+    const set = buildMigrationSet({ data, catalog: CATALOG, fromId: "m1", toId: "m2" });
+    expect(set.eligible.map((e) => e.env)).toEqual([]);
+    const pin = set.approval.find((e) => e.env === "PIN_REPORT");
+    expect(pin.reasons).toEqual(["also moves WDO history off GPT-5.6 Terra"]);
+    expect(pin.collateral).toBeUndefined();
+  });
+
+  it("a leg the code hardcodes on the source model is blocked, not silently dropped", () => {
+    const data = makeData();
+    data.lanes.push({ id: "wdo_history", name: "WDO history", describe: "Prior history", area: "reports", continuity: "verified", inbound: false, lock: null, fanout: false, applies: "restart", primary: { model: "m3", selector: null, pinEnv: "PIN_WDO", setEnv: "PIN_WDO", pinned: true, unpinnedModel: "m3", accepts: text(["openai"]), live: false }, fallback: { model: "m1", selector: null, pinEnv: null, setEnv: null, pinned: false, unpinnedModel: "m1", accepts: text(["anthropic"]), live: false }, retry: null, also: [] });
+    const set = buildMigrationSet({ data, catalog: CATALOG, fromId: "m1", toId: "m2" });
+    expect(set.blocked).toContainEqual(expect.objectContaining({ env: null, kind: "fixed", label: "WDO history · backup", reasons: ["fixed in code"] }));
+    expect(set.eligible.map((e) => e.env)).toEqual(["PIN_REPORT"]);
+  });
+
   it("a judged lane on its own env is a shadow candidate; no source model → empty groups", () => {
     const data = makeData();
     data.lanes[1].inbound = false;
@@ -148,6 +200,13 @@ describe("buildMigrationSet", () => {
     expect(blind.blocked.every((e) => e.reasons.includes("unknown model"))).toBe(true);
     const catalog = { ...CATALOG, m9: discoveredEntry(found, null, "text") };
     expect(catalog.m9).toMatchObject({ label: "Claude Next", provider: "anthropic", caps: ["text"], discovered: true });
+    // A migration-set find is recorded for every modality its envs need.
+    expect(discoveredEntry(found, null, ["vision", "text"]).caps).toEqual(["vision", "text"]);
+    // An id the server already listed with unknown caps (running from an env
+    // override) takes the picker's caps too; known caps are kept.
+    const idOnly = { label: "m9", provider: "anthropic", caps: [], status: "current" };
+    expect(discoveredEntry(found, idOnly, ["text"])).toMatchObject({ caps: ["text"], discovered: false });
+    expect(discoveredEntry(found, { ...idOnly, caps: ["vision"] }, ["text"]).caps).toEqual(["vision"]);
     const set = buildMigrationSet({ data, catalog, fromId: "m1", toId: "m9" });
     expect(set.eligible.map((e) => e.env)).toEqual(["PIN_REPORT"]);
     expect(set.blocked).toEqual([]);
