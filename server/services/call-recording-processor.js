@@ -14010,8 +14010,33 @@ const CallRecordingProcessor = {
                 try {
                   const { buildLatestEstimateLink } = require('./composer-customer-links');
                   const est = await buildLatestEstimateLink([customerId], { purpose: 'call_booking_confirmation' });
-                  if (est?.url) {
+                  // Tied to THIS booking (pre-push codex P1): the link goes
+                  // out only when accepting that estimate would ADOPT the
+                  // row just booked — the accept contract's own resolver,
+                  // pinned to this visit id under the same contract modes
+                  // the estimate page uses. A cross-family or other-property
+                  // estimate (or the customer-wide gate off) would send the
+                  // customer to the slot picker and mint the very duplicate
+                  // this lane exists to prevent, so it gets no link.
+                  let adoptsThisVisit = false;
+                  if (est?.url && est.estimate?.id) {
+                    const estimateRow = await db('estimates').where({ id: est.estimate.id }).first();
+                    if (estimateRow) {
+                      const { findLinkedUpcomingAppointment, adoptionServiceModesForContract } = require('../routes/estimate-public');
+                      let estData = estimateRow.estimate_data;
+                      if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = {}; } }
+                      estData = estData || {};
+                      const offered = await findLinkedUpcomingAppointment(estimateRow, estData, {
+                        appointmentId: String(scheduledServiceId),
+                        serviceModes: adoptionServiceModesForContract(estimateRow, estData),
+                      });
+                      adoptsThisVisit = !!offered && String(offered.id) === String(scheduledServiceId);
+                    }
+                  }
+                  if (adoptsThisVisit) {
                     smsBody = `${String(smsBody).trimEnd()}\n\nYou can accept your estimate and choose your plan here: ${est.url}`;
+                  } else if (est?.url) {
+                    logger.info(`[call-proc] open-estimate link withheld for visit ${scheduledServiceId}: the accept would not adopt this booking`);
                   }
                 } catch (estErr) {
                   logger.warn(`[call-proc] open-estimate link skipped for customer ${customerId}: ${estErr.message}`);
