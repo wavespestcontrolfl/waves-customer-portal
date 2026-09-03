@@ -442,6 +442,14 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
       address: '77 Oak St, Bradenton, FL 34205',
       property: null,
     });
+    // A suppressed attempt (nothing really handed off — lastDeliveredAt
+    // stays) carries the PRIOR send's stamp forward untouched, and stamps
+    // nothing where there was none (pre-push hook P1).
+    const prior = { lines: [{ names: ['Lawn Care'], recurring: false, oneTime: true }], address: '5 Pine Ave, Sarasota, FL 34236', property: null };
+    const suppressed = await router.buildEstimateSendSnapshot(estimateRow({ service_interest: 'Pest Control', address: '77 Oak St, Bradenton, FL 34205', estimate_data: JSON.stringify({ sendSnapshot: { scope: prior } }) }), undefined, { delivered: false });
+    expect(suppressed.sendSnapshot.scope).toEqual(prior);
+    const neverDelivered = await router.buildEstimateSendSnapshot(estimateRow({ service_interest: 'Pest Control' }), undefined, { delivered: false });
+    expect(neverDelivered.sendSnapshot.scope).toBeUndefined();
   });
 
   test('a PENDING invalidation recorded during delivery is COMPLETED by the claim release', async () => {

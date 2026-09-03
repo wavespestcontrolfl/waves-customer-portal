@@ -563,7 +563,10 @@ async function pricedPropertyAddress(propertyId) {
   }
 }
 
-async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
+// delivered: false = this attempt handed nothing to the customer (a
+// suppressed send — SMS gate or template off — leaves lastDeliveredAt where
+// it was), so the prior send's scope stamp is carried forward untouched.
+async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { delivered = true } = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data) || {};
   const estimateDataForBundle = { ...estimateData };
   delete estimateDataForBundle.sendSnapshot;
@@ -572,15 +575,20 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
     ...(estimateData.sendSnapshot || {}),
     renderedAt: snapshotAt,
     tierDiscounts: currentTierDiscounts(),
-    // What THIS send delivers — the priced lines and the address — frozen
-    // beside the pricing bundle. The triage sweep binds a quote_promised
-    // card to the stamp, never to the row's live content: a proposal
-    // re-authored in place keeps its deliveryState, so live lines can grow
-    // past what the customer received without a new handoff (codex r25
-    // P1). Independent of the bundle build below — it is content, not
-    // pricing.
-    scope: deliveredEstimateScope({ ...estimate, estimate_data: estimateDataForBundle, ...(await pricedPropertyAddress(estimate.property_id)) }),
   };
+  // What THIS send delivers — the priced lines and the address — frozen
+  // beside the pricing bundle, and moved ONLY by a real handoff: the same
+  // send that advances deliveryState.lastDeliveredAt, so the triage
+  // sweep's witness and the content it vouches for never drift apart. The
+  // sweep binds a quote_promised card to the stamp, never to the row's
+  // live content: a proposal re-authored in place keeps its deliveryState,
+  // so live lines can grow past what the customer received without a new
+  // handoff (codex r25 P1); a suppressed resend would otherwise re-stamp
+  // undelivered content under the old witness (pre-push hook P1).
+  // Independent of the bundle build below — it is content, not pricing.
+  if (delivered) {
+    sendSnapshot.scope = deliveredEstimateScope({ ...estimate, estimate_data: estimateDataForBundle, ...(await pricedPropertyAddress(estimate.property_id)) });
+  }
 
   try {
     clearEstimatePricingCache(estimate.id);
@@ -2347,7 +2355,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // into ITS audit snapshot too (GH codex P2 on #3628).
   let builtSendSnapshot = null;
   try {
-    const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now);
+    const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0 });
     // Only a VALIDATED bundle feeds the audit — same rule as the sibling
     // and superseded branches (codex pre-push P1).
     builtSendSnapshot = snapshot.sendSnapshot && !snapshot.sendSnapshot.pricingBundleError
@@ -2521,7 +2529,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // snapshot exists to prevent (codex #3244 r7). Treat it like any
           // other publication failure: throw into the retry loop; after the
           // final attempt the sibling is released for an operator re-send.
-          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: nextExpiresAt }, now);
+          // A sibling is delivered by the anchor's handoff — the same
+          // real-channel test decides whether its scope stamp moves.
+          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0 });
           if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
           }
