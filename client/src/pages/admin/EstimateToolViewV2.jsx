@@ -4066,23 +4066,17 @@ export default function EstimateToolViewV2({
       setAddressMatches([]);
       if (!customerAlreadyLinked) {
         try {
-          const addrSearch = address.split(",")[0].trim();
+          // Server-side, unit-aware (the canonical street comparator): a
+          // typed "Unit 4" excludes "Apt 7" at the same building; a typed
+          // address with no unit still lists every unit there.
           const custR = await fetch(
-            `/api/admin/customers?search=${encodeURIComponent(addrSearch)}&limit=10`,
+            `/api/admin/customers/at-address?address=${encodeURIComponent(address)}`,
             { headers: authHeaders, signal: lookupController.signal },
           );
           if (custR.ok) {
             const custData = await custR.json();
             if (lookupSuperseded()) return;
-            const custs = custData.customers || custData || [];
-            const matches = custs.filter(
-              (c) =>
-                c.address &&
-                address
-                  .toLowerCase()
-                  .includes(c.address.split(",")[0].trim().toLowerCase()),
-            );
-            setAddressMatches(matches);
+            setAddressMatches(custData.customers || []);
             setAddressMatchesFor(address);
           }
         } catch {
@@ -6214,7 +6208,7 @@ export default function EstimateToolViewV2({
                               {[
                                 // Street line incl. unit, so two units of one
                                 // building are distinguishable before linking.
-                                c.address ? c.address.split(",")[0].trim() : null,
+                                c.streetLine || (c.address ? c.address.split(",")[0].trim() : null),
                                 c.phone,
                                 c.email,
                                 matchHasActivePlan(c) ? c.tier : null,

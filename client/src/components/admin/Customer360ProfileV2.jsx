@@ -5569,6 +5569,7 @@ export default function Customer360ProfileV2({
   // (past + future) and limited, so use this for next-service selection.
   const upcomingScheduled = data.upcomingScheduled || scheduled;
   const accountProperties = data.accountProperties || [];
+  const addressNeighbors = data.addressNeighbors || [];
   const annualPrepayTerms = data.annualPrepayTerms || [];
   const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || null;
   // What the profile shows/acts on: a truly active term, else a still-outstanding
@@ -6298,6 +6299,65 @@ export default function Customer360ProfileV2({
                           key={p.id}
                           type="button"
                           onClick={() => onSelectCustomer?.(p.id)}
+                          className={className}
+                        >
+                          {content}
+                        </button>
+                      );
+                    })}
+                  </div>{" "}
+                </div>
+              )}
+              {addressNeighbors.length > 0 && (
+                <div
+                  className="mb-4 pb-3 border-b border-hairline border-zinc-200"
+                  data-testid="address-neighbors"
+                >
+                  {" "}
+                  <SectionTitle>Others at this address</SectionTitle>{" "}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {addressNeighbors.map((n) => {
+                      const name =
+                        `${n.firstName || ""} ${n.lastName || ""}`.trim() ||
+                        "(no name)";
+                      const addr = [n.address?.line1, n.address?.line2]
+                        .filter(Boolean)
+                        .join(", ");
+                      const className =
+                        "text-left rounded-sm border-hairline border-zinc-200 bg-zinc-50 hover:bg-zinc-100 u-focus-ring p-2.5";
+                      const content = (
+                        <>
+                          {" "}
+                          <div className="text-14 font-medium text-zinc-900">
+                            {name}
+                          </div>{" "}
+                          <div className="text-14 text-ink-secondary truncate">
+                            {[n.phone, STAGE_LABELS[n.pipelineStage] || n.pipelineStage]
+                              .filter(Boolean)
+                              .join(" · ") || "No contact on file"}
+                          </div>{" "}
+                          <div className="text-12 text-ink-tertiary mt-1 truncate">
+                            {addr || "Address on file"}
+                            {n.matchedVia === "property" ? " · secondary property" : ""}
+                          </div>{" "}
+                        </>
+                      );
+                      if (!onSelectCustomer) {
+                        return (
+                          <a
+                            key={n.id}
+                            href={`/admin/customers?customerId=${encodeURIComponent(n.id)}`}
+                            className={cn(className, "block no-underline")}
+                          >
+                            {content}
+                          </a>
+                        );
+                      }
+                      return (
+                        <button
+                          key={n.id}
+                          type="button"
+                          onClick={() => onSelectCustomer?.(n.id)}
                           className={className}
                         >
                           {content}
