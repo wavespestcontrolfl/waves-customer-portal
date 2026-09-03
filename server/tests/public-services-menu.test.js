@@ -187,6 +187,11 @@ describe('catalog drift never leaks into an instant quote', () => {
       PEST.pestInitialRoach.display.regular_standalone = standalone;
     }
     expect(menuItem(roach()).public_instant_quote).toBe(true);
+    // A menu built without a verified pricing_config refresh (replica whose
+    // resync failed) advertises the package quote-on-request (pre-push P1).
+    expect(menuItem(roach(), { displayVerified: false }).public_instant_quote).toBe(false);
+    expect(menuItem(row({ service_key: 'rodent_inspection', category: 'inspection' }), { displayVerified: false }).public_instant_quote)
+      .toBe(menuItem(row({ service_key: 'rodent_inspection', category: 'inspection' })).public_instant_quote);
     expect(menuItem(pest6({ visits_per_year: 4 })).public_instant_quote).toBe(false);
     // admin edits only the frequency word — still not instant
     expect(requestMatchesCatalogRow('pest_general_bimonthly', pest6({ frequency: 'quarterly' }))).toBe(false);

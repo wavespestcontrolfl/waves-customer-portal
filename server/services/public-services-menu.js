@@ -14,7 +14,10 @@
 const db = require('../models/db');
 // Live (db-bridge merged) pricing display config — the treatment count the
 // cockroach estimate line advertises.
-const { constants: pricingConstants } = require('./pricing-engine');
+// Required as a module (not destructured) so the menu builder's resync is
+// the engine's live export — tests stub it.
+const pricingEngine = require('./pricing-engine');
+const pricingConstants = pricingEngine.constants;
 
 const FAMILY_LABELS = {
   pest_control: 'Pest Control',
@@ -198,8 +201,12 @@ function mergeKeyedRequestOptions(request, bodyServices) {
 function termiteRentalGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
 }
-function instantForRow(row) {
+// `displayVerified: false` = this process could not refresh pricing_config
+// before building the menu; the cockroach package's second authority is
+// then unverified and its row is advertised quote-on-request (fail closed).
+function instantForRow(row, { displayVerified = true } = {}) {
   if (!PUBLIC_INSTANT_QUOTE_KEYS.has(row.service_key) || !requestMatchesCatalogRow(row.service_key, row)) return false;
+  if (PUBLIC_QUOTE_REQUESTS[row.service_key]?.pestInitialRoach && displayVerified === false) return false;
   if (row.service_key === 'termite_bait' && !termiteRentalGateOn()) return false;
   return true;
 }
@@ -209,7 +216,7 @@ function modeFor(row) {
   return row.billing_type === 'recurring' ? 'recurring' : 'one_time';
 }
 
-function menuItem(row) {
+function menuItem(row, opts = {}) {
   const mode = modeFor(row);
   const item = {
     service_key: row.service_key,
@@ -217,7 +224,7 @@ function menuItem(row) {
     family: FAMILY_LABELS[row.category] || row.category,
     family_key: row.category,
     mode,
-    public_instant_quote: instantForRow(row),
+    public_instant_quote: instantForRow(row, opts),
   };
   if (mode === 'recurring') {
     item.cadence = {
@@ -235,7 +242,15 @@ async function loadPublicServicesMenu(conn = db) {
     .where({ is_active: true, is_archived: false, public_quote_selectable: true })
     .orderBy([{ column: 'category' }, { column: 'sort_order' }, { column: 'name' }])
     .select('service_key', 'name', 'category', 'billing_type', 'frequency', 'visits_per_year');
-  return rows.map(menuItem);
+  // The cockroach package's live display count lives in THIS process's
+  // engine constants, which only the admin save's own worker resyncs — pull
+  // pricing_config in (coalesced) before advertising, and fail closed for
+  // that row when the refresh did not land (pre-push codex P1, replicas).
+  let displayVerified = true;
+  if (rows.some((r) => PUBLIC_QUOTE_REQUESTS[r.service_key]?.pestInitialRoach)) {
+    try { displayVerified = (await pricingEngine.syncConstantsFromDB()) === true; } catch { displayVerified = false; }
+  }
+  return rows.map((row) => menuItem(row, { displayVerified }));
 }
 
 // The catalog row a lead-supplied key names — ONLY when it is a product a
