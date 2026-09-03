@@ -1345,6 +1345,15 @@ const CANCEL_FEE_RULE_BUILDERS = {
   // handler exits before its waiver branch, so no waiver can help — the
   // client withholds it for this code (Codex #3806 r4 P1).
   charge_in_flight: () => [null, 'A fee charge for this visit is already in progress or under billing review. This cancel starts no new charge and cannot waive that one — check the visit\'s billing before promising the customer either way.'],
+  // The customer's card capture is mid-completion ('completing') at
+  // preview time (Codex #3806 r5 P1): the completion tail can promote the
+  // row to 'completed' WITH fee consent before the cancel handler reads it,
+  // and that handler charges by the late-cancel rule unless the waiver was
+  // sent — so this is neither "never saved" nor a running charge. The
+  // waiver stamps 'waived' either way (a still-completing row is stamped
+  // terminal at cancel time; a finished one honors waiveFee), so the
+  // client offers it like the retryable unresolved code.
+  capture_in_flight: ({ fee }) => [null, `The customer is saving a card for this visit right now. If that finishes with fee consent before you confirm, the late-cancel rule applies and ${fee} may be charged; if it doesn't, nothing will be charged. Waive it now if this is a Waves-initiated cancel.`],
   // Genuinely indeterminate (Codex #3800 r4 P1): the check runs AGAIN at
   // confirm time and a recovered lookup may charge, so never promise
   // "nothing will be charged" here.

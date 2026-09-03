@@ -2,6 +2,10 @@ import { getAdminAuthToken, getAdminUser } from './adminAuth';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// Undetermined (willCharge null) verdicts whose confirm-time check may still
+// charge the displayed visit's own fee — the admin waiver applies to it.
+const WAIVABLE_UNRESOLVED_CODES = new Set(['unresolved', 'capture_in_flight']);
+
 function fmtFee(amount) {
   const n = Number(amount);
   if (!(n > 0)) return 'the late-cancel fee';
@@ -71,17 +75,20 @@ export async function confirmCardHoldFeeChoice(serviceId, { scope = 'this_only' 
 
   // Undetermined verdict: the in-window "will be charged" prompt would lie,
   // so show the rule's own neutral sentence (Codex #3800 r1 P1). The
-  // waiver is still offered for a RETRYABLE failure (code 'unresolved'):
-  // the confirm-time check may recover and charge, and both handlers honor
-  // waiveCardHoldFee before that check (Codex #3806 r2 P1). A verdict that
-  // says a charge is already in flight gets no waiver — nothing left to
-  // waive.
+  // waiver is still offered when the confirm-time check may still charge —
+  // a RETRYABLE lookup failure ('unresolved') or a card capture that can
+  // finish with fee consent first ('capture_in_flight') — because both
+  // handlers honor waiveCardHoldFee before that check (Codex #3806 r2 P1,
+  // r5 P1). A charge already in flight has nothing of ITS OWN left to
+  // waive, but a series cancel still judges the siblings on their own
+  // cards, so the series-wide waiver stays on offer (r5 P1).
   if (preview?.rule && preview.rule.willCharge === null) {
     if (!window.confirm(`${preview.rule.text}\n\nContinue with the cancellation?`)) {
       return { proceed: false, waiveCardHoldFee: false };
     }
-    if (preview.rule.code !== 'unresolved' || !isAdmin()) {
-      return { proceed: true, waiveCardHoldFee: false };
+    if (!isAdmin()) return { proceed: true, waiveCardHoldFee: false };
+    if (!WAIVABLE_UNRESOLVED_CODES.has(preview.rule.code)) {
+      return { proceed: true, waiveCardHoldFee: seriesWide ? seriesWaiverPrompt() : false };
     }
     const waiveIfApplies = window.confirm(
       `If the fee turns out to apply when you confirm, waive it?\n\nOK = waive — Waves-initiated cancel (rain-out, sick day).\nCancel = charge the customer if it applies — customer-initiated late cancel.`,

@@ -2773,6 +2773,7 @@ async function alertUnresolvedCancellationFee({ scheduledServiceId, outcome }) {
 // operator's confirm prompt lie — surface a fee-may-apply preview so the
 // cancel path shows the waiver choice. Fee amount is best-effort from the
 // row (the prompt copy degrades gracefully).
+const UNRESOLVED_RULE_CODES = { charge_review: 'charge_in_flight', capture_in_flight: 'capture_in_flight' };
 async function unresolvedEligibilityPreview(scheduledServiceId, skipReason) {
   const { describeCancelFeeRule } = require('./estimate-card-holds');
   let feeAmount = null;
@@ -2784,8 +2785,10 @@ async function unresolvedEligibilityPreview(scheduledServiceId, skipReason) {
   } catch (err) { /* best-effort */ }
   // charge_review = fee_status charging / charge_review: a fee event is
   // already running, not a retryable lookup failure — distinct code so the
-  // client offers no waiver (Codex #3806 r4 P1).
-  const code = skipReason === 'charge_review' ? 'charge_in_flight' : 'unresolved';
+  // client offers no waiver (Codex #3806 r4 P1). capture_in_flight = the
+  // card capture itself is mid-completion (r5 P1) — waivable, see the
+  // builder. Anything else is the retryable lookup failure.
+  const code = UNRESOLVED_RULE_CODES[skipReason] || 'unresolved';
   return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code, feeAmount, detail: String(skipReason || 'lookup failed').replace(/_/g, ' ') }) };
 }
 
@@ -2808,9 +2811,13 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
   // — the disabled rail cannot charge, so the lane presents as absent.
   const { describeCancelFeeRule, freeCancelReason } = require('./estimate-card-holds');
   if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'rail_dark' }) };
-  const { request, unresolved, reason: skipReason, status: requestStatus } = await feeEligibleRequestForVisit(scheduledServiceId);
+  const { request, unresolved, inFlight, reason: skipReason, status: requestStatus } = await feeEligibleRequestForVisit(scheduledServiceId);
   if (!request) {
     if (unresolved) return unresolvedEligibilityPreview(scheduledServiceId, skipReason);
+    // A 'completing' capture is an undetermined verdict, not "never saved"
+    // (Codex #3806 r5 P1): it can finish with fee consent before the cancel
+    // handler runs, and that handler charges unless the waiver was sent.
+    if (inFlight) return unresolvedEligibilityPreview(scheduledServiceId, 'capture_in_flight');
     // A secured-but-exempt card must not read as "no card saved" (pre-push
     // Codex P1): map each eligibility exclusion to its truthful rule.
     return { secured: false, feeApplies: false, rule: describeCancelFeeRule(skipRule(skipReason, requestStatus)) };

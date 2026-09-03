@@ -1051,6 +1051,14 @@ describe('appointmentCardCancelPreview', () => {
     expect(res.rule.text).toMatch(/already in progress or under billing review/);
     expect(res.rule.text).not.toMatch(/Nothing will be charged/);
   });
+  test('capture mid-completion (completing) → capture_in_flight: undetermined, waivable, never "never saved" (Codex #3806 r5 P1)', async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'completing' } });
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ unresolved: true, feeAmount: 49, rule: { code: 'capture_in_flight', willCharge: null } });
+    expect(res.rule.text).toMatch(/saving a card for this visit right now/);
+    expect(res.rule.text).toMatch(/\$49 late-cancel fee may be charged/);
+    expect(res.rule.text).not.toMatch(/never saved|nothing will be charged\.$/);
+  });
   test('unresolved (thrown time lookup) → willCharge null and the rule says the cancel parks for review', async () => {
     mockApptTime = null;
     require('../services/appointment-reminders').scheduledServiceApptTime.mockRejectedValueOnce(new Error('db blip'));
