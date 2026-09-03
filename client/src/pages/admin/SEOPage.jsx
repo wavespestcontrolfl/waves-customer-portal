@@ -3571,7 +3571,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                 {c.placement.status === "ready_for_payment" && <span style={{ color: D.amber, fontWeight: 400 }}>{" · at the publisher's checkout"}</span>}
                 {["placed", "live", "indexed"].includes(c.placement.status) && (() => {
                   // the label is the PENDING payment action, never the status alone: a placed placement can still owe its initial fee
-                  const pending = c.rows.find((r) => r.dimension === "payment" && !r.satisfied_at && !r.approved);
+                  const pending = c.rows.find((r) => r.dimension === "payment" && !r.satisfied_at); // approved-but-unsettled is still the obligation
                   return <span style={{ color: D.amber, fontWeight: 400 }}>{` · ${c.placement.status} — ${pending && pending.action === "renewal" ? "renewal" : "initial fee"}`}</span>;
                 })()}
               </div>
