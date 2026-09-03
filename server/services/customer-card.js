@@ -206,10 +206,11 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
     if (!card) return null;
 
     // Make sure a referral link exists so the card's Share action has a real
-    // destination. enrollPromoter is get-or-create with no sends.
+    // destination. resolvePromoter is get-or-create with no sends (a
+    // multi-property sibling resolves the household promoter).
     try {
-      const { enrollPromoter } = require('./referral-engine');
-      await enrollPromoter(customerId);
+      const { resolvePromoter } = require('./referral-engine');
+      await resolvePromoter(customerId);
     } catch (err) {
       // PII: error class/code only — a unique-violation message here can echo
       // customer phone/email values from Postgres details (Codex P1 #2588 r2).

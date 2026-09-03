@@ -96,7 +96,7 @@ router.post('/enroll', async (req, res, next) => {
     const { customerId } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
 
-    const result = await engine.enrollPromoter(customerId);
+    const result = await engine.resolvePromoter(customerId);
     res.json(result);
   } catch (err) {
     if (err.message === 'Customer not found') return res.status(404).json({ error: err.message });
@@ -176,7 +176,7 @@ router.post('/submit', async (req, res, next) => {
 
     // If customerId provided instead of promoterId, find/create promoter
     if (!pid && customerId) {
-      const result = await engine.enrollPromoter(customerId);
+      const result = await engine.resolvePromoter(customerId);
       pid = result.promoter.id;
     }
 
