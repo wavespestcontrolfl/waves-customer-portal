@@ -257,6 +257,7 @@ module.exports = {
   DERIVED_PENALTY_VALUES,
   REJECTION_CODES,
   NOVELTY_TYPES,
+  FAMILY_STATUSES,
   isMalformedAssessment,
   malformedAssessmentReason,
   resolveScoreThresholds,
