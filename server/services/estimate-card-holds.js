@@ -1905,36 +1905,41 @@ async function cardHoldCancelPreview(scheduledServiceId, now = new Date(), { ret
   // Every exit carries the operator-facing rule (code + sentence) so the
   // cancel card can say whether the card WILL be charged and why.
   const describe = (code, extra = {}) => describeCancelFeeRule({ code, feeAmount, windowHours, now, anchorAt: hold.held_at, onFailure: 'release', ...extra });
+  // Competing consents (a /secure appointment-card row beside the hold) —
+  // classified BEFORE any verdict, chargeable, free or parked (Codex #3800
+  // r2 → r6; pre-push P1 on r7): a competing row already in charging /
+  // charge_review is a PaymentIntent that can still land, and a 'charged'
+  // one already did — so even an outside-window / booking-age / parked "no
+  // fee" verdict would lie. A LIVE competing consent (no fee event on the
+  // row) makes chargeNoShowFee refuse to pick a winner and bell the office
+  // — unless the hold is parked, where neither rail charges (the
+  // appointment rail defers to the hold lane; the parked hold follows the
+  // rebooked visit). Fail toward undetermined on an unreadable table, same
+  // as the charge path.
+  let laneCode = null;
+  try {
+    const laneRow = await db('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('id', 'fee_status');
+    if (laneRow) laneCode = COMPETING_LANE_RULE[laneRow.fee_status] || 'competing_consent';
+  } catch (err) {
+    logger.warn('[estimate-card-holds] competing-consent lookup for cancel preview failed — reporting undetermined', { error: err.message });
+    return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'card consent lookup failed', onFailure: 'unknown' }) };
+  }
+  if (laneCode === 'fee_settled') {
+    // The competing row's fee already LANDED (Codex #3800 r7 P1): a settled
+    // fee, not a consent still to be picked — "bill by hand" copy there
+    // invites a double charge.
+    return { held: true, feeApplies: false, feeAmount, rule: describe('fee_settled', { detail: 'charged on the appointment card' }) };
+  }
+  if (laneCode === 'charge_in_flight') return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('charge_in_flight') };
   // A parked hold (status still 'held', parked_at set) follows the rebooked
   // visit: handleCardHoldCancellation returns already_parked without
   // charging, so the preview must not run the window math and promise a
   // charge (pre-push Codex P1). Decided before the rail gate — parking is
   // durable state, not a fee decision.
   if (hold.parked_at) return { held: true, feeApplies: false, feeAmount, parked: true, rule: describe('hold_parked') };
-  // Competing consents (a /secure appointment-card row beside the hold) —
-  // checked BEFORE any verdict, chargeable or free (Codex #3800 r2 → r6):
-  // a competing row already in charging/charge_review is a PaymentIntent
-  // that can still land, so even an outside-window / booking-age "no fee"
-  // verdict would lie; and for a live competing consent chargeNoShowFee
-  // refuses to pick a winner and bells the office. Fail toward
-  // undetermined on an unreadable table, same as the charge path.
-  try {
-    const laneRow = await db('appointment_card_requests')
-      .where({ scheduled_service_id: scheduledServiceId })
-      .first('id', 'fee_status');
-    if (laneRow) {
-      // A competing row whose fee already LANDED is a settled fee, not a
-      // consent still to be picked (Codex #3800 r7 P1): "bill by hand"
-      // copy there invites a double charge. charging / charge_review stay
-      // in flight; every other state is the live competing consent.
-      const code = COMPETING_LANE_RULE[laneRow.fee_status] || 'competing_consent';
-      const settled = code === 'fee_settled';
-      return { held: true, feeApplies: !settled, feeAmount, ...(settled ? {} : { unresolved: true }), rule: describe(code, { detail: 'charged on the appointment card' }) };
-    }
-  } catch (err) {
-    logger.warn('[estimate-card-holds] competing-consent lookup for cancel preview failed — reporting undetermined', { error: err.message });
-    return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('unresolved', { detail: 'card consent lookup failed', onFailure: 'unknown' }) };
-  }
+  if (laneCode) return { held: true, feeApplies: true, feeAmount, unresolved: true, rule: describe('competing_consent') };
   // Rail OFF (ONE_TIME_CARD_HOLD kill switch) with a historical held row:
   // no fee can be collected, so nothing below may report one — including
   // the fee-may-apply posture of a FAILED time lookup, which would make the

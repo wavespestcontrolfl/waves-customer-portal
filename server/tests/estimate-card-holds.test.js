@@ -819,6 +819,21 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     expect(res).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'fee_settled', willCharge: false, text: expect.stringMatching(/already settled \(charged on the appointment card\), so nothing more will be charged/) } });
     expect(res.rule.text).not.toMatch(/two card agreements|bill the fee by hand/);
   });
+  it('PARKED hold beside a /secure row whose fee already charged / is mid-charge → the fee event wins over hold_parked (pre-push P1)', async () => {
+    stubDb({ ...holdRow, parked_at: new Date('2026-07-01T00:00:00Z') }, { laneRows: { id: 'lane-row', fee_status: 'charged' } });
+    let res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: false, rule: { code: 'fee_settled', willCharge: false } });
+    expect(res.parked).toBeUndefined();
+    stubDb({ ...holdRow, parked_at: new Date('2026-07-01T00:00:00Z') }, { laneRows: { id: 'lane-row', fee_status: 'charge_review' } });
+    res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    expect(mockApptTime).not.toHaveBeenCalled();
+  });
+  it('PARKED hold beside a consent-only /secure row → still hold_parked (neither rail charges a parked visit)', async () => {
+    stubDb({ ...holdRow, parked_at: new Date('2026-07-01T00:00:00Z') }, { laneRows: { id: 'lane-row', fee_status: null } });
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: false, parked: true, rule: { code: 'hold_parked', willCharge: false } });
+  });
   it('in-window hold beside a /secure row whose fee was waived/released → still competing_consent (the charge path refuses any lane row)', async () => {
     stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'waived' } });
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
