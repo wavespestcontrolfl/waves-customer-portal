@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  gateEnvValue: jest.fn(() => false),
   gates: {},
 }));
 jest.mock('../services/property-lookup/lookup-cache', () => ({
