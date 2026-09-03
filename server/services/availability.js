@@ -280,10 +280,19 @@ class AvailabilityEngine {
     return { zone: zone.zone_name, days };
   }
 
-  // accept(slot) → false drops a candidate before the four-per-day cap.
+  // accept(slot) → false drops a candidate before the four-per-day cap; the
+  // gap then advances an hour at a time so a long zone-local hole still
+  // yields its first ACCEPTED hour (an out-of-zone stop can reject 9:00 while
+  // 12:00 in the same hole is fine — r5 P2).
   findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null) {
     const slots = [];
-    const offer = (slot) => { if (!accept || accept(slot)) slots.push(slot); };
+    const offer = (gapStart, gapEnd) => {
+      for (let start = gapStart; gapEnd - start >= slotDuration; start += 60) {
+        const slot = { start, end: start + slotDuration };
+        if (!accept || accept(slot)) { slots.push(slot); return; }
+        if (!accept) return;
+      }
+    };
     let cursor = dayStart;
 
     // Round minutes-since-midnight UP to the next clean hour. Customer-
@@ -297,17 +306,12 @@ class AvailabilityEngine {
       const gapStart = roundUpToHour(cursor + buffer);
       const gapEnd = block.start - buffer;
 
-      if (gapEnd - gapStart >= slotDuration) {
-        offer({ start: gapStart, end: gapStart + slotDuration });
-      }
+      offer(gapStart, gapEnd);
       cursor = Math.max(cursor, block.end);
     }
 
     // Gap after the last occupied block — same clean-hour rule.
-    const finalStart = roundUpToHour(cursor + buffer);
-    if (dayEnd - finalStart >= slotDuration) {
-      offer({ start: finalStart, end: finalStart + slotDuration });
-    }
+    offer(roundUpToHour(cursor + buffer), dayEnd);
 
     return slots.slice(0, 4); // max 4 slots per day
   }
@@ -432,6 +436,11 @@ class AvailabilityEngine {
       // address/contact, retry against live state instead of committing a
       // visit whose dispatch/reminders resolve against the cleared row.
       await lockCustomerComms(trx, customerId);
+      // The travel-gap probe's pin, read BEHIND the fence: a background
+      // geocode can fill customers.latitude/longitude between the pre-fence
+      // read and the lock, and the coordinates are deliberately outside the
+      // freshness fingerprint (r5 P2).
+      let bookingPin = { lat: customer.latitude ?? null, lng: customer.longitude ?? null };
       {
         const AVAIL_FINGERPRINT_COLS = [
           'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
@@ -442,10 +451,11 @@ class AvailabilityEngine {
         ];
         const fp = (r) => AVAIL_FINGERPRINT_COLS.map((c) => r?.[c] || '').join('|');
         const freshAvailCustomer = await trx('customers')
-          .where({ id: customerId }).first(...AVAIL_FINGERPRINT_COLS);
+          .where({ id: customerId }).first(...AVAIL_FINGERPRINT_COLS, 'latitude', 'longitude');
         if (!freshAvailCustomer || fp(freshAvailCustomer) !== fp(preFenceAvailCustomer)) {
           throw bookingError('Your account details just changed — please refresh and book again.', 'CUSTOMER_CHANGED_RETRY');
         }
+        bookingPin = { lat: freshAvailCustomer.latitude ?? null, lng: freshAvailCustomer.longitude ?? null };
         // Estimate linkage revalidates under the fence too (r36): a
         // journaled estimate a merge-undo just returned no longer belongs
         // to this customer — the self-booking row would link the restored
@@ -562,9 +572,10 @@ class AvailabilityEngine {
         windowStart: startTime,
         windowEnd: endTime,
         excludeServiceIds: occupancyExcludes,
-        // Travel gap (GATE_SLOT_TRAVEL_GAP): the customer's pin; the zone
-        // engine's offers are city-only, so this is the only drive check.
-        travel: { lat: customer.latitude ?? null, lng: customer.longitude ?? null },
+        // Travel gap (GATE_SLOT_TRAVEL_GAP): the customer's pin from the
+        // fenced re-read; the zone engine's offers are city-only, so this
+        // is the only drive check.
+        travel: bookingPin,
       });
       if (occupancyClash.length) {
         throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');

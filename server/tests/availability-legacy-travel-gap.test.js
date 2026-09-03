@@ -160,3 +160,14 @@ test('findGaps applies the accept predicate BEFORE its four-slot cap (r4 P2)', (
   const late = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, rejectEarly);
   expect(late.map((g) => g.start / 60)).toEqual([14, 16]);
 });
+
+test('findGaps advances an hour at a time inside a rejected gap (r5 P2)', () => {
+  // One long zone-local hole 09:00–15:00 (blocks 08–09 and 15–16). An
+  // out-of-zone rejection of 09:00 must yield the first accepted hour.
+  const occupied = [{ start: 8 * 60, end: 9 * 60 }, { start: 15 * 60, end: 16 * 60 }];
+  const noEarly = (g) => g.start >= 12 * 60;
+  const slots = engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0, noEarly);
+  expect(slots.map((g) => g.start / 60)).toEqual([12, 16]);
+  // Without a predicate the legacy shape is unchanged: one slot per gap.
+  expect(engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0).map((g) => g.start / 60)).toEqual([9, 16]);
+});
