@@ -488,8 +488,9 @@ async function upsertSessionRow(row) {
  * latency: the run for one-shot runners, the longest turn for the assistant.
  * `failure` is the runner's OWN outcome — null on success, else the Error it
  * threw or a short code (`initial_message_failed`, `missing_draft`,
- * `session_error_event`, `max_events` when the runner's own event cap ended
- * the stream) — combined with the remote status: the row is ok
+ * `session_error_event`, `session_timeout` for a runner's own deadline,
+ * `max_events` / `max_tool_calls` when its own cap ended the stream, or a
+ * helper's `anthropic_<status>`) — combined with the remote status: the row is ok
  * only when the session is not terminated AND the runner succeeded, so an
  * application-level failure is never hidden behind an idle session. When
  * the usage GET itself fails (429, network, the 15 s timeout) the session

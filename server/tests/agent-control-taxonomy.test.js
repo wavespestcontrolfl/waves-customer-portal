@@ -80,6 +80,7 @@ describe('agent-control taxonomy', () => {
     ['max_cost', {}, 'budget'],
     ['max_tool_calls', {}, 'budget'],
     ['max_events', {}, 'budget'],
+    ['session_timeout', {}, 'timeout'],
     ['openai_400', {}, 'bad_input'],
     ['anthropic_413', {}, 'bad_input'],
     ['bad_request', {}, 'bad_input'],

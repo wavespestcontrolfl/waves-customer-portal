@@ -364,10 +364,12 @@ class AgentDispatcher {
         // instead of agent_did_not_emit_draft.
         const detail = typeof data === 'string' ? data : JSON.stringify(data).slice(0, 200);
         logger.error(`[agent-dispatcher] session ${sessionId} error: ${detail}`);
-        throw new Error(`session_error: ${detail}`);
+        // `code` is what the session ledger files the exit under (provider).
+        throw Object.assign(new Error(`session_error: ${detail}`), { code: 'session_error_event' });
       }
     }
-    throw new Error(`session ${sessionId} timed out after ${timeoutMs}ms`);
+    // Our own deadline, not the provider's — the ledger files it as a timeout.
+    throw Object.assign(new Error(`session ${sessionId} timed out after ${timeoutMs}ms`), { code: 'session_timeout' });
   }
 }
 
