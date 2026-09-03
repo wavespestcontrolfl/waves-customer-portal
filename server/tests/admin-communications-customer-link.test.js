@@ -440,7 +440,23 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test.each(['contract', 'card_request'])('%s: 409 when the phone belongs to more than one sibling — same rule as Auto Pay', async (kind) => {
+  test('prep_guide: per customer ROW too — the phone owner\'s visits only (the page shows their name + address; /sms requires them to own it)', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildPrepGuideLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/prep/' + 'a'.repeat(32),
+      line: 'Your prep checklist for the upcoming Flea Treatment is here: https://portal.wavespestcontrol.com/prep/' + 'a'.repeat(32) + '\n\n',
+      prep: { pestType: 'flea', label: 'Flea Treatment', scheduledDate: '2026-09-20' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'prep_guide' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildPrepGuideLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
+      expect(body.customerId).toBe(CUSTOMER_UUID);
+    });
+  });
+
+  test.each(['contract', 'card_request', 'prep_guide'])('%s: 409 when the phone belongs to more than one sibling — same rule as Auto Pay', async (kind) => {
     const other = 'bbbb2222-0000-4000-8000-000000000002';
     wireDb({
       customers: makeCustomersBuilder({
@@ -458,6 +474,7 @@ describe('POST /admin/communications/customer-link', () => {
       expect((await res.json()).error).toMatch(/more than one customer on this account/);
       expect(builders.buildContractSigningLink).not.toHaveBeenCalled();
       expect(builders.buildCardRequestLink).not.toHaveBeenCalled();
+      expect(builders.buildPrepGuideLink).not.toHaveBeenCalled();
     });
   });
 

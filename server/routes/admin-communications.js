@@ -1860,7 +1860,11 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       card_request: async (ids, primaryId) => builders.buildCardRequestLink(
         await soonestUpcomingVisit([primaryId], require('../services/appointment-card-request').LIVE_VISIT_STATUSES),
       ),
-      prep_guide: (ids) => builders.buildPrepGuideLink(ids),
+      // The prep page shows its customer's name and address and the /sms
+      // send requires the recipient to own it (GH Codex #3844 r3 P2), so
+      // the visit pick is the phone owner's row too — a sibling's visit
+      // would insert a link the send then refuses (pre-push Codex P1).
+      prep_guide: (ids, primaryId) => builders.buildPrepGuideLink([primaryId]),
       service_report: (ids) => builders.buildServiceReportLink(ids),
       contract: (ids, primaryId) => builders.buildContractSigningLink([primaryId], req),
       // A payer statement covers the bill-to's whole book and goes to the
@@ -1938,8 +1942,9 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     // exactly ONE row on the account, else 409 to the customer's own
     // profile card (GH Codex #3812 r1 P1 + pre-push P0). Card requests and
     // contract signing links are the same class of bearer (per row, money-
-    // or signature-adjacent) and take the same rule.
-    const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract'];
+    // or signature-adjacent) and take the same rule; a prep page is the
+    // owner's too (name + address on the page, ownership re-checked at /sms).
+    const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_guide'];
     const strictOwner = STRICT_OWNER_KINDS.includes(kind);
     if (!primaryId || strictOwner) {
       const phoneRows = await db('customers')

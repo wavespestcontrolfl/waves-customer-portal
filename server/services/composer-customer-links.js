@@ -1013,8 +1013,10 @@ async function buildCardRequestLink(visit) {
 
 /**
  * Prep guide — insert-only: mints (or reuses) the /prep/:token page for the
- * soonest upcoming visit of a prep-supported family across the account,
- * using the prep sender's own visit pick and token mint. The tracker's
+ * soonest upcoming visit of a prep-supported family on the recipient's OWN
+ * row (the route passes the phone owner only — the page shows that
+ * customer's name and address, and the /sms send requires the recipient to
+ * own it), using the prep sender's own visit pick and token mint. The tracker's
  * prep_sent_at proof is NOT stamped: that marks a confirmed guide-email
  * delivery, and this text is the operator's own send. Raw URL — the prep
  * sender never shortens prep links either.
