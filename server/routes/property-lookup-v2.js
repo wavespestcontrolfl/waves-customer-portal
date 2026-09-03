@@ -2649,7 +2649,8 @@ function turfRiskReasons(source = {}) {
   const nearWater = String(source.nearWater || source.waterProximity || '').toUpperCase();
   const shadeCoveragePercent = firstNonNegativeNumber(source.shadeCoveragePercent);
 
-  if (lotSqFt && estimatedTurfSf && estimatedTurfSf / lotSqFt >= TURF_HIGH_LOT_RATIO) {
+  const highLotRatio = !!(lotSqFt && estimatedTurfSf && estimatedTurfSf / lotSqFt >= TURF_HIGH_LOT_RATIO);
+  if (highLotRatio) {
     reasons.push(`estimated turf is ${Math.round((estimatedTurfSf / lotSqFt) * 100)}% of lot`);
   }
   // Above the TRUSTED county-facts ceiling (county-complete + county-sourced
@@ -2664,7 +2665,11 @@ function turfRiskReasons(source = {}) {
   if (aiConfidence !== undefined && aiConfidence < 60) reasons.push(`AI confidence ${aiConfidence}%`);
   if (treeDensity === 'HEAVY') reasons.push('heavy tree canopy');
   if (shadeCoveragePercent !== undefined && shadeCoveragePercent >= 35) reasons.push(`${shadeCoveragePercent}% shade coverage`);
-  if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO') reasons.push('water adjacency');
+  // Water adjacency only qualifies the lot-ratio signal: the worry is a lake
+  // parcel whose lot sq ft includes water and inflates the AI turf. On its own
+  // it flagged every lakefront lot in the service area, including clean
+  // county-verified ones at 40% of lot with HIGH confidence.
+  if (highLotRatio && nearWater && nearWater !== 'NONE' && nearWater !== 'NO') reasons.push('water adjacency');
   return reasons;
 }
 

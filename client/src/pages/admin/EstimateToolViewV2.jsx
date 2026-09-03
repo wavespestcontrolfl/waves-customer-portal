@@ -5492,15 +5492,18 @@ export default function EstimateToolViewV2({
     confirmedTurfSqFt === null &&
     aiTurfSqFt !== null &&
     aiTurfSqFt > 20000;
+  const turfHighLotRatio =
+    aiTurfSqFt !== null && lotSqFtForTurf > 0 && aiTurfSqFt / lotSqFtForTurf >= 0.55;
   const turfReviewReasons = [
-    aiTurfSqFt !== null && lotSqFtForTurf > 0 && aiTurfSqFt / lotSqFtForTurf >= 0.55
+    turfHighLotRatio
       ? `AI turf is ${Math.round((aiTurfSqFt / lotSqFtForTurf) * 100)}% of lot`
       : null,
     Number(enrichedProfile?.aiConfidence) > 0 && Number(enrichedProfile?.aiConfidence) < 60
       ? `AI confidence ${enrichedProfile.aiConfidence}%`
       : null,
     form.treeDensity === "HEAVY" ? "heavy tree canopy" : null,
-    form.nearWater === "YES" ? "water adjacency" : null,
+    // Qualifier only — mirrors turfRiskReasons() in property-lookup-v2.js.
+    turfHighLotRatio && form.nearWater === "YES" ? "water adjacency" : null,
   ].filter(Boolean);
   const showTurfReview =
     hasTurfPricedSelection &&
