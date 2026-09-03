@@ -105,7 +105,8 @@ async function readJobs() {
   };
 }
 
-// Counts only — never the items (customer names live in the titles).
+// Counts only — never the items (customer names live in the titles) and not
+// even the lane label: keys only, so the payload holds no free text at all.
 // `disabled` (boolean, never text) separates "the queue gate is off" from a
 // failed read: only the latter is an attention reason.
 async function readOpsQueue() {
@@ -121,7 +122,6 @@ async function readOpsQueue() {
     failed: q.totals.failed,
     lanes: q.lanes.map((l) => ({
       key: l.key,
-      label: l.label,
       pending: l.pending,
       parked: l.parked,
       failed: l.failed,

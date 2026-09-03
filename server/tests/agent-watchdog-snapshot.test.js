@@ -65,7 +65,8 @@ describe('buildWatchdogSnapshot', () => {
     expect(snap.database).toEqual({ ok: true, latency_ms: expect.any(Number) });
     expect(snap.jobs).toEqual({ available: true, total: 2, unhealthy: 0, items: [] });
     expect(snap.scheduler).toMatchObject({ available: true, heartbeat_job: SCHEDULER_HEARTBEAT_JOB, age_minutes: 5, ok: true });
-    expect(snap.ops_queue.lanes[0]).toEqual({ key: 'calls', label: 'Call processing', pending: 3, parked: 4, failed: 0, error: false });
+    expect(snap.ops_queue.lanes[0]).toEqual({ key: 'calls', pending: 3, parked: 4, failed: 0, error: false });
+    expect(JSON.stringify(snap)).not.toContain('Call processing');
     expect(snap.ops_queue.disabled).toBe(false);
     expect(JSON.stringify(snap)).not.toContain('Jane Customer');
     expect(snap.link_worker).toEqual({ available: true, last_claim_at: '2026-09-03T10:00:00.000Z', last_report_at: '2026-09-03T10:00:00.000Z', open_leases: 0, stale_leases: 0 });

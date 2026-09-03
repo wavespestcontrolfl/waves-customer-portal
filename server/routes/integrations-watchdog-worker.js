@@ -8,8 +8,10 @@
  * (services/agent-watchdog-snapshot.js), and the finalized audit row
  * (result='observed') is the heartbeat services/agent-watchdog-liveness.js reads.
  *
- * Dark behind GATE_HERMES_WATCHDOG (read at call time): off → 404 and the audit
- * row stays 'authenticated', so a disabled lane never counts as liveness.
+ * Dark behind GATE_HERMES_WATCHDOG (read at call time) AHEAD of the auth chain
+ * (unobservable-when-dark, the publicMcpGate precedent; registered as a
+ * passthrough in config/route-auth-guards.json): off → 404 before any audit
+ * row exists, so a disabled lane never counts as liveness.
  * No POST — v1 observes and pages; actions arrive with agent-control S4.
  */
 const express = require('express');
@@ -18,13 +20,18 @@ const { linkWorkerAuth, finalizeWorkerRequest } = require('../middleware/link-wo
 const { gateEnvValue } = require('../config/feature-gates');
 const { buildWatchdogSnapshot } = require('../services/agent-watchdog-snapshot');
 
+// 404 while the lane is dark — before auth, before any audit row. Rejects or
+// calls next(); never serves.
+function watchdogGate(req, res, next) {
+  if (!gateEnvValue('GATE_HERMES_WATCHDOG')) return res.status(404).json({ error: 'watchdog lane disabled' });
+  next();
+}
+
+router.use(watchdogGate);
 router.use(linkWorkerAuth('watchdog'));
 
 router.get('/status', async (req, res, next) => {
   try {
-    if (!gateEnvValue('GATE_HERMES_WATCHDOG')) {
-      return res.status(404).json({ error: 'watchdog lane disabled' });
-    }
     const snapshot = await buildWatchdogSnapshot();
     // The finalized row IS the heartbeat the liveness cron reads: if it did not
     // persist, this poll must not look successful to Hermes.
@@ -36,3 +43,4 @@ router.get('/status', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports._test = { watchdogGate };

@@ -151,8 +151,8 @@ def describe(reason, snap):
         for l in snap.get("ops_queue", {}).get("lanes", []):
             if l.get("key") == lane:
                 if what == "error":
-                    return f"ops queue lane {lane} ({l.get('label', lane)}) failed to load"
-                return f"ops queue lane {lane} ({l.get('label', lane)}): {l.get('failed', '?')} failed row(s)"
+                    return f"ops queue lane {lane} failed to load"
+                return f"ops queue lane {lane}: {l.get('failed', '?')} failed row(s)"
         return f"ops queue lane {lane}: {what}"
     if reason == "link_worker:stale_leases":
         n = snap.get("link_worker", {}).get("stale_leases", "?")

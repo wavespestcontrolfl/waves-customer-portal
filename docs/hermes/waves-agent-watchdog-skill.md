@@ -30,8 +30,7 @@ then the only remedy is a human.
             "items": [ { "job": "geocoder-backstop", "state": "failing",
                          "last_success_age_minutes": 190, "consecutive_failures": 3 } ] },
   "ops_queue": { "available": true, "pending": 12, "parked": 40, "failed": 2,
-                 "lanes": [ { "key": "calls", "label": "Call processing",
-                              "pending": 0, "parked": 1, "failed": 2, "error": false } ] },
+                 "lanes": [ { "key": "calls", "pending": 0, "parked": 1, "failed": 2, "error": false } ] },
   "link_worker": { "available": true, "last_claim_at": "…", "last_report_at": null,
                    "open_leases": 1, "stale_leases": 1 },
   "verdict": "attention",
@@ -115,7 +114,7 @@ New attention reasons (only the NEW ones; cleared ones are not announced):
 
 > ⚠️ Waves agents need attention (2 new):
 > • geocoder-backstop is failing · last success 190 min ago · 3 failures in a row
-> • ops queue lane calls (Call processing): 2 failed row(s)
+> • ops queue lane calls: 2 failed row(s)
 > https://portal.wavespestcontrol.com/admin/agents?tab=queue
 
 Configuration, not an outage (HTTP 401 / 403 / 404, or 503 "worker key not
