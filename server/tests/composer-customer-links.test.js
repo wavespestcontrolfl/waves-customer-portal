@@ -984,6 +984,17 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(mockDb).not.toHaveBeenCalledWith('scheduled_services');
     expect(await expiringLinkSendCheck(`portal.wavespestcontrol.com.evil.example/prep/${PREP}`)).toEqual({ present: false });
   });
+
+  test('a trailing slash is the same working page — every fenced kind is still judged (GH Codex #3844 r7 P1)', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'appointment' } }) };
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/prep/${PREP}/`)).toEqual({ present: true, label: 'Prep guide' });
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}/`)).toEqual({ present: true, label: 'Statement pay' });
+    expect(await immediateOnlyLinkSendCheck('portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY/')).toEqual({ present: true, label: 'Appointment page' });
+    expect(await immediateOnlyLinkSendCheck('wavespest.co/l/Ab12cD/')).toEqual({ present: true, label: 'Appointment page' });
+    expect(mockBuilders.short_codes.where).toHaveBeenLastCalledWith({ code: 'ab12cd' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/${'b'.repeat(32)}//`)).toEqual({ present: true, label: 'Service report' });
+  });
 });
 
 describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointment + report links)', () => {
@@ -1036,6 +1047,11 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no customer on file/);
     });
 
+    test('a trailing slash is the same page — the token is still bound at the send (GH Codex #3844 r7 P1)', async () => {
+      expect((await bearerLinkSendCheck(`${PREP_BODY}/`, '5551234567', { trustedCustomerId: 'c1' })).error).toMatch(/different customer/);
+      expect(resolvePrepSource).toHaveBeenCalledWith(PREP);
+    });
+
     test('a non-canonical prep host refuses outright', async () => {
       expect((await bearerLinkSendCheck(`https://evil.example/?next=portal.wavespestcontrol.com/prep/${PREP}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
     });
@@ -1044,12 +1060,13 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
   test('a statement link: payable + active payer AP phone passes; anything else refuses', async () => {
     const STMT = 'f'.repeat(64);
     const body = `Pay here: portal.wavespestcontrol.com/pay/statement/${STMT}`;
-    const wireStmt = ({ stmt, payer }) => {
+    const wireStmt = ({ stmt, payer, owners = [] }) => {
       mockDb.mockClear();
       isEnabled.mockImplementation((g) => g === 'payerStatements');
       mockBuilders = {
         payer_statements: chainBuilder({ firstRow: stmt }),
         payers: chainBuilder({ firstRow: payer }),
+        customers: chainBuilder({ rows: owners }),
       };
     };
     wireStmt({ stmt: { id: 31, payer_id: 7, status: 'sent' }, payer: { id: 7, ap_phone: '(941) 555-0100' } });
@@ -1071,6 +1088,31 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
     expect((await bearerLinkSendCheck(body, '9415550100', {})).error).toMatch(/no longer payable/);
     wireStmt({ stmt: { id: 31, payer_id: 7, status: 'sent' }, payer: null });
     expect((await bearerLinkSendCheck(body, '9415550100', {})).error).toMatch(/payer's AP phone/);
+  });
+
+  test('a statement to a number on file for several live customers refuses unless the send trusts one of them — never the unverified-lead policy (GH Codex #3844 r7 P1)', async () => {
+    const STMT = 'f'.repeat(64);
+    const body = `Pay here: portal.wavespestcontrol.com/pay/statement/${STMT}`;
+    const stmt = { id: 31, payer_id: 7, status: 'sent' };
+    const payer = { id: 7, ap_phone: '(941) 555-0100' };
+    const wireStmt = (owners) => {
+      isEnabled.mockImplementation((g) => g === 'payerStatements');
+      mockBuilders = {
+        payer_statements: chainBuilder({ firstRow: stmt }),
+        payers: chainBuilder({ firstRow: payer }),
+        customers: chainBuilder({ rows: owners }),
+      };
+    };
+    wireStmt([{ id: 'c1' }, { id: 'c2' }]);
+    expect((await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null })).error).toMatch(/more than one customer/);
+    expect(mockBuilders.customers.whereNull).toHaveBeenCalledWith('deleted_at');
+    wireStmt([{ id: 'c1' }, { id: 'c2' }]);
+    expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, statements: [31] });
+    // One live row, or none (the AP phone is normally no customer's): no ambiguity.
+    wireStmt([{ id: 'c1' }]);
+    expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, statements: [31] });
+    wireStmt([]);
+    expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, statements: [31] });
   });
 
   test('an appointment page link refuses at the send once GATE_APPOINTMENT_PAGE is off', async () => {

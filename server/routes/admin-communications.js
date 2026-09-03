@@ -1764,19 +1764,26 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // it and the /sms send carries it: the recipient's own consent policy
       // then applies instead of the unverified-lead classification, whose
       // exact-phone consent read can miss a differently formatted number on
-      // file (GH Codex #3844 r6 P1). Several rows on the number → none (no
-      // guess); a body customerId is irrelevant to the statement itself.
+      // file (GH Codex #3844 r6 P1). Several rows on the number → the one the
+      // composer selected (it owns the number, so the /sms send trusts it),
+      // else 409 — never a guess, and never the unverified-lead policy for a
+      // number one of those rows has opted out (GH Codex #3844 r7 P1). A
+      // body customerId is irrelevant to the statement itself.
       const owners = await db('customers')
         .whereNull('deleted_at')
         .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
         .select('id');
+      const selected = owners.find((o) => String(o.id) === String(req.body?.customerId || ''));
+      if (!selected && owners.length > 1) {
+        return res.status(409).json({ error: 'That number is on file for more than one customer — pick the customer from the search dropdown before inserting a statement link.' });
+      }
       return res.json({
         kind,
         url: stripSmsLinkScheme(result.url),
         line: stripSmsLinkScheme(result.line),
         statement: result.statement || undefined,
         immediateOnly: result.immediateOnly || undefined,
-        customerId: owners.length === 1 ? owners[0].id : undefined,
+        customerId: (selected || owners[0])?.id,
       });
     }
 

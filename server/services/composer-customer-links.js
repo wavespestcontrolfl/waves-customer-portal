@@ -512,7 +512,11 @@ function canonicalPortalToken(run, host, pathRe) {
   // expose the 30-day bearer before any redirect reaches HTTPS.
   if (url.protocol !== 'https:') return null;
   if (url.host.toLowerCase() !== host) return null;
-  const m = pathRe.exec(url.pathname);
+  // The public routes match with a trailing slash too (React Router and the
+  // Express /l and /secure mounts alike), so /prep/<token>/ is the same
+  // working page as /prep/<token> — judged the same, or it would slip the
+  // schedule/draft fence and every send-time check (GH Codex #3844 r7 P1).
+  const m = pathRe.exec(url.pathname.replace(/\/+$/, ''));
   return m ? m[1] : null;
 }
 function canonicalSecureToken(run, host) {
@@ -814,6 +818,20 @@ async function checkPrepLinks(ctx) {
 // Statement pay links: the gate, a payable row, and the ACTIVE payer's AP
 // phone as the recipient (a statement is the payer's, never a customer's).
 // Every verified statement id lands in `statements`.
+// The statement is the payer's, but the TEXT goes to a phone that may be a
+// customer's: the /sms send applies that customer's consent policy only when
+// it carries a trusted customer id, and with none a number on file for
+// several live customers would fall to the unverified-lead policy — whose
+// exact-phone consent read can miss a differently formatted number and
+// deliver past one row's sms_enabled=false (GH Codex #3844 r7 P1). The
+// insert route 409s this same ambiguity; the send refuses it too.
+async function liveCustomersOnNumber(toLast10) {
+  return db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [toLast10])
+    .select('id');
+}
+
 async function checkStatementLinks(ctx, statements) {
   for (const run of linkRuns(ctx.runs, /\/pay\/statement\//i)) {
     const token = canonicalPortalToken(run, ctx.host, /^\/pay\/statement\/([0-9a-f]{64})$/i);
@@ -829,6 +847,9 @@ async function checkStatementLinks(ctx, statements) {
     const payer = await db('payers').where({ id: stmt.payer_id, active: true }).first('id', 'ap_phone');
     if (!payer || !digitsLast10(payer.ap_phone) || digitsLast10(payer.ap_phone) !== ctx.toLast10) {
       return refuseSend("This statement link only goes to the payer's AP phone on file — remove it before sending.");
+    }
+    if (!ctx.trustedCustomerId && !statements.length && (await liveCustomersOnNumber(ctx.toLast10)).length > 1) {
+      return refuseSend('That number is on file for more than one customer — pick the customer from the search dropdown before sending a statement link.');
     }
     if (!statements.includes(stmt.id)) statements.push(stmt.id);
   }

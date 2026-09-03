@@ -380,7 +380,9 @@ describe('POST /admin/communications/customer-link', () => {
     // One live customer row on the number → it rides back so the /sms send
     // carries customerId and the recipient's own consent policy applies; the
     // statement itself stays authorized against the payer (the builder is
-    // called the same way). Two rows → no guess.
+    // called the same way). Two rows → the composer's selected customer when
+    // it is one of them, else 409 — never a guess, never the lead policy for
+    // a number one of those rows has opted out (GH Codex #3844 r7 P1).
     wireDb({ customers: makeCustomersBuilder({ selectResults: [[{ id: CUSTOMER_UUID }]] }) });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, 'customer-link', { phone: '+19415550100', kind: 'statement' });
@@ -388,11 +390,18 @@ describe('POST /admin/communications/customer-link', () => {
       expect((await res.json()).customerId).toBe(CUSTOMER_UUID);
       expect(builders.buildStatementLink).toHaveBeenLastCalledWith('9415550100');
     });
-    wireDb({ customers: makeCustomersBuilder({ selectResults: [[{ id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002' }]] }) });
+    const SIBLING_UUID = 'bbbb2222-0000-4000-8000-000000000002';
+    wireDb({ customers: makeCustomersBuilder({ selectResults: [[{ id: CUSTOMER_UUID }, { id: SIBLING_UUID }]] }) });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, 'customer-link', { phone: '+19415550100', kind: 'statement' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/more than one customer/);
+    });
+    wireDb({ customers: makeCustomersBuilder({ selectResults: [[{ id: CUSTOMER_UUID }, { id: SIBLING_UUID }]] }) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+19415550100', kind: 'statement', customerId: SIBLING_UUID });
       expect(res.status).toBe(200);
-      expect((await res.json()).customerId).toBeUndefined();
+      expect((await res.json()).customerId).toBe(SIBLING_UUID);
     });
 
     builders.buildStatementLink.mockResolvedValue({ url: null, line: '', reason: "This number is not a payer's AP phone on file" });
