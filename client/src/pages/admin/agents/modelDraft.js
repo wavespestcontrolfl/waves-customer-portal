@@ -78,6 +78,23 @@ export function effectiveLegFor(draft, selectorDraft) {
 // selector it follows (a change there moves every lane on that selector).
 export const envForLeg = (leg, selectorByKey) => leg.pinEnv || (leg.selector && selectorByKey[leg.selector]?.env) || null;
 
+// Holds that must accompany a selector draft: a LOCKED lane that follows the
+// selector through an unset per-lane env is pinned at its current model, so
+// the shared change cannot move it (mentions_prober on WORKHORSE via
+// MODEL_MENTIONS). A locked follower with no env of its own cannot be held —
+// the composer warns about it instead (sealed_eval's Claude leg on SMS_SONNET).
+export function holdsFor(data, selectorKey) {
+  const holds = {};
+  if (!data) return holds;
+  for (const l of data.lanes) {
+    if (!l.lock || !movesOnEnv(l)) continue;
+    for (const leg of legsOf(l)) {
+      if (leg.selector === selectorKey && !leg.pinned && leg.pinEnv && !holds[leg.pinEnv]) holds[leg.pinEnv] = leg.model;
+    }
+  }
+  return holds;
+}
+
 // One change per env var, computed from the COMPLETE draft: selectors (with
 // derived aliases and locked holds), then pins aggregated by env.
 export function computeChanges({ data, draft, selectorDraft }) {
@@ -110,6 +127,7 @@ export function computeChanges({ data, draft, selectorDraft }) {
       label: `${s.key} selector${moving.length ? ` (+ ${moving.map((d) => d.key).join(", ")}, unset so it follows)` : ""}`,
       lanes: following.length,
       laneNames: following.map((l) => l.name),
+      // Locked followers the composer could not hold (no env of their own).
       lockedLanes: following.filter((l) => l.lock).map((l) => l.name),
       uncheckedLanes: following.filter((l) => l.continuity === "unchecked").length,
       restart: true,
@@ -129,13 +147,17 @@ export function computeChanges({ data, draft, selectorDraft }) {
       // Unpinning a shared env can land its lanes on different models.
       const destinations = unpin ? [...new Set(sharing.map((x) => baseAfterDraft(legOf(x))))] : [next];
       if (!unpin && sharing.every((x) => next === baseAfterDraft(legOf(x)) && !legOf(x).pinned)) continue;
-      const label = sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.primary ? "" : " · backup"}`;
+      const hold = !unpin && !leg.pinned && next === leg.model;
+      const label = hold
+        ? `${l.name} held at its current model (locked; it would otherwise follow ${leg.selector})`
+        : sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.primary ? "" : " · backup"}`;
       byEnv.set(env, {
         env,
         from: leg.model,
         to: destinations[0],
         destinations,
         unpin,
+        hold,
         deleteEnv: unpin ? leg.setEnv || env : undefined,
         label,
         lanes: sharing.length,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { UNPIN, buildMigrationSet, computeChanges, discoveredEntry, effectiveLegFor, envBlockOf, modelsInUse, selectorDraftFor } from "./modelDraft";
+import { UNPIN, buildMigrationSet, computeChanges, discoveredEntry, effectiveLegFor, envBlockOf, holdsFor, modelsInUse, selectorDraftFor } from "./modelDraft";
 import { CATALOG, makeData } from "./modelDraft.fixture";
 
 const resolve = (data, draft) => {
@@ -67,6 +67,26 @@ describe("computeChanges", () => {
     expect(envBlockOf(computeChanges({ data, draft: pinDraft, selectorDraft: resolve(data, pinDraft).selectorDraft }), CATALOG)).toBe("# delete REPORT_MODEL_LEGACY  (unpin → Claude Opus 4.8)");
     const plain = makeData();
     expect(computeChanges({ data: plain, draft, selectorDraft: resolve(plain, draft).selectorDraft })).toHaveLength(0);
+  });
+
+  it("a locked follower with its own unset env is held at its model; one without an env is only warned about", () => {
+    const data = makeData();
+    // Deep audit (locked) follows FLAGSHIP through an unset per-lane env.
+    data.lanes[4].primary = { ...data.lanes[4].primary, pinEnv: "AUDIT_MODEL" };
+    expect(holdsFor(data, "FLAGSHIP")).toEqual({ AUDIT_MODEL: "m1" });
+    expect(holdsFor(data, "OPENAI_FAST")).toEqual({});
+    const draft = { MODEL_FLAGSHIP: "m2", ...holdsFor(data, "FLAGSHIP") };
+    const { selectorDraft, effectiveLeg } = resolve(data, draft);
+    const changes = computeChanges({ data, draft, selectorDraft });
+    expect(changes.map((c) => c.env)).toEqual(["MODEL_FLAGSHIP", "AUDIT_MODEL"]);
+    expect(changes[0]).toMatchObject({ lanes: 2, lockedLanes: [] });
+    expect(changes[1]).toMatchObject({ hold: true, from: "m1", to: "m1", label: "Deep audit held at its current model (locked; it would otherwise follow FLAGSHIP)" });
+    expect(effectiveLeg(data.lanes[4].primary)).toBe("m1");
+    expect(envBlockOf(changes, CATALOG)).toBe("MODEL_FLAGSHIP=m2\nAUDIT_MODEL=m1");
+    // No env to hold with → it moves, and the change says so.
+    const plain = makeData();
+    const d2 = { MODEL_FLAGSHIP: "m2" };
+    expect(computeChanges({ data: plain, draft: d2, selectorDraft: resolve(plain, d2).selectorDraft })[0].lockedLanes).toEqual(["Deep audit"]);
   });
 
   it("a registration-locked managed agent never rides a selector change", () => {

@@ -6,7 +6,7 @@ import { useHubParams } from "./agents/hubParams";
 import LaneModelCard from "./agents/LaneModelCard";
 import MigrationSetDialog from "./agents/MigrationSetDialog";
 import PickModelDialog from "./agents/PickModelDialog";
-import { UNPIN, computeChanges, destinationLabel, discoveredEntry, effectiveLegFor, envBlockOf, envForLeg as envForLegIn, legsOf, modelLabel, movesOnEnv, selectorDraftFor, selectorUnpinnedModel } from "./agents/modelDraft";
+import { UNPIN, computeChanges, destinationLabel, discoveredEntry, effectiveLegFor, envBlockOf, envForLeg as envForLegIn, holdsFor, legsOf, modelLabel, movesOnEnv, selectorDraftFor, selectorUnpinnedModel } from "./agents/modelDraft";
 
 // Agents → Models: one card per AI lane, grouped by product area (the area
 // strip in the hub header filters them), each with a plain-English line, the
@@ -147,6 +147,13 @@ export default function AgentModelsTab({ setRefreshHandler }) {
     }
     if (model.unverified) setPickProblem(`${model.label || model.id} drafted UNVERIFIED: the provider check could not run on this server. Confirm the id is enabled for the prod account before applying.`);
     envs.forEach((env) => setDraftValue(env, model.id));
+    // A locked lane that follows a drafted selector through its own unset env
+    // is held where it is (the hold is a pin line in the env block).
+    for (const env of envs) {
+      const selector = (data?.selectors || []).find((s) => s.env === env);
+      if (!selector) continue;
+      for (const [pinEnv, current] of Object.entries(holdsFor(data, selector.key))) setDraftValue(pinEnv, current);
+    }
     setFind(null);
   };
 
