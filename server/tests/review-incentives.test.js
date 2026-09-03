@@ -62,6 +62,9 @@ function createDbMock(initialRows = {}) {
       if (op === '<') return left < value;
       return left === value;
     }));
+    if (query.rawOrder) {
+      rows.sort((a, b) => query.rawOrder(a) - query.rawOrder(b) || String(a.last_name || '').localeCompare(String(b.last_name || '')));
+    }
     if (query.order) {
       const [key, dir] = query.order;
       rows.sort((a, b) => {
@@ -85,6 +88,10 @@ function createDbMock(initialRows = {}) {
       ops: [],
       ins: [],
       rawFilters: [],
+      // Raw OR clauses are pass-throughs (the mock does not model the
+      // customer search's LIKE group); their SQL + bindings are captured so
+      // a test can assert what the search binds.
+      rawWheres: [],
       order: null,
       limitValue: null,
       where(arg, op, value) {
@@ -108,7 +115,7 @@ function createDbMock(initialRows = {}) {
       orWhere() { return this; },
       whereILike() { return this; },
       orWhereILike() { return this; },
-      orWhereRaw() { return this; },
+      orWhereRaw(sql, bindings) { this.rawWheres.push([String(sql), bindings || []]); return this; },
       whereNot(column, value) { this.notEquals.push([column, value]); return this; },
       whereIn(column, values) { this.ins.push([column, values]); return this; },
       whereNotNull(column) { this.notNull.push(column); return this; },
@@ -125,6 +132,19 @@ function createDbMock(initialRows = {}) {
       leftJoin() { return this; },
       select() { return this; },
       orderBy(column, direction = 'asc') { this.order = [column, direction]; return this; },
+      orderByRaw(sql) {
+        // The attribution search's service-proximity ORDER BY becomes a row
+        // sort: customers with a service_records / completed scheduled_services
+        // row first, then last name (bindings ignored — window is not modelled).
+        if (String(sql).includes('EXISTS (SELECT 1 FROM service_records')) {
+          this.rawOrder = (row) => {
+            const served = (state.rows.service_records || []).some((r) => r.customer_id === row.id && r.technician_id != null)
+              || (state.rows.scheduled_services || []).some((r) => r.customer_id === row.id && r.status === 'completed' && r.technician_id != null);
+            return served ? 0 : 1;
+          };
+        }
+        return this;
+      },
       limit(value) { this.limitValue = value; return this; },
       async first() { return filteredRows(this)[0] || null; },
       count() {
@@ -817,12 +837,41 @@ describe('review incentives', () => {
     conn.__state.rows.google_reviews[0].link_source = 'click_auto';
     const pinned = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
     expect(pinned.candidates.map((c) => c.id)).toEqual(['customer-blake', 'customer-john']);
-    // The service ranking sees a superset before the page is cut: with
+    // The service ranking happens in SQL before the page is cut: with
     // limit 1 the serviced customer still wins over the alphabetical first.
     conn.__state.rows.google_reviews[0].customer_id = null;
     conn.__state.rows.google_reviews[0].link_source = null;
     const paged = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn, limit: 1 });
     expect(paged.candidates.map((c) => c.id)).toEqual(['customer-john']);
+  });
+
+  test('candidate search binds the COMPLETE surname both de-accented and as typed — LOWER(last_name) keeps accents (GH codex r1 P1/P2)', async () => {
+    const conn = createDbMock({
+      customers: [{ id: 'customer-pepe', first_name: 'Pepe', last_name: 'Muñoz-Pérez', active: true }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: null,
+        reviewer_name: 'Pepe Muñoz-Pérez',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/pepe',
+      }],
+    });
+    await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    const raw = conn.mock.results.map((r) => r.value).filter((q) => q.table === 'customers').flatMap((q) => q.rawWheres);
+    // De-accented whole-word suffixes, an equality list (no unaccent
+    // extension is assumed) — and never a bare final token only.
+    expect(raw).toContainEqual(['LOWER(last_name) IN (?, ?)', ['pepe munoz-perez', 'munoz-perez']]);
+    // The as-typed lowercase name compares against the accent-keeping
+    // column as an exact or whole-word-suffix match.
+    expect(raw).toContainEqual(["(? = LOWER(last_name) OR ? LIKE ('% ' || LOWER(last_name)))", ['pepe muñoz-pérez', 'pepe muñoz-pérez']]);
+    // A one-token display name binds no surname clause at all.
+    conn.mock.results.length = 0;
+    conn.__state.rows.google_reviews[0].reviewer_name = 'SunshineGal88';
+    await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    const rawHandle = conn.mock.results.map((r) => r.value).filter((q) => q.table === 'customers').flatMap((q) => q.rawWheres);
+    expect(rawHandle.some(([sql]) => sql.includes('last_name) IN') || sql.includes('LOWER(last_name))'))).toBe(false);
   });
 
   test('candidate search and manual attribution reject removed reviews', async () => {

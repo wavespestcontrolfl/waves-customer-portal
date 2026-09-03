@@ -702,14 +702,20 @@ async function searchAttributionCandidates(options = {}) {
   const search = String(options.q || '').trim();
   const fallbackName = String(review.reviewer_name || '').trim();
   const terms = search || fallbackName;
-  // Fetch a bounded superset so the recent-service ranking below sees every
-  // plausible name match before the page is cut (pre-push P1 r3), then slice
-  // to the caller's limit.
-  const SCAN_MULTIPLE = 5;
+  // Proximity to service ranks in SQL, BEFORE the page is cut (pre-push P1
+  // r3/r4): a customer with a completed visit in the same 90-day window the
+  // service picker uses (recentServiceCandidatesForCustomer) leads, then
+  // last name. Owner ruling 2026-09-03.
+  const reviewDateOnly = etBusinessDate(review.review_created_at || review.created_at || new Date());
+  const serviceCutoff = etBusinessDateOffset(review.review_created_at || review.created_at || new Date(), -90);
   let query = conn('customers')
     .where({ active: true })
-    .orderBy('last_name', 'asc')
-    .limit(Math.min(50, limit * SCAN_MULTIPLE))
+    .orderByRaw(
+      `(EXISTS (SELECT 1 FROM service_records sr WHERE sr.customer_id = customers.id AND sr.technician_id IS NOT NULL AND sr.service_date BETWEEN ? AND ?)
+        OR EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.customer_id = customers.id AND ss.status = 'completed' AND ss.technician_id IS NOT NULL AND ss.scheduled_date BETWEEN ? AND ?)) DESC, last_name ASC`,
+      [serviceCutoff, reviewDateOnly, serviceCutoff, reviewDateOnly],
+    )
+    .limit(limit)
     .select(
       'id',
       'first_name',
@@ -727,15 +733,24 @@ async function searchAttributionCandidates(options = {}) {
     const like = `%${terms}%`;
     const likeLower = `%${terms.toLowerCase()}%`;
     // A two-token Google display name ("slim berry") rarely equals the
-    // customer record ("John Berry"): the surname alone is also a hit
-    // (owner ruling 2026-09-03).
-    const { reviewerLastNameToken } = require('./review-click-correlation');
-    const lastToken = reviewerLastNameToken(terms);
+    // customer record ("John Berry"): the COMPLETE surname alone is also a
+    // hit (owner ruling 2026-09-03) — every whole-word suffix of the name,
+    // so "De La Cruz" is found and not just "Cruz" (GH codex r1 P1). The
+    // suffixes are de-accented while LOWER(last_name) keeps accents, and no
+    // unaccent extension exists: the lowercase name is ALSO bound as-is, so
+    // a "Muñoz-Pérez" reviewer finds the customer whether the record keeps
+    // the accents or dropped them (GH codex r1 P2).
+    const { reviewerSurnames } = require('./review-click-correlation');
+    const surnames = reviewerSurnames(terms);
     query = query.where(function searchCustomers() {
       this.whereILike('first_name', like)
         .orWhereILike('last_name', like)
         .orWhereRaw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE ?", [likeLower]);
-      if (lastToken) this.orWhereRaw('LOWER(last_name) = ?', [lastToken]);
+      if (surnames.length) {
+        const lower = terms.toLowerCase();
+        this.orWhereRaw(`LOWER(last_name) IN (${surnames.map(() => '?').join(', ')})`, surnames)
+          .orWhereRaw("(? = LOWER(last_name) OR ? LIKE ('% ' || LOWER(last_name)))", [lower, lower]);
+      }
       this.orWhereILike('phone', like)
         .orWhereILike('email', like)
         .orWhereILike('address_line1', like)
@@ -781,14 +796,10 @@ async function searchAttributionCandidates(options = {}) {
       services,
     });
   }
-  // A customer with a recent service near the review leads the list
-  // (proximity to service — owner ruling 2026-09-03); the linked-customer
-  // pin above stays first. Stable sort keeps the name order within tiers.
+  // The review's currently linked customer is pinned first wherever the
+  // search returned them (pre-push P1 r2).
   const pinned = review.customer_id ? candidates.findIndex((c) => String(c.id) === String(review.customer_id)) : -1;
-  const head = pinned >= 0 ? candidates.splice(pinned, 1) : [];
-  candidates.sort((a, b) => Number(b.services.length > 0) - Number(a.services.length > 0));
-  candidates.unshift(...head);
-  candidates.splice(limit);
+  if (pinned > 0) candidates.unshift(...candidates.splice(pinned, 1));
 
   // Click-time correlation: customers whose tracked review-link click landed
   // near this review's timestamp. Rendered as a separate "likely reviewers"

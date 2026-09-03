@@ -27,26 +27,32 @@ const DEFAULT_LIMIT = 5;
 const SCAN_LIMIT = 200;
 
 /**
- * A surname token for matching: lowercased, diacritics stripped, punctuation
- * trimmed. null when nothing usable remains (under 2 letters).
+ * A name for matching: lowercased, diacritics stripped, punctuation trimmed,
+ * whitespace collapsed ("Muñoz-Pérez" → "munoz-perez", "De La Cruz" →
+ * "de la cruz"). '' when nothing usable remains.
  */
-function normalizeNameToken(value) {
-  const token = String(value || '')
+function normalizeName(value) {
+  return String(value || '')
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/[^a-z'-]/g, '');
-  return token.length >= 2 ? token : null;
+    .replace(/[^a-z'\- ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /**
- * The last name a Google display name carries — its final whitespace token
- * ("slim berry" → "berry"). A one-token display name ("SunshineGal88")
- * offers no surname and returns null.
+ * Every COMPLETE last name a Google display name could carry — its
+ * whole-word suffixes, normalized ("Maria De La Cruz" → "de la cruz",
+ * "la cruz", "cruz", and the whole name). A customer matches when their
+ * normalized last_name is one of these — never a bare final token, which
+ * would let a customer stored as "Cruz" outrank one stored as "De La Cruz"
+ * (GH codex r1 P1). A one-token display name ("SunshineGal88") offers no
+ * surname and returns [].
  */
-function reviewerLastNameToken(reviewerName) {
-  const tokens = String(reviewerName || '').trim().split(/\s+/).filter(Boolean);
-  if (tokens.length < 2) return null;
-  return normalizeNameToken(tokens[tokens.length - 1]);
+function reviewerSurnames(reviewerName) {
+  const tokens = normalizeName(reviewerName).split(' ').filter(Boolean);
+  if (tokens.length < 2) return [];
+  return tokens.map((_, i) => tokens.slice(i).join(' ')).filter((s) => s.length >= 2);
 }
 
 /**
@@ -78,7 +84,8 @@ function describeClickOffset(offsetMs) {
  *   addressLine2: string|null, city: string|null, state: string|null,
  *   zip: string|null, clickedAt: string, clickOffsetMs: number,
  *   clickOffsetLabel: string, clickedBeforeReview: boolean,
- *   locationMatch: boolean|null, alreadyFlagged: boolean, nameMatch: boolean
+ *   locationMatch: boolean|null, locationConflict: boolean, alreadyFlagged: boolean,
+ *   nameMatch: boolean
  * }>>} surname matches first, then nearest-click-first; [] on missing/invalid review timestamp or any
  * query error (suggestions are best-effort and must never break a caller).
  */
@@ -86,7 +93,7 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
   const reviewAtRaw = review?.review_created_at;
   const reviewAt = reviewAtRaw ? new Date(reviewAtRaw) : null;
   if (!reviewAt || Number.isNaN(reviewAt.getTime())) return [];
-  const reviewerLast = reviewerLastNameToken(review?.reviewer_name);
+  const surnames = reviewerSurnames(review?.reviewer_name);
 
   try {
     const windowStart = new Date(reviewAt.getTime() - WINDOW_BEFORE_HOURS * 3600 * 1000);
@@ -180,6 +187,12 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       return Math.abs(a.clickOffsetMs) < Math.abs(b.clickOffsetMs);
     };
     const byCustomer = new Map();
+    // Customers with a pair STAMPED for a different location. That pair is
+    // skipped below, but its existence is anti-evidence the surname rung
+    // must see: a newer post-migration tap at another location must not
+    // leave an older, untrusted first-click pair looking clean (GH codex r1
+    // P1).
+    const conflicting = new Set();
     for (const row of clicks) {
       if (row.google_review_clicked !== true) continue;
       // BOTH observed timestamps are candidate clicks, each judged ONLY
@@ -204,7 +217,10 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       for (const { ts, loc, trusted } of pairs) {
         if (!ts || seenTs.has(String(ts))) continue;
         seenTs.add(String(ts));
-        if (reviewLocationId && loc && loc !== reviewLocationId) continue;
+        if (reviewLocationId && loc && loc !== reviewLocationId) {
+          conflicting.add(row.customer_id);
+          continue;
+        }
         const clickedAt = new Date(ts);
         if (Number.isNaN(clickedAt.getTime())) continue;
         // The OR window admits the ROW when either timestamp qualifies —
@@ -259,9 +275,13 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         // auto-link — the confirmation UI's candidate search requires
         // active=true, so a null-active link would be unconfirmable.
         customerActive: row.active === true,
-        // The reviewer's display-name surname equals this customer's last
-        // name (owner ruling 2026-09-03: the matcher weighs the last name).
-        nameMatch: Boolean(reviewerLast) && normalizeNameToken(row.last_name) === reviewerLast,
+        // Another of this customer's pairs is stamped for a DIFFERENT
+        // location — see `conflicting` above.
+        locationConflict: conflicting.has(row.customer_id),
+        // The reviewer's display-name surname equals this customer's
+        // COMPLETE last name (owner ruling 2026-09-03: the matcher weighs
+        // the last name; GH codex r1 P1: whole surname, not the final token).
+        nameMatch: surnames.includes(normalizeName(row.last_name)),
       });
     const all = [...byCustomer.values()].map(toCandidate);
     // Every clicker in the window, linked ones included — the confident
@@ -295,10 +315,11 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
 //   sole_click — EXACTLY ONE clicker in the whole 72h window (even a
 //     location-unstamped second clicker means a human decides) AND a
 //     post-migration location pair that MATCHES the review's;
-//   click_name — exactly one in-window clicker whose last name equals the
-//     reviewer's display-name surname. The surname is the corroboration
+//   click_name — exactly one in-window clicker whose complete last name
+//     ends the reviewer's display name. The surname is the corroboration
 //     the post-migration stamp stands in for, so a legacy pair qualifies;
-//     a pair stamped with a DIFFERENT location still refuses;
+//     any of the customer's pairs stamped with a DIFFERENT location
+//     refuses;
 //   click_near — the nearest click is within minutes of the review, its
 //     pair is trusted and location-matched, and every other clicker in the
 //     window (linked ones included) is hours away or after the review.
@@ -356,15 +377,18 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     }
 
     // click_name — exactly one clicker in the RAW window carries the
-    // reviewer's surname (a linked same-surname clicker still competes —
-    // their click may aim at another location's profile; pre-push P1), and
-    // that one must be an unlinked candidate. Two same-surname clickers = a
-    // human decides. A legacy pair is fine (the surname corroborates); a
-    // pair stamped with a different location is not.
+    // reviewer's complete surname (a linked same-surname clicker still
+    // competes — their click may aim at another location's profile;
+    // pre-push P1), and that one must be an unlinked candidate. Two
+    // surname matches ("Cruz" and "De La Cruz" both end "Maria De La
+    // Cruz") = a human decides. A legacy pair is fine (the surname
+    // corroborates); a customer with ANY pair stamped for a different
+    // location is not — the retained pair may be the untrusted first click
+    // while their newer tap went elsewhere (GH codex r1 P1).
     const all = meta.allCandidates || [];
     const namedAll = all.filter((c) => c.nameMatch === true);
     const named = namedAll.length === 1 ? candidates.find((c) => c.customerId === namedAll[0].customerId) : null;
-    if (named && eligible(named) && named.locationMatch !== false) {
+    if (named && eligible(named) && named.locationConflict !== true) {
       return decision(named, 'click_name');
     }
 
@@ -388,4 +412,4 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
   }
 }
 
-module.exports = { findLikelyReviewers, findConfidentClickMatch, describeClickOffset, reviewerLastNameToken, AUTO_LINK_MAX_BEFORE_MS, AUTO_LINK_NEAR_MS, AUTO_LINK_FAR_MS };
+module.exports = { findLikelyReviewers, findConfidentClickMatch, describeClickOffset, reviewerSurnames, AUTO_LINK_MAX_BEFORE_MS, AUTO_LINK_NEAR_MS, AUTO_LINK_FAR_MS };

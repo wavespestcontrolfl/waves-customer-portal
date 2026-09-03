@@ -2,7 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const logger = require('../services/logger');
-const { findLikelyReviewers, findConfidentClickMatch, describeClickOffset, reviewerLastNameToken, AUTO_LINK_NEAR_MS, AUTO_LINK_FAR_MS } = require('../services/review-click-correlation');
+const { findLikelyReviewers, findConfidentClickMatch, describeClickOffset, reviewerSurnames, AUTO_LINK_NEAR_MS, AUTO_LINK_FAR_MS } = require('../services/review-click-correlation');
 
 const REVIEW_AT = '2026-08-07T18:00:00.000Z';
 
@@ -325,13 +325,16 @@ describe('findConfidentClickMatch', () => {
   });
 });
 
-describe('reviewerLastNameToken', () => {
-  test('takes the final token, lowercased and de-accented; one-token names offer no surname', () => {
-    expect(reviewerLastNameToken('slim berry')).toBe('berry');
-    expect(reviewerLastNameToken('José Muñoz-Pérez')).toBe('munoz-perez');
-    expect(reviewerLastNameToken('SunshineGal88')).toBeNull();
-    expect(reviewerLastNameToken('Dana B.')).toBeNull();
-    expect(reviewerLastNameToken('')).toBeNull();
+describe('reviewerSurnames', () => {
+  test('every whole-word suffix, lowercased and de-accented; one-token names offer no surname', () => {
+    expect(reviewerSurnames('slim berry')).toEqual(['slim berry', 'berry']);
+    // A compound surname is matched COMPLETE, never as its final token alone
+    // (GH codex r1 P1): "De La Cruz" is a candidate surname, and so is "Cruz".
+    expect(reviewerSurnames('Maria De La Cruz')).toEqual(['maria de la cruz', 'de la cruz', 'la cruz', 'cruz']);
+    expect(reviewerSurnames('José Muñoz-Pérez')).toEqual(['jose munoz-perez', 'munoz-perez']);
+    expect(reviewerSurnames('SunshineGal88')).toEqual([]);
+    expect(reviewerSurnames('Dana B.')).toEqual(['dana b']);
+    expect(reviewerSurnames('')).toEqual([]);
   });
 });
 
@@ -379,6 +382,45 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
   test('refuses a surname match whose pair is stamped with a DIFFERENT location', async () => {
     const conn = makeConn({ clickRows: [berry({ google_location: 'parrish', last_google_location: 'parrish' }), other()] });
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+  });
+
+  test('refuses a surname match whose NEWER tap is stamped for a different location, even with an older first-click pair at this one (GH codex r1 P1)', async () => {
+    // First click 45s before the review at Bradenton (untrusted first pair);
+    // the post-migration latest click routed to Parrish. The Parrish pair is
+    // skipped by the location scan — its existence must still refuse.
+    const conn = makeConn({
+      clickRows: [
+        berry({ google_location: 'bradenton', last_redirected_at: '2026-08-07T18:05:00.000Z', last_google_location: 'parrish' }),
+        other(),
+      ],
+    });
+    const list = await findLikelyReviewers(REVIEW, { conn });
+    expect(list.find((c) => c.customerId === 'cust-berry')).toMatchObject({ nameMatch: true, locationConflict: true, pairTrusted: false });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+    // Same first pair with no conflicting stamp (a legacy pair): the
+    // surname links.
+    const clean = makeConn({ clickRows: [berry({ google_location: 'bradenton', last_redirected_at: null, last_google_location: null }), other()] });
+    expect((await findConfidentClickMatch(REVIEW, { conn: clean }))?.rung).toBe('click_name');
+  });
+
+  test('a compound surname matches the COMPLETE last name: "De La Cruz" links when unique, "Cruz" + "De La Cruz" together refuse (GH codex r1 P1)', async () => {
+    const review = { ...REVIEW, reviewer_name: 'Maria De La Cruz' };
+    const deLaCruz = berry({ customer_id: 'cust-dlc', first_name: 'Maria', last_name: 'De La Cruz' });
+    const cruz = berry({ customer_id: 'cust-cruz', first_name: 'Ana', last_name: 'Cruz', redirected_at: '2026-08-07T16:00:00.000Z' });
+    // Unique complete-surname clicker among others: links.
+    const unique = makeConn({ clickRows: [deLaCruz, other()] });
+    expect(await findConfidentClickMatch(review, { conn: unique })).toMatchObject({ customerId: 'cust-dlc', rung: 'click_name' });
+    // A customer stored as "Cruz" is a surname match too (the display name
+    // ends with the word "cruz"), so two matches in the window refuse.
+    const both = makeConn({ clickRows: [deLaCruz, cruz] });
+    const list = await findLikelyReviewers(review, { conn: both });
+    expect(list.map((c) => [c.customerId, c.nameMatch])).toEqual([['cust-dlc', true], ['cust-cruz', true]]);
+    expect(await findConfidentClickMatch(review, { conn: both })).toBeNull();
+    // A partial-word tail never matches: "Lacruz" is not a whole-word
+    // suffix of "Maria De La Cruz".
+    const partial = makeConn({ clickRows: [berry({ customer_id: 'cust-lacruz', last_name: 'Lacruz', redirected_at: '2026-08-07T16:00:00.000Z' }), other()] });
+    expect((await findLikelyReviewers(review, { conn: partial })).map((c) => [c.customerId, c.nameMatch])).toEqual([['cust-lacruz', false], ['cust-whitney', false]]);
+    expect(await findConfidentClickMatch(review, { conn: partial })).toBeNull();
   });
 
   test('the shared bar still applies: after-review, over 12h, flagged, or inactive surname matches refuse', async () => {
