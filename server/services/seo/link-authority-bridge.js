@@ -163,7 +163,7 @@ async function autoSendDecided(db, { send, now }) {
   const sendFirst = new Set((await db('seo_link_acquisition_paths').whereIn('id', [...new Set(rows.map((r) => r.path_id).filter(Boolean))]).select('id', 'execution_after_send')).filter((x) => x.execution_after_send !== false).map((x) => x.id));
   const decidedPath = new Map(rows.filter((r) => sendFirst.has(r.path_id)).map((r) => [r.prospect_id, r.path_id]));
   if (!decidedPath.size) return out;
-  const batch = await db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...sendFirst]).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').orderBy('updated_at', 'asc').limit(AUTO_SEND_BATCH).select('id', 'path_id');
+  const batch = await db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...sendFirst]).where({ status: PARKABLE, outreach_status: 'drafted' }).whereNull('claimed_at').whereNull('outreach_sent_at').orderBy('updated_at', 'asc').limit(AUTO_SEND_BATCH).select('id', 'path_id', 'updated_at');
   for (const p of batch) {
     if (decidedPath.get(p.id) !== p.path_id) continue; // the row left the path its instance was decided on — the bridge rotates it
     out.attempted += 1;
@@ -172,8 +172,10 @@ async function autoSendDecided(db, { send, now }) {
     if (res && res.ok) { out.sent += 1; continue; }
     out.skipped.push({ id: p.id, code: (res && res.code) || 'error' });
     if (res && res.code === 'rate_limited') break; // the cap is reached for the window — nothing else sends today
-    // the refused row goes behind every draft that existed before this run (still drafted: the claim never took it)
-    await db('seo_link_prospects').where({ id: p.id, outreach_status: 'drafted' }).update({ updated_at: now });
+    // the refused row goes behind every draft that existed before this run (still drafted: the claim never took it) —
+    // unless an edit landed since the run began: a later timestamp is what marks that draft stale for the next
+    // selection and is never moved backward
+    await db('seo_link_prospects').where({ id: p.id, outreach_status: 'drafted' }).where('updated_at', '<=', now).update({ updated_at: now });
   }
   return out;
 }

@@ -610,7 +610,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     // (prospect-domain-lock) and is refused while another row for the domain is
     // already in active outreach — otherwise both are claimable by the worker.
     const result = await db.transaction(async (trx) => {
-      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key');
+      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'conversation_closed_at');
       if (!current) return { missing: true };
       // "In outreach" = active-outreach status AND an outreach-lane link_type:
       // a status flip OR a link_type change out of the signup lane can put a
@@ -627,16 +627,17 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // otherwise keep reading the live row as closed and free its inbox to a second conversation; lost-link recovery
       // clears it the same way. An active row never carries the stamp, so clearing it on every active edit is exact.
       if (ACTIVE_OUTREACH_STATUSES.includes(patch.status)) patch.conversation_closed_at = null;
-      // recording a conversation by hand (→ contacted / negotiating) OPENS one for the recipient: the same
-      // recipient-level lock + predicate the send claim takes (plan §13), so no two writers open the same inbox
-      const opensConversation = 'status' in patch && ['contacted', 'negotiating'].includes(patch.status) && !['contacted', 'negotiating'].includes(current.status);
+      // an edit whose RESULT is an open conversation (§13: contacted / negotiating, a park from them, or a sent pitch
+      // on a row the reopen above just made active again) while the current row is not one OPENS it for the
+      // recipient: the same recipient-level lock + predicate the send claim takes, so no two writers open the same inbox
+      const Outreach = require('../services/seo/link-prospect-outreach');
+      const opensConversation = Outreach.conversationOpen({ ...current, ...patch }) && !Outreach.conversationOpen(current);
       if (opensConversation) {
         // the same lock ORDER as the send claim (domain → inbox advisory lock → row lock) for EVERY conversation-opening
         // edit, not only a board admission — a page move below re-takes the domain lock, which must never follow the
         // inbox lock; the recipient read before the locks is re-read under the row lock — re-addressed meanwhile means
         // the inbox locked is not this row's; refuse
         await lockProspectDomain(trx, current.target_domain);
-        const Outreach = require('../services/seo/link-prospect-outreach');
         const before = await trx('seo_link_prospects').where({ id: current.id }).first('outreach_to_email');
         const recipient = before && before.outreach_to_email;
         if (recipient) {
@@ -768,7 +769,7 @@ router.post('/prospects/:id/outreach/send', requireAdmin, async (req, res, next)
     const Outreach = require('../services/seo/link-prospect-outreach');
     const hash = req.body?.reviewed_lookup_hash;
     const result = await Outreach.sendOutreach({
-      prospectId: req.params.id, approvedBy: req.technician?.name || 'admin', mode: 'owner', reviewedLookupHash: typeof hash === 'string' ? hash : null,
+      prospectId: req.params.id, approvedBy: actorOf(req) || 'admin', mode: 'owner', reviewedLookupHash: typeof hash === 'string' ? hash : null,
     });
     if (!result.ok) {
       const status = ownerQueue.SEND_CODE_STATUS[result.code] || 400;

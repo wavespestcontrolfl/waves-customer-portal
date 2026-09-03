@@ -602,6 +602,11 @@ describe('the nightly auto-send (§6.4)', () => {
     expect(r2).toMatchObject({ attempted: 100, sent: 1 });
     expect(send.mock.calls[120][0]).toMatchObject({ prospectId: valid.id, mode: 'auto' });
     expect(send).toHaveBeenCalledTimes(200);
+    // a draft edited while the run was refusing it keeps its later timestamp (the next selection's staleness signal)
+    const edited = refused[0]; const later = new Date(NOW.getTime() + 48 * 3600 * 1000 + 1);
+    const editing = jest.fn(async ({ prospectId }) => { if (prospectId === edited.id) edited.updated_at = later; return { ok: false, code: 'customer_recipient' }; });
+    await bridge.autoSendDecided(db, { send: editing, now: new Date(NOW.getTime() + 48 * 3600 * 1000) });
+    expect(edited.updated_at).toBe(later);
   });
   test('the real sender over the store: the run sends, the placement reads contacted and the instance is satisfied', async () => {
     const s = scenario({ policy: AUTO_POLICY });

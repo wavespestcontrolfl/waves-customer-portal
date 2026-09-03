@@ -21,6 +21,8 @@ describe('classifyDraft', () => {
     ['a link for you', 'a link for your readers from our resources page', ['reciprocal_promise']],
     ['payment', 'we can pay a $150 placement fee', ['payment']],
     ['sponsorship', 'open to a sponsored post', ['payment']],
+    ['purchase offer', 'We would purchase this placement from you', ['payment']],
+    ['buy / price', 'happy to buy a listing at your price', ['payment']],
     ['a discount', 'your readers get 20% off their first treatment', ['discount']],
     ['a free service', 'a free inspection for your staff', ['discount']],
     ['a guarantee', 'we guarantee results', ['guarantee']],
