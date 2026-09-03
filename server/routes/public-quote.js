@@ -1794,8 +1794,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // rows the request keeps the marker the row actually carries, so the
         // attribution skip and the bell label follow the database, not the
         // relabel that did not land.
+        // ...and to the identity this request wrote (contact, address,
+        // service, extra-property count as observed on the row): two
+        // requests on one lookup token typing different inquiries must not
+        // stamp one request's marker onto the other's fields (r13 P1).
+        const observedExtraCount = parseExtracted(lead.extracted_data)?.additional_properties?.length || 0;
         if (duplicateOfLeadId !== stored) {
-          const relabelled = await db('leads').where({ id: lead.id, status: lead.status }).update(duplicateOfLeadId
+          const relabelled = await db('leads')
+            .where({ id: lead.id, status: lead.status, email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey })
+            .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [observedExtraCount])
+            .update(duplicateOfLeadId
             ? { status: 'duplicate', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }
             : { status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
           if (!relabelled) duplicateOfLeadId = stored;
@@ -2027,7 +2035,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // The current touch needs a mapped channel; a repeat's root repair
         // does not depend on this visit's channel at all (pre-push r12).
         let touch = !channelAttr ? null : {
-          leadId: lead.id, serviceInterest, leadDate: etDateString(), channel: channelAttr,
+          leadId: lead.id, customerId, serviceInterest, leadDate: etDateString(), channel: channelAttr,
           leadSourceDetail: sourceMeta.leadSourceDetail, gclid, wbraid, gbraid, fbclid, fbc, fbp,
           utmCampaign: attr?.utm?.campaign || null, utmTerm: attr?.utm?.term || null,
           // The map's isPaid says the CHANNEL is a paid one; the resolver's
@@ -2042,15 +2050,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const rootHasRow = await db('ad_service_attribution').where({ lead_id: rootId }).first('id');
           const rootSource = !rootHasRow && root?.lead_source_id ? await db('lead_sources').where({ id: root.lead_source_id }).first('source_type') : null;
           const rootChannel = attributionForSourceType(rootSource?.source_type);
+          // The root row belongs to the ROOT's customer (a contact revision
+          // may have given the repeat another profile), and its paid evidence
+          // is every click id the row stored, fbc included (r13 P2s).
           touch = rootHasRow || !root || !rootChannel ? null : {
-            leadId: root.id, serviceInterest: root.service_interest || serviceInterest, leadDate: etDateString(new Date(root.created_at)), channel: rootChannel,
+            leadId: root.id, customerId: root.customer_id || customerId, serviceInterest: root.service_interest || serviceInterest, leadDate: etDateString(new Date(root.created_at)), channel: rootChannel,
             leadSourceDetail: null, gclid: root.gclid, wbraid: root.wbraid, gbraid: root.gbraid, fbclid: root.fbclid, fbc: root.fbc, fbp: root.fbp,
             utmCampaign: null, utmTerm: null,
-            isPaid: rootChannel.isPaid && !!(root.gclid || root.wbraid || root.gbraid || root.fbclid),
+            isPaid: rootChannel.isPaid && !!(root.gclid || root.wbraid || root.gbraid || root.fbclid || root.fbc),
           };
         }
         if (touch) await db('ad_service_attribution').insert({
-          customer_id: customerId,
+          customer_id: touch.customerId,
           lead_id: touch.leadId,
           service_line: inferServiceLine(touch.serviceInterest),
           specific_service: inferSpecificService(touch.serviceInterest),

@@ -290,6 +290,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     // the page's date filter.
     const recentResponded = await db('leads')
       .whereNull('deleted_at')
+      .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
       .whereNotNull('response_time_minutes')
       .whereNotNull('first_contact_at')
       .whereRaw(

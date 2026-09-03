@@ -121,8 +121,8 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(src).toMatch(/const root = await followDuplicateLink\(db, await db\('leads'\)\.where\(\{ id: duplicateOfLeadId \}\)\.first\(\)\);/);
     expect(src).toMatch(/const rootHasRow = await db\('ad_service_attribution'\)\.where\(\{ lead_id: rootId \}\)\.first\('id'\);/);
     expect(src).toMatch(/const rootChannel = attributionForSourceType\(rootSource\?\.source_type\);/);
-    expect(src).toMatch(/touch = rootHasRow \|\| !root \|\| !rootChannel \? null : \{\n\s+leadId: root\.id, serviceInterest: root\.service_interest \|\| serviceInterest, leadDate: etDateString\(new Date\(root\.created_at\)\), channel: rootChannel,/);
-    expect(src).toMatch(/if \(touch\) await db\('ad_service_attribution'\)\.insert\(\{\n\s+customer_id: customerId,\n\s+lead_id: touch\.leadId,/);
+    expect(src).toMatch(/touch = rootHasRow \|\| !root \|\| !rootChannel \? null : \{\n\s+leadId: root\.id, customerId: root\.customer_id \|\| customerId, serviceInterest: root\.service_interest \|\| serviceInterest, leadDate: etDateString\(new Date\(root\.created_at\)\), channel: rootChannel,/);
+    expect(src).toMatch(/if \(touch\) await db\('ad_service_attribution'\)\.insert\(\{\n\s+customer_id: touch\.customerId,\n\s+lead_id: touch\.leadId,/);
     // A submission that adds properties is a wider inquiry, never a repeat
     // (codex r10 P1) — on both paths.
     expect(src).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
@@ -149,7 +149,8 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(block).toMatch(/if \(duplicateOfLeadId !== stored\)/);
     // The relabel is scoped to the status just read (codex r9 P1): a staff
     // transition in between wins and this public retry updates 0 rows.
-    expect(block).toMatch(/const relabelled = await db\('leads'\)\.where\(\{ id: lead\.id, status: lead\.status \}\)\.update\(/);
+    // ...and the identity this request wrote (codex r13 P1).
+    expect(block).toMatch(/const relabelled = await db\('leads'\)\n\s+\.where\(\{ id: lead\.id, status: lead\.status, email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey \}\)\n\s+\.whereRaw\("COALESCE\(jsonb_array_length\(COALESCE\(extracted_data, '\{\}'::jsonb\)->'additional_properties'\), 0\) = \?", \[observedExtraCount\]\)\n\s+\.update\(/);
     // ...and a relabel that did not land leaves the request on the marker
     // the row actually carries (pre-push P1 on r9).
     expect(block).toMatch(/if \(!relabelled\) duplicateOfLeadId = stored;/);

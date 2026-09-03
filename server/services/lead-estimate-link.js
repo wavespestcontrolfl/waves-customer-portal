@@ -45,15 +45,19 @@ function normalizeEmail(value) {
 // the named one or any hop — is out of every live mutation path (admin
 // delete contract), so it is never followed to a live original (codex
 // #3834 r11 P1).
+function duplicateMarkerOf(lead) {
+  let data = lead && lead.extracted_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  return (data && data.duplicate_of_lead_id) || null;
+}
+
 async function followDuplicateLink(database, lead) {
   const seen = new Set();
   let current = lead;
   while (current && current.status === 'duplicate' && !seen.has(current.id) && seen.size < 8) {
     if (current.deleted_at) return lead;
     seen.add(current.id);
-    let data = current.extracted_data;
-    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
-    const originalId = data && data.duplicate_of_lead_id;
+    const originalId = duplicateMarkerOf(current);
     if (!originalId) return current;
     const original = await database('leads').where({ id: originalId }).first();
     if (!original || original.deleted_at) return lead;
@@ -980,14 +984,32 @@ async function convertLeadFromEvent({
           .where({ customer_id: resolvedCustomerId, lead_type: 'quote_wizard', status: 'duplicate' })
           .whereNull('deleted_at')
           .orderBy('created_at', 'desc');
-        const winners = new Map(); // candidate id → the repeat row taking the win (foreign root), or null
+        const winners = new Map(); // candidate id → the repeat row taking the win (foreign/unavailable root), or null
+        const seenAncestry = new Set();
         for (const repeat of repeats) {
+          // Only auto-filed repeats carry a server-issued marker; a row staff
+          // closed as 'duplicate' by hand has no ancestry and is a deliberate
+          // closure, never a rescue candidate (codex #3834 r13 P1).
+          const marker = duplicateMarkerOf(repeat);
+          if (!marker) continue;
           const root = await followDuplicateLink(database, repeat);
-          if (linked.some((l) => l.id === root.id) || [...winners.values()].some((w) => w && w.root === root.id)) continue;
-          const rootIsOurs = root.id !== repeat.id && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at
-            && (!root.customer_id || String(root.customer_id) === String(resolvedCustomerId));
+          const resolved = root.id !== repeat.id;
+          // Group by the RECORDED ancestry when the root is unavailable
+          // (deleted / missing): two repeats of one vanished original are one
+          // opportunity, and the marker is the identity that survives.
+          const ancestryKey = resolved ? root.id : marker;
+          if (linked.some((l) => l.id === ancestryKey) || seenAncestry.has(ancestryKey)) continue;
+          seenAncestry.add(ancestryKey);
+          // An unlinked root is this customer's only if its CURRENT contact
+          // still matches the verified customer (staff may have corrected
+          // it since the repeat was filed) — the same validation the
+          // accepted-estimate path applies.
+          const rootIsOurs = resolved && !CLOSED_LEAD_STATUSES.has(root.status) && !root.deleted_at
+            && (root.customer_id
+              ? String(root.customer_id) === String(resolvedCustomerId)
+              : leadMatchesEstimateContact(root, { customer_phone: resolvedPhone, customer_email: resolvedEmail }));
           linked.push(rootIsOurs ? root : repeat);
-          winners.set(rootIsOurs ? root.id : repeat.id, rootIsOurs ? null : { row: repeat, root: root.id });
+          winners.set(rootIsOurs ? root.id : repeat.id, rootIsOurs ? null : repeat);
         }
         // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
         // estimate belongs to that deal — exclude it so we never convert it or
@@ -1011,7 +1033,7 @@ async function convertLeadFromEvent({
           }
           candidates = scoped;
           resolution = 'customer_link';
-          duplicateWinner = winners.get(scoped[0].id)?.row || null;
+          duplicateWinner = winners.get(scoped[0].id) || null;
         }
       }
 
