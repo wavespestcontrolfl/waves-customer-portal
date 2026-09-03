@@ -32,7 +32,7 @@ jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: je
 // pricing-authority send gate the estimate builder consults) stays off.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'autopayCustomerSms') }));
 jest.mock('../services/appointment-card-request', () => ({
-  CLAIM_PARK_DATE: new Date('2200-01-01T00:00:00Z'),
+  markCardLinkSendOutcome: jest.fn(),
   renderTemplate: jest.fn(),
   requestCardForAppointment: jest.fn(),
   dateLineFor: jest.fn(() => ' on Tue, Sep 8'),
@@ -86,7 +86,7 @@ const { enrollPromoter, getLiveSettings } = require('../services/referral-engine
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { requestAutopaySetupLink, setupLinkIneligibility } = require('../services/autopay-setup-link');
 const { isEnabled } = require('../config/feature-gates');
-const { renderTemplate, requestCardForAppointment } = require('../services/appointment-card-request');
+const { renderTemplate, requestCardForAppointment, markCardLinkSendOutcome } = require('../services/appointment-card-request');
 const { buildAppointmentLink } = require('../services/appointment-link');
 const { nextUpcomingVisit } = require('../services/prep-guide-sender');
 const { ensureServicePrepToken } = require('../services/project-email');
@@ -1228,21 +1228,15 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(mockBuilders.scheduled_services.update.mock.calls[0][0]).toEqual(expect.objectContaining({ card_link_sent_at: null }));
     });
 
-    test('mark: the request row\'s sent_at, value-guarded; a marker failure PARKS the claim so the lease can never re-text', async () => {
-      mockBuilders = { scheduled_services: chainBuilder(), appointment_card_requests: chainBuilder() };
+    test('mark: delegates every visit to the service\'s own finalizer (retries + park + office alert live there) and reports a marker that did not land', async () => {
       const stamp = new Date();
-      await markCardRequestSends({ stamp, cards: [cards[0]] });
-      const requests = mockBuilders.appointment_card_requests;
-      expect(requests.where).toHaveBeenCalledWith({ token: TOKEN, status: 'pending' });
-      expect(requests.whereNull).toHaveBeenCalledWith('sent_at');
-      expect(requests.update).toHaveBeenCalledWith({ sent_at: stamp, updated_at: stamp });
-      expect(mockBuilders.scheduled_services.update).not.toHaveBeenCalled();
-
-      mockBuilders = { scheduled_services: chainBuilder(), appointment_card_requests: chainBuilder() };
-      mockBuilders.appointment_card_requests.update.mockRejectedValue(new Error('db down'));
-      await expect(markCardRequestSends({ stamp, cards: [cards[0]] })).rejects.toThrow('db down');
-      expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ id: 'v1', card_link_sent_at: stamp });
-      expect(mockBuilders.scheduled_services.update.mock.calls[0][0].card_link_sent_at.toISOString()).toBe('2200-01-01T00:00:00.000Z');
+      markCardLinkSendOutcome.mockReset().mockResolvedValue(true);
+      expect(await markCardRequestSends({ stamp, cards })).toBe(true);
+      expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v1', stamp);
+      expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v2', stamp);
+      markCardLinkSendOutcome.mockReset().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      expect(await markCardRequestSends({ stamp, cards })).toBe(false);
+      expect(markCardLinkSendOutcome).toHaveBeenCalledTimes(2); // never short-circuits — every claimed visit is finalized
     });
   });
 });

@@ -467,6 +467,60 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
   }
 }
 
+// The maybe-sent marker MUST land (Codex #2771 r5): the stale-send
+// lease reads a missing sent_at as died-before-send, so a swallowed
+// marker failure after a Twilio-accepted dispatch would let a later
+// trigger re-text a second bearer link once the lease expires.
+// Bounded retries; if all fail — or the update matches no pending row —
+// the claim is parked and the office gets an exception alert naming the
+// visit so a human intervenes before the lease can fire. Shared by the
+// service's own SMS delivery and the composer's /sms send (which takes
+// the same card_link_sent_at claim before dispatch). Returns true when the
+// marker landed.
+async function markCardLinkSendOutcome(visitId, stamp) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const updated = await db('appointment_card_requests')
+        .where({ scheduled_service_id: visitId, status: 'pending' })
+        .update({ sent_at: stamp, updated_at: stamp });
+      if (updated === 1) return true;
+      // No pending row to mark (it left 'pending' mid-send): a retry
+      // cannot land it — park below, exactly as a failed write.
+      logger.warn(`[appt-card-request] sent_at marker matched no pending row for visit ${visitId}`);
+      break;
+    } catch (err) {
+      logger.warn(`[appt-card-request] sent_at marker attempt ${attempt + 1} failed for visit ${visitId}: ${err.message}`);
+    }
+  }
+  // PARK the claim so the stale lease can never adopt it (Codex #2771
+  // r8): staleness is an AGE check on card_link_sent_at, so pushing
+  // the stamp far into the future makes the claim permanently fresh —
+  // no retrier can re-text this visit even though the marker never
+  // landed. Best-effort (a different table than the failed write);
+  // the office alert below is the human backstop either way.
+  let parked = false;
+  try {
+    await db('scheduled_services')
+      .where({ id: visitId, card_link_sent_at: stamp })
+      .update({ card_link_sent_at: CLAIM_PARK_DATE, updated_at: new Date() });
+    parked = true;
+  } catch (parkErr) {
+    logger.warn(`[appt-card-request] claim park failed for visit ${visitId}: ${parkErr.message}`);
+  }
+  logger.error(`[appt-card-request] sent_at marker FAILED for visit ${visitId} (claim ${parked ? 'parked' : 'NOT parked'}) — alerting office`);
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'Card-link sent marker failed',
+      `A secure-card SMS was dispatched but its sent marker could not be written${parked ? ' (the send claim is parked — no automatic retry will re-text)' : ' AND the claim could not be parked — investigate before the send lease expires (~10 min) or the customer may receive a second link'}.`,
+      { link: '/admin/dispatch', metadata: { scheduled_service_id: visitId, claim_parked: parked } },
+    );
+  } catch (alertErr) {
+    logger.warn(`[appt-card-request] marker-failure alert failed: ${alertErr.message}`);
+  }
+  return false;
+}
+
 /**
  * The one entry point. Returns { requested, action, reason }:
  *   action 'sent'         — the single card-link SMS went out (delivery 'sms').
@@ -986,51 +1040,10 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       throw insertErr;
     }
 
-    // The maybe-sent marker MUST land (Codex #2771 r5): the stale-send
-    // lease reads a missing sent_at as died-before-send, so a swallowed
-    // marker failure after a Twilio-accepted dispatch would let a later
-    // trigger re-text a second bearer link once the lease expires.
-    // Bounded retries; if all fail, the office gets an exception alert
-    // naming the visit so a human intervenes before the lease can fire.
-    const markSendOutcome = async () => {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          await db('appointment_card_requests')
-            .where({ scheduled_service_id: visit.id, status: 'pending' })
-            .update({ sent_at: stamp, updated_at: stamp });
-          return true;
-        } catch (err) {
-          logger.warn(`[appt-card-request] sent_at marker attempt ${attempt + 1} failed for visit ${visit.id}: ${err.message}`);
-        }
-      }
-      // PARK the claim so the stale lease can never adopt it (Codex #2771
-      // r8): staleness is an AGE check on card_link_sent_at, so pushing
-      // the stamp far into the future makes the claim permanently fresh —
-      // no retrier can re-text this visit even though the marker never
-      // landed. Best-effort (a different table than the failed write);
-      // the office alert below is the human backstop either way.
-      let parked = false;
-      try {
-        await db('scheduled_services')
-          .where({ id: visit.id, card_link_sent_at: stamp })
-          .update({ card_link_sent_at: CLAIM_PARK_DATE, updated_at: new Date() });
-        parked = true;
-      } catch (parkErr) {
-        logger.warn(`[appt-card-request] claim park failed for visit ${visit.id}: ${parkErr.message}`);
-      }
-      logger.error(`[appt-card-request] sent_at marker FAILED for visit ${visit.id} (claim ${parked ? 'parked' : 'NOT parked'}) — alerting office`);
-      try {
-        await require('./notification-service').notifyAdmin(
-          'billing',
-          'Card-link sent marker failed',
-          `A secure-card SMS was dispatched but its sent marker could not be written${parked ? ' (the send claim is parked — no automatic retry will re-text)' : ' AND the claim could not be parked — investigate before the send lease expires (~10 min) or the customer may receive a second link'}.`,
-          { link: '/admin/dispatch', metadata: { scheduled_service_id: visit.id, claim_parked: parked } },
-        );
-      } catch (alertErr) {
-        logger.warn(`[appt-card-request] marker-failure alert failed: ${alertErr.message}`);
-      }
-      return false;
-    };
+    // The maybe-sent marker MUST land — markCardLinkSendOutcome (module
+    // level so the composer's /sms send, which claims the same way, can
+    // finalize the same way).
+    const markSendOutcome = () => markCardLinkSendOutcome(visit.id, stamp);
 
     let result;
     try {
@@ -3471,7 +3484,7 @@ module.exports = {
   dateLineFor,
   cancelFeeLine,
   LIVE_VISIT_STATUSES,
-  CLAIM_PARK_DATE,
+  markCardLinkSendOutcome,
   _test: {
     dateLineFor,
     resolveExemption,

@@ -770,10 +770,11 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
  *   releaseCardRequestSends — the text never left (blocked, failed,
  *     suppressed, or a throw with no provider acceptance): value-guarded
  *     release so only THIS claim is cleared.
- *   markCardRequestSends — a REAL provider send: the request row's sent_at
- *     (the durable outcome marker the service's stale-claim lease reads).
- *     If the marker cannot land, the claim is PARKED (CLAIM_PARK_DATE, the
- *     service's own rule) so the lease can never adopt it and re-text.
+ *   markCardRequestSends — a REAL provider send: the service's own
+ *     finalizer (markCardLinkSendOutcome — bounded retries, and a marker
+ *     that cannot land PARKS the claim + alerts the office) stamps the
+ *     request row's sent_at, the durable outcome marker the stale-claim
+ *     lease reads. Returns false when any marker did not land.
  * A worker that dies between claim and send leaves the stamp with no
  * marker — the service's stale-claim lease (STALE_CLAIM_MS) recovers that
  * exactly as it does for its own sends.
@@ -802,20 +803,12 @@ async function releaseCardRequestSends(claim) {
 }
 
 async function markCardRequestSends(claim) {
-  for (const { token, scheduledServiceId } of claim.cards) {
-    try {
-      await db('appointment_card_requests')
-        .where({ token, status: 'pending' })
-        .whereNull('sent_at')
-        .update({ sent_at: claim.stamp, updated_at: claim.stamp });
-    } catch (err) {
-      const { CLAIM_PARK_DATE } = require('./appointment-card-request');
-      await db('scheduled_services')
-        .where({ id: scheduledServiceId, card_link_sent_at: claim.stamp })
-        .update({ card_link_sent_at: CLAIM_PARK_DATE, updated_at: new Date() });
-      throw err;
-    }
+  const { markCardLinkSendOutcome } = require('./appointment-card-request');
+  let allMarked = true;
+  for (const { scheduledServiceId } of claim.cards) {
+    if (!await markCardLinkSendOutcome(scheduledServiceId, claim.stamp)) allMarked = false;
   }
+  return allMarked;
 }
 
 // ---------------------------------------------------------------------------

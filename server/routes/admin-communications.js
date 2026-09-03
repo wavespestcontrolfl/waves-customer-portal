@@ -666,18 +666,22 @@ router.post('/sms', async (req, res, next) => {
     // Composer-carried card request links: a REAL provider send IS the
     // visit's one card-request text — mark the request row (the claim
     // stays); a suppressed send hands the claim back (same sentinel rule as
-    // the review seam). markCardRequestSends parks the claim itself when
-    // the marker cannot land, so a warn here never risks a second text.
+    // the review seam). The service's finalizer parks the claim and alerts
+    // the office itself when the marker cannot land, so nothing here can
+    // risk a second text.
     if (cardClaim) {
       const claim = cardClaim;
       cardClaim = null;
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');
         const links = require('../services/composer-customer-links');
-        if (isRealProviderSend(result)) await links.markCardRequestSends(claim);
-        else await links.releaseCardRequestSends(claim);
+        if (isRealProviderSend(result)) {
+          if (!await links.markCardRequestSends(claim)) logger.warn('[communications] card request sent marker did not land (claim parked, office alerted)');
+        } else {
+          await links.releaseCardRequestSends(claim);
+        }
       } catch (markErr) {
-        logger.warn(`[communications] card request sent marker failed (text already sent; claim parked): ${markErr.message}`);
+        logger.warn(`[communications] card request claim finalize failed (text already sent): ${markErr.message}`);
       }
     }
     if (claimedReviewRequestId) {
@@ -844,7 +848,7 @@ router.post('/sms', async (req, res, next) => {
         try {
           await require('../services/composer-customer-links').markCardRequestSends(claim);
         } catch (markErr) {
-          logger.warn(`[communications] card request sent marker failed after a throw (claim parked): ${markErr.message}`);
+          logger.warn(`[communications] card request claim finalize failed after a throw: ${markErr.message}`);
         }
       } else {
         await releaseCardClaim();
