@@ -3221,12 +3221,9 @@ export default function EstimateToolViewV2({
   // link (address suggestion, deep link, or a mis-click) is one tap to undo.
   function unlinkCustomer() {
     setExistingCustomerMatch(null);
-    const restore = preLinkContactRef.current || {
-      customerName: "",
-      customerPhone: "",
-      customerEmail: "",
-      isRecurringCustomer: "NO",
-    };
+    // No snapshot (edit hydration, deep link): keep the contact fields as
+    // they are — only the linkage and its pricing flag go.
+    const restore = preLinkContactRef.current || { isRecurringCustomer: "NO" };
     preLinkContactRef.current = null;
     setForm((f) => ({ ...f, customerId: "", ...restore }));
     setEstimate(null);
