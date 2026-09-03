@@ -7,6 +7,9 @@
  * (product, visit) and its inventory_on_hand decremented by that usage.
  *
  * Contract:
+ *   - gated on GATE_AUTO_REORDER at CALL time — the lane's one kill switch,
+ *     shared with the reorder sweep: unset = { skipped: 'gated' } before any
+ *     read, so PR 1 ships dark end to end (GH codex r6 P1).
  *   - idempotent on the closeout RESUME path: the partial unique index
  *     product_inventory_movements_completion_consumable_uniq (metadata.source
  *     = 'completion_consumable') makes the insert at-most-once; the stock
@@ -36,10 +39,21 @@
  *   - NEVER throws — the closeout must not depend on this.
  */
 const logger = require('./logger');
+const { gateEnvValue } = require('../config/feature-gates');
 
 const SOURCE = 'completion_consumable';
+const GATE = 'GATE_AUTO_REORDER';
 // A scheduled inspection (no application) leaves no yard sign.
 const INSPECTION_SERVICE_RE = /\binspection\b/i;
+
+// Reasons to do nothing at all, in order, decided before any read.
+const SKIP_WHEN = [
+  [() => !gateEnvValue(GATE), 'gated'],
+  [(a) => !a.scheduledServiceId, 'no_scheduled_service_id'],
+  [(a) => a.isIncompleteVisit, 'incomplete_visit'],
+  [(a) => a.visitPerformed === false, 'visit_not_performed'],
+  [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)), 'inspection_service'],
+];
 
 function parseLines(raw) {
   if (raw == null) return null;
@@ -65,10 +79,8 @@ async function consumeCompletionSupplies(db, {
   serviceType = null,
 } = {}) {
   const result = { consumed: [], skipped: [], errors: [] };
-  if (!scheduledServiceId) { result.skipped.push({ reason: 'no_scheduled_service_id' }); return result; }
-  if (isIncompleteVisit) { result.skipped.push({ reason: 'incomplete_visit' }); return result; }
-  if (visitPerformed === false) { result.skipped.push({ reason: 'visit_not_performed' }); return result; }
-  if (serviceType && INSPECTION_SERVICE_RE.test(String(serviceType))) { result.skipped.push({ reason: 'inspection_service' }); return result; }
+  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, serviceType }));
+  if (skip) { result.skipped.push({ reason: skip[1] }); return result; }
 
   let products;
   try {
