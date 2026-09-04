@@ -8,7 +8,7 @@
  * returns a uniform shape:
  *
  *   { ok: true,  text, json, model }
- *   { ok: false, reason: 'no_key' | '<provider>_<status>' | 'empty_json' | 'error' }
+ *   { ok: false, reason: 'no_key' | '<provider>_<status>' | '<provider>_timeout' | 'empty_json' | 'error' }
  *
  * Callers route via dispatch(route, payload) where `route` is a models.ROUTES
  * entry ({ provider, model }). On { ok: false } the caller falls back to its
@@ -21,6 +21,10 @@
 
 const logger = require('../logger');
 const { PROVIDER } = require('../../config/models');
+const agentContext = require('../agent-control/context');
+// Top-level (not lazy) so the ledger shares this module's agent-control
+// context instance; every use below is wrapped so it can never break a call.
+const metrics = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -62,6 +66,17 @@ function extractOpenAIText(data) {
     }
   }
   return parts.join('');
+}
+
+// A completed Responses body whose message content is a `refusal` block —
+// the model declined; there is no text to extract. Null when it answered.
+function extractOpenAIRefusal(data) {
+  for (const item of data?.output || []) {
+    for (const content of item?.content || []) {
+      if (content?.type === 'refusal') return String(content.refusal || '');
+    }
+  }
+  return null;
 }
 
 // Fence/preamble-tolerant JSON parse (from lawn-diagnostic-prompt.js). Returns null on failure.
@@ -140,13 +155,78 @@ const toOpenAIImage = (img) => ({ type: 'input_image', image_url: `data:${img.mi
 const toGeminiImage = (img) => ({ inline_data: { mime_type: img.mimeType || 'image/jpeg', data: img.data } });
 const toAnthropicImage = (img) => ({ type: 'image', source: { type: 'base64', media_type: img.mimeType || 'image/jpeg', data: img.data } });
 
+// The adapter's OWN timeout, as each transport reports it: an
+// AbortSignal.timeout() fetch rejects with a DOMException named TimeoutError
+// (undici); the Anthropic SDK throws APIConnectionTimeoutError (statusless);
+// undici connect / headers timeouts surface as a cause code. A caller's
+// manual abort (AbortError) is not a timeout and stays 'error'.
+function isTimeoutError(err) {
+  const name = String(err?.name || '');
+  if (name === 'TimeoutError' || name === 'APIConnectionTimeoutError') return true;
+  return /TIMEOUT|ETIMEDOUT/.test(String(err?.code || err?.cause?.code || ''));
+}
+
+// `<provider>_<status>` from the SDK / message, `<provider>_timeout` for the
+// adapter's own deadline (so the failure classifier files it as timeout, not
+// as broken plumbing — Codex on PR #3793), else 'error'.
 function providerErrorReason(provider, err) {
   const directStatus = Number(err?.status || err?.statusCode);
   if (Number.isInteger(directStatus) && directStatus >= 100 && directStatus <= 599) {
     return `${provider}_${directStatus}`;
   }
+  if (isTimeoutError(err)) return `${provider}_timeout`;
   const messageStatus = String(err?.message || '').match(/(?:^|\s)([1-5]\d{2})(?:\s|$)/)?.[1];
   return messageStatus ? `${provider}_${messageStatus}` : 'error';
+}
+
+// Call ledger (GATE_LLM_CALL_LEDGER, dark by default): one llm_dispatch_log
+// row per provider call, written by the adapters themselves so bare
+// `dispatch` and `dispatchWithFallback` legs are recorded alike. Lazy-required
+// and fire-and-forget for the same reason recordDispatchOutcome is: the
+// ledger can never slow down or break the call it observes. `base` is the
+// adapter's identity (provider, requested model, ambient lane/prompt-version
+// overrides, the bodies for an opted-in trace); `outcome` is what happened.
+// Latency rides a monotonic clock (performance.now), never Date.now: the
+// dispatcher's deadline math uses Date.now and tests pin it.
+const nowMs = () => performance.now();
+const elapsedMs = (t0) => Math.round(performance.now() - t0);
+// The ledger row id of an adapter result the chain may still reject (the
+// validate hook): keyed by the result object so nothing rides on the value
+// callers receive.
+const ledgerIdOf = new WeakMap();
+function recordLedgerCall(base, outcome) {
+  try {
+    const callId = metrics.recordCall({
+      provider: base.provider,
+      requestedModel: base.requestedModel,
+      laneId: base.laneId,
+      promptVersion: base.promptVersion,
+      policyLabel: base.policyLabel,
+      servedModel: outcome.servedModel,
+      providerRef: outcome.providerRef,
+      usage: outcome.usage,
+      latencyMs: outcome.latencyMs,
+      ok: outcome.ok,
+      errorCode: outcome.errorCode,
+    });
+    metrics.recordTrace(callId, { system: base.system, prompt: base.text, response: outcome.response, laneId: base.laneId });
+    return callId;
+  } catch (err) {
+    logger.debug(`[llm] call ledger skipped: ${err.message}`);
+    return null;
+  }
+}
+// An answered call the chain then rejects is a failed leg in the ledger too
+// (Codex r13 on #3846): the adapter's ok row flips to the rejection code.
+function rejectLedgerCall(result, reason, validator) {
+  try {
+    metrics.failCall(ledgerIdOf.get(result), reason, { validator });
+  } catch (err) {
+    logger.debug(`[llm] call ledger rejection skipped: ${err.message}`);
+  }
+}
+function usageOf(provider, data) {
+  try { return metrics.extractUsage(provider, data); } catch { return null; }
 }
 
 /**
@@ -166,8 +246,12 @@ function providerErrorReason(provider, err) {
 // mime type. The reply still goes through
 // parseLooseJson, so a site converts by adding its schema and deleting its
 // JSON-shape prose — nothing else about the site changes.
-async function callOpenAI({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low' } = {}) {
+// laneId / promptVersion / policyLabel are call-ledger correlation only
+// (explicit beats the ambient agent-control scope); they never reach the wire.
+async function callOpenAI({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low', laneId, promptVersion, policyLabel } = {}) {
   if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_key' };
+  const base = { provider: 'openai', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
+  const t0 = nowMs();
   try {
     const content = [{ type: 'input_text', text: text || '' }, ...images.map(toOpenAIImage)];
     // store:false on EVERY request through this adapter — the Responses API
@@ -195,19 +279,65 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
       body: JSON.stringify(body),
       ...(timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
-    if (!resp.ok) { logger.warn(`[llm] OpenAI ${resp.status}`); return { ok: false, reason: `openai_${resp.status}` }; }
-    const data = await resp.json();
-    if (data?.status && data.status !== 'completed') {
-      logger.warn(`[llm] OpenAI response ${data.status}${data.incomplete_details?.reason ? ` (${data.incomplete_details.reason})` : ''}`);
-      return { ok: false, reason: 'openai_incomplete' };
+    if (!resp.ok) {
+      logger.warn(`[llm] OpenAI ${resp.status}`);
+      recordLedgerCall(base, { ok: false, errorCode: `openai_${resp.status}`, latencyMs: elapsedMs(t0) });
+      return { ok: false, reason: `openai_${resp.status}` };
     }
+    const data = await resp.json();
+    // Latency includes the body read; usage is recorded on every billed
+    // outcome below (incomplete and empty_json cost tokens too).
+    const served = { servedModel: data?.model, providerRef: data?.id, usage: usageOf('openai', data), latencyMs: elapsedMs(t0) };
+    // Extracted before the incomplete branch: the partial output of a
+    // max_output_tokens cut-off is exactly what its trace needs to show.
     const out = extractOpenAIText(data);
+    if (data?.status && data.status !== 'completed') {
+      // 'incomplete' is the model's output cut off (max_output_tokens); any
+      // other terminal state (failed, cancelled …) is the provider's failure
+      // — its own code, filed as provider, never as incomplete output.
+      const code = data.status === 'incomplete' ? 'openai_incomplete' : `openai_${String(data.status).toLowerCase().replace(/[^a-z_]/g, '_')}`;
+      // Bounded diagnostics only: a provider error MESSAGE can quote the
+      // rejected input, so the reason / error code and response id are
+      // logged and the message never is (the redacted trace keeps the body).
+      const detail = data.incomplete_details?.reason || data.error?.code;
+      logger.warn(`[llm] OpenAI response ${data.status}${detail ? ` (${detail})` : ''} (${data.id || 'no id'})`);
+      recordLedgerCall(base, { ...served, ok: false, errorCode: code, response: out });
+      return { ok: false, reason: code };
+    }
+    // A refusal block is a failed leg in BOTH modes, as an Anthropic
+    // stop_reason 'refusal' is: recorded (billed) AND returned as such, so
+    // the call row and the caller agree and the cross-provider fallback runs.
+    const refusal = extractOpenAIRefusal(data);
+    if (refusal !== null && !out) {
+      // The refusal body can echo customer detail from the prompt — never
+      // logged; the (redacted) trace keeps it for lanes that opt in.
+      logger.warn(`[llm] OpenAI refusal (${data?.id || 'no id'})`);
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'openai_refusal', response: refusal });
+      return { ok: false, reason: 'openai_refusal' };
+    }
+    // A text-mode answer with nothing in it is a failed leg (Codex r15 on
+    // #3846): the chain rejected it as `empty_text` before, but a bare
+    // dispatch never reached that check — its call row said ok while the
+    // sms canary / sealed eval called the same result a provider failure.
+    if (!jsonMode && !String(out || '').trim()) {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_text', response: out });
+      return { ok: false, reason: 'empty_text' };
+    }
     const json = jsonMode ? parseLooseJson(out) : null;
-    if (jsonMode && !json) return { ok: false, reason: 'empty_json' };
-    return { ok: true, text: out, json, model };
+    if (jsonMode && !json) {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json', response: out });
+      return { ok: false, reason: 'empty_json' };
+    }
+    const result = { ok: true, text: out, json, model, usage: served.usage };
+    ledgerIdOf.set(result, recordLedgerCall(base, { ...served, ok: true, response: out }));
+    return result;
   } catch (err) {
-    logger.error(`[llm] callOpenAI failed: ${err.message}`);
-    return { ok: false, reason: 'error' };
+    // fetch / body-read failures carry no HTTP status; only the adapter's own
+    // timeout is distinguished (a stray number in a parse error is not one).
+    const reason = isTimeoutError(err) ? 'openai_timeout' : 'error';
+    logger.error(`[llm] callOpenAI failed (${reason}): ${err.message}`);
+    recordLedgerCall(base, { ok: false, errorCode: reason, latencyMs: elapsedMs(t0) });
+    return { ok: false, reason };
   }
 }
 
@@ -215,9 +345,13 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
  * Gemini generateContent. jsonMode sets response_mime_type and joins ALL text
  * parts (a thinking model can emit a thought part before the answer part).
  */
-async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, timeoutMs } = {}) {
+const GEMINI_BLOCK_FINISHES = new Set(['SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII']);
+
+async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, timeoutMs, laneId, promptVersion, policyLabel } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
+  const base = { provider: 'gemini', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
+  const t0 = nowMs();
   try {
     const promptText = system ? `${system}\n\n${text || ''}` : (text || '');
     const parts = [...images.map(toGeminiImage), { text: promptText }];
@@ -230,15 +364,57 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
       body: JSON.stringify({ contents: [{ parts }], generationConfig }),
       ...(timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
-    if (!resp.ok) { logger.warn(`[llm] Gemini ${resp.status}`); return { ok: false, reason: `gemini_${resp.status}` }; }
+    if (!resp.ok) {
+      logger.warn(`[llm] Gemini ${resp.status}`);
+      recordLedgerCall(base, { ok: false, errorCode: `gemini_${resp.status}`, latencyMs: elapsedMs(t0) });
+      return { ok: false, reason: `gemini_${resp.status}` };
+    }
     const data = await resp.json();
+    const served = { servedModel: data?.modelVersion, providerRef: data?.responseId, usage: usageOf('gemini', data), latencyMs: elapsedMs(t0) };
     const out = (data?.candidates?.[0]?.content?.parts || []).map((p) => p && p.text).filter(Boolean).join('');
+    // A MAX_TOKENS finish is an incomplete leg, as OpenAI's `incomplete`
+    // status and Anthropic's 'max_tokens' stop are: the output was cut off,
+    // so the call row and the caller agree it failed and the caller's
+    // fallback runs instead of a truncated answer shipping.
+    const finish = data?.candidates?.[0]?.finishReason;
+    if (finish === 'MAX_TOKENS') {
+      logger.warn(`[llm] Gemini response finished at MAX_TOKENS (${maxTokens})`);
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'gemini_incomplete', response: out });
+      return { ok: false, reason: 'gemini_incomplete' };
+    }
+    // A safety-blocked answer — a blocked candidate, or a prompt-level block
+    // with no candidate at all — is the model declining: `gemini_refusal`,
+    // the class the other providers' refusals take. Any other non-STOP
+    // finish is its own outcome. Both before the success branch, so a
+    // text-mode call never returns ok with nothing in it.
+    const blocked = GEMINI_BLOCK_FINISHES.has(finish) || (!data?.candidates?.length && data?.promptFeedback?.blockReason);
+    if (blocked || (finish && finish !== 'STOP')) {
+      const code = blocked ? 'gemini_refusal' : `gemini_finish_${String(finish).toLowerCase().replace(/[^a-z_]/g, '_')}`;
+      logger.warn(`[llm] Gemini ${code} (${finish || data?.promptFeedback?.blockReason})`);
+      recordLedgerCall(base, { ...served, ok: false, errorCode: code, response: out });
+      return { ok: false, reason: code };
+    }
+    // A text-mode answer with nothing in it is a failed leg (Codex r15 on
+    // #3846): the chain rejected it as `empty_text` before, but a bare
+    // dispatch never reached that check — its call row said ok while the
+    // sms canary / sealed eval called the same result a provider failure.
+    if (!jsonMode && !String(out || '').trim()) {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_text', response: out });
+      return { ok: false, reason: 'empty_text' };
+    }
     const json = jsonMode ? parseLooseJson(out) : null;
-    if (jsonMode && !json) return { ok: false, reason: 'empty_json' };
-    return { ok: true, text: out, json, model };
+    if (jsonMode && !json) {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json', response: out });
+      return { ok: false, reason: 'empty_json' };
+    }
+    const result = { ok: true, text: out, json, model };
+    ledgerIdOf.set(result, recordLedgerCall(base, { ...served, ok: true, response: out }));
+    return result;
   } catch (err) {
-    logger.error(`[llm] callGemini failed: ${err.message}`);
-    return { ok: false, reason: 'error' };
+    const reason = isTimeoutError(err) ? 'gemini_timeout' : 'error';
+    logger.error(`[llm] callGemini failed (${reason}): ${err.message}`);
+    recordLedgerCall(base, { ok: false, errorCode: reason, latencyMs: elapsedMs(t0) });
+    return { ok: false, reason };
   }
 }
 
@@ -249,8 +425,12 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
 // A payload `temperature` is read by the Gemini leg only. Current Anthropic
 // models (Opus 4.7+, Sonnet 5, Fable) reject sampling controls with a 400, so
 // this leg never forwards it.
-async function callAnthropic({ model, system, text, images = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, anthropicClient } = {}) {
+async function callAnthropic({ model, system, text, images = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, anthropicClient, laneId, promptVersion, policyLabel } = {}) {
   if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
+  const base = { provider: 'anthropic', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
+  // Ledger latency. With no budget the SDK keeps its default retries, so one
+  // row can span several attempts — the row is the CALL as the caller saw it.
+  const t0 = nowMs();
   try {
     const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const content = [...images.map(toAnthropicImage)];
@@ -274,14 +454,47 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
       : await client.messages.create(req);
     const out = anthropicText(resp);
     const json = jsonMode ? parseLooseJson(out) : null;
-    if (jsonMode && !json) return { ok: false, reason: 'empty_json' };
-    return { ok: true, text: out, json, model, response: resp };
+    const served = { servedModel: resp?.model, providerRef: resp?.id, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
+    // A stop_reason 'refusal' is a failed leg in BOTH modes — recorded as
+    // such (billed) AND returned as such, so the call row, the chain row and
+    // the caller agree. A refusal can carry partial text: returning it as ok
+    // would hand a truncated answer to the caller and skip the cross-provider
+    // fallback the DEEP helper already takes on a refusal.
+    if (resp?.stop_reason === 'refusal') {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'anthropic_refusal' });
+      return { ok: false, reason: 'anthropic_refusal' };
+    }
+    // A stop_reason 'max_tokens' is an incomplete leg, exactly as an OpenAI
+    // `incomplete` status is above: the output was cut off, so the call row
+    // and the caller agree it failed and the caller's fallback runs instead
+    // of a truncated answer shipping (Codex r7 on #3846).
+    if (resp?.stop_reason === 'max_tokens') {
+      logger.warn(`[llm] Anthropic response stopped at max_tokens (${maxTokens})`);
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'anthropic_incomplete' });
+      return { ok: false, reason: 'anthropic_incomplete' };
+    }
+    // A text-mode answer with nothing in it is a failed leg (Codex r15 on
+    // #3846): the chain rejected it as `empty_text` before, but a bare
+    // dispatch never reached that check — its call row said ok while the
+    // sms canary / sealed eval called the same result a provider failure.
+    if (!jsonMode && !String(out || '').trim()) {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_text' });
+      return { ok: false, reason: 'empty_text' };
+    }
+    if (jsonMode && !json) {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json' });
+      return { ok: false, reason: 'empty_json' };
+    }
+    const result = { ok: true, text: out, json, model, response: resp };
+    ledgerIdOf.set(result, recordLedgerCall(base, { ...served, ok: true }));
+    return result;
   } catch (err) {
     const reason = providerErrorReason('anthropic', err);
     const log = reason === 'anthropic_429' || reason === 'anthropic_529'
       ? logger.warn.bind(logger)
       : logger.error.bind(logger);
     log(`[llm] callAnthropic failed (${reason}): ${err.message}`);
+    recordLedgerCall(base, { ok: false, errorCode: reason, latencyMs: elapsedMs(t0) });
     return { ok: false, reason };
   }
 }
@@ -289,8 +502,9 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
 /**
  * Dispatch a models.ROUTES entry ({ provider, model }) to the matching provider.
  * payload: { system, text, images, jsonMode, jsonSchema, maxTokens, tools, temperature,
- *            anthropicClient } (`anthropicClient` supports existing injected
- *            clients and deterministic tests without bypassing the router).
+ *            anthropicClient, laneId, promptVersion } (`anthropicClient` supports
+ *            existing injected clients and deterministic tests without bypassing
+ *            the router; laneId / promptVersion only label the call-ledger row).
  */
 async function dispatch(route, payload = {}) {
   if (!route || !route.provider || !route.model) return { ok: false, reason: 'no_route' };
@@ -311,7 +525,19 @@ async function dispatch(route, payload = {}) {
  * validate(result, route) may return null/false for success or a short reason
  * string for rejection. Rejected output is never returned as a success.
  */
-async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
+async function dispatchWithFallback(policy, payload = {}, options = {}) {
+  // Every leg of the chain shares one agent-control chain id (the ledger's
+  // call rows join to the chain row on it). A caller that knows its lane or
+  // prompt version passes them on the payload — laneId scopes the whole
+  // chain, promptVersion stamps the chain's own scope only.
+  const chain = () => runFallbackChain(policy, payload, options);
+  const run = () => agentContext.withChain(() => (payload.promptVersion
+    ? agentContext.withPromptVersion(payload.promptVersion, chain)
+    : chain()));
+  return payload.laneId ? agentContext.runInLane(payload.laneId, run) : run();
+}
+
+async function runFallbackChain(policy, payload, { validate } = {}) {
   const routes = [policy?.primary, policy?.fallback].filter(Boolean);
   if (!routes.length) return { ok: false, reason: 'no_route', failures: [] };
   if (routes.length > 1 && routes[0].provider === routes[1].provider) {
@@ -320,6 +546,9 @@ async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
   }
 
   const failures = [];
+  // The chain's registry name, so its call rows carry the same policy label
+  // as the chain row (labels resolve in one place: policyLabel).
+  const chainLabel = metrics.recordedPolicyLabel(policy);
   // Every chain runs under a shared wall-clock deadline. Callers with an
   // explicit timeoutMs keep their original semantics (each leg gets the full
   // remainder — fact-check's hard 60s ceiling). Callers WITHOUT one get
@@ -338,7 +567,7 @@ async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
       break;
     }
     const legMs = explicitBudget ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
-    const routePayload = { ...payload, timeoutMs: legMs };
+    const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
     let result;
     try {
       result = await dispatch(route, routePayload);
@@ -347,15 +576,20 @@ async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
       result = { ok: false, reason: 'error' };
     }
 
-    if (!result?.ok) {
-      failures.push({ provider: route.provider, model: route.model, reason: result?.reason || 'error' });
+    if (!result.ok) {
+      failures.push({ provider: route.provider, model: route.model, reason: result.reason || 'error' });
       continue;
     }
 
-    let rejection = payload.jsonMode === false && !String(result.text || '').trim()
-      ? 'empty_text'
-      : null;
+    // Empty text-mode answers fail in the adapters (`empty_text`), so an ok
+    // result here has content. The caller's validate hook owns its codes
+    // (`too_long`, `trade_name`, `missing_summary`…): a rejection from it is
+    // a model-quality failure, so the failure entry carries that provenance
+    // for classifyFailure.
+    let rejection = null;
+    let fromValidator = false;
     if (typeof validate === 'function') {
+      fromValidator = true;
       try {
         rejection = validate(result, route) || null;
       } catch (err) {
@@ -363,17 +597,16 @@ async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
       }
     }
     if (rejection) {
-      // A response truncated at max_tokens is indistinguishable from
-      // malformed output by the time a validator rejects it ("unparseable"),
-      // which mislabels a budget problem as a model-quality problem in the
-      // dispatch digest. Anthropic responses carry stop_reason; tag it so the
-      // recorded failure reason says which one actually happened.
-      const truncated = result?.response?.stop_reason === 'max_tokens';
+      // A max_tokens-truncated Anthropic answer never reaches the validator:
+      // callAnthropic fails that leg as anthropic_incomplete first, so a
+      // rejection here is a judgement on a complete answer.
       failures.push({
         provider: route.provider,
         model: route.model,
-        reason: truncated ? `${rejection} (response truncated at max_tokens=${payload.maxTokens ?? '?'})` : String(rejection),
+        reason: String(rejection),
+        ...(fromValidator ? { validator: true } : {}),
       });
+      rejectLedgerCall(result, String(rejection), fromValidator);
       continue;
     }
 
@@ -399,7 +632,7 @@ async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
 // slow down or break the dispatch it observes.
 function recordDispatchOutcome(policy, outcome) {
   try {
-    require('../llm-dispatch-metrics').recordDispatch(policy, outcome);
+    metrics.recordDispatch(policy, outcome);
   } catch (err) {
     logger.debug(`[llm] dispatch metrics skipped: ${err.message}`);
   }
