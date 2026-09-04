@@ -330,14 +330,20 @@ router.get('/:token', async (req, res) => {
     // churning after a few rounds, or a stamp that FAILS, is answered 503
     // rather than with a page that could change or vanish behind the
     // customer — an unstamped view is invisible to the manual sender's
-    // re-key / release fences (pre-push Codex P1 on 514bc1fd2).
+    // re-key / release fences (pre-push Codex P1 on 514bc1fd2). Every
+    // fallible payload read happens BEFORE the stamp, which is the last
+    // step before the response: a stamp is a permanent fence, so it must
+    // never outlive a request that then failed (pre-push Codex P1 on
+    // 402de0045).
     let source = null;
     let guide = null;
+    let upcomingVisits = [];
     for (let attempt = 0; attempt < 3; attempt += 1) {
       source = await resolvePrepSource(token);
       if (!source) return res.status(404).json({ error: 'Not found' });
       guide = await renderGuideForSource(source);
       if (!guide) return res.status(404).json({ error: 'Not found' });
+      upcomingVisits = await fetchUpcomingFamilyVisits(source.customerId, source.familyType);
       if (!source.stampView) break;
       let stamped;
       try {
@@ -354,8 +360,6 @@ router.get('/:token', async (req, res) => {
     const {
       customerFirstName, typeLabel, serviceDate, techName, propertyAddress, renderedBlocks,
     } = guide;
-
-    const upcomingVisits = await fetchUpcomingFamilyVisits(source.customerId, source.familyType);
 
     const ipHash = req.ip
       ? crypto.createHash('sha256').update(req.ip).digest('hex').slice(0, 16)
