@@ -367,12 +367,20 @@ class AgentDispatcher {
         throw Object.assign(new Error(`session_error: ${detail}`), { code: 'session_error_event' });
       }
     }
-    // Our own deadline, not the provider's — the ledger files it as a timeout.
-    throw Object.assign(new Error(`session ${sessionId} timed out after ${timeoutMs}ms`), { code: 'session_timeout' });
+    // The loop ended without a terminal event: the provider closed the
+    // stream early — the same session_stream_eof (→ provider) the other
+    // runners file. Our own deadline never reaches here: the reader throws
+    // session_timeout itself (Codex r11).
+    throw Object.assign(new Error(`session ${sessionId} stream ended without a terminal event`), { code: 'session_stream_eof' });
   }
 }
 
 // ── SSE streaming helper (mirrors content-agent.js production pattern) ─
+
+// Our own deadline, not the provider's — the ledger files it as a timeout.
+function deadlineError(sessionId, deadline) {
+  return Object.assign(new Error(`session ${sessionId} timed out at its ${new Date(deadline).toISOString()} deadline`), { code: 'session_timeout' });
+}
 
 async function* streamSessionEvents(sessionId, deadline) {
   if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not set');
@@ -402,7 +410,7 @@ async function* streamSessionEvents(sessionId, deadline) {
     let buf = '';
     let currentEvent = 'message';
     while (true) {
-      if (Date.now() >= deadline) throw new Error('SSE deadline exceeded');
+      if (Date.now() >= deadline) throw deadlineError(sessionId, deadline);
       const { done, value } = await reader.read();
       if (done) return;
       buf += decoder.decode(value, { stream: true });
@@ -429,6 +437,11 @@ async function* streamSessionEvents(sessionId, deadline) {
         yield { event: evName, data };
       }
     }
+  } catch (err) {
+    // The AbortController firing at the deadline rejects reader.read() with
+    // an AbortError — our own timeout, filed as such (Codex r11).
+    if (err?.name === 'AbortError') throw deadlineError(sessionId, deadline);
+    throw err;
   } finally {
     clearTimeout(timer);
   }

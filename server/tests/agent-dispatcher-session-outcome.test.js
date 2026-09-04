@@ -37,11 +37,19 @@ describe('agent dispatcher — stream exits carry their ledger code', () => {
     expect(err.code).toBe('session_error_event');
   });
 
-  it("a stream that ends without a terminal event throws the dispatcher's own session_timeout (→ timeout)", async () => {
+  it('a stream that closes before any terminal event, with time remaining, throws session_stream_eof (→ provider) — not the deadline', async () => {
     global.fetch = jest.fn(async () => ({ ok: true, status: 200, body: sseBody([{ event: 'assistant', data: { text: 'still going' } }]) }));
-    const err = await load()._streamAndExecute('sess-slow', 5_000).catch((e) => e);
+    const err = await load()._streamAndExecute('sess-eof', 5_000).catch((e) => e);
     expect(err).toBeInstanceOf(Error);
-    expect(err.message).toMatch(/timed out after 5000ms/);
+    expect(err.message).toMatch(/stream ended without a terminal event/);
+    expect(err.code).toBe('session_stream_eof');
+  });
+
+  it("the loop ending past the deadline throws the dispatcher's own session_timeout (→ timeout)", async () => {
+    global.fetch = jest.fn(async () => ({ ok: true, status: 200, body: sseBody([{ event: 'assistant', data: { text: 'still going' } }]) }));
+    const err = await load()._streamAndExecute('sess-slow', 0).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/timed out at its .* deadline/);
     expect(err.code).toBe('session_timeout');
   });
 

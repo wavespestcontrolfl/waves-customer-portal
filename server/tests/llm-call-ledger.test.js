@@ -143,6 +143,17 @@ describe('llm call ledger', () => {
       expect(row).toMatchObject({ ok: false, error_code: 'openai_incomplete', error_class: 'incomplete', input_tokens: 120, output_tokens: 30 });
     });
 
+    it('a completed refusal block is a FAILED leg in both modes — openai_refusal recorded (with usage) AND returned, like anthropic_refusal', async () => {
+      const { call } = load();
+      const refused = { ...OPENAI_BODY, output_text: undefined, output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'I cannot help with that.' }] }] };
+      global.fetch = fetchJson(refused);
+      expect(await call.callOpenAI({ model: 'o', text: 't' })).toEqual({ ok: false, reason: 'openai_refusal' });
+      global.fetch = fetchJson(refused);
+      expect(await call.callOpenAI({ model: 'o', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'openai_refusal' });
+      await flush();
+      expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'openai_refusal', 'instruction', 120], [false, 'openai_refusal', 'instruction', 120]]);
+    });
+
     it('records HTTP failures with the status code and a provider class, no usage', async () => {
       global.fetch = fetchJson({}, { ok: false, status: 429 });
       const { call } = load();

@@ -68,6 +68,17 @@ function extractOpenAIText(data) {
   return parts.join('');
 }
 
+// A completed Responses body whose message content is a `refusal` block —
+// the model declined; there is no text to extract. Null when it answered.
+function extractOpenAIRefusal(data) {
+  for (const item of data?.output || []) {
+    for (const content of item?.content || []) {
+      if (content?.type === 'refusal') return String(content.refusal || '');
+    }
+  }
+  return null;
+}
+
 // Fence/preamble-tolerant JSON parse (from lawn-diagnostic-prompt.js). Returns null on failure.
 /**
  * First text block of an Anthropic response. Reasoning-capable models put a
@@ -269,6 +280,15 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
       logger.warn(`[llm] OpenAI response ${data.status}${data.incomplete_details?.reason ? ` (${data.incomplete_details.reason})` : ''}`);
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'openai_incomplete', response: out });
       return { ok: false, reason: 'openai_incomplete' };
+    }
+    // A refusal block is a failed leg in BOTH modes, as an Anthropic
+    // stop_reason 'refusal' is: recorded (billed) AND returned as such, so
+    // the call row and the caller agree and the cross-provider fallback runs.
+    const refusal = extractOpenAIRefusal(data);
+    if (refusal !== null && !out) {
+      logger.warn(`[llm] OpenAI refusal: ${refusal.slice(0, 120)}`);
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'openai_refusal', response: refusal });
+      return { ok: false, reason: 'openai_refusal' };
     }
     const json = jsonMode ? parseLooseJson(out) : null;
     if (jsonMode && !json) {
