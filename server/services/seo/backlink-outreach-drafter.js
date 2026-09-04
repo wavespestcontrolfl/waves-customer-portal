@@ -18,6 +18,7 @@ const logger = require('../logger');
 const worker = require('./link-prospect-worker');
 const { fetchPageText } = require('./contact-finder');
 const { callAnthropic } = require('../llm/call');
+const { etDateString } = require('../../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -44,22 +45,33 @@ Return ONLY JSON: {"subject": "...", "body": "..."}. The body is plain text with
 
 // The ONE follow-up (plan §6.4): ten days of silence after the pitch. Shorter than the pitch, no new ask, the same
 // mandate (no reciprocal promise, payment, discount, guarantee or commitment — the classifier and the owner read it).
-const FOLLOW_UP_SYSTEM_PROMPT = `You are the outreach drafter for Waves Pest Control (family-owned, SW Florida). Ten days ago we sent the ONE-TO-ONE backlink-outreach email below and heard nothing. Write ONE short, courteous follow-up (~50–90 words) in the SAME thread. A human reviews it before any send.
+const FOLLOW_UP_SYSTEM_PROMPT = `You are the outreach drafter for Waves Pest Control (family-owned, SW Florida). A while ago we sent the ONE-TO-ONE backlink-outreach email below and heard nothing — the SENT line says exactly when. Write ONE short, courteous follow-up (~50–90 words) in the SAME thread. A human reviews it before any send.
 
 RULES (mandatory):
 - Reply in the thread: the subject is "Re: " followed by the original subject, verbatim.
 - One gentle nudge, no new ask, no pressure, no guilt. Restate the one useful thing in a sentence and offer to send anything that helps.
+- Timing: refer to the earlier email loosely ("a little while ago", "recently", "last month") consistent with the SENT line — never state a number of days or weeks, and never a date the SENT line does not support.
 - No pricing, no incentives-for-links, no "we'll link back", no discounts, no guarantees, no fabricated facts.
 - Identify clearly as Waves Pest Control. End EXACTLY with two lines: "— The Waves Pest Control Team" then "{brand} · {city}, FL · {phone}" using the SIGN-OFF DETAILS provided.
 - Do NOT write a recipient address or a "From:" line.
 
 Return ONLY JSON: {"subject": "...", "body": "..."}. The body is plain text with \\n line breaks and ends with the two-line signature.`;
 
-function buildFollowUpPrompt(prospect, profile, loc) {
+// the pitch's real send date for the follow-up prompt: the lease can run days or weeks after the ten-day mark (a
+// batch cap, a dark drafter gate, provider downtime, drafting failures), so the model is told WHEN, never "ten days ago"
+function sentLine(prospect, now = new Date()) {
+  const sentAt = prospect.outreach_sent_at ? new Date(prospect.outreach_sent_at) : null;
+  if (!sentAt || Number.isNaN(sentAt.getTime())) return '- sent: (date unknown — refer to it only as "a little while ago")';
+  const days = Math.max(0, Math.floor((now.getTime() - sentAt.getTime()) / 86400000));
+  return `- sent: ${etDateString(sentAt)} (${days} day${days === 1 ? '' : 's'} ago, as of ${etDateString(now)})`;
+}
+
+function buildFollowUpPrompt(prospect, profile, loc, now = new Date()) {
   const city = loc ? String(loc.name || '').replace(/,.*$/, '').trim() : 'Bradenton';
   return [
     'ORIGINAL EMAIL (sent, unanswered)',
     `- site: ${prospect.target_domain}`,
+    sentLine(prospect, now),
     `- subject: ${prospect.outreach_subject || ''}`,
     '- body:',
     String(prospect.outreach_body || ''),
@@ -247,4 +259,4 @@ async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn }) {
 }
 
 module.exports = { run };
-module.exports._internals = { parseDraft, pickLocation, buildUserPrompt, draftOne, draftFollowUp, buildFollowUpPrompt, SYSTEM_PROMPT, FOLLOW_UP_SYSTEM_PROMPT, DRAFT_MODEL };
+module.exports._internals = { parseDraft, pickLocation, buildUserPrompt, draftOne, draftFollowUp, buildFollowUpPrompt, sentLine, SYSTEM_PROMPT, FOLLOW_UP_SYSTEM_PROMPT, DRAFT_MODEL };

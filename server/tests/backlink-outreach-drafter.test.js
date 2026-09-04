@@ -62,6 +62,20 @@ describe('SYSTEM_PROMPT playbook', () => {
   });
 });
 
+describe('the follow-up prompt timing (Codex r13 P2)', () => {
+  const { buildFollowUpPrompt, sentLine, FOLLOW_UP_SYSTEM_PROMPT } = drafter._internals;
+  const profile = { brand: 'Waves Pest Control', locations: [{ id: 'brad', name: 'Bradenton, FL', phone: '941' }], default_location_id: 'brad' };
+  test('the prompt carries the pitch\'s real send date and elapsed days — never a fixed "ten days ago"; the system prompt forbids stating a duration', () => {
+    const now = new Date('2026-10-05T14:00:00Z');
+    const p = { target_domain: 'example.org', outreach_subject: 'A resource', outreach_body: 'hi', outreach_sent_at: '2026-09-10T13:00:00Z' };
+    expect(sentLine(p, now)).toBe('- sent: 2026-09-10 (25 days ago, as of 2026-10-05)');
+    expect(buildFollowUpPrompt(p, profile, profile.locations[0], now)).toContain('- sent: 2026-09-10 (25 days ago, as of 2026-10-05)');
+    expect(sentLine({ ...p, outreach_sent_at: null }, now)).toMatch(/date unknown/);
+    expect(FOLLOW_UP_SYSTEM_PROMPT).not.toMatch(/Ten days ago/);
+    expect(FOLLOW_UP_SYSTEM_PROMPT).toMatch(/never state a number of days or weeks/);
+  });
+});
+
 describe('run', () => {
   test('drafts a claimed prospect and parks it with the STORED contact_email (never the model’s)', async () => {
     claims([prospect()]);

@@ -631,6 +631,14 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // edit (notes, a page move) on a row that carries the stamp.
       const resultStatus = 'status' in patch ? patch.status : current.status;
       if (ACTIVE_OUTREACH_STATUSES.includes(resultStatus) && ('status' in patch || entersOutreach)) patch.conversation_closed_at = null;
+      // a CLOSED conversation reopened by that edit (the stamp dropped on a row that was already in the active set, so
+      // entersOutreach did not run the probe) is a board admission too: the closure released the domain to a later
+      // placement, and two conversations for one publisher must not become active — the same per-domain admission probe
+      // (the probe ignores closure-stamped rows, so the row being reopened is not its own conflict)
+      if (patch.conversation_closed_at === null && current.conversation_closed_at && !entersOutreach) {
+        const { inFlight } = await claimProspectDomain(trx, current.target_domain);
+        if (inFlight && inFlight.id !== current.id) return { inFlight };
+      }
       // an edit whose RESULT is an open conversation (§13: contacted / negotiating, a park from them, or a sent pitch
       // on a row the reopen above just made active again) while the current row is not one OPENS it for the
       // recipient: the same recipient-level lock + predicate the send claim takes, so no two writers open the same inbox
