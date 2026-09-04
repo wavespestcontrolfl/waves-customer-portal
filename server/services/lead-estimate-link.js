@@ -85,9 +85,11 @@ const sameContactIdentity = (read, current) => ['customer_id', 'phone', 'email']
 // rebuilt from its stored touch. One decision for every conversion path
 // (accept fallback, self-booking stand-in, admin convert of a repeat whose
 // root is still open — codex r27 P2), so a deal never books two rows.
-// Returns the row to rebuild, or null (the root took the win, or the lead is
-// not a wizard repeat — every other lead with no row has none on purpose,
-// codex r22 P2 / r24 P1).
+// Returns the row to rebuild, or null (the root carries the win — advanced
+// now, or already at booked / completed from an earlier settlement, so a
+// replayed conversion never inserts a second row for the deal, codex r28
+// P1 — or the lead is not a wizard repeat: every other lead with no row has
+// none on purpose, codex r22 P2 / r24 P1).
 async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {}) {
   const repeat = await database('leads').where('id', leadId).first();
   if (!duplicateMarkerOf(repeat) || repeat.lead_type !== 'quote_wizard') return null;
@@ -95,8 +97,10 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
   const rootOurs = !!root && !root.deleted_at && OPEN_LEAD_STATUSES.includes(root.status)
     && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
     && !(root.estimate_id && repeat.estimate_id && String(root.estimate_id) !== String(repeat.estimate_id));
-  if (rootOurs && (await bridgeLeadFunnelStage(root.id, 'won', database)).updated) return null;
-  return repeat;
+  if (!rootOurs) return repeat;
+  await bridgeLeadFunnelStage(root.id, 'won', database);
+  const rootRow = await database('ad_service_attribution').where({ lead_id: root.id }).first('id');
+  return rootRow ? null : repeat;
 }
 
 // The ancestry a repeat belongs to, for grouping repeats of one inquiry: the
@@ -106,19 +110,24 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
 // B's chain through A to that same O) shares one key instead of each falling
 // back to its own immediate marker and reading as two opportunities (codex
 // #3834 r17 P1). The same bounded, cycle-safe walk through live duplicate
-// hops as followDuplicateLink.
+// hops as followDuplicateLink. A chain that ends on a duplicate parent with
+// NO marker (a shared parent staff closed as duplicate by hand) keys on that
+// parent — the last row visited — so every repeat of it is one ancestry, not
+// one per repeat (codex r28 P1).
 async function resolveAncestry(database, repeat) {
   const seen = new Set([repeat.id]);
   let marker = duplicateMarkerOf(repeat);
+  let last = repeat.id;
   while (marker && seen.size < 8) {
     const parent = await database('leads').where({ id: marker }).first();
     if (!parent || parent.deleted_at) return { root: null, key: marker };
     if (parent.status !== 'duplicate') return { root: parent, key: parent.id };
     if (seen.has(parent.id)) break;
     seen.add(parent.id);
+    last = parent.id;
     marker = duplicateMarkerOf(parent);
   }
-  return { root: null, key: marker || repeat.id };
+  return { root: null, key: marker || last };
 }
 
 function leadMatchesEstimateContact(lead, estimate) {

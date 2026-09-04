@@ -63,6 +63,14 @@ describe('markConverted claims', () => {
     expect(stampLeadFunnelRow).not.toHaveBeenCalled();
   });
 
+  test('a settlement read that fails is best-effort — the conversion still completes with its activity (codex r28 P2)', async () => {
+    settleRepeatFunnelRow.mockRejectedValueOnce(new Error('db boom'));
+    const ok = await markConverted('lead-flaky', { customerId: 'c1' });
+    expect(ok).toBe(true);
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+    expect(mockCalls.some((c) => c[0] === 'lead_activities')).toBe(true);
+  });
+
   test('a win the bridge DID land needs no settling', async () => {
     bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 1, stage: 'booked' });
     await markConverted('lead-bridged', { customerId: 'c1' });

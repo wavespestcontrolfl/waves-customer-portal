@@ -216,12 +216,20 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // an inbound call on the Ads bridge number leaves its slot empty for the
   // delayed bridge to claim as paid, and a generic rebuild would stamp it
   // organic first (codex r24 P1). Inside the conversion write, so a preview
-  // stub swaps it out with the rest (r18 P1). Lazy require: the
-  // lead-estimate-link ⇄ lead-attribution cycle.
+  // stub swaps it out with the rest (r18 P1), and best-effort like the
+  // bridge and the stamp: the status write has committed, so a settlement
+  // read that fails must not fail the conversion (codex r28 P2). Lazy
+  // require: the lead-estimate-link ⇄ lead-attribution cycle.
   const bridged = await bridgeLeadFunnelStage(leadId, 'won');
   const linkedCustomer = customerId || null;
-  const rebuild = bridged.updated ? null : await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId: linkedCustomer });
-  if (rebuild) await stampLeadFunnelRow(db, rebuild, { customerId: linkedCustomer, funnelStage: 'booked' });
+  if (!bridged.updated) {
+    try {
+      const rebuild = await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId: linkedCustomer });
+      if (rebuild) await stampLeadFunnelRow(db, rebuild, { customerId: linkedCustomer, funnelStage: 'booked' });
+    } catch (err) {
+      logger.warn(`[LeadAttribution] funnel-row settlement failed for lead ${leadId}: ${err.message}`);
+    }
+  }
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now
