@@ -7104,8 +7104,10 @@ const CallRecordingProcessor = {
     // The linked customer's address AT FILING, snapshotted on every review
     // card this pass files (buildTriageItem.onFileAddress) — enforce AND
     // shadow lanes alike (codex r31 P2): the evidence sweep reads it
-    // instead of the customer's current columns.
-    const onFileAddress = knownCaller
+    // instead of the customer's current columns. Reassigned to the
+    // CANONICAL customer's row once Step 3 resolves it (below), so the
+    // cards filed after that point carry the right property too.
+    let onFileAddress = knownCaller
       ? { address_line1: knownCaller.addressLine1, address_line2: knownCaller.addressLine2, city: knownCaller.addressCity, zip: knownCaller.addressZip }
       : null;
     // Every card this pass files is created after this instant — the
@@ -8958,13 +8960,17 @@ const CallRecordingProcessor = {
     // on-file address at all). Re-stamp the pass's own cards from the
     // CANONICAL customer — still filing time, the same pass — so the
     // evidence sweep judges the ask against the property the call is
-    // actually linked to (codex r32 P2). Fail-soft: the cards stand.
+    // actually linked to (codex r32 P2). The cards this pass files AFTER
+    // this point (phone-not-on-file, authorization, booking, follow-up
+    // flags…) take the canonical row directly (pre-push audit P1 on
+    // 21de12c4d). Fail-soft: the cards stand.
     if (customerId) {
       try {
         const { onFileAddressSnapshot } = require('./call-routing-gates');
         const canonical = createdCustomerFromCall
           ? null
           : await db('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+        onFileAddress = canonical || null;
         await db('triage_items')
           .where({ call_log_id: call.id, status: 'open' })
           .where('created_at', '>=', cardsFiledSince)
