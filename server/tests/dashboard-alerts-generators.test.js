@@ -50,7 +50,9 @@ function primeDb(results) {
       b[m] = function chainMethod(...args) {
         calls.push({ table: t, method: m, args });
         capture.push({ table: t, method: m, args });
-        if (typeof args[0] === 'function') args[0].call(b);
+        // knex hands the builder to grouped where() and modify() callbacks
+        // as both `this` and the first argument.
+        if (typeof args[0] === 'function') args[0].call(b, b);
         return b;
       };
     }

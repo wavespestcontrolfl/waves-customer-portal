@@ -48,6 +48,7 @@ function makeUpdateChain(result) {
   chain.whereNull = jest.fn(() => chain);
   chain.modify = jest.fn((cb) => { cb(chain); return chain; });
   chain.whereNotExists = jest.fn(() => chain);
+  chain.whereRaw = jest.fn(() => chain);
   chain.update = jest.fn(() => chain);
   chain.returning = jest.fn(() => chain);
   chain.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
@@ -122,7 +123,9 @@ describe('lead staleness sweep', () => {
       const cutoff = new Date(NOW.getTime() - 21 * DAY_MS);
       const { sql, bindings } = buildStaleLeadUpdate(knex, { now: NOW, cutoff }).toSQL();
 
-      expect(sql).toBe(
+      // The recursive-chain clause is a multi-line raw fragment; compare
+      // whitespace-normalized so the pin is on the SQL, not the indentation.
+      expect(sql.replace(/\s+/g, ' ')).toBe(
         'update "leads" set "status" = ?, "updated_at" = ? '
         + 'where "leads"."status" = ? and "leads"."created_at" <= ? '
         + 'and ("leads"."next_follow_up_at" is null or "leads"."next_follow_up_at" <= ?) '
@@ -130,13 +133,25 @@ describe('lead staleness sweep', () => {
         + 'where lead_activities.lead_id = leads.id '
         + "and lead_activities.activity_type IS DISTINCT FROM 'shared_phone_note' "
         + 'and "lead_activities"."created_at" >= ?) '
+        // A quote-wizard repeat filed as a duplicate of this lead — or of any
+        // row in its duplicate chain — inside the window is the customer
+        // re-engaging (codex #3834 r10 P1, chain-aware per pre-push r12).
+        + 'and leads.id::text NOT IN ( WITH RECURSIVE chain AS ( '
+        + "SELECT r.extracted_data->>'duplicate_of_lead_id' AS parent_id, 1 AS depth FROM leads r "
+        // ...recent by its LAST wizard submission — a rerun on the repeat's
+        // own token re-types the row in place (codex r23 P1).
+        + "WHERE r.lead_type = 'quote_wizard' AND r.status = 'duplicate' AND COALESCE(r.updated_at, r.created_at) >= ? "
+        + "UNION ALL SELECT p.extracted_data->>'duplicate_of_lead_id', chain.depth + 1 "
+        + 'FROM chain JOIN leads p ON p.id::text = chain.parent_id '
+        + "WHERE p.lead_type = 'quote_wizard' AND p.status = 'duplicate' AND chain.depth < 8 ) "
+        + 'SELECT parent_id FROM chain WHERE parent_id IS NOT NULL ) '
         + 'and not exists (select 1 from "scheduled_services" '
         + 'where scheduled_services.customer_id = leads.customer_id '
         + 'and "scheduled_services"."status" not in (?, ?, ?, ?) '
         + "and scheduled_services.created_at >= COALESCE(leads.first_contact_at, leads.created_at) - interval '1 day') "
         + 'returning "id"'
       );
-      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show']);
+      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show']);
 
       return knex.destroy();
     });
@@ -147,6 +162,9 @@ describe('lead staleness sweep', () => {
       const { sql } = buildStaleLeadUpdate(knex, { now: NOW, cutoff, excludeSoftDeleted: true }).toSQL();
 
       expect(sql).toContain('"leads"."deleted_at" is null');
+      // A removed repeat or hop must not keep its original out of the sweep.
+      expect(sql).toContain('r.deleted_at IS NULL');
+      expect(sql).toContain('p.deleted_at IS NULL');
 
       return knex.destroy();
     });

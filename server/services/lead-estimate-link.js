@@ -27,6 +27,36 @@ function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase() || null;
 }
 
+// extracted_data.duplicate_of_lead_id off a lead row (jsonb arrives parsed;
+// legacy rows may carry a string), or null — the marker a quote-wizard
+// repeat run carries (routes/public-quote.js).
+function duplicateMarkerOf(lead) {
+  let data = lead && lead.extracted_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  return (data && data.duplicate_of_lead_id) || null;
+}
+
+// Follow a repeat's marker chain to the original it names (B → A → O when
+// two repeats raced), through live 'duplicate' hops only: a deleted hop or
+// a vanished original hands back the row itself, a dead marker the last
+// live row. Bounded and cycle-safe. Read-only — the public route uses it to
+// re-validate a chosen target after its label lands; the conversion paths
+// that act on the resolved original are PR B′ of the #3834 split.
+async function followDuplicateLink(database, lead) {
+  const seen = new Set();
+  let current = lead;
+  while (current && current.status === 'duplicate' && !seen.has(current.id) && seen.size < 8) {
+    if (current.deleted_at) return lead;
+    seen.add(current.id);
+    const originalId = duplicateMarkerOf(current);
+    if (!originalId) return current;
+    const original = await database('leads').where({ id: originalId }).first();
+    if (!original || original.deleted_at) return lead;
+    current = original;
+  }
+  return current;
+}
+
 function leadMatchesEstimateContact(lead, estimate) {
   if (!lead || !estimate) return false;
   if (lead.customer_id && estimate.customer_id) {
@@ -1344,6 +1374,8 @@ module.exports = {
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
+  followDuplicateLink,
+  duplicateMarkerOf,
   stampFirstResponseByContact,
   resolveEstimateEventLeads,
   convertLeadFromEvent,

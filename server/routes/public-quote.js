@@ -2,6 +2,101 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
+const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+const { followDuplicateLink } = require('../services/lead-estimate-link');
+const { stampLeadFunnelRow, bridgeLeadFunnelStage, LEAD_STATUS_TO_FUNNEL_STAGE } = require('../services/lead-funnel-bridge');
+// A wizard re-run of the same inquiry inside this window lands as a
+// 'duplicate' of the prior open lead instead of a second 'new' one.
+const WIZARD_LEAD_REUSE_DAYS = 30;
+
+// The most recent OPEN quote_wizard lead (inside the reuse window) whose
+// email, phone AND quoted address all equal what this run typed — i.e. the
+// same inquiry (same catalog service) submitted again — or null. Used ONLY to label the new row
+// (status 'duplicate' + duplicate_of_lead_id); it never selects a row to
+// update. /calculate is public, and a typed email is not ownership evidence
+// (the token path proves ownership with an unguessable leadId + email), so
+// an existing person's lead must never be mutated from here. A different
+// address is a different inquiry (a second property), never a duplicate.
+// extracted_data.duplicate_of_lead_id off a lead row (jsonb arrives parsed;
+// legacy rows may carry a string), or null.
+function parseExtracted(extractedData) {
+  let data = extractedData;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  return data || null;
+}
+function duplicateOfFromExtracted(extractedData) {
+  return parseExtracted(extractedData)?.duplicate_of_lead_id || null;
+}
+
+// `excludeLeadId` is the caller's OWN row (the token path re-checks a row the
+// property-lookup stage already minted) — a row is never its own prior.
+// `onlyLeadId` re-validates ONE already-chosen target against the exact same
+// predicate (open lead, live courtship, identity) after the label lands.
+async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKey, serviceInterest = null, excludeLeadId = null, beforeCreatedAt = null, onlyLeadId = null } = {}, now = Date.now()) {
+  const emailLc = String(email || '').trim().toLowerCase();
+  const phoneDigits = String(phone || '').replace(/\D/g, '').slice(-10);
+  const addressLc = String(address || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  // The quoted service is part of the identity (codex #3834 r1 P1): pest
+  // today and lawn next week at the same property are two opportunities. A
+  // catalog key names it; the documented direct `services` shape carries no
+  // key (docs/public-route-contracts.md), so its identity is the normalized
+  // service mix — the label buildPublicQuoteServiceInterest derives from it
+  // in a fixed order (codex #3834 r16 P2). Neither → never a duplicate.
+  const serviceLabel = serviceKey ? null : String(serviceInterest || '').trim();
+  if (!emailLc || phoneDigits.length !== 10 || !addressLc || (!serviceKey && !serviceLabel)) return null;
+  // Dark until GATE_WIZARD_LEAD_DEDUPE=true (read at call time): with the
+  // gate off no run is ever a duplicate target, so every run files as 'new'
+  // exactly as before this lane — the conversion side of a repeat lands in
+  // its own PR, and labelling ahead of it would leave accepted reruns
+  // crediting no lead.
+  if (!require('../config/feature-gates').gateEnvValue('GATE_WIZARD_LEAD_DEDUPE')) return null;
+  const prior = await dbh('leads')
+    .where(serviceKey ? { lead_type: 'quote_wizard', service_key: serviceKey } : { lead_type: 'quote_wizard', service_key: null, service_interest: serviceLabel })
+    .whereNull('deleted_at')
+    .whereRaw('LOWER(email) = ?', [emailLc])
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
+    .whereRaw("LOWER(regexp_replace(COALESCE(address, ''), '\\s+', ' ', 'g')) = ?", [addressLc])
+    .whereIn('status', OPEN_LEAD_STATUSES)
+    // A prior run that added properties is a WIDER inquiry the pipeline keeps
+    // open for its manual follow-ups (r10 P1) — never a duplicate target for
+    // a single-property rerun, whose accepted draft would otherwise close
+    // that wider work as won (codex #3834 r20 P1). The caller only looks up
+    // when THIS run has none, so the identity is "no extra properties" on
+    // both sides.
+    .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = 0")
+    // A lead whose FK-linked estimate already closed (expired / declined /
+    // archived) is not a live courtship (codex #3834 r4 P1): a draft stamped
+    // at it would be skipped at send behind the stale FK and mis-stamped at
+    // accept. That rerun is a fresh inquiry and files as a normal new lead.
+    // A lead still holding an OPEN estimate stays a duplicate target — the
+    // same-phone estimate guard withholds the rerun's draft in that case.
+    .whereRaw(
+      `(estimate_id IS NULL OR EXISTS (SELECT 1 FROM estimates e WHERE e.id = leads.estimate_id AND e.archived_at IS NULL AND e.status IN (${OPEN_ESTIMATE_STATUSES.map(() => '?').join(', ')})))`,
+      OPEN_ESTIMATE_STATUSES,
+    )
+    // A wizard draft is mirrored through estimate_data.lead_id, not the FK
+    // (the FK is rescued only at send/view): a draft the office declined —
+    // or that expired or was archived — closed that courtship the same way,
+    // and the 'new' lead it left behind is not a live target either
+    // (codex #3834 r24 P1).
+    .whereRaw(
+      `NOT EXISTS (SELECT 1 FROM estimates e WHERE e.estimate_data->>'lead_id' = leads.id::text AND (e.archived_at IS NOT NULL OR e.status NOT IN (${OPEN_ESTIMATE_STATUSES.map(() => '?').join(', ')})))`,
+      OPEN_ESTIMATE_STATUSES,
+    )
+    .where('created_at', '>', new Date(now - WIZARD_LEAD_REUSE_DAYS * 24 * 60 * 60 * 1000))
+    // The token path only looks BACK: two lookup-minted rows for the same
+    // inquiry reaching /calculate together must not each pick the other and
+    // both close as 'duplicate' (codex #3834 r8 P1) — the newer row is the
+    // duplicate, the older stays the open original.
+    .modify((qb) => {
+      if (excludeLeadId) qb.whereNot('id', excludeLeadId);
+      if (beforeCreatedAt) qb.where('created_at', '<', beforeCreatedAt);
+      if (onlyLeadId) qb.where('id', onlyLeadId);
+    })
+    .orderBy('created_at', 'desc')
+    .first('id');
+  return prior ? prior.id : null;
+}
 const { COCKROACH_PACKAGE_VISITS, publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, LAWN_TRACKS } = require('../services/public-services-menu');
 const logger = require('../services/logger');
 const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
@@ -30,6 +125,7 @@ const { isHoneypotTripped } = require('../utils/lead-abuse');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
+  OPEN_ESTIMATE_STATUSES,
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const {
@@ -1749,7 +1845,31 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     // If the property-lookup step already captured a lead row, update it
     // in place so we don't double-count leads for a single conversion.
+    //
+    // No lead token (a fresh browser session, a second run of the wizard
+    // days later): resolve to the visitor's most recent OPEN quote_wizard
+    // lead by the email they just typed — the same ownership evidence the
+    // token path requires — instead of minting a new lead per run. One
+    // visitor ran the calculator twice in two minutes on 2026-08-31 and got
+    // two identical leads (three with the email lead), so the sweep, the
+    // digest, and the office all counted one prospect three times.
     let lead;
+    // Repeat-run ancestry (see the tokenless branch below). Set from the
+    // stored row on the token path too: the browser's token after a repeat
+    // run IS the duplicate row's id, and everything keyed on this flag
+    // (attribution, bells) must see it on later stages (codex #3834 r3 P1).
+    let duplicateOfLeadId = null;
+    // The identity THIS request typed, as observed on the row (contact,
+    // address, service — catalog key and label — extra-property count): every public write that
+    // moves a label — the relabel (codex #3834 r13 P1) and the
+    // post-validation reopen (r14 P1) — is scoped to it, so two requests on
+    // one lookup token typing different inquiries never stamp or clear each
+    // other's label. The count is what the token path read off the row; the
+    // tokenless path labels only a row it inserted with no extra property.
+    let observedExtraCount = additionalProperties.length;
+    const scopedToTypedIdentity = (qb) => qb
+      .where({ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey, service_interest: serviceInterest })
+      .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [observedExtraCount]);
     if (leadId) {
       // OWNERSHIP (atomic): leadId is a client-supplied id on a public,
       // PII-accepting write surface, so prove ownership the same way /upsell
@@ -1779,11 +1899,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // rule as the attach in public-property-lookup.js. CASE keeps the
         // ownership-predicated UPDATE atomic (no read-then-write).
         // The replace branch carries forward additional_properties and the
-        // declared timeline captured at the property-lookup stage
+        // declared timeline captured at the property-lookup stage, and the
+        // duplicate_of_lead_id marker a repeat run stamped (codex #3834 r2
+        // P1 — it is re-derived below against what THIS stage typed)
         // (jsonb_strip_nulls drops a key the prior row never had); a value in
         // THIS stage's snapshot wins the merge.
         extracted_data: db.raw(
-          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
+          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
           [extractedData, extractedData]
         ),
         updated_at: new Date(),
@@ -1800,11 +1922,90 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .whereNull('deleted_at')
         .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
         .update(updateFields)
-        .returning(['id', 'lead_source_id', 'lead_type']);
+        .returning(['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at']);
       lead = rows[0];
+      if (lead && lead.lead_type === 'quote_wizard' && (lead.status === 'new' || lead.status === 'duplicate')) {
+        // The normal wizard flow mints a 'new' row at the property-lookup
+        // stage and hands its token here, so this is where a repeat through
+        // the documented flow is first fully typed (codex #3834 r7 P1). And a
+        // marker computed from an earlier stage's fields may be stale: this
+        // stage may have changed the property or the service (r4 P1), and a
+        // different inquiry is not a duplicate of the old one. Re-run the
+        // exact predicate against what was just typed, excluding THIS row —
+        // the label moves, lands, or clears on this row only; nothing on the
+        // original is written.
+        const stored = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
+        // A submission that adds properties is a wider inquiry, never a
+        // repeat (codex #3834 r10 P1): the extra addresses live only on
+        // this row and each is a manual follow-up quote the pipeline must
+        // still show — a 'duplicate' label would bury them. The list the
+        // property-lookup stage stored counts too (the update above carried
+        // it forward when this stage omitted the optional field, r12 P1).
+        const widerInquiry = additionalProperties.length > 0 || (parseExtracted(lead.extracted_data)?.additional_properties?.length > 0);
+        duplicateOfLeadId = widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
+        // Scoped to the status just read: a staff transition landing in
+        // between (won / lost / contacted) wins, and this public retry
+        // updates 0 rows instead of regressing it (codex #3834 r9 P1). On 0
+        // rows the request keeps the marker the row actually carries, so the
+        // attribution skip and the bell label follow the database, not the
+        // relabel that did not land.
+        // ...and to the identity this request wrote (contact, address,
+        // service, extra-property count as observed on the row): two
+        // requests on one lookup token typing different inquiries must not
+        // stamp one request's marker onto the other's fields (r13 P1).
+        observedExtraCount = parseExtracted(lead.extracted_data)?.additional_properties?.length || 0;
+        if (duplicateOfLeadId !== stored) {
+          const relabelled = await db('leads')
+            .where({ id: lead.id, status: lead.status })
+            .modify(scopedToTypedIdentity)
+            .update(duplicateOfLeadId
+            ? { status: 'duplicate', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }
+            : { status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
+          if (!relabelled) {
+            // 0 rows: a staff transition, or a concurrent request on this
+            // token, won. Follow the row AS IT IS NOW — not the marker this
+            // request read before the race: the other request may have just
+            // filed this row as a repeat (and dropped its lead-stage funnel
+            // row), and trusting the stale read would re-validate a null
+            // marker and re-insert that row (codex #3834 r17 P1).
+            Object.assign(lead, await db('leads').where({ id: lead.id }).first('status', 'extracted_data'));
+            duplicateOfLeadId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
+          }
+          if (relabelled && duplicateOfLeadId) {
+            // The row just filed as a repeat: a funnel row it carries at the
+            // lead stage — its own earlier stamp, or a concurrent repeat's
+            // root repair that picked it as root while this relabel was in
+            // flight (the r10 chain B → A → O) — is a second row for a
+            // prospect the root now carries. Drop it; the root's own row is
+            // rebuilt below when missing (codex #3834 r14 P1). A row already
+            // advanced past 'lead' is real engagement and stays. Conditioned
+            // in the same statement on the row STILL carrying this request's
+            // label, marker and typed identity: a second request on the token
+            // that reopened the row as 'new' in between keeps its only funnel
+            // row (codex r24 P2).
+            await db('ad_service_attribution')
+              .where({ lead_id: lead.id, funnel_stage: 'lead' })
+              .whereExists(db('leads').select(db.raw('1')).where({ id: lead.id, status: 'duplicate' }).whereRaw("extracted_data->>'duplicate_of_lead_id' = ?", [duplicateOfLeadId]).modify(scopedToTypedIdentity))
+              .del();
+          }
+        }
+      }
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
         await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
       }
+    }
+    // Same inquiry submitted again without the lead token (a fresh browser
+    // session, a second run minutes later): the row still inserts — this
+    // run's snapshot is what the visitor just saw — but as a 'duplicate' of
+    // the open lead it repeats, so the pipeline, the sweep, and the digest
+    // count one prospect once. Non-destructive by design (hook P0): nothing
+    // on the earlier lead changes, and nothing later follows the marker to
+    // it from this public surface — the duplicate row owns its own
+    // lifecycle and upsells like any lead; folding it into the original is
+    // a trusted-path job (the office merge). Two concurrent first runs can
+    // still both land 'new' — the office merges those by hand, as before.
+    if (!lead && !additionalProperties.length) {
+      duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest });
     }
     if (!lead) {
       const rows = await db('leads').insert({
@@ -1821,7 +2022,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         first_contact_channel: 'website_quote',
         lead_source_id: sourceMeta.leadSourceId,
         monthly_value: leadMonthlyValue,
-        status: 'new',
+        status: duplicateOfLeadId ? 'duplicate' : 'new',
         gclid,
         wbraid,
         gbraid,
@@ -1829,9 +2030,52 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         fbc,
         fbp,
         anon_id: anonId,
-        extracted_data: extractedData,
+        extracted_data: duplicateOfLeadId
+          ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
+          : extractedData,
       }).returning(['id']);
       lead = rows[0];
+    }
+    // The label was computed from a read of the target; if the office closed
+    // that original between the read and the write (lost / won / deleted),
+    // this submission is a fresh inquiry, not a repeat of a closed one
+    // (codex #3834 r12 P1). Re-check after the write on both paths — through
+    // the SAME predicate the lookup used (open lead, live courtship: no
+    // declined / expired / archived estimate, identity), so the two cannot
+    // drift — and reopen THIS row, scoped to the label it just received, so
+    // a staff transition on this row in the meantime still wins.
+    if (duplicateOfLeadId) {
+      const targetOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: duplicateOfLeadId });
+      // A target that is no longer open because ITS OWN relabel landed in
+      // flight (B picked A while A was filing as a repeat of O — the r10
+      // chain) still reaches an open root: the recorded ancestry is valid
+      // as a chain and every reader resolves it, so this row keeps its
+      // marker instead of reopening as a second 'new' lead (codex #3834 r20
+      // P1). Only a target whose ancestry reaches no live open root by the
+      // same predicate is a closed one.
+      let ancestryOpen = null;
+      if (!targetOpen) {
+        const target = await db('leads').where({ id: duplicateOfLeadId }).first();
+        const root = target && target.status === 'duplicate' && !target.deleted_at ? await followDuplicateLink(db, target) : null;
+        if (root && root.id !== target.id && root.id !== lead.id) {
+          ancestryOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: root.id });
+        }
+      }
+      if (!targetOpen && !ancestryOpen) {
+        // 0 rows ⇒ a staff transition on this row won; its marker stands and
+        // the request keeps following the database (no second funnel row).
+        // ...and to the identity this request typed plus the marker it just
+        // validated: a concurrent request on the same token that replaced
+        // the row's fields and stamped its own (valid) marker must not have
+        // that label erased by this request's failed validation of the old
+        // one (codex #3834 r14 P1).
+        const reopened = await db('leads')
+          .where({ id: lead.id, status: 'duplicate' })
+          .whereRaw("extracted_data->>'duplicate_of_lead_id' = ?", [duplicateOfLeadId])
+          .modify(scopedToTypedIdentity)
+          .update({ status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
+        if (reopened) duplicateOfLeadId = null;
+      }
     }
 
     // Upsert a customers row so wizard-priced leads surface in /admin/customers
@@ -1975,31 +2219,102 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const attachedCallLead = ['voicemail', 'inbound_call'].includes(lead?.lead_type);
       if (attachedCallLead) {
         await backfillCallLeadAttribution({ leadId: lead.id, customerId, serviceInterest });
-      } else if (channelAttr) {
-        await db('ad_service_attribution').insert({
-          customer_id: customerId,
-          lead_id: lead.id,
-          service_line: inferServiceLine(serviceInterest),
-          specific_service: inferSpecificService(serviceInterest),
-          service_bucket: inferServiceBucket(serviceInterest),
-          lead_date: etDateString(),
-          lead_source: channelAttr.leadSource,
-          lead_source_detail: sourceMeta.leadSourceDetail,
-          gclid: gclid || null,
-          wbraid: wbraid || null,
-          gbraid: gbraid || null,
-          fbclid: fbclid || null,
-          fbc: fbc || null,
-          fbp: fbp || null,
-          utm_campaign: attr?.utm?.campaign || null,
-          utm_term: attr?.utm?.term || null,
-          funnel_stage: 'lead',
+      } else if (channelAttr || duplicateOfLeadId) {
+        // A repeat run is not a second marketing lead: the funnel and
+        // service-line queries count attribution rows without excluding
+        // duplicate lead statuses (codex #3834 r2 P1), and the original's
+        // row already carries this prospect — unless the original's own
+        // best-effort insert never landed, in which case this run backfills
+        // the ONE attribution row for the prospect onto the original's id
+        // (codex #3834 r10 P2): a transient write miss must not become a
+        // permanently missing funnel row. The check and the backfill target
+        // the open ROOT of the ancestry, not the immediate parent — two
+        // concurrent repeats can chain B → A → O, and the prospect gets one
+        // funnel row, on O (pre-push P1 on r10).
+        // The backfill row is the ORIGINAL touch, rebuilt from what the root
+        // row stored (its lead source's channel, click ids, service, date) —
+        // never this return visit's channel, which would credit acquisition
+        // to the wrong touch and corrupt first-touch ROI (codex r11 P2). A
+        // root whose stored source has no channel gets no row, exactly as
+        // its own run would have.
+        // The current touch needs a mapped channel; a repeat's root repair
+        // does not depend on this visit's channel at all (pre-push r12).
+        const touch = !channelAttr ? null : {
+          leadId: lead.id, customerId, serviceInterest, leadDate: etDateString(), channel: channelAttr,
+          leadSourceDetail: sourceMeta.leadSourceDetail, gclid, wbraid, gbraid, fbclid, fbc, fbp,
+          utmCampaign: attr?.utm?.campaign || null, utmTerm: attr?.utm?.term || null,
           // The map's isPaid says the CHANNEL is a paid one; the resolver's
           // isPaidClick says THIS visit carried paid evidence (click id / cpc).
           // Both must hold — organic utm_source=facebook traffic lands in the
           // Facebook channel but must not count as paid spend attribution.
-          is_paid: channelAttr.isPaid && sourceMeta.isPaidClick === true,
-        }).onConflict('lead_id').ignore();
+          isPaid: channelAttr.isPaid && sourceMeta.isPaidClick === true,
+        };
+        // The row lands on the KEEPER — the chain root for a repeat, this row
+        // otherwise — and is re-checked against the keeper after the write:
+        // a keeper chosen while its own relabel was in flight (B picked A
+        // before A's relabel to O landed — the r10 chain) files as a
+        // duplicate a moment later, and the row this request added is then a
+        // second row for a prospect O carries. Paired with the relabel above
+        // dropping its own lead-stage row, every interleaving leaves one
+        // row, on the keeper (codex #3834 r14 P1).
+        let keeperId = lead.id;
+        let stampedId = null;
+        let stampedStage = 'lead';
+        if (duplicateOfLeadId) {
+          const root = await followDuplicateLink(db, await db('leads').where({ id: duplicateOfLeadId }).first());
+          // The root's row is the ORIGINAL touch rebuilt from what the root
+          // row stored, belongs to the ROOT's customer, and starts at the
+          // stage the root's current status maps to (r11 P2, r13 P2s, r15
+          // P2): stampLeadFunnelRow. A vanished root (dead marker) gets nothing.
+          keeperId = root ? root.id : null;
+          stampedStage = root ? LEAD_STATUS_TO_FUNNEL_STAGE[root.status] || 'lead' : 'lead';
+          stampedId = root ? await stampLeadFunnelRow(db, root, { customerId, serviceInterest }) : null;
+        } else if (touch) {
+          const [stamped] = await db('ad_service_attribution').insert({
+            customer_id: touch.customerId,
+            lead_id: touch.leadId,
+            service_line: inferServiceLine(touch.serviceInterest),
+            specific_service: inferSpecificService(touch.serviceInterest),
+            service_bucket: inferServiceBucket(touch.serviceInterest),
+            lead_date: touch.leadDate,
+            lead_source: touch.channel.leadSource,
+            lead_source_detail: touch.leadSourceDetail,
+            gclid: touch.gclid || null,
+            wbraid: touch.wbraid || null,
+            gbraid: touch.gbraid || null,
+            fbclid: touch.fbclid || null,
+            fbc: touch.fbc || null,
+            fbp: touch.fbp || null,
+            utm_campaign: touch.utmCampaign,
+            utm_term: touch.utmTerm,
+            funnel_stage: 'lead',
+            is_paid: touch.isPaid,
+          }).onConflict('lead_id').ignore().returning('id');
+          stampedId = stamped ? stamped.id : null;
+        }
+        if (stampedId) {
+          // ...and reconciled with the keeper's CURRENT status: a keeper that
+          // filed as a duplicate meanwhile loses the row (r14 P1); a keeper
+          // staff moved on (won / lost / contacted) while the repair was in
+          // flight — whose own status bridge found no row to advance yet —
+          // has the fresh row brought to that stage, so a won root never
+          // sits at 'lead' and a lost one never advances (codex #3834 r17 P1).
+          // The drop is ONE statement conditioned on both facts — the keeper
+          // still 'duplicate' and the row still at the stage the repair
+          // inserted — so a promotion (accept / self-booking) landing between
+          // the read and the delete, which sets the keeper won and advances
+          // this same row to booked, keeps its row: either order leaves the
+          // delete at 0 rows (codex #3834 r19 P1).
+          const keeper = await db('leads').where({ id: keeperId }).first('status');
+          if (keeper?.status === 'duplicate') {
+            await db('ad_service_attribution')
+              .where({ id: stampedId, funnel_stage: stampedStage })
+              .whereExists(db('leads').where({ id: keeperId, status: 'duplicate' }))
+              .del();
+          } else if (keeper && LEAD_STATUS_TO_FUNNEL_STAGE[keeper.status]) {
+            await bridgeLeadFunnelStage(keeperId, keeper.status, db);
+          }
+        }
       }
     } catch (attrErr) {
       logger.error(`[public-quote] Ad attribution insert failed: ${attrErr.message}`);
@@ -2147,6 +2462,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     let draftEstimateId = null;
     try {
       const estimateDataObj = {
+        // Always THIS run's row, duplicate or not (pre-push P0 on #3834 r4):
+        // the draft is what /upsell may touch under this token, and a
+        // pointer at the open original would let a typed-contact repeat
+        // reach a draft it never proved ownership of. The pipeline does not
+        // read this key (estimates carry no lead_id; a wizard draft is its
+        // own Draft opportunity), so nothing is lost by keeping it local.
         lead_id: lead.id,
         // setupFeeQuote is injected just before each write, decided under
         // the same transaction/row lock as the write — see applySetupFeeQuote.
@@ -2490,7 +2811,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         quoteRequired
           ? (quoteRequiredReason === 'quote_on_request' ? `Estimate requested: ${contactFirstName} ${contactLastName}` : `Manual quote needed: ${contactFirstName} ${contactLastName}`)
           : `Calculator quote: ${contactFirstName} ${contactLastName}`,
-        quoteRequired
+        `${quoteRequired
           ? (quoteRequiredReason === 'quote_on_request'
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
             : RESIDENTIAL_VERIFICATION_REASONS.has(quoteRequiredReason)
@@ -2498,8 +2819,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
-            : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`,
-        { icon: '\u{1F4B0}', link: '/admin/leads', metadata: { leadId: lead.id } }
+            : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`}${duplicateOfLeadId ? ' · repeat of an open lead (filed as duplicate)' : ''}`,
+        { icon: '\u{1F4B0}', link: '/admin/leads', metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : {}) } }
       );
     } catch (e) {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);
@@ -3039,6 +3360,9 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._internals = {
+  findPriorOpenWizardLeadId,
+  duplicateOfFromExtracted,
+  WIZARD_LEAD_REUSE_DAYS,
   isPublicCommercialQuote,
   publicQuotePestLabel,
   perApplicationForLine,
