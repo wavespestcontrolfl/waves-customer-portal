@@ -3,7 +3,7 @@ const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
 const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString } = require('../utils/datetime-et');
-const { bridgeLeadFunnelStage, stampLeadFunnelRow } = require('./lead-funnel-bridge');
+const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
 const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
@@ -74,6 +74,10 @@ async function followDuplicateLink(database, lead) {
 // back to its own immediate marker and reading as two opportunities (codex
 // #3834 r17 P1). The same bounded, cycle-safe walk through live duplicate
 // hops as followDuplicateLink.
+// The identity a claimed write pins — customer link, phone, email, exactly
+// as the row was read (codex #3834 r17 P1, r18 P1).
+const identityOf = (row) => ({ customer_id: row.customer_id ?? null, phone: row.phone ?? null, email: row.email ?? null });
+
 async function resolveAncestry(database, repeat) {
   const seen = new Set([repeat.id]);
   let marker = duplicateMarkerOf(repeat);
@@ -626,7 +630,7 @@ async function markLinkedLeadEstimateAccepted({
   // onlyIfStatusIn), so a staff closure landing between the stamp and the
   // conversion is never overwritten (codex #3834 r11 P1). The direct path
   // keeps its unconditional stamp and conversion as before.
-  const convert = async (lead, { claim = null } = {}) => {
+  const convert = async (lead, { claim = null, funnelRow = false } = {}) => {
     let stamped = 0;
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
@@ -635,7 +639,7 @@ async function markLinkedLeadEstimateAccepted({
       // after the identity check but before the stamp is no longer this
       // opportunity, and the stamp must lose rather than let markConverted
       // overwrite the row's customer with this one (codex #3834 r17 P1).
-      if (claim) stamp.whereNull('estimate_id').whereIn('status', claim).where({ customer_id: lead.customer_id ?? null, phone: lead.phone ?? null, email: lead.email ?? null });
+      if (claim) stamp.whereNull('estimate_id').whereIn('status', claim).where(identityOf(lead));
       stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
       if (claim && !stamped) {
         const current = await database('leads').where({ id: lead.id }).first();
@@ -654,7 +658,11 @@ async function markLinkedLeadEstimateAccepted({
       monthlyValue,
       initialServiceValue,
       waveguardTier,
-      ...(claim ? { onlyIfStatusIn: claim } : {}),
+      // The status write carries the same claim — status AND identity — so
+      // nothing between the stamp and the conversion can hand the row to a
+      // different customer (codex #3834 r11 P1, r18 P1).
+      ...(claim ? { onlyIfStatusIn: claim, onlyIfIdentity: identityOf(lead) } : {}),
+      ...(funnelRow ? { funnelRowFor: lead } : {}),
     });
     if (claim && !converted) {
       // The stamp landed but the status claim lost (a closure in between):
@@ -756,9 +764,8 @@ async function markLinkedLeadEstimateAccepted({
       // run would have stamped, straight at the booked stage (codex #3834
       // r14 P2).
       const stillOurs = sameOpportunity() && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at;
-      if (await convert(named, { claim: DUPLICATE_LEAD_CLAIM })) {
-        if (stillOurs) await bridgeLeadFunnelStage(lead.id, 'won', database);
-        else await stampLeadFunnelRow(database, named, { customerId, funnelStage: 'booked' });
+      if (await convert(named, { claim: DUPLICATE_LEAD_CLAIM, funnelRow: !stillOurs }) && stillOurs) {
+        await bridgeLeadFunnelStage(lead.id, 'won', database);
       }
     }
     return;
@@ -1191,17 +1198,21 @@ async function convertLeadFromEvent({
       // open statuses: a staff transition in between wins, and this event
       // converts nothing (pre-push P1, codex #3834 r14 P1; one rule for the
       // tier instead of tracking which rows came through ancestry, r15 P2).
+      // ...and on the identity it was read with — customer link, phone,
+      // email — so a row staff re-assigned or re-contacted in between is
+      // never handed to this customer (codex #3834 r18 P1). A repeat taking
+      // the win has no funnel row of its own (its root carried the prospect,
+      // and that root is not ours to book), so the conversion stamps the row
+      // the repeat's own run would have, at booked (r14 P2) — inside
+      // markConverted, so the backfill's dry-run stub covers it (r18 P1).
       const claim = resolution !== 'customer_link' ? null : (lead.status === 'duplicate' ? DUPLICATE_LEAD_CLAIM : OPEN_LEAD_CLAIM);
-      if (claim) conversion.onlyIfStatusIn = claim;
+      if (claim) {
+        conversion.onlyIfStatusIn = claim;
+        conversion.onlyIfIdentity = identityOf(lead);
+        if (claim === DUPLICATE_LEAD_CLAIM) conversion.funnelRowFor = lead;
+      }
       const converted = await leadAttributionService.markConverted(lead.id, conversion);
       if (claim && !converted) return { converted: false, reason: 'customer_link_claim_lost' };
-      // A repeat taking the win has no funnel row of its own (/calculate
-      // skipped it: its root carried the prospect) and that root is not ours
-      // to book, so markConverted's bridge advanced nothing — and the booking
-      // recorder, told a lead converted, adds no row either: the booked deal
-      // would vanish from the Ads funnel. Stamp the row the repeat's own run
-      // would have, straight at booked (codex #3834 r14 P2).
-      if (claim === DUPLICATE_LEAD_CLAIM) await stampLeadFunnelRow(database, lead, { customerId: conversion.customerId, funnelStage: 'booked' });
     }
     return { converted: true, count: open.length, leadIds: open.map((lead) => lead.id) };
   } catch (err) {

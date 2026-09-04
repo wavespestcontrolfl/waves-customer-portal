@@ -1,0 +1,80 @@
+// markConverted's claim (codex #3834 r11 P1, r18 P1) and the repeat's funnel
+// row (r14 P2, r18 P1): the status write is conditional on the status AND
+// identity the caller read, and a repeat's booked row is part of the
+// conversion write — so a preview stub that swaps markConverted out swaps
+// the row out with it.
+let mockUpdateRows = 1;
+const mockCalls = [];
+jest.mock('../models/db', () => {
+  const db = (table) => {
+    const q = {
+      where: (...a) => { mockCalls.push([table, 'where', ...a]); return q; },
+      whereNull: (...a) => { mockCalls.push([table, 'whereNull', ...a]); return q; },
+      whereIn: (...a) => { mockCalls.push([table, 'whereIn', ...a]); return q; },
+      update: async (patch) => { mockCalls.push([table, 'update', patch]); return mockUpdateRows; },
+      insert: async (row) => { mockCalls.push([table, 'insert', row]); return [row]; },
+      first: async () => null,
+    };
+    return q;
+  };
+  db.raw = (s) => ({ __raw: s });
+  return db;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/lead-funnel-bridge', () => ({
+  bridgeLeadFunnelStage: jest.fn(async () => ({ updated: 0 })),
+  stampLeadFunnelRow: jest.fn(async () => 'asa-1'),
+}));
+jest.mock('../services/lead-estimate-link', () => ({ linkLeadEstimatesToCustomer: jest.fn(async () => {}) }));
+
+const db = require('../models/db');
+const { bridgeLeadFunnelStage, stampLeadFunnelRow } = require('../services/lead-funnel-bridge');
+const { markConverted } = require('../services/lead-attribution');
+// The claim = every leads predicate chained before the status UPDATE (the
+// estimate→customer backfill re-reads the row afterwards).
+const claimCalls = () => mockCalls.slice(0, mockCalls.findIndex((c) => c[1] === 'update')).filter((c) => c[0] === 'leads');
+
+describe('markConverted claims', () => {
+  beforeEach(() => { mockCalls.length = 0; mockUpdateRows = 1; jest.clearAllMocks(); });
+
+  test('onlyIfStatusIn + onlyIfIdentity pin the status AND identity the caller read on the status write', async () => {
+    const identity = { customer_id: null, phone: '9415550142', email: 'a@example.com' };
+    const ok = await markConverted('lead-1', { customerId: 'c1', onlyIfStatusIn: ['new', 'contacted'], onlyIfIdentity: identity });
+    expect(ok).toBe(true);
+    expect(claimCalls()).toEqual([
+      ['leads', 'where', 'id', 'lead-1'],
+      ['leads', 'whereNull', 'deleted_at'],
+      ['leads', 'whereIn', 'status', ['new', 'contacted']],
+      ['leads', 'where', identity],
+    ]);
+    expect(mockCalls.find((c) => c[1] === 'update')[2]).toEqual(expect.objectContaining({ status: 'won', customer_id: 'c1' }));
+  });
+
+  test('a lost claim (0 rows) converts nothing — no bridge, no funnel row, no activity', async () => {
+    mockUpdateRows = 0;
+    const repeat = { id: 'lead-rep', customer_id: 'c1' };
+    const ok = await markConverted('lead-rep', { customerId: 'c1', onlyIfStatusIn: ['duplicate'], onlyIfIdentity: { customer_id: 'c1', phone: null, email: null }, funnelRowFor: repeat });
+    expect(ok).toBe(false);
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+    expect(mockCalls.some((c) => c[0] === 'lead_activities')).toBe(false);
+  });
+
+  test("funnelRowFor stamps the repeat's booked row inside the conversion write, after the bridge", async () => {
+    const repeat = { id: 'lead-rep', customer_id: null, status: 'duplicate' };
+    const ok = await markConverted('lead-rep', { customerId: 'c1', onlyIfStatusIn: ['duplicate'], funnelRowFor: repeat });
+    expect(ok).toBe(true);
+    expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-rep', 'won');
+    expect(stampLeadFunnelRow).toHaveBeenCalledWith(db, repeat, { customerId: 'c1', funnelStage: 'booked' });
+    expect(bridgeLeadFunnelStage.mock.invocationCallOrder[0]).toBeLessThan(stampLeadFunnelRow.mock.invocationCallOrder[0]);
+  });
+
+  test('without a claim or a funnel row the write is unconditional and stamps nothing', async () => {
+    await markConverted('lead-2', { customerId: 'c1' });
+    expect(claimCalls()).toEqual([
+      ['leads', 'where', 'id', 'lead-2'],
+      ['leads', 'whereNull', 'deleted_at'],
+    ]);
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+  });
+});

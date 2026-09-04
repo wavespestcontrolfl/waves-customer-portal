@@ -112,6 +112,20 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(PROSPECT_SCOPE_SQL).toBe(`leads.status NOT IN ('cancelled', 'spam', 'duplicate') AND ${SECOND_WIN_SQL}`);
     const adminLeadsSrc = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-leads.js'), 'utf8');
     expect((adminLeadsSrc.match(/leads\.deleted_at IS NULL AND \$\{PROSPECT_SCOPE_SQL\}/g) || []).length).toBe(4);
+    // The dashboard breakdowns (leads-by-source over `leads as l`, channel-mix)
+    // apply the same scope — alias-aware, so every outer reference follows
+    // the alias and none is left on the bare table name (codex r18 P2).
+    const { scopeToProspects } = require('../services/lead-statuses');
+    const aliased = [];
+    const qb = { whereNotIn: (...a) => { aliased.push(['whereNotIn', ...a]); return qb; }, whereRaw: (...a) => { aliased.push(['whereRaw', ...a]); return qb; } };
+    scopeToProspects(qb, 'l');
+    expect(aliased[0]).toEqual(['whereNotIn', 'l.status', expect.arrayContaining(['duplicate', 'spam', 'cancelled'])]);
+    expect(aliased[1][1]).toMatch(/^\(l\.status IS DISTINCT FROM 'won' OR NOT EXISTS/);
+    expect(aliased[1][1]).not.toMatch(/\bleads\.(status|extracted_data|customer_id|estimate_id|phone|email)\b/);
+    expect(aliased[1][1]).toMatch(/FROM chain JOIN leads p ON/); // the inner walk still names the table
+    const dashboardSrc = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dashboard.js'), 'utf8');
+    expect(dashboardSrc).toMatch(/\.whereNull\('l\.deleted_at'\)\n\s+\.modify\(\(qb\) => scopeToProspects\(qb, 'l'\)\),/);
+    expect(dashboardSrc).toMatch(/applyETTimestampWindow\(db\('leads'\)\.whereNull\('deleted_at'\)\.modify\(scopeToProspects\), 'first_contact_at', win\.from, win\.to\)/);
     expect(statusExclusion[3]).toEqual(expect.arrayContaining(['duplicate', 'spam', 'cancelled']));
   });
 

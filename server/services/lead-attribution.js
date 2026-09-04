@@ -9,7 +9,7 @@ const logger = require('./logger');
 // produced invalid E.164 strings on bad input.
 const { normalizePhone } = require('../utils/phone');
 const { startOfETMonth, etDateString } = require('../utils/datetime-et');
-const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
+const { bridgeLeadFunnelStage, stampLeadFunnelRow } = require('./lead-funnel-bridge');
 
 // ---------------------------------------------------------------------------
 // 1. attributeInboundContact
@@ -171,9 +171,19 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // 2. markConverted
 // ---------------------------------------------------------------------------
 // `onlyIfStatusIn` (the estimate-accept claim paths) makes the status write
-// conditional on the state the caller claimed: 0 rows ⇒ a concurrent
-// transition wins and nothing below runs. Returns whether the lead converted.
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn } = {}) {
+// conditional on the state the caller claimed, and `onlyIfIdentity` on the
+// identity it validated (customer link, phone, email, as read — a row staff
+// re-assigned or re-contacted since is no longer that opportunity, and the
+// write must lose rather than overwrite its customer, codex #3834 r18 P1):
+// 0 rows ⇒ a concurrent transition wins and nothing below runs.
+// `funnelRowFor` (the lead row, for a repeat taking the win): a repeat has no
+// funnel row of its own (/calculate skipped it — its root carried the
+// prospect), so the bridge below advances nothing and the booked deal would
+// vanish from the Ads funnel; the conversion stamps the row the repeat's own
+// run would have, straight at booked (codex #3834 r14 P2). It is part of the
+// conversion write so a preview stub swaps it out with the rest (r18 P1).
+// Returns whether the lead converted.
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, funnelRowFor } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -194,6 +204,7 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // means the lead is missing or deleted, and nothing below should run.
   const claim = db('leads').where('id', leadId).whereNull('deleted_at');
   if (onlyIfStatusIn) claim.whereIn('status', onlyIfStatusIn);
+  if (onlyIfIdentity) claim.where(onlyIfIdentity);
   const updatedRows = await claim.update(updates);
   if (!updatedRows) {
     logger.info(`[LeadAttribution] markConverted skipped — lead ${leadId} missing, deleted, or no longer in ${onlyIfStatusIn ? onlyIfStatusIn.join('/') : 'a live state'}`);
@@ -204,6 +215,7 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // (won → 'booked'; 'completed' stays the revenue sync's to write). Monotonic
   // in SQL and best-effort — never blocks the conversion.
   await bridgeLeadFunnelStage(leadId, 'won');
+  if (funnelRowFor) await stampLeadFunnelRow(db, funnelRowFor, { customerId: customerId || null, funnelStage: 'booked' });
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now

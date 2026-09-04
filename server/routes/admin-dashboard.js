@@ -2007,9 +2007,13 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
     const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     const rows = await excludeInternalLeads(
       applyETTimestampWindow(
+        // The same prospect population the core KPIs and the ROI enrichment
+        // count (scopeToProspects): a suppressed rerun or a second win must
+        // not inflate a source's leads or dilute its rate (codex #3834 r18 P2).
         db('leads as l')
           .leftJoin('lead_sources as s', 'l.lead_source_id', 's.id')
-          .whereNull('l.deleted_at'),
+          .whereNull('l.deleted_at')
+          .modify((qb) => scopeToProspects(qb, 'l')),
         'l.first_contact_at',
         win.from,
         win.to,
@@ -2124,7 +2128,7 @@ router.get('/channel-mix', dashboardCache, async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     const rows = await excludeInternalLeads(
-      applyETTimestampWindow(db('leads').whereNull('deleted_at'), 'first_contact_at', win.from, win.to)
+      applyETTimestampWindow(db('leads').whereNull('deleted_at').modify(scopeToProspects), 'first_contact_at', win.from, win.to)
     ).select(
         db.raw("COALESCE(first_contact_channel, 'unknown') as channel"),
         db.raw('COUNT(*) as leads'),

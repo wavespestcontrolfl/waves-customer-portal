@@ -40,18 +40,20 @@ const OPEN_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewe
 // deal, exactly as the accept path promotes it (r17 P2). NULL-safe: no
 // marker, or a marker naming nothing,
 // never excludes; a malformed marker fails the uuid guard rather than the
-// cast. Applied through knex .modify() on an unaliased `leads` query, or
-// spliced raw (PROSPECT_SCOPE_SQL) into a correlated subquery over `leads`.
+// cast. Applied through knex .modify() on a `leads` query — unaliased, or
+// with the alias passed (`scopeToProspects(qb, 'l')`, the dashboard
+// breakdowns, codex #3834 r18 P2) — or spliced raw (PROSPECT_SCOPE_SQL)
+// into a correlated subquery over an unaliased `leads`.
 const UUID_RE = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 // Last 10 digits — the phone identity the wizard lookup and the link
 // resolver's normalizePhone agree on (a leading country code drops away).
 const phoneDigits = (col) => `right(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10)`;
 const markerUuid = (extracted) => `(CASE WHEN ${extracted}->>'duplicate_of_lead_id' ~ '${UUID_RE}' THEN (${extracted}->>'duplicate_of_lead_id')::uuid END)`;
-const SECOND_WIN_SQL = `(leads.status IS DISTINCT FROM 'won' OR NOT EXISTS (
+const secondWinSql = (t) => `(${t}.status IS DISTINCT FROM 'won' OR NOT EXISTS (
   WITH RECURSIVE chain AS (
     SELECT o.status, o.deleted_at, o.customer_id, o.estimate_id, o.phone, o.email, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
     FROM leads o
-    WHERE o.id = ${markerUuid('leads.extracted_data')}
+    WHERE o.id = ${markerUuid(`${t}.extracted_data`)}
     UNION ALL
     SELECT p.status, p.deleted_at, p.customer_id, p.estimate_id, p.phone, p.email, ${markerUuid('p.extracted_data')}, chain.depth + 1
     FROM chain JOIN leads p ON p.id = chain.parent_id
@@ -59,18 +61,19 @@ const SECOND_WIN_SQL = `(leads.status IS DISTINCT FROM 'won' OR NOT EXISTS (
   )
   SELECT 1 FROM chain
   WHERE chain.status = 'won' AND chain.deleted_at IS NULL
-    AND NOT (chain.estimate_id IS NOT NULL AND leads.estimate_id IS NOT NULL AND chain.estimate_id <> leads.estimate_id)
+    AND NOT (chain.estimate_id IS NOT NULL AND ${t}.estimate_id IS NOT NULL AND chain.estimate_id <> ${t}.estimate_id)
     AND CASE
-      WHEN chain.customer_id IS NOT NULL AND leads.customer_id IS NOT NULL THEN chain.customer_id = leads.customer_id
-      ELSE (${phoneDigits('chain.phone')} <> '' AND ${phoneDigits('chain.phone')} = ${phoneDigits('leads.phone')})
-        OR (LOWER(TRIM(COALESCE(chain.email, ''))) <> '' AND LOWER(TRIM(chain.email)) = LOWER(TRIM(leads.email)))
+      WHEN chain.customer_id IS NOT NULL AND ${t}.customer_id IS NOT NULL THEN chain.customer_id = ${t}.customer_id
+      ELSE (${phoneDigits('chain.phone')} <> '' AND ${phoneDigits('chain.phone')} = ${phoneDigits(`${t}.phone`)})
+        OR (LOWER(TRIM(COALESCE(chain.email, ''))) <> '' AND LOWER(TRIM(chain.email)) = LOWER(TRIM(${t}.email)))
     END
 ))`;
+const SECOND_WIN_SQL = secondWinSql('leads');
 // The same scope as a raw fragment, for the correlated COUNT subqueries the
 // sources summary builds over an unaliased `leads` (GET /leads/sources).
 const PROSPECT_SCOPE_SQL = `leads.status NOT IN (${NON_ENGAGED_LEAD_STATUSES.map((s) => `'${s}'`).join(', ')}) AND ${SECOND_WIN_SQL}`;
-function scopeToProspects(qb) {
-  return qb.whereNotIn('status', NON_ENGAGED_LEAD_STATUSES).whereRaw(SECOND_WIN_SQL);
+function scopeToProspects(qb, alias = 'leads') {
+  return qb.whereNotIn(alias === 'leads' ? 'status' : `${alias}.status`, NON_ENGAGED_LEAD_STATUSES).whereRaw(secondWinSql(alias));
 }
 
 module.exports = {
