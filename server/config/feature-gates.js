@@ -335,6 +335,18 @@ const gates = {
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
 
+  // Quote-wizard repeat-run dedupe (#3834 split, PR A′): a tokenless
+  // /calculate rerun of an OPEN quote_wizard lead (same email + phone +
+  // address + service, 30 days) files as status 'duplicate' carrying
+  // extracted_data.duplicate_of_lead_id instead of a second 'new' lead —
+  // label only, the public route never writes the original. OFF (default,
+  // every environment): every run files as 'new', byte-identical to before.
+  // Flip only once the conversion side (PR B′: accept-time and self-booking
+  // resolution of a repeat to its root) has merged, or accepted reruns
+  // credit no lead as won. Kill switch: unset. This entry is for
+  // logGateStatus; the route reads gateEnvValue at CALL time.
+  wizardLeadDedupe: gateEnvValue('GATE_WIZARD_LEAD_DEDUPE'),
+
   // Booking stamping contract (Tier 2 consolidation): the shared
   // field-stamping authority in services/booking/create-scheduled-service.js
   // that scheduled_services insert sites converge on. Gate OFF = no
