@@ -30,6 +30,7 @@ const { addETDaysAtWallClock } = require('../utils/datetime-et');
 const { claimProspectDomain } = require('../services/seo/prospect-domain-lock');
 
 const NOW = new Date('2026-09-03T07:35:00Z');
+const selection = require('../services/seo/link-authority-selection');
 const EARLIER = new Date('2026-09-01T00:00:00Z');
 const CLEAN_BODY = 'Hi Dana,\n\nWe publish a seasonal pest-pressure calendar for the Gulf Coast that your readers may find useful.\n\nAdam, Waves Pest Control';
 const policyRow = (over = {}) => ({ id: 1, ...P.normalizePolicyRow(null), updated_at: EARLIER, ...over });
@@ -1035,15 +1036,19 @@ describe('Codex r1 on #3854', () => {
   test('P2: a failed reply check on an AUTOMATIC attempt routes the follow-up to the owner: the marker lands, the auto path refuses, the nightly re-decides OWNER_OUTREACH, the owner\'s click re-runs the check; a requeue clears the marker', async () => {
     const s = await conversation();
     gmail.getThread.mockRejectedValue(new Error('ECONNRESET'));
-    const ATTEMPT = new Date(LATER.getTime() + 1000); // after the decision (a re-decision follows a later placement change)
-    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: ATTEMPT })).toMatchObject({ ok: false, code: 'reply_check_failed', error: expect.stringMatching(/routed to the owner/) });
-    expect(placement(s.db)).toMatchObject({ follow_up_status: 'drafted', follow_up_skipped_reason: 'reply_check_failed' });
+    // the nightly's OWN dispatch: the attempt carries the run's clock, EQUAL to the decision's — the failure stamp
+    // cannot post-date decided_at, so the selection must re-select the domain on the marker (Codex r8 P1)
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'reply_check_failed', error: expect.stringMatching(/routed to the owner/) });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'drafted', follow_up_skipped_reason: 'reply_check_failed', updated_at: LATER });
+    expect(followUpRow(s.db)).toMatchObject({ level: 'AUTO_OUTREACH', decided_at: LATER });
     expect(M.followUpReview(placement(s.db))).toMatchObject({ clean: false, reason: expect.stringMatching(/owner sends it/) });
+    expect((await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).map((x) => x.why)).toEqual(['stale']);
     // the marker alone stops the next automatic attempt, before the nightly re-decides
     gmail.getThread.mockResolvedValue({ id: 'thr1', messages: [ours('msg1')] });
     expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/owner/) });
-    await nightly(s.db, { now: new Date(LATER.getTime() + DAY) });
+    expect(await nightly(s.db, { now: new Date(LATER.getTime() + DAY) })).toMatchObject({ selected: 1 });
     expect(followUpRow(s.db)).toMatchObject({ level: 'OWNER_OUTREACH' }); // the card's review line carries the why (followUpReview)
+    expect(await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).toEqual([]); // converged: the marker on an OWNER row is settled
     const r = await nightly(s.db, { now: new Date(LATER.getTime() + 2 * DAY), autoSend: true, send: jest.fn(async () => ({ ok: true })) });
     expect(r.autoSend).toEqual({ attempted: 0, sent: 0, skipped: [] });
     // the owner's click: the check runs again, fail-closed on a failure, sends on silence

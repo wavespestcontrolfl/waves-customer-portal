@@ -1671,10 +1671,13 @@ function initScheduledJobs() {
   // conversation_closed_at, releasing its inbox for a later placement. Reads
   // the thread first — a reply keeps the conversation open (the owner's).
   // Under the outreach gate: only the outreach lane needs the inbox back.
+  // runExclusive: the sweep's batch (oldest-checked first) and its Gmail-read
+  // bound are per RUN — two pods or a deploy overlap would each read the same
+  // threads (the per-domain lock serializes a row, it does not dedupe the read).
   cron.schedule('50 3 * * *', async () => {
     if (!isEnabled('linkProspectOutreach')) return;
     try {
-      await require('./seo/link-prospect-outreach').closeSilentConversations();
+      await runExclusive('link-conversation-closure', () => require('./seo/link-prospect-outreach').closeSilentConversations());
     } catch (err) { logger.error(`Link conversation closure failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 

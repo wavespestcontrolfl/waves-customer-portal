@@ -14,7 +14,7 @@ const { WAVES_LOCATIONS } = require('../../config/locations');
 const { SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
 const { isOutreachLocked } = require('./link-registry');
 const { requiredInstances } = require('./link-authority-policy');
-const { followUpPending } = require('./link-outreach-mandate');
+const { followUpPending, REPLY_CHECK_FAILED } = require('./link-outreach-mandate');
 
 const AUTH = 'seo_link_placement_authorities';
 // The aggregate states the bridge OWNS. `new`/`investigating`/`watching`/
@@ -109,7 +109,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const forced = new Set(domainIds || []);
   // candidates: bridge-owned state, or owning an open row (satisfied or not), or carrying an active waiver, or explicitly requested
   const owned = await db('seo_link_domains').whereIn('agent_state', [...BRIDGE_STATES]).whereNotNull('best_path_id').orderBy('updated_at', 'asc').select('id');
-  const open = await db(AUTH).whereNull('ended_at').select('prospect_id', 'path_id', 'path_revision', 'dimension', 'instance_kind', 'decided_at', 'satisfied_at', 'satisfied_reason', 'accepted_terms_hash');
+  const open = await db(AUTH).whereNull('ended_at').select('prospect_id', 'path_id', 'path_revision', 'dimension', 'instance_kind', 'level', 'decided_at', 'satisfied_at', 'satisfied_reason', 'accepted_terms_hash');
   const owners = open.length ? await db('seo_link_prospects').whereIn('id', [...new Set(open.map((r) => r.prospect_id))]).whereNotNull('domain_id').select('id', 'domain_id') : [];
   const waivers = await db('seo_link_floor_waivers').whereNull('invalidated_at').select('domain_id', 'path_id', 'approved_at');
   const candidateIds = [...new Set([...owned.map((d) => d.id), ...owners.map((p) => p.domain_id), ...waivers.map((w) => w.domain_id), ...forced])]
@@ -121,7 +121,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id).filter(Boolean))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'fee_scope', 'revision_payment', 'revision', 'baseline', 'execution_after_send'); // execution_after_send: the follow-up's lifecycle set is path-dependent (followUpPending)
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
-  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'payment_group_id', 'updated_at', 'outreach_status', 'outreach_sent_at', 'follow_up_status');
+  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'payment_group_id', 'updated_at', 'outreach_status', 'outreach_sent_at', 'follow_up_status', 'follow_up_skipped_reason');
   const paid = await paidPlacementIds(db, placements.map((p) => p.id));
   const byDomain = new Map();
   for (const p of placements) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
@@ -162,8 +162,13 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     const frozen = (p) => pinned(p) && p.path_id !== d.best_path_id;
     const onBest = mine.filter((p) => p.path_id === d.best_path_id || pinned(p));
     const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
+    // an AUTOMATIC follow-up whose reply check failed carries the sender's marker (follow_up_skipped_reason =
+    // reply_check_failed, the draft still drafted): its authority is the owner's now (followUpReview reads the marker →
+    // OWNER_OUTREACH, §6.4). Stale by the MARKER, not by the clock — the nightly's own auto dispatch stamps the failure
+    // with the run's `now`, EQUAL to decided_at, so the timestamp test alone would never re-select the row
+    const ownerByMarker = (r, p) => r.dimension === 'communication' && r.instance_kind === 'followup' && String(r.level || '').startsWith('AUTO_') && p.follow_up_skipped_reason === REPLY_CHECK_FAILED;
     const staleRow = (r, p) => (best && rotationOutcome(r, best) !== null)
-      || (!r.satisfied_at && (ts(r.decided_at) < cutoff || ts(r.decided_at) < ts(p.updated_at)));
+      || (!r.satisfied_at && (ownerByMarker(r, p) || ts(r.decided_at) < cutoff || ts(r.decided_at) < ts(p.updated_at)));
     // the OPEN instance set must cover what the path REQUIRES now (policy requiredInstances): an in-place
     // re-investigation that adds a fee or legal terms needs a new row even when every existing row is satisfied;
     // an UNSATISFIED instance the path no longer requires must be ended (the bridge keeps a satisfied surplus row —

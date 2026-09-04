@@ -500,7 +500,8 @@ const withTimeout = (p, ms) => Promise.race([p, new Promise((_, reject) => setTi
  * a lookup error, an empty thread, a timeout or a missing thread ref refuses (reply_check_failed) and — on an
  * AUTOMATIC attempt — parks the follow-up for the owner (plan §6.4: never sent by default after a failed lookup):
  * the failure is stamped on the placement (follow_up_skipped_reason, the draft stays drafted), followUpReview then
- * reads the follow-up as the owner's, the nightly re-decides it OWNER_OUTREACH and the auto dispatch leaves it; the
+ * reads the follow-up as the owner's, the nightly re-selects the domain ON THE MARKER (the failure is stamped with the
+ * run's own clock, equal to decided_at — no timestamp would), re-decides it OWNER_OUTREACH and the auto dispatch leaves it; the
  * owner's click re-runs the check, fail-closed the same way. Silence returns the pitch's Message-ID so the follow-up
  * answers it.
  */
