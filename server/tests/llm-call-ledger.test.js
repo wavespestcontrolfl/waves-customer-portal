@@ -10,12 +10,15 @@
 const mockInsert = jest.fn();
 // The session recorder writes insert(...).onConflict(target).merge(updates).returning('id').
 const mockMerge = jest.fn();
+// failCall writes where({ id }).update(patch) against a call row the adapter filed as ok.
+const mockUpdate = jest.fn(() => Promise.resolve(1));
 const mockDb = jest.fn((table) => ({
   insert: (row) => {
     const p = mockInsert(table, row);
     p.onConflict = (target) => ({ merge: (updates) => { mockMerge(table, target, updates); return { returning: p.returning }; } });
     return p;
   },
+  where: (cond) => ({ update: (patch) => mockUpdate(table, cond, patch) }),
 }));
 jest.mock('../models/db', () => {
   const db = (...args) => mockDb(...args);
@@ -446,6 +449,37 @@ describe('llm call ledger', () => {
       await call.dispatchWithFallback(policy, { text: 't' }, { validate: () => 'missing_summary' });
       await flush();
       expect(ledgerRows().find((r) => r.row_kind === 'chain')).toMatchObject({ ok: false, error_class: 'incomplete' });
+    });
+
+    it('a chain rejection (validate hook / empty_text) flips the adapter\'s ok call row to that code, so both ledgers agree the leg failed', async () => {
+      mockUpdate.mockClear();
+      global.fetch = fetchJson(OPENAI_BODY);
+      mockAnthropicCreate.mockResolvedValue(ANTHROPIC_MESSAGE);
+      const { call } = load();
+      const policy = { name: 'ledgerReject', primary: { provider: 'openai', model: 'o' }, fallback: { provider: 'anthropic', model: 'a' } };
+      await call.dispatchWithFallback(policy, { text: 't' }, { validate: () => 'trade_name' });
+      await flush();
+      // the adapters' own rows still say ok (the answer arrived whole) …
+      expect(callRows().map((r) => r.ok)).toEqual([true, true]);
+      // … and the chain's rejection flipped each of them by id.
+      expect(mockUpdate.mock.calls.map(([t, cond, patch]) => [t, cond.id > 0, patch])).toEqual([
+        ['llm_dispatch_log', true, { ok: false, error_code: 'trade_name', error_class: 'instruction' }],
+        ['llm_dispatch_log', true, { ok: false, error_code: 'trade_name', error_class: 'instruction' }],
+      ]);
+      mockUpdate.mockClear();
+      // empty_text in text mode is the dispatcher's own rejection — same flip.
+      global.fetch = fetchJson({ ...OPENAI_BODY, output_text: '   ' });
+      await call.dispatchWithFallback({ name: 'ledgerEmpty', primary: { provider: 'openai', model: 'o' }, fallback: { provider: 'anthropic', model: 'a' } }, { text: 't', jsonMode: false });
+      await flush();
+      expect(mockUpdate.mock.calls[0][2]).toEqual({ ok: false, error_code: 'empty_text', error_class: 'incomplete' });
+      // off-gate: the adapter never recorded a row, so there is nothing to flip.
+      mockUpdate.mockClear();
+      delete process.env.GATE_LLM_CALL_LEDGER;
+      const { call: dark } = load();
+      global.fetch = fetchJson(OPENAI_BODY);
+      await dark.dispatchWithFallback(policy, { text: 't' }, { validate: () => 'trade_name' });
+      await flush();
+      expect(mockUpdate).not.toHaveBeenCalled();
     });
 
     it('classifies a failed chain by its first failure reason', async () => {

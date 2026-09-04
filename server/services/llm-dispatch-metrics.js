@@ -385,6 +385,30 @@ async function recordCall({
 }
 
 /**
+ * Flip a recorded call row to a failure after the fact: the adapter filed
+ * the answer as ok (it arrived whole), then the chain rejected it — the
+ * validate hook's own code or `empty_text` — so the row carries what the
+ * caller saw, and the success rate / quality-failure selection are not
+ * counting a rejected answer. Same fire-and-forget contract as recordCall:
+ * resolves the id promise the adapter kept, never throws, no-op off-gate.
+ */
+function failCall(callIdPromise, errorCode, { validator = false } = {}) {
+  try {
+    if (!ledgerEnabled()) return;
+    const code = clip(errorCode, 80) || 'error';
+    const errorClass = classifyFailure(code, { validator });
+    void Promise.resolve(callIdPromise).then((callId) => {
+      if (callId === null || callId === undefined) return null;
+      return require('../models/db')('llm_dispatch_log')
+        .where({ id: callId })
+        .update({ ok: false, error_code: code, error_class: errorClass });
+    }).catch((err) => logger.debug(`[llm-dispatch-metrics] failCall skipped: ${err.message}`));
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] failCall skipped: ${err.message}`);
+  }
+}
+
+/**
  * Run one raw provider call under the ledger. `fn` resolves the provider's
  * own value — an SDK Message or a parsed JSON body — which is returned
  * UNCHANGED; a throw is recorded as a failed call and rethrown unchanged, so
@@ -986,6 +1010,7 @@ module.exports = {
   recordDispatch,
   recordHeartbeat,
   recordCall,
+  failCall,
   ledgerCall,
   recordSessionUsage,
   recordTrace,

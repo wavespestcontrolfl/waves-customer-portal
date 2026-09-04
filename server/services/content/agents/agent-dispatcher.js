@@ -222,6 +222,11 @@ class AgentDispatcher {
     // throws) so a preview / CLI process cannot exit before the row lands.
     const recordSession = (failure = null) => recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0, failure });
 
+    // The agent's own end — the recorder's usage GET after it (up to its
+    // 15 s timeout) is observability time, not agent time (Codex r12/r13);
+    // every exit stops this clock before it awaits the recorder.
+    let agentEndedAt;
+
     // Post the initial input to the session. Schema mirrors the
     // live Managed Agents contract used by lead-response-agent.js:
     // events POST is wrapped in { events: [...] } and the event
@@ -237,15 +242,13 @@ class AgentDispatcher {
       // Session state (lint options, attempts) was registered above — a
       // transient initial-message failure must not leak it into the
       // process-global maps.
+      agentEndedAt = Date.now();
       await recordSession(err.code || 'initial_message_failed');
       clearDraft(sessionId);
-      return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId, agent_id: route.agent_id };
+      return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId, agent_id: route.agent_id, duration_ms: agentEndedAt - t0 };
     }
 
     // Stream events; execute tool calls; capture emit_draft / emit_metadata_only.
-    // The agent's own end — the recorder's usage GET after it (up to its
-    // 15 s timeout) is observability time, not agent time (Codex r12).
-    let agentEndedAt;
     try {
       await this._streamAndExecute(sessionId, sessionTimeoutMs);
       agentEndedAt = Date.now();

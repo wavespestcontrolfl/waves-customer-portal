@@ -190,6 +190,10 @@ function providerErrorReason(provider, err) {
 // dispatcher's deadline math uses Date.now and tests pin it.
 const nowMs = () => performance.now();
 const elapsedMs = (t0) => Math.round(performance.now() - t0);
+// The ledger row id of an adapter result the chain may still reject (the
+// validate hook, empty_text): keyed by the result object so nothing rides on
+// the value callers receive.
+const ledgerIdOf = new WeakMap();
 function recordLedgerCall(base, outcome) {
   try {
     const callId = metrics.recordCall({
@@ -206,8 +210,19 @@ function recordLedgerCall(base, outcome) {
       errorCode: outcome.errorCode,
     });
     metrics.recordTrace(callId, { system: base.system, prompt: base.text, response: outcome.response, laneId: base.laneId });
+    return callId;
   } catch (err) {
     logger.debug(`[llm] call ledger skipped: ${err.message}`);
+    return null;
+  }
+}
+// An answered call the chain then rejects is a failed leg in the ledger too
+// (Codex r13 on #3846): the adapter's ok row flips to the rejection code.
+function rejectLedgerCall(result, reason, validator) {
+  try {
+    metrics.failCall(ledgerIdOf.get(result), reason, { validator });
+  } catch (err) {
+    logger.debug(`[llm] call ledger rejection skipped: ${err.message}`);
   }
 }
 function usageOf(provider, data) {
@@ -302,8 +317,9 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json', response: out });
       return { ok: false, reason: 'empty_json' };
     }
-    recordLedgerCall(base, { ...served, ok: true, response: out });
-    return { ok: true, text: out, json, model, usage: served.usage };
+    const result = { ok: true, text: out, json, model, usage: served.usage };
+    ledgerIdOf.set(result, recordLedgerCall(base, { ...served, ok: true, response: out }));
+    return result;
   } catch (err) {
     // fetch / body-read failures carry no HTTP status; only the adapter's own
     // timeout is distinguished (a stray number in a parse error is not one).
@@ -372,8 +388,9 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json', response: out });
       return { ok: false, reason: 'empty_json' };
     }
-    recordLedgerCall(base, { ...served, ok: true, response: out });
-    return { ok: true, text: out, json, model };
+    const result = { ok: true, text: out, json, model };
+    ledgerIdOf.set(result, recordLedgerCall(base, { ...served, ok: true, response: out }));
+    return result;
   } catch (err) {
     const reason = isTimeoutError(err) ? 'gemini_timeout' : 'error';
     logger.error(`[llm] callGemini failed (${reason}): ${err.message}`);
@@ -441,8 +458,9 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json' });
       return { ok: false, reason: 'empty_json' };
     }
-    recordLedgerCall(base, { ...served, ok: true });
-    return { ok: true, text: out, json, model, response: resp };
+    const result = { ok: true, text: out, json, model, response: resp };
+    ledgerIdOf.set(result, recordLedgerCall(base, { ...served, ok: true }));
+    return result;
   } catch (err) {
     const reason = providerErrorReason('anthropic', err);
     const log = reason === 'anthropic_429' || reason === 'anthropic_529'
@@ -561,6 +579,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
         reason: String(rejection),
         ...(fromValidator ? { validator: true } : {}),
       });
+      rejectLedgerCall(result, String(rejection), fromValidator);
       continue;
     }
 
