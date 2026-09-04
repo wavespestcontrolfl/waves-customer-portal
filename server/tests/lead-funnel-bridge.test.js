@@ -348,6 +348,9 @@ describe('stampLeadFunnelRow — the one row a lead row\'s own intake would have
   }
   const stored = {
     id: 'lead-1', lead_source_id: 'ls-1', customer_id: null, service_interest: 'Lawn Care', created_at: '2026-08-30T15:00:00Z',
+    // The inquiry began the evening before (ET) the row was created — the
+    // original touch's date is the first contact, not the row's creation.
+    first_contact_at: '2026-08-30T02:30:00Z',
     gclid: 'g-1', wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fbp-1',
   };
 
@@ -369,8 +372,9 @@ describe('stampLeadFunnelRow — the one row a lead row\'s own intake would have
       fbp: 'fbp-1',
       utm_campaign: null,
       utm_term: null,
-      lead_date: etDateString(new Date('2026-08-30T15:00:00Z')),
+      lead_date: etDateString(new Date('2026-08-30T02:30:00Z')),
     }));
+    expect(database._captured.insert.lead_date).toBe('2026-08-29');
     // The ROW's service wins over the caller's fallback.
     expect(database._captured.insert.service_line).toBe(inferServiceLine('Lawn Care'));
   });

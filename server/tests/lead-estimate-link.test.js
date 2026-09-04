@@ -403,6 +403,10 @@ describe('lead-estimate link service', () => {
       { id: 'lead-origM', patch: expect.objectContaining({ estimate_id: 'estimate-2m' }), conditional: true },
       { id: 'lead-origM', patch: expect.objectContaining({ estimate_id: null }), conditional: true },
     ]);
+    // ...and only while the row still carries THIS call's stamp (its own
+    // updated_at), so a link another writer made since is never erased.
+    expect(database._claims[1]).toEqual({ id: 'lead-origM', identity: { estimate_id: 'estimate-2m', updated_at: database._updates[0].patch.updated_at } });
+    expect(database._updates[0].patch.updated_at).toBeInstanceOf(Date);
   });
 
   test('a live duplicate whose original is soft-deleted resolves to the named row: no conversion of the deleted original, no funnel on it', async () => {

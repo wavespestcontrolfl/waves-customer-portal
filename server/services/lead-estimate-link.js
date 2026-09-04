@@ -632,6 +632,7 @@ async function markLinkedLeadEstimateAccepted({
   // keeps its unconditional stamp and conversion as before.
   const convert = async (lead, { claim = null, funnelRow = false } = {}) => {
     let stamped = 0;
+    let stampedAt = null;
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
       // ...and, for a claimed row, the identity it was read with (customer
@@ -640,7 +641,8 @@ async function markLinkedLeadEstimateAccepted({
       // opportunity, and the stamp must lose rather than let markConverted
       // overwrite the row's customer with this one (codex #3834 r17 P1).
       if (claim) stamp.whereNull('estimate_id').whereIn('status', claim).where(identityOf(lead));
-      stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
+      stampedAt = new Date();
+      stamped = await stamp.update({ estimate_id: estimateId, updated_at: stampedAt });
       if (claim && !stamped) {
         const current = await database('leads').where({ id: lead.id }).first();
         // Refresh the caller's row from the re-read — the WHOLE row — so the
@@ -667,8 +669,11 @@ async function markLinkedLeadEstimateAccepted({
     if (claim && !converted) {
       // The stamp landed but the status claim lost (a closure in between):
       // a closed original must not stay linked to the accepted repeat
-      // estimate, so the stamp THIS call made is reverted (pre-push P1).
-      if (stamped) await database('leads').where({ id: lead.id }).where({ estimate_id: estimateId }).update({ estimate_id: null, updated_at: new Date() });
+      // estimate, so the stamp THIS call made is reverted (pre-push P1) —
+      // proven by its own write: the row must still carry this stamp's
+      // updated_at, so a link another writer made since is never erased
+      // (pre-push P1 on r20).
+      if (stamped) await database('leads').where({ id: lead.id }).where({ estimate_id: estimateId, updated_at: stampedAt }).update({ estimate_id: null, updated_at: new Date() });
       const current = await database('leads').where({ id: lead.id }).first();
       if (current) Object.assign(lead, current);
       return false;

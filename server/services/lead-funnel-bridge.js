@@ -255,7 +255,9 @@ async function stampLeadFunnelRow(database, lead, { customerId = null, serviceIn
       service_line: inferServiceLine(interest),
       specific_service: inferSpecificService(interest),
       service_bucket: inferServiceBucket(interest),
-      lead_date: etDateString(new Date(lead.created_at || Date.now())),
+      // The ORIGINAL touch's date is the first contact (an imported or
+      // backfilled lead's created_at is the import, not the inquiry).
+      lead_date: etDateString(new Date(lead.first_contact_at || lead.created_at || Date.now())),
       lead_source: touch.channel.leadSource,
       lead_source_detail: touch.detail,
       ...Object.fromEntries(CLICK_ID_COLUMNS.map((col) => [col, lead[col] || null])),
