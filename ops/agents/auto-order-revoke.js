@@ -3,13 +3,19 @@
 // (server/services/procurement/order-dispatch.js): the vendor_orders ledger
 // row (status `placed` ONLY — a `placing` row is still the dispatcher's, and
 // reopening its request would race the in-flight vendor call into a double
-// purchase) goes to needs_review and its restock request back to open, with
-// a critical audit row, so the office re-orders by hand. Nothing is sent to
-// the vendor — cancelling with Sticker Mule / SiteOne stays manual (Sticker
-// Mule has no cancel endpoint). Because restock_request_id is UNIQUE on the
-// ledger, the revoked request can never be auto-dispatched again; a fresh
-// restock request is the way back in. Idempotent: a row already
-// needs_review is reported, not rewritten.
+// purchase) goes to needs_review and its restock request is CANCELLED
+// (reason revoked_vendor_order), with a critical audit row. Nothing is sent
+// to the vendor — cancelling with Sticker Mule / SiteOne stays manual
+// (Sticker Mule has no cancel endpoint). Because restock_request_id is
+// UNIQUE on the ledger, the revoked request could never be auto-dispatched
+// again — and an OPEN request the sweep sees with an auto-orderable vendor
+// gets no manual bell either (the sweep leaves it to the dispatcher), so
+// reopening it would leave it silently unworked (pre-push P1). Cancelling
+// it instead lets the next 6:10 sweep raise a fresh request while stock is
+// still low, which the dispatcher can claim (the revoked order is excluded
+// from the prior-order guard) — or the office orders by hand from the
+// Restock tab. Idempotent: a row already needs_review is reported, not
+// rewritten.
 //
 //   railway run --service Postgres node ops/agents/auto-order-revoke.js --order=<vendor_orders.id>            # dry run
 //   railway run --service Postgres node ops/agents/auto-order-revoke.js --order=<vendor_orders.id> --cancelled-with-vendor --execute   # after the vendor has cancelled the order
@@ -85,7 +91,7 @@ function revokeBlocker(row) {
 
 // The revoke itself: ledger → needs_review with the STRUCTURED
 // evidence.revokedAt marker the cancel guard and the dispatcher's prior-order
-// belt read (order-dispatch.js), request ordered → open, critical audit row.
+// belt read (order-dispatch.js), request open/ordered → cancelled, critical audit row.
 // Eligibility AND idempotency are re-checked on the LOCKED row: two --execute
 // runs that both passed the unlocked check must not double-revoke (Codex r2
 // P2).
@@ -117,7 +123,16 @@ async function revoke(row) {
       evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ revokedAt })]),
       updated_at: new Date(),
     });
-    if (req.status === 'ordered') await trx('product_restock_requests').where({ id: row.restock_request_id }).update({ status: 'open', updated_at: new Date() });
+    // Cancelled, not reopened (pre-push P1): the next sweep raises a fresh
+    // request the dispatcher can claim; the office can also order by hand.
+    const reqRow = await trx('product_restock_requests').where({ id: row.restock_request_id }).first('metadata');
+    const reqMeta = parseEvidence(reqRow?.metadata);
+    await trx('product_restock_requests').where({ id: row.restock_request_id }).update({
+      status: 'cancelled',
+      closed_at: new Date(),
+      metadata: JSON.stringify({ ...reqMeta, autoOrderCancelled: 'revoked_vendor_order', autoOrderCancelledAt: revokedAt, revokedVendorOrderId: row.id }),
+      updated_at: new Date(),
+    });
     await auditVendorOrder({ vendor_order_id: row.id, restock_request_id: row.restock_request_id, vendor_id: row.vendor_id, adapter: row.adapter, outcome: 'revoked', amount_cents: row.amount_cents, external_order_number: row.external_order_number, reason: `operator revoke (was ${locked.status})`, actor_type: 'technician', trx });
   });
 }
@@ -139,12 +154,12 @@ async function revoke(row) {
     if (blocker instanceof Error) { console.error(blocker.message); process.exit(1); }
     if (blocker) { console.log(blocker); process.exit(0); }
 
-    console.log(`Would set ledger → needs_review${row.request_status === 'ordered' ? ', request → open' : ''}, stamp evidence.revokedAt, write audit row procurement.vendor_order.revoked.`);
-    console.log(`FIRST cancel order #${row.external_order_number || '?'} with ${row.vendor || 'the vendor'} by hand. Recording the revoke re-opens the request for a replacement order, so it must follow the vendor cancellation, never precede it.`);
+    console.log(`Would set ledger → needs_review, request ${row.request_status} → cancelled (revoked_vendor_order), stamp evidence.revokedAt, write audit row procurement.vendor_order.revoked.`);
+    console.log(`FIRST cancel order #${row.external_order_number || '?'} with ${row.vendor || 'the vendor'} by hand. Recording the revoke clears the way for a replacement order (the next sweep raises a fresh request), so it must follow the vendor cancellation, never precede it.`);
     if (!EXECUTE) { console.log('Dry run. Once the vendor has cancelled it, re-run with --execute --cancelled-with-vendor to apply.'); process.exit(0); }
     if (!CANCELLED_WITH_VENDOR) { console.error('Refusing: --execute needs --cancelled-with-vendor, your confirmation that the vendor order is already cancelled.'); process.exit(2); }
     await revoke(row);
-    console.log('Revoked: ledger needs_review, request re-opened for a replacement.');
+    console.log('Revoked: ledger needs_review, request cancelled — the next low-stock sweep raises a fresh request (or order by hand from the Restock tab).');
     process.exit(0);
   } catch (err) {
     console.error(err.message);
