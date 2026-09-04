@@ -329,8 +329,12 @@ async function orderedQuantityFor(conn, requestId) {
 async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = {}) {
   const monthStart = startOfETMonth(now);
   const nextMonthStart = startOfETMonth(addETDays(monthStart, 32));
+  // A revoked order (evidence.revokedAt — cancelled with the vendor) no longer
+  // consumes headroom, matching the live-order guards: its replacement must
+  // be able to dispatch (pre-push P1).
   let q = conn('vendor_orders')
     .whereNot('status', 'failed')
+    .whereRaw("NULLIF(evidence->>'revokedAt', '') IS NULL")
     .where('created_at', '>=', monthStart)
     .where('created_at', '<', nextMonthStart)
     .where(function dispatched() { this.where('status', 'placing').orWhereNotNull('placed_at'); });
