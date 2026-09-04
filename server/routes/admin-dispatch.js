@@ -13632,6 +13632,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`[dispatch] Job form save failed (non-blocking): ${e.message}`); }
     }
 
+    // Yard-sign kit consumption (sign card + stake + sticker per completed
+    // visit). Runs on the resume path too — the partial unique index on
+    // product_inventory_movements makes it at-most-once per (product, visit).
+    // Skipped for an incomplete visit, for inspection_only /
+    // customer_declined closeouts and for an internal-only completion
+    // profile such as a Waves Assessment (no sign is left). Never throws. Runs
+    // BEFORE job costing so the initial cost calc sees the kit movements
+    // (pre-push codex P1).
+    try {
+      const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+      await consumeCompletionSupplies(db, {
+        scheduledServiceId: svc.id,
+        serviceRecordId: record?.id || null,
+        customerId: svc.customer_id || null,
+        technicianId: svc.technician_id || null,
+        isIncompleteVisit,
+        visitPerformed,
+        isInternalOnlyCompletion,
+        serviceLine: reportServiceLine,
+        serviceType: svc.service_type || null,
+      });
+    } catch (e) { logger.error(`[dispatch] completion supplies consumption failed: ${e.message}`); }
+
     // Job costing (non-blocking, fire-and-forget). Runs on FIRST RUN and on
     // RESUME (Codex P2, PR #2897 fix round 13): the required-mint throw can
     // 503 out of the mint try AFTER the record committed but BEFORE this
@@ -13666,6 +13689,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
       );
     } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
+
 
     // Follow-up suggestion for the RESPONSE (success-overlay CTA). On the
     // normal path this is the pre-transaction verdict whose alert already
@@ -14091,6 +14115,40 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
+    // Yard-sign kit consumption — the recap is the second production
+    // completion path for pest visits (GH codex r2 P1); same hook as
+    // /:serviceId/complete, same at-most-once index, never throws. A recap
+    // re-closing a NOT-performed visit (submitRecap's priorNonPerformed —
+    // the same verdict that blocks referral credit and the card charge)
+    // consumes nothing, matching the original closeout (GH codex r3 P2). A
+    // recap EDIT of a visit that was already completed (priorCompleted) is
+    // not a new visit — no kit was left, nothing is consumed (GH codex r4
+    // P2); the at-most-once index still covers a retry of the completing
+    // recap itself.
+    if (result.priorCompleted !== true) {
+      try {
+        const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+        const svcRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('customer_id', 'technician_id', 'service_type');
+        const consumption = await consumeCompletionSupplies(db, {
+          scheduledServiceId: req.params.serviceId,
+          serviceRecordId: result.recordId || null,
+          customerId: svcRow?.customer_id || null,
+          technicianId: svcRow?.technician_id || null,
+          isIncompleteVisit: false,
+          visitPerformed: result.priorNonPerformed !== true,
+          serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
+          serviceType: svcRow?.service_type || null,
+        });
+        // The recap path has no job-costing kickoff of its own; a kit
+        // movement carries cost_used, so recalc (idempotent UPSERT,
+        // fire-and-forget) whenever something was actually consumed (GH
+        // codex r4 P2).
+        if (consumption?.consumed?.length) {
+          const JobCosting = require('../services/job-costing');
+          void JobCosting.calculateJobCost(req.params.serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
+        }
+      } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }
+    }
     res.json(result);
   } catch (err) { next(err); }
 });

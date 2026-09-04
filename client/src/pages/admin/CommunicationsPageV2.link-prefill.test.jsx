@@ -162,7 +162,7 @@ describe("buildCustomerLinkPrefill", () => {
 });
 
 describe("CUSTOMER_COMPOSER_LINKS", () => {
-  it("carries all eight customer rows in the customer category", () => {
+  it("carries all thirteen customer rows in the customer category", () => {
     expect(CUSTOMER_COMPOSER_LINKS.map((l) => l.key)).toEqual([
       "reschedule",
       "reservice",
@@ -171,7 +171,12 @@ describe("CUSTOMER_COMPOSER_LINKS", () => {
       "estimate",
       "referral",
       "autopay_setup",
+      "appointment",
+      "prep_guide",
+      "service_report",
+      "statement",
       "portal_login",
+      "cancel_plan",
     ]);
     for (const link of CUSTOMER_COMPOSER_LINKS) {
       expect(link.category).toBe("customer");
@@ -181,6 +186,13 @@ describe("CUSTOMER_COMPOSER_LINKS", () => {
     const login = CUSTOMER_COMPOSER_LINKS.find((l) => l.key === "portal_login");
     expect(login.dynamic).toBeUndefined();
     expect(login.url).toBe("portal.wavespestcontrol.com/login");
+    // Cancellation lands IN the portal (owner ruling 2026-09-03): a static
+    // login link whose post-login destination is the My Plan tab, where the
+    // cancel flow lives — no public /cancel route, no server mint.
+    const cancel = CUSTOMER_COMPOSER_LINKS.find((l) => l.key === "cancel_plan");
+    expect(cancel.dynamic).toBeUndefined();
+    expect(cancel.url).toBe("portal.wavespestcontrol.com/login?next=%2F%3Ftab%3Dplan");
+    expect(new URLSearchParams(cancel.url.split("?")[1]).get("next")).toBe("/?tab=plan");
   });
 
   it("only the review request row asks for a channel (Text / Email / Both)", () => {

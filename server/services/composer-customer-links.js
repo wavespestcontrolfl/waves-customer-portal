@@ -1,7 +1,9 @@
 /**
  * Per-customer link builders for the SMS composer's Insert Link sheet —
  * the link kinds beyond the existing reschedule/re-service pair:
- * review request, pay balance, latest estimate, referral, Auto Pay setup.
+ * review request, pay balance, latest estimate, referral, Auto Pay setup,
+ * and (step 2) appointment page, prep guide, latest service report, payer
+ * statement (card request + contract signing: PR 2b).
  *
  * Contract mirrors reschedule-link/reservice-link: each builder returns
  * { url, line, ...context } with url null + a `reason` sentence when there
@@ -30,6 +32,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { etCalendarDayOf } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 
 // Estimate statuses that count as "open" for a composer insert: delivered or
@@ -469,16 +472,31 @@ const TOKEN_RUN_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,64}(?![A-Za-z0-9_-])/g;
 function decodedRuns(body) {
   return String(body || '').split(/\s+/).filter(Boolean).map(decodeLinkText);
 }
-function secureLinkRuns(runs) {
+function linkRuns(runs, fragmentRe) {
   return runs
-    .filter((run) => /\/secure\//i.test(run))
+    .filter((run) => fragmentRe.test(run))
     .map((run) => run.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, ''))
     // A bare label glued to the link ("Link:", "now,") is shed — but only a
     // slash-free prefix, so an outer URL's own path/query is never cut away.
     .map((run) => run.replace(/^[^/]*?(?=https?:\/\/)/i, ''))
     .map((run) => (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : run.replace(/^[^/:,;]*[:,;]/, '')));
 }
-function canonicalSecureToken(run, host) {
+function secureLinkRuns(runs) {
+  return linkRuns(runs, /\/secure\//i);
+}
+// `hosts`: one owned host or the whole owned set (ownedPortalHosts) — this
+// Express app serves the SPA and every public bearer route on EVERY host it
+// answers (server/index.js has no Host restriction), so a long-form
+// /prep, /pay/statement, /appointment or /report URL on the branded short
+// host is the same working page as on the portal origin and is judged the
+// same (GH Codex #3844 r8 P1 — the long-form twin of the r6 short-link fix).
+// `anyScheme`: the schedule/draft FENCE judges presence, not sendability —
+// the public Express mounts are protocol-agnostic and a client or edge that
+// upgrades HTTP opens the same bearer, so an explicit http:// owned link is
+// a protected link that must park the message, not a link that is not there
+// (GH Codex #3844 r11 P1). The immediate seams keep the https-only read and
+// refuse the plaintext form outright.
+function canonicalPortalToken(run, hosts, pathRe, { anyScheme = false } = {}) {
   let url;
   try {
     url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`);
@@ -487,10 +505,20 @@ function canonicalSecureToken(run, host) {
   }
   // HTTPS or the schemeless canonical form only — an explicit http:// would
   // expose the 30-day bearer before any redirect reaches HTTPS.
-  if (url.protocol !== 'https:') return null;
-  if (url.host.toLowerCase() !== host) return null;
-  const m = /^\/secure\/([A-Za-z0-9_-]{16,})$/i.exec(url.pathname);
+  if (url.protocol !== 'https:' && !(anyScheme && url.protocol === 'http:')) return null;
+  // A DNS-equivalent FQDN form (`portal.wavespestcontrol.com.`) keeps its
+  // terminal dot through WHATWG parsing and still resolves to us — the
+  // same working page, judged the same (GH Codex #3844 r10 P1).
+  if (![].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, ''))) return null;
+  // The public routes match with a trailing slash too (React Router and the
+  // Express /l and /secure mounts alike), so /prep/<token>/ is the same
+  // working page as /prep/<token> — judged the same, or it would slip the
+  // schedule/draft fence and every send-time check (GH Codex #3844 r7 P1).
+  const m = pathRe.exec(url.pathname.replace(/\/+$/, ''));
   return m ? m[1] : null;
+}
+function canonicalSecureToken(run, hosts) {
+  return canonicalPortalToken(run, hosts, /^\/secure\/([A-Za-z0-9_-]{16,})$/i);
 }
 
 /**
@@ -520,12 +548,11 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
   const runs = decodedRuns(body);
   const text = runs.join(' ');
   const refuse = (error) => ({ present: true, ok: false, error });
-  const host = new URL(publicPortalUrl()).host.toLowerCase();
-
+  const hosts = ownedPortalHosts();
   // 1. Every run carrying a /secure/ path must parse as a canonical link.
   const canonicalTokens = [];
   for (const run of secureLinkRuns(runs)) {
-    const token = canonicalSecureToken(run, host);
+    const token = canonicalSecureToken(run, hosts);
     if (!token) return refuse('A /secure link in this message is not on the Waves portal — remove it before sending.');
     if (!canonicalTokens.includes(token)) canonicalTokens.push(token);
   }
@@ -584,6 +611,665 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
   return { present: true, ok: true, tokens: live.map((l) => l.token) };
 }
 
+// Immediate-send-only bearer links beyond Auto Pay (pre-push Codex P1 +
+// GH Codex #3844 r1 P1): the composer's client-side refusal is transient
+// state — a loaded draft or a scheduled body has none — and ONLY the
+// immediate /sms path re-runs bearerLinkSendCheck at delivery (the
+// scheduler and draft approve/revise dispatch straight into
+// sendCustomerMessage). So every per-row bearer that seam judges is
+// immediate-only: a payer statement pay link and a prep page (bound to the
+// recipient at /sms alone). Presence-only — the callers (/schedule-sms, draft
+// approve/revise) refuse on any hit. Canonical portal host + path only,
+// like the Auto Pay seam: a look-alike host is not a Waves bearer and is
+// simply not this seam's business. Customer-kind /secure links are the
+// Auto Pay seam's (its own presence check runs first at every caller).
+// The fence reads presence under ANY_SCHEME — see canonicalPortalToken.
+const ANY_SCHEME = { anyScheme: true };
+const IMMEDIATE_ONLY_LINK_KINDS = [
+  {
+    // Every prep page — the page shows the customer's name and address and
+    // only /sms binds it to the recipient (pre-push Codex P0), expiry or not.
+    label: 'Prep guide',
+    fragment: /\/prep\//i,
+    token: (run, host) => canonicalPortalToken(run, host, /^\/prep\/([a-f0-9]{32})$/i, ANY_SCHEME),
+    applies: async () => true,
+  },
+  {
+    label: 'Statement pay',
+    fragment: /\/pay\/statement\//i,
+    token: (run, host) => canonicalPortalToken(run, host, /^\/pay\/statement\/([0-9a-f]{64})$/i, ANY_SCHEME),
+    applies: async () => true,
+  },
+];
+
+// {short}/l/<code> runs → their short_codes rows. The composer inserts the
+// branded short form of appointment and service-report links; the long
+// forms are judged alongside. Codes are stored and resolved lower-case
+// (public-shortlinks lowercases before its lookup), so a pasted upper- or
+// mixed-case code — still a working link — is looked up the same way, or
+// it would slip every fence and send-time check (GH Codex #3844 r5 P1).
+// /l/:code is served on EVERY owned origin — the branded short host and the
+// portal origin alike (server/index.js mounts /l with no host restriction) —
+// so a branded URL rewritten onto the portal host is the same working link
+// and is judged the same (GH Codex #3844 r6 P1) — and the long-form bearer
+// paths the same way in reverse (r8 P1). Any other host is not ours.
+function ownedPortalHosts() {
+  return [...new Set([require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host.toLowerCase()))];
+}
+async function shortCodeRows(runs, scheme = {}) {
+  const shortRuns = linkRuns(runs, /\/l\//i);
+  if (!shortRuns.length) return [];
+  const hosts = ownedPortalHosts();
+  const rows = [];
+  for (const run of shortRuns) {
+    const code = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, scheme);
+    if (!code) continue;
+    const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'target_url', 'expires_at');
+    const dest = row && shortRowDestination(row, hosts);
+    // The seam refuses a plaintext run outright; the fence only needs presence.
+    if (dest) rows.push({ code: row.code, expires_at: row.expires_at, plaintext: /^http:\/\//i.test(run), ...dest });
+  }
+  return rows;
+}
+// What /l/:code actually opens is its target_url (public-shortlinks 302s
+// there); `kind` is an analytics classifier, so a legacy or misclassified
+// code whose target is a protected page is judged by the target — the same
+// token path as the long form (pre-push Codex P0). Metadata that claims a
+// protected kind the target does not confirm fails closed: present to the
+// fence, unverifiable (refused) at the send. The stored target is our own
+// redirect, judged under ANY_SCHEME like the fence.
+function shortRowDestination(row, hosts) {
+  const target = String(row.target_url || '');
+  const appointment = canonicalPortalToken(target, hosts, APPOINTMENT_TOKEN_RE, ANY_SCHEME);
+  if (appointment) return { kind: 'appointment', token: appointment };
+  const report = canonicalPortalToken(target, hosts, REPORT_TOKEN_RE, ANY_SCHEME);
+  if (report) return { kind: 'service_report', token: report };
+  if (row.kind === 'appointment' || row.kind === 'service_report') return { kind: row.kind, token: null };
+  return null;
+}
+// /l/:code answers 410 past expires_at (public-shortlinks) — the same
+// predicate, so an expired short bearer never rides an immediate send on
+// the strength of an entity that still exists (pre-push Codex P1).
+function expiredShortRow(row) {
+  return Boolean(row.expires_at) && new Date(row.expires_at).getTime() < Date.now();
+}
+
+const APPOINTMENT_TOKEN_RE = /^\/appointment\/([A-Za-z0-9_-]{16,})$/i;
+const REPORT_TOKEN_RE = /^\/report\/([A-Za-z0-9_-]{16,})$/i;
+
+// Appointment page links (GH Codex #3844 r2 P1): every /appointment route
+// 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
+// delivery-time re-check — so they are immediate-only, and /sms re-reads the
+// gate. Service report links the same (pre-push Codex P0): only /sms binds
+// the page to the recipient. Long form or the branded short form.
+function appointmentLinkPresent(runs, hosts, shortRows, scheme = {}) {
+  return linkRuns(runs, /\/appointment\//i).some((run) => canonicalPortalToken(run, hosts, APPOINTMENT_TOKEN_RE, scheme))
+    || shortRows.some((row) => row.kind === 'appointment');
+}
+function reportLinkPresent(runs, hosts, shortRows, scheme = {}) {
+  return linkRuns(runs, /\/report\//i).some((run) => canonicalPortalToken(run, hosts, REPORT_TOKEN_RE, scheme))
+    || shortRows.some((row) => row.kind === 'service_report');
+}
+
+async function immediateOnlyLinkSendCheck(body) {
+  const runs = decodedRuns(body);
+  const hosts = ownedPortalHosts();
+  for (const kind of IMMEDIATE_ONLY_LINK_KINDS) {
+    for (const run of linkRuns(runs, kind.fragment)) {
+      const token = kind.token(run, hosts);
+      if (token && await kind.applies(token)) return { present: true, label: kind.label };
+    }
+  }
+  const shortRows = await shortCodeRows(runs, ANY_SCHEME);
+  if (appointmentLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Appointment page' };
+  if (reportLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Service report' };
+  return { present: false };
+}
+
+/**
+ * Immediate-send seam for the other per-row bearers the composer inserts
+ * (pre-push Codex P0 on the step-2 rows — the same protection the Auto Pay
+ * seam gives /secure customer-kind links): a stale tab or a direct API
+ * call must not deliver a customer's page to another phone, or after
+ * expiry. (The contract signing and card request bearers: PR 2b.)
+ *   prep      — /prep/<token>: the public page's own predicates at the send
+ *               (GH Codex #3844 r3 P2) — the token still resolves
+ *               (unexpired) and its guide still has an active version.
+ *   appointment — {short}/l/<code> (kind 'appointment') or /appointment/<token>:
+ *               GATE_APPOINTMENT_PAGE must still be on (r2 P1), the visit
+ *               must still resolve, and its customer must be on an account
+ *               the recipient number is on file for (pre-push Codex P0).
+ *   report    — {short}/l/<code> (kind 'service_report') or /report/<token>:
+ *               the builder's own public predicate (completed v1 record
+ *               with a token, typed delivery not suppressed) and the same
+ *               account binding (pre-push Codex P0).
+ *   statement — /pay/statement/<token>: GATE_PAYER_STATEMENTS still on (the
+ *               pay page 404s the moment it is off — GH Codex #3844 r1 P1),
+ *               a payable payer_statements row whose ACTIVE payer's AP phone
+ *               is the recipient number (a statement is the payer's, never
+ *               a customer's — no customer-id trust).
+ * For prep, the row's customer must own the recipient number, and — when
+ * the route trusts a customer id — be that customer. FAIL CLOSED on any
+ * miss. { ok: true } when nothing applies or all checks out; `statements`
+ * rides back with every verified statement id so a real send can stamp
+ * finalized → sent (markStatementsSent). One function per link kind below;
+ * bearerLinkSendCheck is the composition.
+ */
+// One check per link kind (GH Codex #3844 r5 P2 — the seam was one
+// 40-branch function); the shared parts are the parsed runs, the canonical
+// host and the two binding rules below.
+const refuseSend = (error) => ({ ok: false, error });
+const digitsLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+
+// Per-ROW binding: the row's customer must own the recipient number and —
+// when the route trusts a customer id — be that customer.
+async function ownedByRecipient({ toLast10, trustedCustomerId }, customerId, label) {
+  // A LIVE owner only (pre-push Codex P0): a deleted row's stale phone must
+  // not authorize its page to whoever holds the number now.
+  const owner = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
+  const ownerLast10 = digitsLast10(owner?.phone);
+  if (!ownerLast10 || ownerLast10 !== toLast10) {
+    return refuseSend(`This ${label} belongs to a different customer — remove it before sending.`);
+  }
+  // /sms passes null for "no customer selected" — that is no trusted id
+  // (pre-push Codex P1 on r9): the row's owner rides on to the seam-wide
+  // owner rule, which adopts a unique live owner and refuses an ambiguous one.
+  if (trustedCustomerId != null && String(trustedCustomerId) !== String(customerId)) {
+    return refuseSend(`Pick this customer from the search dropdown before sending a ${label}.`);
+  }
+  return null;
+}
+
+// Per-ACCOUNT binding for the account-scoped kinds (appointment page,
+// service report — a household shares its visits and reports): the target's
+// customer must be on an account the recipient number is on file for, and
+// the trusted customer (when the route has one) on that account too. The
+// client-side recipient-change strip is not authoritative (pre-push Codex
+// P0). Returns the binder; the recipient's accounts are read once per send.
+function recipientAccountBinder({ toLast10, trustedCustomerId }) {
+  const accountKey = (c) => String(c.account_id || c.id);
+  let recipientAccounts = null;
+  return async (customerId, label) => {
+    if (!recipientAccounts) {
+      const rows = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [toLast10])
+        .select('id', 'account_id');
+      recipientAccounts = new Set(rows.map(accountKey));
+    }
+    // A number on file for more than one ACCOUNT is ambiguous: with no
+    // trusted customer naming the account, any of them would authorize a
+    // bearer that belongs to the others (a stale or reassigned number). The
+    // insert route 409s this same ambiguity; the send does too (GH Codex
+    // #3844 r6 P1).
+    if (!trustedCustomerId && recipientAccounts.size > 1) {
+      return refuseSend(`That number is on file for more than one customer account — pick the customer from the search dropdown before sending a ${label}.`);
+    }
+    // The public appointment and report routes 404 once the owning customer
+    // is deleted — a live sibling on the same account must not be texted a
+    // dead bearer (pre-push Codex P1): the owner must be a LIVE row.
+    const row = customerId ? await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'account_id') : null;
+    if (!row) return refuseSend(`This ${label} no longer resolves — remove it and insert a fresh one.`);
+    if (!recipientAccounts.has(accountKey(row))) {
+      return refuseSend(`This ${label} belongs to a different customer — remove it before sending.`);
+    }
+    if (trustedCustomerId) {
+      const trusted = await db('customers').where({ id: trustedCustomerId }).first('id', 'account_id');
+      if (!trusted || accountKey(trusted) !== accountKey(row)) {
+        return refuseSend(`This ${label} is not the selected customer's — remove it before sending.`);
+      }
+    }
+    return null;
+  };
+}
+
+// Prep guide pages: the page shows the customer's name and address and 404s
+// once the token expires or its guide loses its active version — the public
+// route's own predicates (resolvePrepSource, loadTemplateByKey), re-run at
+// the send (GH Codex #3844 r3 P2).
+// Every verified prep page's customer + pest identity lands in `preps` so a
+// real send can write the tagger's dedupe marker (markPrepGuidesSent).
+async function checkPrepLinks(ctx, preps) {
+  const { PREP_CONFIG } = require('./prep-guide-sender');
+  for (const run of linkRuns(ctx.runs, /\/prep\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, /^\/prep\/([a-f0-9]{32})$/i);
+    if (!token) return refuseSend('A prep guide link in this message is not on the Waves portal — remove it before sending.');
+    const source = await require('../routes/prep-public').resolvePrepSource(token);
+    if (!source) return refuseSend('This prep guide link has expired — remove it and insert a fresh one.');
+    const loaded = await require('./email-template-library').loadTemplateByKey(source.templateKey);
+    if (!loaded?.activeVersion) return refuseSend('This prep guide has no active version in Email Templates — remove the prep link before sending.');
+    // A page with no customer owner still shows a service address — nothing
+    // can bind it to a recipient, so it never rides an SMS (pre-push Codex P0).
+    if (!source.customerId) return refuseSend('This prep guide page has no customer on file — remove the prep link before sending.');
+    // A scheduled-service prep page stays resolvable until its token
+    // expires, so the visit's state is re-read NOW like the appointment
+    // seam's: a visit underway, completed, cancelled or moved to a pending
+    // rebook since the insert is not the "upcoming" treatment the text
+    // names (GH Codex #3844 r14 P2). Project preps carry no visit.
+    const serviceId = source.viewRow?.scheduled_service_id;
+    if (serviceId) {
+      const appointmentPublic = require('../routes/appointment-public');
+      const visit = await db('scheduled_services').where({ id: serviceId })
+        .first('id', 'customer_id', 'status', 'scheduled_date', 'window_start', 'window_end', 'source_action', 'customer_confirmed', 'visit_id');
+      if (!visit || appointmentPublic.dispatchOwnedUnreviewed(visit) || (await appointmentPublic.pageStateForVisit(visit)).state !== 'upcoming') {
+        return refuseSend('This prep guide\'s visit is no longer upcoming — remove the prep link and insert a fresh one.');
+      }
+    }
+    const bad = await ownedByRecipient(ctx, source.customerId, 'prep guide link');
+    if (bad) return bad;
+    ctx.bearers += 1;
+    // The marker is keyed by the tagger's pest type; a guide outside
+    // PREP_CONFIG (a project prep page) has no replay guard to satisfy.
+    const pestType = Object.keys(PREP_CONFIG).find((k) => PREP_CONFIG[k].emailTemplateKey === source.templateKey);
+    if (pestType && !preps.some((p) => p.customerId === source.customerId && p.pestType === pestType)) {
+      preps.push({ customerId: source.customerId, pestType });
+    }
+  }
+  return null;
+}
+
+// Statement pay links: the gate, a payable row, and the ACTIVE payer's AP
+// phone as the recipient (a statement is the payer's, never a customer's).
+// Every verified statement id lands in `statements`.
+// Every live customer row whose phone is the recipient number (the seam-
+// wide owner rule in bearerLinkSendCheck).
+async function liveCustomersOnNumber(toLast10) {
+  return db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [toLast10])
+    .select('id');
+}
+
+async function checkStatementLinks(ctx, statements) {
+  for (const run of linkRuns(ctx.runs, /\/pay\/statement\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, /^\/pay\/statement\/([0-9a-f]{64})$/i);
+    if (!token) return refuseSend('A statement link in this message is not on the Waves portal — remove it before sending.');
+    if (!require('../config/feature-gates').isEnabled('payerStatements')) {
+      return refuseSend('Payer statements are switched off (GATE_PAYER_STATEMENTS) — remove the statement link before sending.');
+    }
+    const { isPayableStatementStatus } = require('./payer-statement-settle');
+    const stmt = await db('payer_statements').where({ token }).first('id', 'payer_id', 'status');
+    if (!stmt || !isPayableStatementStatus(stmt.status)) {
+      return refuseSend('This statement link is no longer payable — remove it and insert a fresh one.');
+    }
+    const payer = await db('payers').where({ id: stmt.payer_id, active: true }).first('id', 'ap_phone');
+    if (!payer || !digitsLast10(payer.ap_phone) || digitsLast10(payer.ap_phone) !== ctx.toLast10) {
+      return refuseSend("This statement link only goes to the payer's AP phone on file — remove it before sending.");
+    }
+    ctx.bearers += 1;
+    if (!statements.includes(stmt.id)) statements.push(stmt.id);
+  }
+  return null;
+}
+
+// Appointment pages (long form by reschedule_token, or the branded short
+// form): the visit must still resolve and bind to the recipient's account.
+async function checkAppointmentLinks(ctx, shortRows, onRecipientAccount) {
+  // Liveness NOW, not at the insert: the state the page would render —
+  // grouped (a sibling in pending rebook / underway, or a membership that
+  // no longer forms one stop, fails closed — GH Codex #3844 r13 P1) or the
+  // row's own — plus the dispatch-owned-pending hide every visit-backed
+  // link shares (r5 P1). A visit cancelled, completed, moved to a pending
+  // rebook, elapsed, underway, or still unreviewed since the link was
+  // inserted is not the upcoming appointment the text promises.
+  const appointmentPublic = require('../routes/appointment-public');
+  const visitById = async (where) => db('scheduled_services').where(where)
+    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_start', 'window_end', 'source_action', 'customer_confirmed', 'visit_id');
+  const bind = async (visit) => {
+    if (!visit) return refuseSend('This appointment link no longer resolves — remove it and insert a fresh one.');
+    if (appointmentPublic.dispatchOwnedUnreviewed(visit) || (await appointmentPublic.pageStateForVisit(visit)).state !== 'upcoming') {
+      return refuseSend('This appointment is no longer upcoming — remove the appointment link and insert a fresh one.');
+    }
+    const bad = await onRecipientAccount(visit.customer_id, 'appointment link');
+    if (!bad) ctx.bearers += 1;
+    return bad;
+  };
+  for (const run of linkRuns(ctx.runs, /\/appointment\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, APPOINTMENT_TOKEN_RE);
+    if (!token) return refuseSend('An appointment link in this message is not on the Waves portal — remove it before sending.');
+    const bad = await bind(await visitById({ reschedule_token: token }));
+    if (bad) return bad;
+  }
+  for (const row of shortRows.filter((r) => r.kind === 'appointment')) {
+    if (expiredShortRow(row)) return refuseSend('This appointment link has expired — remove it and insert a fresh one.');
+    if (!row.token) return refuseSend('This appointment short link does not open an appointment page — remove it and insert a fresh one.');
+    const bad = await bind(await visitById({ reschedule_token: row.token }));
+    if (bad) return bad;
+  }
+  return null;
+}
+
+// Service reports (long form by report_view_token, or the short form): the
+// builder's own public predicate re-run, then the account binding.
+async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
+  const { suppressedTypedReport } = require('../routes/reports-public');
+  const publicReport = async (where) => {
+    const record = await db('service_records')
+      .where(where)
+      .where(PUBLIC_REPORT_WHERE)
+      .whereNotNull('report_view_token')
+      .first('id', 'customer_id', 'structured_notes');
+    return record && !suppressedTypedReport(record) ? record : null;
+  };
+  const bind = async (record) => {
+    if (!record) return refuseSend('This service report is no longer viewable — remove the link before sending.');
+    const bad = await onRecipientAccount(record.customer_id, 'service report link');
+    if (!bad) ctx.bearers += 1;
+    return bad;
+  };
+  for (const run of linkRuns(ctx.runs, /\/report\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, REPORT_TOKEN_RE);
+    if (!token) return refuseSend('A service report link in this message is not on the Waves portal — remove it before sending.');
+    const bad = await bind(await publicReport({ report_view_token: token }));
+    if (bad) return bad;
+  }
+  for (const row of shortRows.filter((r) => r.kind === 'service_report')) {
+    if (expiredShortRow(row)) return refuseSend('This service report link has expired — remove it and insert a fresh one.');
+    if (!row.token) return refuseSend('This service report short link does not open a report — remove it and insert a fresh one.');
+    const bad = await bind(await publicReport({ report_view_token: row.token }));
+    if (bad) return bad;
+  }
+  return null;
+}
+
+// The account-scoped kinds together: the appointment gate is re-read at the
+// send (every /appointment route 404s the moment it is off — r2 P1), then
+// each kind binds to the recipient's account.
+async function checkAccountBoundLinks(ctx) {
+  // ANY_SCHEME here too: an http://<owned>/l/<code> run must not vanish from
+  // the seam (nothing later sees the /l/ occurrence) — it is judged, and its
+  // plaintext scheme refused like the long forms' (GH Codex #3844 r12 P1).
+  const shortRows = await shortCodeRows(ctx.runs, ANY_SCHEME);
+  if (shortRows.some((row) => row.plaintext)) {
+    return refuseSend('A short link in this message uses http:// — remove it and insert a fresh one.');
+  }
+  if (appointmentLinkPresent(ctx.runs, ctx.hosts, shortRows) && process.env.GATE_APPOINTMENT_PAGE !== 'true') {
+    return refuseSend('Appointment pages are switched off (GATE_APPOINTMENT_PAGE) — remove the appointment link before sending.');
+  }
+  const onRecipientAccount = recipientAccountBinder(ctx);
+  return (await checkAppointmentLinks(ctx, shortRows, onRecipientAccount))
+    || checkReportLinks(ctx, shortRows, onRecipientAccount);
+}
+
+// `usDestination` (default true): the route says whether `to` normalizes to a
+// US number. Every check here binds by the LAST TEN digits, so a non-US
+// E.164 destination whose last ten equal a customer's or payer's US number
+// would pass ownership and even adopt that customer while the provider
+// texts the other country (GH Codex #3844 r10 P1) — a bearer never goes to
+// a non-US destination.
+async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestination = true } = {}) {
+  const ctx = {
+    runs: decodedRuns(body),
+    hosts: ownedPortalHosts(),
+    toLast10: String(toLast10 || ''),
+    trustedCustomerId,
+    bearers: 0, // verified bearers seen — the owner rule below applies to any
+  };
+  const statements = [];
+  const preps = [];
+  const refusal = (await checkPrepLinks(ctx, preps))
+    || (await checkStatementLinks(ctx, statements))
+    || (await checkAccountBoundLinks(ctx));
+  if (refusal) return refusal;
+  if (ctx.bearers && !usDestination) {
+    return refuseSend('Customer links only go to a US number — check the recipient before sending.');
+  }
+  const out = { ok: true, ...(statements.length ? { statements } : {}), ...(preps.length ? { preps } : {}) };
+  // Owner rule for EVERY bearer send (GH Codex #3844 r7 + r9 P1s): the text
+  // goes to a phone that may be a customer's, and /sms applies that
+  // customer's consent policy only when it trusts a customer id — with none
+  // (a pasted URL, a direct /sms call, a same-account pair sharing the
+  // number) the send would fall to the unverified-lead policy, whose exact-
+  // phone consent read can miss a differently formatted number and deliver
+  // past a row's sms_enabled=false. Exactly one live row on the number
+  // rides back as `customerId` for /sms to adopt as the trusted customer;
+  // several refuse (never an arbitrary pick — the insert route 409s the
+  // same); none is a non-customer number (a payer's AP phone) and stays a lead.
+  if (ctx.bearers && !ctx.trustedCustomerId) {
+    const rows = await liveCustomersOnNumber(ctx.toLast10);
+    if (rows.length > 1) {
+      return refuseSend('That number is on file for more than one customer — pick the customer from the search dropdown before sending a customer link.');
+    }
+    if (rows.length === 1) out.customerId = rows[0].id;
+  }
+  return out;
+}
+
+/**
+ * A REAL provider send of a composer prep link is a delivered prep text:
+ * write the SAME customer_interactions marker the appointment tagger's
+ * replay guard (hasSentPrepSms — sms_outbound + "<pestType> prep info
+ * sent") looks for, as the manual Send prep guide path does, so a later
+ * onServiceScheduled / regenerate-brief replay does not text prep again
+ * (GH Codex #3844 r8 P2). Fail-soft: the text already went out.
+ */
+async function markPrepGuidesSent(preps, actorId) {
+  for (const { customerId, pestType } of preps) {
+    await db('customer_interactions').insert({
+      customer_id: customerId,
+      interaction_type: 'sms_outbound',
+      admin_user_id: actorId || null,
+      subject: `${pestType} prep info sent`,
+      body: 'Prep SMS sent via the Communications composer (prep guide link).',
+    });
+  }
+}
+
+/**
+ * A REAL provider send of a composer statement link is the statement's
+ * first delivery when it was still 'finalized' — stamp finalized → sent
+ * through the email delivery's own writer so the viewed/dunning lifecycle
+ * picks it up (GH Codex #3844 r2 P1). Value-guarded there (never
+ * downgrades, never re-stamps a resend).
+ */
+async function markStatementsSent(statementIds) {
+  const { markStatementSent } = require('./payer-statement-email');
+  for (const id of statementIds) await markStatementSent(id);
+}
+
+// ---------------------------------------------------------------------------
+// Step 2 rows (Adam's rulings 2026-09-03): appointment page, prep guide,
+// latest service report, payer statement (card request + contract signing
+// follow in PR 2b).
+// Every builder is MINT-ONLY — the operator's composer send is the only
+// delivery — and each one is dark wherever its owning system's gate is off
+// (the reason names the gate). The visit-anchored builders take the row the
+// route already picked (soonestUpcomingVisit — the reschedule link's pick)
+// so there is exactly one "next visit" definition across the sheet.
+// ---------------------------------------------------------------------------
+
+// Date-only columns (scheduled_date, service_date) read as their calendar
+// day through the canonical helper — never via toISOString, which would
+// shift an Eastern wall-clock timestamp a day (pre-push Codex P1).
+const dateOnly = (value) => (value ? etCalendarDayOf(value) : null);
+
+const NO_UPCOMING_VISIT = 'No upcoming appointment for this customer';
+
+/**
+ * Appointment page — delegates to appointment-link's builder (the one the
+ * confirmation and 24h reminder texts use): reuses reschedule_token, one
+ * short code per visit, mints nothing while GATE_APPOINTMENT_PAGE is off.
+ */
+async function buildAppointmentPageLink(visit) {
+  if (!visit) return { url: null, line: '', reason: NO_UPCOMING_VISIT };
+  if (process.env.GATE_APPOINTMENT_PAGE !== 'true') {
+    return { url: null, line: '', reason: 'Appointment pages are switched off (GATE_APPOINTMENT_PAGE)' };
+  }
+  const { buildAppointmentLink } = require('./appointment-link');
+  const { url, line } = await buildAppointmentLink(visit.id, { customerId: visit.customer_id });
+  if (!url) return { url: null, line: '', reason: 'This appointment has no appointment link yet' };
+  return {
+    url,
+    line,
+    // Immediate sends only — the gate is re-read on /sms alone (r2 P1).
+    immediateOnly: true,
+    appointment: { id: visit.id, scheduledDate: dateOnly(visit.scheduled_date), serviceType: visit.service_type || null },
+  };
+}
+
+/**
+ * Prep guide — insert-only: mints (or reuses) the /prep/:token page for the
+ * soonest upcoming visit of a prep-supported family on the recipient's OWN
+ * row (the route passes the phone owner only — the page shows that
+ * customer's name and address, and the /sms send requires the recipient to
+ * own it), using the prep sender's own visit pick and token mint. The tracker's
+ * prep_sent_at proof is NOT stamped: that marks a confirmed guide-email
+ * delivery, and this text is the operator's own send. Raw URL — the prep
+ * sender never shortens prep links either.
+ */
+async function buildPrepGuideLink(customerIds) {
+  const { PREP_CONFIG, nextUpcomingVisit } = require('./prep-guide-sender');
+  const { ensureServicePrepToken } = require('./project-email');
+  // Soonest across families by date THEN arrival window (two same-day
+  // visits of different families must not pick arbitrarily), id last.
+  // A NULL window sorts LAST ('~' > any digit), as each family's SQL
+  // orders it — a windowless same-day visit must not beat a timed one
+  // (GH Codex #3844 r12 P2).
+  const sortKey = (v) => `${dateOnly(v.scheduled_date)} ${v.window_start ? String(v.window_start).padStart(8, '0') : '~'} ${v.id}`;
+  let pick = null;
+  for (const [pestType, config] of Object.entries(PREP_CONFIG)) {
+    const visit = await nextUpcomingVisit(customerIds, config.serviceKeywords[0]);
+    if (!visit) continue;
+    if (!pick || sortKey(visit) < sortKey(pick.visit)) pick = { visit, config, pestType };
+  }
+  if (!pick) {
+    return { url: null, line: '', reason: 'No upcoming visit of a prep-guide service on this account' };
+  }
+  let { config, pestType } = pick;
+  const { visit } = pick;
+  // ensureServicePrepToken deliberately keeps an existing token's stored
+  // prep_template_key (it is what the last DELIVERED guide rendered), so
+  // the page shows the STORED guide, not the keyword-inferred one. Label
+  // the text with the guide the link will actually open, or refuse when
+  // the stored key is one the composer cannot name (pre-push Codex P1).
+  if (visit.prep_template_key && visit.prep_template_key !== config.emailTemplateKey) {
+    const stored = Object.entries(PREP_CONFIG).find(([, c]) => c.emailTemplateKey === visit.prep_template_key);
+    if (!stored) {
+      return { url: null, line: '', reason: 'This appointment\'s prep page is set to a guide the composer cannot name — send it from Send prep guide instead' };
+    }
+    [pestType, config] = stored;
+  }
+  // The page 404s past prep_expires_at and the mint would hand back the
+  // same expired token — refuse rather than insert a dead link.
+  if (visit.prep_expires_at && new Date(visit.prep_expires_at).getTime() <= Date.now()) {
+    return { url: null, line: '', reason: 'The prep guide link for this appointment has expired' };
+  }
+  // prep-public renders the guide from the template's ACTIVE version and
+  // 404s without one (renderGuideForSource) — a deactivated guide would
+  // mint a link that cannot render (GH Codex #3844 r1 P1). Same predicate.
+  const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey);
+  if (!loaded?.activeVersion) {
+    return { url: null, line: '', reason: `The ${config.label} prep guide has no active version in Email Templates — activate it before texting a prep link` };
+  }
+  const token = await ensureServicePrepToken(visit.id, config.emailTemplateKey);
+  const url = `${publicPortalUrl()}/prep/${token}`;
+  return {
+    url,
+    line: `Your prep checklist for the upcoming ${config.label} is here: ${url}\n\n`,
+    // Immediate sends only — /sms binds the page to the recipient.
+    immediateOnly: true,
+    prep: { pestType, label: config.label, scheduledDate: dateOnly(visit.scheduled_date) },
+    expiresAt: visit.prep_expires_at || null,
+  };
+}
+
+/**
+ * Latest service report — the newest completed visit that already carries
+ * a public report token. Never mints: a completed record with no token is
+ * one whose typed delivery was disabled (admin-dispatch mints on closeout
+ * only while the mode is not 'disabled'), and an internal_only/disabled
+ * typed report 404s publicly, so those are skipped too (reports-public's
+ * own predicate). Short-wrapped with the closeout text's idiom.
+ */
+// The React report page reads /:token/data, which answers only for
+// service_report_v1 records — a legacy-template row with a token would
+// insert a link that 404s (pre-push Codex P1). Shared with the send seam.
+const PUBLIC_REPORT_WHERE = { status: 'completed', report_template_version: 'service_report_v1' };
+
+async function buildServiceReportLink(customerIds) {
+  const { suppressedTypedReport } = require('../routes/reports-public');
+  const PAGE = 15;
+  let record = null;
+  for (let offset = 0; ; offset += PAGE) {
+    const rows = await db('service_records')
+      .whereIn('customer_id', customerIds)
+      .where(PUBLIC_REPORT_WHERE)
+      .whereNotNull('report_view_token')
+      // Unique tie-breaker last: bulk/backfilled records share a service_date
+      // AND created_at, and OFFSET pages over a tie have no stable order
+      // without it (GH Codex #3844 r6 P2).
+      .orderBy([{ column: 'service_date', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .offset(offset)
+      .limit(PAGE);
+    record = rows.find((row) => !suppressedTypedReport(row)) || null;
+    if (record || rows.length < PAGE) break;
+  }
+  if (!record) return { url: null, line: '', reason: 'No service report on this account yet' };
+  const url = await shortenOrPassthrough(`${publicPortalUrl()}/report/${record.report_view_token}`, {
+    kind: 'service_report',
+    entityType: 'service_records',
+    entityId: record.id,
+    customerId: record.customer_id,
+    channel: 'sms',
+    purpose: 'composer_insert',
+    codePrefix: 'report',
+  });
+  return {
+    url,
+    line: `Here is your latest service report: ${url}\n\n`,
+    // Immediate sends only — /sms binds the report to the recipient's account.
+    immediateOnly: true,
+    report: { id: record.id, serviceDate: dateOnly(record.service_date), serviceType: record.service_type || null },
+  };
+}
+
+/**
+ * Payer statement pay link — FAIL CLOSED on identity: a statement covers
+ * the bill-to's whole book and its pay page charges the PAYER's Stripe
+ * customer, so the link only ever goes to the payer's own AP phone. The
+ * recipient is resolved as a PAYER, not a customer (GH Codex #3844 r2 P1 —
+ * the AP phone is normally no customer's phone at all): every active payer
+ * whose AP phone is the number, newest payable statement (finalized/sent/
+ * viewed — the settle module's own status set) across all of them. A
+ * homeowner's number never qualifies. Raw URL, same as the follow-up emails.
+ */
+async function buildStatementLink(recipientLast10) {
+  if (!require('../config/feature-gates').isEnabled('payerStatements')) {
+    return { url: null, line: '', reason: 'Payer statements are switched off (GATE_PAYER_STATEMENTS)' };
+  }
+  if (!/^\d{10}$/.test(String(recipientLast10 || ''))) {
+    return { url: null, line: '', reason: 'Enter a full 10-digit phone number first' };
+  }
+  const matching = await db('payers')
+    .where({ active: true })
+    .whereRaw("right(regexp_replace(COALESCE(ap_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [recipientLast10])
+    .select('id', 'display_name');
+  if (!matching.length) {
+    return { url: null, line: '', reason: "This number is not a payer's AP phone on file — statement links go to the bill-to contact only" };
+  }
+  // Payability filtered in SQL (the settle module's own status set), so an
+  // older payable statement behind a run of paid ones is still found.
+  const { PAYABLE_STATEMENT_STATUSES } = require('./payer-statement-settle');
+  const stmt = await db('payer_statements')
+    .whereIn('payer_id', matching.map((p) => p.id))
+    .whereIn('status', [...PAYABLE_STATEMENT_STATUSES])
+    .whereNotNull('token')
+    .orderBy('created_at', 'desc')
+    .first();
+  const names = matching.map((p) => p.display_name).join(' / ');
+  if (!stmt) return { url: null, line: '', reason: `No payable statement for ${names}` };
+  const payer = matching.find((p) => String(p.id) === String(stmt.payer_id)) || matching[0];
+  const url = `${publicPortalUrl()}/pay/statement/${stmt.token}`;
+  const number = `S-${stmt.id}`;
+  return {
+    url,
+    line: `You can view and pay statement ${number} securely here: ${url}\n\n`,
+    // Immediate sends only — payability + the gate are re-checked on /sms alone.
+    immediateOnly: true,
+    statement: { id: stmt.id, number, total: Number(stmt.total) || 0, payerName: payer.display_name },
+  };
+}
+
 module.exports = {
   OPEN_ESTIMATE_STATUSES,
   REVIEW_GATE_REASONS,
@@ -598,4 +1284,12 @@ module.exports = {
   AUTOPAY_SKIP_REASONS,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
+  immediateOnlyLinkSendCheck,
+  bearerLinkSendCheck,
+  markStatementsSent,
+  markPrepGuidesSent,
+  buildAppointmentPageLink,
+  buildPrepGuideLink,
+  buildServiceReportLink,
+  buildStatementLink,
 };

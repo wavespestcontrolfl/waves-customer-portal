@@ -33,6 +33,7 @@ const { resolveProjectEmailRecipient, ensureServicePrepToken } = require('./proj
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 
@@ -111,30 +112,82 @@ function isSupportedChannel(channel) {
   return CHANNELS.includes(channel);
 }
 
-// Upcoming visits of this pest family, soonest first, so the emailed guide's
-// "Service date" row references the real appointment and the prep token can
-// hang off a visit row. A few candidates, not one: the soonest visit's page
-// may legitimately belong to another guide while a later visit's is free
-// (GH Codex #3856 r16 P2). Empty when nothing matches; throws on a lookup
-// error (the caller reports it apart from "no visit").
+// Upcoming visits of a pest family, soonest first, as the appointment
+// page would render them ('upcoming' — a call-created follow-up still
+// pending and never customer-confirmed is dispatch-owned and hidden, a
+// same-day row past its window came and went, a visit underway is too
+// late to prep for; GH Codex #3844 r5 P1 / r10 P2 / r13 P2), so the emailed
+// guide's "Service date" row references a real appointment and the prep
+// token can hang off a visit row. Paged like the reschedule pick (a fixed
+// limit could hide a valid upcoming visit behind elapsed same-day rows);
+// soonest by date THEN window, id tie-breaker. Takes one customer id or an
+// account's ids (the composer's prep-guide insert looks across siblings).
+// A few candidates, not one: the soonest visit's page may legitimately
+// belong to another guide while a later visit's is free (GH Codex #3856
+// r16 P2). Empty when nothing matches; THROWS on a lookup error.
 const VISIT_CANDIDATES = 5;
+const VISIT_PAGE = 10;
+async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywords = [] }, max) {
+  const ids = [].concat(customerIds).filter(Boolean);
+  const { pageStateForVisit } = require('../routes/appointment-public');
+  const found = [];
+  for (let offset = 0; ; offset += VISIT_PAGE) {
+    // One raw OR group for the family keywords (the only function predicate
+    // on this query is the dispatch-owned one below — the composer's test
+    // reads it by shape).
+    const q = db('scheduled_services')
+      .whereIn('customer_id', ids)
+      .whereRaw(`(${serviceKeywords.map(() => 'LOWER(service_type) LIKE ?').join(' OR ')})`, serviceKeywords.map((kw) => `%${kw}%`));
+    for (const kw of excludeKeywords) q.whereRaw('LOWER(service_type) NOT LIKE ?', [`%${kw}%`]);
+    const rows = await q
+      .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
+      // The same null-safe dispatch-owned predicate /api/schedule uses.
+      .where((qb) => qb
+        .whereNull('source_action')
+        .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+        .orWhereNot('status', 'pending')
+        .orWhere('customer_confirmed', true))
+      // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
+      // midnight ET "today's" visit would fall before the UTC date and the
+      // email would say "To be confirmed" despite a real upcoming appointment.
+      .where('scheduled_date', '>=', etDateString())
+      .orderBy([
+        { column: 'scheduled_date', order: 'asc' },
+        { column: 'window_start', order: 'asc' },
+        { column: 'id', order: 'asc' },
+      ])
+      .limit(VISIT_PAGE)
+      .offset(offset)
+      .select(
+        'id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'service_type',
+        'visit_id', 'source_action', 'customer_confirmed', 'prep_expires_at',
+        'prep_template_key', 'prep_sent_at', 'prep_token', 'created_at', 'prep_first_viewed_at', 'prep_view_count',
+      );
+    for (const r of rows) {
+      if ((await pageStateForVisit(r)).state === 'upcoming') found.push(r);
+      if (found.length >= max) return found;
+    }
+    if (rows.length < VISIT_PAGE) return found;
+  }
+}
+
+// The composer's pick: the soonest upcoming visit matching one family
+// keyword (its config's exclusions apply), across an account. Null when
+// none or on a lookup error (logged) — the composer refuses, not throws.
+async function nextUpcomingVisit(customerIds, serviceKeyword) {
+  const config = Object.values(PREP_CONFIG).find((c) => c.serviceKeywords.includes(serviceKeyword))
+    || { serviceKeywords: [serviceKeyword] };
+  try {
+    const [row] = await upcomingFamilyVisits(customerIds, config, 1);
+    return row || null;
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${[].concat(customerIds).filter(Boolean).join(',')}: ${err.message}`);
+    return null;
+  }
+}
+
 async function nextUpcomingVisits(customerId, config) {
-  const q = db('scheduled_services')
-    .where({ customer_id: customerId })
-    .where(function familyMatch() {
-      for (const kw of config.serviceKeywords) this.orWhereRaw('LOWER(service_type) LIKE ?', [`%${kw}%`]);
-    });
-  for (const kw of config.excludeKeywords || []) q.whereRaw('LOWER(service_type) NOT LIKE ?', [`%${kw}%`]);
-  const rows = await q
-    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
-    // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
-    // midnight ET "today's" visit would fall before the UTC date and the
-    // email would say "To be confirmed" despite a real upcoming appointment.
-    .where('scheduled_date', '>=', etDateString())
-    .orderBy('scheduled_date', 'asc')
-    .limit(VISIT_CANDIDATES)
-    .select('id', 'scheduled_date', 'prep_template_key', 'prep_sent_at', 'prep_token', 'created_at', 'prep_first_viewed_at', 'prep_view_count');
-  return rows || [];
+  return upcomingFamilyVisits([customerId], config, VISIT_CANDIDATES);
 }
 
 // The automated lanes reserve a visit's prep key BEFORE anything delivers
@@ -705,5 +758,5 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
 }
 
 module.exports = {
-  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
+  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
 };

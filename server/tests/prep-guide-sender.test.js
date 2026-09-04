@@ -43,6 +43,10 @@ let ownershipLost = false; // the send-time re-read finds the page re-keyed
 let upcomingVisitRows = null; // several candidates (soonest first); null = [upcomingVisitRow]
 let viewRow = null; // prep_guide_views
 let visitLookupError = null;
+// A live upcoming visit as the appointment page's pageState reads it —
+// status + a date ahead of the run (the pick requires state 'upcoming').
+const FUTURE = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+const liveVisit = (extra = {}) => ({ id: 'svc-9', status: 'confirmed', scheduled_date: FUTURE, ...extra });
 let servicePrepRow = null;
 let serviceUpdates = [];
 let scheduledQueries = [];
@@ -70,15 +74,20 @@ jest.mock('../services/email-template-automation-executor', () => ({ RUNNABLE_ST
 let serviceUpdateCount = 1;
 function scheduledQuery() {
   let tokenMode = false;
+  let listMode = false; // nextUpcomingVisit: .limit(n).select(cols) → rows
   const q = {
-    select: jest.fn(() => { tokenMode = true; return q; }),
-    where: jest.fn(() => q), whereRaw: jest.fn(() => q), whereNotIn: jest.fn(() => q),
-    whereNull: jest.fn(() => q), limit: jest.fn(() => q),
-    // nextUpcomingVisits awaits the chain itself (…limit().select(cols)).
-    then: (resolve, reject) => {
-      if (visitLookupError) return reject(visitLookupError);
-      return resolve(upcomingVisitRows || (upcomingVisitRow ? [upcomingVisitRow] : []));
-    },
+    limit: jest.fn(() => { listMode = true; return q; }),
+    offset: jest.fn(() => q),
+    // nextUpcomingVisits / nextUpcomingVisit: …limit().offset().select(cols) → rows.
+    select: jest.fn(() => {
+      if (listMode) {
+        if (visitLookupError) return Promise.reject(visitLookupError);
+        return Promise.resolve(upcomingVisitRows || (upcomingVisitRow ? [upcomingVisitRow] : []));
+      }
+      tokenMode = true; return q;
+    }),
+    where: jest.fn(() => q), whereIn: jest.fn(() => q), whereRaw: jest.fn(() => q), whereNotIn: jest.fn(() => q),
+    whereNull: jest.fn(() => q),
     update: jest.fn((patch) => {
       serviceUpdates.push(patch);
       // Thenable so `await …update()` yields the row count, while
@@ -144,7 +153,8 @@ beforeEach(() => {
 });
 
 describe('sendPrepToCustomer', () => {
-  const VISIT = { id: 'svc-9', scheduled_date: '2026-08-01' };
+  // A live upcoming visit as the appointment page's pageState reads it.
+  const VISIT = liveVisit({ customer_id: 'cust-1' });
 
   test('default channel (both), no upcoming visit → emails the guide AND texts the inline-steps standalone', async () => {
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
@@ -727,6 +737,34 @@ describe('sendPrepToCustomer', () => {
     const clean = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
     expect(clean.ok).toBe(true);
     expect(clean.reason).toBeUndefined();
+  });
+
+  test('nextUpcomingVisit hides a dispatch-owned pending booking — the customer schedule\'s own null-safe predicate (GH Codex #3844 r5 P1)', async () => {
+    const { nextUpcomingVisit } = require('../services/prep-guide-sender');
+    const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+    let visitsQuery = null;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') { visitsQuery = scheduledQuery(); return visitsQuery; }
+      return customersQuery();
+    });
+    upcomingVisitRow = liveVisit();
+    expect(await nextUpcomingVisit('cust-1', 'flea')).toEqual(upcomingVisitRow);
+    const predicate = visitsQuery.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    expect(predicate).toBeInstanceOf(Function);
+    const qb = { whereNull: jest.fn(() => qb), orWhereNotIn: jest.fn(() => qb), orWhereNot: jest.fn(() => qb), orWhere: jest.fn(() => qb) };
+    predicate(qb);
+    expect(qb.whereNull).toHaveBeenCalledWith('source_action');
+    expect(qb.orWhereNotIn).toHaveBeenCalledWith('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
+    expect(qb.orWhereNot).toHaveBeenCalledWith('status', 'pending');
+    expect(qb.orWhere).toHaveBeenCalledWith('customer_confirmed', true);
+  });
+
+  test('nextUpcomingVisit skips a visit already underway — too late to prep for, and it would hide the later treatment (GH Codex #3844 r13 P2)', async () => {
+    const { nextUpcomingVisit } = require('../services/prep-guide-sender');
+    upcomingVisitRow = liveVisit({ status: 'en_route' });
+    expect(await nextUpcomingVisit('cust-1', 'flea')).toBeNull();
+    upcomingVisitRow = liveVisit({ status: 'on_site' });
+    expect(await nextUpcomingVisit('cust-1', 'flea')).toBeNull();
   });
 
   test('no upcoming visit → the email prep_url stays the portal visits tab', async () => {

@@ -1147,3 +1147,16 @@ router._test = {
 };
 
 module.exports = router;
+// The page's own state predicate — the composer's visit picks skip what it
+// renders as 'past' (GH Codex #3844 r10).
+module.exports.pageState = pageState;
+// …and the send seam refuses what the page would not render as upcoming,
+// including the dispatch-owned unreviewed booking the builder never picks.
+module.exports.dispatchOwnedUnreviewed = dispatchOwnedUnreviewed;
+// The state the page would render for this row NOW — grouped (the stop's
+// state from every live member, fail-closed on an unreadable membership)
+// or the row's own. The composer's send seam re-runs it (GH Codex #3844 r13).
+module.exports.pageStateForVisit = async function pageStateForVisit(svc, now = new Date()) {
+  const info = svc?.visit_id ? await visitServicesFor(svc) : {};
+  return info.visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, info, now);
+};

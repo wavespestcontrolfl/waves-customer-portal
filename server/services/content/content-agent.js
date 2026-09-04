@@ -17,6 +17,9 @@
 const logger = require('../logger');
 const db = require('../../models/db');
 const { executeContentTool } = require('./content-agent-tools');
+const { CONTENT_AGENT_CONFIG } = require('./content-agent-config');
+const { recordSessionUsage } = require('../llm-dispatch-metrics');
+const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CONTENT_AGENT_ID = process.env.CONTENT_AGENT_ID;
@@ -38,7 +41,7 @@ async function apiCall(method, path, body) {
   });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${err}`);
+    throw Object.assign(new Error(`Anthropic API ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
   return res.json();
 }
@@ -54,7 +57,7 @@ async function* streamSessionEvents(sessionId) {
   });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Stream error ${res.status}: ${err}`);
+    throw Object.assign(new Error(`Stream error ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
 
   const reader = res.body.getReader();
@@ -126,96 +129,124 @@ const ContentAgent = {
 
     const sessionId = session.id;
     logger.info(`[content-agent] Session created: ${sessionId} for topic: ${topic}`);
-
-    // Send the user prompt
-    await apiCall('POST', `/sessions/${sessionId}/events`, {
-      type: 'user',
-      content: [{ type: 'text', text: prompt }],
-    });
-
-    // Stream events and handle tool calls
     let finalReport = '';
     let toolsExecuted = [];
     let postId = null;
     let maxIterations = 50; // content agent needs more room than chat
 
-    notify('researching', 'Agent is researching the topic...');
+    // Call ledger (never throws): one session row with the session's token
+    // usage, written however the session ends from here on — a failed first
+    // event, a stream that throws or times out, all still consumed tokens —
+    // carrying this runner's own outcome. Upserted by session id, so
+    // re-billing is safe.
+    let failure = null;
+    // Set only by a terminal event: any other stream exit is a failure.
+    let sessionEnded = false;
+    // The run's own end — the ledger's usage GET after it is observability
+    // time, not agent time, and stays out of the reported duration.
+    let runEndedAt = null;
+    try {
+      // Send the user prompt
+      await apiCall('POST', `/sessions/${sessionId}/events`, {
+        type: 'user',
+        content: [{ type: 'text', text: prompt }],
+      });
 
-    for await (const { event, data } of streamSessionEvents(sessionId)) {
-      if (--maxIterations <= 0) {
-        logger.warn(`[content-agent] Hit max iterations for session ${sessionId}`);
-        break;
-      }
+      // Stream events and handle tool calls
+      notify('researching', 'Agent is researching the topic...');
 
-      // ── Text output ──
-      if (event === 'assistant' || event === 'text') {
-        if (data.text) finalReport += data.text;
-        if (data.content) {
-          for (const block of data.content) {
-            if (block.type === 'text') finalReport += block.text;
-          }
-        }
-      }
-
-      // ── Custom tool call ──
-      if (event === 'tool_use' || data?.type === 'tool_use') {
-        const toolName = data.name;
-        const toolInput = data.input || {};
-        const toolUseId = data.id;
-
-        // Progress notifications
-        const stageMap = {
-          get_fawn_weather: 'researching',
-          get_pest_pressure: 'researching',
-          search_knowledge_base: 'researching',
-          check_existing_content: 'researching',
-          get_content_gaps: 'researching',
-          create_blog_post: 'writing',
-          generate_blog_content: 'writing',
-          run_content_qa: 'scoring',
-          distribute_to_social: 'distributing',
-          schedule_content: 'scheduling',
-        };
-        notify(stageMap[toolName] || 'working', `Executing: ${toolName}`);
-
-        logger.info(`[content-agent] Tool: ${toolName}(${JSON.stringify(toolInput).slice(0, 200)})`);
-
-        let toolResult;
-        try {
-          toolResult = await executeContentTool(toolName, toolInput);
-
-          // Track post ID when it's created
-          if (toolName === 'create_blog_post' && toolResult.post_id) {
-            postId = toolResult.post_id;
-          }
-        } catch (err) {
-          toolResult = { error: `Tool failed: ${err.message}` };
-          logger.error(`[content-agent] Tool ${toolName} error: ${err.message}`);
+      for await (const { event, data } of streamSessionEvents(sessionId)) {
+        if (--maxIterations <= 0) {
+          logger.warn(`[content-agent] Hit max iterations for session ${sessionId}`);
+          failure = 'max_events';
+          break;
         }
 
-        toolsExecuted.push({ tool: toolName, input: toolInput, result: toolResult });
+        // ── Text output ──
+        if (event === 'assistant' || event === 'text') {
+          if (data.text) finalReport += data.text;
+          if (data.content) {
+            for (const block of data.content) {
+              if (block.type === 'text') finalReport += block.text;
+            }
+          }
+        }
 
-        // Send result back
-        await apiCall('POST', `/sessions/${sessionId}/events`, {
-          type: 'tool_result',
-          tool_use_id: toolUseId,
-          content: [{ type: 'text', text: JSON.stringify(toolResult) }],
-        });
+        // ── Custom tool call ──
+        if (event === 'tool_use' || data?.type === 'tool_use') {
+          const toolName = data.name;
+          const toolInput = data.input || {};
+          const toolUseId = data.id;
+
+          // Progress notifications
+          const stageMap = {
+            get_fawn_weather: 'researching',
+            get_pest_pressure: 'researching',
+            search_knowledge_base: 'researching',
+            check_existing_content: 'researching',
+            get_content_gaps: 'researching',
+            create_blog_post: 'writing',
+            generate_blog_content: 'writing',
+            run_content_qa: 'scoring',
+            distribute_to_social: 'distributing',
+            schedule_content: 'scheduling',
+          };
+          notify(stageMap[toolName] || 'working', `Executing: ${toolName}`);
+
+          logger.info(`[content-agent] Tool: ${toolName}(${JSON.stringify(toolInput).slice(0, 200)})`);
+
+          let toolResult;
+          try {
+            toolResult = await executeContentTool(toolName, toolInput);
+
+            // Track post ID when it's created
+            if (toolName === 'create_blog_post' && toolResult.post_id) {
+              postId = toolResult.post_id;
+            }
+          } catch (err) {
+            toolResult = { error: `Tool failed: ${err.message}` };
+            logger.error(`[content-agent] Tool ${toolName} error: ${err.message}`);
+          }
+
+          toolsExecuted.push({ tool: toolName, input: toolInput, result: toolResult });
+
+          // Send result back
+          await apiCall('POST', `/sessions/${sessionId}/events`, {
+            type: 'tool_result',
+            tool_use_id: toolUseId,
+            content: [{ type: 'text', text: JSON.stringify(toolResult) }],
+          });
+        }
+
+        // ── Session complete ──
+        if (isSessionTerminal(event, data)) {
+          sessionEnded = true;
+          break;
+        }
+
+        // ── Error ──
+        if (isSessionError(event)) {
+          logger.error(`[content-agent] Agent error: ${JSON.stringify(data)}`);
+          failure = 'session_error_event';
+          break;
+        }
+      }
+      // The stream closed (or was left) before the session said it ended:
+      // not a success, whatever the session GET reports later.
+      if (!failure && !sessionEnded) {
+        logger.error(`[content-agent] Stream ended without a terminal event for session ${sessionId}`);
+        failure = 'session_stream_eof';
       }
 
-      // ── Session complete ──
-      if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') {
-        break;
-      }
-
-      // ── Error ──
-      if (event === 'error') {
-        logger.error(`[content-agent] Agent error: ${JSON.stringify(data)}`);
-        break;
-      }
+    } catch (err) {
+      failure = err;
+      throw err;
+    } finally {
+      runEndedAt = Date.now();
+      await recordSessionUsage({ laneId: 'agent_content', sessionId, agentId: CONTENT_AGENT_ID, model: CONTENT_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
 
-    const durationMs = Date.now() - startTime;
+    const durationMs = runEndedAt - startTime;
     notify('complete', `Finished in ${Math.round(durationMs / 1000)}s`);
 
     // Gather results from the post record

@@ -210,6 +210,10 @@ router.post('/sms', async (req, res, next) => {
   // by email too (ReviewService.sendInlineEmailCopy). Hoisted: the catch
   // below emails after an accepted-but-thrown send.
   let reviewRequestEmail = false;
+  // Verified composer statement links — a real send is their first delivery.
+  let statementLinkIds = null;
+  // Verified composer prep links — a real send writes the tagger's dedupe marker.
+  let prepLinkSends = null;
   const clearManualReservation = async () => {
     if (!manualReservationId) return;
     const id = manualReservationId;
@@ -443,6 +447,30 @@ router.post('/sms', async (req, res, next) => {
       logger.warn(`[communications] Auto Pay link pre-send check failed — aborting send: ${autopayErr.message}`);
       return abortUnsent(503, 'Could not verify the inserted Auto Pay setup link — try again in a moment.');
     }
+    // The other per-row bearers (prep guide, payer statement, and the
+    // account-bound appointment page + service report links): liveness +
+    // recipient ownership NOW, fail closed — same bar as above.
+    try {
+      const { bearerLinkSendCheck } = require('../services/composer-customer-links');
+      const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), {
+        trustedCustomerId: trustedCustomerId || null,
+        // The seam binds by the last ten digits; a non-US E.164 destination
+        // sharing them with a customer's US number is a different phone.
+        usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
+      });
+      if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
+      if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
+      if (bearerCheck.preps) prepLinkSends = bearerCheck.preps;
+      // A bearer send to a number exactly one live customer owns is that
+      // customer's text (a pasted URL never passes /customer-link to adopt
+      // its owner): trust the row the seam verified so the recipient's own
+      // consent policy applies, never the unverified-lead one (GH Codex
+      // #3844 r9 P1). The seam already refused an ambiguous number.
+      if (!trustedCustomerId && bearerCheck.customerId) trustedCustomerId = bearerCheck.customerId;
+    } catch (bearerErr) {
+      logger.warn(`[communications] bearer link pre-send check failed — aborting send: ${bearerErr.message}`);
+      return abortUnsent(503, 'Could not verify a customer link in this message — try again in a moment.');
+    }
 
     if (reviewRequestId) {
       try {
@@ -636,6 +664,28 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] Auto Pay link sent_at stamp failed (text already sent): ${stampErr.message}`);
       }
     }
+    // Composer-carried statement links: a REAL provider send is the
+    // statement's first delivery — finalized → sent through the email
+    // delivery's own writer (fail-soft: lifecycle bookkeeping, no resend
+    // risk — the statement stays payable either way).
+    if (statementLinkIds && result?.sent) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        if (isRealProviderSend(result)) await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
+      } catch (stampErr) {
+        logger.warn(`[communications] statement sent stamp failed (text already sent): ${stampErr.message}`);
+      }
+    }
+    // Composer-carried prep links: a REAL send is a delivered prep text —
+    // the tagger's replay-guard marker, as the manual sender writes it.
+    if (prepLinkSends && result?.sent) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        if (isRealProviderSend(result)) await require('../services/composer-customer-links').markPrepGuidesSent(prepLinkSends, req.technicianId || null);
+      } catch (stampErr) {
+        logger.warn(`[communications] prep sent marker failed (text already sent): ${stampErr.message}`);
+      }
+    }
     if (claimedReviewRequestId) {
       try {
         reviewEmailOutcome = await settleInlineReviewAfterSend({
@@ -780,6 +830,22 @@ router.post('/sms', async (req, res, next) => {
         });
       } catch (claimErr) {
         logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
+      }
+    }
+    // Same convention for the statement stamp (GH Codex #3844 r3 P1): an
+    // accepted-then-thrown send DID deliver the statement.
+    if (statementLinkIds && err?.providerOutcome?.sent === true) {
+      try {
+        await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
+      } catch (stampErr) {
+        logger.warn(`[communications] statement sent stamp failed after a throw: ${stampErr.message}`);
+      }
+    }
+    if (prepLinkSends && err?.providerOutcome?.sent === true) {
+      try {
+        await require('../services/composer-customer-links').markPrepGuidesSent(prepLinkSends, req.technicianId || null);
+      } catch (stampErr) {
+        logger.warn(`[communications] prep sent marker failed after a throw: ${stampErr.message}`);
       }
     }
     // Guarded reopen: anything the send actually resolved before the throw
@@ -1386,6 +1452,69 @@ function isElapsedSameDayReschedulePlaceholder(svc, now = new Date()) {
   return Math.max(...bounds) <= nowEt.hour * 60 + nowEt.minute;
 }
 
+// Soonest customer-facing upcoming visit across an account — the visit
+// the reschedule, appointment, and card-request composer inserts all
+// anchor on (one pick, one set of exclusions).
+//
+// Candidate visits, soonest first. ET day frame: scheduled_date is a
+// DATE column, so comparing against the ET 'YYYY-MM-DD' string is exact
+// (same comparison reschedule-public makes). The status gate mirrors
+// RESCHEDULABLE_STATUSES there — live (en_route/on_site) and terminal
+// rows never match. Dispatch-owned pending call-pipeline bookings are
+// excluded with the same null-safe predicate /api/schedule uses: their
+// tentative times are hidden from the customer until the office
+// confirms, so this button must not hand out a bearer link to one.
+//
+// The elapsed-placeholder skip happens in JS (the time math doesn't
+// survive SQL TIME wrap-arounds cleanly), so page until a usable
+// candidate turns up or the candidate set is exhausted — a page full of
+// today's elapsed 'rescheduled' placeholders must not read as "no
+// upcoming appointment" when a later visit exists. Ordering is fully
+// deterministic (id tie-breaker), so offset pages can't skip or repeat
+// rows within a request.
+// `statuses`: the reschedule link rebooks a 'rescheduled' placeholder, so
+// it is upcoming there; the appointment PAGE renders that status as
+// pending_rebook (its retained date/window is stale — appointment-public),
+// so the appointment link passes the statuses the page treats as upcoming
+// (pre-push Codex P1).
+// `skip`: the candidate predicate — the reschedule link skips only elapsed
+// 'rescheduled' placeholders (a same-day pending/confirmed row past its
+// window is a MISSED visit the rebook page serves); the appointment link
+// skips whatever its page renders as 'past' (GH Codex #3844 r10 P1).
+async function soonestUpcomingVisit(customerIds, { statuses = ['pending', 'confirmed', 'rescheduled'], skip = isElapsedSameDayReschedulePlaceholder } = {}) {
+  const PAGE = 25;
+  let svc = null;
+  for (let offset = 0; ; offset += PAGE) {
+    const candidates = await db('scheduled_services')
+      .whereIn('customer_id', customerIds)
+      .whereIn('status', statuses)
+      .where('scheduled_date', '>=', etDateString())
+      .where((qb) => qb
+        .whereNull('source_action')
+        .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+        .orWhereNot('status', 'pending')
+        .orWhere('customer_confirmed', true))
+      .orderBy([
+        { column: 'scheduled_date', order: 'asc' },
+        { column: 'window_start', order: 'asc' },
+        // Stable tie-breaker: two properties' visits can share a date and
+        // window, and without a unique key the "soonest" pick would be
+        // whichever row Postgres returns first that day.
+        { column: 'id', order: 'asc' },
+      ])
+      .limit(PAGE)
+      .offset(offset)
+      .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status', 'visit_id', 'source_action', 'customer_confirmed');
+    // `skip` may be async (the composer's pick reads the grouped page state).
+    svc = null;
+    for (const c of candidates) {
+      if (!(await skip(c))) { svc = c; break; }
+    }
+    if (svc || candidates.length < PAGE) break;
+  }
+  return svc;
+}
+
 // All live customer rows under one account. Self-adoption sets
 // account_id = id, and rows created by webhook/call paths can carry NULL
 // until the lazy login-time adoption (backfill 20260721000000) — callers
@@ -1509,48 +1638,7 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     // goes to the phone's owner.
     const recipientFirstName = await firstNameForPhone(last10, customerIds);
 
-    // Candidate visits, soonest first. ET day frame: scheduled_date is a
-    // DATE column, so comparing against the ET 'YYYY-MM-DD' string is exact
-    // (same comparison reschedule-public makes). The status gate mirrors
-    // RESCHEDULABLE_STATUSES there — live (en_route/on_site) and terminal
-    // rows never match. Dispatch-owned pending call-pipeline bookings are
-    // excluded with the same null-safe predicate /api/schedule uses: their
-    // tentative times are hidden from the customer until the office
-    // confirms, so this button must not hand out a bearer link to one.
-    //
-    // The elapsed-placeholder skip happens in JS (the time math doesn't
-    // survive SQL TIME wrap-arounds cleanly), so page until a usable
-    // candidate turns up or the candidate set is exhausted — a page full of
-    // today's elapsed 'rescheduled' placeholders must not read as "no
-    // upcoming appointment" when a later visit exists. Ordering is fully
-    // deterministic (id tie-breaker), so offset pages can't skip or repeat
-    // rows within a request.
-    const PAGE = 25;
-    let svc = null;
-    for (let offset = 0; ; offset += PAGE) {
-      const candidates = await db('scheduled_services')
-        .whereIn('customer_id', customerIds)
-        .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
-        .where('scheduled_date', '>=', etDateString())
-        .where((qb) => qb
-          .whereNull('source_action')
-          .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-          .orWhereNot('status', 'pending')
-          .orWhere('customer_confirmed', true))
-        .orderBy([
-          { column: 'scheduled_date', order: 'asc' },
-          { column: 'window_start', order: 'asc' },
-          // Stable tie-breaker: two properties' visits can share a date and
-          // window, and without a unique key the "soonest" pick would be
-          // whichever row Postgres returns first that day.
-          { column: 'id', order: 'asc' },
-        ])
-        .limit(PAGE)
-        .offset(offset)
-        .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status');
-      svc = candidates.find((c) => !isElapsedSameDayReschedulePlaceholder(c)) || null;
-      if (svc || candidates.length < PAGE) break;
-    }
+    const svc = await soonestUpcomingVisit(customerIds);
     if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
 
     const { url, line } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
@@ -1685,67 +1773,6 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
   }
 });
 
-// Resolves the composer's recipient into the account's customer ids, the
-// single-customer target, and the greeting name. Answers { status, error }
-// on a refusal. The single-customer kinds (review ask, referral) target the
-// phone's owner: the operator-selected row first, else the account row
-// whose phone matches the number, else the first sibling (sorted — the
-// account expansion has no ORDER BY of its own). Auto Pay is money-
-// affecting and per row (a consented saved card can enroll on the spot) —
-// never guess the row: the body's customerId is NOT proof of an operator
-// pick (opening a thread auto-fills whichever sibling the latest message
-// carried — see firstNameForPhone), so the phone must belong to exactly
-// ONE row on the account, else 409 to the customer's own profile card
-// (GH Codex #3812 r1 P1 + pre-push P0).
-async function resolveLinkTarget({ kind, customerId, last10 }) {
-  let customerIds = [];
-  if (customerId && UUID_RE.test(String(customerId))) {
-    const customer = await db('customers')
-      .where({ id: customerId })
-      .whereNull('deleted_at')
-      .first('id', 'phone', 'account_id');
-    if (!customer) return { status: 404, error: 'Customer not found' };
-    if (fullPhoneLast10(customer.phone) !== last10) {
-      return { status: 400, error: 'phone must match the selected customer' };
-    }
-    customerIds = await customerIdsForAccount(customer.account_id || customer.id);
-  } else {
-    const matches = await db('customers')
-      .whereNull('deleted_at')
-      .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-      .select('id', 'account_id');
-    if (!matches.length) return { status: 404, error: 'No customer found for that number' };
-    const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
-    if (accountKeys.length > 1) {
-      return {
-        status: 409,
-        error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
-      };
-    }
-    customerIds = await customerIdsForAccount(accountKeys[0]);
-  }
-  if (!customerIds.length) return { status: 404, error: 'No customer found for that number' };
-
-  const recipientFirstName = await firstNameForPhone(last10, customerIds);
-  const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
-  let primaryId = selectedId;
-  if (!primaryId || kind === 'autopay_setup') {
-    const phoneRows = await db('customers')
-      .whereNull('deleted_at')
-      .whereIn('id', customerIds)
-      .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-      .select('id');
-    if (kind === 'autopay_setup' && phoneRows.length !== 1) {
-      return {
-        status: 409,
-        error: 'That number is on file for more than one customer on this account — send the Auto Pay setup link from that customer\'s profile instead',
-      };
-    }
-    if (!primaryId) primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
-  }
-  return { customerIds, primaryId, recipientFirstName };
-}
-
 // Quick Links review channel 'email' (owner ruling 2026-09-03): a SEND, not
 // a link build — the gate-wrapped engine path emails the ask now and nothing
 // is inserted into the text. strictChannel: the operator chose Email — never
@@ -1879,11 +1906,15 @@ async function emailReviewAskNow(primaryId) {
   return { status: ask.outcome === 'no_customer' ? 404 : 409, body: { error, outcome: ask.outcome } };
 }
 
-const CUSTOMER_LINK_KINDS = ['review_request', 'pay_balance', 'estimate', 'referral', 'autopay_setup'];
 const REVIEW_LINK_CHANNELS = ['sms', 'email', 'both'];
 
-// POST /api/admin/communications/customer-link  { phone, customerId?, kind, channel? }
-// Composer helper: mint one of the "for this customer" links. The builders
+// POST /api/admin/communications/customer-link  { phone, customerId?, kind }
+// The Insert Link sheet's other per-customer links — kind ∈ review_request |
+// pay_balance | estimate | referral | autopay_setup | appointment |
+// prep_guide | service_report | statement (card_request + contract: PR 2b).
+// Same fail-closed recipient contract as
+// /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
+// cross-checked then expanded to the account, cross-account 409). Builders
 // live in services/composer-customer-links.js; a kind with nothing to insert
 // answers 404 with the builder's plain reason.
 // review_request mints a real review_requests row via createInline with
@@ -1896,82 +1927,225 @@ const REVIEW_LINK_CHANNELS = ['sms', 'email', 'both'];
 // 'email' sends the ask now instead (emailReviewAskNow); 'sms' and 'both'
 // mint the inline row as before — for 'both' the composer's send carries
 // reviewRequestEmail so the email goes out with the text.
-// The request's own validation: { kind, last10, channel } or { status, error }.
-function parseCustomerLinkRequest(body) {
-  const kind = String(body.kind || '');
-  if (!CUSTOMER_LINK_KINDS.includes(kind)) {
-    return { status: 400, error: `kind must be one of ${CUSTOMER_LINK_KINDS.join(', ')}` };
+// The statement kind of /customer-link. A payer statement covers the
+// bill-to's whole book and goes to the PAYER's AP phone — which is normally
+// no customer's phone at all, so the builder resolves the payer from the
+// recipient number itself (GH Codex #3844 r2 P1). The statement is
+// authorized against the payer, but the text goes to a phone that may also
+// be a customer's — exactly one live row on the number rides back as
+// customerId so the composer selects it and the /sms send carries it: the
+// recipient's own consent policy then applies instead of the unverified-
+// lead classification, whose exact-phone consent read can miss a
+// differently formatted number on file (r6 P1). Several rows on the number
+// → the one the composer selected (it owns the number, so the /sms send
+// trusts it), else 409 — never a guess, and never the unverified-lead
+// policy for a number one of those rows has opted out (r7 P1). A body
+// customerId is otherwise irrelevant to the statement itself.
+async function statementLinkInsert(builders, last10, bodyCustomerId) {
+  const result = await builders.buildStatementLink(last10);
+  if (!result?.url) return { status: 404, body: { error: result?.reason || 'No payable statement for that number' } };
+  const owners = await db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .select('id');
+  const selected = owners.find((o) => String(o.id) === String(bodyCustomerId || ''));
+  if (!selected && owners.length > 1) {
+    return { status: 409, body: { error: 'That number is on file for more than one customer — pick the customer from the search dropdown before inserting a statement link.' } };
   }
-  const last10 = fullPhoneLast10(body.phone);
-  if (!last10) return { status: 400, error: 'Enter a full 10-digit phone number first' };
-  const channel = kind === 'review_request' ? String(body.channel || 'sms') : null;
-  if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) {
-    return { status: 400, error: 'channel must be one of sms, email, both' };
-  }
-  return { kind, last10, channel };
-}
-
-// A builder's outcome as the composer's response: { status, body }.
-function customerLinkResponse({ kind, channel, result, primaryId, recipientFirstName }) {
-  // Auto Pay auto-secure: a consented saved card was enrolled instead of a
-  // link being minted — a successful outcome with nothing to insert.
-  if (result.autoSecured) {
-    return { status: 200, body: { kind, url: null, line: '', autoSecured: true, firstName: recipientFirstName } };
-  }
-  if (!result.url) return { status: 404, body: { error: result.reason || 'Nothing to link for this customer' } };
   return {
     status: 200,
     body: {
-      kind,
-      channel: channel || undefined,
+      kind: 'statement',
       url: stripSmsLinkScheme(result.url),
       line: stripSmsLinkScheme(result.line),
-      firstName: recipientFirstName,
-      requestId: result.requestId || undefined,
-      balance: result.balance || undefined,
-      estimate: result.estimate || undefined,
-      expiresAt: result.expiresAt || undefined,
-      // Auto Pay: the resolved owner rides back so the composer can select
-      // it — the /sms send then carries customerId and the link's owner
-      // policy applies (GH Codex #3812 r3 P1). standalone: the line is a
-      // complete greeted message, inserted as-is.
-      customerId: kind === 'autopay_setup' ? primaryId : undefined,
-      standalone: result.standalone || undefined,
+      statement: result.statement || undefined,
+      immediateOnly: result.immediateOnly || undefined,
+      customerId: (selected || owners[0])?.id,
     },
   };
 }
 
+// /customer-link's recipient: the operator-selected customer (phone cross-
+// checked, then expanded to its account), else every live row on the
+// number — which must sit on ONE account (cross-account 409). Same fail-
+// closed contract as /reschedule-link. Returns { customerIds } or
+// { status, error }.
+async function resolveComposerRecipient(customerId, last10) {
+  if (customerId && UUID_RE.test(String(customerId))) {
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first('id', 'phone', 'account_id');
+    if (!customer) return { status: 404, error: 'Customer not found' };
+    if (fullPhoneLast10(customer.phone) !== last10) return { status: 400, error: 'phone must match the selected customer' };
+    const customerIds = await customerIdsForAccount(customer.account_id || customer.id);
+    return customerIds.length ? { customerIds } : { status: 404, error: 'No customer found for that number' };
+  }
+  const matches = await db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .select('id', 'account_id');
+  if (!matches.length) return { status: 404, error: 'No customer found for that number' };
+  const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
+  if (accountKeys.length > 1) {
+    return { status: 409, error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first' };
+  }
+  const customerIds = await customerIdsForAccount(accountKeys[0]);
+  return customerIds.length ? { customerIds } : { status: 404, error: 'No customer found for that number' };
+}
+
+// Per-kind builders for /customer-link. Visit-anchored kinds share the
+// reschedule-link pick (one set of exclusions — dispatch-owned pendings,
+// elapsed placeholders); the builder takes the picked row so the pick stays
+// route-owned. Statement is handled by statementLinkInsert before any
+// customer resolution (the key here only admits the kind).
+function composerLinkBuilders() {
+  const builders = require('../services/composer-customer-links');
+  return {
+    review_request: (ids, primaryId) => builders.buildReviewRequestLink(primaryId),
+    pay_balance: (ids) => builders.buildPayBalanceLink(ids),
+    estimate: (ids) => builders.buildLatestEstimateLink(ids),
+    referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
+    // Auto Pay is per customer row (the phone's owner), same as referral.
+    // The builder delegates to autopay-setup-link's single entry point —
+    // gate, payer exemption, dedup and the saved-card auto-secure all
+    // live there; a link_created outcome is the ONLY thing inserted.
+    autopay_setup: (ids, primaryId) => builders.buildAutopaySetupLink(primaryId),
+    // Visit-anchored kinds share the reschedule-link pick (one set of
+    // exclusions — dispatch-owned pendings, elapsed placeholders); the
+    // builder takes the picked row so the pick stays route-owned.
+    appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids, {
+    statuses: ['pending', 'confirmed'],
+    // The state the page would render — grouped (a sibling in pending rebook
+    // or underway, or an unreadable membership) or the row's own — so the
+    // pick never inserts a link the send seam then refuses while a later
+    // genuinely upcoming visit goes unconsidered (GH Codex #3844 r14 P2).
+    skip: async (svc) => (await require('./appointment-public').pageStateForVisit(svc)).state !== 'upcoming',
+    })),
+    // The prep page shows its customer's name and address and the /sms
+    // send requires the recipient to own it (GH Codex #3844 r3 P2), so
+    // the visit pick is the phone owner's row — never an account sibling's
+    // (a sibling's visit would insert a link the send then refuses; pre-
+    // push Codex P1). STRICT_OWNER_KINDS below.
+    prep_guide: (ids, primaryId) => builders.buildPrepGuideLink([primaryId]),
+    service_report: (ids) => builders.buildServiceReportLink(ids),
+    // Handled by statementLinkInsert before any customer resolution (the
+    // key here only admits the kind).
+    statement: null,
+  };
+}
+
+// Auto Pay is money-affecting and per row (a consented saved card can enroll
+// on the spot) — never guess the row. The body's customerId is NOT proof of
+// an operator pick (opening a thread auto-fills whichever sibling the latest
+// message carried — see firstNameForPhone), so the check runs whether or not
+// one was supplied: the phone must belong to exactly ONE row on the account,
+// else 409 to the customer's own profile card (GH Codex #3812 r1 P1 +
+// pre-push P0). A prep page is the owner's too (name + address on the page,
+// ownership re-checked at /sms).
+const STRICT_OWNER_KINDS = ['autopay_setup', 'prep_guide'];
+// Appointment pages and service reports are account-scoped (any sibling's
+// visit or report) but the TEXT is a customer-specific bearer, so the
+// resolved phone owner rides back for them too: the /sms send then carries
+// customerId and the recipient's own consent policy applies — without it a
+// typed-in number sends as an unverified conversational lead, whose consent
+// read can miss the customer's notification_prefs entirely when the number
+// is formatted differently on file (GH Codex #3844 r4 P1).
+const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report'];
+
+// The row a /customer-link kind targets: the operator-selected row first,
+// else the account row whose phone matches the number, else the first
+// sibling (sorted — the account expansion has no ORDER BY of its own).
+// Returns { primaryId } or { status, error }.
+async function resolveLinkOwner(kind, customerIds, customerId, last10) {
+  const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
+  const strictOwner = STRICT_OWNER_KINDS.includes(kind);
+  if (selectedId && !strictOwner) return { primaryId: selectedId };
+  const phoneRows = await db('customers')
+    .whereNull('deleted_at')
+    .whereIn('id', customerIds)
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .select('id');
+  if (strictOwner && phoneRows.length !== 1) {
+    return { status: 409, error: 'That number is on file for more than one customer on this account — send this link from that customer\'s profile instead' };
+  }
+  if (selectedId) return { primaryId: selectedId };
+  // A number two live siblings on the account share: the owner that rides
+  // back would be an arbitrary pick, and /sms would apply only that row's
+  // consent — refuse, like the strict kinds, until the operator picks (GH
+  // Codex #3844 r9 P1); the send seam refuses the same ambiguity.
+  if (OWNER_RIDES_BACK_KINDS.includes(kind) && phoneRows.length > 1) {
+    return { status: 409, error: 'That number is on file for more than one customer on this account — pick the customer from the search dropdown first' };
+  }
+  return { primaryId: phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0] };
+}
+
+// Builder fields that ride to the composer verbatim when set. immediateOnly:
+// the composer refuses to schedule or draft those kinds; /schedule-sms +
+// drafts re-fence. standalone: the line is a complete greeted message,
+// inserted as-is.
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'statement', 'expiresAt', 'immediateOnly', 'standalone'];
+
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
-    const body = req.body || {};
-    const parsed = parseCustomerLinkRequest(body);
-    if (parsed.error) return res.status(parsed.status).json({ error: parsed.error });
-    const { kind, last10, channel } = parsed;
+    const kind = String(req.body?.kind || '');
+    const builderByKind = composerLinkBuilders();
+    if (!(kind in builderByKind)) {
+      return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
+    }
 
-    const target = await resolveLinkTarget({ kind, customerId: body.customerId, last10 });
-    if (target.error) return res.status(target.status).json({ error: target.error });
-    const { customerIds, primaryId, recipientFirstName } = target;
+    const last10 = fullPhoneLast10(req.body?.phone);
+    if (!last10) {
+      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
+    }
+    // Quick Links review channel (owner ruling 2026-09-03): sms | email | both.
+    const channel = kind === 'review_request' ? String(req.body?.channel || 'sms') : null;
+    if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) {
+      return res.status(400).json({ error: 'channel must be one of sms, email, both' });
+    }
+    if (kind === 'statement') {
+      const { status, body } = await statementLinkInsert(require('../services/composer-customer-links'), last10, req.body?.customerId);
+      return res.status(status).json(body);
+    }
 
+    const customerId = req.body?.customerId;
+    const recipient = await resolveComposerRecipient(customerId, last10);
+    if (recipient.error) return res.status(recipient.status).json({ error: recipient.error });
+    const { customerIds } = recipient;
+
+    const recipientFirstName = await firstNameForPhone(last10, customerIds);
+    const owner = await resolveLinkOwner(kind, customerIds, customerId, last10);
+    if (owner.error) return res.status(owner.status).json({ error: owner.error });
+    const { primaryId } = owner;
+
+    // Email: a SEND, not a link build — nothing is inserted into the text.
     if (channel === 'email') {
       const answer = await emailReviewAskNow(primaryId);
       return res.status(answer.status).json(answer.body);
     }
 
-    const builders = require('../services/composer-customer-links');
-    const builderByKind = {
-      review_request: () => builders.buildReviewRequestLink(primaryId),
-      pay_balance: () => builders.buildPayBalanceLink(customerIds),
-      estimate: () => builders.buildLatestEstimateLink(customerIds),
-      referral: () => builders.buildReferralLink(primaryId),
-      // Auto Pay is per customer row (the phone's owner), same as referral.
-      // The builder delegates to autopay-setup-link's single entry point —
-      // gate, payer exemption, dedup and the saved-card auto-secure all
-      // live there; a link_created outcome is the ONLY thing inserted.
-      autopay_setup: () => builders.buildAutopaySetupLink(primaryId),
-    };
-    const result = (await builderByKind[kind]()) || {};
-    const answer = customerLinkResponse({ kind, channel, result, primaryId, recipientFirstName });
-    res.status(answer.status).json(answer.body);
+    const result = await builderByKind[kind](customerIds, primaryId);
+    // Auto Pay auto-secure: a consented saved card was enrolled instead of a
+    // link being minted — a successful outcome with nothing to insert.
+    if (result?.autoSecured) {
+      return res.json({ kind, url: null, line: '', autoSecured: true, firstName: recipientFirstName });
+    }
+    if (!result?.url) {
+      return res.status(404).json({ error: result?.reason || 'Nothing to link for this customer' });
+    }
+    res.json({
+      kind,
+      channel: channel || undefined,
+      url: stripSmsLinkScheme(result.url),
+      line: stripSmsLinkScheme(result.line),
+      firstName: recipientFirstName,
+      ...Object.fromEntries(LINK_RESULT_FIELDS.map((field) => [field, result[field] || undefined])),
+      // Owner-bound kinds (and the account-scoped bearers above): the
+      // resolved owner rides back so the composer can select it — the /sms
+      // send then carries customerId and the link's owner policy applies
+      // (GH Codex #3812 r3 P1).
+      customerId: OWNER_RIDES_BACK_KINDS.includes(kind) ? primaryId : undefined,
+    });
   } catch (err) {
     logger.error(`customer-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -2295,6 +2469,17 @@ router.post('/schedule-sms', async (req, res, next) => {
       const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to));
       if (autopayCheck.present) {
         return res.status(400).json({ error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' });
+      }
+      // Same fence for the other per-row bearers the composer inserts
+      // (statement pay, prep pages, appointment pages, service reports):
+      // only the immediate /sms path re-checks them at delivery —
+      // the scheduler dispatches straight into sendCustomerMessage (GH
+      // Codex #3844 r1 P1). The client refusal is transient state; this is
+      // the authoritative one.
+      const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+      const immediateOnly = await immediateOnlyLinkSendCheck(cleanBody);
+      if (immediateOnly.present) {
+        return res.status(400).json({ error: `${immediateOnly.label} links are re-checked at delivery — send them now, or remove the link before scheduling` });
       }
     }
     // A review ask rides the immediate /sms send only — that path claims and

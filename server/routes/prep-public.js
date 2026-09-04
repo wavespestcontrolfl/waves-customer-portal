@@ -435,3 +435,6 @@ router.get('/:token/pdf', async (req, res) => {
 router._test = { resolvePrepSource };
 
 module.exports = router;
+// The public page's own resolver (token → source, expiry enforced), re-run
+// by the composer's send-time bearer check.
+module.exports.resolvePrepSource = resolvePrepSource;
