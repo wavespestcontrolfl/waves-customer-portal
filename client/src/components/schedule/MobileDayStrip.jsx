@@ -10,9 +10,9 @@
 // All date math is ET-calendar via lib/timezone (noon-UTC anchors), the
 // same convention the page's own helpers use.
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '../ui';
-import { addETDays, etDateString, isETToday } from '../../lib/timezone';
+import { addETDays, etDateString } from '../../lib/timezone';
 
 const DAYS_BACK = 60;
 const DAYS_FORWARD = 120;
@@ -31,9 +31,23 @@ function shiftISO(iso, days) {
   return etDateString(addETDays(anchor(iso), days));
 }
 
-function listDays(start, end) {
+// One record per day in [start, end]; built once per range (the page
+// re-renders on every fetch / modal / status change, and each record costs
+// several Intl formats).
+function buildDays(start, end) {
   const out = [];
-  for (let iso = start; iso <= end; iso = shiftISO(iso, 1)) out.push(iso);
+  for (let iso = start; iso <= end; iso = shiftISO(iso, 1)) {
+    const d = anchor(iso);
+    const dow = d.getUTCDay();
+    out.push({
+      iso,
+      dayNum: d.getUTCDate(),
+      weekend: dow === 0 || dow === 6,
+      firstOfMonth: d.getUTCDate() === 1,
+      weekday: d.toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short' }),
+      monthShort: d.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short' }),
+    });
+  }
   return out;
 }
 
@@ -58,10 +72,12 @@ export default function MobileDayStrip({ date, onSelect }) {
   const extendingRef = useRef(false);
   const mountedRef = useRef(false);
   const rafRef = useRef(0);
+  const days = useMemo(() => buildDays(range.start, range.end), [range]);
+  const today = etDateString();
 
   const updateVisibleMonth = useCallback(() => {
     const list = listRef.current;
-    // No layout (desktop md:hidden, jsdom): nothing measurable, keep the
+    // No layout (jsdom, or not yet painted): nothing measurable, keep the
     // label pinned to the selected date.
     if (!list || list.clientWidth === 0) return;
     const left = list.getBoundingClientRect().left;
@@ -143,8 +159,22 @@ export default function MobileDayStrip({ date, onSelect }) {
     }
   };
 
+  // Roving focus: only the selected day sits in the tab order; arrows walk
+  // the strip without leaving it.
+  const handleKeyDown = (e) => {
+    const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+    if (!step) return;
+    const current = e.target.closest?.('[data-iso]')?.dataset.iso;
+    if (!current) return;
+    const next = listRef.current?.querySelector(`[data-iso="${shiftISO(current, step)}"]`);
+    if (!next) return;
+    e.preventDefault();
+    next.focus();
+    next.scrollIntoView?.({ block: 'nearest', inline: 'center' });
+  };
+
   return (
-    <div className="md:hidden mb-4">
+    <div className="mb-4">
       <div
         className="px-1 pb-1.5 text-12 uppercase tracking-label font-medium text-zinc-900 u-nums"
         aria-live="polite"
@@ -154,26 +184,20 @@ export default function MobileDayStrip({ date, onSelect }) {
       <div
         ref={listRef}
         onScroll={handleScroll}
+        onKeyDown={handleKeyDown}
         className="relative flex gap-1.5 overflow-x-auto px-1 pt-0.5 pb-1.5 snap-x snap-proximity overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         role="listbox"
         aria-label="Pick a day"
       >
-        {listDays(range.start, range.end).map((iso) => {
-          const d = anchor(iso);
+        {days.map(({ iso, dayNum, weekend, firstOfMonth, weekday, monthShort }) => {
           const selected = iso === date;
-          const dow = d.getUTCDay();
-          const weekend = dow === 0 || dow === 6;
-          const firstOfMonth = d.getUTCDate() === 1;
-          const weekday = d.toLocaleDateString('en-US', {
-            timeZone: 'UTC',
-            weekday: 'short',
-          });
           return (
             <button
               key={iso}
               type="button"
               role="option"
               aria-selected={selected}
+              tabIndex={selected ? 0 : -1}
               data-iso={iso}
               onClick={() => onSelect(iso)}
               className={cn(
@@ -192,7 +216,7 @@ export default function MobileDayStrip({ date, onSelect }) {
                   aria-hidden="true"
                   className="absolute -left-3 top-1/2 -translate-y-1/2 rotate-180 [writing-mode:vertical-rl] text-11 uppercase tracking-label font-medium text-zinc-400 leading-none"
                 >
-                  {d.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short' })}
+                  {monthShort}
                 </span>
               )}
               <span
@@ -209,9 +233,9 @@ export default function MobileDayStrip({ date, onSelect }) {
                   !selected && weekend && 'text-zinc-600',
                 )}
               >
-                {d.getUTCDate()}
+                {dayNum}
               </span>
-              {isETToday(iso) && (
+              {iso === today && (
                 <span
                   aria-hidden="true"
                   className={cn(

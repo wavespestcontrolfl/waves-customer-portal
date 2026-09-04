@@ -1295,8 +1295,12 @@ export default function DispatchPageV2({
       )}
 
       {/* Mobile day strip — scrollable window of days with a live month
-          label; scrolling browses, tapping selects. */}
-      {viewMode === "day" && <MobileDayStrip date={date} onSelect={setDate} />}
+          label; scrolling browses, tapping selects. Mounted only on mobile
+          so it measures and centers itself on a real layout (a CSS-hidden
+          mount would never re-center after a resize). */}
+      {isMobile && viewMode === "day" && (
+        <MobileDayStrip date={date} onSelect={setDate} />
+      )}
 
       {/* Mobile-only ViewMode selector — Day + Week only on phones. */}
       <div className="md:hidden mb-3 grid grid-cols-2 gap-1.5">

@@ -52,6 +52,20 @@ describe('MobileDayStrip', () => {
     expect(screen.getByText('June 2027')).toBeInTheDocument();
   });
 
+  it('keeps only the selected day in the tab order and walks the strip with arrow keys', () => {
+    render(<MobileDayStrip date="2026-09-04" onSelect={() => {}} />);
+    const list = screen.getByRole('listbox');
+    const selected = list.querySelector('[data-iso="2026-09-04"]');
+    expect(selected).toHaveAttribute('tabindex', '0');
+    expect(list.querySelector('[data-iso="2026-09-05"]')).toHaveAttribute('tabindex', '-1');
+    selected.focus();
+    fireEvent.keyDown(selected, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(list.querySelector('[data-iso="2026-09-05"]'));
+    fireEvent.keyDown(document.activeElement, { key: 'ArrowLeft' });
+    fireEvent.keyDown(document.activeElement, { key: 'ArrowLeft' });
+    expect(document.activeElement).toBe(list.querySelector('[data-iso="2026-09-03"]'));
+  });
+
   it('extends the window when scrolled to the end', () => {
     render(<MobileDayStrip date="2026-09-04" onSelect={() => {}} />);
     const list = screen.getByRole('listbox');
