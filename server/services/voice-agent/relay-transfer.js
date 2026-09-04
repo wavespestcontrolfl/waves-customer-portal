@@ -37,7 +37,12 @@ const TRANSFER_TOOL_NAME = 'transfer_to_office';
 const WHISPER_MAX_WORDS = 20;
 const SUMMARY_MAX_WORDS = 20;
 const NAME_MAX_CHARS = 60;
-const PACKET_WRITE_TIMEOUT_MS = 8000; // = relay-conversation WRITE_TOOL_TIMEOUT_MS
+// STRICTLY inside relay-conversation's WRITE_TOOL_TIMEOUT_MS (8000): the packet
+// write, the no-context fallback write, and the say/end must all complete
+// before the outer tool deadline, or the model hears "outcome unknown" and
+// keeps talking while this function ends the call underneath it.
+const PACKET_WRITE_TIMEOUT_MS = 4000;
+const NO_CONTEXT_WRITE_TIMEOUT_MS = 1500;
 const NO_CONTEXT_BELL = 'sandy_transfer_no_context';
 
 function isTransferGateOn() {
@@ -223,34 +228,37 @@ async function writePacketBounded(ctx, packet) {
  */
 async function recordNoContext(ctx, packet, facts) {
   try {
-    await withTimeout(Promise.resolve(ctx.writeHandoff({ ...packet, summary: null, unresolved_question: null, facts_collected: {}, tools: [], commitments: [], context_available: false })), 2000, 'timeout');
+    await withTimeout(Promise.resolve(ctx.writeHandoff({ ...packet, summary: null, unresolved_question: null, facts_collected: {}, tools: [], commitments: [], context_available: false })), NO_CONTEXT_WRITE_TIMEOUT_MS, 'timeout');
   } catch { /* the bell below is the record */ }
   if (ctx.sandbox === true) return;
-  try {
-    const { triggerNotification } = require('../notification-triggers');
-    await triggerNotification(NO_CONTEXT_BELL, { callSid: ctx.callSid || null, from: facts.from || null });
-  } catch (err) {
-    logger.warn(`[voice-relay] ${NO_CONTEXT_BELL} bell failed: ${err.message}`);
-  }
+  // Detached: the bell is never on the caller's path or the tool budget.
+  Promise.resolve()
+    .then(() => require('../notification-triggers').triggerNotification(NO_CONTEXT_BELL, { callSid: ctx.callSid || null, from: facts.from || null }))
+    .catch((err) => logger.warn(`[voice-relay] ${NO_CONTEXT_BELL} bell failed: ${err.message}`));
 }
 
 /**
- * The AI segment to keep ahead of a transferred call's staff-leg transcript
- * (call-recording-processor). Only a row the relay itself transcribed
- * (transcription_provider 'conversation_relay') with call_outcome
- * 'ai_transferred' qualifies; anything else ⇒ null (today's overwrite).
+ * The AI segment to keep ahead of a transferred call's recording transcript
+ * (call-recording-processor). Qualified on the PERSISTED handoff packet
+ * (metadata.relay_handoff) plus the relay's own provider stamp — never on
+ * the final outcome: a transfer nobody accepted ends as 'voicemail' through
+ * /call-complete, and that voicemail's transcript must not erase the AI
+ * conversation either. Anything else ⇒ null (today's overwrite).
  */
 function composeRelaySegment(call) {
-  if (!call || call.call_outcome !== 'ai_transferred') return null;
+  if (!call) return null;
+  let meta = call.metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  if (!meta || typeof meta !== 'object' || !meta.relay_handoff || typeof meta.relay_handoff !== 'object') return null;
   const { TRANSCRIPTION_PROVIDER } = require('./relay-transcript');
   if (call.transcription_provider !== TRANSCRIPTION_PROVIDER) return null;
   const text = String(call.transcription || '').trim();
   if (!text) return null;
-  let meta = call.transcription_metadata;
-  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  let tmeta = call.transcription_metadata;
+  if (typeof tmeta === 'string') { try { tmeta = JSON.parse(tmeta); } catch { tmeta = null; } }
   return {
     text: `[AI segment]\n${text}`,
-    metadata: meta && typeof meta === 'object' ? meta : { provider: TRANSCRIPTION_PROVIDER },
+    metadata: tmeta && typeof tmeta === 'object' ? tmeta : { provider: TRANSCRIPTION_PROVIDER },
   };
 }
 

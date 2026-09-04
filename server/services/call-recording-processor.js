@@ -6774,14 +6774,15 @@ const CallRecordingProcessor = {
             recording_url_present: !!call.recording_url,
           },
         };
-        // Sandy PR 2A: a transferred call's recording is the STAFF leg only
-        // (the <Dial> records from answer). The relay's own played-text
-        // transcript already sits on the row — keep it ahead of the human
-        // segment and its provenance under transcription_metadata.relay,
-        // instead of letting the staff-leg transcript replace it.
+        // Sandy PR 2A: a transferred call's recording is the STAFF leg (the
+        // <Dial> records from answer) or, when nobody accepted, the voicemail.
+        // The relay's own played-text transcript already sits on the row —
+        // keep it ahead of the recorded segment and its provenance under
+        // transcription_metadata.relay, instead of letting the recording's
+        // transcript replace it. Qualified on the persisted handoff packet.
         const relaySegment = composeRelaySegment(call);
         if (relaySegment) {
-          transcription = `${relaySegment.text}\n\n[Staff segment]\n${transcription}`;
+          transcription = `${relaySegment.text}\n\n[${call.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff'} segment]\n${transcription}`;
           transcriptionProvenance.metadata.relay = relaySegment.metadata;
         }
         const transcriptUpdate = {

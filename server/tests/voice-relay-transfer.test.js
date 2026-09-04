@@ -219,11 +219,26 @@ describe('whisper + AI segment', () => {
     expect(transfer.transferWhisper({ context_available: false, intent: 'x' })).toBe(generic);
     expect(transfer.transferWhisper(null)).toBe(generic);
   });
-  test('composeRelaySegment keeps the relay transcript ahead of the staff leg only for a transferred relay row', () => {
-    const row = { call_outcome: 'ai_transferred', transcription_provider: 'conversation_relay', transcription: 'Caller: hi\nSandy: hello', transcription_metadata: JSON.stringify({ provider: 'conversation_relay', latency: { p50: 1 } }) };
+  test('composeRelaySegment keeps the relay transcript for any row carrying the persisted packet — including the no-answer voicemail fallback', () => {
+    const row = { call_outcome: 'ai_transferred', metadata: JSON.stringify({ relay_handoff: { context_available: true } }), transcription_provider: 'conversation_relay', transcription: 'Caller: hi\nSandy: hello', transcription_metadata: JSON.stringify({ provider: 'conversation_relay', latency: { p50: 1 } }) };
     expect(transfer.composeRelaySegment(row)).toEqual({ text: '[AI segment]\nCaller: hi\nSandy: hello', metadata: { provider: 'conversation_relay', latency: { p50: 1 } } });
-    expect(transfer.composeRelaySegment({ ...row, call_outcome: 'ai_handled' })).toBeNull();
+    expect(transfer.composeRelaySegment({ ...row, call_outcome: 'voicemail' })).not.toBeNull(); // nobody pressed 1 ⇒ voicemail, AI segment survives
+    expect(transfer.composeRelaySegment({ ...row, metadata: { relay_handoff: { context_available: false } } })).not.toBeNull();
+    expect(transfer.composeRelaySegment({ ...row, metadata: {} })).toBeNull(); // an ordinary relay call: the processor path is unchanged
     expect(transfer.composeRelaySegment({ ...row, transcription_provider: 'openai' })).toBeNull();
     expect(transfer.composeRelaySegment({ ...row, transcription: '' })).toBeNull();
+  });
+
+  test('the packet + fallback deadlines fit strictly inside the 8s write-tool budget', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    jest.useFakeTimers();
+    const never = () => new Promise(() => {});
+    const { ctx } = ctxFor({ writeHandoff: jest.fn(never) });
+    const p = executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx);
+    await jest.advanceTimersByTimeAsync(7000);
+    const out = await p;
+    jest.useRealTimers();
+    expect(out).toMatch(/Transferring the caller/);
+    expect(ctx.endForTransfer).toHaveBeenCalledTimes(1); // settled before the outer 8s deadline
   });
 });
