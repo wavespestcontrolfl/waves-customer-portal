@@ -991,6 +991,22 @@ async function livePayloadForRun(run, storedPayload = {}) {
   return {};
 }
 
+// Hand back a FRESH prep-page claim the run never delivered on — fenced
+// like the manual sender's releasePrepPage: never a delivered or opened
+// page. Fail-soft.
+async function releaseFreshPrepClaim(run) {
+  try {
+    await db('scheduled_services')
+      .where({ id: run.entity_id, prep_template_key: run.template_key })
+      .whereNull('prep_sent_at')
+      .whereNull('prep_first_viewed_at')
+      .whereRaw('COALESCE(prep_view_count, 0) = 0')
+      .update({ prep_template_key: null });
+  } catch (releaseErr) {
+    logger.warn(`[email-template-automations] prep page release failed for service ${run.entity_id}: ${releaseErr.message}`);
+  }
+}
+
 async function markRunSkipped(run, reason, metadata = {}) {
   const [skipped] = await db('email_template_automation_runs').where({ id: run.id }).update({
     status: 'skipped',
@@ -1067,6 +1083,12 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     attempt: attemptNumber,
   });
   const claimedRun = { ...run, ...running };
+  // Prep-page claim bookkeeping for the catch below: a FRESH claim is
+  // released on a definite no-delivery — blocked, or a final failure whose
+  // throw came BEFORE dispatch (onQueued never fired); a post-dispatch
+  // throw is ambiguous and keeps it (pre-push Codex P1 on e493a0711).
+  let freshPrepClaim = false;
+  let prepDispatched = false;
 
   try {
     const storedPayload = asObject(claimedRun.payload);
@@ -1098,7 +1120,6 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     // (pre-push Codex P1 on 61bff479f); an ambiguous throw keeps it.
     const prepRun = String(claimedRun.entity_type || '') === 'scheduled_service'
       && String(claimedRun.template_key || '').startsWith('prep.');
-    let freshPrepClaim = false;
     if (prepRun) {
       const fresh = await db('scheduled_services')
         .where({ id: claimedRun.entity_id })
@@ -1128,6 +1149,8 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
       idempotencyKey: claimedRun.idempotency_key,
       categories: ['email_template_automation', `automation_${claimedRun.automation_key}`],
       suppressionGroupKey: resolvedAutomation.suppression_group_key || undefined,
+      // Fires immediately before the provider call — the dispatch boundary.
+      onQueued: () => { prepDispatched = true; },
     });
     const status = result.blocked ? 'blocked' : 'sent';
     const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({
@@ -1142,19 +1165,8 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
       provider_message_id: result.message?.provider_message_id || null,
       deduped: !!result.deduped,
     });
-    if (status !== 'sent' && freshPrepClaim) {
-      // Definite no-delivery on a fresh claim: hand the page back.
-      try {
-        await db('scheduled_services')
-          .where({ id: claimedRun.entity_id, prep_template_key: claimedRun.template_key })
-          .whereNull('prep_sent_at')
-          .whereNull('prep_first_viewed_at')
-          .whereRaw('COALESCE(prep_view_count, 0) = 0')
-          .update({ prep_template_key: null });
-      } catch (releaseErr) {
-        logger.warn(`[email-template-automations] prep page release failed for service ${claimedRun.entity_id}: ${releaseErr.message}`);
-      }
-    }
+    // Definite no-delivery on a fresh claim: hand the page back.
+    if (status !== 'sent' && freshPrepClaim) await releaseFreshPrepClaim(claimedRun);
     // Prep guides: a CONFIRMED send stamps the visit's prep_sent_at (the
     // tracker's "prep actually went out" proof) and aligns the rendered
     // guide to the delivered template. Queue time is too early — a queued
@@ -1185,6 +1197,9 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
       attempt: attemptNumber,
       max_attempts: retryPolicy.maxAttempts,
     });
+    // Final failure BEFORE dispatch on a fresh claim: nobody received the
+    // page — hand it back. After dispatch it may have been delivered: keep.
+    if (freshPrepClaim && !prepDispatched) await releaseFreshPrepClaim(claimedRun);
     return failed || { ...running, status: 'failed', last_error: err.message };
   }
 }

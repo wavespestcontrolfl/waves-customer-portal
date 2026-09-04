@@ -1110,6 +1110,82 @@ describe('email template automation executor', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('a prep run that finally FAILS before dispatch hands its fresh page claim back; a post-dispatch throw keeps it (pre-push Codex P1 on e493a0711)', async () => {
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({ stop_if: ['appointment.cancelled', 'appointment.closed', 'appointment.past'] }),
+      retry_policy: JSON.stringify({ max_attempts: 1, backoff_minutes: [] }),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      max_attempts: 1,
+      payload: JSON.stringify({
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      }),
+    });
+    const failedRun = { ...queuedRun, status: 'failed' };
+    const trigger = () => AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: { scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+    const queues = (scheduledServices) => ({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [failedRun] }),
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'e1' }] }),
+        chain({ returning: [{ id: 'e2' }] }),
+        chain({ returning: [{ id: 'e3' }] }),
+      ],
+      scheduled_services: scheduledServices,
+    });
+
+    // Pre-dispatch throw (onQueued never fired): live read, fresh claim, release.
+    const releaseQuery = chain({});
+    setDbQueues(queues([
+      chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+      chain({ returning: [{ id: 'svc-1' }] }),
+      releaseQuery,
+    ]));
+    EmailTemplates.sendTemplate.mockRejectedValue(new Error('template missing'));
+    expect((await trigger()).results[0].run.status).toBe('failed');
+    expect(releaseQuery.update).toHaveBeenCalledWith({ prep_template_key: null });
+    expect(releaseQuery.whereNull).toHaveBeenCalledWith('prep_first_viewed_at');
+
+    // Post-dispatch throw: the page may have been delivered — no release
+    // (a release attempt would throw "Unexpected db table" here).
+    setDbQueues(queues([
+      chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+      chain({ returning: [{ id: 'svc-1' }] }),
+    ]));
+    EmailTemplates.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); throw new Error('post-dispatch bookkeeping'); });
+    expect((await trigger()).results[0].run.status).toBe('failed');
+  });
+
   describe('processDueRuns preview mode', () => {
     const dueRows = [
       { id: 'run-1', recipient_email: 'a@example.com', automation_key: 'k1', template_key: 't1', status: 'pending', run_after: new Date('2026-07-14T00:00:00.000Z') },
