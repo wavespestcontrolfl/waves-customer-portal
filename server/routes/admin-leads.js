@@ -784,6 +784,13 @@ router.get('/', async (req, res, next) => {
       const { whereBuilderWarrantyExpiring } = require('../services/dashboard-alerts');
       whereBuilderWarrantyExpiring(countQuery);
     }
+    // The source panel counts prospects (scopeToProspects: no non-engaged
+    // rows, no second wins) — its drill shows the same population, so the
+    // list matches the count the owner clicked (codex #3834 r24 P2).
+    if (source_name) {
+      query = query.modify(scopeToProspects);
+      countQuery.modify(scopeToProspects);
+    }
     // Dashboard drills (source panel + builder-warranty bell): mirror
     // excludeInternalLeads so the drilled rows match the count the owner
     // clicked. Scoped to the drill paths so the day-to-day list is unchanged.

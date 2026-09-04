@@ -68,6 +68,15 @@ async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKe
       `(estimate_id IS NULL OR EXISTS (SELECT 1 FROM estimates e WHERE e.id = leads.estimate_id AND e.archived_at IS NULL AND e.status IN (${OPEN_ESTIMATE_STATUSES.map(() => '?').join(', ')})))`,
       OPEN_ESTIMATE_STATUSES,
     )
+    // A wizard draft is mirrored through estimate_data.lead_id, not the FK
+    // (the FK is rescued only at send/view): a draft the office declined —
+    // or that expired or was archived — closed that courtship the same way,
+    // and the 'new' lead it left behind is not a live target either
+    // (codex #3834 r24 P1).
+    .whereRaw(
+      `NOT EXISTS (SELECT 1 FROM estimates e WHERE e.estimate_data->>'lead_id' = leads.id::text AND (e.archived_at IS NOT NULL OR e.status NOT IN (${OPEN_ESTIMATE_STATUSES.map(() => '?').join(', ')})))`,
+      OPEN_ESTIMATE_STATUSES,
+    )
     .where('created_at', '>', new Date(now - WIZARD_LEAD_REUSE_DAYS * 24 * 60 * 60 * 1000))
     // The token path only looks BACK: two lookup-minted rows for the same
     // inquiry reaching /calculate together must not each pick the other and
@@ -1963,8 +1972,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // flight (the r10 chain B → A → O) — is a second row for a
             // prospect the root now carries. Drop it; the root's own row is
             // rebuilt below when missing (codex #3834 r14 P1). A row already
-            // advanced past 'lead' is real engagement and stays.
-            await db('ad_service_attribution').where({ lead_id: lead.id, funnel_stage: 'lead' }).del();
+            // advanced past 'lead' is real engagement and stays. Conditioned
+            // in the same statement on the row STILL carrying this request's
+            // label, marker and typed identity: a second request on the token
+            // that reopened the row as 'new' in between keeps its only funnel
+            // row (codex r24 P2).
+            await db('ad_service_attribution')
+              .where({ lead_id: lead.id, funnel_stage: 'lead' })
+              .whereExists(db('leads').select(db.raw('1')).where({ id: lead.id, status: 'duplicate' }).whereRaw("extracted_data->>'duplicate_of_lead_id' = ?", [duplicateOfLeadId]).modify(scopedToTypedIdentity))
+              .del();
           }
         }
       }

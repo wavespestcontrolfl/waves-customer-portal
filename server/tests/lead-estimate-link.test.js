@@ -31,6 +31,8 @@ const {
   attachLeadToEstimate,
   markLinkedLeadEstimateAccepted,
   markLinkedLeadEstimateSent,
+  resolveEstimateEventLeads,
+  findWizardRepeatRow,
   markLinkedLeadEstimateViewed,
   convertLeadFromEvent,
   linkLeadEstimatesToCustomer,
@@ -717,9 +719,15 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
           // customerHasWonLead: .where({ customer_id, status: 'won' })
           // .whereNull('deleted_at').first('id')
           if (table === 'leads' && clause && 'customer_id' in clause && 'status' in clause) {
+            let scopedEstimate = null; // the estimate an estimate-scoped event pins the prior-win check to (codex r24 P1)
             const won = {
               whereNull: () => won,
-              first: async () => opts.customerWonLead || null,
+              modify: (fn) => { fn(won); return won; },
+              where: (fn) => { const q = { whereNull: () => q, orWhere: (col, val) => { scopedEstimate = val; return q; } }; fn(q); return won; },
+              first: async () => {
+                const w = opts.customerWonLead || null;
+                return w && (!scopedEstimate || !w.estimate_id || w.estimate_id === scopedEstimate) ? w : null;
+              },
             };
             return won;
           }
@@ -729,6 +737,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
             const open = {
               whereNull: () => open,
               whereNotIn: () => Promise.resolve(opts.customerOpenLeads || []),
+              whereIn: (col, vals) => Promise.resolve((opts.customerOpenLeads || []).filter((l) => vals.includes(l.status))),
             };
             return open;
           }
@@ -1234,6 +1243,69 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
     expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep-spam'] });
     expect(markConverted).not.toHaveBeenCalledWith('L-root-spam', expect.anything());
+  });
+
+  test('findWizardRepeatRow: only a quote_wizard row carrying the duplicate marker is a repeat — a call lead is never one (codex r24 P1)', async () => {
+    const rows = {
+      rep: { id: 'rep', lead_type: 'quote_wizard', extracted_data: { duplicate_of_lead_id: 'root' } },
+      call: { id: 'call', lead_type: 'inbound_call', extracted_data: null },
+      wiz: { id: 'wiz', lead_type: 'quote_wizard', extracted_data: {} },
+    };
+    const database = () => ({ where: (col, id) => ({ first: async () => rows[id] || null }) });
+    await expect(findWizardRepeatRow(database, 'rep')).resolves.toBe(rows.rep);
+    await expect(findWizardRepeatRow(database, 'call')).resolves.toBeNull();
+    await expect(findWizardRepeatRow(database, 'wiz')).resolves.toBeNull();
+    await expect(findWizardRepeatRow(database, 'missing')).resolves.toBeNull();
+  });
+
+  test('self-booking: a SPAM root already among the customer\'s linked rows never reaches the candidate set (positive open filter) — its repeat stands in (codex r24 P1)', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const spamRoot = { id: 'L-root-spam2', status: 'spam', customer_id: 'c1', first_contact_at: '2026-08-30T12:00:00Z' };
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [spamRoot],
+      customerDuplicateLead: { id: 'L-rep-spam2', status: 'duplicate', customer_id: 'c1', extracted_data: { duplicate_of_lead_id: 'L-root-spam2' }, first_contact_at: '2026-09-01T12:00:00Z' },
+      leadsById: { 'L-root-spam2': spamRoot },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep-spam2'] });
+    expect(markConverted).not.toHaveBeenCalledWith('L-root-spam2', expect.anything());
+  });
+
+  test('deposit_paid: a root WON through a different estimate neither stands for its repeat nor makes the customer established for THIS estimate (codex r24 P1)', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const wonRoot = { id: 'L-won-e1', status: 'won', customer_id: 'c1', estimate_id: 'e1', first_contact_at: '2026-08-30T12:00:00Z' };
+    const database = makeConvertDb({
+      estimate: { id: 'e2', status: 'accepted', customer_id: 'c1', monthly_total: 80 },
+      leadsByEstimate: [],
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLead: { id: 'L-rep-e2b', status: 'duplicate', customer_id: 'c1', extracted_data: { duplicate_of_lead_id: 'L-won-e1' }, first_contact_at: '2026-09-01T12:00:00Z' },
+      leadsById: { 'L-won-e1': wonRoot },
+      customerWonLead: wonRoot,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'deposit_paid', estimateId: 'e2', customerId: 'c1', database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep-e2b'] });
+  });
+
+  test('send/view: a marker followed to a SPAM root does not link the estimate to it (a followed root must be open by positive membership — codex r24 P1)', async () => {
+    const rows = {
+      'lead-dupS': { id: 'lead-dupS', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-spamS' } },
+      'lead-spamS': { id: 'lead-spamS', status: 'spam', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' },
+    };
+    const estimate = { id: 'estimate-S', estimate_data: { lead_id: 'lead-dupS' }, customer_phone: '9415550142', customer_email: 'a@example.com' };
+    const database = (table) => ({
+      where(clause) {
+        if (table === 'leads' && 'estimate_id' in clause) return Promise.resolve([]);
+        if (table === 'leads') return { first: async () => rows[clause.id] || null };
+        if (table === 'estimates') return { first: async () => estimate };
+        return Promise.resolve([]);
+      },
+    });
+    await expect(resolveEstimateEventLeads(database, 'estimate-S')).resolves.toEqual({ leads: [], rescued: false });
   });
 
   test('deposit_paid: a repeat whose open root is linked to a DIFFERENT estimate stands in for it — the root is out of scope, the repeat converts (codex r22 P1)', async () => {
@@ -2142,6 +2214,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
         if (table === 'leads' && clause && 'customer_id' in clause && 'status' in clause) {
           const won = {
             whereNull: () => won,
+            modify: (fn) => { fn(won); return won; },
             first: async () => opts.customerWonLead || null,
           };
           return won;

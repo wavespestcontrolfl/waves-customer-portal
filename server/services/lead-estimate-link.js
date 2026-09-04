@@ -66,6 +66,15 @@ async function followDuplicateLink(database, lead) {
   return current;
 }
 
+// The lead row when it is a wizard repeat — a quote_wizard row carrying the
+// duplicate marker — else null. The one kind of lead whose missing funnel
+// row is a gap to repair rather than a slot left empty on purpose
+// (markConverted; codex #3834 r22 P2, r24 P1).
+async function findWizardRepeatRow(database, leadId) {
+  const row = await database('leads').where('id', leadId).first();
+  return duplicateMarkerOf(row) && row.lead_type === 'quote_wizard' ? row : null;
+}
+
 // The ancestry a repeat belongs to, for grouping repeats of one inquiry: the
 // live non-duplicate root the marker chain reaches, or — when the chain
 // dead-ends (a vanished or deleted hop) — the LAST recorded marker on it, so
@@ -269,11 +278,15 @@ async function resolveEstimateEventLeads(database, estimateId, { originatingNotA
   const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id || null;
   if (dataLeadId) {
     const lead = await followDuplicateLink(database, await database('leads').where({ id: dataLeadId }).first());
+    // A FOLLOWED root must be open by positive membership: linking the
+    // estimate to a spam or cancelled root would hand acceptance the
+    // authoritative FK branch, which converts unconditionally (codex #3834
+    // r24 P1). The named row itself keeps the not-closed rule.
+    const live = lead && (lead.id === dataLeadId ? !CLOSED_LEAD_STATUSES.has(lead.status) : OPEN_LEAD_STATUSES.includes(lead.status));
     if (
-      lead
+      live
       && !lead.deleted_at
       && !lead.estimate_id
-      && !CLOSED_LEAD_STATUSES.has(lead.status)
       && leadMatchesEstimateContact(lead, estimate)
     ) {
       return { leads: [lead], rescued: true, estimate };
@@ -944,12 +957,16 @@ async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } =
 // originating lead that already carries a `customer_id` while still open never
 // auto-converts. convertLeadFromEvent gates this (single open lead + the
 // customer's FIRST close) so it can't sweep an established customer's add-on.
+// Open by positive membership (OPEN_LEAD_STATUSES), never NOT-closed: a
+// spam or cancelled row is not answerable, and read as "open" here it would
+// silence its own repeats and then lose the open-status claim (codex #3834
+// r24 P1).
 async function findOpenLeadsForCustomer(database, customerId) {
   if (!customerId) return [];
   return database('leads')
     .where({ customer_id: customerId })
     .whereNull('deleted_at')
-    .whereNotIn('status', [...CLOSED_LEAD_STATUSES]);
+    .whereIn('status', OPEN_LEAD_STATUSES);
 }
 
 // First-close guard: if this customer already has a WON lead, a separate open
@@ -957,11 +974,15 @@ async function findOpenLeadsForCustomer(database, customerId) {
 // auto-convert on a routine invoice/visit. A genuinely-won add-on still
 // converts through the authoritative estimate-link path when its estimate is
 // accepted.
-async function customerHasWonLead(database, customerId) {
+// For an estimate-scoped event, a lead won through a DIFFERENT estimate is a
+// different deal (the rule every other scope check here applies) and does
+// not make the customer established for this one (codex #3834 r24 P1).
+async function customerHasWonLead(database, customerId, { estimateId = null } = {}) {
   if (!customerId) return false;
   const won = await database('leads')
     .where({ customer_id: customerId, status: 'won' })
     .whereNull('deleted_at')
+    .modify((qb) => { if (estimateId) qb.where((q) => q.whereNull('estimate_id').orWhere('estimate_id', estimateId)); })
     .first('id');
   return !!won;
 }
@@ -1113,7 +1134,7 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
     });
     return { reason: 'ambiguous_customer_link' };
   }
-  const established = wonAncestry || await customerHasWonLead(database, customerId);
+  const established = wonAncestry || await customerHasWonLead(database, customerId, { estimateId });
   const originating = await isOriginatingLead(database, customerId, scoped[0]);
   if (established || !originating) {
     logger.warn(`[lead-trigger] ${source} customer-link skip (established=${established}, originating=${originating})`, {
@@ -1693,6 +1714,7 @@ module.exports = {
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
   followDuplicateLink,
+  findWizardRepeatRow,
   stampFirstResponseByContact,
   resolveEstimateEventLeads,
   convertLeadFromEvent,

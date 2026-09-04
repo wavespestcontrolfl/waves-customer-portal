@@ -45,6 +45,11 @@ describe('findPriorOpenWizardLeadId', () => {
     // courtship — the rerun files as a fresh lead (codex r4 P1).
     expect(calls.whereRaw[4][0]).toMatch(/estimate_id IS NULL OR EXISTS \(SELECT 1 FROM estimates e WHERE e\.id = leads\.estimate_id AND e\.archived_at IS NULL AND e\.status IN \(\?, \?, \?, \?\)\)/);
     expect(calls.whereRaw[4][1]).toEqual(OPEN_ESTIMATE_STATUSES);
+    // ...and a lead whose MIRRORED wizard draft (estimate_data.lead_id, no
+    // FK until send/view) was declined, expired or archived is not a live
+    // courtship either (codex r24 P1).
+    expect(calls.whereRaw[5][0]).toMatch(/NOT EXISTS \(SELECT 1 FROM estimates e WHERE e\.estimate_data->>'lead_id' = leads\.id::text AND \(e\.archived_at IS NOT NULL OR e\.status NOT IN \(\?, \?, \?, \?\)\)\)/);
+    expect(calls.whereRaw[5][1]).toEqual(OPEN_ESTIMATE_STATUSES);
     const [col, op, cutoff] = calls.where[1];
     expect([col, op]).toEqual(['created_at', '>']);
     expect(cutoff.getTime()).toBe(now - _internals.WIZARD_LEAD_REUSE_DAYS * 86400000);
@@ -195,7 +200,9 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // (its earlier stamp, or a concurrent repeat's root repair that picked
     // it while the relabel was in flight) — the root carries the prospect
     // (codex r14 P1).
-    expect(block).toMatch(/if \(relabelled && duplicateOfLeadId\) \{[\s\S]*?await db\('ad_service_attribution'\)\.where\(\{ lead_id: lead\.id, funnel_stage: 'lead' \}\)\.del\(\);/);
+    // ...in ONE statement conditioned on the row still carrying this
+    // request's label, marker and typed identity (codex r24 P2).
+    expect(block).toMatch(/if \(relabelled && duplicateOfLeadId\) \{[\s\S]*?await db\('ad_service_attribution'\)\n\s+\.where\(\{ lead_id: lead\.id, funnel_stage: 'lead' \}\)\n\s+\.whereExists\(db\('leads'\)\.select\(db\.raw\('1'\)\)\.where\(\{ id: lead\.id, status: 'duplicate' \}\)\.whereRaw\("extracted_data->>'duplicate_of_lead_id' = \?", \[duplicateOfLeadId\]\)\.modify\(scopedToTypedIdentity\)\)\n\s+\.del\(\);/);
     // ...and a relabel that did not land leaves the request on the marker
     // the row actually carries (pre-push P1 on r9).
     // ...re-read from the database, not the marker this request read before

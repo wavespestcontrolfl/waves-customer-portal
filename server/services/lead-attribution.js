@@ -212,27 +212,29 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // Mirror the win onto the lead's ad_service_attribution funnel row
   // (won → 'booked'; 'completed' stays the revenue sync's to write). Monotonic
   // in SQL and best-effort — never blocks the conversion.
-  // A win the bridge could not land on any row — the lead's funnel row was
-  // never stamped, or /calculate dropped it when the row was filed as a
-  // repeat and staff converted that repeat by hand — is rebuilt here from
-  // the row's own stored touch, at booked, so no conversion path (admin
-  // convert, referral) leaves a won lead invisible to the Ads funnel
-  // (codex #3834 r22 P2). Idempotent on lead_id and a no-op without a
-  // stored touch, like the intake stamp it stands in for.
+  // A wizard repeat's win the bridge could not land on any row — /calculate
+  // dropped the row's lead-stage funnel row when it was filed as a repeat,
+  // and staff converted that repeat by hand (admin convert, referral) — is
+  // rebuilt here from the row's own stored touch, at booked (codex #3834
+  // r22 P2). ONLY a repeat (quote_wizard row carrying the marker): every
+  // other lead with no row has none on purpose — an inbound call on the Ads
+  // bridge number leaves its slot empty for the delayed bridge to claim as
+  // paid, and a generic rebuild would stamp it organic first (codex r24 P1).
   const bridged = await bridgeLeadFunnelStage(leadId, 'won');
-  if (!funnelRowFor && !bridged.updated) funnelRowFor = await db('leads').where('id', leadId).first();
-  if (funnelRowFor) await stampLeadFunnelRow(db, funnelRowFor, { customerId: customerId || null, funnelStage: 'booked' });
+  if (!funnelRowFor && !bridged.updated) funnelRowFor = await require('./lead-estimate-link').findWizardRepeatRow(db, leadId);
+  const linkedCustomer = customerId || null;
+  if (funnelRowFor) await stampLeadFunnelRow(db, funnelRowFor, { customerId: linkedCustomer, funnelStage: 'booked' });
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now
   // a lead estimate kept customer_id = NULL and was invisible/unbookable). Lazy
   // require breaks the lead-estimate-link ⇄ lead-attribution cycle. Best-effort:
   // a backfill miss must never break the conversion.
-  if (customerId) {
+  if (linkedCustomer) {
     try {
       const lead = await db('leads').where('id', leadId).first('id', 'estimate_id', 'phone', 'email');
       const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
-      await linkLeadEstimatesToCustomer({ lead, customerId });
+      await linkLeadEstimatesToCustomer({ lead, customerId: linkedCustomer });
     } catch (err) {
       logger.warn(`[LeadAttribution] estimate→customer backfill failed for lead ${leadId}: ${err.message}`);
     }
