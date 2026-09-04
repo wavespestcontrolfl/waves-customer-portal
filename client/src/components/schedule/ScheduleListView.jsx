@@ -180,8 +180,27 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
     enabled: bulkAction === 'reschedule' && !!bulkDate,
   });
 
+  // Bulk cancel writes one row per selected id — the bulk-action route
+  // has no scope, so a selected visit of a recurring plan is cancelled
+  // alone and its plan keeps generating visits. Say so in the bar while
+  // Cancel is chosen, and once more on Apply. Ending a plan stays with the
+  // scoped cancel (appointment sidebar / Edit appointment modal). The
+  // meta ref is filled synchronously before setSelected, so keying the
+  // memo on `selected` reads a complete map.
+  const recurringSelectedCount = useMemo(
+    () => Array.from(selected).filter((id) => selectedMetaRef.current.get(id)?.isRecurring).length,
+    [selected],
+  );
+  const bulkCancelPlanNotice = recurringSelectedCount > 0
+    ? `${recurringSelectedCount} of the selected visits ${recurringSelectedCount === 1 ? 'is' : 'are'} part of a recurring plan. Only ${recurringSelectedCount === 1 ? 'that visit is' : 'those visits are'} cancelled and each plan continues. To end a plan, cancel it from the appointment sidebar or the Edit appointment modal.`
+    : '';
+
   const executeBulkAction = async () => {
     if (!bulkAction || selected.size === 0) return;
+    if (bulkAction === 'cancel' && bulkCancelPlanNotice) {
+      const ok = window.confirm(`${bulkCancelPlanNotice}\n\nCancel ${selected.size} selected visit${selected.size === 1 ? '' : 's'}?`);
+      if (!ok) return;
+    }
     setBulkBusy(true);
     try {
       // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this bulk mover
@@ -406,6 +425,11 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
                 ? `⚠️ ${bulkConflicts.conflictCount} of the selected visits overlap existing appointments on ${bulkDate}.`
                 : '⚠️ Overlap check covered only the first 25 selected visits.'}
               {bulkConflicts.conflictCount > 0 && bulkConflicts.truncated ? ' (checked first 25)' : ''}
+            </span>
+          )}
+          {bulkAction === 'cancel' && bulkCancelPlanNotice && (
+            <span className="basis-full text-11" style={{ color: '#FDE68A' }}>
+              ⚠️ {bulkCancelPlanNotice}
             </span>
           )}
         </div>
