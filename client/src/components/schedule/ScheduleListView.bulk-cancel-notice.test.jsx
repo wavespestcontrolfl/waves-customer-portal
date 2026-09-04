@@ -10,6 +10,8 @@ const BASE_ROWS = [
   { id: 'svc-once', customerName: 'Sam Once', serviceType: 'Flea Treatment', scheduledDate: '2026-09-11', status: 'confirmed', isRecurring: false },
   // A booster: stored is_recurring=false but linked to its plan.
   { id: 'svc-boost', customerName: 'Bo Booster', serviceType: 'Mosquito Booster', scheduledDate: '2026-09-12', status: 'confirmed', isRecurring: false, recurringParentId: 'svc-plan' },
+  // A legacy series row: recurring_pattern only, no is_recurring flag.
+  { id: 'svc-legacy', customerName: 'Lee Legacy', serviceType: 'Lawn Care', scheduledDate: '2026-09-13', status: 'confirmed', isRecurring: null, recurringPattern: 'monthly' },
 ];
 let ROWS = BASE_ROWS;
 
@@ -62,6 +64,28 @@ describe('ScheduleListView bulk cancel — recurring plan notice', () => {
     fireEvent.click(boxes[3]); // svc-boost
     chooseCancel();
     expect(screen.getByText(/belong to a recurring plan: 1\./)).toBeInTheDocument();
+  });
+
+  it('counts a legacy recurring-pattern row with no isRecurring flag', async () => {
+    await renderWithRows();
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[2]); // svc-once
+    fireEvent.click(boxes[4]); // svc-legacy
+    chooseCancel();
+    expect(screen.getByText(/belong to a recurring plan: 1\./)).toBeInTheDocument();
+  });
+
+  it('disables Apply while the list is refreshing', async () => {
+    const view = await renderWithRows({ refreshKey: 0 });
+    fireEvent.click(screen.getAllByRole('checkbox')[2]);
+    chooseCancel();
+    expect(screen.getByRole('button', { name: 'Apply' })).not.toBeDisabled();
+    let release;
+    global.fetch = vi.fn(() => new Promise((resolve) => { release = () => resolve({ ok: true, json: async () => ({ services: ROWS, total: ROWS.length }) }); }));
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} />);
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
+    release();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Apply' })).not.toBeDisabled());
   });
 
   it('re-reads a selected row when the host bumps refreshKey after an edit', async () => {

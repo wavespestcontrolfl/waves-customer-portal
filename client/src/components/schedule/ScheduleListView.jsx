@@ -60,9 +60,11 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
       scheduledDate: s.scheduledDate ? String(s.scheduledDate).split('T')[0] : '',
       isRecurring: !!(s.isRecurring ?? s.is_recurring),
       // Plan membership for the bulk-cancel notice: boosters are stored
-      // is_recurring=false but carry recurring_parent_id, and cancelling
-      // one alone leaves its plan running just the same (Codex #3868 r1).
-      inPlan: !!(s.isRecurring ?? s.is_recurring) || !!(s.recurringParentId ?? s.recurring_parent_id),
+      // is_recurring=false but carry recurring_parent_id, and legacy series
+      // rows carry only recurring_pattern (the shape #3857 handles in the
+      // mobile sheet); cancelling either alone leaves its plan running just
+      // the same (Codex #3868 r1 + r4).
+      inPlan: !!(s.isRecurring ?? s.is_recurring) || !!(s.recurringParentId ?? s.recurring_parent_id) || !!(s.recurringPattern ?? s.recurring_pattern),
     });
   }, []);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -127,7 +129,15 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
         selectedMetaRef.current.delete(editedId);
         setSelected((prev) => { const next = new Set(prev); next.delete(editedId); return next; });
       }
-    } catch { setServices([]); setTotal(0); }
+    } catch {
+      setServices([]); setTotal(0);
+      // Save-driven refresh failed: the edited row cannot be verified, so
+      // it leaves the selection (fail closed, Codex #3868 r4).
+      if (editedId) {
+        selectedMetaRef.current.delete(editedId);
+        setSelected((prev) => { const next = new Set(prev); next.delete(editedId); return next; });
+      }
+    }
     setLoading(false);
   }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page, rememberSelectedMeta]);
 
@@ -433,7 +443,9 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
               size="sm"
               variant="secondary"
               onClick={executeBulkAction}
-              disabled={bulkBusy || (bulkAction === 'reschedule' && !bulkDate) || (bulkAction === 'mark_prepaid' && !bulkPrepaidAmount)}
+              // loading: a bulk action must not read selection meta while
+              // the save-driven refresh is still in flight (Codex #3868 r4).
+              disabled={bulkBusy || loading || (bulkAction === 'reschedule' && !bulkDate) || (bulkAction === 'mark_prepaid' && !bulkPrepaidAmount)}
               className="rounded-sm"
             >
               {bulkBusy ? 'Applying…' : 'Apply'}
