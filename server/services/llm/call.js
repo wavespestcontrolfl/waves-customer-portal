@@ -296,8 +296,11 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
       // other terminal state (failed, cancelled …) is the provider's failure
       // — its own code, filed as provider, never as incomplete output.
       const code = data.status === 'incomplete' ? 'openai_incomplete' : `openai_${String(data.status).toLowerCase().replace(/[^a-z_]/g, '_')}`;
-      const detail = data.incomplete_details?.reason || data.error?.code || data.error?.message;
-      logger.warn(`[llm] OpenAI response ${data.status}${detail ? ` (${detail})` : ''}`);
+      // Bounded diagnostics only: a provider error MESSAGE can quote the
+      // rejected input, so the reason / error code and response id are
+      // logged and the message never is (the redacted trace keeps the body).
+      const detail = data.incomplete_details?.reason || data.error?.code;
+      logger.warn(`[llm] OpenAI response ${data.status}${detail ? ` (${detail})` : ''} (${data.id || 'no id'})`);
       recordLedgerCall(base, { ...served, ok: false, errorCode: code, response: out });
       return { ok: false, reason: code };
     }

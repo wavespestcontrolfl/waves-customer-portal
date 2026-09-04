@@ -149,8 +149,12 @@ describe('llm call ledger', () => {
 
     it('a failed / cancelled Responses body is the provider\'s failure (openai_<status> → provider), never openai_incomplete', async () => {
       const { call } = load();
-      global.fetch = fetchJson({ ...OPENAI_BODY, status: 'failed', error: { code: 'server_error', message: 'boom' } });
+      global.__llmWarns = [];
+      global.fetch = fetchJson({ ...OPENAI_BODY, status: 'failed', error: { code: 'server_error', message: 'rejected input: Jane Doe 941-555-0100' } });
       expect(await call.callOpenAI({ model: 'm', text: 't' })).toEqual({ ok: false, reason: 'openai_failed' });
+      // the provider's error MESSAGE can quote the input — only its code and the response id are logged
+      expect(global.__llmWarns.join("\n")).toMatch(/OpenAI response failed \(server_error\) \(resp_1\)/);
+      expect(global.__llmWarns.join("\n")).not.toMatch(/Jane Doe|941-555/);
       global.fetch = fetchJson({ ...OPENAI_BODY, status: 'cancelled' });
       expect(await call.callOpenAI({ model: 'm', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'openai_cancelled' });
       await flush();
