@@ -46,7 +46,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
-const { findLiveRestockRequest } = require('./live-restock-request');
+const { findLiveRestockRequest, LIVE_RESTOCK_STATUSES } = require('./live-restock-request');
 
 const GATE = 'GATE_AUTO_REORDER';
 const SOURCE = 'auto_reorder';
@@ -63,16 +63,18 @@ function parseMeta(raw) {
   try { return JSON.parse(raw) || {}; } catch { return {}; }
 }
 
-// Every active auto-reorder product — NOT only the low ones: an open
-// request must be found and re-belled even after the threshold or count it
-// was raised against was cleared; the low-stock decision (stillLow) is made
-// per product after the live-request check, then again under the lock
-// (Codex r15 P2).
+// Every auto-reorder product PLUS every product that still carries a live
+// auto request — NOT only the low, enabled ones: an open request must be
+// found and re-belled even after the threshold, the count or "reorder when
+// low" itself was cleared; creation eligibility (stillLow: enabled, active,
+// low) is decided per product after the live-request check, then again
+// under the lock (Codex r15 P2, r16 P2).
 async function findLowStockCandidates(conn = db) {
   return conn('products_catalog as pc')
     .leftJoin('vendors as v', 'v.id', 'pc.auto_reorder_vendor_id')
-    .where('pc.auto_reorder_enabled', true)
-    .where('pc.active', true)
+    .where((q) => q.where('pc.auto_reorder_enabled', true).orWhereExists(function liveAutoRequest() {
+      this.select(1).from('product_restock_requests as prr').whereRaw('prr.product_id = pc.id').whereIn('prr.status', LIVE_RESTOCK_STATUSES).where('prr.source', SOURCE);
+    }))
     .select(
       'pc.id', 'pc.name', 'pc.inventory_on_hand', 'pc.inventory_unit', 'pc.low_stock_threshold',
       'pc.reorder_quantity', 'pc.auto_reorder_vendor_id', 'pc.auto_reorder_enabled', 'pc.active',
