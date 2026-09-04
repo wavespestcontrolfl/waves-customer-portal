@@ -280,11 +280,15 @@ async function createRequestLocked(conn, p) {
 
 async function sweepProduct(ctx, p) {
   const { conn, result } = ctx;
+  // A live request comes FIRST: it carries its own quantity and unit, so a
+  // reorder quantity cleared after it was raised must not stop its bell
+  // from being retried (Codex r14 P2). Creation-only configuration is
+  // checked only when there is something to create.
+  const existing = await findLiveRestockRequest(conn, p.id);
+  if (existing) { await handleLiveRequest(ctx, p, existing); return; }
   if (!p.inventory_unit) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_unit' }); return; }
   const reorderQty = num(p.reorder_quantity);
   if (!reorderQty || reorderQty <= 0) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_reorder_quantity' }); return; }
-  const existing = await findLiveRestockRequest(conn, p.id);
-  if (existing) { await handleLiveRequest(ctx, p, existing); return; }
 
   const outcome = await createRequestLocked(conn, p);
   if (outcome.deduped) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: outcome.deduped }); return; }

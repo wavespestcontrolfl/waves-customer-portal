@@ -274,6 +274,16 @@ test('reorder quantity cleared under the lock → unconfigured, no row', async (
   expect(res.unconfigured[0]).toMatchObject({ reason: 'no_reorder_quantity' });
 });
 
+test('an open auto request still re-rings when the product\'s reorder quantity was cleared afterwards (Codex r14 P2)', async () => {
+  mockState.candidates = [{ ...lowSign, reorder_quantity: null }];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Gemplers', metadata: { vendorId: 'vend-gemplers' } };
+  const notify = jest.fn(async () => ({}));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.unconfigured).toHaveLength(0);
+  expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
+  expect(notify).toHaveBeenCalledTimes(1);
+});
+
 test('no reorder_quantity → unconfigured, no row', async () => {
   mockState.candidates = [{ ...lowSign, reorder_quantity: null }];
   const notify = jest.fn(async () => ({}));

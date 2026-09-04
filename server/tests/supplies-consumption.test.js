@@ -245,6 +245,16 @@ test('notifyAdmin resolving null (its own persistence failure) counts as a lost 
   expect(require('../services/logger').error).toHaveBeenCalledWith(expect.stringContaining('failure bell NOT sent'));
 });
 
+test('a failed consumables lookup rings ONE visit-scoped deduped bell (Codex r14 P2)', async () => {
+  notifyAdmin.mockClear();
+  const db = () => { throw new Error('relation lost'); };
+  db.transaction = async () => { throw new Error('unreachable'); };
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('supplies-consumption-failed:lookup:svc-1');
+});
+
 test('a successful deduction rings no bell', async () => {
   notifyAdmin.mockClear();
   const { db } = fakeDb({ products: [sign] });
