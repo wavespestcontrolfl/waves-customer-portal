@@ -12,17 +12,21 @@ const mockInsert = jest.fn();
 const mockMerge = jest.fn();
 // failCall writes where({ id }).update(patch) against a call row the adapter filed as ok.
 const mockUpdate = jest.fn(() => Promise.resolve(1));
+// The session row already in the table when a turn is recorded (null = first turn).
+let sessionPrev = null;
 const mockDb = jest.fn((table) => ({
   insert: (row) => {
     const p = mockInsert(table, row);
     p.onConflict = (target) => ({ merge: (updates) => { mockMerge(table, target, updates); return { returning: p.returning }; } });
     return p;
   },
-  where: (cond) => ({ update: (patch) => mockUpdate(table, cond, patch) }),
+  where: (cond) => ({ update: (patch) => mockUpdate(table, cond, patch), first: () => Promise.resolve(sessionPrev) }),
 }));
 jest.mock('../models/db', () => {
   const db = (...args) => mockDb(...args);
   db.raw = (sql) => sql;
+  // the session recorder reads-then-writes inside one transaction
+  db.transaction = async (fn) => { const trx = (...args) => mockDb(...args); trx.raw = () => Promise.resolve(); return fn(trx); };
   return db;
 });
 // warn lines are captured globally: each isolateModules load gets its own mock instance.
@@ -57,7 +61,8 @@ function load() {
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-const ledgerRows = () => mockInsert.mock.calls.filter(([t]) => t === 'llm_dispatch_log').map(([, row]) => row);
+const ledgerRows = () => mockInsert.mock.calls.filter(([t, row]) => t === 'llm_dispatch_log' && row.row_kind !== 'session_turn').map(([, row]) => row);
+const turnRows = () => mockInsert.mock.calls.filter(([t, row]) => t === 'llm_dispatch_log' && row.row_kind === 'session_turn').map(([, row]) => row);
 const callRows = () => ledgerRows().filter((r) => r.row_kind === 'call');
 
 function fetchJson(data, { ok = true, status = 200 } = {}) {
@@ -614,7 +619,7 @@ describe('llm call ledger', () => {
       global.fetch = jest.fn(() => Promise.reject(new Error('network')));
       const { metrics } = load();
       await expect(metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's2', model: 'req-m', startedAt: Date.now() - 10 })).resolves.toEqual(expect.any(Number));
-      expect(ledgerRows()[0]).toMatchObject({ row_kind: 'session', provider_ref: 's2', ok: true, error_code: null, input_tokens: null, output_tokens: null, requested_model: 'req-m', served_model: null, last_activity_at: expect.any(Date) });
+      expect(ledgerRows()[0]).toMatchObject({ row_kind: 'session', provider_ref: 's2', ok: true, error_code: null, input_tokens: null, output_tokens: null, requested_model: 'req-m', served_model: null });
       global.fetch = jest.fn(() => Promise.reject(new Error('network')));
       await metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's3', failure: 'streaming_failed' });
       expect(ledgerRows()[1]).toMatchObject({ provider_ref: 's3', ok: false, error_code: 'streaming_failed', input_tokens: null });
@@ -629,14 +634,41 @@ describe('llm call ledger', () => {
       expect(table).toBe('llm_dispatch_log');
       expect(String(target)).toBe("(provider_ref) WHERE row_kind = 'session'");
       // counters and latency only grow
-      for (const col of ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens', 'latency_ms', 'last_activity_at']) {
+      for (const col of ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens', 'latency_ms']) {
         expect(String(updates[col])).toBe(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
       }
       // a terminal status is sticky: ok only ever goes false, the first error and served model stay
       expect(String(updates.ok)).toBe('(llm_dispatch_log.ok AND EXCLUDED.ok)');
       for (const col of ['error_code', 'error_class', 'served_model']) expect(String(updates[col])).toBe(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
       // the first write's identity and context stay: nothing else is merged
-      expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'last_activity_at', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
+      expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
+    });
+
+    it('writes one session_turn row per recorded turn carrying that turn\'s delta of the counters, this turn\'s latency and outcome', async () => {
+      const { metrics } = load();
+      // first turn: no session row yet → the delta is the whole snapshot
+      sessionPrev = null;
+      global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 250, output_tokens: 40 } });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: Date.now() - 50 });
+      expect(turnRows()).toHaveLength(1);
+      expect(turnRows()[0]).toMatchObject({ row_kind: 'session_turn', lane_id: 'agent_assistant', provider_ref: 'sess_9', ok: true, input_tokens: 250, output_tokens: 40, cached_input_tokens: null });
+      expect(turnRows()[0].latency_ms).toBeGreaterThanOrEqual(50);
+      // second turn: the cumulative snapshot grew by 100 / 5 → only that lands on the turn row
+      sessionPrev = { input_tokens: 250, cached_input_tokens: null, cache_write_tokens: null, output_tokens: 40, reasoning_tokens: null };
+      global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 350, output_tokens: 45 } });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'streaming_failed' });
+      expect(turnRows()[1]).toMatchObject({ input_tokens: 100, output_tokens: 5, ok: false, error_code: 'streaming_failed' });
+      // a delayed lower snapshot never goes negative; a failed usage GET stays null, not zero
+      sessionPrev = { input_tokens: 400, cached_input_tokens: null, cache_write_tokens: null, output_tokens: 50, reasoning_tokens: null };
+      global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 350, output_tokens: 45 } });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9' });
+      expect(turnRows()[2]).toMatchObject({ input_tokens: 0, output_tokens: 0 });
+      global.fetch = jest.fn(() => Promise.reject(new Error('network')));
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9' });
+      expect(turnRows()[3]).toMatchObject({ input_tokens: null, output_tokens: null });
+      // the session row itself is still the ONE cumulative upsert per turn
+      expect(mockMerge).toHaveBeenCalledTimes(4);
+      sessionPrev = null;
     });
 
     it('is a no-op while the gate is off', async () => {

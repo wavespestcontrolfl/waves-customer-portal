@@ -197,7 +197,7 @@ describe('readLanes / readAreas', () => {
     ];
     const out = await hubRead.readLanes({ area: 'sms', now: NOW });
     expect(out.phases).toEqual({ ledger: false, runs: false, cost: false, verification: false });
-    expect(out.basis).toMatchObject({ source: 'llm_dispatch_log', rowKinds: ['call', 'session'], workloads: ['live'], sessionAttribution: 'last_activity', ledgerRecording: false, window: { key: '7d', unit: 'day' } });
+    expect(out.basis).toMatchObject({ source: 'llm_dispatch_log', rowKinds: ['call', 'session_turn'], workloads: ['live'], sessions: 'per_turn', ledgerRecording: false, window: { key: '7d', unit: 'day' } });
     expect(out.counts).toEqual({ all: out.lanes.length, active: 1, attention: 1, idle: out.lanes.length - 2 });
     expect(out.lanes.every((l) => l.area === 'sms')).toBe(true);
     expect(out.lanes.slice(0, 2).map((l) => [l.id, l.status])).toEqual([['sms_draft', 'attention'], ['sms_tone', 'active']]);

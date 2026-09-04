@@ -33,8 +33,12 @@
  * The same table is also the CALL LEDGER (agent-control S2a): behind the
  * separate GATE_LLM_CALL_LEDGER, every provider call through the llm adapters
  * writes one row_kind='call' row (tokens, latency, served model, error
- * class) and every Managed Agents session one row_kind='session' row, each
- * stamped with the ambient agent-control lane / chain / run / step ids. Chain
+ * class) and every Managed Agents session one row_kind='session' row (the
+ * cumulative session) plus one row_kind='session_turn' row per recorded
+ * turn carrying that turn's DELTA of the counters — what a windowed read
+ * sums, so a session live across a window edge never drags its earlier
+ * turns along. Each is stamped with the ambient agent-control lane / chain
+ * / run / step ids. Chain
  * rows and heartbeats keep their row_kind so the digest above reads exactly
  * what it always did. Redacted bodies (GATE_LLM_CALL_TRACES + a lane policy
  * that opts in) live in llm_call_traces, keyed to the call row and pruned
@@ -481,28 +485,49 @@ function messageText(value) {
 // code / class stays), so a delayed pre-termination snapshot can never
 // resurrect a terminated session. A runner's finally re-bills safely; a sum
 // over session rows never counts a session twice.
+//
+// Beside it, ONE row_kind='session_turn' row per recorded turn carries this
+// turn's share: the counters minus the session row's previous snapshot,
+// this turn's latency and outcome. Windowed reads (agent-control hub) sum
+// turn rows, so a session live across a window edge contributes only what
+// it did inside the window (GH codex #3869 r2). The read-then-write runs in
+// one transaction under a per-session advisory lock, so two overlapping
+// turns of the same session cannot both subtract the same snapshot.
+const SESSION_COUNTERS = ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens'];
+function sessionTurnRow(row, prev) {
+  const turn = { ...row, row_kind: 'session_turn' };
+  for (const col of SESSION_COUNTERS) {
+    // null = this turn's usage GET failed; no number is better than a false zero
+    turn[col] = row[col] == null ? null : Math.max(row[col] - Number(prev?.[col] || 0), 0);
+  }
+  return turn;
+}
 async function upsertSessionRow(row) {
   try {
     const db = require('../models/db');
     const greatest = (col) => db.raw(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
     const first = (col) => db.raw(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
-    return await writtenId(db('llm_dispatch_log')
-      .insert(row)
-      .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
-      .merge({
-        ok: db.raw('(llm_dispatch_log.ok AND EXCLUDED.ok)'),
-        error_code: first('error_code'),
-        error_class: first('error_class'),
-        latency_ms: greatest('latency_ms'),
-        served_model: first('served_model'),
-        input_tokens: greatest('input_tokens'),
-        cached_input_tokens: greatest('cached_input_tokens'),
-        cache_write_tokens: greatest('cache_write_tokens'),
-        output_tokens: greatest('output_tokens'),
-        reasoning_tokens: greatest('reasoning_tokens'),
-        // when the session last moved (S2d hub read windows sessions on it)
-        last_activity_at: greatest('last_activity_at'),
-      }));
+    return await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [row.provider_ref]);
+      const prev = await trx('llm_dispatch_log').where({ provider_ref: row.provider_ref, row_kind: 'session' }).first(SESSION_COUNTERS);
+      const id = await writtenId(trx('llm_dispatch_log')
+        .insert(row)
+        .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
+        .merge({
+          ok: db.raw('(llm_dispatch_log.ok AND EXCLUDED.ok)'),
+          error_code: first('error_code'),
+          error_class: first('error_class'),
+          latency_ms: greatest('latency_ms'),
+          served_model: first('served_model'),
+          input_tokens: greatest('input_tokens'),
+          cached_input_tokens: greatest('cached_input_tokens'),
+          cache_write_tokens: greatest('cache_write_tokens'),
+          output_tokens: greatest('output_tokens'),
+          reasoning_tokens: greatest('reasoning_tokens'),
+        }));
+      await trx('llm_dispatch_log').insert(sessionTurnRow(row, prev || null));
+      return id;
+    });
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] session upsert failed: ${err.message}`);
     return null;
@@ -553,7 +578,7 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
     logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId}) usage in=${tokens.input_tokens} out=${tokens.output_tokens} ${errorCode || 'ok'}`);
-    return await upsertSessionRow({ ...ledgerRow({
+    return await upsertSessionRow(ledgerRow({
       ctx,
       rowKind: 'session',
       laneId: lane,
@@ -566,7 +591,7 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
       tokens,
       latencyMs,
       providerRef: sessionId,
-    }), last_activity_at: new Date() });
+    }));
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] recordSessionUsage skipped: ${err.message}`);
     return null;
