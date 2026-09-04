@@ -147,8 +147,12 @@ async function consumeCompletionSupplies(db, {
 
   for (const product of products) {
     if (parseLines(product.per_completion_service_lines) === INVALID_LINES) {
+      // A corrupt scope is a hand-off like any other miss: the deduction
+      // is not retried (the config would fail again), so staff must hear
+      // about it (Codex #3832 hook P1).
       logger.warn(`[supplies-consumption] ${product.name}: per_completion_service_lines is not a list — nothing consumed (fix it on the Inventory page)`);
       result.errors.push({ productId: product.id, reason: 'invalid_service_lines' });
+      await ringMissedDeductionBell(result, { scheduledServiceId, product, reason: 'per_completion_service_lines is not a list — fix the product, then adjust the count' });
       continue;
     }
     if (!appliesToLine(product.per_completion_service_lines, serviceLine)) {

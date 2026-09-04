@@ -800,6 +800,19 @@ async function parkIfOverCapAfterPlacement(conn, { adapter, ctx, vendor, ledger,
   return park(conn, { ...ctx, markRequestOrdered: true, reason: 'over_cap_after_placement', message: `${vendor.name} charged ${dollars(finalCents)} for order ${placed.externalOrderNumber || '?'}: ${finalCap.message}.`, amountCents: finalCents, evidence: placed.evidence || null, placed });
 }
 
+// The amount a PLACED order is recorded and cap-counted at: the vendor's
+// confirmed total, else the pre-submit quote, else the amount beforeSubmit
+// reserved on the ledger row — never null or non-positive, which would
+// overwrite the reservation and drop the order from the monthly cap
+// (pre-push P0). null = nothing positive anywhere: the caller parks.
+const positiveCents = (v) => (Number.isInteger(v) && v > 0 ? v : null);
+async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
+  const known = positiveCents(placed?.amountCents) ?? positiveCents(quoteCents);
+  if (known != null) return known;
+  const row = await conn('vendor_orders').where({ id: ledger.id }).first('amount_cents');
+  return positiveCents(row?.amount_cents == null ? null : Number(row.amount_cents));
+}
+
 // Stages after a committed claim: price → binding total → vendor call →
 // post-submit detector → record. Every exit is a park, a record, or a
 // run-level throw after releasing the claim.
@@ -836,7 +849,8 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     } finally { stopHeartbeat(); }
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
-    const finalCents = placed.amountCents ?? quoteCents ?? null;
+    const finalCents = await settledFinalCents(conn, { ledger, placed, quoteCents });
+    if (finalCents == null) return await park(conn, { ...ctx, markRequestOrdered: true, reason: 'no_final_total', message: `${vendor.name} order ${placed.externalOrderNumber || '?'} was placed but no positive total was confirmed or reserved — verify the charge with the vendor and record it.`, evidence: placed.evidence || null, placed });
     const overCap = await parkIfOverCapAfterPlacement(conn, { adapter, ctx, vendor, ledger, placed, finalCents, quoteCents, now, env });
     if (overCap) return overCap;
     return await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });

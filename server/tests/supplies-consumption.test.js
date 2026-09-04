@@ -184,12 +184,15 @@ describe('service-line scope', () => {
     expect(appliesToLine({ pest: true }, 'pest')).toBe(false);
   });
 
-  test('a product whose scope is malformed is skipped with a recorded error, no movement', async () => {
+  test('a product whose scope is malformed is skipped with a recorded error, no movement — and handed to staff by the per-product bell (Codex #3832 hook P1)', async () => {
+    notifyAdmin.mockClear();
     const { db, inserts } = fakeDb({ products: [{ ...sign, per_completion_service_lines: 'not json' }] });
     const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' });
     expect(res.errors).toEqual([{ productId: 'prod-sign', reason: 'invalid_service_lines' }]);
     expect(res.consumed).toHaveLength(0);
     expect(inserts).toHaveLength(0);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('supplies-consumption-failed:prod-sign:svc-1');
   });
 
   test('a pest visit consumes the kit item', async () => {

@@ -48,6 +48,7 @@ jest.mock('../models/db', () => {
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
       if (cols[0] === 'evidence' && table === 'vendor_orders') return { evidence: mockState.parkedEvidence || {} }; // attachLatePlacement
+      if (cols[0] === 'amount_cents' && table === 'vendor_orders') { const r = [...mockState.updates].reverse().find((u) => u.table === 'vendor_orders' && u.row.amount_cents != null); return { amount_cents: r ? r.row.amount_cents : null }; } // settledFinalCents: the reserved amount
       if (table === 'product_restock_requests') {
         if (cols[0] === 'status') return { status: mockState.freshRequestStatus };
         if (cols[0] === 'id') return mockState.sibling; // the sibling live-request probe
@@ -205,6 +206,19 @@ test('a request the claim finds undispatchable (vendor deactivated / gated after
   expect(r).toMatchObject({ skipped: 'no_adapter', belled: true });
   expect(notify).toHaveBeenCalledTimes(1);
   expect(notify.mock.calls[0][3].dedupeKey).toMatch(/^auto-reorder:/);
+});
+
+test('a placed order with no confirmed total is recorded at the amount beforeSubmit reserved — never null over the reservation (pre-push P0)', async () => {
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { await beforeSubmit(10593); return { externalOrderNumber: 'S1-9', amountCents: null, evidence: {} }; }) });
+  expect(await run(a)).toMatchObject({ status: 'placed' });
+  const placedRow = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'placed');
+  expect(placedRow.row.amount_cents).toBe(10593);
+});
+
+test('a placed order with no positive total anywhere parks post-submit as no_final_total, request ordered (pre-push P0)', async () => {
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async () => ({ externalOrderNumber: 'S1-9', amountCents: 0, evidence: {} })) });
+  expect(await run(a)).toMatchObject({ status: 'needs_review', reason: 'no_final_total' });
+  expect(mockState.updates.some((u) => u.table === 'product_restock_requests' && u.row.status === 'ordered')).toBe(true);
 });
 
 test('adapter refusal → needs_review with the refuse code', async () => {
