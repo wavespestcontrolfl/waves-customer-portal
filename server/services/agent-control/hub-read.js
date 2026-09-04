@@ -157,6 +157,25 @@ function bucketRows(from, to, unit) {
     );
 }
 
+// The area p95 has to come from the latency rows themselves — a percentile
+// of lane percentiles is not a percentile (pre-push audit P1). The lane →
+// area map is JS-side, so it rides in as a VALUES list.
+function areaLatency(from, to, laneArea) {
+  if (!laneArea.length) return Promise.resolve([]);
+  const values = laneArea.map(() => '(?, ?)').join(', ');
+  return db(TABLE)
+    .joinRaw(`JOIN (VALUES ${values}) AS m(lane_id, area) ON m.lane_id = ${TABLE}.lane_id`, laneArea.flat())
+    .whereIn('row_kind', ['call', 'session'])
+    .whereNotNull('latency_ms')
+    .where('created_at', '>=', from)
+    .andWhere('created_at', '<', to)
+    .groupBy('m.area')
+    .select(
+      'm.area',
+      db.raw('(percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms))::int AS p95_latency_ms'),
+    );
+}
+
 async function loadLedger(window, now) {
   const recentSince = new Date(now.getTime() - 60 * 60 * 1000);
   const [current, prior, chains, buckets, recent] = await Promise.all([
@@ -353,16 +372,30 @@ function laneMetrics(row, before, chain) {
   };
 }
 
-function buildAreas({ areas, laneRows, window }) {
+// Area numbers come from the RAW ledger counts (ok calls, chains,
+// fallbacks summed per area — weighted by construction) and the area-level
+// percentile query; the lane rows only supply membership and the per-lane
+// sparks, which sum exactly.
+function buildAreas({ areas, laneRows, window, ledger }) {
+  const areaOf = new Map(laneRows.map((l) => [l.id, l.area]));
+  const sumBy = (rows, field) => {
+    const out = new Map();
+    for (const r of rows) {
+      const area = areaOf.get(r.lane_id);
+      if (area) out.set(area, (out.get(area) || 0) + num(r[field]));
+    }
+    return out;
+  };
+  const okCalls = sumBy(ledger.current, 'ok_calls');
+  const chains = sumBy(ledger.chains, 'chains');
+  const fallbacks = sumBy(ledger.chains, 'fallbacks');
+  const p95 = new Map((ledger.areaLatency || []).map((r) => [r.area, num(r.p95_latency_ms)]));
   return areas.map((area) => {
     const rows = laneRows.filter((l) => l.area === area.key);
     const calls = rows.reduce((n, l) => n + l.calls, 0);
-    const okCalls = rows.reduce((n, l) => n + (l.okRate == null ? 0 : l.okRate * l.calls), 0);
-    const withFallback = rows.filter((l) => l.fallbackRate != null);
     const attention = emptyAttention();
     for (const l of rows) for (const k of Object.keys(attention)) attention[k] += l.attention[k];
     const priorCalls = rows.reduce((n, l) => n + (l.calls - l.deltaVsPrior.calls), 0);
-    const p95 = rows.map((l) => l.p95LatencyMs).filter((v) => v != null);
     return {
       key: area.key,
       label: area.label,
@@ -370,11 +403,9 @@ function buildAreas({ areas, laneRows, window }) {
       lanes: rows.length,
       calls,
       attention,
-      okRate: round(rate(okCalls, calls)),
-      // Mean of the lanes that have chains — a lane-weighted view, since the
-      // chain count per lane is not on the lane row.
-      fallbackRate: withFallback.length ? round(withFallback.reduce((n, l) => n + l.fallbackRate, 0) / withFallback.length) : null,
-      p95LatencyMs: p95.length ? Math.max(...p95) : null,
+      okRate: round(rate(okCalls.get(area.key) || 0, calls)),
+      fallbackRate: round(rate(fallbacks.get(area.key) || 0, chains.get(area.key) || 0)),
+      p95LatencyMs: p95.has(area.key) ? p95.get(area.key) : null,
       estCostUsd: null,
       deltaVsPrior: { calls: calls - priorCalls },
       spark: sumSparks(rows.map((l) => l.spark), window),
@@ -396,14 +427,14 @@ function basisFor(window) {
   };
 }
 
-async function loadLaneRows(window, now) {
+async function loadHub(window, now) {
   const [ledger, queueReasons, activityReasons] = await Promise.all([
     loadLedger(window, now),
     loadQueueReasons(),
     loadActivityReasons(window.key === '30d' ? 168 : 24),
   ]);
   const { lanes } = modelSwitchboard.getSwitchboard();
-  return buildLanes({ lanes, window, ledger, reasons: [...queueReasons, ...activityReasons] });
+  return { ledger, laneRows: buildLanes({ lanes, window, ledger, reasons: [...queueReasons, ...activityReasons] }) };
 }
 
 /**
@@ -415,7 +446,7 @@ async function readLanes({ area = null, window: preset = '7d', status = 'all', n
   if (!window) throw badRequest(`window must be one of ${Object.keys(WINDOWS).join(', ')}`);
   if (!STATUSES.includes(status)) throw badRequest(`status must be one of ${STATUSES.join(', ')}`);
   if (area && !modelSwitchboard.AREAS.some((a) => a.key === area)) throw badRequest(`unknown area: ${area}`);
-  const all = await loadLaneRows(window, now);
+  const { laneRows: all } = await loadHub(window, now);
   const scoped = area ? all.filter((l) => l.area === area) : all;
   const counts = { all: scoped.length, active: 0, attention: 0, idle: 0 };
   for (const l of scoped) counts[l.status] += 1;
@@ -428,12 +459,13 @@ async function readLanes({ area = null, window: preset = '7d', status = 'all', n
 async function readAreas({ window: preset = '7d', now = new Date() } = {}) {
   const window = resolveWindow(preset, now);
   if (!window) throw badRequest(`window must be one of ${Object.keys(WINDOWS).join(', ')}`);
-  const laneRows = await loadLaneRows(window, now);
+  const { ledger, laneRows } = await loadHub(window, now);
+  ledger.areaLatency = await areaLatency(window.from, window.to, laneRows.map((l) => [l.id, l.area]));
   return {
     generatedAt: now.toISOString(),
     window: { from: window.from.toISOString(), to: window.to.toISOString() },
     basis: basisFor(window),
-    areas: buildAreas({ areas: modelSwitchboard.AREAS, laneRows, window }),
+    areas: buildAreas({ areas: modelSwitchboard.AREAS, laneRows, window, ledger }),
   };
 }
 
@@ -453,6 +485,7 @@ module.exports = {
   recentAggregates,
   chainAggregates,
   bucketRows,
+  areaLatency,
   SOURCE_LANE,
   WINDOWS,
   STATUSES,

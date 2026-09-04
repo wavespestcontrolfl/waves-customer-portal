@@ -94,7 +94,10 @@ describe('buildLanes', () => {
       { lane_id: 'sms_draft', recent_calls: 6, recent_errors: 2 },
       { lane_id: 'email_classify', recent_calls: 3, recent_errors: 3 },
     ],
-    chains: [{ lane_id: 'sms_draft', chains: 2, fallbacks: 1 }],
+    // sms_tone: many chains, no fallback — the area rate must be weighted
+    // (1 / 102), not the mean of the two lane rates (0.25).
+    chains: [{ lane_id: 'sms_draft', chains: 2, fallbacks: 1 }, { lane_id: 'sms_tone', chains: 100, fallbacks: 0 }],
+    areaLatency: [{ area: 'sms', p95_latency_ms: 8500 }],
     buckets: [
       { lane_id: 'sms_draft', bucket: '2026-09-04', calls: 6, errors: 2 },
       { lane_id: 'report_copy', bucket: '2026-09-02', calls: 1, errors: 0 },
@@ -152,12 +155,12 @@ describe('buildLanes', () => {
     expect(blog.attentionReasons.map((r) => r.kind)).toEqual(['queue_failed', 'activity_blocked']);
   });
 
-  test('areas roll lanes up: weighted ok rate, max p95, summed attention and sparks', () => {
+  test('areas roll up from raw counts: weighted rates, the area percentile, summed attention and sparks', () => {
     const laneRows = hubRead.buildLanes({ lanes: lanesFixture(), window, ledger });
-    const areas = hubRead.buildAreas({ areas: modelSwitchboard.AREAS, laneRows, window });
+    const areas = hubRead.buildAreas({ areas: modelSwitchboard.AREAS, laneRows, window, ledger });
     expect(areas.map((a) => a.key)).toEqual(modelSwitchboard.AREAS.map((a) => a.key));
     const sms = areas.find((a) => a.key === 'sms');
-    expect(sms).toMatchObject({ calls: 6, okRate: 0.667, fallbackRate: 0.5, p95LatencyMs: 9000, attention: { p0: 0, p1: 1, p2: 0, p3: 0 }, deltaVsPrior: { calls: 5 }, estCostUsd: null });
+    expect(sms).toMatchObject({ calls: 6, okRate: 0.667, fallbackRate: 0.01, p95LatencyMs: 8500, attention: { p0: 0, p1: 1, p2: 0, p3: 0 }, deltaVsPrior: { calls: 5 }, estCostUsd: null });
     expect(sms.lanes).toBe(laneRows.filter((l) => l.area === 'sms').length);
     expect(sms.spark.at(-1)).toEqual({ t: '2026-09-04', calls: 6, errors: 2 });
     const email = areas.find((a) => a.key === 'email');
