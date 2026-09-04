@@ -3064,10 +3064,40 @@ router.get('/waveguard-forecast', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The forecast restock row, built from the LOCKED product and the request
+// body (validated by the caller). Pure — no decisions about whether to insert.
+function forecastRestockRow(product, body, { actor, actorName, requestedQuantity, unit }) {
+  const now = new Date();
+  return {
+    product_id: product.id,
+    status: 'open',
+    priority: String(body.priority || 'high').toLowerCase(),
+    requested_quantity: requestedQuantity,
+    unit,
+    current_stock: numberOrNull(product.inventory_on_hand),
+    target_stock: numberOrNull(body.targetStock),
+    vendor: product.best_vendor || null,
+    needed_by: body.neededBy || null,
+    reason: String(body.reason || '').trim() || `Forecasted WaveGuard inventory demand for ${product.name}`,
+    source: 'waveguard_inventory_forecast',
+    created_by: actor,
+    created_by_name: actorName,
+    metadata: {
+      forecastDays: numberOrNull(body.forecastDays),
+      committedDemand: numberOrNull(body.committedDemand),
+      projectedRemaining: numberOrNull(body.projectedRemaining),
+      firstShortDate: body.firstShortDate || null,
+    },
+    created_at: now,
+    updated_at: now,
+  };
+}
+
 // POST /waveguard-forecast/:productId/restock-request — create a restock request from projected demand.
 router.post('/waveguard-forecast/:productId/restock-request', async (req, res, next) => {
   try {
     if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
+    const body = req.body || {};
     const actor = req.technicianId || req.technician?.id || null;
     const actorName = req.technician?.name || req.technician?.email || null;
     // One transaction, product row LOCKED before the insert: the auto-order
@@ -3082,8 +3112,8 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
       // (err.statusCode, caught below); the Restock tab carries the order
       // line (pre-push P0).
       await require('../services/procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id);
-      const requestedQuantity = numberOrNull(req.body?.requestedQuantity);
-      const unit = String(req.body?.unit || product.inventory_unit || product.rate_unit || '').trim();
+      const requestedQuantity = numberOrNull(body.requestedQuantity);
+      const unit = String(body.unit || product.inventory_unit || product.rate_unit || '').trim();
       if (!requestedQuantity || requestedQuantity <= 0 || !unit) {
         return { status: 400, body: { error: 'Requested quantity and unit are required' } };
       }
@@ -3094,35 +3124,12 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
         .whereIn('status', ['open', 'ordered'])
         .where('source', 'waveguard_inventory_forecast')
         .first();
-      if (existing && req.body?.allowDuplicate !== true) {
+      if (existing && body.allowDuplicate !== true) {
         return { status: 200, body: { success: true, existing: true, restockRequest: existing } };
       }
 
-      const now = new Date();
       const [restockRequest] = await trx('product_restock_requests')
-        .insert({
-          product_id: product.id,
-          status: 'open',
-          priority: String(req.body?.priority || 'high').toLowerCase(),
-          requested_quantity: requestedQuantity,
-          unit,
-          current_stock: numberOrNull(product.inventory_on_hand),
-          target_stock: numberOrNull(req.body?.targetStock),
-          vendor: product.best_vendor || null,
-          needed_by: req.body?.neededBy || null,
-          reason: String(req.body?.reason || '').trim() || `Forecasted WaveGuard inventory demand for ${product.name}`,
-          source: 'waveguard_inventory_forecast',
-          created_by: actor,
-          created_by_name: actorName,
-          metadata: {
-            forecastDays: numberOrNull(req.body?.forecastDays),
-            committedDemand: numberOrNull(req.body?.committedDemand),
-            projectedRemaining: numberOrNull(req.body?.projectedRemaining),
-            firstShortDate: req.body?.firstShortDate || null,
-          },
-          created_at: now,
-          updated_at: now,
-        })
+        .insert(forecastRestockRow(product, body, { actor, actorName, requestedQuantity, unit }))
         .returning('*');
       return { status: 200, body: { success: true, existing: false, restockRequest } };
     });
