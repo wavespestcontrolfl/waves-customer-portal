@@ -238,6 +238,7 @@ function normalizeBrief(raw) {
 async function composeProspectBrief({ intent, propertyFacts, facts, context, reasons }) {
   try {
     const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      laneId: 'commercial_proposal',
       text: briefPrompt({ intent, propertyFacts, facts, context, reasons }),
       jsonMode: true,
       jsonSchema: BRIEF_SCHEMA,

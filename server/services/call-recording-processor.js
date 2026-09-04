@@ -6079,6 +6079,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   // them), so the primary's repeat-stability rests on the reasoning model's
   // default decoding.
   const res = await dispatchWithFallback(CALL_EXTRACTION_ROUTE, {
+    laneId: 'call_extraction',
     text: prompt,
     jsonMode: true,
     maxTokens: 16384,

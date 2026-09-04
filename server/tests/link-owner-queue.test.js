@@ -118,12 +118,12 @@ describe('listOwnerQueue', () => {
     expect(pay).toMatchObject({ level: 'OWNER_INPUT_REQUIRED', approvable: false, why_not: expect.stringMatching(/price entry/) });
     const foreign = await parked({ make: paidPath, path: { currency: 'foreign' } });
     expect((await Q.listOwnerQueue(foreign.db)).cards[0].rows.find((r) => r.dimension === 'payment')).toMatchObject({ level: 'OWNER_MANUAL_PAYMENT', approvable: false });
-    // an outreach conversation with a drafted pitch parks for the send — approved from the outreach queue, not here
+    // an outreach conversation with a drafted pitch parks for the send — the send click (sendRow) is its approval (PR 3a)
     const d = domainRow(); const p = outreachPath(d); d.best_path_id = p.id;
-    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [p], seo_link_policy: [policyRow()], seo_link_prospects: [{ id: uid(), domain_id: d.id, path_id: p.id, target_domain: 'example.org', target_page: '/', location_key: '-', status: 'prospect', outreach_status: 'drafted', link_type: 'resource', updated_at: EARLIER }] });
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [p], seo_link_policy: [policyRow()], seo_link_prospects: [{ id: uid(), domain_id: d.id, path_id: p.id, target_domain: 'example.org', target_page: '/', location_key: '-', status: 'prospect', outreach_status: 'drafted', outreach_to_email: 'editor@example.org', outreach_subject: 'A resource for your readers', outreach_body: 'Hello — we publish a seasonal pest calendar for the Gulf Coast.', link_type: 'resource', updated_at: EARLIER }] });
     await nightly(db);
     const comm = (await Q.listOwnerQueue(db)).cards[0].rows.find((r) => r.dimension === 'communication');
-    expect(comm).toMatchObject({ level: 'OWNER_OUTREACH', action: 'outreach_send', approvable: false, why_not: expect.stringMatching(/outreach queue/) });
+    expect(comm).toMatchObject({ level: 'OWNER_OUTREACH', action: 'outreach_send', approvable: true, why_not: null, draft: { to: 'editor@example.org', review: { clean: true }, recipient_review: { kind: 'clear' } } });
   });
 });
 
@@ -277,7 +277,7 @@ describe('approveRow', () => {
     const d = domainRow(); const p = outreachPath(d); d.best_path_id = p.id;
     const odb = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [p], seo_link_policy: [policyRow()], seo_link_prospects: [{ id: uid(), domain_id: d.id, path_id: p.id, target_domain: 'example.org', target_page: '/', location_key: '-', status: 'prospect', outreach_status: 'drafted', link_type: 'resource', updated_at: EARLIER }] });
     await nightly(odb);
-    await expect(Q.approveRow(odb, { authorityId: openRows(odb, 'communication')[0].id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/outreach queue/) });
+    await expect(Q.approveRow(odb, { authorityId: openRows(odb, 'communication')[0].id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/Send action/) });
     const sup = await parked();
     storedPath(sup.db).superseded_by = uid();
     await expect(Q.approveRow(sup.db, { authorityId: openRows(sup.db)[0].id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/superseded/) });
@@ -543,6 +543,15 @@ describe('approveRow', () => {
 });
 
 describe('decideDomain (Reject / Watch)', () => {
+  test('a pitch whose outcome is not settled (a placement `sending`, or `send_error` awaiting reconciliation) refuses the decision', async () => {
+    for (const outreach_status of ['sending', 'send_error']) {
+      const { db, d } = await parked({ make: paidPath, path: { currency: 'unknown' } });
+      placements(db)[0].outreach_status = outreach_status;
+      await expect(Q.decideDomain(db, { domainId: d.id, decision: 'rejected', actor: ACTOR, now: NOW })).rejects.toThrow(/being sent or awaits reconciliation/);
+      expect(db._tables.seo_link_domains[0].agent_state).not.toBe('rejected');
+      expect(approvals(db)).toHaveLength(0);
+    }
+  });
   test('reject: audit rows for approvable rows only, domain rejected by the owner, nothing ended or moved, nightly leaves it alone, Reopen brings the cards back', async () => {
     const { db, d } = await parked({ make: paidPath, path: { currency: 'unknown' } }); // payment = OWNER_INPUT_REQUIRED (not auditable), execution = OWNER_FREE
     const before = rows(db).map((r) => ({ ...r }));

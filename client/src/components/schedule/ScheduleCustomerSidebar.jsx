@@ -162,7 +162,9 @@ export default function ScheduleCustomerSidebar({
   const noteDirty = (service?.notes || '') !== note;
   const customerFirstName = (service?.customerName || `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'customer').split(' ')[0];
   const customerDisplayName = service?.customerName || `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Customer';
-  const canCancelSeries = !!service?.isRecurring;
+  // Legacy series rows carry recurring_pattern without is_recurring; the
+  // dispatch status route accepts either as series evidence.
+  const canCancelSeries = !!(service?.isRecurring || service?.recurringPattern);
   const canCancelAppointment = !['completed', 'skipped', 'cancelled'].includes(String(service?.status || '').toLowerCase());
   // Stricter than the cancel gate: SmartRebooker.reschedule 409s a no_show
   // (terminal) — the menu must not offer a reschedule that can never work.

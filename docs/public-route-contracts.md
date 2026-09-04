@@ -501,6 +501,30 @@ lookup-measured or customer-confirmed lot (owner ruling 2026-09-03; the
 recurring program joined this contract then, so a direct-API caller that
 posts an unconfirmed `lotSqFt` with `mosquito` now receives a manual
 quote where it previously received a price)).
+
+Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
+read at call time, default off in every environment — off, every run
+files as `new` exactly as before): a tokenless `/calculate` whose typed
+email AND phone AND quoted address AND service (catalog `serviceKey`, or
+the normalized service-mix label for the direct `services` shape) equal an
+OPEN `quote_wizard` lead's (`OPEN_LEAD_STATUSES`) created inside 30 days,
+with no additional properties on either side and a live courtship (no
+FK-linked estimate that is declined, expired or archived, and the LATEST
+mirrored `estimate_data.lead_id` estimate, if any, is open), is filed as `status = 'duplicate'` carrying
+`extracted_data.duplicate_of_lead_id` = that original's id, instead of a
+second `new` lead. The token path (`leadId` + email) re-runs the exact
+predicate against its OWN row, excluding itself and looking only back
+(older rows), so the label lands, moves or clears on THIS row — scoped to
+the status and typed identity the request read; a relabel that hits 0
+rows follows the row as it now is. A row that just filed as a repeat
+drops its own lead-stage `ad_service_attribution` row and the root's row
+is rebuilt when missing. Label ONLY: the route never selects, updates or
+reads the original for anything but re-validating the chosen target; the
+marker grants no access (a typed contact is not ownership evidence), the
+draft estimate stays mirrored to the run's own row, and `/upsell` reaches
+only the authenticated lead's draft. Resolving a repeat to its root at
+estimate acceptance / self-booking is PR B′ (services, not this route).
+Kill switch: unset the gate — rows already labelled keep their marker.
 `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
 marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on

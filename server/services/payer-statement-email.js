@@ -273,14 +273,22 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
     }
   }
 
-  // Stamp finalized → sent atomically; never downgrade a viewed/paid statement
-  // and never re-stamp sent_at on a resend.
-  await database('payer_statements')
-    .where({ id: statementId, status: 'finalized' })
-    .update({ status: 'sent', sent_at: database.fn.now(), updated_at: database.fn.now() });
+  await markStatementSent(statementId, database);
 
   logger.info(`[payer-statement-email] statement ${statementId} sent to payer ${statement.payer_id} AP inbox (${lines.length} visits)`);
   return { ok: true, recipient, total: statement.total };
 }
 
-module.exports = { sendStatementEmail, resolveApRecipient, forcedRetryKey };
+// Stamp finalized → sent atomically; never downgrade a viewed/paid statement
+// and never re-stamp sent_at on a resend. The ONE writer of the first
+// delivery — the AP email above and the composer's /sms statement link
+// (composer-customer-links.markStatementsSent) both land here, so an
+// SMS-delivered statement enters the viewed/dunning lifecycle exactly like
+// an emailed one (GH Codex #3844 r2 P1).
+async function markStatementSent(statementId, database = db) {
+  await database('payer_statements')
+    .where({ id: statementId, status: 'finalized' })
+    .update({ status: 'sent', sent_at: database.fn.now(), updated_at: database.fn.now() });
+}
+
+module.exports = { sendStatementEmail, resolveApRecipient, forcedRetryKey, markStatementSent };

@@ -1,3 +1,4 @@
+const { scopeToProspects } = require('./lead-statuses');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -340,7 +341,13 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
     .whereNull('deleted_at')
     .where('first_contact_at', '>=', start)
     .where('first_contact_at', '<=', end)
-    .modify((qb) => applyNameExclusion(qb, excludeCustomerNames));
+    .modify((qb) => applyNameExclusion(qb, excludeCustomerNames))
+    // Same population rule as the leads analytics overview: spam, cancelled
+    // and auto-filed wizard 'duplicate' repeats are not prospects and must
+    // not dilute the source's conversion rate (codex #3834 r6), and a repeat
+    // that took the win beside an already-won original is a second win, not
+    // a second prospect and conversion (scopeToProspects, lead-statuses.js).
+    .modify(scopeToProspects);
 
   const totalLeads = leads.length;
   const wonLeads = leads.filter(l => l.status === 'won');
@@ -560,6 +567,12 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
       .where('first_contact_at', '<=', end)
       .whereNotNull('customer_id')
       .modify((qb) => applyNameExclusion(qb, excludeCustomerNames))
+      // The same population each source's wonLeads counts (scopeToProspects):
+      // a second win beside its won original must not claim the customer in
+      // this map while its own source has no scoped conversion to credit —
+      // the original's source would then skip the customer too, and the
+      // revenue would vanish from every source (codex #3834 r20 P2).
+      .modify(scopeToProspects)
       .orderByRaw('COALESCE(converted_at, ?) ASC', [start])
       // Stable tiebreakers so ties on converted_at (esp. legacy NULLs that all
       // coalesce to `start`) attribute deterministically across runs/plans.

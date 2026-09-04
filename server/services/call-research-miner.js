@@ -248,6 +248,7 @@ async function extractResearchChunks(call, customer, { route = CALL_RESEARCH_ROU
   // primary would starve the Claude leg. The dispatcher's default budget
   // splits evenly across legs, which is exactly what a nightly job wants.
   const res = await dispatchWithFallback(route, {
+    laneId: 'call_research',
     text: buildCallResearchPrompt(transcript),
     jsonMode: true,
     jsonSchema: PROVIDER_OUTPUT_SCHEMA,

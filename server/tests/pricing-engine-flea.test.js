@@ -14,6 +14,10 @@ describe('flea treatment pricing', () => {
 
     expect(result).toMatchObject({
       service: 'flea_package',
+      // Top-level name like every sibling one-time pricer — the public
+      // breakdown labels a raw engine line from it (display.name alone
+      // rendered the row as "One-Time Pest Control").
+      name: 'Flea Elimination Package — 2 visits',
       offerKey: 'flea_elimination_two_visit',
       billingCadence: 'one_time',
       warrantyType: 'conditional_retreat',
@@ -66,6 +70,7 @@ describe('flea treatment pricing', () => {
         initial: 240, followUp: 130, total: 370,
       });
       expect(result.display.name).toBe('Flea Elimination Package — 2 visits');
+      expect(result.name).toBe(result.display.name);
       // Exterior add-on mode is part of the contract too: priced on BOTH visits.
       const exterior = priceFlea({ services: { flea: { fleaExterior: true } }, footprintSqFt: 2000, lotSqFt: 7500, fleaExteriorAreaSqFt: 4000, fleaExteriorAreaSource: 'CONFIRMED_SQ_FT' });
       expect(exterior.adjustments.exteriorArea.followUp).toBeGreaterThan(0);

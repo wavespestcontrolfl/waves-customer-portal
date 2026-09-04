@@ -9,6 +9,7 @@
 //                      → MobilePaymentSheet → Tap to Pay / Cash / etc.).
 // Edit (top-right)   → opens EditServiceModal (existing V1).
 // Cancel             → PUT /admin/dispatch/:id/status with status="cancelled"
+//                      + scope this_only | following | series (recurring only)
 //                      (existing endpoint). The manual Mark-as-no-show button
 //                      was removed 2026-07-31 (owner call) — misses go through
 //                      the Quick Move sheet's soft No-show reason (rebook +
@@ -136,6 +137,10 @@ export default function MobileAppointmentDetailSheet({
   // always chooses whether the customer gets the cancellation text.
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelNotificationType, setCancelNotificationType] = useState('text');
+  // Series scope, same three options the desktop sidebar and Edit-appointment
+  // modal already send. Non-recurring visits never show the picker and stay
+  // on 'this_only'.
+  const [cancelScope, setCancelScope] = useState('this_only');
   const [showCustomer, setShowCustomer] = useState(false);
   const [showRainOut, setShowRainOut] = useState(false);
   const [estimateSource, setEstimateSource] = useState(null);
@@ -347,19 +352,25 @@ export default function MobileAppointmentDetailSheet({
     onClose?.();
   };
 
+  // Series options only for a recurring visit — mirrors ScheduleCustomerSidebar.
+  // A legacy series row can carry recurring_pattern without is_recurring; the
+  // dispatch status route accepts either as series evidence, so match it.
+  const canCancelSeries = !!(service?.isRecurring || service?.recurringPattern);
   const cancelAppointment = async () => {
     // Busy BEFORE the async card-hold preview — a slow preview must not
     // leave the Cancel control active for a double-tap re-entry.
     setActionBusy('cancel');
     // Card-hold visits inside the late-cancel window: ask whether this is a
     // business-initiated cancel (waive the fee) before committing.
-    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id);
+    const scope = canCancelSeries ? cancelScope : 'this_only';
+    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id, { scope });
     if (!proceed) { setActionBusy(''); return; }
     try {
       const result = await adminFetch(`/admin/dispatch/${service.id}/status`, {
         method: 'PUT',
         body: JSON.stringify({
           status: 'cancelled',
+          scope,
           notifyCustomer: cancelNotificationType === 'text',
           waiveCardHoldFee,
         }),
@@ -807,6 +818,31 @@ export default function MobileAppointmentDetailSheet({
                   <div className="text-15 font-medium text-zinc-900">
                     Cancel appointment for {service.customerName || 'this customer'}? This cannot be undone.
                   </div>
+                  {canCancelSeries && (
+                    <div className="mt-4">
+                      <div className="text-13 font-medium text-zinc-900 mb-2">Apply changes to</div>
+                      <div className="space-y-2">
+                        {[
+                          ['this_only', 'This appointment only'],
+                          ['following', 'This and following appointments'],
+                          ['series', 'All appointments in series'],
+                        ].map(([value, label]) => (
+                          <label key={value} className="flex items-center gap-3 text-14 text-zinc-900">
+                            <input
+                              type="radio"
+                              name="cancel-scope"
+                              value={value}
+                              checked={cancelScope === value}
+                              disabled={!!actionBusy}
+                              onChange={() => setCancelScope(value)}
+                              className="h-4 w-4 accent-zinc-900"
+                            />
+                            <span>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="mt-4">
                     <div className="text-13 font-medium text-zinc-900 mb-2">Client booking notifications</div>
                     <div className="space-y-2">
@@ -837,7 +873,9 @@ export default function MobileAppointmentDetailSheet({
                       className="w-full rounded-full bg-alert-fg text-white font-medium u-focus-ring disabled:opacity-50"
                       style={{ padding: '14px 20px', fontSize: 16 }}
                     >
-                      {actionBusy === 'cancel' ? 'Cancelling…' : 'Confirm cancellation'}
+                      {actionBusy === 'cancel'
+                        ? 'Cancelling…'
+                        : canCancelSeries && cancelScope !== 'this_only' ? 'Confirm cancellations' : 'Confirm cancellation'}
                     </button>
                     <button
                       type="button"
@@ -849,7 +887,7 @@ export default function MobileAppointmentDetailSheet({
                       Keep appointment
                     </button>
                   </div>
-                  <CancelFeeNotice serviceId={service.id} />
+                  <CancelFeeNotice serviceId={service.id} scope={canCancelSeries ? cancelScope : 'this_only'} />
                 </div>
               )}
             </>

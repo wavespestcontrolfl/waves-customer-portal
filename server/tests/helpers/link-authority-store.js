@@ -7,10 +7,13 @@
  */
 const { canonicalProspectDomain } = require("../../services/seo/prospect-domain-lock");
 const R = require("../../services/seo/link-registry");
+const { canonicalEmail } = require("../../services/ads/ad-audience-consent");
 
 let idSeq = 0;
 const uid = () => `00000000-0000-4000-8000-${String(++idSeq).padStart(12, '0')}`;
-const TABLES = ['seo_link_domains', 'seo_link_acquisition_paths', 'seo_link_prospects', 'seo_link_placement_authorities', 'seo_link_floor_waivers', 'seo_link_approvals', 'seo_link_policy', 'seo_link_domain_sources'];
+const TABLES = ['seo_link_domains', 'seo_link_acquisition_paths', 'seo_link_prospects', 'seo_link_placement_authorities', 'seo_link_floor_waivers', 'seo_link_approvals', 'seo_link_policy', 'seo_link_domain_sources',
+  // the §13 customer-recipient exclusion's contact sources (link-outreach-mandate)
+  'customers', 'notification_prefs', 'leads'];
 
 function makeDb(seed = {}) {
   const tables = Object.fromEntries(TABLES.map((t) => [t, []]));
@@ -20,9 +23,9 @@ function makeDb(seed = {}) {
   function builder(table) {
     const rows = tables[table];
     if (!rows) throw new Error(`unknown table ${table}`);
-    const st = { preds: [], order: null, limit: null, cols: null };
+    const st = { preds: [], order: null, limit: null, cols: null, count: false };
     const matches = (r) => st.preds.every((p) => p(r));
-    const project = (r) => (!st.cols || st.cols.includes('*') ? { ...r } : Object.fromEntries(st.cols.map((c) => [c, r[c]])));
+    const project = (r) => (!st.cols || st.cols.includes('*') ? { ...r } : Object.fromEntries(st.cols.map((c) => { const m = /^(\w+) as (\w+)$/.exec(c); return m ? [m[2], r[m[1]]] : [c, r[c]]; })));
     const resolve = () => {
       if (db._beforeResolve) db._beforeResolve(table, db);
       let out = rows.filter(matches);
@@ -43,17 +46,32 @@ function makeDb(seed = {}) {
       whereIn(col, arr) { st.preds.push((r) => arr.includes(r[col])); return q; },
       whereNotIn(col, arr) { st.preds.push((r) => !arr.includes(r[col])); return q; },
       whereRaw(sql, bindings = []) {
-        if (/split_part/.test(sql)) st.preds.push((r) => canonicalProspectDomain(r.target_domain) === bindings[0]);
+        // the stored-address form link-outreach-mandate compares in: lower-cased, every whitespace character removed
+        const lower = (v) => String(v == null ? '' : v).replace(/\s+/g, '').toLowerCase();
+        const STORED = "LOWER\\(REGEXP_REPLACE\\(\\?\\?, '\\\\s', '', 'g'\\)\\)";
+        if (new RegExp(`^${STORED} = ANY\\(\\?\\)$`).test(sql)) st.preds.push((r) => bindings[1].includes(lower(r[bindings[0]])));
+        else if (new RegExp(`^split_part\\(${STORED}, '@', 2\\) = ANY\\(\\?\\)$`).test(sql)) st.preds.push((r) => bindings[1].includes(lower(r[bindings[0]]).split('@')[1]));
+        else if (new RegExp(`^split_part\\(${STORED}, '@', 2\\) = ANY\\(\\?\\) OR split_part\\(${STORED}, '@', 2\\) LIKE ANY\\(\\?\\)$`).test(sql)) st.preds.push((r) => { const host = lower(r[bindings[0]]).split('@')[1] || ''; return bindings[1].includes(host) || bindings[3].some((p) => host.endsWith(p.slice(1))); });
+        else if (/gmail-canonical/.test(sql)) st.preds.push((r) => { const c = canonicalEmail(r[bindings[0]]); return Boolean(c) && bindings[1].includes(c.split('@')[1]) && bindings[3].includes(c.split('@')[0]); });
+        else if (/split_part/.test(sql)) st.preds.push((r) => canonicalProspectDomain(r.target_domain) === bindings[0]);
+        // the sender's trailing-24h attempt count (link-prospect-outreach dailySendCount): rows attempted since `since`
+        else if (/outreach_attempted_at >= \?/.test(sql)) { st.count = true; st.preds.push((r) => r.outreach_attempted_at != null && new Date(r.outreach_attempted_at).getTime() >= new Date(bindings[0]).getTime()); }
         else if (/COALESCE\(link_type, ''\) NOT IN/.test(sql)) st.preds.push((r) => !bindings.includes(r.link_type || ''));
         else throw new Error(`unsupported whereRaw: ${sql}`);
         return q;
       },
       orderBy(col, dir = 'asc') { st.order = { col, dir }; return q; },
       limit(n) { st.limit = n; return q; },
-      select(...cols) { st.cols = cols.length ? cols : null; return q; },
+      // `col as alias` projections (the recipient lookup selects `id as id` / `customer_id as id`)
+      select(...cols) { const named = cols.filter((c) => typeof c === 'string'); st.cols = named.length ? named : null; return q; },
       forUpdate() { raws.push(`FOR UPDATE ${table}`); return q; },
-      async first(...cols) { if (cols.length) st.cols = cols; return resolve()[0]; },
-      async update(patch) { if (db._failUpdate === table) throw new Error(`injected failure on ${table}`); if (db._beforeUpdate) db._beforeUpdate(table, db); const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit.length; },
+      async first(...cols) { if (cols.length) st.cols = cols; if (st.count) return { c: String(resolve().length) }; return resolve()[0]; },
+      // resolves to the affected count; `.returning('*')` yields the updated rows (the sender's CAS + finalize)
+      update(patch) {
+        const apply = () => { if (db._failUpdate === table) throw new Error(`injected failure on ${table}`); if (db._beforeUpdate) db._beforeUpdate(table, db); const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit; };
+        let hit = null; const once = () => (hit || (hit = apply()));
+        return { returning: async () => once().map((r) => ({ ...r })), then: (res, rej) => Promise.resolve().then(() => once().length).then(res, rej) };
+      },
       insert(row) {
         const created = { id: uid(), ...row };
         if (table === 'seo_link_placement_authorities' && rows.some((r) => r.prospect_id === row.prospect_id && r.dimension === row.dimension && r.instance_key === row.instance_key)) throw new Error('duplicate key value violates unique constraint "seo_link_placement_authorities_prospect_id_dimension_instance_key_unique"');
@@ -71,7 +89,7 @@ function makeDb(seed = {}) {
     _failUpdate: null,
     _beforeResolve: null,
     _beforeUpdate: null,
-    raw: async (sql) => { raws.push(sql); return {}; },
+    raw: async (sql, bindings = []) => { raws.push(bindings.length ? `${sql} ${JSON.stringify(bindings)}` : sql); return {}; },
     transaction: async (cb) => cb(db),
     _tables: tables,
     _raws: raws,
