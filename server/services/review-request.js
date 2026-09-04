@@ -260,6 +260,11 @@ const ASK_CAP_WINDOW_DAYS = 180;
 // {{intro_paragraph}} default when no personalized draft verified. Keep in
 // lockstep with the seed copy in
 // migrations/20260806000001_review_email_intro_paragraph.js.
+// Same span as the review cooldown ("received a review request in the last
+// 30 days"): an inline row texted inside it is the one an Email-only Quick
+// Link would otherwise be refused for.
+const INLINE_EMAIL_RETRY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
 const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. If your recent service hit the mark, would you take 15 seconds to share a quick review?";
 
 /**
@@ -1881,6 +1886,26 @@ const ReviewService = {
    * off, or email_enabled off refuses; a prefs read failure fails CLOSED.
    * Returns { sent, reason } — never throws.
    */
+  /**
+   * The most recent composer-texted inline ask whose email leg never went
+   * (status 'sent', sms_sent_at within the 30-day cooldown, sent_at null).
+   * Quick Links → Email after a Both whose email leg failed lands here:
+   * the cooldown would refuse a fresh ask, so the caller re-attempts the
+   * SAME row's email copy instead — idempotent per row (GH Codex #3856 r7).
+   */
+  async findInlineAwaitingEmail(customerId) {
+    if (!customerId) return null;
+    const since = new Date(Date.now() - INLINE_EMAIL_RETRY_WINDOW_MS);
+    const row = await db("review_requests")
+      .where({ customer_id: customerId, triggered_by: "auto_inline", status: "sent" })
+      .whereNotNull("sms_sent_at")
+      .where("sms_sent_at", ">=", since)
+      .whereNull("sent_at")
+      .orderBy("sms_sent_at", "desc")
+      .first("id");
+    return row || null;
+  },
+
   async sendInlineEmailCopy(requestId) {
     if (!requestId) return { sent: false, reason: "no_request" };
     try {
@@ -3239,6 +3264,10 @@ const ReviewService = {
             : `review_touch:${request.id}`,
         suppressionGroupKey: "service_operational",
         categories: ["review_request"],
+        // Provider rejections can echo the recipient address — keep the raw
+        // SendGrid body out of the transport log; the sanitized catch below
+        // (request id + error class) is the only log.
+        suppressProviderErrorLog: true,
       });
     } catch (err) {
       logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"})`);

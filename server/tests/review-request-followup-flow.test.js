@@ -697,6 +697,24 @@ describe('review request follow-up flow', () => {
   });
 
   // Quick Links "Both": the emailed copy of an inline ask (owner ruling 2026-09-03).
+  describe('findInlineAwaitingEmail', () => {
+    test('finds the latest texted inline row whose email leg never went, inside the cooldown window', async () => {
+      const q = chain({ first: jest.fn().mockResolvedValue({ id: 'rr-texted' }) });
+      db.mockImplementation((table) => {
+        if (table === 'review_requests') return q;
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+
+      expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toEqual({ id: 'rr-texted' });
+      expect(q.where).toHaveBeenCalledWith({ customer_id: 'cust-1', triggered_by: 'auto_inline', status: 'sent' });
+      expect(q.whereNotNull).toHaveBeenCalledWith('sms_sent_at');
+      expect(q.where).toHaveBeenCalledWith('sms_sent_at', '>=', expect.any(Date));
+      expect(q.whereNull).toHaveBeenCalledWith('sent_at');
+      expect(q.orderBy).toHaveBeenCalledWith('sms_sent_at', 'desc');
+      expect(await ReviewService.findInlineAwaitingEmail(null)).toBeNull();
+    });
+  });
+
   describe('sendInlineEmailCopy', () => {
     const EmailLib = require('../services/email-template-library');
     let rrUpdate;

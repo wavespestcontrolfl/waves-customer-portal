@@ -462,7 +462,7 @@ describe('admin communications SMS route', () => {
       const shortCodes = {
         whereIn: jest.fn(function () { return this; }),
         where: jest.fn(function () { return this; }),
-        select: jest.fn(async () => [{ code: 'abc123xyz9' }]),
+        select: jest.fn(async () => [{ code: 'abcde' }]),
       };
       db.mockImplementation((table) => {
         if (table === 'short_codes') return shortCodes;
@@ -472,11 +472,12 @@ describe('admin communications SMS route', () => {
         const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
           method: 'POST',
           headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ to: '+15551234567', body: 'Review us: wavespestcontrol.com/l/abc123xyz9', messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+          // A legacy five-character code and a current ten-character one.
+          body: JSON.stringify({ to: '+15551234567', body: 'Review us: wavespestcontrol.com/l/abcde or wavespestcontrol.com/l/abc123xyz9', messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
         });
         expect(res.status).toBe(400);
         expect((await res.json()).error).toMatch(/immediate send/);
-        expect(shortCodes.whereIn).toHaveBeenCalledWith('code', ['abc123xyz9']);
+        expect(shortCodes.whereIn).toHaveBeenCalledWith('code', ['abcde', 'abc123xyz9']);
         expect(shortCodes.where).toHaveBeenCalledWith({ kind: 'review' });
       });
     });

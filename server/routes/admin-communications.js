@@ -1772,29 +1772,51 @@ async function resolveLinkTarget({ kind, customerId, last10 }) {
 // a link build — the gate-wrapped engine path emails the ask now and nothing
 // is inserted into the text. strictChannel: the operator chose Email — never
 // fall back to a text. Answers { status, body } for the route to send.
+// The email went to the resolved email contact (a service contact when one
+// is on file) — the toast names THAT person, not the phone's owner. A
+// nicety: undefined when the row can't be read (the email already went).
+async function emailContactFirstName(customerId) {
+  try {
+    const { getServiceContact, firstNameFrom, SERVICE_CONTACT_COLUMNS } = require('../services/customer-contact');
+    const row = await db('customers').where({ id: customerId }).first('first_name', 'last_name', 'email', 'phone', ...SERVICE_CONTACT_COLUMNS);
+    return row ? (firstNameFrom(getServiceContact(row).name) || undefined) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Email-leg refusals by reason — transient ones (prefs read, provider
+// throw) are retryable and must not read as a missing address or an opt-out.
+const EMAIL_LEG_REASONS = {
+  prefs_unavailable: 'Notification preferences could not be read — try again',
+  email_send_failed: 'The review email could not be sent — try again',
+  opted_out: 'Review emails are turned off in this customer\'s notification preferences',
+  email_off: 'Review emails are turned off in this customer\'s notification preferences',
+  no_contact: 'No review email for this customer — no email on file',
+  no_email: 'No review email for this customer — no email on file',
+  email_blocked: 'The review email could not be sent — the address is suppressed',
+};
+
 async function emailReviewAskNow(primaryId) {
   const ReviewService = require('../services/review-request');
+  // A Both ask whose text went out but whose email leg failed: the text
+  // already started the cooldown, so a fresh ask would be refused — re-send
+  // the SAME row's email copy instead (idempotent per row; GH Codex #3856 r7 P2).
+  const awaiting = await ReviewService.findInlineAwaitingEmail(primaryId).catch(() => null);
+  if (awaiting?.id) {
+    const copy = await ReviewService.sendInlineEmailCopy(awaiting.id);
+    if (copy?.sent) {
+      const firstName = await emailContactFirstName(primaryId);
+      return { status: 200, body: { kind: 'review_request', channel: 'email', sent: true, requestId: awaiting.id, firstName, retriedInline: true } };
+    }
+    const error = EMAIL_LEG_REASONS[copy?.reason] || 'Review request email could not be sent';
+    return { status: 409, body: { error, outcome: 'blocked', reason: copy?.reason || null } };
+  }
   const ask = await ReviewService.sendGatedAsk({ customerId: primaryId, channel: 'email', triggeredBy: 'admin', strictChannel: true });
   if (ask.outcome === 'sent') {
-    // The email went to the resolved email contact (a service contact when
-    // one is on file) — name THAT person, not the phone's owner.
-    let firstName;
-    try {
-      const { getServiceContact, firstNameFrom, SERVICE_CONTACT_COLUMNS } = require('../services/customer-contact');
-      const row = await db('customers').where({ id: primaryId }).first('first_name', 'last_name', 'email', 'phone', ...SERVICE_CONTACT_COLUMNS);
-      firstName = row ? (firstNameFrom(getServiceContact(row).name) || undefined) : undefined;
-    } catch { /* the name is a nicety; the email already went */ }
+    const firstName = await emailContactFirstName(primaryId);
     return { status: 200, body: { kind: 'review_request', channel: 'email', sent: true, requestId: ask.requestId, firstName } };
   }
-  // A 'blocked' outcome carries the touch's own reason — transient ones
-  // (prefs read, provider throw) are retryable and must not read as a
-  // missing address or an opt-out.
-  const blockedReasons = {
-    prefs_unavailable: 'Notification preferences could not be read — try again',
-    email_send_failed: 'The review email could not be sent — try again',
-    opted_out: 'Review emails are turned off in this customer\'s notification preferences',
-    no_contact: 'No review email for this customer — no email on file',
-  };
   const outcomeReasons = {
     already_reviewed: 'This customer is already marked as having left a review',
     no_customer: 'That customer could not be found',
@@ -1805,7 +1827,7 @@ async function emailReviewAskNow(primaryId) {
   };
   const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
   const error = REVIEW_GATE_REASONS[ask.outcome]
-    || (ask.outcome === 'blocked' && blockedReasons[ask.reason])
+    || (ask.outcome === 'blocked' && EMAIL_LEG_REASONS[ask.reason])
     || outcomeReasons[ask.outcome]
     || 'Review request email could not be sent';
   return { status: ask.outcome === 'no_customer' ? 404 : 409, body: { error, outcome: ask.outcome } };
@@ -2189,7 +2211,8 @@ router.post('/rewrite-sms', async (req, res) => {
 const REVIEW_LINK_RE = /\/(?:api\/)?rate\/[A-Za-z0-9_-]{6,}/i;
 // Branded /l/:code short links — what buildReviewUrl normally hands out
 // (shortenOrPassthrough); resolved through short_codes.kind below.
-const SHORT_LINK_RE = /\/l\/([A-Za-z0-9_-]{6,})/g;
+// {5,}: legacy five-character codes still resolve (short-url.js).
+const SHORT_LINK_RE = /\/l\/([A-Za-z0-9_-]{5,})/g;
 const REVIEW_LINK_SCHEDULE_ERROR = 'Review request links can only go on an immediate send — send now, or remove the review link before scheduling';
 
 router.post('/schedule-sms', async (req, res, next) => {

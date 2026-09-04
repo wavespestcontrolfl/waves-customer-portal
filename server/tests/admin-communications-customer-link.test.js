@@ -83,6 +83,8 @@ jest.mock('../services/composer-customer-links', () => ({
 }));
 jest.mock('../services/review-request', () => ({
   sendGatedAsk: jest.fn(),
+  findInlineAwaitingEmail: jest.fn(async () => null),
+  sendInlineEmailCopy: jest.fn(),
 }));
 
 const express = require('express');
@@ -359,6 +361,29 @@ describe('POST /admin/communications/customer-link', () => {
           expect.objectContaining({ customerId: CUSTOMER_UUID, channel: 'email', triggeredBy: 'admin', strictChannel: true }),
         );
         expect(builders.buildReviewRequestLink).not.toHaveBeenCalled();
+      });
+    });
+
+    test('email after a Both whose email leg failed re-sends the SAME inline row copy (no cooldown refusal)', async () => {
+      wireDb({ customers: soloCustomer() });
+      ReviewService.findInlineAwaitingEmail.mockResolvedValueOnce({ id: 'rr-texted' });
+      ReviewService.sendInlineEmailCopy.mockResolvedValueOnce({ sent: true });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ channel: 'email', sent: true, requestId: 'rr-texted', retriedInline: true });
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-texted');
+        expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
+      });
+
+      // A failed retry keeps the leg's own reason.
+      wireDb({ customers: soloCustomer() });
+      ReviewService.findInlineAwaitingEmail.mockResolvedValueOnce({ id: 'rr-texted' });
+      ReviewService.sendInlineEmailCopy.mockResolvedValueOnce({ sent: false, reason: 'prefs_unavailable' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/could not be read — try again/);
       });
     });
 
