@@ -1110,6 +1110,97 @@ describe('email template automation executor', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('a prep run whose first attempt fails before dispatch hands its fresh claim back BEFORE the retry — the retry re-claims, so a conclusive final failure cannot pin the page (GH Codex #3856 r24 P2)', async () => {
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({}),
+      retry_policy: JSON.stringify({ max_attempts: 2, backoff_minutes: [15] }),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      max_attempts: 2,
+      payload: JSON.stringify({
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      }),
+    });
+    const retryRun = { ...queuedRun, status: 'retry_scheduled', attempts: 1 };
+    const releaseQuery = chain({});
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [retryRun] }),
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'e1' }] }),
+        chain({ returning: [{ id: 'e2' }] }),
+        chain({ returning: [{ id: 'e3' }] }),
+      ],
+      // Live read, FRESH claim, then — pre-dispatch throw, retry ahead — the
+      // release: the page is not carried into the retry.
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [{ id: 'svc-1' }] }),
+        releaseQuery,
+      ],
+    });
+    EmailTemplates.sendTemplate.mockRejectedValue(new Error('template missing'));
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: { scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+    expect(result.results[0].run.status).toBe('retry_scheduled');
+    expect(releaseQuery.update).toHaveBeenCalledWith({ prep_template_key: null });
+    expect(releaseQuery.whereNull).toHaveBeenCalledWith('prep_sent_at');
+
+    // A post-dispatch ambiguous throw before a retry keeps the page (a
+    // release would throw "Unexpected db table" here).
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [retryRun] }),
+      ],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'e1' }] }), chain({ returning: [{ id: 'e2' }] }), chain({ returning: [{ id: 'e3' }] })],
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [{ id: 'svc-1' }] }),
+      ],
+    });
+    EmailTemplates.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); throw new Error('post-dispatch bookkeeping'); });
+    expect((await AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: { scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    })).results[0].run.status).toBe('retry_scheduled');
+  });
+
   test('a prep run that finally FAILS before dispatch hands its fresh page claim back; a post-dispatch throw keeps it (pre-push Codex P1 on e493a0711)', async () => {
     const prepAutomation = automation({
       id: 'automation-prep',
