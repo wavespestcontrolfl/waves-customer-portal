@@ -63,14 +63,27 @@ describe('resolveWindow', () => {
     expect(w.buckets).toHaveLength(18);
   });
 
-  test('7d / 30d = the last N ET days including today, daily buckets, prior of the same length', () => {
+  test('7d / 30d = the last N ET days including today, daily buckets, prior = the same ET shape N days back', () => {
     const w = hubRead.resolveWindow('7d', NOW);
     expect(w.from.toISOString()).toBe('2026-08-29T04:00:00.000Z');
     expect(w.buckets).toEqual(['2026-08-29', '2026-08-30', '2026-08-31', '2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04']);
-    expect(w.prior.to).toBe(w.from);
-    expect(w.to.getTime() - w.from.getTime()).toBe(w.prior.to.getTime() - w.prior.from.getTime());
+    // 6 full days + the same 17:30 ET portion of the 7th, ending before this window starts
+    expect(w.prior.from.toISOString()).toBe('2026-08-22T04:00:00.000Z');
+    expect(w.prior.to.toISOString()).toBe('2026-08-28T21:30:00.000Z');
+    const today = hubRead.resolveWindow('today', NOW);
+    expect(today.prior).toEqual({ from: new Date('2026-09-03T04:00:00.000Z'), to: new Date('2026-09-03T21:30:00.000Z') });
     expect(hubRead.resolveWindow('30d', NOW).buckets).toHaveLength(30);
     expect(hubRead.resolveWindow('30d', NOW).buckets[0]).toBe('2026-08-06');
+  });
+
+  test('the prior window keeps its ET wall clock across a DST change', () => {
+    // Mon 2026-11-02 10:00 EST (UTC-5); the fall-back was Sun 11-01.
+    const w = hubRead.resolveWindow('7d', new Date('2026-11-02T15:00:00Z'));
+    expect(w.from.toISOString()).toBe('2026-10-27T04:00:00.000Z'); // 00:00 EDT
+    // prior.to = Mon 10-26 10:00 EDT (UTC-4) — a millisecond shift would land at 13:00 EDT
+    expect(w.prior.to.toISOString()).toBe('2026-10-26T14:00:00.000Z');
+    expect(w.prior.from.toISOString()).toBe('2026-10-20T04:00:00.000Z');
+    expect(w.buckets).toHaveLength(7);
   });
 
   test('unknown preset → null; default is 7d', () => {

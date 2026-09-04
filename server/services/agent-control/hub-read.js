@@ -10,7 +10,9 @@
  * Windows are ET calendar windows (utils/datetime-et.js): `today` = ET
  * midnight → now, bucketed by hour; `7d` / `30d` = the last N ET days
  * including today, bucketed by day. `deltaVsPrior` compares against the
- * window of the same length ending where this one starts.
+ * same ET-calendar shape shifted back N days: N-1 full ET days plus the
+ * same wall-clock portion of the Nth (never a millisecond length, which
+ * drifts an hour across a DST change — pre-push audit P1).
  *
  * Status (highest wins): `attention` — an attention reason on the lane
  * (ledger error rate > 20 % over the last hour with ≥ 5 calls; a failed
@@ -65,6 +67,13 @@ function etStartOfDay(date) {
   return parseETDateTime(`${etDateString(date)}T00:00`);
 }
 
+// The instant with `now`'s ET wall clock on `day`'s ET date.
+function sameETWallClock(day, now) {
+  const { hour, minute, second } = etParts(now);
+  const hms = [hour, minute, second].map((n) => String(n).padStart(2, '0')).join(':');
+  return parseETDateTime(`${etDateString(day)}T${hms}`);
+}
+
 // { key, unit, from, to, prior:{from,to}, buckets:[key…] } or null for an
 // unknown preset. Bucket keys match the SQL to_char formats below so a
 // quiet bucket still renders as a zero.
@@ -73,7 +82,10 @@ function resolveWindow(preset = '7d', now = new Date()) {
   if (!spec) return null;
   const from = etStartOfDay(addETDays(now, -(spec.days - 1)));
   const to = now;
-  const prior = { from: new Date(from.getTime() - (to.getTime() - from.getTime())), to: from };
+  const prior = {
+    from: etStartOfDay(addETDays(now, -(2 * spec.days - 1))),
+    to: sameETWallClock(addETDays(now, -spec.days), now),
+  };
   const buckets = [];
   if (spec.unit === 'hour') {
     const { hour } = etParts(now);
