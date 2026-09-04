@@ -1917,6 +1917,10 @@ const ReviewService = {
     // onQueued fires immediately before the provider call: a throw after it
     // MAY have reached SendGrid (the library's post-dispatch bookkeeping
     // carries no marker), so it is uncertain — never "try again" (r8 P2).
+    // The owed-leg marker is cleared INSIDE onQueued, durably, while the
+    // email still cannot have gone out; a failed clear aborts the provider
+    // call, so no later Quick Links click can ever re-send an email the
+    // provider may hold (r9 P2).
     let dispatched = false;
     try {
       const request = await db("review_requests").where({ id: requestId }).first();
@@ -1962,8 +1966,20 @@ const ReviewService = {
         // SendGrid body out of the transport log (AGENTS.md: no email
         // addresses in logs); the sanitized catch below is the only log.
         suppressProviderErrorLog: true,
-        onQueued: () => { dispatched = true; },
+        onQueued: async () => {
+          try {
+            await db("review_requests").where({ id: request.id }).update({ email_leg_owed_at: null });
+          } catch (e) {
+            logger.warn(`[review] inline email owed clear failed pre-dispatch (requestId=${request.id}): ${e.message}`);
+            return false;
+          }
+          dispatched = true;
+          return true;
+        },
       });
+      // Aborted at the dispatch boundary (owed clear failed): nothing reached
+      // the provider and the leg is still owed — a plain, retryable failure.
+      if (result?.aborted) return { sent: false, reason: "email_send_failed" };
       if (!result?.sent) return { sent: false, reason: result?.reason || "email_blocked" };
       // channel 'both': the row texted AND emailed — the outreach analytics
       // count it as an email touch (channel IN ('email','both')), so the
@@ -1971,19 +1987,15 @@ const ReviewService = {
       await db("review_requests")
         .where({ id: request.id })
         .whereNull("sent_at")
-        .update({ sent_at: new Date(), channel: "both", email_leg_owed_at: null })
+        .update({ sent_at: new Date(), channel: "both" })
         .catch((err) => logger.warn(`[review] inline email sent_at stamp failed (requestId=${request.id}): ${err.message}`));
       return { sent: true };
     } catch (err) {
       logger.error(`[review] inline email copy failed (requestId=${requestId} errType=${err?.name || "Error"} dispatched=${dispatched})`);
       if (!dispatched) return { sent: false, reason: "email_send_failed" };
-      // The provider may hold this email: the leg is no longer owed, so the
-      // Quick Links retry path can never re-send it blindly — the operator
-      // checks the email log instead.
-      await db("review_requests")
-        .where({ id: requestId })
-        .update({ email_leg_owed_at: null })
-        .catch((e) => logger.warn(`[review] inline email owed clear failed (requestId=${requestId}): ${e.message}`));
+      // The provider may hold this email. The owed leg was already cleared
+      // before dispatch, so the Quick Links retry path cannot re-send it —
+      // the operator checks the email log instead.
       return { sent: false, reason: "email_uncertain" };
     }
   },
@@ -3264,6 +3276,9 @@ const ReviewService = {
   async _sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia, introParagraph = null }) {
     // Same split as SMS (audit P1): only the SEND is in the retry-on-throw path.
     let result;
+    // onQueued fires immediately before the provider call — a throw after it
+    // MAY have reached SendGrid (GH Codex #3856 r9 P2).
+    let dispatched = false;
     try {
       const EmailLib = require("./email-template-library");
       result = await EmailLib.sendTemplate({
@@ -3295,9 +3310,20 @@ const ReviewService = {
         // SendGrid body out of the transport log; the sanitized catch below
         // (request id + error class) is the only log.
         suppressProviderErrorLog: true,
+        onQueued: () => { dispatched = true; },
       });
     } catch (err) {
-      logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"})`);
+      logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"} dispatched=${dispatched})`);
+      if (dispatched && manageRetryVia !== "sequence") {
+        // A one-off (admin Email-only / satisfaction) has no retry driver, and
+        // "try again" would mint a fresh row — a fresh idempotency key — so a
+        // second solicitation could land on top of one SendGrid may hold.
+        // Count it as the ask (sent_at starts the cooldown) and tell the
+        // operator to check the email log. Sequence steps keep their
+        // step-stable key and the cron's own retry.
+        await db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() }).catch(() => {});
+        return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_uncertain" };
+      }
       // There is NO standalone email retry driver — processScheduled only
       // re-sends SMS (it excludes channel='email'). So:
       //  • sequence touch → the sequence cron re-runs this step; mark 'failed'

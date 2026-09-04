@@ -734,7 +734,9 @@ describe('review request follow-up flow', () => {
             first: jest.fn().mockResolvedValue({ id: 'rr-1', customer_id: 'cust-1', token: 'tok-1', status: 'sent' }),
             update: rrUpdate,
           });
-          q.update = jest.fn((patch) => ({ ...q, catch: jest.fn(async () => rrUpdate(patch)) }));
+          // A real promise: the pre-dispatch owed clear is awaited directly,
+          // the sent stamp goes through .catch().
+          q.update = jest.fn((patch) => rrUpdate(patch));
           return q;
         }
         if (table === 'customers') {
@@ -750,12 +752,17 @@ describe('review request follow-up flow', () => {
 
     test('emails the SAME ask (same token) and stamps sent_at once — status untouched', async () => {
       wire({ prefs: { review_request: true, email_enabled: true } });
-      EmailLib.sendTemplate.mockResolvedValue({ sent: true });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        expect(await opts.onQueued({ id: 'em-1' })).toBe(true);
+        return { sent: true };
+      });
 
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
-      // The row texted AND emailed — recorded as channel 'both' so the
-      // outreach analytics count the email leg.
-      expect(rrUpdate).toHaveBeenCalledWith(expect.objectContaining({ sent_at: expect.any(Date), channel: 'both', email_leg_owed_at: null }));
+      // The owed leg is cleared durably BEFORE dispatch (r9 P2), then the
+      // row texted AND emailed is recorded as channel 'both' so the outreach
+      // analytics count the email leg.
+      expect(rrUpdate).toHaveBeenNthCalledWith(1, { email_leg_owed_at: null });
+      expect(rrUpdate).toHaveBeenNthCalledWith(2, expect.objectContaining({ sent_at: expect.any(Date), channel: 'both' }));
       const call = EmailLib.sendTemplate.mock.calls[0][0];
       expect(call).toMatchObject({
         templateKey: 'review_request_email',
@@ -766,6 +773,18 @@ describe('review request follow-up flow', () => {
       });
       expect(call.payload.first_name).toBe('Megan');
       expect(call.payload.review_url).toContain('tok-1');
+      expect(rrUpdate).toHaveBeenCalledTimes(2);
+    });
+
+    test('a failed pre-dispatch owed clear aborts the provider call — retryable, leg still owed (r9 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      rrUpdate.mockRejectedValueOnce(new Error('db down'));
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        const keep = await opts.onQueued({ id: 'em-1' });
+        if (keep === false) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+        throw new Error('must not dispatch');
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
       expect(rrUpdate).toHaveBeenCalledTimes(1);
     });
 
@@ -802,8 +821,38 @@ describe('review request follow-up flow', () => {
         throw new Error('post-dispatch bookkeeping failed');
       });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_uncertain' });
+      // Cleared once, before dispatch — no second write after the throw.
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
       expect(rrUpdate).toHaveBeenCalledWith({ email_leg_owed_at: null });
-      expect(rrUpdate).not.toHaveBeenCalledWith(expect.objectContaining({ sent_at: expect.any(Date) }));
+    });
+
+    test('_sendOutreachEmail (one-off): a post-dispatch throw is uncertain — counted as the ask, never "try again" (r9 P2)', async () => {
+      const rrUpdateOneOff = jest.fn().mockResolvedValue(1);
+      db.mockImplementation((table) => {
+        if (table === 'review_requests') return chain({ update: rrUpdateOneOff });
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+      const args = { request: { id: 'rr-7' }, customer: { id: 'cust-1', first_name: 'Megan' }, contact: { email: 'megan@example.com', name: 'Megan' }, reviewUrl: 'https://x/rate/t', techName: 'Adam', manageRetryVia: null };
+
+      EmailLib.sendTemplate.mockImplementationOnce(async (opts) => {
+        await opts.onQueued({ id: 'em-7' });
+        throw new Error('post-dispatch bookkeeping failed');
+      });
+      expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, terminal: true, channel: 'email', requestId: 'rr-7', reason: 'email_uncertain' });
+      expect(rrUpdateOneOff).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', sent_at: expect.any(Date) }));
+
+      // Pre-dispatch (no onQueued): nothing reached SendGrid — the plain failure.
+      rrUpdateOneOff.mockClear();
+      EmailLib.sendTemplate.mockRejectedValueOnce(new Error('template missing'));
+      expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, terminal: true, channel: 'email', requestId: 'rr-7', reason: 'email_send_failed' });
+      expect(rrUpdateOneOff).toHaveBeenCalledWith({ status: 'failed' });
+
+      // A sequence step keeps its retry contract (step-stable idempotency key).
+      EmailLib.sendTemplate.mockImplementationOnce(async (opts) => {
+        await opts.onQueued({ id: 'em-8' });
+        throw new Error('post-dispatch bookkeeping failed');
+      });
+      expect(await ReviewService._sendOutreachEmail({ ...args, manageRetryVia: 'sequence' })).toEqual({ ok: false, retryable: true, channel: 'email', requestId: 'rr-7' });
     });
 
     test('re-checks the live customer: already reviewed or removed refuses before any send (r8 P2)', async () => {

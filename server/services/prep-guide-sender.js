@@ -282,9 +282,13 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
   }
 }
 
-// The SMS leg. Outcome { sent, uncertain }: uncertain means the provider call
-// threw after it may have accepted the message, so the caller must not hand
-// the prep page back on the strength of "nothing delivered".
+// The SMS leg. Outcome { sent }. sendCustomerMessage swallows provider
+// failures itself and throws in exactly two places: BEFORE the handoff
+// (definite — nothing reached Twilio) or while persisting the final audit,
+// carrying the KNOWN provider outcome on the error. So a throw is never
+// uncertain: providerOutcome.sent === true is a send (the caller stamps the
+// page and writes the tagger-compatible marker exactly as for a returned
+// send), anything else a plain failure (GH Codex #3856 r9 P2).
 async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, pestType, actorId }) {
   let body;
   try {
@@ -325,8 +329,9 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
       },
     });
   } catch (err) {
-    logger.warn(`[prep-guide-sender] prep SMS provider call threw for customer ${customer.id} (${err?.code || err?.name || 'Error'})`);
-    return { sent: false, uncertain: true };
+    const accepted = err?.providerOutcome?.sent === true;
+    logger.warn(`[prep-guide-sender] prep SMS wrapper threw for customer ${customer.id} (${err?.code || err?.name || 'Error'}, providerAccepted=${accepted})`);
+    return { sent: accepted };
   }
   // sent:true with a suppression sentinel (gate off, template disabled, owner
   // SMS kill) means nothing left — never record that as a delivery.
@@ -371,7 +376,7 @@ function planPrepSms(config, prepUrl) {
 // Runs the requested legs and settles the outcome on `result`: ok when either
 // delivered; 'partial' (+ failedChannel) when Both delivered one; 'send_failed'
 // when neither did — then the provisional page claim is handed back, unless
-// a provider left either leg uncertain (GH Codex #3856 r4 P2 / r5 P1).
+// the email leg is uncertain (GH Codex #3856 r4 P2 / r5 P1).
 async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result }) {
   const { visit, prepUrl, stampVisit } = page;
   let uncertain = false;
@@ -388,8 +393,6 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
       customer, firstName: contacts.smsFirstName, phone: contacts.phone, pestType, actorId, ...smsPlan,
     });
     result.smsSent = sms.sent;
-    result.smsUncertain = !!sms.uncertain;
-    uncertain = uncertain || result.smsUncertain;
     if (sms.sent && smsPlan.variant === 'guide_link' && !result.emailSent) await stampPrepSent(stampVisit, config);
   }
   result.ok = result.emailSent || result.smsSent;

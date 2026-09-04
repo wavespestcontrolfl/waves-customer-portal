@@ -849,12 +849,11 @@ const { isSupportedPestType, isSupportedChannel } = require('../services/prep-gu
 
 function manualPrepMessage(result) {
   if (!result.ok) {
-    // No leg confirmed, but a provider MAY have accepted one: the page claim
-    // is kept and "try again" would double-send the guide (GH Codex #3856 r8 P2).
-    if (result.emailUncertain || result.smsUncertain) {
-      const legs = [result.emailUncertain ? 'email' : null, result.smsUncertain ? 'text' : null].filter(Boolean).join(' and ');
-      const logs = [result.emailUncertain ? 'email' : null, result.smsUncertain ? 'message' : null].filter(Boolean).join(' and ');
-      return `The prep ${legs} may or may not have gone out — check the customer's ${logs} log before sending it again.`;
+    // No leg confirmed, but SendGrid MAY have accepted the email: the page
+    // claim is kept and "try again" would double-send the guide (GH Codex
+    // #3856 r8 P2). The text leg is never uncertain (sendPrepSms).
+    if (result.emailUncertain) {
+      return "The prep email may or may not have gone out — check the customer's email log before sending it again.";
     }
     switch (result.reason) {
       case 'customer_not_found': return 'That customer could not be found.';
@@ -876,12 +875,10 @@ function manualPrepMessage(result) {
   if (result.smsSent) parts.push(`texted to ${result.phone}`);
   const sent = `${result.label} prep ${parts.join(' and ')}.`;
   if (result.reason !== 'partial') return sent;
-  // Both with one leg down: name the leg that did not go out. A leg the
-  // provider MAY have accepted (uncertain) must not be re-sent blindly.
+  // Both with one leg down: name the leg that did not go out. An email
+  // SendGrid MAY have accepted (uncertain) must not be re-sent blindly.
   if (result.failedChannel === 'sms') {
-    return result.smsUncertain
-      ? `${sent} The text may or may not have gone out — check the customer's message log before sending it again.`
-      : `${sent} The text did not go out — send it again as Text once the number is confirmed.`;
+    return `${sent} The text did not go out — send it again as Text once the number is confirmed.`;
   }
   return result.emailUncertain
     ? `${sent} The email may or may not have gone out — check the customer's email log before sending it again.`

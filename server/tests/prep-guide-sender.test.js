@@ -320,7 +320,7 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
   });
 
-  test('a text that fails before the provider releases the claim; a provider throw keeps it', async () => {
+  test('a text that fails before the provider releases the claim; a wrapper throw is classified by its provider outcome', async () => {
     upcomingVisitRow = VISIT;
     renderSmsTemplate.mockRejectedValueOnce(new Error('renderer down'));
     const preProvider = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
@@ -329,10 +329,22 @@ describe('sendPrepToCustomer', () => {
 
     serviceUpdates = [];
     renderSmsTemplate.mockResolvedValue('Prep text...');
+    // sendCustomerMessage swallows provider failures; a throw WITHOUT a
+    // provider outcome happened before the handoff — definite, claim released.
     sendCustomerMessage.mockRejectedValueOnce(new Error('socket hang up'));
-    const uncertain = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
-    expect(uncertain).toMatchObject({ ok: false, reason: 'send_failed' });
-    // The provider may have accepted it — the page is NOT handed back.
+    const preHandoff = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    expect(preHandoff).toMatchObject({ ok: false, reason: 'send_failed', smsSent: false });
+    expect(preHandoff.smsUncertain).toBeUndefined();
+    expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
+
+    // A throw while persisting the audit carries the KNOWN outcome: an
+    // accepted send is a send — page stamped, never handed back.
+    serviceUpdates = [];
+    const auditErr = new Error('audit insert failed');
+    auditErr.providerOutcome = { sent: true, messageId: 'SM1' };
+    sendCustomerMessage.mockRejectedValueOnce(auditErr);
+    const accepted = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    expect(accepted).toMatchObject({ ok: true, smsSent: true });
     expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
   });
 
@@ -357,12 +369,13 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
   });
 
-  test('a partial Both carries the failed leg uncertainty', async () => {
+  test('a partial Both names the failed leg', async () => {
     sendCustomerMessage.mockRejectedValueOnce(new Error('socket hang up'));
 
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
 
-    expect(result).toMatchObject({ ok: true, reason: 'partial', failedChannel: 'sms', smsUncertain: true, emailUncertain: false });
+    expect(result).toMatchObject({ ok: true, reason: 'partial', failedChannel: 'sms', emailUncertain: false });
+    expect(result.smsUncertain).toBeUndefined();
   });
 
   test('a claim that already matched (another same-guide attempt made it) is never released', async () => {

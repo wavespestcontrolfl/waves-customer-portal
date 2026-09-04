@@ -470,16 +470,11 @@ describe('POST /admin/communications/customer-link', () => {
   describe('POST /send-prep', () => {
     const { sendPrepToCustomer } = require('../services/prep-guide-sender');
     test('no leg confirmed + an uncertain leg → check the log, not try again', async () => {
-      sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, emailUncertain: true, smsSent: false, smsUncertain: false });
+      sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, emailUncertain: true, smsSent: false });
       await withServer(async (baseUrl) => {
         const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'flea', channel: 'email' });
         expect(res.status).toBe(400);
         expect((await res.json()).error).toBe("The prep email may or may not have gone out — check the customer's email log before sending it again.");
-      });
-      sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, emailUncertain: true, smsSent: false, smsUncertain: true });
-      await withServer(async (baseUrl) => {
-        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'flea', channel: 'both' });
-        expect((await res.json()).error).toMatch(/prep email and text may or may not have gone out — check the customer's email and message log/);
       });
       // A definite failure keeps the plain retry copy.
       sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, smsSent: false });
