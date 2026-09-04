@@ -39,5 +39,9 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
-  await knex('sms_templates').whereIn('template_key', NEW_TEMPLATES.map((t) => t.template_key)).del();
+  // up() is onConflict-ignore, so a row with this key may pre-date this
+  // migration or carry an admin edit — only remove the exact seeded body.
+  for (const t of NEW_TEMPLATES) {
+    await knex('sms_templates').where({ template_key: t.template_key, body: t.body }).del();
+  }
 };
