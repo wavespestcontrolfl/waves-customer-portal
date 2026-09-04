@@ -21,7 +21,6 @@ jest.mock('../services/project-email', () => ({
   // Real implementations (against the mocked db) so the tokened prep_url
   // and confirmed-delivery stamp paths are exercised end-to-end.
   ensureServicePrepToken: jest.requireActual('../services/project-email').ensureServicePrepToken,
-  markServicePrepSent: jest.requireActual('../services/project-email').markServicePrepSent,
 }));
 
 const db = require('../models/db');
@@ -40,6 +39,7 @@ function customersQuery() {
 // upcomingVisitRow, the same table also serves ensureServicePrepToken's
 // chains (.select()…first() token read + .update().returning() mint).
 let upcomingVisitRow = null;
+let ownershipLost = false; // the send-time re-read finds the page re-keyed
 let upcomingVisitRows = null; // several candidates (soonest first); null = [upcomingVisitRow]
 let viewRow = null; // prep_guide_views
 let visitLookupError = null;
@@ -91,6 +91,8 @@ function scheduledQuery() {
     first: jest.fn(async (...cols) => {
       // The post-claim key re-read asks for the key column alone.
       if (cols.length === 1 && cols[0] === 'prep_template_key') return servicePrepRow;
+      // The send-time ownership re-check.
+      if (cols.length === 1 && cols[0] === 'id') return ownershipLost ? undefined : { id: upcomingVisitRow?.id || 'svc-1' };
       return tokenMode ? servicePrepRow : upcomingVisitRow;
     }),
   };
@@ -129,6 +131,7 @@ beforeEach(() => {
   interactionMarkerRow = null;
   scheduledQueries = [];
   upcomingVisitRow = null;
+  ownershipLost = false;
   upcomingVisitRows = null;
   viewRow = null;
   visitLookupError = null;
@@ -620,6 +623,20 @@ describe('sendPrepToCustomer', () => {
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' }))
       .toMatchObject({ ok: false, reason: 'prep_page_taken', takenBy: 'Interior Pest Treatment' });
     expect(serviceUpdates).toEqual([]);
+  });
+
+  test('a page re-keyed between the claim and dispatch is never linked: text skipped with the reason, email falls back to the portal (send-time fence)', async () => {
+    upcomingVisitRow = VISIT;
+    ownershipLost = true;
+    const both = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'both' });
+    expect(both).toMatchObject({ ok: true, reason: 'partial', failedChannel: 'sms', smsLinkReason: 'prep_page_taken', emailSent: true, smsSent: false });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const payload = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;
+    expect(payload.prep_url).toContain('?tab=visits');
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
+
+    const textOnly = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    expect(textOnly).toMatchObject({ ok: false, reason: 'prep_page_taken' });
   });
 
   test('the interior-pest visit match excludes "Lawn Pest Control" (a lawn-line visit)', async () => {

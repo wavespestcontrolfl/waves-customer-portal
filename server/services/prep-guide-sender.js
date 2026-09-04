@@ -571,7 +571,31 @@ function planPrepSms(config, prepUrl) {
 // delivered; 'partial' (+ failedChannel) when Both delivered one; 'send_failed'
 // when neither did — then the provisional page claim is handed back, unless
 // the email leg is uncertain (GH Codex #3856 r4 P2 / r5 P1).
+// Send-time ownership fence: the automated lanes take no lock with this
+// sender, so the page could have been re-keyed between the claim and the
+// provider calls; a link delivered after that would render another guide.
+// Re-read the key as late as possible and, if it moved, deliver WITHOUT the
+// link (email → portal fallback, text → skipped with the link's reason;
+// pre-push Codex P1 on b36ba5eb7). Unknown (read failed) = moved.
+async function pageStillOwned(page, config) {
+  if (!page.ownsPage) return true;
+  try {
+    const row = await db('scheduled_services')
+      .where({ id: page.visit.id, prep_template_key: config.emailTemplateKey })
+      .first('id');
+    return !!row;
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] prep page ownership re-check failed for service ${page.visit.id}: ${err.message}`);
+    return false;
+  }
+}
+
 async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result }) {
+  if (!(await pageStillOwned(page, config))) {
+    page = { ...page, prepUrl: null, ownsPage: false, stampVisit: null, freshClaim: false, linkReason: 'prep_page_taken' };
+    smsPlan = null;
+    if (contacts.wantSms) result.smsLinkReason = 'prep_page_taken';
+  }
   const { visit, prepUrl, stampVisit } = page;
   let uncertain = false;
   if (contacts.wantEmail) {
@@ -591,7 +615,7 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
   }
   result.ok = result.emailSent || result.smsSent;
   if (!result.ok) {
-    result.reason = 'send_failed';
+    result.reason = result.smsLinkReason === 'prep_page_taken' && !contacts.wantEmail ? 'prep_page_taken' : 'send_failed';
     if (page.freshClaim && !uncertain) await releasePrepPage(stampVisit.id, config.emailTemplateKey);
   } else if (contacts.wantEmail && contacts.wantSms && result.emailSent !== result.smsSent) {
     // Both: one leg delivered, the other did not — say which, or the
