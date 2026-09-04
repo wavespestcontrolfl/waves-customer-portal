@@ -22,16 +22,20 @@ function projectsQuery(row) {
   return q;
 }
 
-// The service read is the view-stamping UPDATE … RETURNING: unknown,
-// expired or keyless tokens match nothing.
+// The service read: a plain first() (PDF twin — read-only by contract) or,
+// for the page, the view-stamping UPDATE … RETURNING. Unknown, expired or
+// keyless tokens match nothing either way.
+let lastServicesQuery = null;
 function servicesQuery(row) {
   const usable = row && row.prep_template_key && !(row.prep_expires_at && new Date(row.prep_expires_at) < new Date());
   const q = {
     where: jest.fn(() => q),
     whereNotNull: jest.fn(() => q),
+    first: jest.fn(async () => (usable ? row : undefined)),
     update: jest.fn(() => q),
     returning: jest.fn(async () => (usable ? [row] : [])),
   };
+  lastServicesQuery = q;
   return q;
 }
 
@@ -96,6 +100,18 @@ describe('resolvePrepSource — scheduled-service tokens', () => {
     expect(source.familyType).toBe('flea');
     expect(source.techName).toBe('Adam Benetti');
     expect(source.viewRow).toEqual({ scheduled_service_id: 'svc-1' });
+  });
+
+  test('the page read stamps the view in the same statement; the default (PDF) read writes nothing', async () => {
+    installDb({ service: serviceRow() });
+    expect(await resolvePrepSource(TOKEN, { countView: true })).not.toBeNull();
+    expect(lastServicesQuery.update).toHaveBeenCalledWith(expect.objectContaining({ prep_view_count: expect.anything(), prep_first_viewed_at: expect.anything() }));
+    expect(lastServicesQuery.first).not.toHaveBeenCalled();
+
+    installDb({ service: serviceRow() });
+    expect(await resolvePrepSource(TOKEN)).not.toBeNull();
+    expect(lastServicesQuery.update).not.toHaveBeenCalled();
+    expect(lastServicesQuery.first).toHaveBeenCalled();
   });
 
   test('projects win the token lookup over scheduled_services', async () => {

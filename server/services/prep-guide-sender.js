@@ -295,11 +295,17 @@ async function claimPrepPage(serviceId, templateKey) {
 // our own key is released, and only while no delivery of it was ever
 // stamped (markServicePrepSent sets prep_sent_at — the delivered key stays;
 // pre-push Codex P1 on dde34633e). Callers release fresh claims only.
+// Fenced on the view columns like rekeyAbandonedPage: a page the customer
+// opened between the claim and this release must keep resolving (the
+// public read stamps the view in the same statement, so the row lock orders
+// the two; pre-push Codex P0 on fb2d7d01f).
 async function releasePrepPage(serviceId, templateKey) {
   try {
     await db('scheduled_services')
       .where({ id: serviceId, prep_template_key: templateKey })
       .whereNull('prep_sent_at')
+      .whereNull('prep_first_viewed_at')
+      .whereRaw('COALESCE(prep_view_count, 0) = 0')
       .update({ prep_template_key: null });
   } catch (err) {
     logger.warn(`[prep-guide-sender] prep page release failed for service ${serviceId}: ${err.message}`);

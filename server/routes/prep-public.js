@@ -177,7 +177,10 @@ const VISIT_FAMILY_TYPE_BY_TEMPLATE_KEY = {
 // have no project row — 20260714100000). Returns null when neither owns
 // the token or the guide can't render; the route answers a uniform 404
 // so unknown/expired/unmapped stay indistinguishable.
-async function resolvePrepSource(token) {
+// countView: the PAGE route stamps the visit's view inside the read (one
+// statement — see below); the PDF twin is read-only by contract
+// (docs/public-route-contracts.md: no view-analytics writes on that route).
+async function resolvePrepSource(token, { countView = false } = {}) {
   const now = new Date();
 
   const project = await db('projects').where({ prep_token: token }).first();
@@ -211,18 +214,22 @@ async function resolvePrepSource(token) {
   // row lock orders the two — a page the customer has opened can never
   // change guides behind them (GH Codex #3856 r17 P0). A token that is
   // unknown, expired or keyless matches nothing (404, no view counted).
-  const [service] = await db('scheduled_services')
+  const SERVICE_COLUMNS = [
+    'id', 'customer_id', 'service_type', 'scheduled_date', 'prep_template_key', 'technician_id',
+    'service_address_line1', 'service_address_city', 'service_address_state', 'service_address_zip',
+  ];
+  const live = db('scheduled_services')
     .where({ prep_token: token })
     .whereNotNull('prep_template_key')
-    .where((q) => q.whereNull('prep_expires_at').orWhere('prep_expires_at', '>=', now))
-    .update({
-      prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
-      prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
-    })
-    .returning([
-      'id', 'customer_id', 'service_type', 'scheduled_date', 'prep_template_key', 'technician_id',
-      'service_address_line1', 'service_address_city', 'service_address_state', 'service_address_zip',
-    ]);
+    .where((q) => q.whereNull('prep_expires_at').orWhere('prep_expires_at', '>=', now));
+  const service = countView
+    ? (await live
+      .update({
+        prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
+        prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
+      })
+      .returning(SERVICE_COLUMNS))[0]
+    : await live.first(...SERVICE_COLUMNS);
   if (!service) return null;
   const tech = service.technician_id
     ? await db('technicians').where({ id: service.technician_id }).first('name')
@@ -315,7 +322,7 @@ router.get('/:token', async (req, res) => {
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
 
   try {
-    const source = await resolvePrepSource(token);
+    const source = await resolvePrepSource(token, { countView: true });
     if (!source) return res.status(404).json({ error: 'Not found' });
 
     const guide = await renderGuideForSource(source);

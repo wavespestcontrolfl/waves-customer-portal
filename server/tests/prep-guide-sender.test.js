@@ -377,6 +377,10 @@ describe('sendPrepToCustomer', () => {
     const preProvider = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
     expect(preProvider).toMatchObject({ ok: false, reason: 'send_failed' });
     expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
+    // The release is fenced on the view columns like the re-key (P0 on fb2d7d01f).
+    expect(scheduledQueries.some((q) => q.whereNull.mock.calls.some(([c]) => c === 'prep_first_viewed_at')
+      && q.whereRaw.mock.calls.some(([sql]) => sql === 'COALESCE(prep_view_count, 0) = 0')
+      && q.update.mock.calls.some(([p]) => p && p.prep_template_key === null))).toBe(true);
 
     serviceUpdates = [];
     renderSmsTemplate.mockResolvedValue('Prep text...');
