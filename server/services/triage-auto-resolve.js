@@ -62,7 +62,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { etCalendarDayOf } = require('../utils/datetime-et');
-const { v2PrimaryLabelForCategory } = require('../utils/lead-service-interest');
+const { v2PrimaryLabelForCategory, composeWordsForV2Category } = require('../utils/lead-service-interest');
 
 const SPAM_AGE_DAYS = 7;
 const ADVISORY_AGE_DAYS = 30;
@@ -374,12 +374,17 @@ function bookingAtRequestedAddress(item, visit, places) {
 // multi-service ask (pest + lawn) is fulfilled only when bookings cover every
 // category. A requirement is the token lists that each answer it: the
 // category enum's own words (the engine's estimate lines carry the enum as
-// their service key) and, when the enum stands for ONE catalog service, that
-// service's words through v2PrimaryLabelForCategory — the identity map the
-// compose path already reads, never a local copy: the catalog books
-// stinging_insect as "Bee / Wasp Nest Removal" under the specialty category,
-// so neither a booking's service_type nor its snapshot says "stinging" or
-// "insect" (codex r22 P2). Never the call's ai_extraction_enriched: that
+// their service key), the service words the compose path scans the enum as
+// (composeWordsForV2Category — bundled_waveguard IS pest control there and
+// in the legacy category map, and a card that snapshotted the bundle with
+// no specific service is otherwise answerable only by a row literally
+// stamped "bundled waveguard", codex r27 P2) and, when the enum stands for
+// ONE catalog service, that service's words through
+// v2PrimaryLabelForCategory — the identity maps the compose path already
+// reads, never a local copy: the catalog books stinging_insect as "Bee /
+// Wasp Nest Removal" under the specialty category, so neither a booking's
+// service_type nor its snapshot says "stinging" or "insect" (codex r22
+// P2). Never the call's ai_extraction_enriched: that
 // column is a rolling snapshot a force-reprocess overwrites while the open
 // card keeps its original ask. A card filed before the snapshot existed
 // yields no categories, so its association arm stays closed.
@@ -389,7 +394,7 @@ function requestedServiceTokens(item) {
   if (!Array.isArray(cats)) return [];
   const out = [];
   for (const c of cats) {
-    const answers = [c, v2PrimaryLabelForCategory(c)].map(serviceTokens).filter((tokens) => tokens.length);
+    const answers = [...new Map([c, composeWordsForV2Category(c), v2PrimaryLabelForCategory(c)].map(serviceTokens).filter((tokens) => tokens.length).map((tokens) => [tokens.join(' '), tokens])).values()];
     if (answers.length) out.push(answers);
   }
   // The specific service the caller named narrows the PRIMARY category —
@@ -689,11 +694,18 @@ function customerPredatesCall(item) {
 // GATE_CALL_FAIL_OPEN_BOOKING off, a confirmed call from an existing
 // customer can be held solely on its address card — that card is then the
 // ONLY visible trace of the lost booking, and resolving it as "address
-// moot" would hide a confirmed-but-unbooked appointment. Fail closed on an
-// unparseable extraction.
-function callConfirmedUnbooked(item, ctx) {
+// moot" would hide a confirmed-but-unbooked appointment. Confirmed by the
+// card's filing-time status OR the call's rolling extraction (a reprocess
+// may have rewritten either reading of the same call), and booked ONLY by
+// the booking arm's `booking_after_card` — a live row answering the card's
+// snapshotted ask (service, address, day, hour) — never any live row that
+// points at the call: a force-reprocess that minted a booking for a
+// different ask would otherwise release this guard and close the original
+// ask's only trace before the booking arm ever judged it (codex r27 P1).
+// The arm is gated, so with the evidence gate off a confirmed call's
+// address card stays held. Fail closed on an unparseable extraction.
+function callConfirmedUnbooked(item, ev) {
   let v2 = item.call_extraction;
-  if (!v2) return false; // no V2 → no confirmed-slot claim to protect
   if (typeof v2 === 'string') {
     try {
       v2 = JSON.parse(v2);
@@ -701,8 +713,8 @@ function callConfirmedUnbooked(item, ctx) {
       return true;
     }
   }
-  if (v2?.scheduling?.status !== 'confirmed') return false;
-  return !ctx.bookedCallIds.has(item.call_log_id);
+  if (cardSchedulingStatus(item) !== 'confirmed' && v2?.scheduling?.status !== 'confirmed') return false;
+  return !(ev && ev.booking_after_card);
 }
 
 // The CARD's answer to the same question, for the evidence arms: its
@@ -766,14 +778,17 @@ function surnameCameFromCall(item) {
 }
 
 // Pure classifier, exported for tests. `item` is a triage_items row joined
-// with its call's customer fields; `ctx.bookedCallIds` is a Set of
-// call_log_ids that have a scheduled_services row via source_call_log_id.
-// Returns { action: 'resolve'|'dismiss', rule } or null (untouched).
+// with its call's customer fields; `ctx.evidence` is the per-item proof map
+// loadEvidence() built (empty when GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE is
+// off). Returns { action: 'resolve'|'dismiss', rule } or null (untouched).
 // Order matters: moot-condition resolves outrank age-based dismissal so a
 // card that is BOTH old and moot records the real reason it closed.
 function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   if (item.status !== 'open') return null;
   const code = item.reason_code;
+  // Each evidence flag is true only when the proof postdates the CARD —
+  // see loadEvidence for the exact predicates.
+  const ev = ctx.evidence instanceof Map ? ctx.evidence.get(item.id) : null;
 
   // Address cards are moot ONLY for a customer who existed before the call,
   // has a full on-file address, and whose call supplied no address of its
@@ -786,7 +801,7 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
       && customerPredatesCall(item)
       && !hasNewAddressEvidence(item.payload)
       && !callSuppliedAddress(item.call_extraction, item.call_extraction_v1)
-      && !callConfirmedUnbooked(item, ctx)
+      && !callConfirmedUnbooked(item, ev)
       && String(item.customer_address_line1 || '').trim() !== ''
       && String(item.customer_zip || '').trim() !== '') {
     return { action: 'resolve', rule: 'address_moot' };
@@ -805,11 +820,7 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
       && String(item.customer_last_name || '').trim() !== '') {
     return { action: 'resolve', rule: 'name_moot' };
   }
-  // Evidence rules: ctx.evidence is the per-item proof map loadEvidence()
-  // built (empty when GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE is off, so none of
-  // these can fire). Each flag is true only when the proof postdates the
-  // CARD — see loadEvidence for the exact predicates.
-  const ev = ctx.evidence instanceof Map ? ctx.evidence.get(item.id) : null;
+  // Evidence rules: none can fire while the evidence gate is off.
   if (ev) {
     if (code === 'quote_promised' && ev.estimate_direct) {
       return { action: 'resolve', rule: 'quote_fulfilled' };
@@ -1168,13 +1179,13 @@ const entryNames = (entry) => [entry.service, entry.serviceKey, entry.service_ke
 function lineCollector() {
   const lines = [];
   const seen = new Set();
-  const add = (rawNames, cadence, priced) => {
+  const add = (rawNames, cadence, priced, { authored = false } = {}) => {
     if (!priced) return;
     const names = rawNames.filter((w) => typeof w === 'string' && w.trim());
     const identity = [...names, cadence.recurring].join('|');
     if (seen.has(identity)) return;
     seen.add(identity);
-    lines.push({ names, ...cadence });
+    lines.push({ names, ...cadence, ...(authored ? { authored } : {}) });
   };
   return { lines, add };
 }
@@ -1182,11 +1193,28 @@ function lineCollector() {
 // A delivered line's matchable words: its names plus the service families
 // the shared reader infers from them — derived at SWEEP time from the
 // frozen names, so the matcher's vocabulary stays current while the
-// content it judges stays what was delivered.
+// content it judges stays what was delivered. For an AUTHORED line the
+// reader's families count only where the compose path's word-bounded
+// family scan (familiesIn) confirms them: operator text is not catalog
+// text, and the reader's substring patterns read the bare word "general"
+// as Pest Control (and "advanced" as termite, "plant" as ant), so "General
+// lawn maintenance" would gain a pest family and close a pest
+// quote_promised card no pest line ever priced (codex r27 P1). The scan's
+// own grouping is NOT the reader's (flea, stinging and bed bug are their
+// own compose families), so a confirmed family is one the reader assigns
+// to the scan's label as well — one vocabulary judging, the other
+// vouching, never a local copy of either. The structured identity the
+// normalizer validated is among an authored line's names.
 function lineWords(line) {
   const { serviceKeysFromText, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
   const names = Array.isArray(line.names) ? line.names.filter((w) => typeof w === 'string' && w.trim()) : [];
-  const families = serviceKeysFromText(...names).flatMap((k) => (k && k !== 'unknown' ? [k, SERVICE_LINE_LABELS[k]] : []));
+  let keys = serviceKeysFromText(...names);
+  if (line.authored === true) {
+    const { familiesIn } = require('../utils/lead-service-interest');
+    const vouched = new Set(familiesIn(names.join('. ')).flatMap((fam) => serviceKeysFromText(fam.label)));
+    keys = keys.filter((k) => vouched.has(k));
+  }
+  const families = keys.flatMap((k) => (k && k !== 'unknown' ? [k, SERVICE_LINE_LABELS[k]] : []));
   return [...names, ...families].join(' ');
 }
 
@@ -1195,16 +1223,23 @@ function lineWords(line) {
 // building line items per their frequency (a line's service is its
 // description, the normalizer's one name field; the building it sits under
 // is a place, not a service — codex r22 P2), corrective work → one-time.
+// Each line's structured identity — the program family the normalizer
+// validated against PROGRAM_FAMILIES, the corrective line's engine service
+// id — rides as names with its catalog label, so a program answers its
+// family even when its authored label does not name it (lineWords).
 function proposalLines(row, add) {
+  const { SERVICE_LINE_LABELS } = require('./estimate-service-lines');
   const proposal = require('./estimate-proposal').normalizeProposal(row);
   if (proposal.enabled !== true) return;
-  for (const program of proposal.programs || []) add([program.label, program.service], RECURRING, program.annual > 0);
+  const AUTHORED = { authored: true };
+  const family = (key) => (key && key !== 'other' ? [key, SERVICE_LINE_LABELS[key]] : []);
+  for (const program of proposal.programs || []) add([program.label, ...family(program.service)], RECURRING, program.annual > 0, AUTHORED);
   for (const building of proposal.buildings || []) {
     for (const item of building.lineItems || []) {
-      add([item.description], item.frequency === 'one_time' ? ONE_TIME : RECURRING, item.amount > 0);
+      add([item.description], item.frequency === 'one_time' ? ONE_TIME : RECURRING, item.amount > 0, AUTHORED);
     }
   }
-  for (const work of proposal.correctiveWork || []) add([work.label, work.service], ONE_TIME, work.amount > 0);
+  for (const work of proposal.correctiveWork || []) add([work.label, ...family(work.service)], ONE_TIME, work.amount > 0, AUTHORED);
 }
 
 // The engine result's typed lines, from both persisted roots.
@@ -1434,32 +1469,11 @@ async function loadEvidence(conn, items) {
 
 async function sweep({ now = new Date() } = {}) {
   const items = await loadCandidateItems(db);
-
-  // Booking provenance (LIVE source-linked rows only — the evidence
-  // loader's positive allowlist, so a skipped / no-show row that once
-  // answered the confirmed ask does not keep reporting the call as booked
-  // and let address_moot close its card with no live appointment behind it
-  // (codex r26 P1); no follow-up children) feeds the confirmed-unbooked
-  // address guard.
-  const loadBookedCallIds = async (conn, callIds) => {
-    const set = new Set();
-    if (!callIds.length) return set;
-    const booked = await conn('scheduled_services')
-      .whereIn('source_call_log_id', callIds)
-      .whereNull('parent_service_id')
-      .whereIn('status', [...LIVE_BOOKING_STATUSES])
-      .orderBy('id', 'asc')
-      .select('source_call_log_id');
-    for (const b of booked) set.add(b.source_call_log_id);
-    return set;
-  };
-  const allItemCallIds = [...new Set(items.map((i) => i.call_log_id))];
-  const bookedCallIds = await loadBookedCallIds(db, allItemCallIds);
   const evidence = await loadEvidence(db, items);
 
   const decisions = [];
   for (const item of items) {
-    const decision = classifyTriageItem(item, { bookedCallIds, evidence }, { now });
+    const decision = classifyTriageItem(item, { evidence }, { now });
     if (decision) decisions.push({ item, ...decision });
   }
   const applied = decisions.slice(0, MAX_TRANSITIONS_PER_RUN);
@@ -1516,16 +1530,15 @@ async function sweep({ now = new Date() } = {}) {
     // the pre-lock classification is a candidate list, not a verdict. The
     // joined card/call/customer rows (a customer soft-deleted, demoted, or
     // stripped of the address/surname since the scan must re-arm its
-    // guards), booking provenance, and the evidence arms are all reloaded
-    // inside the transaction.
+    // guards) and the evidence arms (booking provenance included) are all
+    // reloaded inside the transaction.
     const freshRows = await loadCandidateItems(trx, applied.map((d) => d.item.id));
     const freshById = new Map(freshRows.map((r) => [r.id, r]));
-    const freshBookedCallIds = await loadBookedCallIds(trx, allCallIds);
     const freshEvidence = await loadEvidence(trx, freshRows);
     const reverified = applied.filter((d) => {
       const fresh = freshById.get(d.item.id);
       if (!fresh) return false; // no longer open — lost the race
-      const again = classifyTriageItem(fresh, { bookedCallIds: freshBookedCallIds, evidence: freshEvidence }, { now });
+      const again = classifyTriageItem(fresh, { evidence: freshEvidence }, { now });
       return again && again.rule === d.rule && again.action === d.action;
     });
     const touchedCalls = new Map(); // call_log_id -> status we applied last

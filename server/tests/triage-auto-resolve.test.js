@@ -46,14 +46,13 @@ function item(over = {}) {
     ...over,
   };
 }
-const noBookings = { bookedCallIds: new Set(), bookedCallLatest: new Map() };
+const noBookings = { evidence: new Map() };
 // The surname card's filing-time names (the merged V1 extraction's, as the
 // processor snapshots them) — never the call's rolling columns.
 const heardV1 = (first, last) => ({ payload: { flag: 'missing_last_name', heard_name_v1: { first_name: first, last_name: last } } });
-// A LIVE booking created after the card (the current-routing-result case).
-const bookedCtx = (callId, at = new Date(NOW.getTime() - 24 * 3600 * 1000).toISOString()) => (
-  { bookedCallIds: new Set([callId]), bookedCallLatest: new Map([[callId, at]]) }
-);
+// The booking arm's proof: a LIVE booking created after the card that
+// answers its snapshotted ask (the current-routing-result case).
+const bookedCtx = (id = 't1') => ({ evidence: new Map([[id, { booking_after_card: true }]]) });
 
 describe('moot-condition resolves', () => {
   test('address flag resolves when the customer now has street + zip', () => {
@@ -142,8 +141,19 @@ describe('moot-condition resolves', () => {
       call_extraction: { ...NO_ADDR_EXTRACTION, scheduling: { status: 'confirmed', confirmed_start_at: '2026-08-05T10:00:00-04:00' } },
     });
     expect(classifyTriageItem(confirmedUnbooked, noBookings, { now: NOW })).toBeNull();
-    // Same call WITH booking provenance → the guard releases and it moots.
-    expect(classifyTriageItem(confirmedUnbooked, bookedCtx('call-1'), { now: NOW }))
+    // Same call WITH the booking arm's proof → the guard releases and it moots.
+    expect(classifyTriageItem(confirmedUnbooked, bookedCtx(), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'address_moot' });
+    // The CARD's filing-time status holds the guard too: a reprocess that
+    // rewrote the rolling extraction to 'requested' does not release the
+    // original confirmation's only trace (codex r27 P1).
+    const confirmedAtFiling = item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      payload: { flag: 'address_unverified', scheduling_window: { status: 'confirmed' } },
+      call_extraction: { ...NO_ADDR_EXTRACTION, scheduling: { status: 'requested' } },
+    });
+    expect(classifyTriageItem(confirmedAtFiling, noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(confirmedAtFiling, bookedCtx(), { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'address_moot' });
   });
 
@@ -309,13 +319,13 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
   });
 
   test('a created booking does NOT clear cancellation/coordination transition requests', () => {
-    const booked = bookedCtx('call-1');
+    const booked = bookedCtx();
     expect(classifyTriageItem(item({ reason_code: 'reschedule_or_cancel' }), booked, { now: NOW })).toBeNull();
     expect(classifyTriageItem(item({ reason_code: 'existing_appointment_coordination' }), booked, { now: NOW })).toBeNull();
   });
 
   test('low_extraction_confidence never auto-clears (no booking rule, no age rule)', () => {
-    const booked = bookedCtx('call-1');
+    const booked = bookedCtx();
     expect(classifyTriageItem(item({ reason_code: 'low_extraction_confidence' }), booked, { now: NOW })).toBeNull();
     // Nor does age: the office owes confirming the doubted fields.
     expect(classifyTriageItem(item({ reason_code: 'low_extraction_confidence', created_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();
@@ -371,7 +381,7 @@ const {
   loadEvidence,
 } = require('../services/triage-auto-resolve');
 
-const evidenceFor = (id, flags) => ({ bookedCallIds: new Set(), evidence: new Map([[id, flags]]) });
+const evidenceFor = (id, flags) => ({ evidence: new Map([[id, flags]]) });
 
 describe('evidence rules', () => {
   test('quote_promised resolves only on a DIRECT delivered estimate', () => {
@@ -402,9 +412,7 @@ describe('evidence rules', () => {
     const confirmed = { ...base, customer_phone: '+19415550123', payload: { scheduling_window: { status: 'confirmed' } }, call_extraction: { ...NO_ADDR_EXTRACTION, scheduling: { status: 'requested' } } };
     expect(classifyTriageItem(item(confirmed), evidenceFor('t1', { caller_phone_added: true }), { now: NOW })).toBeNull();
     // Only a booking answering the snapshotted ask (the booking arm's
-    // evidence) counts as the confirmed appointment — not any row pointing
-    // at the call.
-    expect(classifyTriageItem(item(confirmed), { bookedCallIds: new Set(['call-1']), evidence: new Map([['t1', { caller_phone_added: true }]]) }, { now: NOW })).toBeNull();
+    // evidence) counts as the confirmed appointment.
     expect(classifyTriageItem(item(confirmed), evidenceFor('t1', { caller_phone_added: true, booking_after_card: true }), { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'caller_phone_added' });
     // The base payload's scheduling_status serves when the card has no window.
@@ -418,8 +426,7 @@ describe('evidence rules', () => {
   test('not_confirmed resolves on a booking created after the card', () => {
     expect(classifyTriageItem(item({ reason_code: 'not_confirmed' }), evidenceFor('t1', { booking_after_card: true }), { now: NOW }))
       .toEqual({ action: 'resolve', rule: 'booking_created' });
-    // The legacy source-linked set alone (pre-card provenance) is still not enough.
-    expect(classifyTriageItem(item({ reason_code: 'not_confirmed' }), bookedCtx('call-1'), { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ reason_code: 'not_confirmed' }), noBookings, { now: NOW })).toBeNull();
   });
 
   test('address cards resolve on a completed visit only when every heard address matches the on-file street', () => {
@@ -531,11 +538,21 @@ describe('evidence helpers', () => {
     // "Bee / Wasp Nest Removal" under specialty on a booking, while the
     // engine's own estimate line carries the enum (codex r22 P2).
     const [stinging] = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['stinging_insect'] } } }));
-    expect(stinging).toEqual([['stinging', 'insect'], ['bee', 'wasp', 'nest', 'removal']]);
+    expect(stinging).toEqual([['stinging', 'insect'], ['wasp', 'nest'], ['bee', 'wasp', 'nest', 'removal']]);
     expect(serviceTypeMatches('Bee / Wasp Nest Removal specialty', stinging)).toBe(true);
     expect(serviceTypeMatches('Stinging Insect — Paper Wasp', stinging)).toBe(true);
     expect(serviceTypeMatches('Quarterly Pest Control specialty', stinging)).toBe(false);
-    expect(serviceTypeMatches('Wasp Nest Removal', stinging)).toBe(false);
+    expect(serviceTypeMatches('Wasp Nest Removal', stinging)).toBe(true);
+    expect(serviceTypeMatches('Wasp Removal', stinging)).toBe(false);
+    // The words the compose path scans a category as answer it too: the
+    // bundled WaveGuard category is pest control in both category maps, so
+    // a pest booking or line answers a card that snapshotted the bundle
+    // with no specific service (codex r27 P2). One answer per distinct list.
+    const [bundled] = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['bundled_waveguard'] } } }));
+    expect(bundled).toEqual([['bundled', 'waveguard'], ['pest']]);
+    expect(serviceTypeMatches('Quarterly Pest Control', bundled)).toBe(true);
+    expect(serviceTypeMatches('Lawn Care', bundled)).toBe(false);
+    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_general'] } } }))).toEqual([[['pest']]]);
     // The specific service the caller named narrows the PRIMARY category
     // into one requirement: a flea treatment filed under pest_general is
     // not a generic pest booking, and it is one ask, not two.
@@ -543,7 +560,7 @@ describe('evidence helpers', () => {
     expect(flea).toEqual([[['pest', 'flea']]]);
     expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: [], requested_specific_service: 'Flea Treatment' } } }))).toEqual([[['flea']]]);
     // ...and it narrows every answer of the primary alike.
-    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['stinging_insect'], requested_specific_service: 'Yellow Jacket' } } }))).toEqual([[['stinging', 'insect', 'yellow', 'jacket'], ['bee', 'wasp', 'nest', 'removal', 'yellow', 'jacket']]]);
+    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['stinging_insect'], requested_specific_service: 'Yellow Jacket' } } }))).toEqual([[['stinging', 'insect', 'yellow', 'jacket'], ['wasp', 'nest', 'yellow', 'jacket'], ['bee', 'wasp', 'nest', 'removal', 'yellow', 'jacket']]]);
     // quote_promised cards carry the same ask under quote_scope.
     expect(requestedServiceTokens(item({ payload: { quote_scope: { requested_service_categories: ['lawn_care'] } } }))).toEqual([[['lawn']]]);
     expect(flea.every((tokens) => serviceTypeMatches('Quarterly Pest Control pest_control', tokens))).toBe(false);
@@ -638,6 +655,24 @@ describe('evidence helpers', () => {
     const towers = est({ estimate_data: { proposal: { enabled: true, buildings: [{ name: 'Lawn House', lineItems: [{ description: 'Monthly pest', unitPrice: 200, frequency: 'monthly' }] }] } } });
     expect(estimateCoversAsk(card(plan), towers)).toBe(true);
     expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['lawn_care'] }), towers)).toBe(false);
+    // Authored text gains a family only where the compose path's
+    // word-bounded scan vouches for it — the shared reader's pest pattern
+    // reads the bare word "general" as Pest Control (and "advanced" as
+    // termite): "General lawn maintenance" prices lawn care, not pest
+    // control (codex r27 P1). A program's validated family still answers
+    // through its catalog label; a corrective flea line still reads as
+    // pest work (the reader's grouping, vouched by the scan's flea family).
+    const lawnAsk = card({ ...plan, requested_service_categories: ['lawn_care'] });
+    const generalLawn = est({ estimate_data: { proposal: { enabled: true, buildings: [{ name: 'Main', lineItems: [{ description: 'General lawn maintenance', unitPrice: 200, frequency: 'monthly' }] }] } } });
+    expect(estimateCoversAsk(card(plan), generalLawn)).toBe(false);
+    expect(estimateCoversAsk(lawnAsk, generalLawn)).toBe(true);
+    const advancedTurf = est({ estimate_data: { proposal: { enabled: true, buildings: [{ name: 'Main', lineItems: [{ description: 'Advanced turf program', unitPrice: 200, frequency: 'monthly' }] }] } } });
+    expect(estimateCoversAsk(card({ ...plan, requested_service_categories: ['termite'], requested_specific_service: null }), advancedTurf)).toBe(false);
+    expect(estimateCoversAsk(lawnAsk, advancedTurf)).toBe(true);
+    const turfProgram = est({ estimate_data: { proposal: { enabled: true, programs: [{ service: 'lawn', label: 'Bermuda program', frequencyPerYear: 8, pricePerApplication: 90 }] } } });
+    expect(estimateCoversAsk(card(plan), turfProgram)).toBe(false);
+    expect(estimateCoversAsk(lawnAsk, turfProgram)).toBe(true);
+    expect(deliveredEstimateScope(turfProgram).lines).toEqual([{ names: ['Bermuda program', 'lawn', 'Lawn Care'], recurring: true, oneTime: false, authored: true }]);
     // The engine's stinging line carries the category enum as its service
     // key; the enum's own words answer it (codex r22 P2).
     const wasps = card({ requested_service_categories: ['stinging_insect'], requested_specific_service: null });

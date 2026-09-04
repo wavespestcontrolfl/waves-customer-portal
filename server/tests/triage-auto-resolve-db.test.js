@@ -295,8 +295,10 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   });
 
   // address card on a call that CONFIRMED a slot: booked only by a LIVE
-  // source-linked row (codex r26 P1 — a skipped one is not the appointment).
-  async function seedConfirmedAddressCall(sid, { bookingStatus }) {
+  // source-linked row (codex r26 P1 — a skipped one is not the appointment)
+  // that answers the card's snapshotted ask (codex r27 P1 — a reprocess's
+  // booking for another service is not the appointment either).
+  async function seedConfirmedAddressCall(sid, { bookingStatus, bookingService = 'Quarterly Pest Control' }) {
     const { customerId, propertyId } = await seedCustomer(sid.slice(-2));
     const callAt = new Date(Date.now() - 65 * 60000);
     const [call] = await db('call_log').insert({
@@ -310,10 +312,14 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const [card] = await db('triage_items').insert({
       call_log_id: call.id, category: 'address_review', severity: 'blocking', reason_code: 'address_unverified',
       status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
-      payload: JSON.stringify({ flag: 'address_unverified', scheduling_status: 'confirmed' }),
+      payload: JSON.stringify({ flag: 'address_unverified', scheduling_status: 'confirmed', scheduling_window: {
+        status: 'confirmed', confirmed_start_at: null, requested_date_range_start: null,
+        requested_service_categories: ['pest_control'], requested_service_intent: 'preventative_one_time', preferred_time_of_day: null,
+        requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 },
+      } }),
     }).returning('id');
     const [visit] = await db('scheduled_services').insert({
-      customer_id: customerId, property_id: propertyId, source_call_log_id: call.id, service_type: 'Quarterly Pest Control', status: bookingStatus,
+      customer_id: customerId, property_id: propertyId, source_call_log_id: call.id, service_type: bookingService, status: bookingStatus,
       scheduled_date: new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10),
       created_at: new Date(Date.now() - 10 * 60000),
     }).returning('id');
@@ -321,14 +327,16 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     return { callId: call.id, cardId: card.id };
   }
 
-  test('a confirmed call counts as booked only by a LIVE source-linked appointment — a skipped one keeps the address card (codex r26 P1)', async () => {
+  test('a confirmed call counts as booked only by a LIVE source-linked appointment answering its ask — a skipped one, or one for another service, keeps the address card (codex r26 + r27 P1)', async () => {
     const live = await seedConfirmedAddressCall(SID.replace(/e2$/, 'a1'), { bookingStatus: 'confirmed' });
     const skippedBooking = await seedConfirmedAddressCall(SID.replace(/e2$/, 'a2'), { bookingStatus: 'skipped' });
+    const otherService = await seedConfirmedAddressCall(SID.replace(/e2$/, 'a3'), { bookingStatus: 'confirmed', bookingService: 'Lawn Care Program' });
     const result = await sweep.runTriageAutoResolve({ now: new Date() });
     expect(result.skipped).toBe(false);
     const statusOf = async (c) => (await db('triage_items').where({ id: c.cardId }).first('status')).status;
     expect(await statusOf(live)).toBe('resolved');
     expect(await statusOf(skippedBooking)).toBe('open');
+    expect(await statusOf(otherService)).toBe('open');
   });
 
   test('booking after the card on the requested day resolves it as auto; a pre-card, skipped, or off-day booking leaves it open', async () => {
