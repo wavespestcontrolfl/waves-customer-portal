@@ -120,36 +120,47 @@ async function bellOrWarn(ctx, product, request, bucket) {
   }
 }
 
-// Vendor configured after the request was raised (the seeded sticker starts
-// unpriced): carry the new vendor/SKU/URL onto the open request so the tab
-// and the refreshed bell show it. Only NULL fields are filled — a populated
-// request is never rewritten from the product's current configuration.
-// Returns the request as the bell must see it.
-async function refreshOpenRequest(ctx, p, existing, pricing) {
-  const meta = parseMeta(existing.metadata);
-  // Everything learned comes from ONE vendor — the request's own. A request
-  // already pinned to a vendor (id, or name when it predates ids) learns
-  // nothing from a product that has since moved to another vendor: it keeps
-  // saying "from Gemplers" with no Amazon SKU/link (Codex r8 P2). Only a
-  // request with no vendor identity at all adopts the product's vendor.
-  const scanVendorId = p.auto_reorder_vendor_id || null;
-  const sameVendor = meta.vendorId ? meta.vendorId === scanVendorId : (!existing.vendor || existing.vendor === p.vendor_name);
-  if (!sameVendor) return existing;
+// What an open request still has to learn from ITS vendor (SKU, URL, the
+// vendor id when it predates ids; the name when it has none): only NULL
+// fields are filled, and everything comes from ONE vendor — a request pinned
+// to a vendor the product has since left keeps its identity and gets no
+// mixed SKU/link (Codex r8 P2). Null = nothing to write.
+function learnedVendorFields(request, vendor) {
+  const meta = parseMeta(request.metadata);
+  const sameVendor = meta.vendorId ? meta.vendorId === vendor.vendorId : (!request.vendor || request.vendor === vendor.vendorName);
+  if (!sameVendor) return null;
+  const name = request.vendor || vendor.vendorName || null;
   const learned = {
-    vendorId: meta.vendorId || p.auto_reorder_vendor_id || null,
-    vendorSku: meta.vendorSku || pricing?.vendor_sku || null,
-    vendorProductUrl: meta.vendorProductUrl || pricing?.vendor_product_url || null,
+    vendorId: meta.vendorId || vendor.vendorId || null,
+    vendorSku: meta.vendorSku || vendor.pricing?.vendor_sku || null,
+    vendorProductUrl: meta.vendorProductUrl || vendor.pricing?.vendor_product_url || null,
   };
-  const vendor = existing.vendor || p.vendor_name || null;
-  const changed = vendor !== (existing.vendor || null)
+  const changed = name !== (request.vendor || null)
     || learned.vendorId !== (meta.vendorId || null)
     || learned.vendorSku !== (meta.vendorSku || null)
     || learned.vendorProductUrl !== (meta.vendorProductUrl || null);
-  if (!changed) return existing;
-  const metadata = { ...meta, ...learned };
-  await ctx.conn('product_restock_requests').where({ id: existing.id }).update({ vendor, metadata: JSON.stringify(metadata), updated_at: new Date() });
-  ctx.result.refreshed.push({ productId: p.id, requestId: existing.id });
-  return { ...existing, vendor, metadata };
+  return changed ? { vendor: name, metadata: { ...meta, ...learned } } : null;
+}
+
+// Vendor configured after the request was raised (the seeded sticker starts
+// unpriced): carry the vendor/SKU/URL onto the open request so the tab and
+// the refreshed bell show it. Product AND request are locked in one
+// transaction: the vendor is re-derived from the locked product (an admin
+// edit between the scan and here must not pin the request to the old
+// vendor), and a request that left 'open' meanwhile is neither updated nor
+// re-belled (pre-push P1). Returns the request as the bell must see it, or
+// null when it is no longer an open auto request.
+async function refreshOpenRequest(ctx, p, existing, scanPricing) {
+  return ctx.conn.transaction(async (trx) => {
+    const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('auto_reorder_vendor_id');
+    const request = await trx('product_restock_requests').where({ id: existing.id }).forUpdate().first();
+    if (!fresh || !request || request.status !== 'open' || request.source !== SOURCE) return null;
+    const learned = learnedVendorFields(request, await lockedVendor(trx, p, fresh, scanPricing));
+    if (!learned) return request;
+    await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ vendor: learned.vendor, metadata: JSON.stringify(learned.metadata), updated_at: new Date() });
+    ctx.result.refreshed.push({ productId: p.id, requestId: request.id });
+    return { ...request, ...learned };
+  });
 }
 
 // A still-open auto request whose bell failed earlier would otherwise sit
@@ -159,6 +170,7 @@ async function handleLiveRequest(ctx, p, existing, pricing) {
   ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: existing.id });
   if (existing.source !== SOURCE || existing.status !== 'open') return;
   const request = await refreshOpenRequest(ctx, p, existing, pricing);
+  if (!request) return;
   await bellOrWarn(ctx, p, request, 'renotified');
 }
 
