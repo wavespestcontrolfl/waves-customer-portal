@@ -66,11 +66,14 @@ function read(file) {
 // The lane literal may sit inside the expression a site labels with (a
 // route- or flag-chosen ternary — response-drafter, the shadow drafter) as
 // long as it is the runInLane argument or the `laneId:` payload value on
-// that line. A bare `laneId = …` assignment does not count: nothing ties it
-// to a call (pre-push audit on #3860).
+// that line — and only that expression: the scan stops at a comma or
+// semicolon, so a literal in the NEXT argument or property (`runInLane(x,
+// () => log('id'))`, `{ laneId: x, note: 'id' }`) never counts (Codex r2).
+// A bare `laneId = …` assignment does not count either: nothing ties it to
+// a call (pre-push audit on #3860).
 function labelPattern(id) {
   const q = `['"\`]${id}['"\`]`;
-  return new RegExp(`(?:runInLane\\(|laneId:)[^\\n;]*?${q}`);
+  return new RegExp(`(?:runInLane\\(|laneId:)[^\\n;,]*?${q}`);
 }
 
 function isLabelled(lane) {
@@ -110,6 +113,12 @@ describe('llm call-ledger coverage', () => {
 
   describe('call lanes: labelled at a call site, or listed as a known gap', () => {
     const labelled = new Set(byLedger.call.filter(isLabelled).map((l) => l.id));
+
+    test('labelPattern: the literal must be the runInLane argument / laneId value, not a later argument or property', () => {
+      const re = labelPattern('sms_intent');
+      for (const yes of ["laneId: 'sms_intent',", "runInLane('sms_intent', fn)", "laneId: highStakes ? 'other' : 'sms_intent',", "laneId: preset || (route === X ? 'sms_intent' : 'y') };"]) expect(re.test(yes)).toBe(true);
+      for (const no of ["runInLane(activeLane, () => log('sms_intent'))", "{ laneId: activeLane, note: 'sms_intent' }", "const laneId = 'sms_intent';"]) expect(re.test(no)).toBe(false);
+    });
 
     test('UNLABELLED_LANES lists only call-ledger lanes', () => {
       const callIds = new Set(byLedger.call.map((l) => l.id));
