@@ -2703,49 +2703,62 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // reminders alongside the group's anchor and drops off the combined link
   // when its earlier expiry hits. Reconcile without any channel delivery:
   // align expiry forward-only and pre-burn the follow-up flags — the group's
-  // anchor owns all further comms. Status and pricing snapshot untouched
-  // (their original send froze them) — but the combined link this REAL
-  // handoff delivered carries the sibling's frozen scope too, so that scope
-  // is appended to its history at the GROUP handoff instant: the triage
-  // sweep pairs a cited revision only with sibling revisions of the same
-  // instant, and a sibling stamped only at its own earlier send would drop
-  // out of a genuinely complete group quote (codex #3811 r34 P2).
+  // anchor owns all further comms. Status/snapshot untouched (their original
+  // send froze them).
   if (estimate.estimate_group_id) {
+    const liveSiblings = () => db('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNot({ id: estimate.id })
+      .whereIn('status', ['sent', 'viewed'])
+      .whereNull('archived_at')
+      .whereNull('price_locked_at');
     try {
-      const liveSiblings = await db('estimates')
-        .where({ estimate_group_id: estimate.estimate_group_id })
-        .whereNot({ id: estimate.id })
-        .whereIn('status', ['sent', 'viewed'])
-        .whereNull('archived_at')
-        .whereNull('price_locked_at')
-        .select('id', 'estimate_data');
-      for (const sibling of liveSiblings) {
-        const patch = { groupPublishedByEstimateId: estimate.id };
-        const priorSnapshot = (parseEstimateData(sibling.estimate_data) || {}).sendSnapshot;
-        const frozenScope = priorSnapshot?.scope;
-        if (stampChannels.length > 0 && frozenScope && typeof frozenScope === 'object' && Array.isArray(frozenScope.lines)) {
-          patch.sendSnapshot = { ...priorSnapshot, ...scopeRevision(priorSnapshot, frozenScope, lastDeliveredAt) };
-        }
-        await db('estimates')
-          .where({ id: sibling.id })
-          .update({
-            // Forward-only expiry inside the SET (not the WHERE): a sibling
-            // already extended past this send still needs its reminder flags
-            // burned — the anchor owns all group comms (codex #3244 r5).
-            expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [nextExpiresAt, nextExpiresAt]),
-            followup_unviewed_sent: true,
-            followup_viewed_sent: true,
-            followup_final_sent: true,
-            followup_expiring_sent: true,
-            estimate_data: db.raw(
-              "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
-              [JSON.stringify(patch)],
-            ),
-            updated_at: db.fn.now(),
-          });
-      }
+      await liveSiblings()
+        .update({
+          // Forward-only expiry inside the SET (not the WHERE): a sibling
+          // already extended past this send still needs its reminder flags
+          // burned — the anchor owns all group comms (codex #3244 r5).
+          expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [nextExpiresAt, nextExpiresAt]),
+          followup_unviewed_sent: true,
+          followup_viewed_sent: true,
+          followup_final_sent: true,
+          followup_expiring_sent: true,
+          estimate_data: db.raw(
+            "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ groupPublishedByEstimateId: estimate.id })],
+          ),
+          updated_at: db.fn.now(),
+        });
     } catch (e) {
       logger.warn(`[admin-estimates] live-sibling group reconciliation failed for estimate ${estimate.id}: ${e.message}`);
+    }
+    // The combined link this REAL handoff delivered carries each live
+    // sibling's frozen scope too, so that scope joins its history at the
+    // GROUP handoff instant: the triage sweep pairs a cited revision only
+    // with sibling revisions of the same instant, and a sibling stamped
+    // only at its own earlier send would drop out of a genuinely complete
+    // group quote (codex #3811 r34 P2). ONE statement, reading the row's
+    // snapshot as it is at write time — a customer's bond / interior /
+    // service-mix selection landing on the sibling between a read and a
+    // write deliberately drops pricingBundle / tierDiscounts, and a
+    // rebuilt snapshot would restore the pre-selection pricing (r35 P1).
+    // Only the history key is set; scope and pricing are never touched.
+    // Same cap as scopeRevision; a non-array history is replaced.
+    if (stampChannels.length > 0) {
+      try {
+        const history = "CASE WHEN jsonb_typeof(estimate_data->'sendSnapshot'->'scopeHistory') = 'array' THEN estimate_data->'sendSnapshot'->'scopeHistory' ELSE '[]'::jsonb END";
+        const appended = `(${history} || jsonb_build_array(jsonb_build_object('deliveredAt', ?::text, 'scope', estimate_data->'sendSnapshot'->'scope')))`;
+        await liveSiblings()
+          .whereRaw("jsonb_typeof(estimate_data->'sendSnapshot'->'scope'->'lines') = 'array'")
+          .update({
+            estimate_data: db.raw(
+              `jsonb_set(estimate_data, '{sendSnapshot,scopeHistory}', (SELECT COALESCE(jsonb_agg(e ORDER BY ord), '[]'::jsonb) FROM jsonb_array_elements(${appended}) WITH ORDINALITY AS h(e, ord) WHERE ord > jsonb_array_length(${appended}) - ?), true)`,
+              [lastDeliveredAt, lastDeliveredAt, DELIVERY_HISTORY_MAX],
+            ),
+          });
+      } catch (e) {
+        logger.warn(`[admin-estimates] live-sibling scope stamp failed for estimate ${estimate.id}: ${e.message}`);
+      }
     }
   }
 

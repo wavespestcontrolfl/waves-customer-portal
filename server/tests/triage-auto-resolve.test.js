@@ -795,6 +795,16 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(termiteQuote('inspection_only'), inspectionLine)).toBe(true);
     expect(estimateCoversAsk(termiteQuote('inspection_only'), treatmentLine)).toBe(false);
     expect(estimateCoversAsk(termiteQuote('preventative_one_time'), inspectionLine)).toBe(false);
+    // A recurring engine row carries its cadence as a number, never a
+    // word; the frozen line spells it as the catalog does, so the catalog
+    // name a card cites is answered at its cadence and no other (codex
+    // r35 P2).
+    const cadenceAsk = (name) => card({ requested_service_categories: ['pest_general'], requested_specific_service: name, requested_service_intent: 'recurring_membership_inquiry' });
+    const rawQuarterly = est({ estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', visitsPerYear: 4, monthly: 40 }] } } });
+    const rawBiMonthly = est({ estimate_data: { result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'bi_monthly', mo: 45 }] } } } });
+    expect(estimateCoversAsk(cadenceAsk('Quarterly Pest Control Service'), rawQuarterly)).toBe(true);
+    expect(estimateCoversAsk(cadenceAsk('Quarterly Pest Control Service'), rawBiMonthly)).toBe(false);
+    expect(estimateCoversAsk(cadenceAsk('Bi-Monthly Pest Control Service'), rawBiMonthly)).toBe(true);
     expect(estimateCoversAsk(termiteQuote('quote_only'), treatmentLine)).toBe(true);
     // A quote-only ask takes either subtype — the category / specific
     // service says what was quoted, so a delivered inspection quote closes
@@ -958,6 +968,14 @@ describe('evidence helpers', () => {
     expect(bookingCoversRequest(termite('inspection_only'), [treatment], ctx)).toBe(false);
     expect(bookingCoversRequest(termite('inspection_only'), [inspection], ctx)).toBe(true);
     expect(bookingCoversRequest(termite('preventative_one_time'), [inspection], ctx)).toBe(false);
+    // The catalog's own consultation — the pipeline books an uncertain
+    // "come look" ask as Waves Assessment (lawn_inspection) — answers an
+    // inspection ask by its structured identity, and no treatment ask
+    // (codex r35 P2).
+    const assessmentAsk = (intent) => card({ requested_date_range_start: '2026-07-30', requested_service_categories: ['lawn_care'], requested_specific_service: 'Waves Assessment', requested_service_intent: intent });
+    const assessment = booking({ service_type: 'Waves Assessment', service_category_snapshot: 'lawn_inspection' });
+    expect(bookingCoversRequest(assessmentAsk('inspection_only'), [assessment], ctx)).toBe(true);
+    expect(bookingCoversRequest(assessmentAsk('preventative_one_time'), [assessment], ctx)).toBe(false);
     expect(bookingCoversRequest(termite('active_infestation_treatment'), [inspection], ctx)).toBe(false);
     expect(bookingCoversRequest(termite('follow_up_existing_service'), [treatment], ctx)).toBe(true);
     expect(bookingCoversRequest(termite('follow_up_existing_service'), [booking({ service_type: 'Termite Treatment', service_category_snapshot: 'termite', is_recurring: true })], ctx)).toBe(false);

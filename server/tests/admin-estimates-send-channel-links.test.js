@@ -222,17 +222,25 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     expect(result.sent).toBe(true);
     const groupInstant = deliveryPatches()[0].deliveryState.lastDeliveredAt;
     expect(groupInstant).toBeTruthy();
+    // The flag/expiry reconciliation still merges only the publisher id…
     const siblingPatch = db.raw.mock.calls
       .filter(([sql, bindings]) => /jsonb/.test(String(sql)) && Array.isArray(bindings))
       .map(([, bindings]) => { try { return JSON.parse(bindings[0]); } catch { return null; } })
       .find((patch) => patch && patch.groupPublishedByEstimateId === anchor.id);
-    expect(siblingPatch).toBeTruthy();
-    expect(siblingPatch.sendSnapshot.pricingBundle).toEqual({ frozen: true });
-    expect(siblingPatch.sendSnapshot.scope).toEqual(frozenScope);
-    expect(siblingPatch.sendSnapshot.scopeHistory).toEqual([
-      { deliveredAt: earlier, scope: frozenScope },
-      { deliveredAt: groupInstant, scope: frozenScope },
-    ]);
+    expect(siblingPatch).toEqual({ groupPublishedByEstimateId: anchor.id });
+    // …and the scope stamp is ONE jsonb_set on the history key alone, at
+    // the group instant, reading the row's own scope at write time — never
+    // a rebuilt snapshot that could restore pricing a concurrent customer
+    // selection dropped (codex r35 P1).
+    const stamp = db.raw.mock.calls.find(([sql]) => /jsonb_set\(estimate_data, '\{sendSnapshot,scopeHistory\}'/.test(String(sql)));
+    expect(stamp).toBeTruthy();
+    expect(stamp[0]).toMatch(/estimate_data->'sendSnapshot'->'scope'\)/);
+    expect(stamp[1]).toEqual([groupInstant, groupInstant, 25]);
+    // Only the anchor's own finalize writes a snapshot; no sibling-bound JSON patch carries one.
+    const siblingJsonPatches = db.raw.mock.calls.filter(([sql, bindings]) => /\|\| \?::jsonb/.test(String(sql)) && Array.isArray(bindings) && /groupPublishedByEstimateId/.test(String(bindings[0])));
+    expect(siblingJsonPatches.length).toBe(1);
+    expect(String(siblingJsonPatches[0][1][0])).not.toMatch(/sendSnapshot/);
+    expect(sibling.estimate_data).toContain(earlier); // the fixture's own history was never rewritten client-side
   });
 
   test('a REAL provider send advances lastDeliveredAt past the prior stamp', async () => {

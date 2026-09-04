@@ -536,7 +536,12 @@ const INTENT_RULES = {
   quote_only: { recurring: true, oneTime: true, inspection: null, booking: false },
 };
 const intentRule = (item) => INTENT_RULES[requestAsk(item)?.requested_service_intent] || null;
-const isInspection = (words) => /\binspections?\b/i.test(String(words || ''));
+// An inspection is a record that says so — or the catalog's own
+// consultation: the call pipeline books an uncertain "come look / diagnose"
+// ask as "Waves Assessment" (service_key lawn_inspection), and that
+// structured identity answers an inspection ask the way the word does; a
+// treatment row carries neither (codex r35 P2).
+const isInspection = (words) => /\binspections?\b|\bassessments?\b|\blawn_inspection\b/i.test(String(words || ''));
 // A record — a booking's service words and cadence, or an estimate line —
 // answers the intent when it carries a cadence the rule allows and is an
 // inspection exactly when the rule wants one (null: either).
@@ -1198,6 +1203,26 @@ const ENGINE_LINE_SOURCES = [
   { list: (root) => root.lineItems, line: rawLine },
 ];
 const isPlaceholder = (entry) => entry.quoteRequired === true || entry.requiresManualReview === true;
+// A recurring engine row's cadence, as the catalog spells it: raw rows
+// (pricePestControl, priceLawnCare) carry a service key plus a numeric
+// visitsPerYear / frequency and no cadence word, while the catalog name a
+// card cites ("Quarterly Pest Control Service", "Bi-Monthly Lawn Care
+// Service") keeps its cadence word as a token — so the frozen line names
+// carry the same label the public menu prints (codex r35 P2).
+const CADENCE_KEY_BY_VISITS = { 12: 'monthly', 9: 'every_6_weeks', 8: 'every_6_weeks', 6: 'bimonthly', 4: 'quarterly', 2: 'semiannual', 1: 'annual' };
+const CADENCE_KEY_BY_WORD = { monthly: 'monthly', bimonthly: 'bimonthly', everyweeks: 'every_6_weeks', quarterly: 'quarterly', semiannual: 'semiannual', biannual: 'semiannual', annual: 'annual', yearly: 'annual' };
+function cadenceWord(entry) {
+  const { CADENCE_LABELS } = require('./public-services-menu');
+  let key = null;
+  for (const raw of [entry.frequency, entry.recurringPattern, entry.visitsPerYear, entry.visits]) {
+    if (raw == null || raw === '') continue;
+    key = typeof raw === 'number' || /^\d+$/.test(String(raw))
+      ? CADENCE_KEY_BY_VISITS[Math.round(Number(raw))] || null
+      : CADENCE_KEY_BY_WORD[String(raw).toLowerCase().replace(/[^a-z]/g, '')] || null;
+    if (key) break;
+  }
+  return key ? CADENCE_LABELS[key] || null : null;
+}
 const entryNames = (entry) => [entry.service, entry.serviceKey, entry.service_key, entry.name, entry.label, entry.description, entry.detail, entry.det];
 
 // One line per priced entry — its own name fields plus the service family
@@ -1287,7 +1312,7 @@ function engineLines(data, add) {
     if (!identity) return add(entryNames(entry), cadence, priced);
     const key = `${identity.trim().toLowerCase()}|${cadence.recurring}`;
     const line = pooled.get(key) || { names: [], cadence, priced: false };
-    line.names.push(...entryNames(entry));
+    line.names.push(...entryNames(entry), ...(cadence.recurring ? [cadenceWord(entry)] : []));
     line.priced = line.priced || priced;
     pooled.set(key, line);
     return undefined;

@@ -213,4 +213,4 @@ async function isPublicSelectableServiceKey(serviceKey, conn = db) {
   return !!(await publicSelectableService(serviceKey, conn));
 }
 
-module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS };
+module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS, CADENCE_LABELS };
