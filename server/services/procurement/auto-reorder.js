@@ -134,12 +134,19 @@ async function ringRestockBell({ notify, product, request }) {
   );
 }
 
+// The bell is the only handoff to staff, so a bell that did not land is a
+// sweep ERROR (job_health red via sweepFailureError), not a warning:
+// notifyAdmin resolves NULL when it could not persist the notification
+// (its own catch), so the resolved row is checked like a rejection (Codex
+// r13 P2). The request row stays; the next sweep re-rings it.
 async function bellOrWarn(ctx, product, request, bucket) {
   try {
-    await ringRestockBell({ notify: ctx.notify, product, request });
+    const row = await ringRestockBell({ notify: ctx.notify, product, request });
+    if (!row) throw new Error('notification not persisted');
     ctx.result[bucket].push({ productId: product.id, requestId: request.id });
   } catch (notifyErr) {
-    logger.warn(`[auto-reorder] bell failed for ${product.name} (request ${request.id}): ${notifyErr.message}`);
+    logger.error(`[auto-reorder] bell NOT delivered for ${product.name} (request ${request.id}): ${notifyErr.message}`);
+    ctx.result.errors.push({ productId: product.id, name: product.name, requestId: request.id, message: `bell: ${notifyErr.message}` });
   }
 }
 

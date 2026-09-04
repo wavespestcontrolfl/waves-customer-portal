@@ -256,6 +256,18 @@ test('the pricing advisory lock is taken before the product row lock, and a fail
   expect(mockState.inserted).toHaveLength(0);
 });
 
+test('a restock bell that rejects, or resolves null (not persisted), is a sweep error the job-health path sees — the request row stays for the next re-ring (Codex r13 P2)', async () => {
+  mockState.candidates = [lowSign];
+  const rejected = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => { throw new Error('bell down'); }) });
+  expect(rejected.created).toHaveLength(1);
+  expect(rejected.bells).toHaveLength(0);
+  expect(rejected.errors).toEqual([{ productId: 'prod-sign', name: lowSign.name, requestId: 'req-1', message: 'bell: bell down' }]);
+  expect(sweepFailureError(rejected)).toBeInstanceOf(Error);
+  mockState.inserted = [];
+  const nullRow = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => null) });
+  expect(nullRow.errors).toEqual([expect.objectContaining({ message: 'bell: notification not persisted' })]);
+});
+
 test('reorder quantity cleared under the lock → unconfigured, no row', async () => {
   mockState.candidates = [lowSign];
   mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: true, active: true, reorder_quantity: null, auto_reorder_vendor_id: 'vend-gemplers', inventory_unit: 'each' };
