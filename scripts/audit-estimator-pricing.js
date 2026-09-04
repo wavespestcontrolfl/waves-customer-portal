@@ -508,7 +508,11 @@ function expectTreeShrub({ bedArea, treeCount = 0, palmCount = 0, access = 'easy
   const factor = tier === 'light' ? TS.materialModel.lightFactor : tier === 'enhanced' ? TS.materialModel.enhancedFactor : 1;
   const modeledMaterial = (TS.materialModel.fixedAnnual + TS.materialModel.perTreeAnnual * materialTreeCount + TS.materialModel.perSqFtAnnual * bedArea * density) * factor + palmReserveAnnual;
   const materialCost = Math.max(tc.frequency * 10, modeledMaterial);
-  const laborPerVisit = (G.LABOR_RATE * (onSiteMin + 10)) / 60;
+  // Same operation order as priceTreeShrub (service-pricing.js:2800): rate ×
+  // (minutes / 60), not (rate × minutes) / 60 — the two float orders differ by
+  // an ulp that the whole-dollar pass can turn into a $1 false mismatch near a
+  // half-dollar boundary (codex r29 P2).
+  const laborPerVisit = G.LABOR_RATE * ((onSiteMin + 10) / 60);
   const laborAnnual = laborPerVisit * tc.frequency;
   const directCost = materialCost + laborAnnual + (TS.callbackReservePerVisit || 0) * tc.frequency;
   const baseAnnual = (directCost + G.ADMIN_ANNUAL) / (1 - TS.marginTarget);
@@ -606,7 +610,13 @@ function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, apps
   } else if (treatmentType === 'fungal') {
     if (diagnosisConfirmed !== true || !t.products.includes(selectedProduct)) return null;
     if (appsPerYear == null && intervalMonths == null) return null;
-    apps = appsPerYear != null ? Number(appsPerYear) : round2(12 / Number(intervalMonths));
+    // Mirror resolveAppsPerYear → assertPositiveNumber: the cadence must be a
+    // finite positive NUMBER (a numeric string, zero, negative, NaN or Infinity
+    // is refused) — never Number()-coerced into a zero / negative / infinite
+    // annual price (codex r29 P2).
+    const cadence = appsPerYear != null ? appsPerYear : intervalMonths;
+    if (typeof cadence !== 'number' || !Number.isFinite(cadence) || cadence <= 0) return null;
+    apps = appsPerYear != null ? appsPerYear : round2(12 / intervalMonths);
     perPalm = quote(t.floorPerPalm);
   } else if (treatmentType === 'lethalBronzing') {
     if (!t.eligibleStatuses.includes(palmStatus)) return null;
@@ -1282,6 +1292,14 @@ function runSpecialtyMatrix() {
     { treatmentType: 'fungal', palmCount: 1, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet', intervalMonths: 4 },
     { treatmentType: 'fungal', palmCount: 2, diagnosisConfirmed: false, selectedProduct: 'PHOSPHO-Jet', appsPerYear: 2 },
     { treatmentType: 'fungal', palmCount: 2, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet' },
+    // fungal cadence validation (codex r29 P2): zero, negative, non-finite and
+    // string cadences are refused by assertPositiveNumber — expect NO price.
+    { treatmentType: 'fungal', palmCount: 2, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet', appsPerYear: 0, _refusal: /appsPerYear/ },
+    { treatmentType: 'fungal', palmCount: 2, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet', appsPerYear: -2, _refusal: /appsPerYear/ },
+    { treatmentType: 'fungal', palmCount: 2, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet', appsPerYear: Infinity, _refusal: /appsPerYear/ },
+    { treatmentType: 'fungal', palmCount: 2, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet', appsPerYear: '2', _refusal: /appsPerYear/ },
+    { treatmentType: 'fungal', palmCount: 1, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet', intervalMonths: 0, _refusal: /intervalMonths/ },
+    { treatmentType: 'fungal', palmCount: 1, diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet', intervalMonths: '4', _refusal: /intervalMonths/ },
     // lethal bronzing: each eligible status, custom above / below the floor, an ineligible status
     { treatmentType: 'lethalBronzing', palmCount: 1, palmStatus: 'healthy_preventive' },
     { treatmentType: 'lethalBronzing', palmCount: 4, palmStatus: 'near_infected', customPricePerPalm: 150 },
