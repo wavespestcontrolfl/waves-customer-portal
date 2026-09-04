@@ -75,6 +75,22 @@ describe('ScheduleListView bulk cancel — recurring plan notice', () => {
     await screen.findByText(/belong to a recurring plan: 1\./);
   });
 
+  it('drops the edited row from the selection when the refresh no longer returns it', async () => {
+    const onEdit = vi.fn();
+    const view = await renderWithRows({ refreshKey: 0, onEdit });
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[1]); // svc-plan stays selected (other-page semantics)
+    fireEvent.click(boxes[2]); // svc-once, then edited
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Sam Once')); // row click opens the Edit modal
+    expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-once' }));
+    // The edit moved it out of the filtered window; the host bumps the key.
+    ROWS = ROWS.filter((r) => r.id !== 'svc-once');
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} onEdit={onEdit} />);
+    await screen.findByText('1 selected');
+    expect(screen.queryByText('Sam Once')).not.toBeInTheDocument();
+  });
+
   it('shows nothing for a selection with no recurring visit', async () => {
     await renderWithRows();
     fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once only

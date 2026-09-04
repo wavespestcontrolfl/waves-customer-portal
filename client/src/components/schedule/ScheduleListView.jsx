@@ -48,6 +48,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
   // bulk conflict check must cover rows no longer loaded. Entries follow
   // the selection: deleted on deselect, cleared when it empties.
   const selectedMetaRef = useRef(new Map());
+  const lastEditedIdRef = useRef(null);
   const rememberSelectedMeta = useCallback((s) => {
     selectedMetaRef.current.set(s.id, {
       id: s.id,
@@ -116,6 +117,17 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
       // modal) comes back changed — refresh its meta from the fresh page
       // so the bulk pre-flights read the saved row (Codex #3868 r2 P2).
       (data.services || []).forEach((s) => { if (selectedMetaRef.current.has(s.id)) rememberSelectedMeta(s); });
+      // The row this list handed to the Edit modal may have left the
+      // filtered page (date/status/tech/service changed). Its cached meta
+      // is then unverifiable, so drop it from the selection rather than
+      // bulk-act on a pre-edit snapshot (Codex #3868 r3 P2). Other-page
+      // selections are untouched: only the edited id is checked.
+      const edited = lastEditedIdRef.current;
+      lastEditedIdRef.current = null;
+      if (edited && selectedMetaRef.current.has(edited) && !(data.services || []).some((s) => s.id === edited)) {
+        selectedMetaRef.current.delete(edited);
+        setSelected((prev) => { const next = new Set(prev); next.delete(edited); return next; });
+      }
     } catch { setServices([]); setTotal(0); }
     setLoading(false);
   }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page, rememberSelectedMeta]);
@@ -472,7 +484,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
                 <tr
                   key={s.id}
                   className={cn('hover:bg-zinc-50 cursor-pointer', isSelected && 'bg-zinc-50')}
-                  onClick={() => onEdit?.(s)}
+                  onClick={() => { lastEditedIdRef.current = s.id; onEdit?.(s); }}
                 >
                   <td className={tdClass} onClick={e => e.stopPropagation()}>
                     <input type="checkbox" checked={isSelected}
