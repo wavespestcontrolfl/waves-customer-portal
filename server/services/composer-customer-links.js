@@ -508,7 +508,13 @@ function secureLinkRuns(runs) {
 // /prep, /pay/statement, /appointment or /report URL on the branded short
 // host is the same working page as on the portal origin and is judged the
 // same (GH Codex #3844 r8 P1 — the long-form twin of the r6 short-link fix).
-function canonicalPortalToken(run, hosts, pathRe) {
+// `anyScheme`: the schedule/draft FENCE judges presence, not sendability —
+// the public Express mounts are protocol-agnostic and a client or edge that
+// upgrades HTTP opens the same bearer, so an explicit http:// owned link is
+// a protected link that must park the message, not a link that is not there
+// (GH Codex #3844 r11 P1). The immediate seams keep the https-only read and
+// refuse the plaintext form outright.
+function canonicalPortalToken(run, hosts, pathRe, { anyScheme = false } = {}) {
   let url;
   try {
     url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`);
@@ -517,7 +523,7 @@ function canonicalPortalToken(run, hosts, pathRe) {
   }
   // HTTPS or the schemeless canonical form only — an explicit http:// would
   // expose the 30-day bearer before any redirect reaches HTTPS.
-  if (url.protocol !== 'https:') return null;
+  if (url.protocol !== 'https:' && !(anyScheme && url.protocol === 'http:')) return null;
   // A DNS-equivalent FQDN form (`portal.wavespestcontrol.com.`) keeps its
   // terminal dot through WHATWG parsing and still resolves to us — the
   // same working page, judged the same (GH Codex #3844 r10 P1).
@@ -635,19 +641,21 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
 // like the Auto Pay seam: a look-alike host is not a Waves bearer and is
 // simply not this seam's business. Customer-kind /secure links are the
 // Auto Pay seam's (its own presence check runs first at every caller).
+// The fence reads presence under ANY_SCHEME — see canonicalPortalToken.
+const ANY_SCHEME = { anyScheme: true };
 const IMMEDIATE_ONLY_LINK_KINDS = [
   {
     // Every prep page — the page shows the customer's name and address and
     // only /sms binds it to the recipient (pre-push Codex P0), expiry or not.
     label: 'Prep guide',
     fragment: /\/prep\//i,
-    token: (run, host) => canonicalPortalToken(run, host, /^\/prep\/([a-f0-9]{32})$/i),
+    token: (run, host) => canonicalPortalToken(run, host, /^\/prep\/([a-f0-9]{32})$/i, ANY_SCHEME),
     applies: async () => true,
   },
   {
     label: 'Statement pay',
     fragment: /\/pay\/statement\//i,
-    token: (run, host) => canonicalPortalToken(run, host, /^\/pay\/statement\/([0-9a-f]{64})$/i),
+    token: (run, host) => canonicalPortalToken(run, host, /^\/pay\/statement\/([0-9a-f]{64})$/i, ANY_SCHEME),
     applies: async () => true,
   },
 ];
@@ -666,13 +674,13 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
 function ownedPortalHosts() {
   return [...new Set([require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host.toLowerCase()))];
 }
-async function shortCodeRows(runs) {
+async function shortCodeRows(runs, scheme = {}) {
   const shortRuns = linkRuns(runs, /\/l\//i);
   if (!shortRuns.length) return [];
   const hosts = ownedPortalHosts();
   const rows = [];
   for (const run of shortRuns) {
-    const code = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i);
+    const code = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, scheme);
     if (!code) continue;
     const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'entity_type', 'entity_id');
     if (row) rows.push(row);
@@ -688,12 +696,12 @@ const REPORT_TOKEN_RE = /^\/report\/([A-Za-z0-9_-]{16,})$/i;
 // delivery-time re-check — so they are immediate-only, and /sms re-reads the
 // gate. Service report links the same (pre-push Codex P0): only /sms binds
 // the page to the recipient. Long form or the branded short form.
-function appointmentLinkPresent(runs, hosts, shortRows) {
-  return linkRuns(runs, /\/appointment\//i).some((run) => canonicalPortalToken(run, hosts, APPOINTMENT_TOKEN_RE))
+function appointmentLinkPresent(runs, hosts, shortRows, scheme = {}) {
+  return linkRuns(runs, /\/appointment\//i).some((run) => canonicalPortalToken(run, hosts, APPOINTMENT_TOKEN_RE, scheme))
     || shortRows.some((row) => row.kind === 'appointment');
 }
-function reportLinkPresent(runs, hosts, shortRows) {
-  return linkRuns(runs, /\/report\//i).some((run) => canonicalPortalToken(run, hosts, REPORT_TOKEN_RE))
+function reportLinkPresent(runs, hosts, shortRows, scheme = {}) {
+  return linkRuns(runs, /\/report\//i).some((run) => canonicalPortalToken(run, hosts, REPORT_TOKEN_RE, scheme))
     || shortRows.some((row) => row.kind === 'service_report');
 }
 
@@ -706,9 +714,9 @@ async function immediateOnlyLinkSendCheck(body) {
       if (token && await kind.applies(token)) return { present: true, label: kind.label };
     }
   }
-  const shortRows = await shortCodeRows(runs);
-  if (appointmentLinkPresent(runs, hosts, shortRows)) return { present: true, label: 'Appointment page' };
-  if (reportLinkPresent(runs, hosts, shortRows)) return { present: true, label: 'Service report' };
+  const shortRows = await shortCodeRows(runs, ANY_SCHEME);
+  if (appointmentLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Appointment page' };
+  if (reportLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Service report' };
   return { present: false };
 }
 

@@ -997,6 +997,19 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/${'b'.repeat(32)}//`)).toEqual({ present: true, label: 'Service report' });
   });
 
+  test('an explicit http:// owned bearer is a protected link the fence parks — the public mounts are protocol-agnostic (GH Codex #3844 r11 P1)', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'appointment' } }) };
+    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: true, label: 'Prep guide' });
+    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`)).toEqual({ present: true, label: 'Statement pay' });
+    expect(await immediateOnlyLinkSendCheck('http://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Appointment page' });
+    expect(await immediateOnlyLinkSendCheck('http://wavespest.co/l/Ab12cD')).toEqual({ present: true, label: 'Appointment page' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/report/${'b'.repeat(32)}`)).toEqual({ present: true, label: 'Service report' });
+    // Only http(s) is a served page; another host under http is still not ours.
+    expect(await immediateOnlyLinkSendCheck(`ftp://portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: false });
+    expect(await immediateOnlyLinkSendCheck(`http://evil.example/prep/${PREP}`)).toEqual({ present: false });
+  });
+
   test('long-form bearers on the branded short host are the same served pages — fenced like the portal origin (GH Codex #3844 r8 P1)', async () => {
     mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
     expect(await immediateOnlyLinkSendCheck(`wavespest.co/prep/${PREP}`)).toEqual({ present: true, label: 'Prep guide' });
