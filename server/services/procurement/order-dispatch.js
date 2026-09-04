@@ -359,20 +359,26 @@ async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = 
 // order was reserved in stays its month (the documented fixed-at-reservation
 // policy): the increase is checked against THAT month's headroom and
 // created_at is left alone (Codex r19 P2).
-async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env, accountingAt = null } = {}) {
+async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env, accountingAt = null, postPlacement = false } = {}) {
   const now = new Date();
   const monthAnchor = accountingAt || now;
   const { perOrder, monthly } = caps(env);
   if (perOrder == null || monthly == null) return { ok: false, reason: 'caps_unconfigured', message: 'AUTO_ORDER_MAX_PER_ORDER_CENTS and AUTO_ORDER_MAX_MONTHLY_CENTS must both be set' };
   if (!Number.isFinite(cents) || cents <= 0) return { ok: false, reason: 'no_binding_total', message: 'no positive vendor total to reserve' };
-  if (cents > perOrder) return { ok: false, reason: 'over_per_order_cap', message: `${dollars(cents)} exceeds the per-order cap ${dollars(perOrder)}` };
+  const overPerOrder = cents > perOrder ? { ok: false, reason: 'over_per_order_cap', message: `${dollars(cents)} exceeds the per-order cap ${dollars(perOrder)}` } : null;
+  // Before the vendor call an over-cap figure is simply refused. After it
+  // (postPlacement) the money has MOVED: the actual charge is written under
+  // the cap lock whatever the verdict, so no concurrent reservation can read
+  // the stale lower amount in the gap before the park (pre-push P0).
+  if (overPerOrder && !postPlacement) return overPerOrder;
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAPS_LOCK_KEY]);
     const spent = await monthlySpentCents(trx, { now: monthAnchor, excludeId: ledgerId });
-    if (spent + cents > monthly) return { ok: false, reason: 'over_monthly_cap', message: `${dollars(cents)} would take this month to ${dollars(spent + cents)}, over the monthly cap ${dollars(monthly)}` };
+    const overMonthly = spent + cents > monthly ? { ok: false, reason: 'over_monthly_cap', message: `${dollars(cents)} would take this month to ${dollars(spent + cents)}, over the monthly cap ${dollars(monthly)}` } : null;
+    if (overMonthly && !postPlacement) return overMonthly;
     const n = await trx('vendor_orders').where({ id: ledgerId, status: 'placing' }).update({ amount_cents: cents, ...(accountingAt ? {} : { created_at: now }), updated_at: now });
     if (n !== 1) return { ok: false, reason: 'claim_lost', message: 'this order\'s claim was parked by stale recovery while the vendor call ran — nothing submitted; see the Restock tab' };
-    return { ok: true };
+    return overPerOrder || overMonthly || { ok: true };
   });
 }
 
@@ -881,7 +887,7 @@ async function parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, 
   const reservation = await ledgerReservation(conn, ledger);
   const admitted = positiveCents(quoteCents) ?? reservation.cents;
   if (finalCents <= (admitted ?? 0)) return null;
-  const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { env, accountingAt: reservation.createdAt });
+  const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { env, accountingAt: reservation.createdAt, postPlacement: true });
   if (finalCap.ok) return null;
   // The row already left 'placing' (stale recovery parked or the operator
   // revoked it while the vendor call ran): the order still EXISTS at this

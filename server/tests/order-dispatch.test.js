@@ -594,6 +594,9 @@ test('vendor total over cap after placement → needs_review, request ordered, b
   const a = mockAdapter({ place: jest.fn(async () => ({ externalOrderNumber: 'SM-2', amountCents: 60000, response: {}, evidence: { totalSource: 'vendor' } })) });
   const r = await run(a);
   expect(r).toMatchObject({ status: 'needs_review', reason: 'over_cap_after_placement' });
+  // The ACTUAL charge is written under the cap lock before the park — no gap where a concurrent reservation reads the lower quote (pre-push P0).
+  const amounts = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.amount_cents != null).map((u) => ({ cents: u.row.amount_cents, parked: !!u.row.status }));
+  expect(amounts).toEqual([{ cents: 31400, parked: false }, { cents: 60000, parked: false }, { cents: 60000, parked: true }]);
   expect(requestStatus()).toBe('ordered');
   const ledger = lastLedgerPatch();
   expect(ledger).toMatchObject({ status: 'needs_review', external_order_number: 'SM-2', amount_cents: 60000 });
