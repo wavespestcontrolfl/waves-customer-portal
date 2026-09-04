@@ -109,20 +109,22 @@ const LIVE_WORKLOAD = "(workload IS NULL OR workload = 'live')";
 // ONE row per Managed Agents session, re-recorded after every turn with
 // cumulative usage while created_at stays the first write, so it is
 // windowed on last_activity_at (written by every session upsert; rows from
-// before migration 000030 were backfilled to created_at) — a session that
-// crosses ET midnight lands in the window it last moved in (Codex r1 P2).
-const ACTIVITY_AT = "(CASE WHEN row_kind = 'session' THEN COALESCE(last_activity_at, created_at) ELSE created_at END)";
+// before migration 000030 were backfilled to created_at, so it is never
+// null on a session row — no COALESCE, which would defeat the index) — a
+// session that crosses ET midnight lands in the window it last moved in
+// (Codex r1 P2).
+const ACTIVITY_AT = "(CASE WHEN row_kind = 'session' THEN last_activity_at ELSE created_at END)";
 
 function ledgerRows(from, to) {
   return db(TABLE)
     // qualified: areaLatency joins a VALUES list that also has a lane_id
     .whereNotNull(`${TABLE}.lane_id`)
     .whereRaw(LIVE_WORKLOAD)
-    // Two index-backed ranges rather than one CASE: created_at for calls
-    // (llm_dispatch_log_lane_created_idx), last_activity_at for sessions
-    // (llm_dispatch_log_session_activity_idx).
+    // Two index-backed ranges rather than one CASE: (row_kind, created_at)
+    // for calls (llm_dispatch_log_row_kind_created_idx), the partial
+    // last_activity_at index for sessions (llm_dispatch_log_session_activity_idx).
     .whereRaw(
-      "((row_kind = 'call' AND created_at >= ? AND created_at < ?) OR (row_kind = 'session' AND COALESCE(last_activity_at, created_at) >= ? AND COALESCE(last_activity_at, created_at) < ?))",
+      "((row_kind = 'call' AND created_at >= ? AND created_at < ?) OR (row_kind = 'session' AND last_activity_at >= ? AND last_activity_at < ?))",
       [from, to, from, to],
     );
 }
