@@ -41,7 +41,8 @@ const PACKET_WRITE_TIMEOUT_MS = 8000; // = relay-conversation WRITE_TOOL_TIMEOUT
 const NO_CONTEXT_BELL = 'sandy_transfer_no_context';
 
 function isTransferGateOn() {
-  return String(process.env.GATE_VOICE_RELAY_TRANSFER || '').toLowerCase() === 'true';
+  // Exact 'true' — the same parser as the feature-gates listing, fail closed.
+  return process.env.GATE_VOICE_RELAY_TRANSFER === 'true';
 }
 
 /** Tool registration rule: gate on AND the office is open right now (null = closed). */
@@ -176,8 +177,17 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   const packet = buildHandoffPacket(input, facts);
   const { copy } = require('./relay-language');
 
-  const contextAvailable = await writePacketBounded(ctx, packet);
-  if (!contextAvailable) await recordNoContext(ctx, packet, facts);
+  const wrote = await writePacketBounded(ctx, packet);
+  if (wrote === 'rejected') {
+    // 0 rows = the owner fence or the terminal guard refused: this socket no
+    // longer owns the call (a reconnect took the claim) or the call is
+    // already over. A stale socket must not end the replacement session or
+    // ring staff — abort, and the model is told not to retry.
+    logger.warn(`[voice-relay] transfer refused — row not owned or already terminal callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
+    return 'The transfer could not be started on this call. Do NOT try again — take their details with capture_lead '
+      + 'and say a Waves team member will call them back.';
+  }
+  if (wrote !== 'written') await recordNoContext(ctx, packet, facts);
   // Speak, then end the relay leg: /relay-complete reads reason 'transfer'
   // from the end frame and rings the office.
   if (typeof ctx.say === 'function') ctx.say(copy('transferring', facts.language));
@@ -185,17 +195,24 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   return 'Transferring the caller to the office now. Your part of the call is over — do not say anything else and do not call any more tools.';
 }
 
-/** The bounded packet write: true only when a row took it. Never throws. */
+/**
+ * The bounded packet write: 'written' (a row took it), 'rejected' (0 rows —
+ * the owner fence or the terminal guard refused), or 'failed' (a storage
+ * error / timeout — the transfer proceeds without context). Never throws.
+ */
 async function writePacketBounded(ctx, packet) {
-  if (typeof ctx.writeHandoff !== 'function') return false;
+  if (typeof ctx.writeHandoff !== 'function') return 'failed';
   const { maskSid } = require('../twilio-failure-alerts');
   try {
     const rows = await withTimeout(Promise.resolve(ctx.writeHandoff(packet)), PACKET_WRITE_TIMEOUT_MS, 'timeout');
-    if (rows === 'timeout') logger.warn(`[voice-relay] transfer packet write timed out callSid=${maskSid(ctx.callSid)} — transferring without context`);
-    return Number(rows) > 0;
+    if (rows === 'timeout') {
+      logger.warn(`[voice-relay] transfer packet write timed out callSid=${maskSid(ctx.callSid)} — transferring without context`);
+      return 'failed';
+    }
+    return Number(rows) > 0 ? 'written' : 'rejected';
   } catch (err) {
     logger.error(`[voice-relay] transfer packet write failed callSid=${maskSid(ctx.callSid)}: ${err.message}`);
-    return false;
+    return 'failed';
   }
 }
 

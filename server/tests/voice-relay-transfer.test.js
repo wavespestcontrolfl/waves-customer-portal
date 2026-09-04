@@ -121,17 +121,26 @@ describe('executeTool transfer_to_office', () => {
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
   });
 
-  test('a 0-row packet write (row already terminal / foreign owner) counts as no context', async () => {
+  test('a 0-row packet write (owner fence / terminal guard refused) ABORTS the transfer — a stale socket never ends the call or rings staff', async () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     const { ctx } = ctxFor({ writeHandoff: jest.fn(async () => 0) });
-    await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx);
-    expect(triggerNotification).toHaveBeenCalledTimes(1);
-    expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
+    expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started.*Do NOT try again/s);
+    expect(ctx.writeHandoff).toHaveBeenCalledTimes(1);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(ctx.say).not.toHaveBeenCalled();
+    expect(ctx.endForTransfer).not.toHaveBeenCalled();
+  });
+
+  test('the gate is exact `true` — TRUE / 1 / on stay closed', () => {
+    for (const v of ['TRUE', 'True', '1', 'on']) {
+      process.env.GATE_VOICE_RELAY_TRANSFER = v;
+      expect(transfer.isTransferGateOn()).toBe(false);
+    }
   });
 
   test('a sandbox session transfers (its own row) but never rings the bell', async () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
-    const { ctx } = ctxFor({ sandbox: true, writeHandoff: jest.fn(async () => 0) });
+    const { ctx } = ctxFor({ sandbox: true, writeHandoff: jest.fn().mockRejectedValueOnce(new Error('down')).mockResolvedValueOnce(1) });
     await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx);
     expect(triggerNotification).not.toHaveBeenCalled();
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
