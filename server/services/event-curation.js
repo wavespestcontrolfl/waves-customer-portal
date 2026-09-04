@@ -50,21 +50,17 @@ const {
 } = require('./newsletter-event-selection');
 const {
   FACTOR_MAXES,
+  FAMILY_STATUSES,
+  NOVELTY_TYPES,
+  PENALTY_VALUES,
   REJECTION_CODES,
   assessEvent,
   featureScoreFloor,
   malformedAssessmentReason,
 } = require('./event-scoring');
 
-let Anthropic;
-try {
-  Anthropic = require('@anthropic-ai/sdk');
-} catch {
-  Anthropic = null;
-}
-
 const MODELS = require('../config/models');
-const { stripThinkingBlocks } = require('./llm/deep');
+const { dispatchWithFallback } = require('./llm/call');
 
 // Examined per run. One Claude call per CLASSIFY_BATCH; the structured
 // assessment is ~10× the old approve/note payload, so the batch is
@@ -206,15 +202,12 @@ Hard-policy rejection codes — set when ANY apply (the event can then never be 
 ${REJECTION_CODES.map((c) => `  ${c}`).join('\n')}
 A class, screening, market, or store event may still qualify WITHOUT a rejection code when it has a genuinely exceptional, verifiable element — the exceptional element must appear in the listing, never invented.
 
-Output STRICT JSON only:
-{"assessments": [{"id": "<uuid exactly as given>", "event_type": "<short slug>", "novelty_type": "one_time|inaugural|opening_weekend|closing_weekend|touring|annual_signature|special_edition|limited_engagement|series_debut|ordinary", "family_status": "confirmed|adults_lean|unknown", "audience_tags": ["family"|"parents_night"|"teens"|"free"|"worth_the_drive"], "scores": {"specialness": 0, "reader_pull": 0, "audience_fit": 0, "planning_value": 0, "local_relevance": 0, "source_confidence": 0, "accessibility": 0}, "penalty_flags": [], "rejection_codes": [], "editorial_reason": "<one sentence, max 200 chars>", "evidence": ["<short verifiable statement from the listing>"]}]}
+Per assessment: the event's exact id, a short event_type slug, novelty_type, family_status, audience_tags (from: family, parents_night, teens, free, worth_the_drive), the seven scores, penalty_flags, rejection_codes, a one-sentence editorial_reason (max 200 chars), and evidence (short verifiable statements from the listing).
 
 Rules:
 - One assessment per input event, using its exact id.
 - Score from the LISTING's evidence only — never invent prices, ticket status, or special elements.
 - When unsure whether something is special, score it LOW — a human reviews everything that isn't auto-approved.
-- Return JSON only — no code fence, no commentary.
-
 Events:
 ${lines.join('\n')}`;
 }
@@ -224,10 +217,44 @@ ${lines.join('\n')}`;
  * a missing assessment means the event stays pending (fail-closed).
  * Factor clamping / code allow-listing happens in event-scoring.
  */
-function parseCurationResponse(text, candidateIds) {
-  const jsonMatch = String(text || '').match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('Claude did not return JSON for event curation');
-  const parsed = JSON.parse(jsonMatch[0]);
+// Structured-output contract (llm/call.js jsonSchema). Score maxima are
+// outside the provider subset — normalizeAssessment still clamps them, and
+// parseCurationResponse still drops unknown / duplicate ids.
+const CURATION_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['assessments'],
+  properties: {
+    assessments: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'event_type', 'novelty_type', 'family_status', 'audience_tags', 'scores', 'penalty_flags', 'rejection_codes', 'editorial_reason', 'evidence'],
+        properties: {
+          id: { type: 'string', description: 'The event id exactly as given' },
+          event_type: { type: 'string', description: 'Short slug' },
+          novelty_type: { type: 'string', enum: NOVELTY_TYPES },
+          family_status: { type: 'string', enum: FAMILY_STATUSES },
+          audience_tags: { type: 'array', items: { type: 'string', enum: ['family', 'parents_night', 'teens', 'free', 'worth_the_drive'] } },
+          scores: {
+            type: 'object',
+            additionalProperties: false,
+            required: Object.keys(FACTOR_MAXES),
+            properties: Object.fromEntries(Object.keys(FACTOR_MAXES).map((k) => [k, { type: 'integer' }])),
+          },
+          penalty_flags: { type: 'array', items: { type: 'string', enum: Object.keys(PENALTY_VALUES) } },
+          rejection_codes: { type: 'array', items: { type: 'string', enum: REJECTION_CODES } },
+          editorial_reason: { type: 'string', description: 'One sentence, max 200 chars' },
+          evidence: { type: 'array', items: { type: 'string' }, description: 'Short verifiable statements from the listing' },
+        },
+      },
+    },
+  },
+};
+
+function parseCurationResponse(parsed, candidateIds) {
+  if (!parsed || typeof parsed !== 'object') throw new Error('Claude did not return JSON for event curation');
   const raw = Array.isArray(parsed.assessments) ? parsed.assessments : [];
   const known = new Set(candidateIds.map(String));
   const seen = new Set();
@@ -242,21 +269,18 @@ function parseCurationResponse(text, candidateIds) {
 }
 
 async function classifyBatch(events, todayIso) {
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-    throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY)');
-  }
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const response = await anthropic.messages.create({
-    model: MODELS.WORKHORSE,
-    max_tokens: CLASSIFY_MAX_TOKENS,
-    system: 'You are a precise, demanding events editor. You output strict JSON and nothing else.',
-    messages: [{ role: 'user', content: buildCurationPrompt(events, todayIso) }],
+  // A miss on both legs throws, exactly like the old SDK path — the run
+  // loop's catch leaves the batch un-examined for the next run.
+  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    laneId: 'events_editorial',
+    system: 'You are a precise, demanding events editor.',
+    text: buildCurationPrompt(events, todayIso),
+    jsonMode: true,
+    jsonSchema: CURATION_SCHEMA,
+    maxTokens: CLASSIFY_MAX_TOKENS,
   });
-  // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
-  // with a thinking block (no .text) on larger inputs, which made a blind
-  // content[0] read return '' — see event-ingestion.js for the incident.
-  const text = stripThinkingBlocks(response).content?.[0]?.text || '';
-  return parseCurationResponse(text, events.map((e) => e.id));
+  if (!res.ok || !res.json) throw new Error(`event curation LLM unavailable (${res.reason || 'no_json'})`);
+  return parseCurationResponse(res.json, events.map((e) => e.id));
 }
 
 /**
@@ -413,6 +437,7 @@ module.exports = {
   runAutoCuration,
   // Exported for unit tests — pure pieces.
   buildCurationPrompt,
+  CURATION_SCHEMA,
   parseCurationResponse,
   missingAssessmentFallbacks,
   curationEnabled,

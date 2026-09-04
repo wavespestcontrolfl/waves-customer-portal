@@ -376,6 +376,12 @@ function compactLineItem(item = {}) {
     // default, and without program/addOns its station/dunk COGS is lost.
     visitsPerYear: item.visitsPerYear ?? null,
     visits: item.visits ?? null,
+    // Sold-scope flags the estimate's one-time copy pack reads (flea
+    // retreat terms + yard scope) — GH codex #3845 r1 P2.
+    warrantyType: item.warrantyType ?? null,
+    guaranteeWindowDaysAfterFollowUp: item.guaranteeWindowDaysAfterFollowUp ?? null,
+    maxIncludedRetreats: item.maxIncludedRetreats ?? null,
+    exteriorStatus: item.exteriorStatus ?? null,
     perVisit: item.perVisit ?? null,
     appsPerYear: item.appsPerYear ?? null,
     tier: item.tier ?? null,

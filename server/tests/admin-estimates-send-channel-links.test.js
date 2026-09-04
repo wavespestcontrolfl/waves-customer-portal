@@ -116,7 +116,7 @@ function estimateRow(overrides = {}) {
 // finalize claim write succeeds).
 function makeBuilder(row) {
   const b = {};
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'forUpdate', 'select', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereRaw', 'forUpdate', 'select', 'orderBy', 'limit']) {
     b[m] = jest.fn(() => b);
   }
   b.first = jest.fn(async () => row);

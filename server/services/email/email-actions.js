@@ -3,6 +3,7 @@ const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const { isOperationalDomain, domainFromAddress, domainMatches, normalizeAddress } = require('./spam-blocker');
 const { whereLiveCustomer } = require('../customer-stages');
+const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 
 /**
  * Destructive auto-actions (trash, archive, one-click UNSUBSCRIBE) must
@@ -12,11 +13,18 @@ const { whereLiveCustomer } = require('../customer-stages');
  * unsubscribing — which silently enrolled contact@ in SendGrid's
  * newsletter suppression group (twice). The same guard protects Google
  * security notices etc. from a spam/newsletter misclassification.
- * Non-destructive handlers (leads, vendor invoices) are unaffected.
+ * Non-destructive handlers (leads, vendor invoices) are unaffected —
+ * EXCEPT for our OWN addresses (isInternalEmailRecipient, the same
+ * owned-address definition email-sync's customer match refuses): a
+ * self-addressed alert, digest or outbound copy the classifier calls
+ * customer_request / complaint / lead_inquiry would otherwise be matched
+ * back to the customer record that carries contact@ and get a reply
+ * drafted to ourselves. Authenticated or spoofed makes no difference for
+ * those handlers — neither may match or draft for "us".
  */
 const DESTRUCTIVE_CATEGORIES = new Set(['spam', 'marketing_newsletter']);
 function shouldSkipAutoAction(category, fromAddress, authResults) {
-  if (!DESTRUCTIVE_CATEGORIES.has(category)) return false;
+  if (!DESTRUCTIVE_CATEGORIES.has(category)) return isInternalEmailRecipient(fromAddress);
   if (!isOperationalDomain(domainFromAddress(fromAddress))) return false;
   // Gmail stamps EVERY inbound SMTP message with a trusted
   // Authentication-Results header, so:
@@ -1114,6 +1122,7 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
     // rides user-priority text only — inbound email must never be able to
     // out-rank the drafting rules (prompt injection).
     const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+      laneId: 'email_reply',
       system: [
         'You draft reply emails from Waves Pest Control (a family-owned pest control and lawn care company in SW Florida).',
         `Greeting name: ${firstName}. Tone: warm, professional, concise (under 150 words). ${tone === 'complaint' ? 'This is a COMPLAINT — acknowledge specifically, apologize once without admitting fault beyond what the message states, and commit to a concrete next step.' : 'Answer what can be answered and offer a concrete next step.'}`,

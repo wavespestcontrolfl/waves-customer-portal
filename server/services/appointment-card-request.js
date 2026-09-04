@@ -467,6 +467,98 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
   }
 }
 
+// The maybe-sent marker MUST land (Codex #2771 r5): the stale-send
+// lease reads a missing sent_at as died-before-send, so a swallowed
+// marker failure after a Twilio-accepted dispatch would let a later
+// trigger re-text a second bearer link once the lease expires.
+// Bounded retries; if all fail — or the update matches no pending row —
+// the claim is parked and the office gets an exception alert naming the
+// visit so a human intervenes before the lease can fire. Shared by the
+// service's own SMS delivery and the composer's /sms send (which takes
+// the same card_link_sent_at claim before dispatch). Returns true when the
+// marker landed.
+// The one-text-ever send claim on the visit row: card_link_sent_at NULL →
+// stamp. On a lost claim, the stale-claim lease (Codex #2771 r4): a worker
+// that died between its claim and the send leaves the stamp set with no
+// text out — and every later trigger would skip forever. The request row's
+// sent_at is the durable outcome marker (stamped on success AND on
+// uncertain outcomes), so an old stamp (older than STALE_CLAIM_MS) with no
+// marker may be adopted by exactly one retrier via the value-guarded
+// UPDATE. A pending row whose token differs from the one this run holds
+// means a concurrent run owns it — never adopt that. Shared by the
+// service's own SMS delivery and the composer's /sms send. Returns true
+// when this run holds the claim under `stamp`.
+async function claimCardLinkSend(visitId, stamp, token) {
+  const claimed = await db('scheduled_services')
+    .where({ id: visitId })
+    .whereNull('card_link_sent_at')
+    .update({ card_link_sent_at: stamp, updated_at: stamp });
+  if (claimed === 1) return true;
+  const current = await db('scheduled_services')
+    .where({ id: visitId })
+    .first('card_link_sent_at');
+  const row = await db('appointment_card_requests')
+    .where({ scheduled_service_id: visitId })
+    .first('status', 'token', 'sent_at');
+  const priorStamp = current?.card_link_sent_at ? new Date(current.card_link_sent_at) : null;
+  const stale = priorStamp && (Date.now() - priorStamp.getTime()) > STALE_CLAIM_MS;
+  const rowBlocks = row && (row.sent_at || row.status !== 'pending' || (row.token && row.token !== token));
+  if (!stale || rowBlocks) return false;
+  const adopted = await db('scheduled_services')
+    .where({ id: visitId, card_link_sent_at: priorStamp })
+    .update({ card_link_sent_at: stamp, updated_at: stamp });
+  if (adopted !== 1) return false;
+  logger.warn(`[appt-card-request] reclaimed stale send claim for visit ${visitId}`);
+  return true;
+}
+
+async function markCardLinkSendOutcome(visitId, stamp) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const updated = await db('appointment_card_requests')
+        .where({ scheduled_service_id: visitId, status: 'pending' })
+        .update({ sent_at: stamp, updated_at: stamp });
+      if (updated === 1) return true;
+      // No pending row to mark (it left 'pending' mid-send): a retry
+      // cannot land it — park below, exactly as a failed write.
+      logger.warn(`[appt-card-request] sent_at marker matched no pending row for visit ${visitId}`);
+      break;
+    } catch (err) {
+      logger.warn(`[appt-card-request] sent_at marker attempt ${attempt + 1} failed for visit ${visitId}: ${err.message}`);
+    }
+  }
+  // PARK the claim so the stale lease can never adopt it (Codex #2771
+  // r8): staleness is an AGE check on card_link_sent_at, so pushing
+  // the stamp far into the future makes the claim permanently fresh —
+  // no retrier can re-text this visit even though the marker never
+  // landed. Best-effort (a different table than the failed write);
+  // the office alert below is the human backstop either way.
+  let parked = false;
+  try {
+    // Value-guarded on OUR stamp: zero rows means the claim is no longer
+    // ours (released, adopted, or already parked) — that is NOT parked, and
+    // the alert below says so (pre-push Codex P1 on #3844).
+    const parkedRows = await db('scheduled_services')
+      .where({ id: visitId, card_link_sent_at: stamp })
+      .update({ card_link_sent_at: CLAIM_PARK_DATE, updated_at: new Date() });
+    parked = parkedRows === 1;
+  } catch (parkErr) {
+    logger.warn(`[appt-card-request] claim park failed for visit ${visitId}: ${parkErr.message}`);
+  }
+  logger.error(`[appt-card-request] sent_at marker FAILED for visit ${visitId} (claim ${parked ? 'parked' : 'NOT parked'}) — alerting office`);
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'Card-link sent marker failed',
+      `A secure-card SMS was dispatched but its sent marker could not be written${parked ? ' (the send claim is parked — no automatic retry will re-text)' : ' AND the claim could not be parked — investigate before the send lease expires (~10 min) or the customer may receive a second link'}.`,
+      { link: '/admin/dispatch', metadata: { scheduled_service_id: visitId, claim_parked: parked } },
+    );
+  } catch (alertErr) {
+    logger.warn(`[appt-card-request] marker-failure alert failed: ${alertErr.message}`);
+  }
+  return false;
+}
+
 /**
  * The one entry point. Returns { requested, action, reason }:
  *   action 'sent'         — the single card-link SMS went out (delivery 'sms').
@@ -840,37 +932,11 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       return { requested: true, action: 'link_created', reason: 'created', secureUrl };
     }
 
-    // 4. One text, ever — atomic claim on the visit row.
+    // 4. One text, ever — atomic claim on the visit row (claimCardLinkSend:
+    // module level so the composer's /sms send claims — and recovers a
+    // stale claim — exactly the same way).
     const stamp = new Date();
-    let claimed = await db('scheduled_services')
-      .where({ id: visit.id })
-      .whereNull('card_link_sent_at')
-      .update({ card_link_sent_at: stamp, updated_at: stamp });
-    if (claimed !== 1) {
-      // Stale-claim lease (Codex #2771 r4): a worker that died between
-      // this claim and the send leaves the stamp set with no text out —
-      // and every later trigger would skip forever. The request row's
-      // sent_at is the durable outcome marker (stamped on success AND on
-      // uncertain outcomes below), so an old stamp with no marker may be
-      // adopted by exactly one retrier via the value-guarded UPDATE. A
-      // row whose token differs from the one this run rendered means a
-      // concurrent run owns it — never adopt that.
-      const current = await db('scheduled_services')
-        .where({ id: visit.id })
-        .first('card_link_sent_at');
-      const row = await db('appointment_card_requests')
-        .where({ scheduled_service_id: visit.id })
-        .first('status', 'token', 'sent_at');
-      const priorStamp = current?.card_link_sent_at ? new Date(current.card_link_sent_at) : null;
-      const stale = priorStamp && (Date.now() - priorStamp.getTime()) > STALE_CLAIM_MS;
-      const rowBlocks = row && (row.sent_at || row.status !== 'pending' || (row.token && row.token !== token));
-      if (!stale || rowBlocks) return skip('link_already_sent');
-      claimed = await db('scheduled_services')
-        .where({ id: visit.id, card_link_sent_at: priorStamp })
-        .update({ card_link_sent_at: stamp, updated_at: stamp });
-      if (claimed !== 1) return skip('link_already_sent');
-      logger.warn(`[appt-card-request] reclaimed stale send claim for visit ${visit.id}`);
-    }
+    if (!await claimCardLinkSend(visit.id, stamp, token)) return skip('link_already_sent');
 
     const releaseClaim = async () => {
       try {
@@ -986,51 +1052,10 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       throw insertErr;
     }
 
-    // The maybe-sent marker MUST land (Codex #2771 r5): the stale-send
-    // lease reads a missing sent_at as died-before-send, so a swallowed
-    // marker failure after a Twilio-accepted dispatch would let a later
-    // trigger re-text a second bearer link once the lease expires.
-    // Bounded retries; if all fail, the office gets an exception alert
-    // naming the visit so a human intervenes before the lease can fire.
-    const markSendOutcome = async () => {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          await db('appointment_card_requests')
-            .where({ scheduled_service_id: visit.id, status: 'pending' })
-            .update({ sent_at: stamp, updated_at: stamp });
-          return true;
-        } catch (err) {
-          logger.warn(`[appt-card-request] sent_at marker attempt ${attempt + 1} failed for visit ${visit.id}: ${err.message}`);
-        }
-      }
-      // PARK the claim so the stale lease can never adopt it (Codex #2771
-      // r8): staleness is an AGE check on card_link_sent_at, so pushing
-      // the stamp far into the future makes the claim permanently fresh —
-      // no retrier can re-text this visit even though the marker never
-      // landed. Best-effort (a different table than the failed write);
-      // the office alert below is the human backstop either way.
-      let parked = false;
-      try {
-        await db('scheduled_services')
-          .where({ id: visit.id, card_link_sent_at: stamp })
-          .update({ card_link_sent_at: CLAIM_PARK_DATE, updated_at: new Date() });
-        parked = true;
-      } catch (parkErr) {
-        logger.warn(`[appt-card-request] claim park failed for visit ${visit.id}: ${parkErr.message}`);
-      }
-      logger.error(`[appt-card-request] sent_at marker FAILED for visit ${visit.id} (claim ${parked ? 'parked' : 'NOT parked'}) — alerting office`);
-      try {
-        await require('./notification-service').notifyAdmin(
-          'billing',
-          'Card-link sent marker failed',
-          `A secure-card SMS was dispatched but its sent marker could not be written${parked ? ' (the send claim is parked — no automatic retry will re-text)' : ' AND the claim could not be parked — investigate before the send lease expires (~10 min) or the customer may receive a second link'}.`,
-          { link: '/admin/dispatch', metadata: { scheduled_service_id: visit.id, claim_parked: parked } },
-        );
-      } catch (alertErr) {
-        logger.warn(`[appt-card-request] marker-failure alert failed: ${alertErr.message}`);
-      }
-      return false;
-    };
+    // The maybe-sent marker MUST land — markCardLinkSendOutcome (module
+    // level so the composer's /sms send, which claims the same way, can
+    // finalize the same way).
+    const markSendOutcome = () => markCardLinkSendOutcome(visit.id, stamp);
 
     let result;
     try {
@@ -1163,22 +1188,30 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // email can never outrun the one-text rails or reach a visit the
     // funnel skipped. (The window-held path is the one exception: its
     // queued SMS row owns the text, and the deferred-replay finalize runs
-    // this same helper after that SMS delivers.) Best-effort
-    // fire-and-forget: the gate being off, no email on file, or a
-    // SendGrid failure never changes the funnel result.
-    try {
-      runInvitationEmailLeg({ visit, secureUrl, planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY })
-        .catch((emailErr) => {
-          logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
-        });
-    } catch (emailErr) {
-      logger.warn(`[appt-card-request] invitation email leg failed to start for visit ${visit.id}: ${emailErr.message}`);
-    }
+    // this same helper after that SMS delivers.)
+    startInvitationEmailLeg({ visit, secureUrl, planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY });
     logger.info(`[appt-card-request] secure-card link sent for visit ${visit.id} (trigger ${trigger})`);
     return { requested: true, action: 'sent', reason: 'sent' };
   } catch (err) {
     logger.error(`[appt-card-request] request failed for visit ${scheduledServiceId}: ${err.message}`);
     return skip(`error:${err.message}`);
+  }
+}
+
+// Best-effort, fire-and-forget start of the email twin after a CONFIRMED
+// card text: the gate being off, no email on file, or a SendGrid failure
+// never changes the caller's result. Shared by the funnel's own SMS success
+// path above and the composer's /sms send (composer-customer-links
+// markCardRequestSends), so a card text always travels with its email
+// (GH Codex #3844 r5 P1).
+function startInvitationEmailLeg({ visit, secureUrl, planChoice }) {
+  try {
+    runInvitationEmailLeg({ visit, secureUrl, planChoice })
+      .catch((emailErr) => {
+        logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
+      });
+  } catch (emailErr) {
+    logger.warn(`[appt-card-request] invitation email leg failed to start for visit ${visit.id}: ${emailErr.message}`);
   }
 }
 
@@ -2810,7 +2843,30 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
   // Dark rail: no lookups, no fee-may-apply previews (Codex #3153 r11 P1)
   // — the disabled rail cannot charge, so the lane presents as absent.
   const { describeCancelFeeRule, freeCancelReason } = require('./estimate-card-holds');
-  if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'rail_dark' }) };
+  if (!isApptCardFeeRailEnabled()) {
+    // Dark rail — but a row already in charging/charge_review is a
+    // PaymentIntent a gate-on worker may still land (the cancellation
+    // handler checks these states with the gate off too). Surface it
+    // before the dark verdict (Codex #3800 r4 P1); no other lookups.
+    try {
+      const row = await db('appointment_card_requests')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first('fee_status', 'no_show_fee_amount');
+      if (row && (row.fee_status === 'charging' || row.fee_status === 'charge_review')) {
+        const feeAmount = Number(row.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : null;
+        return { secured: true, feeApplies: true, feeAmount, unresolved: true, rule: describeCancelFeeRule({ code: 'charge_in_flight', feeAmount }) };
+      }
+    } catch (err) {
+      logger.warn(`[appt-card-request] fee-state lookup on the dark rail failed — reporting undetermined: ${err.message}`);
+      // Exposure shape (secured + feeApplies + unresolved, amount unknown):
+      // the cancellation handler parks charge_review on this failure, and
+      // admin-cancellation's previewVisitFees keeps only secured, fee-
+      // applying appointment previews — a secured:false verdict would drop
+      // the review warning from the plan-cancel preview (pre-push P1).
+      return { secured: true, feeApplies: true, feeAmount: null, unresolved: true, rule: describeCancelFeeRule({ code: 'unresolved', onFailure: 'unknown', detail: 'fee state lookup failed' }) };
+    }
+    return { secured: false, feeApplies: false, rule: describeCancelFeeRule({ code: 'rail_dark' }) };
+  }
   const { request, unresolved, inFlight, reason: skipReason, status: requestStatus } = await feeEligibleRequestForVisit(scheduledServiceId);
   if (!request) {
     if (unresolved) return unresolvedEligibilityPreview(scheduledServiceId, skipReason);
@@ -3445,7 +3501,15 @@ module.exports = {
   sendDeferredInvitationEmailLeg,
   resolveExemption,
   renderTemplate,
+  dateLineFor,
+  cancelFeeLine,
   LIVE_VISIT_STATUSES,
+  TEMPLATE_KEY,
+  PLAN_TEMPLATE_KEY,
+  planInviteApplies,
+  claimCardLinkSend,
+  markCardLinkSendOutcome,
+  startInvitationEmailLeg,
   _test: {
     dateLineFor,
     resolveExemption,

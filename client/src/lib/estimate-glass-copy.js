@@ -414,6 +414,26 @@ export function glassOneTimeHeroOverlay(pack, { reviewBeforeBooking = false, pre
   return { ...(pack || GLASS_PACKS.bundle), ...(reviewBeforeBooking ? GLASS_ONE_TIME_HERO_REVIEW : GLASS_ONE_TIME_HERO) };
 }
 
+// One-time-only service hero (server contract pricing.oneTimeServiceCopy —
+// roach cleanout, flea, wasp, bed bug, …) names the service actually quoted.
+// It rides the page whether or not the category's glass COPY is released:
+// the server-rendered page applies it unconditionally, so with glass off
+// React must too (codex #3823 deferred P2) — a pack is synthesized from the
+// service hero alone. A review-gated quote keeps the base pack's
+// confirm-with-you subline (a pack subline may promise "approve online and
+// pick a day" — codex #3823 pre-push P1); with no base pack the renderer's
+// default subline stands.
+export function glassPackWithOneTimeHero(basePack, oneTimeServiceCopy, { reviewBeforeBooking = false } = {}) {
+  const hero = oneTimeServiceCopy?.hero;
+  if (!hero) return basePack;
+  return {
+    ...(basePack || {}),
+    eyebrow: hero.eyebrow,
+    heroH1: hero.h1,
+    heroSub: reviewBeforeBooking ? (basePack?.heroSub ?? null) : hero.sub,
+  };
+}
+
 // CTA micro line under the primary booking CTA. Recurring plans keep the
 // service-agnostic recurring terms (contract/callbacks/guarantee — all
 // already shipped on pest+lawn); packs override where those terms don't

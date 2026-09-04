@@ -9,6 +9,9 @@ const linkIntake = require('../services/seo/link-registry-intake');
 const { etDateString } = require('../utils/datetime-et');
 const { SIGNUP_TYPES } = require('../services/seo/link-prospect-worker');
 const linkPolicy = require('../services/seo/link-authority-policy');
+const { REGISTRY_ACTIONS, applyRegistryAction } = require('../services/seo/link-registry');
+const ownerQueue = require('../services/seo/link-owner-queue');
+const M = require('../services/seo/link-outreach-mandate');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -346,6 +349,15 @@ router.get('/registry', async (req, res, next) => {
       const byId = new Map(paths.map((p) => [p.id, p]));
       for (const d of items) d.best_path = byId.get(d.best_path_id) || null;
     }
+    // Acquire anyway applies only to a rejected domain whose best path fails a quality floor NOW — the row says so
+    // (`waivable`) so the button never offers a click the service refuses with 409
+    const rejected = items.filter((d) => d.agent_state === 'rejected' && d.best_path_id);
+    if (rejected.length) {
+      const { policy } = await linkPolicy.loadPolicy(db);
+      const full = await db('seo_link_acquisition_paths').whereIn('id', rejected.map((d) => d.best_path_id));
+      const fullById = new Map(full.map((p) => [p.id, p]));
+      for (const d of rejected) d.waivable = ownerQueue.waivableFloors(fullById.get(d.best_path_id) || null, d, policy).length > 0;
+    }
     res.json({ items });
   } catch (err) { next(err); }
 });
@@ -375,7 +387,20 @@ router.get('/registry/:id', async (req, res, next) => {
         .orderBy('created_at', 'desc').limit(50)
         .select('id', 'path_id', 'prospect_id', 'provider', 'action', 'outcome', 'cost_cents', 'sandbox', 'evidence_url', 'created_at')
       : [];
-    res.json({ domain, paths, touches, placements, attempts });
+    // the owner's active "Acquire anyway" waiver on the best path (step 4 PR 2b) — shown only while the bridge
+    // would still honour it: its floors hash must equal the CURRENT floors (a moved score / spam / confidence /
+    // policy floor makes it stale until the next run invalidates it)
+    let waiver = null;
+    const bestPath = domain.best_path_id ? paths.find((p) => p.id === domain.best_path_id) : null;
+    if (bestPath) {
+      const w = await db('seo_link_floor_waivers').where({ domain_id: domain.id, path_id: bestPath.id }).whereNull('invalidated_at').orderBy('approved_at', 'desc')
+        .first('id', 'overridden_floors', 'decision_inputs_hash', 'note', 'approved_by', 'approved_at');
+      if (w) {
+        const { policy } = await linkPolicy.loadPolicy(db);
+        if (w.decision_inputs_hash === linkPolicy.floorInputsHash({ path: bestPath, domain, policy, score: domain.score })) waiver = w;
+      }
+    }
+    res.json({ domain, paths, touches, placements, attempts, waiver });
   } catch (err) { next(err); }
 });
 
@@ -383,71 +408,86 @@ router.get('/registry/:id', async (req, res, next) => {
 // Watch / Reject / Reopen). acquiring/acquired are lane-owned aggregates the
 // investigator/bridge recompute — never hand-set; "Acquire anyway" is step 4
 // (it needs a stamped authority, not a state flip).
-const REGISTRY_ACTIONS = Object.freeze({ watch: 'watching', reject: 'rejected', reopen: 'investigating' });
+const actorOf = (req) => (req.technician ? (req.technician.name || String(req.technician.id)) : null);
 router.patch('/registry/:id', async (req, res, next) => {
   try {
-    const { action } = req.body || {};
+    const { action, note = null } = req.body || {};
     const nextState = REGISTRY_ACTIONS[action];
     if (!nextState) return res.status(400).json({ error: `invalid action; must be one of ${Object.keys(REGISTRY_ACTIONS).join(', ')}` });
     const domain = await db('seo_link_domains').where({ id: req.params.id }).first('id', 'domain', 'agent_state', 'score_reasons');
     if (!domain) return res.status(404).json({ error: 'not found' });
-    const now = new Date();
-    const patch = { agent_state: nextState, updated_at: now };
-    // who rejected: the authority bridge lifts only its OWN rejections once the
-    // inputs improve; the owner's stands until Reopen / Watch clears the marker
-    patch.rejected_by = action === 'reject' ? 'owner' : null;
-    patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
-    // A manual Watch starts a LONG-TERM watch generation exactly like the
-    // investigator's own parks: the probe-coverage mask resets, so the
-    // resumed pass a month later re-earns coverage instead of closing on
-    // routes credited before the park.
-    if (action === 'watch') patch.probe_coverage_mask = 0;
-    // An explicit Reopen is a fresh mandate: clear the failure backoff so the
-    // very next sweep picks the domain up instead of honoring a stale defer —
-    // and the probe-tail deferral marker with it, so the reopened
-    // investigation gets its own rotated tail pass before a terminal close.
-    if (action === 'reopen') {
-      patch.investigate_after = null;
-      patch.investigate_failures = 0;
-      patch.probe_coverage_mask = 0; // the reopened investigation re-earns probe coverage
-      // …and a run claimed BEFORE this reopen must not finish on top of it:
-      // its claim token no longer matches, so its write phase aborts stale
-      patch.investigate_claim_token = null;
-      const cleared = String(domain.score_reasons || '').replace(/\s*·?\s*downgraded: terminal verdict deferred: unfetched candidate URLs remain/, '').trim();
-      if (cleared !== String(domain.score_reasons || '').trim()) patch.score_reasons = cleared || null;
-    }
-    // Guard is IN the update: a lane can move the row to a lane-owned
-    // aggregate (ready_to_acquire = a placement holds stamped pending
-    // authority; acquiring/acquired) between read and write, so the
-    // condition rides the UPDATE and a zero count means the race (or a
-    // delete) was lost — never overwrite it: a domain-only flip would
-    // contradict the placements and authority behind it.
-    // A new generation (Watch park, Reopen) is ONE atomic write: the domain
-    // state/mask and the provenance-hint coverage — BOTH halves, the stamp
-    // (covered_at) and the per-URL accrual (covered_urls), on every touch —
-    // reset together, exactly like the investigator's own generation resets.
-    // A partially covered touch carries no stamp but does carry covered_urls,
-    // and the resumed pass would credit those URLs as observed without
-    // re-fetching them; so a failure can never leave a reset mask beside
-    // stale hint coverage, and a fresh generation never inherits any.
-    const n = await db.transaction(async (trx) => {
-      const updated = await trx('seo_link_domains')
-        .where({ id: domain.id }).whereNotIn('agent_state', ['ready_to_acquire', 'acquiring', 'acquired'])
-        .update(patch);
-      if (updated && patch.probe_coverage_mask === 0) {
-        await trx('seo_link_domain_sources').where({ domain_id: domain.id }).update({ covered_at: null, covered_urls: null });
+    // Reject / Watch is the SAME decision the Owner-queue buttons make, whatever the state: ONE audited, attributed path
+    // (decideDomain writes the per-row decision records, invalidates approvals and waivers, then the registry action) —
+    // never a state-only sibling. A domain that left the queue (Reopen → investigating) can still carry approved rows.
+    // Lane-owned states are refused by the service with the same 409. Reopen stays the plain action below.
+    if (action === 'reject' || action === 'watch') {
+      let r;
+      try {
+        r = await ownerQueue.decideDomain(db, { domainId: domain.id, decision: action === 'reject' ? 'rejected' : 'watch', actor: actorOf(req), note });
+      } catch (err) {
+        if (err instanceof ownerQueue.OwnerQueueError) return res.status(err.status).json({ error: err.message });
+        throw err;
       }
-      return updated;
-    });
+      logger.info(`[backlink-registry] ${actorOf(req)} ${action}: ${domain.domain} (${domain.agent_state} -> ${r.agent_state}; ${r.audited} row(s) audited)`);
+      return res.json({ id: domain.id, domain: domain.domain, agent_state: r.agent_state, watch_recheck_at: r.watch_recheck_at, audited: r.audited });
+    }
+    // the ONE registry-action writer (link-registry.applyRegistryAction): the
+    // patch, the lane-owned guard IN the update and the coverage reset are
+    // shared with the Owner-queue cards
+    const { updated: n, watchRecheckAt } = await db.transaction((trx) => applyRegistryAction(trx, domain, action, new Date()));
     if (!n) {
       const current = await db('seo_link_domains').where({ id: domain.id }).first('agent_state');
       if (!current) return res.status(404).json({ error: 'not found' });
       return res.status(409).json({ error: `agent_state '${current.agent_state}' is lane-owned; registry actions apply to pre-acquisition states only` });
     }
     logger.info(`[backlink-registry] admin ${action}: ${domain.domain} (${domain.agent_state} -> ${nextState})`);
-    res.json({ id: domain.id, domain: domain.domain, agent_state: nextState, watch_recheck_at: patch.watch_recheck_at });
+    res.json({ id: domain.id, domain: domain.domain, agent_state: nextState, watch_recheck_at: watchRecheckAt });
   } catch (err) { next(err); }
 });
+
+// ---------------------------------------------------------------------------
+// §11 items 2–3 / §3.6b / §6.3 1b — the Owner queue (step 4 PR 2b). The
+// service is the only writer of seo_link_approvals / seo_link_floor_waivers;
+// every click is attributed to the signed-in admin. Errors the service raises
+// carry an HTTP status (400 / 404 / 409); anything else is a real failure.
+// ---------------------------------------------------------------------------
+const ownerQueueCall = (res, next, fn) => fn().then((r) => res.json(r)).catch((err) => {
+  if (err instanceof ownerQueue.OwnerQueueError) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.review ? { review: err.review } : {}) });
+  return next(err);
+});
+// GET /api/admin/backlink-agent/owner-queue — one card per parked placement
+router.get('/owner-queue', (req, res, next) => ownerQueueCall(res, next, async () => ({ ...(await ownerQueue.listOwnerQueue(db)), gateOn: isEnabled('linkAuthority') })));
+// POST /api/admin/backlink-agent/owner-queue/rows/:id/approve — { approved_amount_cents?, note? }
+router.post('/owner-queue/rows/:id/approve', (req, res, next) => ownerQueueCall(res, next, async () => {
+  const { approved_amount_cents: cents = null, note = null } = req.body || {};
+  const r = await ownerQueue.approveRow(db, { authorityId: req.params.id, actor: actorOf(req), approvedAmountCents: cents, note });
+  logger.info(`[backlink-owner-queue] ${actorOf(req)} approved ${r.approval.dimension}/${r.approval.action} ${r.approval.instance_key} on ${r.attached.length} row(s); bridge ${r.bridge.gated ? 'gated' : r.bridge.skipped || `released ${r.bridge.released}`}`);
+  return r;
+}));
+// POST …/owner-queue/domains/:id/reject | /watch — { note? }. Literal paths: the public-route scanner
+// (tests/route-surface) must be able to prove what every mount exposes.
+const decideDomainHandler = (decision) => (req, res, next) => ownerQueueCall(res, next, async () => {
+  const r = await ownerQueue.decideDomain(db, { domainId: req.params.id, decision, actor: actorOf(req), note: (req.body || {}).note || null });
+  logger.info(`[backlink-owner-queue] ${actorOf(req)} ${decision}: ${r.domain} → ${r.agent_state} (${r.audited} row(s) audited)`);
+  return r;
+});
+// POST /api/admin/backlink-agent/owner-queue/rows/:id/send — { draft_hash, reviewed_lookup_hash? }. The click IS the send
+// approval (§6.3 2c) of the draft the card DISPLAYED (draft_hash, §3.6b); requireAdmin like the board's send: it mails
+// from the primary inbox.
+router.post('/owner-queue/rows/:id/send', requireAdmin, (req, res, next) => ownerQueueCall(res, next, async () => {
+  const { reviewed_lookup_hash: hash, draft_hash: draftHash } = req.body || {};
+  const r = await ownerQueue.sendRow(db, { authorityId: req.params.id, actor: actorOf(req), reviewedLookupHash: typeof hash === 'string' ? hash : null, draftHash: typeof draftHash === 'string' ? draftHash : null });
+  logger.info(`[backlink-owner-queue] ${actorOf(req)} sent the pitch for ${r.prospectId} (${r.authority ? r.authority.level : 'no authority row'})`);
+  return r;
+}));
+router.post('/owner-queue/domains/:id/reject', decideDomainHandler('rejected'));
+router.post('/owner-queue/domains/:id/watch', decideDomainHandler('watch'));
+// POST /api/admin/backlink-agent/registry/:id/acquire-anyway — { note? } (a floor waiver, never an approval)
+router.post('/registry/:id/acquire-anyway', (req, res, next) => ownerQueueCall(res, next, async () => {
+  const r = await ownerQueue.acquireAnyway(db, { domainId: req.params.id, actor: actorOf(req), note: (req.body || {}).note || null });
+  logger.info(`[backlink-owner-queue] ${actorOf(req)} acquire anyway: ${r.domain} waived ${r.floors.map((x) => x.floor).join(', ')}; bridge ${r.bridge.gated ? 'gated' : r.bridge.skipped || `parked ${r.bridge.parked}`}; ${r.awaiting} awaiting`);
+  return r;
+}));
 
 // ---------------------------------------------------------------------------
 // §3.8 / §6.2 / §11 item 4 — acquisition-authority policy (step 4a). The DB row
@@ -571,7 +611,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     // (prospect-domain-lock) and is refused while another row for the domain is
     // already in active outreach — otherwise both are claimable by the worker.
     const result = await db.transaction(async (trx) => {
-      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key');
+      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'conversation_closed_at');
       if (!current) return { missing: true };
       // "In outreach" = active-outreach status AND an outreach-lane link_type:
       // a status flip OR a link_type change out of the signup lane can put a
@@ -582,6 +622,36 @@ router.patch('/prospects/:id', async (req, res, next) => {
       if (entersOutreach) {
         const { inFlight } = await claimProspectDomain(trx, current.target_domain);
         if (inFlight && inFlight.id !== current.id) return { inFlight };
+      }
+      // a status edit INTO the active outreach lifecycle (prospect / contacted / negotiating / awaiting_owner) — a reopen
+      // from lost / rejected above all — drops the closure stamp with it: conversationClosed (the §13 inbox guard) would
+      // otherwise keep reading the live row as closed and free its inbox to a second conversation; lost-link recovery
+      // clears it the same way. The clear is tied to the edits that REOPEN: a status edit into the active lifecycle, or
+      // the row entering the outreach lane (a link_type edit alone, the status already active) — never an unrelated
+      // edit (notes, a page move) on a row that carries the stamp.
+      const resultStatus = 'status' in patch ? patch.status : current.status;
+      if (ACTIVE_OUTREACH_STATUSES.includes(resultStatus) && ('status' in patch || entersOutreach)) patch.conversation_closed_at = null;
+      // an edit whose RESULT is an open conversation (§13: contacted / negotiating, a park from them, or a sent pitch
+      // on a row the reopen above just made active again) while the current row is not one OPENS it for the
+      // recipient: the same recipient-level lock + predicate the send claim takes, so no two writers open the same inbox
+      const Outreach = require('../services/seo/link-prospect-outreach');
+      const opensConversation = Outreach.conversationOpen({ ...current, ...patch }) && !Outreach.conversationOpen(current);
+      if (opensConversation) {
+        // the same lock ORDER as the send claim (domain → inbox advisory lock → row lock) for EVERY conversation-opening
+        // edit, not only a board admission — a page move below re-takes the domain lock, which must never follow the
+        // inbox lock; the recipient read before the locks is re-read under the row lock — re-addressed meanwhile means
+        // the inbox locked is not this row's; refuse
+        await lockProspectDomain(trx, current.target_domain);
+        const before = await trx('seo_link_prospects').where({ id: current.id }).first('outreach_to_email');
+        const recipient = before && before.outreach_to_email;
+        if (recipient) {
+          const open = await Outreach.inboxConflict(trx, { recipient, excludeId: current.id });
+          if (open) return { inbox: open };
+        }
+        // the row lock + re-read for EVERY conversation-opening edit, an empty recipient included: a draft saved between
+        // the read and the update would open the conversation with an address no inbox lock covers
+        const locked = await trx('seo_link_prospects').where({ id: current.id }).forUpdate().first('outreach_to_email');
+        if (!locked || M.normalizeEmail(locked.outreach_to_email) !== M.normalizeEmail(recipient)) return { readdressed: true };
       }
       // A target_page edit is a placement move: under the same domain lock,
       // refuse if another row already represents (domain, page) under ANY
@@ -601,6 +671,8 @@ router.patch('/prospects/:id', async (req, res, next) => {
     });
     if (result.missing) return res.status(404).json({ error: 'prospect not found' });
     if (result.inFlight) return res.status(409).json({ error: `domain already has a prospect in active outreach (${result.inFlight.status}${result.inFlight.target_page ? ` for ${result.inFlight.target_page}` : ''}) — one conversation per inbox`, id: result.inFlight.id });
+    if (result.readdressed) return res.status(409).json({ error: 'the prospect was re-addressed while you edited it — reload and retry' });
+    if (result.inbox) return res.status(409).json({ error: `another placement already has a conversation with this recipient (${result.inbox.status}${result.inbox.outreach_status ? ` / ${result.inbox.outreach_status}` : ''}) — one conversation per inbox`, id: result.inbox.id });
     if (result.taken) return res.status(409).json({ error: `another prospect already represents this domain + target page (${result.taken.status})`, id: result.taken.id });
     res.json({ prospect: result.row });
   } catch (err) { next(err); }
@@ -646,20 +718,41 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
       .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
       .orderBy('updated_at', 'desc');
     const Outreach = require('../services/seo/link-prospect-outreach');
+    // an open draft, or one the nightly bridge parked for the owner's send (awaiting_owner, PR 3a)
     const items = await orderByPriority(
-      db('seo_link_prospects').where({ outreach_status: 'drafted', status: 'prospect' })
+      db('seo_link_prospects').where({ outreach_status: 'drafted' }).whereIn('status', [...Outreach.SENDABLE_STATUSES])
     );
     // Reconcilable = ambiguous sends: a send_error, OR a 'sending' stuck past the
     // stale window (a crashed mid-send) — both resolvable via reconcileSendError.
+    // WHATEVER the lifecycle status reads: an ambiguous send holds its recipient's inbox until it is reconciled
+    // (conversationOpen), so a row moved on by hand must stay in the one place the operator can settle it.
     const staleCutoff = new Date(Date.now() - Outreach.STALE_SENDING_MS);
     const needsReconcile = await orderByPriority(
       db('seo_link_prospects')
-        .where({ status: 'prospect' })
         .where((b) => b
           .where('outreach_status', 'send_error')
           .orWhere((s) => s.where('outreach_status', 'sending').andWhere('updated_at', '<', staleCutoff)))
     );
     const sentToday = await Outreach.dailySendCount();
+    // §6.4 / §13 — what the owner sees before Approve & send: the draft review and the recipient match to acknowledge
+    let byEmail = null; let reviewError = null;
+    try { byEmail = await M.reviewByEmail(db, items.map((p) => p.outreach_to_email)); } catch (err) { reviewError = err.message; } // one batch for the whole list
+    // the click's bindings (§3.6b): the hash of the text THIS list displays (the click carries it back; the claim refuses
+    // a draft edited since) — and the send's legal context on an attested path (the open communication row's level, the
+    // agreement the owner reads before a send that attests to it), shown here as the Owner queue shows it
+    const pathIds = [...new Set(items.map((p) => p.path_id).filter(Boolean))];
+    const pathById = new Map((pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'legal_attestation', 'investigation') : []).map((p) => [p.id, p]));
+    const openRows = items.length ? await db('seo_link_placement_authorities').whereIn('prospect_id', items.map((p) => p.id)).where({ dimension: 'communication', instance_kind: '-' }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'level') : [];
+    const levelByProspect = new Map(openRows.map((r) => [r.prospect_id, r.level]));
+    for (const p of items) {
+      p.draft_hash = M.draftHash(p);
+      p.authority_level = levelByProspect.get(p.id) || null;
+      const path = pathById.get(p.path_id) || null;
+      p.legal_attestation = Boolean(path && path.legal_attestation === true);
+      p.legal_terms_url = p.legal_attestation ? ownerQueue.legalTermsUrlOf(path) : null;
+      p.draft_review = M.draftReview(p);
+      p.recipient_review = byEmail ? byEmail.get(p.outreach_to_email) || null : { kind: 'error', recipient: p.outreach_to_email, matched: [], lookup_hash: null, error: reviewError };
+    }
     res.json({
       items,
       needsReconcile,
@@ -685,22 +778,23 @@ router.post('/prospects/:id/outreach/draft', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/backlink-agent/prospects/:id/outreach/send — approve + send.
-// The authenticated operator call IS the approval click (design §9). Sends only
-// when the lane gate is on; rate-limited + idempotent (see link-prospect-outreach).
-// requireAdmin: sending from the PRIMARY Waves inbox is admin-only — techs may draft
-// (compose) but not approve+send.
+// POST /api/admin/backlink-agent/prospects/:id/outreach/send — approve + send:
+// { draft_hash, reviewed_lookup_hash? }. The authenticated operator call IS the
+// approval click (design §9) of the draft the list DISPLAYED (draft_hash, §3.6b —
+// required: the claim refuses a draft edited since). Sends only when the lane gate
+// is on; rate-limited + idempotent (see link-prospect-outreach). requireAdmin:
+// sending from the PRIMARY Waves inbox is admin-only — techs may draft (compose)
+// but not approve+send.
 router.post('/prospects/:id/outreach/send', requireAdmin, async (req, res, next) => {
   try {
+    const { reviewed_lookup_hash: hash, draft_hash: draftHash } = req.body || {};
+    if (typeof draftHash !== 'string' || !draftHash) return res.status(400).json({ ok: false, code: 'draft_hash_required', error: 'the hash of the draft the list displayed is required — reload and send again' });
     const Outreach = require('../services/seo/link-prospect-outreach');
     const result = await Outreach.sendOutreach({
-      prospectId: req.params.id, approvedBy: req.technician?.name || 'admin',
+      prospectId: req.params.id, approvedBy: actorOf(req) || 'admin', mode: 'owner', reviewedLookupHash: typeof hash === 'string' ? hash : null, draftHash,
     });
     if (!result.ok) {
-      const status = {
-        not_found: 404, gate_off: 403, gmail_not_connected: 503, rate_limited: 429,
-        already_sent: 409, not_actionable: 409, send_failed: 502, finalize_failed: 500,
-      }[result.code] || 400;
+      const status = ownerQueue.SEND_CODE_STATUS[result.code] || 400;
       return res.status(status).json(result);
     }
     res.json(result);
@@ -717,7 +811,7 @@ router.post('/prospects/:id/outreach/reconcile', requireAdmin, async (req, res, 
       prospectId: req.params.id, outcome: req.body?.outcome, approvedBy: req.technician?.name || 'admin',
     });
     if (!result.ok) {
-      const status = { not_found: 404, not_reconcilable: 409, send_in_flight: 409 }[result.code] || 400;
+      const status = { not_found: 404, not_reconcilable: 409, not_requeueable: 409, send_in_flight: 409 }[result.code] || 400;
       return res.status(status).json(result);
     }
     res.json(result);

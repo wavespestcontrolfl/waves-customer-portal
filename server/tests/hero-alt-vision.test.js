@@ -4,10 +4,8 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
-const mockCreate = jest.fn();
-jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
-  messages: { create: mockCreate },
-})));
+const mockDispatch = jest.fn();
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mockDispatch(...args) }));
 
 const MODELS = require('../config/models');
 const { describeHeroForAlt, sanitizeAlt } = require('../services/content/hero-alt-vision');
@@ -31,9 +29,7 @@ describe('describeHeroForAlt', () => {
   });
 
   test('returns the sanitized vision description on the happy path', async () => {
-    mockCreate.mockResolvedValue({
-      content: [{ type: 'text', text: 'Large black-and-yellow orb weaver spider on its web outside a Florida home' }],
-    });
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Large black-and-yellow orb weaver spider on its web outside a Florida home' });
 
     const alt = await describeHeroForAlt({
       buffer: PNG_BUFFER,
@@ -42,32 +38,31 @@ describe('describeHeroForAlt', () => {
     });
 
     expect(alt).toBe('Large black-and-yellow orb weaver spider on its web outside a Florida home');
-    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ model: MODELS.VISION }));
-    const content = mockCreate.mock.calls[0][0].messages[0].content;
-    expect(content[0]).toEqual({
-      type: 'image',
-      source: { type: 'base64', media_type: 'image/webp', data: PNG_BUFFER.toString('base64') },
-    });
-    expect(content[1].text).toContain('Colorful Spiders in Southwest Florida');
+    const [policy, payload] = mockDispatch.mock.calls[0];
+    expect(policy).toBe(MODELS.TEXT_POLICIES.visionAnalysis);
+    expect(payload.images).toEqual([{ data: PNG_BUFFER.toString('base64'), mimeType: 'image/webp' }]);
+    expect(payload.jsonMode).toBe(false);
+    expect(payload.text).toContain('Colorful Spiders in Southwest Florida');
   });
 
-  test('fails open (null) on an API error', async () => {
-    mockCreate.mockRejectedValue(new Error('overloaded'));
+  test('fails open (null) when both providers miss', async () => {
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
+    await expect(describeHeroForAlt({ buffer: PNG_BUFFER, title: 'T' })).resolves.toBeNull();
+  });
+
+  test('fails open (null) when the dispatcher throws', async () => {
+    mockDispatch.mockRejectedValue(new Error('overloaded'));
     await expect(describeHeroForAlt({ buffer: PNG_BUFFER, title: 'T' })).resolves.toBeNull();
   });
 
   test('fails open (null) on unusable output instead of stamping junk', async () => {
-    mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'A bug.' }] }); // too short
+    mockDispatch.mockResolvedValue({ ok: true, text: 'A bug.' }); // too short
     await expect(describeHeroForAlt({ buffer: PNG_BUFFER, title: 'T' })).resolves.toBeNull();
   });
 
-  test('skips the API entirely without image bytes or an API key', async () => {
+  test('skips the dispatcher entirely without image bytes', async () => {
     await expect(describeHeroForAlt({ buffer: null, title: 'T' })).resolves.toBeNull();
-
-    delete process.env.ANTHROPIC_API_KEY;
-    await expect(describeHeroForAlt({ buffer: PNG_BUFFER, title: 'T' })).resolves.toBeNull();
-
-    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 });
 

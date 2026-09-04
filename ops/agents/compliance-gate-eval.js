@@ -19,10 +19,11 @@
  * MAKES LIVE LLM CALLS. Never runs in CI; invoke it deliberately. Reads only
  * fixture strings — no database, no customer records, no writes anywhere.
  * READ-ONLY is enforced, not just declared: the run disables the dispatcher's
- * llm_dispatch_log recording before loading the gate and ABORTS if the gate
- * still resolves enabled. `railway run` (the documented way to supply API
- * keys) injects the live service env, so inheriting GATE_LLM_DISPATCH_METRICS
- * is the normal case, not the exotic one.
+ * llm_dispatch_log recording (the chain rows, the per-call ledger and its
+ * traces) before loading the gate and ABORTS if any of those gates still
+ * resolves enabled. `railway run` (the documented way to supply API keys)
+ * injects the live service env, so inheriting GATE_LLM_DISPATCH_METRICS /
+ * GATE_LLM_CALL_LEDGER is the normal case, not the exotic one.
  *
  * Usage (from repo root):
  *   node ops/agents/compliance-gate-eval.js --document --all   # ACTIVATION RUN
@@ -390,6 +391,11 @@ async function main() {
   // config/feature-gates snapshots the gate into a module-level object at load
   // time (feature-gates.js:47) — setting it afterwards would do nothing.
   delete process.env.GATE_LLM_DISPATCH_METRICS;
+  // The per-call ledger (agent-control S2a) writes a row from EVERY adapter
+  // leg, chain or not, and the trace gate keeps request bodies on top —
+  // both read at call time, so unset = off for this process (Codex r14).
+  delete process.env.GATE_LLM_CALL_LEDGER;
+  delete process.env.GATE_LLM_CALL_TRACES;
 
   const complianceGate = require(path.join(REPO, 'server/services/content/compliance-gate'));
   const guardrails = require(path.join(REPO, 'server/services/content/content-guardrails'));
@@ -399,10 +405,11 @@ async function main() {
   // silently restore the writes. A promise of "no DB access" that can be
   // broken by moving a line is not a promise — so check the resolved gate and
   // refuse to run rather than discover it in the table afterwards.
-  if (require(path.join(REPO, 'server/config/feature-gates')).isEnabled('llmDispatchMetrics')) {
-    console.error('ABORT: LLM dispatch metrics resolved ENABLED — this run would write llm_dispatch_log rows.');
+  const gates = require(path.join(REPO, 'server/config/feature-gates'));
+  if (gates.isEnabled('llmDispatchMetrics') || gates.gateEnvValue('GATE_LLM_CALL_LEDGER') || gates.gateEnvValue('GATE_LLM_CALL_TRACES')) {
+    console.error('ABORT: an LLM ledger gate resolved ENABLED — this run would write llm_dispatch_log rows.');
     console.error('       This harness is READ-ONLY and must not touch the database.');
-    console.error('       Unset GATE_LLM_DISPATCH_METRICS in the calling environment and re-run.');
+    console.error('       Unset GATE_LLM_DISPATCH_METRICS / GATE_LLM_CALL_LEDGER / GATE_LLM_CALL_TRACES in the calling environment and re-run.');
     process.exit(1);
   }
 

@@ -514,22 +514,57 @@ async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
  * regroup only covers estimate-backed rows). Two or more active
  * properties → null: the office places those, same exactly-one rule the
  * 20260829000050 linkage backfill applied. Best-effort — null on error.
+ * Inside a caller transaction the read runs in a SAVEPOINT (knex nested
+ * transaction): a failed statement aborts a PostgreSQL transaction, so a
+ * swallowed error here would otherwise fail every later scheduling write
+ * with 25P02 (pre-push audit #3837 r3 P1; same shape as
+ * visit-groups.maybeGroupRow).
  */
 async function soleActivePropertyId(customerId, conn = db) {
   if (!customerId) return null;
+  const read = (c) => c('customer_properties')
+    .where({ customer_id: customerId, active: true })
+    .limit(2)
+    .select('id');
   try {
-    const rows = await conn('customer_properties')
-      .where({ customer_id: customerId, active: true })
-      .limit(2)
-      .select('id');
+    const rows = conn.isTransaction ? await conn.transaction((sp) => read(sp)) : await read(conn);
     return rows.length === 1 ? rows[0].id : null;
   } catch {
     return null;
   }
 }
 
+/**
+ * Sole-property anchor for a SPAWNED row (recurring follow-ups, series
+ * extensions, next-visit rolls): when the row copied from its parent carries
+ * no property_id, stamp the customer's sole active property so the visit-group
+ * seam (visit-groups.js groupRowOn) can see it — a null-property row never
+ * groups automatically. Prod 2026-09-03: 11 of 23 admin-created rows since
+ * Sep 1 inherited a parent's empty value this way. Rules: never overrides an
+ * explicit stamp; only an UNSTAMPED row (no service_address_line1) — an
+ * unstamped row resolves to the customer's address by every reader's
+ * COALESCE, which for a sole-property customer IS that property, while a
+ * stamped row may name an address the customer never registered; the
+ * 20260903000050 backfill applies the same rule to existing rows.
+ * Estimate-backed rows (source_estimate_id) are NOT anchored here (GH
+ * codex #3837 r1 P1): an accepted estimate for a NEW address seeds its
+ * children before the post-commit estimate linkage creates that property,
+ * and the linker only stamps rows still NULL — anchoring them to the old
+ * sole property would dispatch the series to the wrong house. The
+ * linkage owns those rows.
+ * Cols-guarded like the stamp copy; best-effort (null on error).
+ */
+async function anchorSoleProperty(target, cols, conn = db) {
+  if (!target || !cols || !cols.property_id) return;
+  if (target.property_id != null || !target.customer_id) return;
+  if (cols.service_address_line1 && target.service_address_line1) return;
+  if (cols.source_estimate_id && target.source_estimate_id) return;
+  target.property_id = await soleActivePropertyId(target.customer_id, conn);
+}
+
 module.exports = {
   soleActivePropertyId,
+  anchorSoleProperty,
   OCCUPANCY_TYPES,
   normStreet,
   addressKey,

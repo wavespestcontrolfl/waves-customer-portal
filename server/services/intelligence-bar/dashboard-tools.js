@@ -12,7 +12,7 @@ const { computeMrrBreakdown } = require('../mrr-breakdown');
 const { pendingPrepayIds } = require('../mrr-snapshot');
 const logger = require('../logger');
 const { whereLiveCustomer, CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../customer-stages');
-const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime, validCalendarDate } = require('../../utils/datetime-et');
 
 // Internal/test customers excluded from sales-funnel analytics. Names are
 // matched lowercase against both estimates.customer_name (denormalized
@@ -172,6 +172,17 @@ period can be: "this_week", "last_week", "this_month", "last_month", "this_quart
     },
   },
   {
+    name: 'get_report_engagement',
+    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Use for "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?". Defaults to the last 30 days.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        date_from: { type: 'string', description: 'YYYY-MM-DD (ET). Default: 30 days ago' },
+        date_to: { type: 'string', description: 'YYYY-MM-DD (ET). Default: today' },
+      },
+    },
+  },
+  {
     name: 'get_customer_acquisition',
     description: `Analyze customer acquisition: new customers over time, lead sources, conversion from lead to active. Use for "where are new customers coming from?" or "which lead source converts best?"`,
     input_schema: {
@@ -223,6 +234,7 @@ async function executeDashboardTool(toolName, input) {
       case 'get_estimate_funnel': return await getEstimateFunnel(input);
       case 'get_churn_analysis': return await getChurnAnalysis(input);
       case 'get_service_mix': return await getServiceMix(input);
+      case 'get_report_engagement': return await getReportEngagement(input);
       case 'get_customer_acquisition': return await getCustomerAcquisition(input);
       case 'get_outstanding_balances': return await getOutstandingBalances(input);
       case 'get_payer_ar_aging': return await getPayerArAging();
@@ -870,6 +882,162 @@ async function getServiceMix(input) {
       revenue: parseFloat(m.revenue || 0),
       unique_customers: parseInt(m.unique_customers),
     })),
+  };
+}
+
+
+// Report engagement — the read path for the service-report telemetry that
+// completion + the public report page already write (service_report_events,
+// service_report_deliveries.sent_at, service_records.report_viewed_at).
+// Cohort = service_report_v1 records whose report was FIRST sent inside the
+// window. Every send source is server-owned: the per-recipient email ledger
+// (email_messages, keyed service_report_ready:<record>:<role> — the earliest
+// recipient success, so a partial multi-recipient send still counts from its
+// first delivery), the delivery queue's terminal sent_at, and the
+// completion-SMS stamp the dispatch route / deferred sender write into
+// service_records.structured_notes. The sms_sent/mms_sent EVENT rows are
+// deliberately not used — the public token endpoint accepts those names, so
+// a token holder could forge a send. Non-v1 completions text a generic
+// portal link and stamp the same SMS status, so the cohort is filtered to
+// report_template_version = service_report_v1. An open is the FIRST view at
+// or after the first send, from either signal: the immutable first-view
+// stamp (report_viewed_at) when it falls after the send, or the page-load
+// service_report_viewed event (customer-only — the client never fires it for
+// a staff token). The stamp alone would hide every later real open once a
+// pre-send view had claimed it. In-report actions are distinct records with
+// the (customer-written) event.
+const REPORT_ACTION_EVENTS = [
+  'pdf_downloaded',
+  'photo_opened',
+  'map_interacted',
+  'reentry_timer_viewed',
+  'review_request_clicked',
+  'referral_cta_clicked',
+  'cross_sell_requested',
+  'followup_requested',
+  'report_question_asked',
+];
+
+async function getReportEngagement(input = {}) {
+  const now = new Date();
+  // Inclusive lower bound: 29 days back + today = exactly 30 ET calendar days.
+  const from = input.date_from || etDateString(addETDays(now, -29));
+  const to = input.date_to || etDateString(now);
+  if (!validCalendarDate(from) || !validCalendarDate(to)) {
+    return { error: 'date_from and date_to must be real YYYY-MM-DD dates' };
+  }
+  // ET wall-clock day bounds as real Dates — the send timestamps are
+  // timestamptz, so a naive string here would shift the window 4-5 hours.
+  const fromTs = parseETDateTime(`${from}T00:00`);
+  const toTs = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${to}T12:00`), 1))}T00:00`);
+  if (!(fromTs < toTs)) return { error: 'date_from must be on or before date_to' };
+
+  const actionFlags = REPORT_ACTION_EVENTS
+    .map((name) => `BOOL_OR(sre.event_name = '${name}') AS ${name}`)
+    .join(',\n           ');
+  const actionPassthrough = REPORT_ACTION_EVENTS
+    .map((name) => `act.${name}`)
+    .join(',\n             ');
+  const actionCounts = REPORT_ACTION_EVENTS
+    .map((name) => `(COUNT(*) FILTER (WHERE opn.${name}))::int AS ${name}`)
+    .join(',\n           ');
+  const actionList = REPORT_ACTION_EVENTS.map((name) => `'${name}'`).join(', ');
+
+  const { rows } = await db.raw(`
+    WITH sends AS (
+      SELECT service_record_id, MIN(sent_at) AS first_sent_at
+      FROM (
+        SELECT service_record_id, sent_at
+        FROM service_report_deliveries
+        WHERE status = 'sent' AND sent_at IS NOT NULL
+        UNION ALL
+        SELECT split_part(idempotency_key, ':', 2)::uuid AS service_record_id, sent_at
+        FROM email_messages
+        WHERE idempotency_key LIKE 'service_report_ready:%'
+          AND split_part(idempotency_key, ':', 2) ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          AND status IN ('sent', 'delivered', 'opened', 'clicked')
+          AND sent_at IS NOT NULL
+        UNION ALL
+        SELECT id AS service_record_id,
+               COALESCE(structured_notes->>'completionSmsDeferredDeliveredAt',
+                        structured_notes->>'sentSmsAt')::timestamptz AS sent_at
+        FROM service_records
+        WHERE structured_notes->>'completionSmsStatus' = 'sent'
+          AND COALESCE(structured_notes->>'completionSmsDeferredDeliveredAt',
+                       structured_notes->>'sentSmsAt') ~ '^\\d{4}-\\d{2}-\\d{2}T'
+      ) snd
+      GROUP BY service_record_id
+    ),
+    cohort AS (
+      SELECT srec.id,
+             COALESCE(NULLIF(srec.service_line, ''), 'unknown') AS service_line,
+             snd.first_sent_at,
+             srec.report_viewed_at
+      FROM sends snd
+      JOIN service_records srec ON srec.id = snd.service_record_id
+      WHERE srec.report_template_version = 'service_report_v1'
+        AND snd.first_sent_at >= ? AND snd.first_sent_at < ?
+    ),
+    acts AS (
+      SELECT sre.service_record_id,
+           MIN(sre.occurred_at) FILTER (WHERE sre.event_name = 'service_report_viewed') AS first_view_event_at,
+           ${actionFlags}
+      FROM service_report_events sre
+      JOIN cohort rpt ON rpt.id = sre.service_record_id
+      WHERE sre.event_name IN ('service_report_viewed', ${actionList})
+        AND sre.occurred_at >= rpt.first_sent_at
+      GROUP BY sre.service_record_id
+    ),
+    opens AS (
+      SELECT rpt.service_line,
+             rpt.first_sent_at,
+             LEAST(
+               CASE WHEN rpt.report_viewed_at >= rpt.first_sent_at THEN rpt.report_viewed_at END,
+               act.first_view_event_at
+             ) AS first_open_at,
+             ${actionPassthrough}
+      FROM cohort rpt
+      LEFT JOIN acts act ON act.service_record_id = rpt.id
+    )
+    SELECT opn.service_line,
+           GROUPING(opn.service_line) AS is_total,
+           COUNT(*)::int AS sent,
+           (COUNT(*) FILTER (WHERE opn.first_open_at IS NOT NULL))::int AS opened,
+           percentile_cont(0.5) WITHIN GROUP (
+             ORDER BY EXTRACT(EPOCH FROM (opn.first_open_at - opn.first_sent_at)) / 60.0
+           ) FILTER (WHERE opn.first_open_at IS NOT NULL) AS median_minutes_to_open,
+           ${actionCounts}
+    FROM opens opn
+    GROUP BY ROLLUP (opn.service_line)
+    ORDER BY is_total DESC, sent DESC
+  `, [fromTs, toTs]);
+
+  const shape = (row) => {
+    const sent = parseInt(row.sent, 10) || 0;
+    const opened = parseInt(row.opened, 10) || 0;
+    const out = {
+      sent,
+      opened,
+      open_rate_pct: sent > 0 ? Math.round(opened / sent * 100) : 0,
+      median_minutes_to_open: row.median_minutes_to_open == null ? null : Math.round(parseFloat(row.median_minutes_to_open)),
+    };
+    for (const name of REPORT_ACTION_EVENTS) out[name] = parseInt(row[name], 10) || 0;
+    return out;
+  };
+  const totalRow = rows.find((r) => Number(r.is_total) === 1);
+  const byLine = rows.filter((r) => Number(r.is_total) !== 1);
+
+  return {
+    period: { from, to },
+    cohort: 'service_report_v1 records first sent to the customer (report email per the email ledger / delivery queue, or the completion SMS/MMS per the server-stamped send status) in the period',
+    total: totalRow ? shape(totalRow) : shape({ sent: 0, opened: 0 }),
+    by_service_line: byLine.map((r) => ({ service_line: r.service_line, ...shape(r) })),
+    notes: [
+      'opened = the report was first viewed at or after the first send, per the customer-only page-load event or the first-view stamp. Staff previews with a staff JWT and portal static views never count, but a staff download through the plain customer PDF link stamps the first view (that link cannot carry the staff JWT), so a small share of opens can be internal QA. A view that predates every send does not count, and does not hide a later real open.',
+      'median_minutes_to_open is over those post-send first opens',
+      'action counts are distinct reports with at least one such event at or after the first send (pdf_downloaded shares the staff-download caveat above)',
+      "service_line 'unknown' = records completed before the line was stamped on the record",
+    ],
   };
 }
 

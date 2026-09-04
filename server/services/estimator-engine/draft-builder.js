@@ -1081,8 +1081,18 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'superseded_at', '') = ''")
         // The draft this re-run supersedes carries the same call — it is
-        // the row being replaced, not a concurrent duplicate.
-        .modify((q) => { if (supersedeTarget) q.whereNot('id', supersedeTarget.id); })
+        // the row being replaced, not a concurrent duplicate. A clarify
+        // re-run (an adopted unit answer, or the bedroom re-price of a reply
+        // that also held the call's drafts) also passes the other rows the
+        // same clarify hold marked (one attempt token per reply): they stay
+        // held for the operator, never block the corrected replacement
+        // (codex r2 P2 + r4 P2 on #3804).
+        .modify((q) => {
+          if (supersedeTarget) q.whereNot('id', supersedeTarget.id);
+          if (context?.supersedeAttempt) {
+            q.whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_attempt', '') <> ?", [String(context.supersedeAttempt)]);
+          }
+        })
         .first();
       if (existingForCall) {
         return {
@@ -1117,6 +1127,29 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
               blocked: true,
               reason: 'call_rejected',
               message: `This call was rejected by the pipeline (${rejected}) — no draft is created.`,
+            },
+          };
+        }
+      }
+      // UNIT-ANSWER fence for EVERY call-origin insert (clarify write-back,
+      // codex r5 P1 on #3785): the customer's texted unit is stamped on the
+      // call row under the same lock this transaction holds (above), so a
+      // composer that built a whole-building draft before the answer
+      // arrived is blocked here instead of inserting it unguarded after
+      // the reply's own lookup ran. The FINAL address is what is judged —
+      // the engine applies a stamped answer to the composer's address
+      // deterministically — so a draft that would persist the whole
+      // building (or a stale unit) at the asked building is blocked; a
+      // draft for another building is untouched.
+      {
+        const { callUnitAnswerFence } = require('../../utils/estimate-claim-sql');
+        const fenceReason = await callUnitAnswerFence(trx, call.id, { address: intent.address, adopted: context?.adoptedUnitAnswer || null });
+        if (fenceReason) {
+          return {
+            duplicateBlock: {
+              blocked: true,
+              reason: fenceReason,
+              message: 'The caller texted their unit after this draft was composed — the re-draft with the unit replaces it.',
             },
           };
         }
@@ -1205,6 +1238,12 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // it answers is retired HERE — same transaction, right before the
     // open-estimate listing — so the replacement passes the guard while a
     // red/skip outcome (no insert) leaves the original draft standing.
+    // The rows this re-run's clarify reply held (same attempt token) are
+    // excluded from EVERY probe, not only the same-call one above: a
+    // building with two held drafts would otherwise surface the second one
+    // here as duplicate_phone and bounce the corrected replacement (codex
+    // r13 P2 on #3804).
+    const probeOptions = { database: trx, excludeRepriceAttempt: context?.supersedeAttempt || null };
     const allOpen = [];
     const seenEstimateIds = new Set();
     const absorb = (rows) => {
@@ -1216,7 +1255,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       }
     };
     for (const phone of dedupePhones) {
-      absorb(await listOpenEstimatesByPhone(phone, { database: trx }));
+      absorb(await listOpenEstimatesByPhone(phone, probeOptions));
     }
     // IDENTITY read, not just phones: an estimate carries ONE
     // customer_phone, so the draft a coordinator (or another service
@@ -1227,7 +1266,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // is unchanged: conflictingOpenEstimate still lets a genuinely
     // different property through.
     if (dedupeCustomerId) {
-      absorb(await listOpenEstimatesByCustomerId(dedupeCustomerId, { database: trx }));
+      absorb(await listOpenEstimatesByCustomerId(dedupeCustomerId, probeOptions));
     }
     if (allOpen.length) {
       const conflicting = conflictingOpenEstimate(allOpen, intent.address);

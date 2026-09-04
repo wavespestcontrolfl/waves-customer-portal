@@ -615,6 +615,7 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const { parsed, passes, converged, model } = await drafter.generateGroundedDraft({
+      laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
       inboundMessage: body,

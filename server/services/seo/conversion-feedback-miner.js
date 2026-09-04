@@ -27,6 +27,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { WEIGHTS, CITIES } = require('../content/scoring-config');
+const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 
 // ── normalization (pure, test-friendly) ──────────────────────────────
 
@@ -259,6 +260,7 @@ class ConversionFeedbackMiner {
 
       const calls = await db('call_log')
         .where('direction', 'inbound')
+        .modify((qb) => whereNotSandboxCall(qb)) // bake-off test calls are not handled calls
         .where('created_at', '>=', sinceCutoff)
         .select('from_phone', 'call_outcome');
 

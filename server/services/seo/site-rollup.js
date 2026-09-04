@@ -153,8 +153,10 @@ class SiteRollup {
     // window by the UTC offset.
     const since = new Date(Date.now() - d * DAY_MS);
 
+    const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
     const callRows = await db('call_log')
       .where('direction', 'inbound')
+      .modify((qb) => whereNotSandboxCall(qb)) // voice-agent bake-off calls are not traffic
       .where('created_at', '>=', since)
       .groupBy('to_phone')
       .select('to_phone')

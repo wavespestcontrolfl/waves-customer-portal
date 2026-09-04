@@ -19,7 +19,36 @@ function jsonb(value) {
   try { return JSON.stringify(value == null ? {} : value); } catch (_) { return '{}'; }
 }
 
+// A run whose process died mid-sweep (Railway container swap during the
+// 4:10 tick — 2026-09-03, the GATE_PAY_PAGE_FAQ redeploy) never reaches
+// completeRun, so its row stays 'running' forever: the Auto-Dispatch page
+// shows a blue in-flight chip for a run that ended hours ago and the job
+// watch pages "stuck" every morning. The advisory lock itself is freed by
+// Postgres when the connection drops, so nothing blocks the next tick —
+// only the ledger lies. Settle any prior 'running' row older than the
+// longest plausible sweep before starting a new one. Best-effort: a failed
+// settle must never stop a real run.
+const STALE_RUNNING_MINUTES = 60;
+
+async function settleAbandonedRuns() {
+  try {
+    const n = await db('auto_dispatch_runs')
+      .where({ status: 'running' })
+      .where('started_at', '<', new Date(Date.now() - STALE_RUNNING_MINUTES * 60 * 1000))
+      .update({
+        status: 'failed',
+        completed_at: db.fn.now(),
+        updated_at: db.fn.now(),
+        error_message: `process exited mid-run (no completion recorded within ${STALE_RUNNING_MINUTES} min — deploy restart?)`,
+      });
+    if (n) logger.warn(`[auto-dispatch] settled ${n} abandoned run(s) still marked running`);
+  } catch (e) {
+    logger.warn(`[auto-dispatch] abandoned-run settle failed: ${e.message}`);
+  }
+}
+
 async function startRun(config, triggeredBy = 'cron') {
+  await settleAbandonedRuns();
   const [row] = await db('auto_dispatch_runs')
     .insert({
       status: 'running',
@@ -117,4 +146,4 @@ async function completeRun(runId, { status, totals, error = null }) {
   } catch (_) { /* non-critical */ }
 }
 
-module.exports = { startRun, logDecision, completeRun };
+module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES };

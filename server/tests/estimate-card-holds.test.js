@@ -139,7 +139,7 @@ function stubDb(firstResults, { rescheduleLog = [], holdRows = null, visitRows =
   mockRescheduleLogChains = [];
   mockDbHandler = (table) => {
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select', 'forUpdate']) {
+    for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'andWhere', 'orWhere', 'orderBy', 'orderByRaw', 'modify', 'select', 'forUpdate']) {
       chain[m] = jest.fn(() => chain);
     }
     chain.first = jest.fn(() => {
@@ -764,6 +764,41 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     stubDb(null);
     expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: false, feeApplies: false, rule: expect.objectContaining({ code: 'no_card', willCharge: false }) });
   });
+  it('no HELD row but a charging/charge_review hold → undetermined in-flight verdict, never "no card"', async () => {
+    stubDb([null, { id: 'h1', status: 'charging', no_show_fee_amount: 49 }]);
+    const res = await cardHoldCancelPreview('svc1', now);
+    // Legacy shape stays fee-may-apply so previewVisitFees keeps the exposure.
+    expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: 49, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    expect(res.rule.text).toMatch(/already in progress or under billing review/);
+  });
+  it('hold-state lookup FAILURE → undetermined in the exposure shape (previewVisitFees keeps it), promising neither release nor review', async () => {
+    stubDb([null, new Error('db blip')]);
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toEqual({ held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: expect.objectContaining({ code: 'unresolved', willCharge: null }) });
+    expect(res.rule.text).not.toMatch(/released free|billing review\./);
+    expect(res.rule.text).toMatch(/check the visit's billing after cancelling/);
+  });
+  it('no HELD row but a never-held pending row → not_secured (nothing settled, nothing held), and an unknown state → undetermined (pre-push P1)', async () => {
+    stubDb([null, { id: 'h1', status: 'pending', no_show_fee_amount: 49 }]);
+    let res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: false, feeApplies: false, rule: { code: 'not_secured', willCharge: false } });
+    expect(res.rule.text).not.toMatch(/settled/);
+    stubDb([null, { id: 'h1', status: 'weird_new_state', no_show_fee_amount: 49 }]);
+    res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: { code: 'unresolved', willCharge: null } });
+    expect(res.rule.text).toMatch(/hold state weird_new_state/);
+  });
+  it('closed-hold fallback orders held_at DESC NULLS LAST so a pending row never outranks the real closed hold', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/estimate-card-holds'), 'utf8');
+    expect(src).toMatch(/const HELD_ROW_ORDER = 'held_at DESC NULLS LAST, created_at DESC'/);
+    expect(src).toMatch(/orderByRaw\(HELD_ROW_ORDER\)/);
+  });
+  it('no HELD row but a released/charged hold → fee settled, with the state named', async () => {
+    stubDb([null, { id: 'h1', status: 'released', no_show_fee_amount: 49 }]);
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: false, feeApplies: false, rule: { code: 'fee_settled', willCharge: false } });
+    expect(res.rule.text).toMatch(/already settled \(released\)/);
+  });
   it('held + in-window with the local card row gone → STILL a charge verdict: the direct cancel path self-heals the attach and charges', async () => {
     stubDb([holdRow, null]);
     mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
@@ -778,6 +813,73 @@ describe('cardHoldCancelPreview — cancel-UI preview', () => {
     // ET wall clock of the start + the fee + the rule, in one sentence.
     // Stubbed ET formatters (see the datetime-et mock) — the shape is what's under test.
     expect(res.rule.text).toBe('A card is saved and the visit starts Monday, July 13, 2026 at 9:00 AM, within the 24-hour late-cancel window. The $49 late-cancel fee will be charged — rule: cancellations within 24 hours of the visit.');
+  });
+  it('in-window hold beside a /secure appointment-card row → undetermined (the charge path refuses competing consents)', async () => {
+    stubDb(holdRow, { laneRows: { id: 'lane-row' } });
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    // Amount UNKNOWN (Codex #3800 r8 P1): neither rail auto-charges, so the
+    // plan-cancel total must not promise the hold's $49.
+    expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: null, unresolved: true, rule: { code: 'competing_consent', willCharge: null } });
+    expect(res.rule.text).toMatch(/two card agreements/);
+  });
+  it('in-window hold beside a /secure row already mid-charge → charge_in_flight carrying THAT row\'s frozen fee, not the hold\'s', async () => {
+    stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'charging', no_show_fee_amount: 75 } });
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: 75, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+  });
+  it('in-window hold beside a /secure row whose fee already CHARGED → fee settled on the appointment card, never "bill by hand" (Codex #3800 r7 P1)', async () => {
+    stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'charged' } });
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toEqual({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'fee_settled', willCharge: false, text: expect.stringMatching(/already settled \(charged on the appointment card\), so nothing more will be charged/) } });
+    expect(res.rule.text).not.toMatch(/two card agreements|bill the fee by hand/);
+  });
+  it('PARKED hold beside a /secure row whose fee already charged / is mid-charge → the fee event wins over hold_parked (pre-push P1)', async () => {
+    stubDb({ ...holdRow, parked_at: new Date('2026-07-01T00:00:00Z') }, { laneRows: { id: 'lane-row', fee_status: 'charged' } });
+    let res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: false, rule: { code: 'fee_settled', willCharge: false } });
+    expect(res.parked).toBeUndefined();
+    stubDb({ ...holdRow, parked_at: new Date('2026-07-01T00:00:00Z') }, { laneRows: { id: 'lane-row', fee_status: 'charge_review' } });
+    res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    expect(mockApptTime).not.toHaveBeenCalled();
+  });
+  it('PARKED hold beside a consent-only /secure row → still hold_parked (neither rail charges a parked visit)', async () => {
+    stubDb({ ...holdRow, parked_at: new Date('2026-07-01T00:00:00Z') }, { laneRows: { id: 'lane-row', fee_status: null } });
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: false, parked: true, rule: { code: 'hold_parked', willCharge: false } });
+  });
+  it('rail OFF: a consent-only /secure row beside the hold → rail_off (neither rail can charge), but a fee event already running still reports (pre-push P1)', async () => {
+    delete process.env.ONE_TIME_CARD_HOLD;
+    try {
+      stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: null } });
+      let res = await cardHoldCancelPreview('svc1', now);
+      expect(res).toMatchObject({ held: true, feeApplies: false, rule: { code: 'rail_off', willCharge: false } });
+      stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'charging', no_show_fee_amount: 75 } });
+      res = await cardHoldCancelPreview('svc1', now);
+      expect(res).toMatchObject({ held: true, feeApplies: true, feeAmount: 75, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    } finally { process.env.ONE_TIME_CARD_HOLD = 'true'; }
+  });
+  it('in-window hold beside a /secure row whose fee was waived/released → still competing_consent (the charge path refuses any lane row)', async () => {
+    stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'waived' } });
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'competing_consent', willCharge: null } });
+  });
+  it('OUTSIDE-window hold beside a /secure row mid-charge → still charge_in_flight (the competing check precedes every verdict, free ones included)', async () => {
+    stubDb(holdRow, { laneRows: { id: 'lane-row', fee_status: 'charging' } });
+    mockApptTime.mockResolvedValue(new Date('2026-07-13T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, unresolved: true, rule: { code: 'charge_in_flight', willCharge: null } });
+    expect(mockApptTime).not.toHaveBeenCalled();
+  });
+  it('hold committed between the two reads → re-runs the held preview instead of calling it settled', async () => {
+    stubDb([null, { ...holdRow, status: 'held' }, holdRow]);
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    const res = await cardHoldCancelPreview('svc1', now);
+    expect(res).toMatchObject({ held: true, feeApplies: true, rule: { code: 'in_window', willCharge: true } });
   });
   it('parked hold → never a charge prompt, matching the handler\'s already_parked (no window math)', async () => {
     stubDb({ ...holdRow, parked_at: new Date('2026-07-05T12:00:00Z') });

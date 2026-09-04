@@ -27,13 +27,14 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { redactText } = require('./agent-decision-training');
 const { redact: redactPii } = require('./content/pii-redactor');
 const { dispatchWithFallback } = require('./llm/call');
 const MODELS = require('../config/models');
 const { hasAgentCallerLabels } = require('./sms-voice-corpus-miner');
 const { RESEARCH_SCHEMA_VERSION } = require('./call-research-taxonomy');
-const { buildCallResearchPrompt, validateResearchOutput, PROMPT_HASH } = require('./prompts/call-research-v1');
+const { buildCallResearchPrompt, validateResearchOutput, PROVIDER_OUTPUT_SCHEMA, PROMPT_HASH } = require('./prompts/call-research-v1');
 
 // Route locked by the 7-arm bake-off (2026-07-18, 20 fixed prod calls, all
 // arms through the identical validate → verbatim-guard → redact pipeline):
@@ -204,6 +205,7 @@ function mapSegmentRefs(quote, transcriptStructured) {
 function eligibleCallsQuery({ onlyUnmined = true } = {}) {
   let q = db('call_log')
     .where('direction', 'inbound')
+    .modify((qb) => whereNotSandboxCall(qb)) // voice-agent bake-off calls never reach a corpus
     .whereNotNull('transcription')
     .where('call_recording_consent_disclaimer_played', true)
     .where(function () {
@@ -246,8 +248,10 @@ async function extractResearchChunks(call, customer, { route = CALL_RESEARCH_ROU
   // primary would starve the Claude leg. The dispatcher's default budget
   // splits evenly across legs, which is exactly what a nightly job wants.
   const res = await dispatchWithFallback(route, {
+    laneId: 'call_research',
     text: buildCallResearchPrompt(transcript),
     jsonMode: true,
+    jsonSchema: PROVIDER_OUTPUT_SCHEMA,
     maxTokens: 8192,
     temperature: 0, // closed-enum structured extraction — greedy decode
   }, {

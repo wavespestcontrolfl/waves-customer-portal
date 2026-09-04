@@ -19,10 +19,7 @@
 
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { anthropicText } = require('../llm/call');
-
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const { dispatchWithFallback } = require('../llm/call');
 
 // Alt-text conventions: concrete subject first, no "image of"/"photo of"
 // preamble, one plain sentence sized for screen readers and image search.
@@ -65,26 +62,22 @@ function sanitizeAlt(text) {
  */
 async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyword } = {}) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) return null;
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-    logger.warn('[hero-alt-vision] Anthropic SDK / API key unavailable — keeping writer alt (fail-open)');
-    return null;
-  }
 
   try {
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropic.messages.create({
-      model: MODELS.VISION,
-      max_tokens: 300,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: mimeType, data: buffer.toString('base64') } },
-          { type: 'text', text: buildAltPrompt({ title, keyword }) },
-        ],
-      }],
+    // VISION first, OpenAI Terra on a miss; a two-leg miss (no key, provider
+    // error) keeps the writer alt below.
+    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
+      text: buildAltPrompt({ title, keyword }),
+      images: [{ data: buffer.toString('base64'), mimeType }],
+      jsonMode: false,
+      maxTokens: 300,
     });
+    if (!res.ok) {
+      logger.warn(`[hero-alt-vision] vision call failed (${res.reason}) — keeping writer alt (fail-open)`);
+      return null;
+    }
 
-    const alt = sanitizeAlt(anthropicText(response));
+    const alt = sanitizeAlt(res.text);
     if (!alt) {
       logger.warn('[hero-alt-vision] unusable vision output — keeping writer alt (fail-open)');
       return null;

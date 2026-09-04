@@ -388,7 +388,7 @@ async function sendCustomerMessage(input) {
       policy,
       segmentMeta,
       validatorsPassed,
-      validatorsFailed: ['check_send_window_boundary'],
+      validatorsFailed: [providerOutcome.validator || 'check_send_window_boundary'],
       blockedBy: { code: providerOutcome.code, reason: providerOutcome.error },
       identityTrust: resolvedTrust,
       providerOutcome: null,

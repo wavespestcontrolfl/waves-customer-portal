@@ -247,7 +247,11 @@ estimate+service+day, suppression-blocked addresses return 409 with no
 send, generic errors — no PII in responses or logs; while
 GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
 the engine-pricing-authority verdict (#3750) answers the same generic 404
-before either provider path).
+before either provider path; both provider paths re-read the row and repeat
+the customer-viewable + call-side-hold check as the LAST step before the
+SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
+PDF render withholds the packet with the same generic 404 and releases the
+SMS dedup claim so a later legitimate retap can send).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
@@ -448,7 +452,79 @@ authority on any money path).
 `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
 instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
 limit. Persists a quote/lead and may text the quote via a Twilio short-link;
-returns pricing only).
+returns pricing only. Request shape: either `services` keyed by the engine
+keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
+`serviceKey` / `service_key` from the `/api/public/services/menu` payload,
+which expands SERVER-SIDE via `quoteServicesForKey` — the posted body can
+only add the site-collected options `mergeKeyedRequestOptions` allows
+(today: the lawn grass `track`, forwarded into `lawn` AND
+`lawnPestControl`). Service-menu phase 2 (2026-09-03) widened the instant
+set by two keys: `oneTimeMosquito` (menu `mosquito_one_time`; priced by
+treatable lot area; station / dunk add-ons are staff-scoped and never
+site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
+(turf-priced on the forwarded track; a lot-only lookup routes it to manual
+review like the lawn programs). Catalog `cockroach_control` → `pestInitialRoach`
+(owner ruling 2026-09-03: the two-treatment package priced as one
+regular_standalone knockdown on the home footprint; species / severity /
+price override stay staff-scoped, the site prices the native scale; the
+included second visit is booked at completion at no charge). It prices
+instantly but never mints a self-book slot (`bookingUrl` null, like bed
+bug): the self-book funnel collapses it to the generic pest visit with no
+catalog `service_id`, which the included second visit's scheduling needs —
+the owner books the first visit. Instant eligibility also requires the live
+`regular_standalone.treatments` display count to still read 2 — read from the persisted `pricing_config`
+row itself (never process-local engine constants), on the menu build, on
+the first eligibility read, and again immediately before the engine. The engine input freezes `packageTreatments: 2` and
+`catalogServiceKey: cockroach_control` on the request, so the stored draft
+regenerates the two-visit promise on every send / view and the accepted
+visit resolves `service_id` by that exact key. All three are
+additive — no existing key or response field changed. **Menu `flea_tick` changed product on 2026-09-03**
+(owner ruling "flea is two visits"; PR #3845): the keyed request now
+expands to the two-visit Flea Elimination Package (`flea_package`, 2
+visits, conditional retreat guarantee) — previously the single-visit
+knockdown. The retired `services.flea.offerKey = flea_knockdown_single`
+is still accepted on the direct-`services` shape, but the engine prices
+the package and routes the line to manual review
+(`flea_single_visit_offer_retired`), so a stale caller gets a review
+response, never an instant two-visit price it did not ask for. A
+site-collected `services.flea.fleaComplexity` (`light` / `moderate` /
+`heavy`) is forwarded on both shapes; absent, the package prices at the
+base (light) rate. Lot-priced keys (`mosquito`, `oneTimeMosquito`,
+`treeShrub`) park as `lot_size_requires_verification` when the lookup
+flagged the lot verify-first; the response is then a manual quote, never a
+price built from the synthetic sqft×4 fallback. Every mosquito line
+(`mosquito`, `oneTimeMosquito`, commercial) goes one step further: the
+engine line itself routes to review whenever the route passes
+`lotSizeMeasured:false` (lookup miss, or a direct-API lot posted without
+`lotSizeConfirmed`) — a mosquito price is only ever built from a
+lookup-measured or customer-confirmed lot (owner ruling 2026-09-03; the
+recurring program joined this contract then, so a direct-API caller that
+posts an unconfirmed `lotSqFt` with `mosquito` now receives a manual
+quote where it previously received a price)).
+
+Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
+read at call time, default off in every environment — off, every run
+files as `new` exactly as before): a tokenless `/calculate` whose typed
+email AND phone AND quoted address AND service (catalog `serviceKey`, or
+the normalized service-mix label for the direct `services` shape) equal an
+OPEN `quote_wizard` lead's (`OPEN_LEAD_STATUSES`) created inside 30 days,
+with no additional properties on either side and a live courtship (no
+FK-linked estimate that is declined, expired or archived, and the LATEST
+mirrored `estimate_data.lead_id` estimate, if any, is open), is filed as `status = 'duplicate'` carrying
+`extracted_data.duplicate_of_lead_id` = that original's id, instead of a
+second `new` lead. The token path (`leadId` + email) re-runs the exact
+predicate against its OWN row, excluding itself and looking only back
+(older rows), so the label lands, moves or clears on THIS row — scoped to
+the status and typed identity the request read; a relabel that hits 0
+rows follows the row as it now is. A row that just filed as a repeat
+drops its own lead-stage `ad_service_attribution` row and the root's row
+is rebuilt when missing. Label ONLY: the route never selects, updates or
+reads the original for anything but re-validating the chosen target; the
+marker grants no access (a typed contact is not ownership evidence), the
+draft estimate stays mirrored to the run's own row, and `/upsell` reaches
+only the authenticated lead's draft. Resolving a repeat to its root at
+estimate acceptance / self-booking is PR B′ (services, not this route).
+Kill switch: unset the gate — rows already labelled keep their marker.
 `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
 marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on
@@ -544,6 +620,43 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+A clarify RE-PRICE HOLD (`estimate_data.estimatorEngine.reprice_pending_at`
+non-empty — stamped by `estimate-clarify-asks` when a customer's unit or
+bedroom reply proves the row's address or dollars stale; lifted only by the
+operator's revision / proposal save or by the replacement draft's supersede
+archive) takes the row out of the customer surface for as long as the
+marker is on the row, whatever the row's status becomes afterwards. The
+marker is stamped on UNSENT rows only (draft / scheduled / send_failed /
+sending — a delivery that has not published yet); a building-level quote
+staff already SENT before the customer's reply is NOT retracted by this
+mechanism (the office is belled and the unit lands on the CRM record; an
+automatic retract-and-replace is the C2b follow-up). While the marker is on:
+the GET view (React `/data`, the legacy SSR page, `/pdf`, the slots
+routes, every `isEstimateCustomerViewable` consumer) answers the same
+generic 404 as an unknown token, and the two writes refuse with 409
+`{ error: 'This estimate is being re-priced — please try again in a few
+minutes' }` — `/accept` inside its locked read, `/decline` at the
+guard AND on the UPDATE's own predicate (a hold landing between the two
+parks the decline on that 409, never a stale 'declined' terminal); the
+pricing mutations (`/select-tier`, `/bond`, `/interior-service`,
+`/service-opt-out`, `/preferences`) and the ask endpoint treat a held
+row as not accept-active / not answerable at the pre-read, and the five
+mutations predicate their whole-blob writes on the marker's absence, so
+none of them can overwrite the hold off the row; `/extension-request`
+treats a held row as ineligible (the generic 404), and the auto-grant
+claim, the notify-only claim, the guarded expiry write, and the sibling
+revive all carry the marker predicate — a hold that lands after the
+eligibility read never burns the grant, texts a link the renderer
+refuses, or pages the office with a 201 (the zero-row claim re-reads and
+answers the generic 404); `/bundle-inquiry` judges the locked row with
+the same verdict (409 "no longer active", the route's existing shape for
+an inactive row); the slots `/reserve` write re-judges the LOCKED row
+with the same verdict before minting a hold (generic 404, no
+reservation). A
+group's held siblings are skipped at preflight, claim and publication;
+a held ANCHOR parks as `send_failed`. No enumeration signal: the hold
+is unobservable from outside beyond the accept/decline 409, which a held
+row can only reach through a link that went out before the hold.
 `/select-tier` refuses any tier above the tier the ENGINE wrote for the
 estimate's qualifying services (400 `tier_not_available_for_current_services`
 + `maxTier`; downgrades stay allowed): the ceiling is the last opt-out
@@ -555,6 +668,24 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+`/accept` existing-appointment adoption (`existingAppointmentId` in the
+body, offered by the view contract instead of the slot picker): the row
+must belong to this customer, be unclaimed or claimed by THIS estimate,
+never a reservation hold or a callback visit, dated today or later, and
+in an adoptable status. Adoptable statuses are `pending`/`confirmed`;
+behind `GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT` (fail-closed in every
+environment — off unless the var is a `gateEnvValue` true: `true`, `1`
+or `on`, case-insensitive; re-read per accept request, so a flip is a
+live kill) `en_route`/`on_site` rows are adoptable too, so an on-site accept prices and claims the visit in
+progress instead of minting a duplicate. The status set is snapshotted
+ONCE per accept request and feeds both the preflight offer and the
+under-lock UPDATE (a gate flip mid-request cannot 409 an offered row);
+a row that stops qualifying between them answers 409 `existing appointment is no longer available`.
+Adoption stamps `source_estimate_id`, the customer, the accepted plan's
+per-visit price (or clears a stale one), and the catalog identity — it
+never changes the row's status or date. The customer-wide fallback that
+OFFERS an unlinked same-family row stays behind
+`GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE`.
 `/data` carries an optional `lawnCalendar` block behind
 `GATE_ESTIMATE_LAWN_CALENDAR` (dev-open, prod dark): `{ programs: {
 [frequencyKey]: { visitsPerYear, cadence, months } } }` for the recurring
@@ -567,6 +698,24 @@ plan matching the frequency's visitsPerYear through the scheduler's own
 with no catalog plan is omitted; the key is ABSENT when the gate is off or
 nothing resolves (it was boolean `true` from 2026-08 until #3755). The page
 only buckets months into seasons — it never derives an interval itself.
+`/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
+`copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
+and a one-time-ONLY estimate whose billable rows all resolve to one copy
+pack may carry `pricing.oneTimeServiceCopy` — `{ key, hero: { eyebrow, h1,
+sub }, aiTitle?, aiBody?, askChips[] }` (hero strings keep `{first}`/`{city}`
+tokens for the page; `aiTitle`/`aiBody` are present only for packs that
+carry Waves AI copy) — both resolved server-side from the static pack in
+`server/services/estimate-one-time-copy.json` (owner-approved customer
+copy: what the visit includes + guarantee terms per service; no customer
+or pricing data). A row with no pack entry omits `copy` (rows keep it on
+mixed and recurring estimates — a recurring pest plan with a roach cleanout
+add-on still describes the cleanout); `oneTimeServiceCopy` is omitted on
+mixed one-time quotes and on any estimate with a recurring service; a
+regulated certificate surface (WDO in the aligned OR raw rows) never
+carries either key. When `oneTimeServiceCopy` is present its
+`askChips` ARE `pricing.askChips` — a pack with its own chips supplies
+them, a hero-only pack echoes the category chips the page renders — and the
+server-rendered page reads the same pack, so the two paths cannot drift.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,
@@ -579,7 +728,12 @@ public by protocol).
 `/api/health` (GET; liveness probe, no data).
 `/api/integrations/*-worker` mounts (hermes workers; each authenticates
 via its own HMAC-signed header check inside the router — an
-unauthenticated internal route here is P0).
+unauthenticated internal route here is P0). `watchdog-worker` (GET
+`/status`, key `hermes_watchdog`, gate `GATE_HERMES_WATCHDOG`) serves the
+external agent watchdog a counts-only health snapshot — no customer data,
+no item titles, no error text (job_health.last_error is only digit-masked),
+no sub-read error messages; adding any free-text field is P0. `reasons` are
+count-free stable keys — a count inside a key re-pages one incident.
 Customer authentication (`server/routes/auth.js`, mounted at `/api/auth`):
 `POST /send-code`, `/verify-code`, `/refresh`, `/logout` are unauthenticated
 by definition. send-code and verify-code sit behind the `server/index.js`
@@ -861,6 +1015,37 @@ service-contact slot — are gated separately again by
 booking and no re-service ticket).
 Any change to this endpoint, its auth, or its frame handling is
 security-critical).
+`/api/webhooks/twilio/relay-sandbox` + `/api/webhooks/twilio/relay-sandbox/cell`
+(POST; machine-to-machine TwiML webhooks — the voice URL and the in-call
+`<Gather>` action of the dead GA# SANDBOX number, the only test path for the
+AI receptionist. Twilio-signature validated at the `/api/webhooks/twilio`
+mount like every Twilio inbound route, and additionally fail-closed to a 403
+`<Hangup/>` unless the posted `To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`
+(unset ⇒ every request refused) and a `CallSid` is present; relay not
+attached ⇒ a spoken notice and hangup. The first hit inserts a `call_log`
+row for the CallSid (`direction` inbound, `source` 'voice_relay_sandbox')
+under the same per-CallSid advisory lock `/voice` and `/call-status` take;
+a generic `/call-status` fallback row that won the race (`source` NULL) is
+adopted — sandbox source, customer link cleared — and any row with a foreign
+non-null source is refused (403 hangup). `/call-status` itself writes the
+sandbox-sourced row, with no customer link or touchpoint, when it sees the
+sandbox number first. The handler then renders a 3-second two-digit DTMF
+`<Gather>` (a relay-profile cell code, `relay-profiles.SANDBOX_CELLS`;
+'99' = the raw env attributes; no digits ⇒ the production profile) followed
+by the same `<Connect><ConversationRelay>` + per-call minted token that
+`/voice` renders — the WS secret never leaves the server. Payload: standard
+Twilio voice-webhook form fields (`CallSid`, `From`, `To`, `CallStatus`,
+`Digits` on the cell action). The session that answers is a DRY RUN: the ws
+upgrade proves the sandbox source from the call_log row and the relay answers
+`capture_lead` / `request_reservice` / `request_booking` without running them,
+its hangup capture floor stays down, and every call reader (Calls tab,
+unified inbox, dashboard KPIs, corpus/research/insights miners, self-audit,
+the relay's own call history) drops the source through
+`relay-protocol.whereNotSandboxCall` — so a test call, or a stranger dialling
+the test number, can neither create dispatch work nor move a metric. The
+transcript, latency summary and version stamps land on the sandbox row
+exactly as in production; that record is the bake-off. Any change to the
+number gate or the dry-run invariant is security-critical).
 `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
 appointment-card-request funnel — ALSO serves the standalone "set up

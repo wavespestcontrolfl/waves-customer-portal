@@ -208,9 +208,11 @@ async function queueOne(loss, out, scoreMod) {
           // The prior attempt is APPENDED to quality_signals.prior_outreach_attempts
           // (an append-only ledger dailySendCount also counts): a resend of this
           // reopened row stamps its own outreach_attempted_at, so every attempt
-          // inside one trailing-24h window counts against the cap — however many
+          // inside one ET calendar day counts against the cap — however many
           // times the row is recovered, lost and reopened.
           outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null, outreach_attempted_at: null,
+          // the reopened conversation re-enters the one-conversation-per-inbox guard (plan §13): its closure stamp goes
+          conversation_closed_at: null,
           quality_signals: trx.raw(
             "jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{lost_recovery}', 'true'::jsonb, true), '{lost_reason}', to_jsonb(?::text), true), '{prior_outreach_sent_at}', COALESCE(to_jsonb(outreach_sent_at), COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_sent_at', 'null'::jsonb), true), '{prior_outreach_attempts}', CASE WHEN jsonb_typeof(COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_attempts') = 'array' THEN quality_signals -> 'prior_outreach_attempts' ELSE '[]'::jsonb END || COALESCE(to_jsonb(outreach_attempted_at), '[]'::jsonb), true), '{prior_attempts}', to_jsonb(COALESCE(attempts, 0)), true)",
             [loss.lost_reason || 'unknown'],

@@ -15,6 +15,7 @@ const { UI_GATED_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/writ
 function rowsChain(rows) {
   const q = {};
   ['where', 'whereRaw', 'whereNotNull', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+  q.modify = jest.fn((fn) => { fn(q); return q; });
   // list_call_partners awaits the builder directly (keyset batching); the
   // history tool awaits .limit(). Support both: limit stays chainable and the
   // object is thenable, resolving the rows once (subsequent batches empty).
@@ -171,7 +172,9 @@ describe('get_partner_call_history', () => {
     db.mockImplementation(() => {
       const q = {};
       ['where', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
-      q.whereRaw = jest.fn((sql, bindings) => { capturedWhereRaw = { sql, bindings }; return q; });
+      q.modify = jest.fn((fn) => { fn(q); return q; });
+      // The FIRST whereRaw is the phone arm; the sandbox exclusion follows it.
+      q.whereRaw = jest.fn((sql, bindings) => { if (!capturedWhereRaw) capturedWhereRaw = { sql, bindings }; return q; });
       q.limit = jest.fn(async () => [
         {
           id: 'c1', created_at: '2026-07-08T21:38:00.000Z', direction: 'inbound',

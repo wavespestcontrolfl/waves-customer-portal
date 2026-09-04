@@ -39,6 +39,7 @@ let mockCustomerWhereSql = [];
 jest.mock('../models/db', () => {
   const db = (table) => ({
     select() { return this; },
+    modify(fn) { fn(this); return this; },
     where(arg, op, val) {
       // knex invokes where-group callbacks as fn.call(builder, builder) —
       // both `this`-style and `(qb) =>`-style callbacks must work.

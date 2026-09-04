@@ -708,12 +708,30 @@ export const CUSTOMER_COMPOSER_LINKS = [
   { key: "pay_balance", name: "Pay balance link", keywords: "pay payment invoice bill billing owe money", dynamic: true },
   { key: "estimate", name: "Latest estimate link", keywords: "estimate proposal open pending price quote", dynamic: true },
   { key: "referral", name: "Referral link", keywords: "refer friend neighbor share reward", dynamic: true },
+  { key: "autopay_setup", name: "Auto Pay setup link", keywords: "autopay auto pay card on file save payment method bank ach enroll secure", dynamic: true },
+  { key: "appointment", name: "Appointment page link", keywords: "appointment visit details confirm calendar upcoming next", dynamic: true },
+  { key: "card_request", name: "Card request link", keywords: "card request secure appointment hold card on file first visit", dynamic: true },
+  { key: "prep_guide", name: "Prep guide link", keywords: "prep prepare checklist flea bed bug cockroach roach treatment", dynamic: true },
+  { key: "service_report", name: "Latest service report link", keywords: "report service report visit summary last recap", dynamic: true },
+  { key: "contract", name: "Contract signing link", keywords: "contract sign signature agreement document esign", dynamic: true },
+  { key: "statement", name: "Statement pay link", keywords: "statement payer bill-to property manager builder net30 pay", dynamic: true },
   {
     key: "portal_login",
     name: "Portal login",
     url: "portal.wavespestcontrol.com/login",
     clause: "Manage your account and appointments here",
     keywords: "portal login account app sign in manage",
+  },
+  // Cancellation lands IN the portal (owner ruling 2026-09-03): the cancel
+  // flow lives on the My Plan tab behind login, so the link is the login
+  // page with the plan tab as its post-login destination (LoginPage's
+  // safeNextPath honors ?next=; same encoded form the project emails use).
+  {
+    key: "cancel_plan",
+    name: "Cancel plan link",
+    url: "portal.wavespestcontrol.com/login?next=%2F%3Ftab%3Dplan",
+    clause: "You can review or cancel your plan from your account here",
+    keywords: "cancel cancellation stop plan end service quit",
   },
 ].map((l) => ({ ...l, category: "customer" }));
 
@@ -820,7 +838,7 @@ function SmsTab() {
   const [libraryError, setLibraryError] = useState(null);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
-  // kind: { url, recipientKey, customerId, requestId? }. Same bearer-link
+  // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
   // strip contract as insertedResched/insertedReservice above.
   const [insertingCustomerLink, setInsertingCustomerLink] = useState(null);
   const [insertedCustomerLinks, setInsertedCustomerLinks] = useState({});
@@ -1186,6 +1204,24 @@ function SmsTab() {
       });
       return;
     }
+    // A per-row bearer credential (Auto Pay setup, contract signing, prep
+    // guide — anything the server minted with an expiresAt — plus the
+    // kinds it flags immediateOnly: card request, statement pay, appointment
+    // page, service report) is only
+    // re-checked at delivery on the immediate send; the schedule picker has
+    // no upper bound and a draft dispatches without a re-check. Immediate
+    // sends only, same rule as review links (the server re-fences).
+    {
+      const bearer = Object.entries(insertedCustomerLinks).find(([, entry]) => entry?.expiresAt || entry?.immediateOnly);
+      if (bearer && (scheduledFor || loadedMessageDraft?.id)) {
+        const name = CUSTOMER_COMPOSER_LINKS.find((l) => l.key === bearer[0])?.name || "This";
+        setSendResult({
+          ok: false,
+          text: `${name}s are re-checked at delivery — send now, or remove that link first.`,
+        });
+        return;
+      }
+    }
     // SYNCHRONOUS bearer-link check at the send boundary: the recipient-
     // change strip runs in an effect (and defers while `sending`), so a
     // recipient edit followed immediately by Send can race it and transmit
@@ -1269,6 +1305,9 @@ function SmsTab() {
             // The send that just left IS the review ask — the server marks
             // the inline review_requests row delivered (see /sms route).
             reviewRequestId: insertedCustomerLinks.review_request?.requestId || undefined,
+            // A freshly inserted contract signing link is unwritten until
+            // this send activates it — the server needs the contract it names.
+            contractId: insertedCustomerLinks.contract?.contractId || undefined,
           }),
         });
         setSendResult({ ok: true, text: "Message sent." });
@@ -1708,6 +1747,19 @@ function SmsTab() {
         : "Pay link added.",
     estimate: (d) => `Estimate link added${d.estimate?.serviceType ? ` — ${d.estimate.serviceType}` : ""}.`,
     referral: (d) => `Referral link added${d.firstName ? ` — ${d.firstName}'s personal link` : ""}.`,
+    autopay_setup: () => "Auto Pay setup link added — nothing is charged until they save a payment method.",
+    appointment: (d) => `Appointment page link added${d.appointment?.scheduledDate ? ` — visit on ${d.appointment.scheduledDate}` : ""}.`,
+    card_request: (d) =>
+      `Card request link added${d.appointment?.scheduledDate ? ` for the ${d.appointment.scheduledDate} visit` : ""} — nothing is charged until they save a card.`,
+    prep_guide: (d) =>
+      `Prep guide link added${d.prep?.label ? ` — ${d.prep.label}` : ""}${d.prep?.scheduledDate ? ` on ${d.prep.scheduledDate}` : ""}.`,
+    service_report: (d) => `Service report link added${d.report?.serviceDate ? ` — visit on ${d.report.serviceDate}` : ""}.`,
+    contract: (d) =>
+      `Contract signing link added${d.contract?.title ? ` — ${d.contract.title}` : ""}.`,
+    statement: (d) =>
+      d.statement
+        ? `Statement pay link added — ${d.statement.number}, $${Number(d.statement.total).toFixed(2)} for ${d.statement.payerName}.`
+        : "Statement pay link added.",
   };
 
   // Withdrawal is NON-destructive: the pending review row is SHARED — every
@@ -1753,8 +1805,41 @@ function SmsTab() {
         // shared pending row stays reusable (see the withdrawal note above).
         return;
       }
+      if (d.autoSecured) {
+        // A consented saved card covered the ask (Auto Pay enrolled, or the
+        // appointment secured) — a successful outcome with nothing to insert.
+        setSendResult({
+          ok: true,
+          text: kind === "card_request"
+            ? "A consented card was already on file — the appointment is secured, no link needed."
+            : "A consented card was already on file — Auto Pay is now enrolled, no link needed.",
+        });
+        return;
+      }
       const clause = String(d.line || "").trim() || `${d.url}`;
-      const prefill = buildCustomerLinkPrefill({ firstName: d.firstName, clause });
+      // A standalone line (Auto Pay: the reviewed SMS template, already
+      // greeted) goes in as-is; the generic prefill wraps the others.
+      const prefill = d.standalone ? clause : buildCustomerLinkPrefill({ firstName: d.firstName, clause });
+      // Owner-bound kinds (Auto Pay, card request, contract, prep guide,
+      // appointment page, service report) hand back the resolved owner:
+      // adopt it as the selected customer when none was picked, so the send
+      // carries customerId and the recipient's own consent policy applies
+      // (the server refuses the strict-owner kinds otherwise).
+      const linkCustomerId = d.customerId || requestCustomerId;
+      if (!requestCustomerId && d.customerId) {
+        // The phone did not change — links already minted for this
+        // recipient with no selected customer adopt the resolved owner too,
+        // or the recipient-change effects would strip them (r4 P2).
+        const adopt = (e) => (
+          e && e.recipientKey === requestRecipientKey && e.customerId == null
+            ? { ...e, customerId: d.customerId }
+            : e
+        );
+        setSelectedCustomerId(d.customerId);
+        setInsertedResched(adopt);
+        setInsertedReservice(adopt);
+        setInsertedCustomerLinks((m) => Object.fromEntries(Object.entries(m).map(([k, e]) => [k, adopt(e)])));
+      }
       // Replace-don't-stack per kind (same rule as the reschedule insert).
       // A replaced review link's row is NOT canceled: reuse means the fresh
       // insert hands back the same shared row anyway.
@@ -1771,8 +1856,13 @@ function SmsTab() {
         [kind]: {
           url: d.url,
           recipientKey: requestRecipientKey,
-          customerId: requestCustomerId,
+          customerId: linkCustomerId,
           requestId: d.requestId || null,
+          contractId: d.contract?.id || null,
+          // Expiring / immediate-only bearer links refuse scheduled and
+          // draft sends (see the send boundary) — the server says which.
+          expiresAt: d.expiresAt || null,
+          immediateOnly: !!d.immediateOnly,
         },
       }));
       setSendResult({ ok: true, text: (CUSTOMER_LINK_NOTES[kind] || (() => "Link added."))(d) });

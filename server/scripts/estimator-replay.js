@@ -44,6 +44,7 @@ const { maybeDraftEstimateForCall } = require('../services/estimator-engine');
 
 async function listRecent(limit) {
   const rows = await db('call_log')
+    .modify((q) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(q)) // bake-off calls are not data
     .select('id', 'created_at', 'lead_quality', 'disposition')
     .where('created_at', '>', db.raw("now() - interval '7 days'"))
     .where(function quoteFlavored() {

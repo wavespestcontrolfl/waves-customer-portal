@@ -65,7 +65,19 @@ const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
 const NotificationService = require('./notification-service');
 const MODELS = require('../config/models');
-const { callAnthropic } = require('./llm/call');
+const { dispatchWithFallback } = require('./llm/call');
+
+// Structured-output contract for the decode (llm/call.js jsonSchema). The
+// verbatim-quote anchor and the syntax/MX/suppression revalidation still run.
+const DECODE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['candidate_email', 'supporting_quote'],
+  properties: {
+    candidate_email: { type: ['string', 'null'], description: 'The reconstructed address, or null when the excerpts do not determine one' },
+    supporting_quote: { type: 'string', description: 'Copied VERBATIM from the excerpts' },
+  },
+};
 const { redactEmail, correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 
 const EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
@@ -210,19 +222,20 @@ function extractSpelledContexts(transcription) {
  * auto-apply. Decode failures degrade to "no tier-C candidate".
  */
 async function llmDecodeCandidate({ contexts, bouncedEmail, transcription }) {
-  if (!contexts.length || !process.env.ANTHROPIC_API_KEY) return null;
-  const res = await callAnthropic({
-    model: MODELS.FAST,
+  if (!contexts.length) return null;
+  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    laneId: 'bounce_rescue',
     system: [
       'You reconstruct email addresses that a phone-call transcriber mis-heard.',
       'The stored address is KNOWN WRONG (it hard-bounced). Use only the spelled',
       'letters, phonetic hints ("w like whiskey"), and stated abbreviations in the',
-      'transcript excerpts. Reply as JSON: {"candidate_email": string|null,',
-      '"supporting_quote": string} where supporting_quote is copied VERBATIM from',
-      'the excerpts. If the excerpts do not determine a correction, candidate_email is null.',
+      'transcript excerpts. Report the reconstructed candidate_email with a',
+      'supporting_quote copied VERBATIM from the excerpts. If the excerpts do not',
+      'determine a correction, candidate_email is null.',
     ].join(' '),
     text: `Known-wrong address: ${bouncedEmail}\n\nTranscript excerpts:\n${contexts.join('\n---\n')}`,
     jsonMode: true,
+    jsonSchema: DECODE_SCHEMA,
     maxTokens: 1024,
   }).catch((err) => {
     logger.warn(`[email-bounce-rescue] LLM decode failed: ${err.message}`);
@@ -317,6 +330,7 @@ async function callSightings(phone) {
   if (!phone) return { sightings: [], calls: [] };
   const calls = await db('call_log')
     .where((q) => q.where('from_phone', phone).orWhere('to_phone', phone))
+    .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a test call's spoken email is not evidence
     .whereNotNull('transcription')
     .orderBy('created_at')
     .select('id', 'created_at', 'transcription', 'ai_extraction')

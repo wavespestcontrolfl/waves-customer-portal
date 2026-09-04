@@ -724,6 +724,7 @@ Return ONLY the review body. No quotes, no preamble, no sign-off.`;
     let reviewText = '';
     try {
       const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+        laneId: 'review_gate_text',
         text: prompt,
         jsonMode: false,
         maxTokens: 256,

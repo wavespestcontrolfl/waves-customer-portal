@@ -18,7 +18,7 @@ function mockDb({ calls, onInsert = () => {} }) {
   db.raw = (sql) => sql;
   db.mockImplementation((table) => {
     const b = {
-      where() { return b; }, whereIn() { return b; }, whereRaw() { return b; },
+      where() { return b; }, whereIn() { return b; }, whereRaw() { return b; }, modify(fn) { fn(b); return b; },
       orderBy() { return b; }, limit() { return b; },
       select: async () => (table === 'call_log' ? calls : []),
       insert: (row) => { onInsert(table, row); return { onConflict: () => ({ merge: async () => {}, catch: () => {} }) }; },

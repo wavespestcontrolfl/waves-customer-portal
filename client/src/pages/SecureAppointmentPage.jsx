@@ -601,7 +601,7 @@ export default function SecureAppointmentPage() {
         </h1>
         <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
           {standalone
-            ? `Save a ${bankOffered ? 'card or bank account' : 'card'} and each visit is paid automatically after it’s completed. Nothing is charged today.`
+            ? `Save a ${bankOffered ? 'card or bank account' : 'card'} and each completed service is paid automatically. Nothing is charged today.`
             : planRecurring
               ? 'Your appointment is booked. Pick a plan below, add a card, and you’re all set.'
               : 'Add a card on file to secure your visit. Nothing is charged today — your card is only charged after your service is completed.'}

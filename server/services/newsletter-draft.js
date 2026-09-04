@@ -1765,6 +1765,7 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   // (captions, scoop labels, checklists) and a 10-event lineup at 4096
   // risked mid-JSON truncation.
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    laneId: 'newsletter',
     maxTokens: 8192,
     jsonMode: true,
     system: systemPrompt,

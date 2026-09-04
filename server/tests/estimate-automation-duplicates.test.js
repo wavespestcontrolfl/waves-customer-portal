@@ -5,6 +5,7 @@ const {
   automatedDuplicateBlock,
   findDuplicateEstimateByPhone,
   listOpenEstimatesByPhone,
+  listOpenEstimatesByCustomerId,
   phoneLookupValues,
   acquireAutomatedEstimateLocks,
   automatedEstimateLockKeys,
@@ -66,6 +67,29 @@ describe('estimate automation duplicate guard', () => {
     // Archived rows keep their status but are closed courtships — they must
     // not block a genuinely new automated estimate.
     expect(query.whereNull).toHaveBeenCalledWith('archived_at');
+  });
+
+  test('excludeRepriceAttempt drops the rows the same clarify reply held from the phone and identity probes', async () => {
+    const calls = [];
+    const query = {
+      select: jest.fn(function () { return this; }),
+      where: jest.fn(function () { return this; }),
+      whereRaw: jest.fn(function (sql, params) { calls.push([sql, params]); return this; }),
+      whereIn: jest.fn(function () { return this; }),
+      whereNull: jest.fn(function () { return this; }),
+      whereNot: jest.fn(function () { return this; }),
+      orderBy: jest.fn(function () { return this; }),
+      then: function (resolve, reject) { return Promise.resolve([]).then(resolve, reject); },
+    };
+    const database = jest.fn(() => query);
+    await listOpenEstimatesByPhone('941.555.0101', { database, excludeRepriceAttempt: 'att-1' });
+    await listOpenEstimatesByCustomerId('cust-1', { database, excludeRepriceAttempt: 'att-1' });
+    const attemptClauses = calls.filter(([sql, params]) => /reprice_attempt/.test(sql) && params[0] === 'att-1');
+    expect(attemptClauses).toHaveLength(2);
+    // Without the option the probes stay as they were.
+    calls.length = 0;
+    await listOpenEstimatesByPhone('941.555.0101', { database });
+    expect(calls.some(([sql]) => /reprice_attempt/.test(sql))).toBe(false);
   });
 
   test('list returns empty (and never queries) without a lookup key', async () => {

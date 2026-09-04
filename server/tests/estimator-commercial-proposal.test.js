@@ -20,6 +20,8 @@ jest.mock('../models/db', () => {
       whereNull() { return builder; },
       orWhere() { return builder; },
       whereExists() { return builder; },
+      // The held-row exclusion is applied through knex's modify().
+      modify(fn) { fn(builder); return builder; },
       whereRaw(...args) { mockState.whereRaws.push({ table, args }); return builder; },
       orderBy() { return builder; },
       forUpdate() { return builder; },

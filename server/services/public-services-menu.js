@@ -65,22 +65,39 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
   tree_shrub_6week: { treeShrub: { tier: 'enhanced' } },
   rodent_bait_quarterly: { rodentBait: {} },
   rodent_trapping: { rodentTrapping: {} },
-  // Catalog flea_tick is the SINGLE-visit treatment (engine key
-  // flea_knockdown_single); the engine's default flea offer is the two-visit
-  // package, so the offer is pinned here (pre-push codex P0).
-  flea_tick: { flea: { offerKey: 'flea_knockdown_single' } },
+  // Catalog flea_tick prices the two-visit Flea Elimination Package (engine
+  // key flea_package) — the engine's only flea offer since the owner ruling
+  // 2026-09-03 ("flea should be two visits"; migration 20260903000060).
+  flea_tick: { flea: {} },
   // Station RENTAL, not purchase (owner ruling 2026-08-29): the website shows
   // the monthly rental number; no $600+ installation charge. Instant only
   // while GATE_TERMITE_STATION_RENTAL is on (see instantForRow) — with the
   // gate off the engine silently prices purchase, which is the wrong number.
   termite_bait: { termite: { ownership: 'rent' } },
   rodent_inspection: { rodentInspection: {} },
+  // Service-menu phase 2 (2026-09-03): one-time products the engine already
+  // prices from the lookup alone. Mosquito prices by treatable lot area;
+  // station / dunk add-ons are staff-scoped, never site-selected. Lawn pest
+  // knockdown is the engine's lawnPestControl line (turf-priced, so a
+  // lot-only lookup routes it to review like the lawn programs); the
+  // site-collected grass track rides along (mergeKeyedRequestOptions).
+  mosquito_one_time: { oneTimeMosquito: {} },
+  lawn_pest_knockdown: { lawnPestControl: {} },
+  // Owner ruling 2026-09-03: cockroach_control is the two-treatment package
+  // priced as ONE standalone knockdown (engine pestInitialRoach on the
+  // regular_standalone footprint scale); the included second visit is booked
+  // at completion at no charge (typed-followup-obligation
+  // TWO_TREATMENT_PACKAGE_KEYS). Species / severity / price override are
+  // staff-scoped — the site prices the native (regular) scale. Instant
+  // price only: the self-book funnel cannot carry the catalog identity the
+  // second visit needs (public-quote NO_SELF_BOOK_LINE_SERVICES).
+  cockroach_control: { pestInitialRoach: { roachType: 'regular' } },
 });
 // Selectable but NOT instant (quote-on-request), because the public engine
 // needs inputs the website does not collect or returns a manual line:
 //   palm_injection (palm count) · bed_bug_treatment (method) ·
 //   dethatching / termite_trenching / termite_slab_pretreat (quote-required
-//   lines) · pest_general_semiannual · lawn_care_quarterly · mosquito_one_time ·
+//   lines) · lawn_care_quarterly ·
 //   lawn_care_one_time (manually scoped: fert / weed / insect — the keyed
 //   request carries no treatment type) · rodent_sanitation_light/standard/heavy
 //   (one engine key covers three rows, so acceptance could stamp no service_id).
@@ -89,6 +106,9 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
 //   depth options move the price ~4× and the site does not collect them) ·
 //   rodent_exclusion_only (per-entry-point pricing; with no counts the
 //   engine returns the floor) — all pre-push / GH codex findings.
+//   Office-only rows (cadence variants, termite riders, the rodent job
+//   decomposition, species tiers) are no longer selectable at all — see
+//   migration 20260903000020 (owner rulings 2026-09-03).
 // The contract test runs every instant key through the engine and requires
 // a positive, non-manual line.
 const PUBLIC_INSTANT_QUOTE_KEYS = new Set(Object.keys(PUBLIC_QUOTE_REQUESTS));
@@ -126,30 +146,74 @@ function expectedCadenceForRequest(request) {
 // True when the catalog row (as it is NOW) still describes the product the
 // mapped request prices: recurring rows must match visits/year AND
 // frequency; one-time rows must not have become recurring.
+// The standalone cockroach request prices ONE knockdown and presents the
+// two-treatment package typed-followup-obligation schedules (visit 2 at
+// completion, then stops). Two independently admin-editable authorities
+// describe the package to the customer — the catalog row's visits_per_year
+// and the live pest_base.initial_roach.display.regular_standalone.treatments
+// the estimate line renders ("Includes N treatment visits.") — and BOTH must
+// still say two, or the instant quote advertises a package the obligation
+// does not deliver (pre-push codex P1; codex #3842 r1 P1).
+const COCKROACH_PACKAGE_VISITS = 2;
+// The count the customer is promised is FROZEN into the engine input at
+// quote time (public-quote); this gate only decides whether the package is
+// advertised instant. Its second authority is the persisted
+// pricing_config row itself — read directly, never this process's engine
+// constants (which only the admin save's own worker resyncs, and which a
+// full resync per public request would be too expensive to refresh —
+// codex #3842 r3–r5). Absent / unreadable ⇒ unverified ⇒ not instant.
+async function cockroachPackageCountVerified(conn = db) {
+  try {
+    if (!(await conn.schema.hasTable('pricing_config'))) return false;
+    const row = await conn('pricing_config').where({ config_key: 'pest_base' }).first('data');
+    if (!row) return false;
+    const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+    return Number(data?.initial_roach?.display?.regular_standalone?.treatments) === COCKROACH_PACKAGE_VISITS;
+  } catch {
+    return false;
+  }
+}
 function requestMatchesCatalogRow(serviceKey, row) {
   const request = PUBLIC_QUOTE_REQUESTS[serviceKey];
   if (!request || !row) return false;
+  if (request.pestInitialRoach) {
+    return row.billing_type !== 'recurring' && Number(row.visits_per_year) === COCKROACH_PACKAGE_VISITS;
+  }
   const expected = expectedCadenceForRequest(request);
   if (expected == null) return row.billing_type !== 'recurring';
   return Number(row.visits_per_year) === expected[0] && String(row.frequency || '') === expected[1];
 }
 
 // Site-supplied options a keyed request may carry — ONLY those the engine
-// needs and the website actually collects (grass type for lawn). Everything
-// else is fixed by the canonical request.
+// needs and the website actually collects (grass type for the lawn family:
+// the recurring program and the one-time pest knockdown are both priced on
+// the track's bracket table). Everything else is fixed by the canonical
+// request.
 const LAWN_TRACKS = new Set(['st_augustine', 'bahia', 'bermuda', 'zoysia']);
+const FLEA_COMPLEXITIES = new Set(['light', 'moderate', 'heavy']);
 function mergeKeyedRequestOptions(request, bodyServices) {
   if (!request) return null;
   const out = JSON.parse(JSON.stringify(request));
   const track = String(bodyServices?.lawn?.track || '').toLowerCase();
-  if (out.lawn && LAWN_TRACKS.has(track)) out.lawn.track = track;
+  if (LAWN_TRACKS.has(track)) {
+    if (out.lawn) out.lawn.track = track;
+    if (out.lawnPestControl) out.lawnPestControl.track = track;
+  }
+  // Flea infestation complexity (light / moderate / heavy) when the site
+  // collected it; absent, the package prices at the base (light) rate.
+  const fleaComplexity = String(bodyServices?.flea?.fleaComplexity || '').toLowerCase();
+  if (out.flea && FLEA_COMPLEXITIES.has(fleaComplexity)) out.flea.fleaComplexity = fleaComplexity;
   return out;
 }
 function termiteRentalGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
 }
-function instantForRow(row) {
+// `packageCountVerified` = cockroachPackageCountVerified() as read by the
+// caller for this request/menu build; false (or omitted) keeps the cockroach
+// package quote-on-request (fail closed) — every other row ignores it.
+function instantForRow(row, { packageCountVerified = false } = {}) {
   if (!PUBLIC_INSTANT_QUOTE_KEYS.has(row.service_key) || !requestMatchesCatalogRow(row.service_key, row)) return false;
+  if (PUBLIC_QUOTE_REQUESTS[row.service_key]?.pestInitialRoach && packageCountVerified !== true) return false;
   if (row.service_key === 'termite_bait' && !termiteRentalGateOn()) return false;
   return true;
 }
@@ -159,7 +223,7 @@ function modeFor(row) {
   return row.billing_type === 'recurring' ? 'recurring' : 'one_time';
 }
 
-function menuItem(row) {
+function menuItem(row, opts = {}) {
   const mode = modeFor(row);
   const item = {
     service_key: row.service_key,
@@ -167,7 +231,7 @@ function menuItem(row) {
     family: FAMILY_LABELS[row.category] || row.category,
     family_key: row.category,
     mode,
-    public_instant_quote: instantForRow(row),
+    public_instant_quote: instantForRow(row, opts),
   };
   if (mode === 'recurring') {
     item.cadence = {
@@ -185,23 +249,51 @@ async function loadPublicServicesMenu(conn = db) {
     .where({ is_active: true, is_archived: false, public_quote_selectable: true })
     .orderBy([{ column: 'category' }, { column: 'sort_order' }, { column: 'name' }])
     .select('service_key', 'name', 'category', 'billing_type', 'frequency', 'visits_per_year');
-  return rows.map(menuItem);
+  // One targeted read of the persisted count per menu build (only when the
+  // catalog carries the package row).
+  const packageCountVerified = rows.some((r) => PUBLIC_QUOTE_REQUESTS[r.service_key]?.pestInitialRoach)
+    ? await cockroachPackageCountVerified(conn)
+    : false;
+  return rows.map((row) => menuItem(row, { packageCountVerified }));
 }
 
 // The catalog row a lead-supplied key names — ONLY when it is a product a
 // NEW customer may choose; null otherwise. Callers derive the lead's display
 // label from `name` so key and label can never disagree (pre-push codex P1:
 // serviceKey and serviceInterest are independently attacker-controlled).
+// Keys the menu advertised until migration 20260903000020 hid them. A visitor
+// on a cached quote page, or on the astro fallback snapshot until it is
+// refreshed, can still post one; it must keep resolving (AGENTS.md: astro
+// form posts are an external contract, breaking them is P0) — as a
+// quote-on-request lead, never instant. Kept in step with the migration's
+// HIDE_KEYS by public-quote-menu-tier-c-hide.test.js. Drop entries once the
+// snapshot has shipped without them for a release.
+const FORMERLY_PUBLIC_KEYS = new Set([
+  'pest_general_semiannual', 'palm_injection_semiannual', 'lawn_care_quarterly',
+  'german_roach_initial', 'tick_control', 'mud_dauber_removal',
+  'termite_bond_10yr', 'termite_bond_5yr', 'termite_bond_1yr', 'termite_monitoring', 'foam_recurring',
+  'foam_drill', 'termite_pretreatment', 'termite_spot_treatment',
+  'rodent_exclusion_only', 'rodent_trapping_exclusion', 'rodent_trapping_sanitation',
+  'rodent_trapping_exclusion_sanitation', 'rodent_wire_mesh', 'rodent_bird_box', 'rodent_general_one_time',
+  'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
+]);
+
 async function publicSelectableService(serviceKey, conn = db) {
   if (!serviceKey) return null;
   try {
     if (!(await conn.schema.hasColumn('services', 'public_quote_selectable'))) return null;
     const row = await conn('services')
-      .where({ service_key: serviceKey, is_active: true, is_archived: false, public_quote_selectable: true })
-      .first('id', 'service_key', 'name', 'billing_type', 'visits_per_year', 'frequency', 'booking_enabled');
+      .where({ service_key: serviceKey, is_active: true, is_archived: false })
+      .first('id', 'service_key', 'name', 'billing_type', 'visits_per_year', 'frequency', 'booking_enabled', 'public_quote_selectable');
+    if (!row) return null;
+    const selectable = row.public_quote_selectable === true;
+    if (!selectable && !FORMERLY_PUBLIC_KEYS.has(serviceKey)) return null;
     // booking_enabled rides along so /calculate never mints a self-book slot
     // for a product the Service Library has turned off (GH codex #3585).
-    return row ? { service_key: row.service_key, name: row.name, instant: instantForRow(row), booking_enabled: row.booking_enabled !== false } : null;
+    // The cockroach package's persisted count is read HERE, so the route's
+    // pre-engine re-call of this function re-verifies both authorities.
+    const packageCountVerified = PUBLIC_QUOTE_REQUESTS[serviceKey]?.pestInitialRoach ? await cockroachPackageCountVerified(conn) : false;
+    return { service_key: row.service_key, name: row.name, instant: selectable && instantForRow(row, { packageCountVerified }), booking_enabled: row.booking_enabled !== false };
   } catch {
     // Fail closed to a prose-only lead: a keyed lead must never be created
     // from an unverified key, and a catalog read failure must not fail intake.
@@ -213,4 +305,5 @@ async function isPublicSelectableServiceKey(serviceKey, conn = db) {
   return !!(await publicSelectableService(serviceKey, conn));
 }
 
-module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS };
+module.exports = {
+  COCKROACH_PACKAGE_VISITS, cockroachPackageCountVerified, LAWN_TRACKS, loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS };

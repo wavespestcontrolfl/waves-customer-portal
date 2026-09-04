@@ -16,6 +16,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { describeInventoryConversion, unitDefinition } = require('../inventory-units');
+const { findLiveRestockRequest } = require('../procurement/live-restock-request');
 
 const PROCUREMENT_TOOLS = [
   {
@@ -1224,10 +1225,19 @@ async function createRestockRequest(input) {
   // fallback) came from an unlocked read — re-derive them under the product
   // row lock and, when a card approved this request, refuse if they no
   // longer match what the operator saw (GH r12 P1, same contract as the
-  // receive pin).
+  // receive pin). The SHARED any-source live-request check runs under the
+  // same lock: a request that committed meanwhile (the sweep's, or staff's)
+  // is reported, never twinned (Codex r9 P1).
   return db.transaction(async (trx) => {
     const fresh = await trx('products_catalog').where('id', product.id).forUpdate().first();
     if (!fresh) return { error: 'Product not found' };
+    const live = await findLiveRestockRequest(trx, fresh.id);
+    if (live) {
+      return {
+        error: `A restock request for ${fresh.name} is already ${live.status} — nothing was requested. Update that request instead.`,
+        existing_request: { id: live.id, status: live.status, source: live.source, requested_quantity: toNumber(live.requested_quantity), unit: live.unit },
+      };
+    }
     const lockedUnit = input.unit || fresh.inventory_unit;
     if (!lockedUnit) return { error: 'unit is required — this product has no inventory unit set' };
     if (!unitDefinition(lockedUnit)) return { error: `Unsupported unit "${lockedUnit}". Supported: fl_oz, gal, qt, pt, ml, l, oz, lb, g, kg` };

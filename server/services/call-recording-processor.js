@@ -266,14 +266,11 @@ Street names in addresses are real words or proper names — prefer a plausible 
 When a caller spells something letter-by-letter or with phonetic markers like "B as in boy", write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
 // Literal keyword hints for the gpt-transcribe family (the gpt-4o-transcribe
-// generation rejects the parameter, hence the model guard below). These are
-// the proper nouns prod transcripts have actually misheard — service-area
-// place names ("Englewood" → "Inglewood") and product/brand terms.
-const DEFAULT_TRANSCRIPTION_KEYWORDS = [
-  'Waves Pest Control', 'WaveGuard', 'Sentricon', 'Termidor', 'WDO',
-  'Bradenton', 'Sarasota', 'Venice', 'Parrish', 'Palmetto', 'Ellenton',
-  'Englewood', 'North Port', 'Port Charlotte', 'Lakewood Ranch', 'Myakka',
-];
+// generation rejects the parameter, hence the model guard below). The list
+// itself lives in config/transcription-vocabulary — shared with the live
+// ConversationRelay `hints` attribute so both recognizers learn the same
+// proper nouns.
+const DEFAULT_TRANSCRIPTION_KEYWORDS = require('../config/transcription-vocabulary').STT_HINTS;
 const ENV_TRANSCRIPTION_KEYWORDS = String(process.env.OPENAI_TRANSCRIPTION_KEYWORDS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
@@ -1057,7 +1054,9 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db,
     // Both directions: an office CALLBACK stores the contact's number in
     // to_phone (Waves line in from_phone) — that conversation is prior
     // context for the contact's next inbound call too.
-    const q = conn('call_log')
+    // A bake-off call is not prior context for a real caller — modifier
+    // called on the chain (the conn may be a where-family-only double).
+    const q = require('./voice-agent/relay-protocol').whereNotSandboxCall(conn('call_log'))
       .whereRaw(
         "(right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ? OR right(regexp_replace(coalesce(to_phone,''),'\\D','','g'),10) = ?)",
         [digits, digits],
@@ -3348,6 +3347,7 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
       // rejection will reconcile it.
       const eq = (a, b) => (a ?? null) === (b ?? null);
       const successors = (await trx('call_log')
+        .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
         .whereRaw("metadata->>'lead_id' = ?", [stampedLeadId])
         .whereNot('id', call.id)
         .select('id', 'metadata'))
@@ -6079,6 +6079,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   // them), so the primary's repeat-stability rests on the reasoning model's
   // default decoding.
   const res = await dispatchWithFallback(CALL_EXTRACTION_ROUTE, {
+    laneId: 'call_extraction',
     text: prompt,
     jsonMode: true,
     maxTokens: 16384,
@@ -10783,6 +10784,7 @@ const CallRecordingProcessor = {
                 // re-parenting). Allocation is race-free because every
                 // stamper holds this lead's row lock.
                 const seqRow = await trx('call_log')
+                  .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
                   .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
                   .select(db.raw("COALESCE(MAX((metadata->>'lead_stamp_seq')::bigint), 0) + 1 AS next_seq"))
                   .first();
@@ -12343,6 +12345,9 @@ const CallRecordingProcessor = {
           // the row (and its reschedule_token) must exist before a real
           // appointment-page link can be minted for the v2 body (codex r4).
           let alreadySent = false;
+          // Open estimate the confirmation may link (resolved below, minted
+          // at send time inside smsAttempt).
+          let estimateForConfirmationLink = null;
 
           // Create the scheduled_services record FIRST. Previously we sent
           // the SMS first and inserted the schedule row afterward — if the
@@ -13994,6 +13999,63 @@ const CallRecordingProcessor = {
                 entity_id: customer.id,
               });
 
+              // Open-estimate accept link (GATE_CALL_CONFIRMATION_ESTIMATE_LINK,
+              // env re-read at call time = live kill): a booking taken
+              // against a sent-but-unaccepted estimate lands unpriced on
+              // purpose (the per-visit price is fixed by the frequency the
+              // customer picks at accept), so the visit would otherwise
+              // complete unbilled or be accepted on the doorstep (owner case
+              // 2026-09-03). Carrying the link lets the customer accept,
+              // pick the plan, and add the card before the visit.
+              // RESOLVE ONLY here — nothing is minted until the SMS leg is
+              // actually about to send (smsAttempt below), so an email-only
+              // preference or a withheld link never leaves a permanent
+              // bearer short_codes row behind (GH codex #3814 r1 P2).
+              // Three gates, all fail closed:
+              //  1. Recipient IS the account's saved phone (customers.phone,
+              //     compared last-10) — never an implied-consent redirect to
+              //     the inbound ANI, and never the validation fallback that
+              //     fills a phone-less account's slot from the extracted or
+              //     caller number (pre-push codex P0): a spouse, tenant or
+              //     service contact who called must not receive the account
+              //     holder's bearer estimate link (r1 P1).
+              //  2. The composer's resolver picks the newest OPEN estimate
+              //     (viewability + pricing-authority gates).
+              //  3. Tied to THIS booking (pre-push P1): accepting that
+              //     estimate must ADOPT the row just booked — the accept
+              //     contract's own resolver pinned to this visit id under
+              //     the estimate page's contract modes. A cross-family or
+              //     other-property estimate would send the customer to the
+              //     slot picker and mint the very duplicate this lane exists
+              //     to prevent, so it gets no link.
+              const recipientIsSavedCustomerPhone = smsLast10(customer?.phone).length === 10
+                && smsLast10(customer.phone) === smsLast10(smsRecipient);
+              const estimateLinkGateOn = require('../config/feature-gates').gateEnvValue('GATE_CALL_CONFIRMATION_ESTIMATE_LINK');
+              // EXPLICIT prerequisite (GH codex #3814 r2 P1): a call-booked
+              // visit carries no source_estimate_id, so the accept contract
+              // can reach it only through the customer-wide adoption
+              // fallback behind GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE.
+              // With that gate off the accept page could not honor the
+              // link, so the link gate is inert — say so once per booking
+              // rather than withhold silently.
+              const estimateLinkPrereqOn = !estimateLinkGateOn
+                || require('../config/feature-gates').isEnabled('estimateExistingApptCustomerWide');
+              if (estimateLinkGateOn && !estimateLinkPrereqOn) {
+                logger.warn(`[call-proc] GATE_CALL_CONFIRMATION_ESTIMATE_LINK is on but GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE is off — the accept page could not adopt visit ${scheduledServiceId}, so no estimate link is sent`);
+              }
+              if (smsBody && !redirectImpliedToAni && recipientIsSavedCustomerPhone
+                && estimateLinkGateOn && estimateLinkPrereqOn) {
+                try {
+                  const { resolveConfirmationEstimate } = require('./composer-customer-links');
+                  estimateForConfirmationLink = await resolveConfirmationEstimate({ customerId, scheduledServiceId });
+                  if (!estimateForConfirmationLink) {
+                    logger.info(`[call-proc] open-estimate link withheld for visit ${scheduledServiceId}: no open estimate, or the accept would not adopt this booking`);
+                  }
+                } catch (estErr) {
+                  logger.warn(`[call-proc] open-estimate link skipped for customer ${customerId}: ${estErr.message}`);
+                }
+              }
+
               // Content-level dedup: even if the concurrent-run guard
               // misses (e.g., admin reprocess inside the same minute),
               // don't fire an identical confirmation the customer just got.
@@ -14003,7 +14065,10 @@ const CallRecordingProcessor = {
               try {
                 const existing = await db('sms_log')
                   .where({ to_phone: smsRecipient, message_type: 'confirmation' })
-                  .where('message_body', smsBody)
+                  // PREFIX match: the sent body may carry the open-estimate
+                  // line appended in smsAttempt (minted only at send time),
+                  // and a reprocess must still find that send.
+                  .whereRaw('left(message_body, ?) = ?', [smsBody.length, smsBody])
                   .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
                   .first();
                 if (existing) alreadySent = true;
@@ -14091,7 +14156,7 @@ const CallRecordingProcessor = {
                     }
                     : await sendCustomerMessage({
                       to: smsRecipient,
-                      body: smsBody,
+                      body: await require('./composer-customer-links').appendEstimateAcceptLine(smsBody, estimateForConfirmationLink, { scheduledServiceId }),
                       channel: 'sms',
                       audience: 'customer',
                       purpose: 'appointment_confirmation',
@@ -14127,7 +14192,15 @@ const CallRecordingProcessor = {
                           .where({ scheduled_service_id: scheduledServiceId })
                           // never re-open a sibling-suppressed row (codex)
                           .where({ cancelled: false, suppressed_by_sibling: false })
-                          .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                          // The held text owed an estimate accept line: stamp
+                          // the estimate so the sweep's canonical renderer can
+                          // re-verify and append it (GH codex #3814 r2 P2).
+                          .update({
+                            confirmation_sent: false,
+                            confirmation_sent_at: null,
+                            confirmation_estimate_id: estimateForConfirmationLink?.id || null,
+                            updated_at: new Date(),
+                          });
                         if (rearmed > 0) {
                           // The sweep's canonical confirmation fans out to
                           // EVERY appointment contact — the secondary loop
@@ -15734,6 +15807,7 @@ const CallRecordingProcessor = {
     // with duration_seconds fallback, since the call-status webhook may not have populated
     // the latter yet — earlier filter on duration_seconds alone excluded fresh recordings.
     const pending = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
       .where(function () {
         this.where(function () {
           this.where('recording_url', '!=', '').whereNotNull('recording_url');
@@ -15962,6 +16036,7 @@ const CallRecordingProcessor = {
     const { MIN_DURATION_SECONDS: ALERT_MIN_SECONDS, GRACE_MINUTES: ALERT_GRACE_MINUTES, EXEMPT_ANSWERED_BY: ALERT_EXEMPT } = require('./unrecorded-call-watchdog');
     const exemptList = [...ALERT_EXEMPT].map((v) => `'${String(v).replace(/'/g, "''")}'`).join(', ');
     let candidates = db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
       .select('twilio_call_sid', 'direction', 'duration_seconds', 'recording_sid', 'recording_url',
         'answered_by', 'call_outcome', 'from_phone', 'to_phone', 'customer_id', 'created_at')
       .where({ direction: 'inbound', status: 'completed' })
@@ -16005,6 +16080,7 @@ const CallRecordingProcessor = {
     let quarantineRetries = [];
     try {
       quarantineRetries = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
         .select('twilio_call_sid')
         .whereNotNull('twilio_call_sid')
         .whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
@@ -16082,7 +16158,9 @@ const CallRecordingProcessor = {
    * Get processing stats.
    */
   async getStats() {
-    const [totals] = await db('call_log').select(
+    const [totals] = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
+      .select(
       db.raw("COUNT(*) FILTER (WHERE recording_url IS NOT NULL) as total_recordings"),
       db.raw("COUNT(*) FILTER (WHERE processing_status = 'processed') as processed"),
       db.raw("COUNT(*) FILTER (WHERE processing_status IS NULL OR processing_status = 'pending') as pending"),
@@ -16126,6 +16204,7 @@ const CallRecordingProcessor = {
 
     // Source analytics: calls grouped by receiving number
     const sourceBreakdown = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
       .select('to_phone')
       .count('* as call_count')
       .whereNotNull('recording_url')

@@ -16,6 +16,8 @@
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
+const crypto = require('crypto');
+const { performance } = require('perf_hooks');
 const MODELS = require('../../config/models');
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -25,6 +27,24 @@ const { createLeadFromExtraction } = require('../lead-from-extraction');
 const { syncVoiceMessageForCall } = require('../conversations');
 const { activeTools } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
+const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
+
+/**
+ * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
+ * context (Sandy PR 1B). Read at call time so a flip reaches the next
+ * barge-in without a redeploy; `feature-gates.voiceRelayInterruptContext` is the status listing.
+ * Off ⇒ a barge-in only aborts the in-flight generation and the model's
+ * history is byte-identical to today: it still believes the caller heard the
+ * whole reply and tends to repeat the unheard clause verbatim.
+ */
+function isInterruptContextEnabled() {
+  // Same parser as the status listing, so the two can never disagree.
+  return require('../../config/feature-gates').gateEnvValue('GATE_VOICE_RELAY_INTERRUPT_CONTEXT');
+}
+
+// Monotonic clock for every duration (a wall clock can step; this cannot).
+const now = () => performance.now();
+const sha256 = (text) => crypto.createHash('sha256').update(String(text)).digest('hex');
 
 /** 'HH:MM[:SS]' on an engine slot → minutes past midnight (the slot-ref key). */
 function slotStartMinutes(slot) {
@@ -35,6 +55,17 @@ function slotStartMinutes(slot) {
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 // output_config.effort — GA, no beta header. See the call site for why `low`.
 const VOICE_EFFORT = 'low';
+// How agent text reaches Twilio today: one whole utterance per frame. Stamped
+// into every call's version record so a renderer change is attributable.
+const RENDERER_VERSION = 'block-v1';
+// A barge-in with no caller transcript inside this window is recorded as
+// `interrupt_without_followup_transcript` — a cough, a backchannel, or a
+// genuine interruption STT missed. Named for what it measures, not for a
+// verdict (false-interruption rate is a human/audio review, not this count).
+const INTERRUPT_FOLLOWUP_MS = 1500;
+// A caller-stop event older than this when the prompt lands belongs to some
+// earlier exchange, not to this turn's endpointing.
+const CALLER_STOP_STALE_MS = 15000;
 const MAX_TOOL_ROUNDS = 6; // safety cap on tool_use loops per caller turn
 const MAX_CALL_TURNS = 40; // safety cap on total caller turns for one call
 const STREAM_TIMEOUT_MS = 20000; // bound a single model stream so it can't hang
@@ -411,8 +442,16 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, from, to, language, send, endSession }) {
+  constructor({ callSid, sessionKey, sessionGeneration, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false }) {
     this.callSid = callSid || null;
+    // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
+    // row's source (never the setup frame): the transcript, latency record and
+    // version stamps land on the sandbox row exactly as in production — that
+    // record IS the bake-off — but every tool that would write outside that
+    // row (lead, re-service ticket, booking) is answered without running, and
+    // the hangup capture floor stays down. A profile test or a stranger
+    // dialling the test number can never create dispatch work.
+    this.sandbox = sandbox === true;
     // The upgrade token's nonce — the per-session key the CallSid claim is
     // owned by, so a fresh-token reconnect can reclaim the live call — and
     // its expiry, the monotonic generation a takeover must beat.
@@ -435,6 +474,32 @@ class RelayConversation {
     this._chain = Promise.resolve(); // serializes overlapping prompts
     this._userTurns = [];
     this._startedAt = Date.now(); // for the AI-handled leg duration on reconcile
+
+    // ── Per-turn telemetry (summarized into transcription_metadata.latency at
+    // close by relay-transcript.summarizeTurnStats). One record per caller
+    // turn; monotonic timestamps; NO text — what was said lives in the
+    // transcript entries, which the played-text sync below keeps honest.
+    this._turnStats = [];
+    this._currentTurn = null; // the turn whose model round is in flight
+    this._playing = []; // agent utterances sent and not yet known to have finished, in send order
+    this._lastCallerSpeechStopAt = null; // from the clientSpeaking-end event
+    this._interruptFollowupTimer = null;
+    // PR 1B: the barge-in the NEXT caller message is annotated with (gate on).
+    this._pendingInterruptNote = null;
+    this._eventShapesSeen = new Set();
+    // Telemetry labels the rendering TwiML put on its <Parameter>s (the
+    // active relay profile and the voice it rendered) — stamped into the
+    // version record, never acted on.
+    this._relayProfileId = relayProfileId ? String(relayProfileId).slice(0, 64) : null;
+    // null = no parameter arrived (the env default voice was rendered);
+    // '' = the TwiML rendered NO voice attribute (Twilio's own default).
+    this._ttsVoice = typeof ttsVoice === 'string' ? ttsVoice.slice(0, 128) : null;
+    // Hashes of what the model was actually given, frozen with the system
+    // prompt (see _runLoop) so a bake-off or an audit can tell two calls'
+    // prompts apart without storing them.
+    this._promptSha = null;
+    this._contextSnapshotSha = null;
+    this._toolSchemaSha = null;
 
     // Phase 2 caller recognition: kick off the ANI→customer resolution at
     // session setup so it is (almost always) done before the first caller
@@ -495,7 +560,7 @@ class RelayConversation {
     // The recent-texts DATA TURN — customer-AUTHORED SMS bodies, seeded into
     // the USER role ahead of the first caller turn, never into `system`.
     this._dataTurnSeeded = false;
-    this._lateContextBlockPending = false;
+    this._lateContextBlock = null; // a KNOWN CALLER block that arrived after the system prompt froze
     // Phase E — the audit trail. Ordered turn list (caller / agent / tool) for
     // the call_log transcript written at close, the model's own capture_lead
     // summary (so the close needs no second LLM round trip), and the
@@ -550,7 +615,7 @@ class RelayConversation {
             // The system prompt may already be FROZEN (prompt-cache prefix
             // stability) — the KNOWN CALLER block then rides the next user
             // turn instead, like the recent-texts data turn.
-            if (this._systemBlocks) this._lateContextBlockPending = true;
+            if (this._systemBlocks && ctx.block) this._lateContextBlock = ctx.block;
             // A late confident match still earns the language stamp (codex
             // #3561 P2) — same guarded, bounded, detached write as below.
             void this._persistLanguagePreference();
@@ -574,11 +639,241 @@ class RelayConversation {
     }
   }
 
-  /** Append one turn to the session transcript (the record; never truncated here). */
+  /**
+   * Append one turn to the session transcript (the record). Returns the entry.
+   * An agent entry's `text` is what the caller HEARD: it starts as the full
+   * model text and is rewritten by the played-text sync when Twilio reports
+   * a barge-in (utteranceUntilInterrupt) or the tokens actually played; the
+   * full model text survives in `planned`. Every consumer of the transcript —
+   * the stored record, the summary, the audits — therefore reads played text
+   * by construction.
+   */
   _recordTurn(role, text) {
     const t = String(text == null ? '' : text).trim();
-    if (!t) return;
-    this._transcript.push({ role, text: t });
+    if (!t) return null;
+    // Agent entries are UTTERANCES: each one tracks its own played text and
+    // interruption (a single caller turn can emit two — a read-tool filler,
+    // then the answer — and Twilio plays and interrupts them one by one).
+    const entry = role === 'agent'
+      ? { role, text: t, planned: t, played: null, playedSource: 'assumed', interrupted: false, notPlayed: false, done: false }
+      : { role, text: t };
+    this._transcript.push(entry);
+    return entry;
+  }
+
+  /**
+   * The turn a speech event belongs to. Twilio's events arrive in send order,
+   * so 'start' is the OLDEST sent turn still waiting for its audio and 'end'
+   * the oldest turn speaking but not yet ended — searched from the newest
+   * turn that already started (an earlier one cannot still be pending), so a
+   * burst of queued caller prompts cannot push turn 1 out of reach (codex
+   * r13 P2). Anything else (an interrupt) wants the turn speaking now, else
+   * the latest sent turn.
+   */
+  _speechTurn(kind = 'start') {
+    const stats = this._turnStats;
+    let from = 0;
+    for (let i = stats.length - 1; i >= 0; i--) if (stats[i].agentSpeakingStartAt != null) { from = i; break; }
+    if (kind === 'start') {
+      for (let i = from; i < stats.length; i++) {
+        const s = stats[i];
+        if (s.firstSendAt != null && s.agentSpeakingStartAt == null && !s.interrupted) return s;
+      }
+    }
+    for (let i = from; i < stats.length; i++) {
+      const s = stats[i];
+      if (s.agentSpeakingStartAt != null && s.agentSpeakingEndAt == null) return s;
+    }
+    for (let i = stats.length - 1; i >= 0; i--) if (stats[i].firstSendAt != null) return stats[i];
+    return null;
+  }
+
+  /** Re-derive one utterance's stored text from what was played. */
+  /**
+   * The context the model actually saw = the caller block (system role) AND
+   * the recent-texts data turn (user role). Two calls on the same account
+   * block with different texts must not stamp alike. Hash only — never stored.
+   */
+  _snapshotSha(block) {
+    const dataTurn = (this._callerContext && this._callerContext.dataTurn) || '';
+    const parts = [block, dataTurn].filter(Boolean);
+    return parts.length ? sha256(parts.join('\n\n')) : null;
+  }
+
+  _syncPlayedEntry(entry) {
+    if (entry.notPlayed) {
+      entry.text = '[not played — caller interrupted]';
+    } else if (entry.playedUnknown) {
+      entry.text = '[interrupted — played text unknown]';
+    } else {
+      const heard = entry.played != null && entry.played !== '' ? entry.played : entry.planned;
+      entry.text = `${heard}${entry.interrupted ? ' [interrupted]' : ''}`.trim();
+    }
+    // The turn's summary source = the best evidence any of its utterances got.
+    const stat = this._turnStats[entry.turn - 1];
+    if (stat) {
+      const rank = { assumed: 0, interrupt_truncation: 1, twilio_event: 2 };
+      stat.playedSource = stat.agentEntries.reduce(
+        (best, e) => (rank[e.playedSource] > rank[best] ? e.playedSource : best), 'assumed',
+      );
+    }
+  }
+
+  /** Retire every utterance still queued as playing (a new caller turn began). */
+  _drainPlaying() {
+    for (const entry of this._playing) entry.done = true;
+    if (this._playing.length) this._retiredPlanned = this._playing[this._playing.length - 1].planned;
+    this._playing = [];
+  }
+
+  /**
+   * A tokens-played notification: what Twilio actually spoke. Utterances play
+   * in send order, so the tokens belong to the FIRST unfinished utterance
+   * they fit (a prefix of its planned text); when they only fit a later one,
+   * the earlier utterances are over. Twilio's payload is undocumented: a
+   * cumulative snapshot replaces, a token appends.
+   */
+  _appendPlayed(piece) {
+    const text = String(piece || '').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const extend = (entry) => {
+      const prev = entry.played || '';
+      // Only a STRICTLY longer prefix is a cumulative snapshot; an equal chunk
+      // goes through the planned-continuation check below (codex r11 P2).
+      if (!prev || (text.length > prev.length && text.startsWith(prev))) return text;
+      const appended = `${prev}${/^[,.;:!?]/.test(text) ? '' : ' '}${text}`;
+      // A chunk that repeats the tail is a duplicate notification ONLY when
+      // the planned text does not continue with it — "very very effective"
+      // legitimately plays "very" twice (codex r10 P2).
+      if (prev.endsWith(text) && !norm(entry.planned).startsWith(norm(appended))) return prev;
+      return appended;
+    };
+    let target = null;
+    let idx = -1;
+    for (let i = 0; i < this._playing.length; i++) {
+      if (norm(this._playing[i].planned).startsWith(norm(extend(this._playing[i])))) { target = this._playing[i]; idx = i; break; }
+    }
+    if (!target) {
+      if (!this._playing.length) return;
+      // A repeat of an utterance that already retired (Twilio re-sent its
+      // completion) must not land on the NEXT utterance (codex r14 P2).
+      const retired = String(this._retiredPlanned || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (retired && retired.startsWith(norm(text))) return;
+      target = this._playing[0];
+      idx = 0;
+    }
+    // Utterances ahead of the matched one have finished playing.
+    for (let i = 0; i < idx; i++) this._playing[i].done = true;
+    this._playing.splice(0, idx);
+    target.played = extend(target);
+    target.playedSource = 'twilio_event';
+    this._syncPlayedEntry(target);
+    if (norm(target.played) === norm(target.planned)) {
+      target.done = true;
+      this._retiredPlanned = target.planned;
+      this._playing.shift();
+    }
+  }
+
+  /** Relay notifications the `events` attribute adds (speaker / tokens-played). */
+  handleRelayEvent(frame) {
+    const ev = classifyRelayEvent(frame);
+    if (ev.shape && !this._eventShapesSeen.has(ev.shape)) {
+      // Key names only — never values — so the first sandbox call can pin the
+      // undocumented payload shape without the log carrying spoken text.
+      this._eventShapesSeen.add(ev.shape);
+      logger.info(`[voice-relay] relay event shape seen callSid=${maskSid(this.callSid)} kind=${ev.kind} shape=${ev.shape}`);
+    }
+    const t = now();
+    switch (ev.kind) {
+      case 'caller_speaking_end':
+        this._lastCallerSpeechStopAt = t;
+        break;
+      case 'agent_speaking_start': {
+        const stat = this._speechTurn('start');
+        if (stat && stat.agentSpeakingStartAt == null) stat.agentSpeakingStartAt = t;
+        if (stat && stat.awaitingAudio) this._finishTurn(stat);
+        break;
+      }
+      case 'agent_speaking_end': {
+        const stat = this._speechTurn('end');
+        if (stat && stat.agentSpeakingStartAt != null && stat.agentSpeakingEndAt == null) stat.agentSpeakingEndAt = t;
+        break;
+      }
+      case 'tokens_played':
+        if (ev.text) this._appendPlayed(ev.text);
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
+   * A Flux partial prompt arrived (relay-server drops it; this only counts).
+   * Partials PRECEDE the final prompt that becomes their turn, so they
+   * accumulate here and the next turn's stat takes them — crediting the last
+   * finished turn would shift every partial one turn back.
+   */
+  notePartialPrompt() {
+    this._pendingPartials = (this._pendingPartials || 0) + 1;
+  }
+
+  /**
+   * One structured log line per caller turn — durations only, never text.
+   * Twilio's agent-speaking event lands AFTER the text frame that finished
+   * the turn, so a turn that spoke waits for it (the speaker handler calls
+   * this again); end() flushes whatever never arrived.
+   */
+  _finishTurn(stat) {
+    if (!stat || stat.logged) return;
+    if (stat.firstSendAt != null && stat.agentSpeakingStartAt == null && !this.ended) {
+      stat.awaitingAudio = true;
+      return;
+    }
+    stat.logged = true;
+    const ms = (a, b) => (Number.isFinite(a) && Number.isFinite(b) && b >= a ? `${Math.round(b - a)}ms` : 'n/a');
+    logger.info(
+      `[voice-relay] turn=${stat.turn} callSid=${maskSid(this.callSid)} endpoint=${ms(stat.callerSpeechStoppedAt, stat.promptAt)} `
+      + `firstToken=${ms(stat.promptAt, stat.firstTokenAt)} firstSend=${ms(stat.promptAt, stat.firstSendAt)} `
+      + `firstAudio=${ms(stat.callerSpeechStoppedAt, stat.agentSpeakingStartAt)} model=${Math.round(stat.modelMs)}ms rounds=${stat.rounds} `
+      + `tools=${stat.toolCount}/${Math.round(stat.toolMs)}ms effort=${stat.effort} renderer=${stat.renderer} `
+      + `interrupted=${stat.interrupted} timedOut=${stat.timedOut}`
+    );
+  }
+
+  /**
+   * What produced this call's speech — every field a later bake-off, eval
+   * verdict or audit finding may need to attribute a difference to.
+   */
+  _versionStamps() {
+    const { parseTtsVoice } = require('./relay-profiles');
+    const voice = this._ttsVoice != null ? this._ttsVoice : defaultTtsVoice();
+    const tts = parseTtsVoice(voice, DEFAULT_TTS_PROVIDER);
+    // The Spanish leg's <Parameter lang=es> is the setup-frame fallback when
+    // Twilio omits msg.lang; the TwiML rendered language="es-US", and that is
+    // what the stamp must say (codex r10 P2).
+    const { isSpanish } = require('./relay-language');
+    const raw = this.language || DEFAULT_LANGUAGE;
+    const language = !/[-_]/.test(raw) && isSpanish(raw) ? require('./relay-protocol').SPANISH_LANGUAGE : raw;
+    return {
+      git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
+      model: MODEL,
+      effort: VOICE_EFFORT,
+      prompt_sha: this._promptSha,
+      context_snapshot_sha: this._contextSnapshotSha,
+      tool_schema_sha: this._toolSchemaSha,
+      policy_pack_sha: null,
+      relay_profile_id: this._relayProfileId,
+      stt_language: language,
+      tts_language: language,
+      tts_provider: DEFAULT_TTS_PROVIDER,
+      voice_id: tts.voiceId,
+      tts_model: tts.ttsModel,
+      tts_settings: tts.ttsSettings,
+      renderer_version: RENDERER_VERSION,
+      speech_format_version: null,
+    };
   }
 
   /**
@@ -672,15 +967,33 @@ class RelayConversation {
   say(text) {
     const t = String(text || '').trim();
     if (t) {
-      this._recordTurn('agent', t);
+      const entry = this._recordTurn('agent', t);
+      const stat = this._currentTurn;
+      if (stat) {
+        if (stat.firstSendAt == null) stat.firstSendAt = now();
+        if (entry) {
+          entry.turn = stat.turn;
+          stat.agentEntries.push(entry);
+        }
+      }
+      if (entry) this._playing.push(entry);
       this._send(t);
+      return entry;
     }
+    return null;
   }
 
   /** Handle one transcribed caller turn. Serialized so turns never interleave. */
   handlePrompt(text) {
     const t = String(text || '').trim();
     if (!t || this.ended || this._ending) return this._chain;
+    // The prompt's ARRIVAL is the turn's origin for every latency below —
+    // stamped before the chain, which may still be draining a prior loop.
+    const promptAt = now();
+    if (this._interruptFollowupTimer) {
+      clearTimeout(this._interruptFollowupTimer);
+      this._interruptFollowupTimer = null;
+    }
     // Per-call cap on total caller turns. MAX_TOOL_ROUNDS bounds the tool loop
     // WITHIN a turn; this bounds the NUMBER of turns so a never-ending or abusive
     // call (or a leaked ws key) can't drive the model — and spend Anthropic
@@ -701,6 +1014,38 @@ class RelayConversation {
       return this._chain;
     }
     this._userTurns.push(t);
+    // The caller-stop instant (from Twilio's speaker event) belongs to THIS
+    // turn only if it is recent; it is consumed so no later turn reuses it.
+    const stoppedAt = this._lastCallerSpeechStopAt;
+    this._lastCallerSpeechStopAt = null;
+    // The caller spoke after whatever was queued: those utterances are over
+    // (a barge-in would have arrived as an interrupt frame first).
+    this._drainPlaying();
+    const stat = {
+      turn: this._userTurns.length,
+      promptAt,
+      callerSpeechStoppedAt: stoppedAt != null && promptAt - stoppedAt <= CALLER_STOP_STALE_MS ? stoppedAt : null,
+      loopStartAt: null,
+      firstTokenAt: null,
+      firstSendAt: null,
+      agentSpeakingStartAt: null,
+      agentSpeakingEndAt: null,
+      modelMs: 0,
+      toolMs: 0,
+      toolCount: 0,
+      rounds: 0,
+      effort: VOICE_EFFORT,
+      renderer: 'block',
+      interrupted: false,
+      durationUntilInterruptMs: null,
+      interruptWithoutFollowupTranscript: false,
+      timedOut: false,
+      partialCount: this._pendingPartials || 0,
+      playedSource: 'assumed', // best evidence across the turn's utterances
+      agentEntries: [],
+    };
+    this._pendingPartials = 0;
+    this._turnStats.push(stat);
     // Append the turn to the shared transcript INSIDE the serialized chain —
     // right before the loop that handles it — so a turn that arrives while a
     // prior _runLoop is still in flight can't be inserted ahead of that loop's
@@ -713,20 +1058,115 @@ class RelayConversation {
       // read settles, so the live clock can ride this user turn instead of
       // being re-rendered into the (cached) system prompt every turn.
       this._recordTurn('caller', t);
+      this._currentTurn = stat;
+      stat.loopStartAt = now();
       return this._runLoop(t);
     }).catch((e) => {
       logger.error(`[voice-relay] loop error callSid=${this.callSid}: ${e.message}`);
-    });
+    }).then(() => this._finishTurn(stat));
     return this._chain;
   }
 
-  /** Caller barged in over the agent's speech — abort the in-flight generation. */
-  interrupt() {
+  /**
+   * Caller barged in over the agent's speech — abort the in-flight generation.
+   * With a `detail` (the relay's interrupt frame) this is a real barge-in and
+   * the turn's record is corrected to what the caller actually heard; a bare
+   * call is end()'s own abort and records nothing.
+   */
+  interrupt(detail) {
     try {
       if (this._controller) this._controller.abort();
     } catch {
       /* no-op */
     }
+    if (!detail || typeof detail !== 'object') return;
+    const stat = this._speechTurn('end') || this._currentTurn;
+    if (!stat) return;
+    stat.interrupted = true;
+    const duration = Number(detail.durationUntilInterruptMs);
+    if (Number.isFinite(duration) && duration >= 0) stat.durationUntilInterruptMs = Math.round(duration);
+    // utteranceUntilInterrupt is OUR text as far as it played. It names WHICH
+    // queued utterance was cut (the first one it is a prefix of); the ones
+    // queued behind it were never played — Twilio drops the queue on a
+    // barge-in — and the record says so rather than crediting them.
+    const utterance = String(detail.utteranceUntilInterrupt || '').replace(/\s+/g, ' ').trim();
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    let idx = utterance
+      ? this._playing.findIndex((e) => norm(e.planned).startsWith(norm(utterance)) || (e.played != null && e.played !== '' && norm(utterance).startsWith(norm(e.played))))
+      : -1;
+    if (idx < 0) idx = this._playing.length ? 0 : -1;
+    if (idx >= 0) {
+      const cut = this._playing[idx];
+      for (let i = 0; i < idx; i++) this._playing[i].done = true;
+      cut.interrupted = true;
+      if (cut.playedSource === 'twilio_event') {
+        // A tokens-played chunk landed earlier; the interrupt's prefix is
+        // newer and may be longer — keep whichever says more, if compatible.
+        if (utterance.length > cut.played.length && norm(utterance).startsWith(norm(cut.played))) cut.played = utterance;
+      } else {
+        // An interrupt with no utterance (barge-in before any audio, or the
+        // field omitted) says nothing about what played — the record must not
+        // credit the whole planned text.
+        cut.played = utterance;
+        cut.playedSource = 'interrupt_truncation';
+        cut.playedUnknown = !utterance;
+      }
+      cut.done = true;
+      this._syncPlayedEntry(cut);
+      const laters = this._playing.slice(idx + 1);
+      for (const later of laters) {
+        later.notPlayed = true;
+        later.played = '';
+        later.playedSource = 'interrupt_truncation';
+        later.done = true;
+        this._syncPlayedEntry(later);
+      }
+      this._playing = [];
+      this._noteInterruptForModel(cut, laters);
+    }
+    clearTimeout(this._interruptFollowupTimer);
+    this._interruptFollowupStat = stat;
+    this._interruptFollowupTimer = setTimeout(() => {
+      this._interruptFollowupTimer = null;
+      this._interruptFollowupStat = null;
+      stat.interruptWithoutFollowupTranscript = true;
+    }, INTERRUPT_FOLLOWUP_MS);
+    this._interruptFollowupTimer.unref?.();
+  }
+
+  /**
+   * PR 1B (GATE_VOICE_RELAY_INTERRUPT_CONTEXT): make the model's history agree
+   * with the air after a barge-in. Each cut utterance's assistant message has
+   * its text replaced by the utterance's PLAYED record — the same
+   * `entry.text` the transcript stores ("<heard> [interrupted]",
+   * "[not played — caller interrupted]", "[interrupted — played text
+   * unknown]") — so the rewrite reads played text by construction, never
+   * `planned`. Tool-use blocks on that message are kept (their tool_result
+   * must still pair). The next caller message then carries what the caller
+   * heard, so the model resumes from there instead of repeating the clause
+   * the caller never heard. Utterances with no history message (copy()
+   * fallbacks) get the note only. Gate off ⇒ nothing here runs.
+   */
+  _noteInterruptForModel(cut, laters) {
+    if (!isInterruptContextEnabled()) return;
+    for (const entry of [cut, ...laters]) {
+      const msg = entry.historyMessage;
+      if (!msg || !Array.isArray(msg.content)) continue;
+      const kept = msg.content.filter((b) => b && b.type !== 'text');
+      msg.content = [{ type: 'text', text: entry.text }, ...kept];
+    }
+    const heard = cut.playedUnknown ? null : String(cut.played || '').trim();
+    this._pendingInterruptNote = { heard: heard || null };
+  }
+
+  /** The one-shot prefix the next caller message carries after a barge-in. */
+  _consumeInterruptNote() {
+    const note = this._pendingInterruptNote;
+    if (!note) return '';
+    this._pendingInterruptNote = null;
+    return note.heard
+      ? `[Caller interrupted you after: "${note.heard}"] `
+      : '[Caller interrupted you before your reply finished; what they heard is unknown] ';
   }
 
   /**
@@ -798,6 +1238,8 @@ class RelayConversation {
       // only showed on the normal path).
       to: this.to,
       callSid: this.callSid,
+      // Dry-run flag for the write tools (see the constructor).
+      sandbox: this.sandbox,
       // The claim-owner nonce — every WRITE transaction re-proves ownership
       // against it INSIDE the transaction (the supersession fences outside
       // are check-then-act; the in-trx check is the atomic one). LIVE getter,
@@ -958,8 +1400,9 @@ class RelayConversation {
    * not keep answering from its frozen KNOWN CALLER block, running tools, or
    * writing the call record at close. Tri-state: a CLAIMED session (verified
    * — verification implies the claim won) requires a PROVEN read matching its
-   * own nonce and fails CLOSED on unprovable; an unclaimed session (the
-   * sandbox path has no call_log row) is out only on a proven foreign owner.
+   * own nonce and fails CLOSED on unprovable; an unclaimed session (one
+   * whose call_log row never vouched for its ANI) is out only on a proven
+   * foreign owner.
    */
   async _sessionSuperseded() {
     if (!this.sessionKey || !this.callSid) return false;
@@ -1013,21 +1456,6 @@ class RelayConversation {
         { role: 'assistant', content: 'Noted — I have the recent text history for this number.' },
       );
     }
-    // ⭐ A LATE-HYDRATED KNOWN CALLER BLOCK STILL REACHES THE MODEL. The system
-    // prompt is frozen per call (cache-prefix stability), so a context that
-    // settled after the first round would upgrade the tool ctx but never the
-    // prompt — the model kept treating a matched caller as a stranger. The
-    // block rides a one-time user/assistant pair instead (the recent-texts
-    // pattern); its content already passed the same injection filters the
-    // system placement uses.
-    if (this._lateContextBlockPending && this._callerContext && this._callerContext.block) {
-      this._lateContextBlockPending = false;
-      this.messages.push(
-        { role: 'user', content: `ACCOUNT CONTEXT (hydrated after the call started — same rules as a KNOWN CALLER block):\n\n${this._callerContext.block}` },
-        { role: 'assistant', content: 'Noted — I have the account context for this caller now.' },
-      );
-    }
-
     const toolCtx = this._buildToolCtx();
     const contextEnabled = isContextEnabled();
 
@@ -1050,30 +1478,61 @@ class RelayConversation {
     //      definition, so leaving it in the system prompt would invalidate the
     //      cache on every single turn — it now rides the user turn below.
     if (!this._systemBlocks) {
-      const basePrompt = buildBasePrompt(contextEnabled, this.language)
-        + (contextEnabled && this._callerContext && this._callerContext.block
-          ? `\n\n${this._callerContext.block}`
-          : '');
+      const callerBlock = (contextEnabled && this._callerContext?.block) || '';
+      const bareBase = buildBasePrompt(contextEnabled, this.language);
+      const basePrompt = bareBase + (callerBlock ? `\n\n${callerBlock}` : '');
+      const profileText = getVoiceProfileTextNonBlocking();
       this._systemBlocks = [{
         type: 'text',
-        text: composeSystemPrompt(basePrompt, getVoiceProfileTextNonBlocking()),
+        text: composeSystemPrompt(basePrompt, profileText),
         cache_control: { type: 'ephemeral' },
       }];
       // Frozen with the system prompt: tools render BEFORE system, so a tool
       // list that changed mid-call (a gate flipped) would invalidate everything.
       this._tools = activeTools();
+      // Version stamps: the prompt WITHOUT the per-caller block (so two calls
+      // on the same prompt hash alike), the caller block on its own, and the
+      // tool schemas the model saw. Hashes only — nothing is stored twice.
+      this._promptSha = sha256(composeSystemPrompt(bareBase, profileText));
+      this._contextSnapshotSha = this._snapshotSha(callerBlock);
+      this._toolSchemaSha = sha256(JSON.stringify(this._tools));
     }
+    // ⭐ A LATE-HYDRATED KNOWN CALLER BLOCK STILL REACHES THE MODEL. The system
+    // prompt is frozen per call (cache-prefix stability), so a context that
+    // settled after the first round would upgrade the tool ctx but never the
+    // prompt — the model kept treating a matched caller as a stranger. The
+    // block rides a one-time user/assistant pair instead (the recent-texts
+    // pattern); its content already passed the same injection filters the
+    // system placement uses. Runs AFTER the freeze above so its hash is the
+    // one the version record keeps.
+    if (this._lateContextBlock) {
+      const lateBlock = this._lateContextBlock;
+      this._lateContextBlock = null;
+      // The version record hashes the context the model actually saw — the
+      // late block is that context for this call.
+      this._contextSnapshotSha = this._snapshotSha(lateBlock);
+      this.messages.push(
+        { role: 'user', content: `ACCOUNT CONTEXT (hydrated after the call started — same rules as a KNOWN CALLER block):\n\n${lateBlock}` },
+        { role: 'assistant', content: 'Noted — I have the account context for this caller now.' },
+      );
+    }
+    // Always a stat to write into: a loop with no caller turn (tests, a
+    // future greeting round) records into a discarded one.
+    const stat = this._currentTurn || { modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0 };
 
     // The caller's turn, with the live clock attached as a per-turn note. Past
     // turns keep the time they actually happened at, so the message prefix stays
     // stable for caching AND the transcript reads honestly.
     if (callerText) {
       const clockBlock = contextEnabled ? renderClockBlock(this._officeHours) : null;
+      // PR 1B: the model — not the transcript — is told what the caller heard
+      // before they cut in. Set only under its gate (see interrupt()).
+      const turnText = `${this._consumeInterruptNote()}${callerText}`;
       this.messages.push({
         role: 'user',
         content: clockBlock
-          ? [{ type: 'text', text: clockBlock }, { type: 'text', text: callerText }]
-          : callerText,
+          ? [{ type: 'text', text: clockBlock }, { type: 'text', text: turnText }]
+          : turnText,
       });
     }
 
@@ -1089,6 +1548,8 @@ class RelayConversation {
         streamTimedOut = true;
         try { this._controller.abort(); } catch { /* no-op */ }
       }, STREAM_TIMEOUT_MS);
+      const modelStartAt = now();
+      stat.rounds += 1; // an ATTEMPT — a timed-out or aborted round is still a round
       try {
         const stream = anthropic.messages.stream(
           {
@@ -1107,9 +1568,16 @@ class RelayConversation {
           },
           { signal: this._controller.signal }
         );
+        // First-token latency (test doubles expose only finalMessage). The
+        // first streamed CONTENT BLOCK, not the first text event: a round that
+        // opens with tool_use has produced output, and stamping only text
+        // would charge the tool's latency to the model (codex r9 P2). The
+        // turn keeps its FIRST stamp, not the last round's.
+        stream.on?.('streamEvent', (ev) => { if (ev?.type === 'content_block_start') stat.firstTokenAt ??= now(); });
         msg = await stream.finalMessage();
       } catch (err) {
         if (streamTimedOut) {
+          stat.timedOut = true;
           logger.warn(`[voice-relay] model stream timeout (${STREAM_TIMEOUT_MS}ms) callSid=${this.callSid}`);
           this.say(require('./relay-language').copy('streamTimeout', this.language));
           return;
@@ -1120,6 +1588,8 @@ class RelayConversation {
         return;
       } finally {
         clearTimeout(streamTimer);
+        // Every path — success, timeout, barge-in abort, error — is model time.
+        stat.modelMs += now() - modelStartAt;
       }
 
       const text = msg.content
@@ -1144,12 +1614,13 @@ class RelayConversation {
       // empty end_turn, ending the exchange with no confirmation spoken at
       // all. Suppressed turns are stored tool-use-only, so the follow-up round
       // knows nothing has been said yet and states the outcome itself.
-      this.messages.push({
+      const assistantMessage = {
         role: 'assistant',
         content: hasPendingWrite && text
           ? msg.content.filter((b) => b.type !== 'text')
           : msg.content,
-      });
+      };
+      this.messages.push(assistantMessage);
       // ⭐ RE-PROVEN IMMEDIATELY BEFORE SPEAKING. The turn-entry check is
       // check-then-act — a reconnect can take the claim during the model
       // round, and this socket would then speak from cached account context.
@@ -1160,8 +1631,11 @@ class RelayConversation {
         try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
         return;
       }
-      if (text && !hasPendingWrite) this.say(text);
-      else if (text && hasPendingWrite) {
+      if (text && !hasPendingWrite) {
+        // The utterance's own history message — what a barge-in rewrites (PR 1B).
+        const entry = this.say(text);
+        if (entry) entry.historyMessage = assistantMessage;
+      } else if (text && hasPendingWrite) {
         logger.info(`[voice-relay] suppressed pre-write text on a write-tool turn callSid=${this.callSid}`);
       }
 
@@ -1173,7 +1647,10 @@ class RelayConversation {
           // something up rather than invented it. Name only — tool INPUT can
           // carry the caller's contact details and belongs in the lead row.
           this._recordTurn('tool', block.name);
+          const toolStartAt = now();
           const out = await this._executeToolBounded(block.name, block.input, toolCtx);
+          stat.toolMs += now() - toolStartAt;
+          stat.toolCount += 1;
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
         }
         this.messages.push({ role: 'user', content: results });
@@ -1203,6 +1680,16 @@ class RelayConversation {
     if (this.ended) return;
     this.ended = true;
     this.interrupt();
+    // A barge-in the caller never followed with speech before hanging up is
+    // still an interrupt without a follow-up transcript (codex r9 P2): close
+    // the pending watch as "missing" rather than dropping it, so abrupt
+    // hang-ups do not vanish from the metric.
+    if (this._interruptFollowupTimer) {
+      clearTimeout(this._interruptFollowupTimer);
+      if (this._interruptFollowupStat) this._interruptFollowupStat.interruptWithoutFollowupTranscript = true;
+    }
+    this._interruptFollowupTimer = null;
+    this._interruptFollowupStat = null;
 
     // Drain the serialized prompt/tool chain BEFORE the capture floor runs. If
     // the caller hung up while executeTool('capture_lead') was mid-write, this
@@ -1256,8 +1743,8 @@ class RelayConversation {
     // stale duration; stamp the FINAL completed status + the AI-handled leg
     // duration + outcome here (mirroring the /agent-fallback path) so these
     // calls don't linger as ringing/no-answer/null, then resync the unified
-    // message row. Keyed by CallSid — a no-op (0 rows) for the TwiML-Bin
-    // sandbox path, which has no call_log row.
+    // message row. Keyed by CallSid — a no-op (0 rows) when no call_log row
+    // exists for the session (a call answered outside the signed webhooks).
     if (this.callSid && !supersededAtClose) {
       try {
         // RACE: end() runs on EVERY WebSocket close, including a relay failure
@@ -1280,7 +1767,9 @@ class RelayConversation {
         // /relay-complete already stamped voicemail must not be retro-fitted
         // with an AI transcript. Composition never throws; null just means
         // there was nothing said worth recording.
-        const { buildTranscriptUpdate } = require('./relay-transcript');
+        // Turns still waiting on a speaker event log now (firstAudio=n/a).
+        for (const s of this._turnStats) this._finishTurn(s);
+        const { buildTranscriptUpdate, summarizeTurnStats } = require('./relay-transcript');
         const transcriptUpdate = buildTranscriptUpdate({
           turns: this._transcript,
           modelSummary: this._modelSummary,
@@ -1290,24 +1779,31 @@ class RelayConversation {
           callSid: this.callSid,
           model: MODEL,
           startedAt: this._startedAt,
+          latency: summarizeTurnStats(this._turnStats),
+          versions: this._versionStamps(),
         });
         const reconcileQuery = db('call_log')
           .where('twilio_call_sid', this.callSid)
-          .where((q) => q.whereNull('call_outcome').orWhereNot('call_outcome', 'voicemail'));
+          // NULL OR not terminal: a relay-failure row that /relay-complete
+          // already stamped (voicemail in production, relay_failed on the
+          // sandbox) is never retro-fitted as an AI-handled call, whichever
+          // callback lands last.
+          .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', RELAY_TERMINAL_OUTCOMES));
         // ⭐ THE OWNER FENCE RIDES THE SAME STATEMENT. The pre-close
         // supersession check is check-then-act — a reconnect can take the
         // claim between it and this UPDATE. For a keyed session the write
         // itself proves ownership: a row whose claim owner is no longer this
         // nonce matches 0 rows atomically (the voicemail-guard pattern).
-        if (this.sessionKey) {
-          // NULL owner allowed: an unverified session (claim never won — the
-          // row is unclaimed) still owns its own honest reconcile; only a
-          // FOREIGN owner means the record belongs to a replacement.
-          reconcileQuery.whereRaw(
+        // NULL owner allowed: an unverified session (claim never won — the
+        // row is unclaimed) still owns its own honest reconcile; only a
+        // FOREIGN owner means the record belongs to a replacement.
+        const fenceOwner = (q) => (this.sessionKey
+          ? q.whereRaw(
             "((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)",
             [this.sessionKey],
-          );
-        }
+          )
+          : q);
+        fenceOwner(reconcileQuery);
         const updated = await reconcileQuery
           .update({
             status: 'completed',
@@ -1319,9 +1815,22 @@ class RelayConversation {
           });
         // LOUD on a dropped audit record: 0 rows with a real transcript means
         // either the voicemail guard fired (a genuinely failed relay leg) or
-        // there is no call_log row for this CallSid (the TwiML-Bin sandbox
-        // path). Either way the conversation is not recoverable, so say so.
+        // there is no call_log row for this CallSid (a call answered outside
+        // the signed webhooks). Either way the conversation is not
+        // recoverable, so say so.
+        // A relay that FAILED after exchanging turns: /relay-complete can stamp
+        // relay_failed before this reconcile runs, so it matched 0 rows. The
+        // transcript, latency and version stamps are the evidence for exactly
+        // that failure — keep them; the outcome stays. relay_failed only (the
+        // sandbox stamp): a production voicemail row's transcript belongs to
+        // the recording processor.
+        let salvaged = 0;
         if (transcriptUpdate && !updated) {
+          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).where('call_outcome', 'relay_failed'))
+            .update({ ...transcriptUpdate, updated_at: new Date() });
+          if (salvaged) logger.info(`[voice-relay] transcript kept on a relay_failed row callSid=${maskSid(this.callSid)} turns=${this._transcript.length}`);
+        }
+        if (transcriptUpdate && !updated && !salvaged) {
           logger.error(
             `[voice-relay] transcript NOT persisted callSid=${this.callSid} (0 rows: voicemail-guard or missing call_log row) `
             + `— ${this._transcript.length} turns lost from the audit trail`
@@ -1385,6 +1894,11 @@ class RelayConversation {
     // matching capture_lead in relay-tools.
     const callerPhone = toE164(this.from || '');
     if (this.leadCaptured || !isLikelyE164(callerPhone)) return;
+    // A sandbox call ends with no lead BY DESIGN (its call_log row is the artifact).
+    if (this.sandbox) {
+      logger.info(`[voice-relay] capture-floor skipped — sandbox call callSid=${this.callSid}`);
+      return;
+    }
     // ⭐ A STILL-RUNNING capture_lead OUTRANKS THE FLOOR. The drain above is
     // BOUNDED, so a wedged write can outlive it — and createLeadFromExtraction
     // is not idempotent on callSid, so starting a second one here is exactly

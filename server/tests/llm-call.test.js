@@ -424,19 +424,23 @@ describe('dispatchWithFallback', () => {
     expect(result.failures[0]).toMatchObject({ provider: PROVIDER.OPENAI, reason: 'empty_text' });
   });
 
-  test('a validator rejection on a max_tokens-truncated Anthropic response records the truncation, not just "unparseable"', async () => {
+  test('a max_tokens-truncated Anthropic response fails the leg as anthropic_incomplete before any validator sees it', async () => {
     // Single-leg (pinned) policy, like the sealed-exam lanes: no fallback.
+    // The truncation is filed as the budget problem it is (incomplete), not
+    // as whatever the validator would have called the cut-off text.
     mockAnthropicCreate.mockResolvedValue({
       content: [{ type: 'text', text: '{"reply": "cut off mid-jso' }],
       stop_reason: 'max_tokens',
     });
+    const validate = jest.fn(() => 'unparseable');
     const result = await dispatchWithFallback(
       { primary: { provider: PROVIDER.ANTHROPIC, model: 'claude-pinned' } },
       { text: 'write', jsonMode: false, maxTokens: 600 },
-      { validate: () => 'unparseable' },
+      { validate },
     );
     expect(result.ok).toBe(false);
-    expect(result.failures[0].reason).toBe('unparseable (response truncated at max_tokens=600)');
+    expect(result.failures[0].reason).toBe('anthropic_incomplete');
+    expect(validate).not.toHaveBeenCalled();
   });
 
   test('a validator rejection with a normal stop_reason keeps the plain reason', async () => {

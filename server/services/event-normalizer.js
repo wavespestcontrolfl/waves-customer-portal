@@ -37,23 +37,31 @@ const { geocodeAddress } = require('./geocoder');
 const { classifyFreshness, cityToZone } = require('./event-freshness');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
-let Anthropic;
-try {
-  Anthropic = require('@anthropic-ai/sdk');
-} catch {
-  Anthropic = null;
-}
 const MODELS = require('../config/models');
-const { stripThinkingBlocks } = require('./llm/deep');
+const { dispatchWithFallback } = require('./llm/call');
+
+const VALID_EVENT_TYPES = ['one_time', 'annual', 'limited_run', 'recurring_series', 'special_edition', 'ongoing', 'unknown'];
+const VALID_RECURRENCE_TYPES = ['none', 'daily', 'weekly', 'monthly', 'seasonal', 'annual', 'custom', 'unknown'];
+
+// Structured-output contract (llm/call.js jsonSchema); the allowlist checks
+// in extractVenueAndFreshness still run on the result.
+const VENUE_FRESHNESS_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['venueName', 'venueAddress', 'eventType', 'recurrenceType', 'familyFriendly', 'isFree'],
+  properties: {
+    venueName: { type: ['string', 'null'] },
+    venueAddress: { type: ['string', 'null'] },
+    eventType: { type: 'string', enum: VALID_EVENT_TYPES },
+    recurrenceType: { type: 'string', enum: VALID_RECURRENCE_TYPES },
+    familyFriendly: { type: ['boolean', 'null'] },
+    isFree: { type: ['boolean', 'null'] },
+  },
+};
 
 const MAX_BATCH = 50;
 
 async function extractVenueAndFreshness({ title, description, existingVenue, city }) {
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-    throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY)');
-  }
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
   const systemPrompt = `You normalize event-listing metadata. Given a raw event, extract:
 
 VENUE:
@@ -71,10 +79,7 @@ EVENT CLASSIFICATION:
   • unknown = can't determine from the listing
 - recurrenceType: one of "none" | "daily" | "weekly" | "monthly" | "seasonal" | "annual" | "custom" | "unknown"
 - familyFriendly: true if clearly family-oriented or all-ages, false if clearly adults-only, null if unclear
-- isFree: true if free/no-cost, false if paid, null if unclear
-
-Output STRICT JSON only, no prose:
-{ "venueName": "string or null", "venueAddress": "string or null", "eventType": "string", "recurrenceType": "string", "familyFriendly": "boolean or null", "isFree": "boolean or null" }`;
+- isFree: true if free/no-cost, false if paid, null if unclear`;
 
   const userPrompt = `Title: ${title || '(none)'}
 City context: ${city || '(unknown)'}
@@ -82,22 +87,18 @@ Existing venueName (may be null or partial): ${existingVenue || '(none)'}
 Description:
 ${description || '(none)'}`;
 
-  const response = await anthropic.messages.create({
-    model: MODELS.WORKHORSE,
-    max_tokens: 500,
+  // A miss on both legs throws, exactly like the old SDK path: normalized_at
+  // stays NULL and the cron retries the row.
+  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    laneId: 'events_editorial',
     system: systemPrompt,
-    messages: [{ role: 'user', content: userPrompt }],
+    text: userPrompt,
+    jsonMode: true,
+    jsonSchema: VENUE_FRESHNESS_SCHEMA,
+    maxTokens: 500,
   });
-  // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
-  // with a thinking block (no .text) on larger inputs, which made a blind
-  // content[0] read return '' — see event-ingestion.js for the incident.
-  const text = stripThinkingBlocks(response).content?.[0]?.text || '';
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('Claude returned no JSON');
-  const parsed = JSON.parse(jsonMatch[0]);
-
-  const VALID_EVENT_TYPES = ['one_time', 'annual', 'limited_run', 'recurring_series', 'special_edition', 'ongoing', 'unknown'];
-  const VALID_RECURRENCE_TYPES = ['none', 'daily', 'weekly', 'monthly', 'seasonal', 'annual', 'custom', 'unknown'];
+  if (!res.ok || !res.json) throw new Error(`event normalizer LLM unavailable (${res.reason || 'no_json'})`);
+  const parsed = res.json;
 
   return {
     venueName: typeof parsed.venueName === 'string' ? parsed.venueName.trim() : null,

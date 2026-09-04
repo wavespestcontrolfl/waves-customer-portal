@@ -19,12 +19,27 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { dispatchWithFallback } = require('./llm/call');
 const { etDateString } = require('../utils/datetime-et');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+// Structured-output contract for the photo-quality gate (llm/call.js
+// jsonSchema). The weighted score and the usable flag decide the verdict.
+const PHOTO_QUALITY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['sharpness', 'lawn_coverage_pct', 'lighting', 'issues', 'usable'],
+  properties: {
+    sharpness: { type: 'integer', description: '0-100' },
+    lawn_coverage_pct: { type: 'integer', description: '0-100, what percent of the image is lawn' },
+    lighting: { type: 'integer', description: '0-100' },
+    issues: {
+      type: 'array',
+      items: { type: 'string', enum: ['blurry', 'too_dark', 'too_bright', 'shadow_heavy', 'feet_visible', 'not_lawn', 'too_far', 'too_close'] },
+    },
+    usable: { type: 'boolean' },
+  },
+};
 
 function assessmentAnalytics() {
   return require('./assessment-analytics');
@@ -63,29 +78,18 @@ async function fetchFawnWeather() {
 // ══════════════════════════════════════════════════════════════
 
 async function assessPhotoQuality(base64Image, mimeType) {
-  if (!Anthropic) return { passed: true, score: 50, issues: [] };
   try {
-    const client = new Anthropic();
-    const response = await client.messages.create({
-      model: MODELS.VISION,
-      max_tokens: 300,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
-          { type: 'text', text: `Evaluate this lawn photo for quality. Return ONLY JSON, no markdown:
-{
-  "sharpness": <0-100>,
-  "lawn_coverage_pct": <0-100 what percent of the image is lawn>,
-  "lighting": <0-100>,
-  "issues": [<list of: "blurry", "too_dark", "too_bright", "shadow_heavy", "feet_visible", "not_lawn", "too_far", "too_close">],
-  "usable": <true/false>
-}` },
-        ],
-      }],
+    // VISION first, OpenAI Terra on a miss. A two-leg miss fails open below,
+    // exactly as an SDK error did.
+    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
+      text: 'Evaluate this lawn photo for quality: sharpness (0-100), what percent of the image is lawn (0-100), lighting (0-100), any issues from the allowed list, and whether the photo is usable.',
+      images: [{ data: base64Image, mimeType }],
+      jsonMode: true,
+      jsonSchema: PHOTO_QUALITY_SCHEMA,
+      maxTokens: 300,
     });
-    const text = anthropicText(response);
-    const result = JSON.parse(text.replace(/```json|```/g, '').trim());
+    if (!res.ok || !res.json) throw new Error(res.reason || 'no_json');
+    const result = res.json;
     const score = Math.round((result.sharpness * 0.4 + result.lawn_coverage_pct * 0.35 + result.lighting * 0.25));
     return {
       passed: result.usable !== false && score >= 35,

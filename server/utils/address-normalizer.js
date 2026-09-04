@@ -315,8 +315,22 @@ function normalizeUnitToken(token) {
 // leads with one keeps it, title-cased. '#' is decoration, not unit identity
 // — "Apt #4", "#4", and "Apt 4" all mean unit 4 — so it's stripped globally
 // to keep stored values comparable across notations.
+// A hash RIGHT AFTER a designator word ("Apt #4", "Bldg #9") is that
+// designator's own decoration. Dropped BEFORE the pair rule below, so a
+// hashed structural value still leaves "Bldg 9 #204" for it to read —
+// "Bldg #9 #204" otherwise lost both hashes to "Bldg 9 204", unitless, and
+// a correct address was asked again, held, or fenced (codex r18 P1 on #3804).
+const DESIGNATOR_HASH_RE = new RegExp(`\\b(${[...UNIT_DESIGNATORS].join('|')})\\.?\\s*#\\s*(?=[A-Za-z0-9])`, 'gi');
 function normalizeUnitLine(value) {
-  const cleaned = cleanString(value).replace(/[#,]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60).trim();
+  // A hash AFTER another designator pair ("Bldg 9 #204") is an implicit
+  // dwelling designator, not punctuation: stripping it left "Bldg 9 204"
+  // with no apartment for dwellingUnitOnLine to find, so a correct "Bldg 9
+  // #204" draft read as unitless — asked again, held, or fenced (codex
+  // r14 P2 on #3804). A LEADING hash keeps the existing path.
+  const cleaned = cleanString(value).replace(/,/g, ' ')
+    .replace(DESIGNATOR_HASH_RE, '$1 ')
+    .replace(/\b([A-Za-z.]+\s+[A-Za-z0-9-]+)\s*#\s*(?=[A-Za-z0-9])/g, '$1 unit ')
+    .replace(/#/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60).trim();
   if (!cleaned) return '';
   const tokens = cleaned.split(' ').filter(Boolean);
   const firstKey = tokens[0].replace(/\./g, '').toLowerCase();
@@ -381,6 +395,94 @@ const UNIT_VALUE = /^#?[A-Za-z]{0,3}\d+[A-Za-z]?$|^[A-Za-z]$|^#?[A-Za-z0-9]+(?:-
 function splitStreetLineUnit(value) {
   const { street, unit } = splitStreetLineUnitParts(value);
   return { street, unit };
+}
+
+// The UNIT-FIRST line form ("Apt 204, 123 Main St, Sarasota, FL 34232"):
+// a leading comma segment that is nothing but a designator + value (or
+// "#value"). splitStreetLineUnit reads that segment as the street, so
+// callers that must recognize the unit wherever it sits check this first.
+// Returns { unit, rest } (rest = the remaining segments joined) or null.
+// One or more designator + value pairs ("Apt 204", "Bldg 9 Apt 204",
+// "Building 2, Floor 3" collapses to one segment only when comma-free) or
+// a lone "#value" — the same vocabulary the trailing peel accepts, so no
+// second grammar (codex r6 P1 on #3796).
+// Longer spellings before their prefixes (floor|fl, building|bldg) — the
+// comma-free form has no anchor after the designator, and "Floor 2 123
+// Main St" would otherwise match "fl" + "oor" (codex r2 P2 on #3804).
+// A hash pair AFTER a named pair ("Bldg 9 #204") is the implicit dwelling
+// designator normalizeUnitLine reads — accepted here too, or the unit-first
+// compound line never peels and the hold/fence reads the building as a
+// different address (codex r15 P2 on #3804).
+const UNIT_FIRST_SEGMENT_RE = /^(?:(?:(?:apartment|apt|unit|ste|suite|building|bldg|floor|fl|space|spc|lot)\.?\s*#?\s*[A-Za-z0-9-]+\s*)+(?:#\s*[A-Za-z0-9-]+\s*)?|#\s*[A-Za-z0-9-]+)$/i;
+// The comma-free forms the canonical matcher already supports ("Apt 204 at
+// 123 Main St", "Unit 204 123 Main St", "#204 900 Bayview Ter" — the street
+// begins at the first digit-leading token) canonicalize here too (codex r1
+// P2 on #3804), so the override never appends a second unit behind them.
+const UNIT_FIRST_INLINE_RE = /^\s*((?:(?:apartment|apt|unit|ste|suite|building|bldg|floor|fl|space|spc|lot)\.?\s*#?\s*[A-Za-z0-9-]+\s*)+(?:#\s*[A-Za-z0-9-]+\s*)?|#\s*[A-Za-z0-9-]+)\s+(?:at\s+)?(\d.*)$/i;
+function splitUnitFirstLine(value) {
+  const segments = cleanString(value).split(',').map((s) => s.trim()).filter(Boolean);
+  if (!segments.length) return null;
+  if (segments.length >= 2 && UNIT_FIRST_SEGMENT_RE.test(segments[0])) {
+    // EVERY consecutive leading unit segment ("Bldg 9, Apt 204, 123 Main
+    // St") folds into one unit, mirroring the street-first multi-segment
+    // peel (codex r3 P2 on #3804).
+    let consumed = 1;
+    while (consumed < segments.length - 1 && UNIT_FIRST_SEGMENT_RE.test(segments[consumed])) consumed += 1;
+    return { unit: normalizeUnitLine(segments.slice(0, consumed).join(' ')), rest: segments.slice(consumed).join(', ') };
+  }
+  const inline = segments[0].match(UNIT_FIRST_INLINE_RE);
+  if (inline) {
+    return { unit: normalizeUnitLine(inline[1]), rest: [inline[2].trim(), ...segments.slice(1)].join(', ') };
+  }
+  return null;
+}
+
+// The unit a line carries in EITHER supported position — trailing/inline
+// ("123 Main St Apt 204, …") or unit-first ("Apt 204, 123 Main St, …").
+function unitAnywhereOnLine(value) {
+  return splitUnitFirstLine(value)?.unit || splitStreetLineUnit(value).unit || '';
+}
+
+// A unit line split into its designator/value pairs, normalized:
+// "Bldg 9 Apt 204" → [{ designator: 'bldg', value: '9' }, { designator:
+// 'apt', value: '204' }]; "#204" → [{ designator: 'unit', value: '204' }].
+function unitDesignatorPairs(unitLine) {
+  const tokens = String(normalizeUnitLine(unitLine) || '').split(' ').filter(Boolean);
+  const pairs = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const key = tokens[i].replace(/\./g, '').toLowerCase();
+    if (UNIT_DESIGNATORS.has(key) && i + 1 < tokens.length) { pairs.push({ designator: key, value: tokens[i + 1] }); i += 1; }
+  }
+  return pairs;
+}
+// Lot / space are the dwelling of a mobile-home or RV park ("Lot 12",
+// "Space 7") — subpremises a customer answers WITH, never structural
+// (pre-push codex P1 on #3804 r15): excluded, a "Lot 12" reply could never
+// satisfy the fence or lift the hold. Building / floor stay structural.
+const DWELLING_DESIGNATORS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite', 'lot', 'spc', 'space']);
+// The DWELLING (subpremise) part of the unit a line carries, or '' — a
+// structural component alone ("Bldg 9", "Floor 2") is a resolved
+// building, not the apartment the customer was asked for; it is
+// preserved beside the dwelling unit, never mistaken for it (pre-push
+// codex P1 on #3804).
+function dwellingUnitOnLine(value) {
+  const unit = unitAnywhereOnLine(value);
+  return unit ? dwellingUnitOfUnitLine(unit) : '';
+}
+// The same verdict for a value that IS a unit line already — a dedicated
+// line 2 ("204", "Apt 204", "Bldg 9 Apt 204", or a structural-only "Bldg
+// 9" → ''): the raw column is never unit evidence on its own (codex r17
+// P1 on #3804).
+function dwellingUnitOfUnitLine(unitLine) {
+  const pair = unitDesignatorPairs(unitLine).find((p) => DWELLING_DESIGNATORS.has(p.designator));
+  return pair ? normalizeUnitLine(`${pair.designator} ${pair.value}`) : '';
+}
+// The structural (non-dwelling) part of a unit line, kept when the
+// dwelling unit is replaced: "Bldg 9 Apt 9" → "Bldg 9"; "Apt 9" → ''.
+function structuralUnitPart(unitLine) {
+  return unitDesignatorPairs(unitLine)
+    .filter((p) => !DWELLING_DESIGNATORS.has(p.designator))
+    .map((p) => normalizeUnitLine(`${p.designator} ${p.value}`)).join(' ');
 }
 
 // splitStreetLineUnit plus the PLACE tail — every comma segment after the
@@ -636,6 +738,11 @@ module.exports = {
   unitLineValueKey,
   splitStreetLineUnit,
   splitStreetLineUnitParts,
+  splitUnitFirstLine,
+  unitAnywhereOnLine,
+  dwellingUnitOnLine,
+  dwellingUnitOfUnitLine,
+  structuralUnitPart,
   splitStreetAndCity,
   titleCaseWords,
   normalizeState,

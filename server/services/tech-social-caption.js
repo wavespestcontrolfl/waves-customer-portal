@@ -57,7 +57,7 @@ Return ONLY a JSON object, no markdown or backticks:
  */
 async function analyzePhoto(image) {
   if (!image || !image.data) return null;
-  const payload = { system: VISION_SYSTEM, text: 'Describe this field photo.', images: [image], jsonMode: true, maxTokens: 600 };
+  const payload = { laneId: 'tech_caption_vision', system: VISION_SYSTEM, text: 'Describe this field photo.', images: [image], jsonMode: true, maxTokens: 600 };
 
   // Rung 1+2: Gemini (best, then prior). Rung 3: Claude VISION.
   const attempts = [
@@ -153,7 +153,7 @@ async function generateCaptions({ vision, techNote, location, photoType } = {}) 
 
   // Public captions are VOICE-owned customer copy (registry: social posts),
   // same policy as the admin social-media paths — not the content lane.
-  const res = await llm.dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, payload);
+  const res = await llm.dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, { laneId: 'tech_caption_copy', ...payload });
   if (!res || !res.ok || !res.json) {
     const err = new Error('Caption generation failed');
     err.statusCode = 502;
