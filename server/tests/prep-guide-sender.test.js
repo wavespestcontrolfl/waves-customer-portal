@@ -342,6 +342,19 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
   });
 
+  test('a claim that already matched (another same-guide attempt made it) is never released', async () => {
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.termite' };
+    servicePrepRow = { prep_token: 'd'.repeat(32), prep_template_key: 'prep.termite' };
+    serviceUpdateCount = 0; // whereNull fresh claim affects no row — the key is already ours
+    renderSmsTemplate.mockRejectedValueOnce(new Error('renderer down'));
+
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+
+    expect(result).toMatchObject({ ok: false, reason: 'send_failed' });
+    // The other attempt's (or a prior delivery's) page stays intact.
+    expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
+  });
+
   test('a delivered guide keeps its page claim; a partial Both does not release it', async () => {
     upcomingVisitRow = VISIT;
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'suppressed' });

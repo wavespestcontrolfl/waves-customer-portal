@@ -131,27 +131,30 @@ function guideLabelForTemplateKey(templateKey) {
   return match ? match.label : String(templateKey || '').replace(/^prep\./, '');
 }
 
-// Atomic claim of the row's prep page for this guide: the key moves onto
-// this guide only while it is unset or already ours. 0 rows = another
-// guide owns the page (two operators sending different guides for one
-// unkeyed combined visit both pass the read above — only one can claim;
-// GH Codex #3856 r3 P1).
+// Atomic claim of the row's prep page for this guide. A FRESH claim moves
+// the key onto this guide only while it is unset (whereNull — two operators
+// sending for one unkeyed visit both pass the read above; exactly one
+// claims, GH Codex #3856 r3 P1). A key that already matches is owned but
+// not fresh: some earlier attempt — possibly a concurrent same-guide send
+// still in flight — made it, so this attempt may send on it but must never
+// release it (pre-push Codex P1 on 87c0e9e95). Anything else is taken.
 async function claimPrepPage(serviceId, templateKey) {
-  const claimed = await db('scheduled_services')
+  const fresh = await db('scheduled_services')
     .where({ id: serviceId })
-    .where(function ownable() {
-      this.whereNull('prep_template_key').orWhere('prep_template_key', templateKey);
-    })
+    .whereNull('prep_template_key')
     .update({ prep_template_key: templateKey });
-  return Number(claimed) > 0;
+  if (Number(fresh) > 0) return { owned: true, fresh: true };
+  const row = await db('scheduled_services').where({ id: serviceId }).first('prep_template_key');
+  if (row?.prep_template_key === templateKey) return { owned: true, fresh: false };
+  return { owned: false, takenBy: row?.prep_template_key || null };
 }
 
-// A claim is PROVISIONAL until a channel delivers: when nothing went out,
-// hand the page back so a failed first attempt neither blocks a later
+// A FRESH claim is PROVISIONAL until a channel delivers: when nothing went
+// out, hand the page back so a failed first attempt neither blocks a later
 // guide nor ties the visit to content the customer never received. Only
 // our own key is released, and only while no delivery of it was ever
 // stamped (markServicePrepSent sets prep_sent_at — the delivered key stays;
-// pre-push Codex P1 on dde34633e).
+// pre-push Codex P1 on dde34633e). Callers release fresh claims only.
 async function releasePrepPage(serviceId, templateKey) {
   try {
     await db('scheduled_services')
@@ -191,14 +194,14 @@ async function resolvePrepVisit(customer, config) {
   }
   try {
     const token = await ensureServicePrepToken(visit.id, config.emailTemplateKey);
-    if (!(await claimPrepPage(visit.id, config.emailTemplateKey))) {
-      const now = await db('scheduled_services').where({ id: visit.id }).first('prep_template_key');
+    const claim = await claimPrepPage(visit.id, config.emailTemplateKey);
+    if (!claim.owned) {
       return {
         visit, prepUrl: null, ownsPage: false, linkReason: 'prep_page_taken',
-        takenBy: guideLabelForTemplateKey(now?.prep_template_key),
+        takenBy: guideLabelForTemplateKey(claim.takenBy),
       };
     }
-    return { visit, prepUrl: portalUrl(`/prep/${token}`), ownsPage: true, linkReason: null };
+    return { visit, prepUrl: portalUrl(`/prep/${token}`), ownsPage: true, freshClaim: claim.fresh, linkReason: null };
   } catch (tokenErr) {
     // No token or no claim = no page to own: the email still goes out
     // (portal link, dated by the visit) but never stamps the row as a
@@ -379,7 +382,7 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
   result.ok = result.emailSent || result.smsSent;
   if (!result.ok) {
     result.reason = 'send_failed';
-    if (stampVisit && !uncertain) await releasePrepPage(stampVisit.id, config.emailTemplateKey);
+    if (page.freshClaim && !uncertain) await releasePrepPage(stampVisit.id, config.emailTemplateKey);
   } else if (contacts.wantEmail && contacts.wantSms && result.emailSent !== result.smsSent) {
     // Both: one leg delivered, the other did not — say which, or the
     // operator reads a half-delivered ask as fully sent (GH Codex #3856 r2 P2).
