@@ -2058,9 +2058,13 @@ const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_r
 // else the account row whose phone matches the number, else the first
 // sibling (sorted — the account expansion has no ORDER BY of its own).
 // Returns { primaryId } or { status, error }.
-async function resolveLinkOwner(kind, customerIds, customerId, last10) {
+// emailSend: the kind is not a text link but an email SEND to the resolved
+// row's own contact (a Quick Links review ask by Email / Both) — strict
+// like a prep page, whatever the kind: a number two siblings share must
+// never pick the row whose inbox receives it (GH Codex #3856 r21 P1).
+async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSend = false } = {}) {
   const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
-  const strictOwner = STRICT_OWNER_KINDS.includes(kind);
+  const strictOwner = STRICT_OWNER_KINDS.includes(kind) || emailSend;
   if (selectedId && !strictOwner) return { primaryId: selectedId };
   const phoneRows = await db('customers')
     .whereNull('deleted_at')
@@ -2115,7 +2119,7 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     const { customerIds } = recipient;
 
     const recipientFirstName = await firstNameForPhone(last10, customerIds);
-    const owner = await resolveLinkOwner(kind, customerIds, customerId, last10);
+    const owner = await resolveLinkOwner(kind, customerIds, customerId, last10, { emailSend: channel === 'email' || channel === 'both' });
     if (owner.error) return res.status(owner.status).json({ error: owner.error });
     const { primaryId } = owner;
 

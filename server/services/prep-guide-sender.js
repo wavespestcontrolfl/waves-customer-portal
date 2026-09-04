@@ -297,10 +297,17 @@ async function automationLaneLive(visit, key, customerId) {
   if (run) return true;
   const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[key];
   if (!sequenceKey) return false;
-  const enrollment = await db('automation_enrollments')
-    .where({ customer_id: customerId, template_key: sequenceKey })
-    .whereIn('status', LIVE_ENROLLMENT_STATUSES)
-    .first('id');
+  // The runner processes an enrolment only while its template is ENABLED
+  // (processDueSteps joins automation_templates on t.enabled — toggling
+  // the automation off HOLDS in-flight enrolments); a held enrolment
+  // cannot deliver, so it must not park the manual send behind
+  // prep_send_pending (GH Codex #3856 r21 P1).
+  const enrollment = await db('automation_enrollments as e')
+    .join('automation_templates as t', 't.key', 'e.template_key')
+    .where({ 'e.customer_id': customerId, 'e.template_key': sequenceKey })
+    .whereIn('e.status', LIVE_ENROLLMENT_STATUSES)
+    .where('t.enabled', true)
+    .first('e.id');
   return !!enrollment;
 }
 

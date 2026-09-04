@@ -69,11 +69,13 @@ function traceQuery(row) {
 // the full trace read (select) see the same rows.
 function livenessQuery(rows) {
   let statuses = null;
+  let enabledOnly = false; // the enrolment liveness read joins the template and requires t.enabled
   const q = {
-    where: jest.fn(() => q),
-    whereIn: jest.fn((col, vals) => { if (col === 'status') statuses = vals; return q; }),
+    join: jest.fn(() => q),
+    where: jest.fn((col, val) => { if (col === 't.enabled' && val === true) enabledOnly = true; return q; }),
+    whereIn: jest.fn((col, vals) => { if (col === 'status' || col === 'e.status') statuses = vals; return q; }),
     select: jest.fn(async () => rows),
-    first: jest.fn(async () => rows.find((r) => !statuses || statuses.includes(r.status)) || undefined),
+    first: jest.fn(async () => rows.find((r) => (!statuses || statuses.includes(r.status)) && (!enabledOnly || r.template_enabled !== false)) || undefined),
   };
   return q;
 }
@@ -132,7 +134,7 @@ beforeEach(() => {
     if (table === 'email_messages') { const q = traceQuery(manualEmailRow); manualEmailQueries.push(q); return q; }
     if (table === 'sms_log') return traceQuery(manualSmsRow);
     if (table === 'email_template_automation_runs') { lastRunsQuery = livenessQuery(runRows); return lastRunsQuery; }
-    if (table === 'automation_enrollments') return livenessQuery(enrollmentRows);
+    if (table === 'automation_enrollments' || table === 'automation_enrollments as e') return livenessQuery(enrollmentRows);
     if (table === 'automation_step_sends') return traceQuery(stepSendRow);
     if (table === 'prep_guide_views') return traceQuery(viewRow);
     return customersQuery();
@@ -628,6 +630,17 @@ describe('sendPrepToCustomer', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
 
     runRows = [{ status: 'sent', idempotency_key: 'run-k2' }];
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: true });
+  });
+
+  test('a live enrolment whose automation template is DISABLED is held, not pending — the manual send goes through (GH Codex #3856 r21 P1)', async () => {
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea' };
+    servicePrepRow = { prep_token: 'h'.repeat(32), prep_template_key: 'prep.flea' };
+    runRows = [];
+    enrollmentRows = [{ id: 'enr-1', status: 'active', template_enabled: true }];
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: false, reason: 'prep_send_pending' });
+
+    enrollmentRows = [{ id: 'enr-1', status: 'active', template_enabled: false }];
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: true });
   });
 

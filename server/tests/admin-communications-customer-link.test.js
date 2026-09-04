@@ -683,6 +683,22 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
+  test.each(['email', 'both'])('review_request by %s: 409 when two live siblings on the account share the phone — the emailed ask goes to the owner\'s own inbox, never an arbitrary row\'s (GH Codex #3856 r21 P1)', async (channel) => {
+    wireDb({ customers: makeCustomersBuilder({
+      selectResults: [
+        [{ id: CUSTOMER_UUID, account_id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002', account_id: CUSTOMER_UUID }], // number → one account
+        [{ id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002' }], // account expansion
+        [{ first_name: 'PersonA' }, { first_name: 'PersonA' }], // greeting name
+        [{ id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002' }], // phone rows on the account
+      ],
+    }) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/more than one customer on this account/);
+    });
+  });
+
   test.each(['appointment', 'service_report'])('%s: 409 when two live siblings on the account share the phone and no customer was picked — the owner that rides back is never an arbitrary row (GH Codex #3844 r9 P1)', async (kind) => {
     wireDb({ customers: makeCustomersBuilder({
       selectResults: [
