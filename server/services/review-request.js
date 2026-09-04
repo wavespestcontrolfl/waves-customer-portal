@@ -265,6 +265,26 @@ const ASK_CAP_WINDOW_DAYS = 180;
 // Link would otherwise be refused for.
 const INLINE_EMAIL_RETRY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
+// One retry for a bookkeeping write that IS a send-once guard or the
+// delivery record: a lost stamp leaves a delivered ask invisible to the
+// gates or the analytics for good. Returns whether a write landed; the
+// second failure is an error, never a shrug.
+async function stampWithRetry(makeQuery, label) {
+  try {
+    await makeQuery();
+    return true;
+  } catch (firstErr) {
+    logger.warn(`[review] ${label} failed, retrying once: ${firstErr.message}`);
+    try {
+      await makeQuery();
+      return true;
+    } catch (err) {
+      logger.error(`[review] ${label} LOST after retry: ${err.message}`);
+      return false;
+    }
+  }
+}
+
 const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. If your recent service hit the mark, would you take 15 seconds to share a quick review?";
 
 /**
@@ -1924,6 +1944,53 @@ const ReviewService = {
     return { id: row.id };
   },
 
+  /**
+   * Live eligibility for the inline email leg: the terminal guards
+   * sendGatedAsk applies (a Both row can be retried days after its text
+   * went — the customer may have reviewed or been removed since; r8 P2)
+   * plus the email half of sendOutreachTouch's consent (no prefs row = no
+   * recorded email consent = no email, fail closed; a prefs read failure
+   * fails closed too). Returns { customer, contact } or { reason }.
+   */
+  async _inlineEmailRecipient(request) {
+    const customer = await db("customers").where({ id: request.customer_id }).first();
+    if (!customer || customer.deleted_at) return { reason: "no_customer" };
+    if (customer.has_left_google_review) return { reason: "already_reviewed" };
+    const { getServiceContact } = require("./customer-contact");
+    const contact = getServiceContact(customer);
+    if (!contact.email) return { reason: "no_email" };
+    let prefs;
+    try {
+      prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
+    } catch {
+      return { reason: "prefs_unavailable" };
+    }
+    if (!prefs || prefs.review_request === false || prefs.email_enabled === false) return { reason: "email_off" };
+    return { customer, contact };
+  },
+
+  /**
+   * The dispatch claim for the inline email leg, run INSIDE the library's
+   * onQueued hook — durably, while the email still cannot have gone out.
+   * Conditional (whereNotNull): a sibling attempt that finds the leg already
+   * cleared, or a failed write, returns false and the library aborts the
+   * provider call (r9/r10 P2). True = this attempt owns the dispatch.
+   */
+  async _claimInlineEmailDispatch(requestId) {
+    let cleared;
+    try {
+      cleared = await db("review_requests")
+        .where({ id: requestId })
+        .whereNotNull("email_leg_owed_at")
+        .update({ email_leg_owed_at: null });
+    } catch (e) {
+      logger.warn(`[review] inline email owed clear failed pre-dispatch (requestId=${requestId}): ${e.message}`);
+      return false;
+    }
+    if (!cleared) logger.warn(`[review] inline email leg no longer owed at dispatch (requestId=${requestId})`);
+    return !!cleared;
+  },
+
   async sendInlineEmailCopy(requestId) {
     if (!requestId) return { sent: false, reason: "no_request" };
     // onQueued fires immediately before the provider call: a throw after it
@@ -1937,26 +2004,9 @@ const ReviewService = {
     try {
       const request = await db("review_requests").where({ id: requestId }).first();
       if (!request) return { sent: false, reason: "no_request" };
-      const customer = await db("customers").where({ id: request.customer_id }).first();
-      // Live customer eligibility, the same terminal guards sendGatedAsk
-      // applies: a Both row can be retried days after its text went, and the
-      // customer may have reviewed (or been removed) since (r8 P2).
-      if (!customer || customer.deleted_at) return { sent: false, reason: "no_customer" };
-      if (customer.has_left_google_review) return { sent: false, reason: "already_reviewed" };
-      const { getServiceContact } = require("./customer-contact");
-      const contact = getServiceContact(customer);
-      if (!contact.email) return { sent: false, reason: "no_email" };
-      let prefs = null;
-      try {
-        prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
-      } catch {
-        return { sent: false, reason: "prefs_unavailable" };
-      }
-      // Same rule as sendOutreachTouch's canEmail: no prefs row = no recorded
-      // email consent = no email (fail closed), not permissive defaults.
-      if (!prefs || prefs.review_request === false || prefs.email_enabled === false) {
-        return { sent: false, reason: "email_off" };
-      }
+      const who = await this._inlineEmailRecipient(request);
+      if (who.reason) return { sent: false, reason: who.reason };
+      const { customer, contact } = who;
       const reviewUrl = await buildReviewUrl(request, customer.id);
       const EmailLib = require("./email-template-library");
       const result = await EmailLib.sendTemplate({
@@ -1984,23 +2034,8 @@ const ReviewService = {
         // addresses in logs); the sanitized catch below is the only log.
         suppressProviderErrorLog: true,
         onQueued: async () => {
-          let cleared;
-          try {
-            cleared = await db("review_requests")
-              .where({ id: request.id })
-              .whereNotNull("email_leg_owed_at")
-              .update({ email_leg_owed_at: null });
-          } catch (e) {
-            logger.warn(`[review] inline email owed clear failed pre-dispatch (requestId=${request.id}): ${e.message}`);
-            return false;
-          }
-          if (!cleared) {
-            // A sibling attempt already owns this email — never dispatch twice.
-            logger.warn(`[review] inline email leg no longer owed at dispatch (requestId=${request.id})`);
-            return false;
-          }
-          dispatched = true;
-          return true;
+          dispatched = await this._claimInlineEmailDispatch(request.id);
+          return dispatched;
         },
       });
       // Aborted at the dispatch boundary (owed clear failed): nothing reached
@@ -2010,19 +2045,12 @@ const ReviewService = {
       // channel 'both': the row texted AND emailed — the outreach analytics
       // count it as an email touch (channel IN ('email','both')), so the
       // Both path no longer reads as SMS-only.
-      const stamp = () => db("review_requests")
-        .where({ id: request.id })
-        .whereNull("sent_at")
-        .update({ sent_at: new Date(), channel: "both" });
-      try {
-        await stamp();
-      } catch (firstErr) {
-        // Retried once: the owed leg is already cleared, so nothing ever
-        // revisits this row — a lost stamp would under-count Both email
-        // delivery in the outreach analytics for good (GH Codex #3856 r10 P2).
-        logger.warn(`[review] inline email sent_at stamp failed, retrying once (requestId=${request.id}): ${firstErr.message}`);
-        await stamp().catch((err) => logger.error(`[review] inline email sent_at stamp LOST after retry (requestId=${request.id}): ${err.message}`));
-      }
+      // The owed leg is already cleared, so nothing ever revisits this row —
+      // a lost stamp would under-count Both email delivery for good (r10 P2).
+      await stampWithRetry(
+        () => db("review_requests").where({ id: request.id }).whereNull("sent_at").update({ sent_at: new Date(), channel: "both" }),
+        `inline email sent_at stamp (requestId=${request.id})`,
+      );
       return { sent: true };
     } catch (err) {
       logger.error(`[review] inline email copy failed (requestId=${requestId} errType=${err?.name || "Error"} dispatched=${dispatched})`);
@@ -3318,6 +3346,33 @@ const ReviewService = {
     return { ok: false, retryable: true, channel, requestId: request.id, code: result?.code };
   },
 
+  /**
+   * The outcome of an outreach email whose send THREW. There is NO standalone
+   * email retry driver — processScheduled only re-sends SMS — so:
+   *  • after dispatch, one-off → SendGrid MAY hold it, and "try again" would
+   *    mint a fresh row (a fresh idempotency key) on top of it: count it as
+   *    the ask (the cooldown stamp, retried once — it IS the duplicate guard,
+   *    r11 P2) and tell the operator to check the email log (r9 P2);
+   *  • sequence touch → the cron re-runs this step under its step-stable
+   *    idempotency key: mark 'failed', report retryable;
+   *  • one-off before dispatch → nothing would ever retry it: mark 'failed',
+   *    report a hard failure so the caller never says "queued".
+   */
+  async _outreachEmailThrowOutcome({ request, manageRetryVia, dispatched }) {
+    if (dispatched && manageRetryVia !== "sequence") {
+      await stampWithRetry(
+        () => db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() }),
+        `uncertain outreach email cooldown stamp (requestId=${request.id})`,
+      );
+      return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_uncertain" };
+    }
+    await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+    if (manageRetryVia === "sequence") {
+      return { ok: false, retryable: true, channel: "email", requestId: request.id };
+    }
+    return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_send_failed" };
+  },
+
   async _sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia, introParagraph = null }) {
     // Same split as SMS (audit P1): only the SEND is in the retry-on-throw path.
     let result;
@@ -3359,54 +3414,32 @@ const ReviewService = {
       });
     } catch (err) {
       logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"} dispatched=${dispatched})`);
-      if (dispatched && manageRetryVia !== "sequence") {
-        // A one-off (admin Email-only / satisfaction) has no retry driver, and
-        // "try again" would mint a fresh row — a fresh idempotency key — so a
-        // second solicitation could land on top of one SendGrid may hold.
-        // Count it as the ask (sent_at starts the cooldown) and tell the
-        // operator to check the email log. Sequence steps keep their
-        // step-stable key and the cron's own retry.
-        // The stamp IS the duplicate-send guard (an unscheduled pending row
-        // is invisible to checkUnscheduledAskGates), so it is retried once
-        // and a second failure is an error, not a shrug (r11 P2).
-        const stamp = () => db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() });
-        try {
-          await stamp();
-        } catch (firstErr) {
-          logger.warn(`[review] uncertain outreach email stamp failed, retrying once (requestId=${request.id}): ${firstErr.message}`);
-          await stamp().catch((e) => logger.error(`[review] uncertain outreach email stamp LOST after retry (requestId=${request.id}) — cooldown guard not established: ${e.message}`));
-        }
-        return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_uncertain" };
-      }
-      // There is NO standalone email retry driver — processScheduled only
-      // re-sends SMS (it excludes channel='email'). So:
-      //  • sequence touch → the sequence cron re-runs this step; mark 'failed'
-      //    and report retryable so _runSequenceStep reschedules next_run_at.
-      //  • one-off (cron) → nothing would ever retry it; mark 'failed' and report
-      //    a hard failure so the caller doesn't tell the operator it's "queued".
-      await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
-      if (manageRetryVia === "sequence") {
-        return { ok: false, retryable: true, channel: "email", requestId: request.id };
-      }
-      return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_send_failed" };
+      return this._outreachEmailThrowOutcome({ request, manageRetryVia, dispatched });
     }
 
     // Send returned — bookkeeping failures here must NOT requeue (the email
     // library already deduped/sent). Report based on the result.
+    if (result && result.sent) {
+      const stamped = await stampWithRetry(
+        () => db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() }),
+        `outreach email sent stamp (requestId=${request.id})`,
+      );
+      if (stamped || manageRetryVia === "sequence") return { ok: true, sent: true, channel: "email", requestId: request.id };
+      // The email WENT, but the one-off row is still an unscheduled pending
+      // ask — invisible to checkUnscheduledAskGates — so reporting "sent"
+      // would invite a second click and a duplicate. Terminal, and the
+      // operator is told it went and not to resend (GH Codex #3856 r12 P2).
+      // A sequence step keeps its step-stable idempotency key, so it stays ok.
+      return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_sent_unrecorded" };
+    }
     try {
-      if (result && result.sent) {
-        await db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() });
-        return { ok: true, sent: true, channel: "email", requestId: request.id };
-      }
       await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
       return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: result?.reason || "email_blocked" };
     } catch (bookErr) {
-      logger.error(`[review] post-send email bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`);
-      // Only a SENT result avoids retry. A not-sent result keeps retryability so
-      // the cadence step isn't stopped over a bookkeeping blip.
-      return result?.sent
-        ? { ok: true, sent: true, channel: "email", requestId: request.id }
-        : { ok: false, retryable: true, channel: "email", requestId: request.id, reason: "bookkeeping_failed" };
+      logger.error(`[review] post-send email bookkeeping failed (requestId=${request.id} errType=${bookErr?.name || "Error"})`);
+      // A not-sent result keeps retryability so the cadence step isn't
+      // stopped over a bookkeeping blip.
+      return { ok: false, retryable: true, channel: "email", requestId: request.id, reason: "bookkeeping_failed" };
     }
   },
 

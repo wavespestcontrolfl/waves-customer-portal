@@ -142,15 +142,17 @@ async function nextUpcomingVisit(customerId, config) {
 // sequence enrolment whose first step stamps this key (the runner's
 // PREP_TEMPLATE_BY_SEQUENCE_KEY, mirrored here). Unknown (a read failed) is
 // NOT abandoned — fail closed on the delivered URL.
-const LIVE_RUN_STATUSES = ['queued', 'pending', 'running', 'retry_scheduled'];
 const LIVE_ENROLLMENT_STATUSES = ['queued', 'active'];
 const SEQUENCE_KEY_BY_PREP_TEMPLATE = Object.freeze({ 'prep.bed_bug': 'bed_bug', 'prep.cockroach': 'cockroach', 'prep.flea': 'flea' });
 async function reservationAbandoned(visit, takenKey, customerId) {
   if (visit.prep_sent_at) return false;
   try {
+    // The executor's own runnable set (queued / scheduled — a future
+    // run_after — / retry_scheduled) plus a run mid-send (GH Codex #3856 r12 P1).
+    const { RUNNABLE_STATUSES } = require('./email-template-automation-executor');
     const run = await db('email_template_automation_runs')
       .where({ entity_type: 'scheduled_service', entity_id: visit.id, template_key: takenKey })
-      .whereIn('status', LIVE_RUN_STATUSES)
+      .whereIn('status', [...RUNNABLE_STATUSES, 'running'])
       .first('id');
     if (run) return false;
     const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[takenKey];

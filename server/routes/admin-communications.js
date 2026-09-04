@@ -847,44 +847,46 @@ router.post('/sms', async (req, res, next) => {
 // ruling 2026-09-03). All PREP_CONFIG pests are allowed — every prep.* guide.
 const { isSupportedPestType, isSupportedChannel } = require('../services/prep-guide-sender');
 
+// Operator copy for a prep send that delivered nothing, by reason.
+const PREP_REFUSAL_COPY = {
+  customer_not_found: () => 'That customer could not be found.',
+  no_email: () => 'This customer has no email on file — choose Text instead.',
+  no_phone: () => 'This customer has no phone number on file — choose Email instead.',
+  no_upcoming_visit: () => 'This guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to — email it, or book the visit first.',
+  // One prep page per visit: the row's page already renders another guide,
+  // and re-keying it would flip every link already delivered.
+  prep_page_taken: (r) => `This guide can only be texted as a link, and the customer's next visit already carries the ${r.takenBy || 'other'} prep page — email this guide instead.`,
+  prep_link_failed: () => "Couldn't build the guide page link for this visit — try again.",
+  prep_send_busy: () => 'Another prep send for this customer is in progress — try again in a moment.',
+  unsupported_pest_type: () => 'That prep type is not available yet.',
+  unsupported_channel: () => 'Choose Email, Text, or Both.',
+};
+// Both delivered the email but not the text: why the text did not go, by the
+// link's own reason (an unplanned text); anything else = the number.
+const PREP_TEXT_DOWN_COPY = {
+  no_upcoming_visit: () => 'The text was not sent — this guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to.',
+  prep_page_taken: (r) => `The text was not sent — the customer's next visit already carries the ${r.takenBy || 'other'} prep page.`,
+  prep_link_failed: () => 'The text was not sent — the guide page link could not be built; try Text again later.',
+};
+// SendGrid MAY have accepted the email (post-dispatch throw): the page claim
+// is kept and "try again" would double-send the guide (GH Codex #3856 r8 P2).
+// The text leg is never uncertain (sendPrepSms).
+const PREP_EMAIL_UNCERTAIN_COPY = "The prep email may or may not have gone out — check the customer's email log before sending it again.";
+
 function manualPrepMessage(result) {
   if (!result.ok) {
-    // No leg confirmed, but SendGrid MAY have accepted the email: the page
-    // claim is kept and "try again" would double-send the guide (GH Codex
-    // #3856 r8 P2). The text leg is never uncertain (sendPrepSms).
-    if (result.emailUncertain) {
-      return "The prep email may or may not have gone out — check the customer's email log before sending it again.";
-    }
-    switch (result.reason) {
-      case 'customer_not_found': return 'That customer could not be found.';
-      case 'no_email': return 'This customer has no email on file — choose Text instead.';
-      case 'no_phone': return 'This customer has no phone number on file — choose Email instead.';
-      case 'no_upcoming_visit': return 'This guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to — email it, or book the visit first.';
-      // One prep page per visit: the row's page already renders another
-      // guide, and re-keying it would flip every link already delivered.
-      case 'prep_page_taken': return `This guide can only be texted as a link, and the customer's next visit already carries the ${result.takenBy || 'other'} prep page — email this guide instead.`;
-      case 'prep_link_failed': return "Couldn't build the guide page link for this visit — try again.";
-      case 'prep_send_busy': return 'Another prep send for this customer is in progress — try again in a moment.';
-      case 'unsupported_pest_type': return 'That prep type is not available yet.';
-      case 'unsupported_channel': return 'Choose Email, Text, or Both.';
-      default: return "Couldn't send the prep — check the customer's contact info and try again.";
-    }
+    if (result.emailUncertain) return PREP_EMAIL_UNCERTAIN_COPY;
+    const copy = PREP_REFUSAL_COPY[result.reason];
+    return copy ? copy(result) : "Couldn't send the prep — check the customer's contact info and try again.";
   }
   const parts = [];
   if (result.emailSent) parts.push(`emailed to ${result.emailAddress}`);
   if (result.smsSent) parts.push(`texted to ${result.phone}`);
   const sent = `${result.label} prep ${parts.join(' and ')}.`;
   if (result.reason !== 'partial') return sent;
-  // Both with one leg down: name the leg that did not go out. An email
-  // SendGrid MAY have accepted (uncertain) must not be re-sent blindly.
   if (result.failedChannel === 'sms') {
-    // An unplanned text (Both with no link to text) names the link's reason.
-    switch (result.smsLinkReason) {
-      case 'no_upcoming_visit': return `${sent} The text was not sent — this guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to.`;
-      case 'prep_page_taken': return `${sent} The text was not sent — the customer's next visit already carries the ${result.takenBy || 'other'} prep page.`;
-      case 'prep_link_failed': return `${sent} The text was not sent — the guide page link could not be built; try Text again later.`;
-      default: return `${sent} The text did not go out — send it again as Text once the number is confirmed.`;
-    }
+    const why = PREP_TEXT_DOWN_COPY[result.smsLinkReason];
+    return `${sent} ${why ? why(result) : 'The text did not go out — send it again as Text once the number is confirmed.'}`;
   }
   return result.emailUncertain
     ? `${sent} The email may or may not have gone out — check the customer's email log before sending it again.`
@@ -1812,6 +1814,9 @@ const EMAIL_LEG_REASONS = {
   email_uncertain: "The review email may or may not have gone out — check the customer's email log before sending it again",
   already_reviewed: 'This customer is already marked as having left a review',
   no_customer: 'That customer could not be found',
+  // The email WENT but the row could not be stamped (twice): the ask is
+  // invisible to the cooldown, so the operator must not click again.
+  email_sent_unrecorded: 'The review email was sent, but it could not be recorded — do not send it again',
 };
 
 async function emailReviewAskNow(primaryId) {
@@ -2271,7 +2276,10 @@ router.post('/schedule-sms', async (req, res, next) => {
     }
     // A pasted branded short link hides the /rate/ path — ask short_codes
     // what it points at (GH Codex #3856 r5 P1). Fail closed on a lookup miss.
-    const shortCodes = [...cleanBody.matchAll(SHORT_LINK_RE)].map((m) => m[1]);
+    // Lowercased like the public resolver (public-shortlinks.js): short_codes.code
+    // is case-sensitive, and a pasted /l/AbCdE still resolves for the customer
+    // (GH Codex #3856 r12 P1).
+    const shortCodes = [...cleanBody.matchAll(SHORT_LINK_RE)].map((m) => m[1].toLowerCase());
     if (shortCodes.length) {
       let reviewCodes;
       try {

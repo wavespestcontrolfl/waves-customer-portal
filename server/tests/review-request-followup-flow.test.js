@@ -887,6 +887,21 @@ describe('review request follow-up flow', () => {
       expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, terminal: true, channel: 'email', requestId: 'rr-7', reason: 'email_uncertain' });
       expect(rrUpdateOneOff).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', sent_at: expect.any(Date) }));
 
+      // A REAL send whose sent stamp is lost twice must not read as "sent":
+      // the row would be invisible to the gates (r12 P2). Once lost = fine.
+      rrUpdateOneOff.mockClear();
+      rrUpdateOneOff.mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down'));
+      EmailLib.sendTemplate.mockResolvedValueOnce({ sent: true });
+      expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, terminal: true, channel: 'email', requestId: 'rr-7', reason: 'email_sent_unrecorded' });
+      rrUpdateOneOff.mockClear();
+      rrUpdateOneOff.mockRejectedValueOnce(new Error('db blip'));
+      EmailLib.sendTemplate.mockResolvedValueOnce({ sent: true });
+      expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: true, sent: true, channel: 'email', requestId: 'rr-7' });
+      // A sequence step keeps its retry contract even when the stamp is lost.
+      rrUpdateOneOff.mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down'));
+      EmailLib.sendTemplate.mockResolvedValueOnce({ sent: true });
+      expect(await ReviewService._sendOutreachEmail({ ...args, manageRetryVia: 'sequence' })).toMatchObject({ ok: true, sent: true });
+
       // The cooldown stamp is the duplicate guard: retried once (r11 P2).
       rrUpdateOneOff.mockClear();
       rrUpdateOneOff.mockRejectedValueOnce(new Error('db blip'));

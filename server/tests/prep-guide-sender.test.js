@@ -47,10 +47,12 @@ let scheduledQueries = [];
 // Automated-lane liveness for the abandoned-reservation check: null = no live row.
 let liveRunRow = null;
 let liveEnrollmentRow = null;
+let lastRunsQuery = null;
 function livenessQuery(row) {
   const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), first: jest.fn(async () => row) };
   return q;
 }
+jest.mock('../services/email-template-automation-executor', () => ({ RUNNABLE_STATUSES: ['queued', 'scheduled', 'retry_scheduled'] }));
 // Rows affected by an awaited .update() (the prep-page claim); 1 = claimed.
 let serviceUpdateCount = 1;
 function scheduledQuery() {
@@ -91,7 +93,7 @@ beforeEach(() => {
     if (table === 'customers') return customersQuery();
     if (table === 'scheduled_services') { const q = scheduledQuery(); scheduledQueries.push(q); return q; }
     if (table === 'customer_interactions') return { insert: interactionsInsert };
-    if (table === 'email_template_automation_runs') return livenessQuery(liveRunRow);
+    if (table === 'email_template_automation_runs') { lastRunsQuery = livenessQuery(liveRunRow); return lastRunsQuery; }
     if (table === 'automation_enrollments') return livenessQuery(liveEnrollmentRow);
     return customersQuery();
   });
@@ -464,6 +466,9 @@ describe('sendPrepToCustomer', () => {
     const rekeyed = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' });
     expect(rekeyed).toMatchObject({ ok: true, smsSent: true });
     expect(serviceUpdates[0]).toEqual({ prep_template_key: 'prep.lawn' });
+    // A future run_after is stored as 'scheduled' — the executor's own
+    // runnable set, plus a run mid-send, counts as live (r12 P1).
+    expect(lastRunsQuery.whereIn).toHaveBeenCalledWith('status', ['queued', 'scheduled', 'retry_scheduled', 'running']);
 
     // A live sequence enrolment (its first step would stamp prep.flea) owns the page.
     serviceUpdates = [];

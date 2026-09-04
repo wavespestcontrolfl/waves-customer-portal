@@ -1221,6 +1221,7 @@ async function listRuns({ automationKey, limit = 100 } = {}) {
 }
 
 module.exports = {
+  RUNNABLE_STATUSES,
   TRIGGER_MAPPINGS,
   processTrigger,
   processDueRuns,
