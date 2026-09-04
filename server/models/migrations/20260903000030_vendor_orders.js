@@ -85,5 +85,13 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   // The Sticker Mule vendor row and the sticker's vendor pointer are left in
   // place (documented no-op — admin edits may live on them by now).
+  // The ledger is financial record (order numbers, charged amounts,
+  // reconciliation evidence, audit linkage): a rollback drops the table only
+  // while it is EMPTY and refuses once real rows exist — archive them first
+  // (pre-push P0; same retention contract the header documents).
+  if (await knex.schema.hasTable('vendor_orders')) {
+    const [{ count }] = await knex('vendor_orders').count({ count: '*' });
+    if (Number(count) > 0) throw new Error(`vendor_orders holds ${count} automatic-order ledger row(s) — rollback refused; archive the ledger before dropping it`);
+  }
   await knex.schema.dropTableIfExists('vendor_orders');
 };
