@@ -242,12 +242,12 @@ async function resolvePrepSource(token) {
     serviceAddress,
     viewRow: { scheduled_service_id: service.id },
     // The view stamp, fenced on the key that was RENDERED: the manual prep
-    // sender may move an abandoned reservation onto another guide, fenced
-    // on these very view columns (prep-guide-sender.js rekeyAbandonedPage /
-    // releasePrepPage), and the row lock orders the two — either this stamp
-    // lands and the re-key matches nothing, or the re-key landed first and
-    // this stamp matches nothing (0), so the handler renders the NEW guide
-    // instead of stamping a view of a page the customer never saw (GH Codex
+    // sender hands an undelivered fresh claim back fenced on these very view
+    // columns (prep-guide-sender.js releasePrepPage), and the row lock
+    // orders the two — either this stamp lands and the release matches
+    // nothing, or the release landed first and this stamp matches nothing
+    // (0), so the handler re-resolves instead of stamping a view of a page
+    // the customer never saw (GH Codex
     // #3856 r17 P0 + pre-push P1 on 92afc3361). Committed only after a
     // successful render, so an unrenderable template never pins its token.
     stampView: () => db('scheduled_services')

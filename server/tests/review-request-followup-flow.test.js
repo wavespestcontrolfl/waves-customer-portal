@@ -824,6 +824,18 @@ describe('review request follow-up flow', () => {
       expect(rrQ.whereNotIn).toHaveBeenCalledWith('status', ['completed', 'stopped', 'suppressed', 'failed', 'rated']);
       expect(rrQ.whereNull).toHaveBeenCalledWith('submitted_at');
       expect(rrQ.whereExists).toHaveBeenCalledWith(expect.any(Function));
+      // …and re-checks consent as of the write, the last fence before the
+      // provider (r23 P1): a prefs row for the customer with review_request
+      // and email_enabled not false — the recipient read's predicate.
+      const consent = rrQ.whereExists.mock.calls.map(([fn]) => fn).find((fn) => fn.name === 'emailConsent');
+      const sub = { select: jest.fn(() => sub), from: jest.fn(() => sub), whereRaw: jest.fn(() => sub) };
+      consent.call(sub);
+      expect(sub.from).toHaveBeenCalledWith('notification_prefs');
+      expect(sub.whereRaw.mock.calls.map(([sql]) => sql)).toEqual([
+        'notification_prefs.customer_id = review_requests.customer_id',
+        'COALESCE(notification_prefs.review_request, true) = true',
+        'COALESCE(notification_prefs.email_enabled, true) = true',
+      ]);
       // The dispatch claim excludes a non-promoter draft score too (r19 P2).
       const claimDraft = rrQ.where.mock.calls.map(([a]) => a).filter((a) => typeof a === 'function').pop();
       const qb2 = { whereNull: jest.fn(() => qb2), orWhere: jest.fn(() => qb2) };

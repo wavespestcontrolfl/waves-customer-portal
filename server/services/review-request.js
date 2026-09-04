@@ -2026,6 +2026,18 @@ const ReviewService = {
             .whereNull("customers.deleted_at")
             .whereRaw("COALESCE(customers.has_left_google_review, false) = false");
         })
+        // Consent as of THIS write, not the recipient read: an opt-out that
+        // lands while the library resolves the template would otherwise
+        // still be emailed — this claim is the last fence before the
+        // provider. Same predicate as _inlineEmailRecipient (a prefs row
+        // must exist; review_request / email_enabled not false) so the two
+        // never disagree (GH Codex #3856 r23 P1).
+        .whereExists(function emailConsent() {
+          this.select(db.raw("1")).from("notification_prefs")
+            .whereRaw("notification_prefs.customer_id = review_requests.customer_id")
+            .whereRaw("COALESCE(notification_prefs.review_request, true) = true")
+            .whereRaw("COALESCE(notification_prefs.email_enabled, true) = true");
+        })
         // The Both analytics stamp (channel 'both', sent_at — the cooldown
         // and follow-up anchor) rides on this same durable pre-dispatch
         // write: stamped after the send it could be lost while the owed

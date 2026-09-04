@@ -199,14 +199,11 @@ async function resolveSmsLogCustomerFallbacks(rows) {
 }
 
 // Composer-carried prep links: the provider call AND the tagger's replay
-// marker (markPrepGuidesSent — the evidence the prep sender's
-// reservationAbandoned reads) run under the manual sender's own
-// per-customer `prep-send:<customer>` lock. Between the bearer check and
-// that marker the only trace of this send is the 'sending' reservation row,
-// which the trace rightly ignores — so unlocked, a manual send of ANOTHER
-// guide could classify the visit's page as abandoned and re-key its token
-// mid-dispatch: the customer's text would name one guide and open another
-// (GH Codex #3856 r22 P0). A held lease is an operator-facing "try again",
+// marker (markPrepGuidesSent) run under the manual sender's own
+// per-customer `prep-send:<customer>` lock, so a manual send for the same
+// customer never interleaves with this dispatch's claim → send → stamp
+// (GH Codex #3856 r22 P0; the sender no longer re-keys reservations at all,
+// r23 P0). A held lease is an operator-facing "try again",
 // never a wait — reported as a not-sent result so the route's own no-send
 // exit releases every claim taken before dispatch. A throw the provider
 // accepted (err.providerOutcome.sent === true) still writes the marker

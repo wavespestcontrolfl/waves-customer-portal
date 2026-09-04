@@ -212,26 +212,21 @@ async function nextUpcomingVisits(customerId, config) {
   return upcomingFamilyVisits([customerId], config, VISIT_CANDIDATES);
 }
 
-// The automated lanes reserve a visit's prep key BEFORE anything delivers
-// (appointment-tagger mints the token at enrol/queue time; only a confirmed
-// send stamps prep_sent_at). A reservation whose lane then skipped, blocked
-// or failed would otherwise refuse every other guide for that visit forever
-// (GH Codex #3856 r11 P2). Abandoned = never delivered AND no lane can still
-// deliver it AND nothing may already have delivered it. Automated lanes
-// (pre-push Codex P0 on 8a5799a6d): a transactional run for this visit +
-// key that is still runnable / running, or that SENT (prep_sent_at stamp
-// lost), or whose email_messages row (the run's idempotency key) got past
-// the dispatch boundary — anything but blocked / aborted-before-dispatch,
-// a post-dispatch 'failed' MAY have reached SendGrid; a sequence enrolment
-// (the runner's PREP_TEMPLATE_BY_SEQUENCE_KEY, mirrored here) that is
-// live, ever sent a step, or has a step-send row past its blocked gate.
-// Manual lane (GH Codex #3856 r13 P0): a manual send keeps its key without
-// prep_sent_at when its email threw after dispatch (uncertain) or its
-// delivered stamp was lost — an email_messages row for this customer + key
-// past the dispatch boundary, an outbound sms_log row carrying the visit's
-// /prep/:token link, or the interaction marker a confirmed manual text
-// writes. Unknown (a read failed) is NOT abandoned — fail closed on the
-// delivered URL.
+// A visit's prep key is never MOVED between guides. The automated lanes
+// reserve it before anything delivers (the tagger mints the token at
+// enrol/queue time; only a confirmed send stamps prep_sent_at), and every
+// attempt to read an unstamped reservation as "abandoned" — from runs,
+// enrolments, email_messages, sms_log and the interaction marker — was
+// lossy: a real Twilio send survives a failed sms_log insert (twilio.js
+// continues on it), the composer's marker write is fail-soft, and an
+// inserted-but-unsent composer draft leaves no trace at all, so absence of
+// evidence re-keyed tokens the customer already held (GH Codex #3856 r23
+// P0 / P2 — after r11, r13, r14, r16, r17 each patched one gap). A keyed
+// page is released only by the fresh-claim release when nothing delivers;
+// a reservation orphaned by a crash keeps the visit's page for its guide
+// (text refuses prep_page_taken, the email still goes with the portal link)
+// — rare, operator-visible, recoverable. Sequence enrolments live in the
+// runner's PREP_TEMPLATE_BY_SEQUENCE_KEY, mirrored here.
 const LIVE_ENROLLMENT_STATUSES = ['queued', 'active'];
 const SEQUENCE_KEY_BY_PREP_TEMPLATE = Object.freeze({ 'prep.bed_bug': 'bed_bug', 'prep.cockroach': 'cockroach', 'prep.flea': 'flea' });
 // The manual email's trigger id — VISIT-scoped, so a guide emailed for an
@@ -241,57 +236,11 @@ function manualPrepTriggerId(customerId, templateKey, visitId) {
   return `manual_prep:${customerId}:${templateKey}:${visitId || 'none'}`;
 }
 
-// Any trace that a MANUAL send of takenKey reached (or may have reached)
-// the customer on THIS visit — see reservationAbandoned. Throws on a read
-// failure (the caller fails closed).
-async function manualDeliveryTrace(visit, takenKey, customerId) {
-  const pastDispatch = (q) => q
-    .whereNot('status', 'blocked')
-    .whereRaw("COALESCE(error_message, '') <> ?", [ABORTED_BEFORE_DISPATCH])
-    .first('id');
-  const email = await pastDispatch(db('email_messages')
-    .where({ trigger_event_id: manualPrepTriggerId(customerId, takenKey, visit.id) }));
-  if (email) return true;
-  // Rows the parent sender wrote carry the customer-wide legacy id
-  // (manual_prep:<customer>:<key>); an email-only customer whose stamp
-  // was lost has no other trace, so a legacy row sent since this visit was
-  // created keeps the page — conservative, visit-bounded (GH Codex #3856
-  // r14 P0). No created_at to bound on = any legacy row keeps it.
-  let legacy = db('email_messages').where({ trigger_event_id: `manual_prep:${customerId}:${takenKey}` });
-  if (visit.created_at) legacy = legacy.where('created_at', '>=', visit.created_at);
-  if (await pastDispatch(legacy)) return true;
-  if (visit.prep_token) {
-    const text = await db('sms_log')
-      .where('direction', 'outbound')
-      .whereNotIn('status', ['sending', 'failed', 'undelivered', 'blocked', 'canceled'])
-      .where('message_body', 'like', `%/prep/${visit.prep_token}%`)
-      .first('id');
-    if (text) return true;
-  }
-  // The confirmed-text marker is customer + pest wide (the tagger's replay
-  // guard) — bounded to this visit's lifetime so an older appointment's
-  // prep text cannot pin a later visit's reservation.
-  const pestType = Object.keys(PREP_CONFIG).find((k) => PREP_CONFIG[k].emailTemplateKey === takenKey);
-  if (pestType && visit.created_at) {
-    const marker = await db('customer_interactions')
-      .where({ customer_id: customerId, interaction_type: 'sms_outbound', subject: `${pestType} prep info sent` })
-      .where('created_at', '>=', visit.created_at)
-      .first('id');
-    if (marker) return true;
-  }
-  return false;
-}
-
-const ABORTED_BEFORE_DISPATCH = 'aborted_by_caller_before_dispatch';
-
-// Any automated lane that can still deliver takenKey on this visit, or may
-// already have — see reservationAbandoned. Throws on a read failure.
-// Is an automated lane still ABOUT to deliver takenKey on this visit — a
+// Is an automated lane still ABOUT to deliver key on this visit — a
 // transactional run that is runnable / running (the executor's own set,
 // GH Codex #3856 r12 P1) or a live sequence enrolment whose first step
-// stamps that key? Used both to keep a reservation (automatedDeliveryTrace)
-// and to refuse a manual send of the SAME guide that would duplicate it
-// (pre-push Codex P1 on 52bbb43b1). Throws on a read failure.
+// stamps that key? Refuses a manual send of the SAME guide that would
+// duplicate it (pre-push Codex P1 on 52bbb43b1). Throws on a read failure.
 async function automationLaneLive(visit, key, customerId) {
   const { RUNNABLE_STATUSES } = require('./email-template-automation-executor');
   const live = [...RUNNABLE_STATUSES, 'running'];
@@ -302,69 +251,43 @@ async function automationLaneLive(visit, key, customerId) {
   if (run) return true;
   const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[key];
   if (!sequenceKey) return false;
-  // The runner processes an enrolment only while its template is ENABLED
-  // (processDueSteps joins automation_templates on t.enabled — toggling
-  // the automation off HOLDS in-flight enrolments); a held enrolment
-  // cannot deliver, so it must not park the manual send behind
-  // prep_send_pending (GH Codex #3856 r21 P1).
-  const enrollment = await db('automation_enrollments as e')
-    .join('automation_templates as t', 't.key', 'e.template_key')
-    .where({ 'e.customer_id': customerId, 'e.template_key': sequenceKey })
-    .whereIn('e.status', LIVE_ENROLLMENT_STATUSES)
-    .where('t.enabled', true)
-    .first('e.id');
+  // Held enrolments count too: toggling the automation off HOLDS an active
+  // enrolment (processDueSteps joins t.enabled; next_send_at stays in the
+  // past) and re-enabling resumes it — so a manual send that went ahead
+  // while it was held would be followed by the same prep on the next tick
+  // (GH Codex #3856 r23 P1, superseding r21's enabled-only read). A
+  // confirmed manual delivery settles the enrolment instead
+  // (settleHeldEnrollment).
+  const enrollment = await db('automation_enrollments')
+    .where({ customer_id: customerId, template_key: sequenceKey })
+    .whereIn('status', LIVE_ENROLLMENT_STATUSES)
+    .first('id');
   return !!enrollment;
 }
 
-async function automatedDeliveryTrace(visit, takenKey, customerId) {
-  if (await automationLaneLive(visit, takenKey, customerId)) return true;
-  // A run that SENT (prep_sent_at stamp lost) …
-  const runs = await db('email_template_automation_runs')
-    .where({ entity_type: 'scheduled_service', entity_id: visit.id, template_key: takenKey })
-    .select('status', 'idempotency_key');
-  if (runs.some((r) => r.status === 'sent')) return true;
-  const runKeys = runs.map((r) => r.idempotency_key).filter(Boolean);
-  if (runKeys.length) {
-    const dispatched = await db('email_messages')
-      .whereIn('idempotency_key', runKeys)
-      .whereNot('status', 'blocked')
-      .whereRaw("COALESCE(error_message, '') <> ?", [ABORTED_BEFORE_DISPATCH])
-      .first('id');
-    if (dispatched) return true;
-  }
-  const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[takenKey];
-  if (!sequenceKey) return false;
-  const enrollments = await db('automation_enrollments')
-    .where({ customer_id: customerId, template_key: sequenceKey })
-    .select('id', 'status', 'last_sent_at');
-  if (enrollments.some((e) => e.last_sent_at)) return true;
-  const enrollmentIds = enrollments.map((e) => e.id);
-  if (enrollmentIds.length) {
-    // The runner marks a step send 'blocked' before the provider and
-    // 'failed' on any throw — before or after dispatch — so only blocked is
-    // proof of no delivery.
-    const stepSend = await db('automation_step_sends')
-      .whereIn('enrollment_id', enrollmentIds)
-      .whereNot('status', 'blocked')
-      .first('id');
-    if (stepSend) return true;
-  }
-  return false;
-}
-
-async function reservationAbandoned(visit, takenKey, customerId) {
-  // Delivered, or OPENED: a page the customer has already viewed (the
-  // public route stamps prep_first_viewed_at / prep_view_count and logs a
-  // prep_guide_views row) must never change content (GH Codex #3856 r16 P0).
-  if (visit.prep_sent_at || visit.prep_first_viewed_at || Number(visit.prep_view_count) > 0) return false;
+// After a confirmed manual delivery of a sequence-backed guide (flea /
+// bed bug / cockroach), the customer's live enrolment for that sequence is
+// settled — cancelled with a reason, the runner's own cancel shape
+// (cancelEnrollmentForSuppression) — so a held one cannot resume and send
+// the same prep again (GH Codex #3856 r23 P1). automationLaneLive lets the
+// manual send through only when no enrolment is live for the key; this
+// closes the held case, and a lost write is logged, never a failed send.
+async function settleHeldEnrollment(customerId, templateKey) {
+  const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[templateKey];
+  if (!sequenceKey) return;
   try {
-    const viewed = await db('prep_guide_views').where({ scheduled_service_id: visit.id }).first('id');
-    if (viewed) return false;
-    if (await automatedDeliveryTrace(visit, takenKey, customerId)) return false;
-    return !(await manualDeliveryTrace(visit, takenKey, customerId));
+    await db('automation_enrollments')
+      .where({ customer_id: customerId, template_key: sequenceKey })
+      .whereIn('status', LIVE_ENROLLMENT_STATUSES)
+      .update({
+        status: 'cancelled',
+        next_send_at: null,
+        completed_at: new Date(),
+        metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify('manual_prep_sent')]),
+        updated_at: new Date(),
+      });
   } catch (err) {
-    logger.warn(`[prep-guide-sender] prep reservation liveness check failed for service ${visit.id}: ${err.message}`);
-    return false;
+    logger.warn(`[prep-guide-sender] enrolment settle failed for customer ${customerId} (${sequenceKey}): ${err.message}`);
   }
 }
 
@@ -397,7 +320,7 @@ async function claimPrepPage(serviceId, templateKey) {
 // our own key is released, and only while no delivery of it was ever
 // stamped (markServicePrepSent sets prep_sent_at — the delivered key stays;
 // pre-push Codex P1 on dde34633e). Callers release fresh claims only.
-// Fenced on the view columns like rekeyAbandonedPage: a page the customer
+// Fenced on the view columns: a page the customer
 // opened between the claim and this release must keep resolving (the
 // public read stamps the view in the same statement, so the row lock orders
 // the two; pre-push Codex P0 on fb2d7d01f).
@@ -425,28 +348,6 @@ async function releasePrepPage(serviceId, templateKey) {
 //   no_upcoming_visit — nothing for a page to describe
 //   prep_page_taken   — the row's page belongs to another guide (takenBy)
 //   prep_link_failed  — visit lookup or token mint threw (retryable)
-// An abandoned reservation moves onto this guide atomically (only while
-// still that key, still undelivered AND still unviewed) — a FRESH claim like
-// any other, handed back if nothing delivers. 0 = someone else moved first.
-// The view columns in the WHERE are the fence against a concurrent public
-// page load: /prep/:token stamps the view in the SAME statement that reads
-// the key (prep-public.js), so the row lock orders the two — either the view
-// lands first and this update matches nothing, or this update lands first
-// and the customer's load renders the new guide (GH Codex #3856 r17 P0).
-async function rekeyAbandonedPage(visit, templateKey) {
-  try {
-    return Number(await db('scheduled_services')
-      .where({ id: visit.id, prep_template_key: visit.prep_template_key })
-      .whereNull('prep_sent_at')
-      .whereNull('prep_first_viewed_at')
-      .whereRaw('COALESCE(prep_view_count, 0) = 0')
-      .update({ prep_template_key: templateKey }));
-  } catch (err) {
-    logger.warn(`[prep-guide-sender] prep page re-key failed for service ${visit.id}: ${err.message}`);
-    return 0;
-  }
-}
-
 async function resolvePrepVisit(customer, config) {
   let visits;
   try {
@@ -457,10 +358,9 @@ async function resolvePrepVisit(customer, config) {
   }
   if (!visits.length) return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'no_upcoming_visit' };
   // Soonest first: a free (or same-guide) page wins; a page another guide
-  // legitimately owns is skipped for the next visit; an abandoned
-  // reservation is re-keyed. Nothing usable = the soonest visit's refusal.
+  // owns — delivered or merely reserved — is skipped for the next visit.
+  // Nothing usable = the soonest visit's refusal.
   let visit = null;
-  let claim = null;
   let taken = null;
   for (const candidate of visits) {
     if (!candidate.prep_template_key) {
@@ -486,18 +386,14 @@ async function resolvePrepVisit(customer, config) {
       visit: candidate, prepUrl: null, ownsPage: false, linkReason: 'prep_page_taken',
       takenBy: guideLabelForTemplateKey(candidate.prep_template_key),
     };
-    if (!(await reservationAbandoned(candidate, candidate.prep_template_key, customer.id))) continue;
-    if (!(await rekeyAbandonedPage(candidate, config.emailTemplateKey))) continue;
-    visit = candidate;
-    claim = { owned: true, fresh: true };
-    break;
   }
   if (!visit) return taken;
   // Claim BEFORE the mint: ensureServicePrepToken initializes an unset key
   // itself, so a claim after it could never be fresh and a failed first
   // send would reserve the page forever (pre-push Codex P1 on cd6de743e).
+  let claim = null;
   try {
-    if (!claim) claim = await claimPrepPage(visit.id, config.emailTemplateKey);
+    claim = await claimPrepPage(visit.id, config.emailTemplateKey);
     if (!claim.owned) {
       return {
         visit, prepUrl: null, ownsPage: false, linkReason: 'prep_page_taken',
@@ -817,7 +713,10 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     }
 
     await deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result });
-    if (result.ok) await logPrepInteraction({ customer, config, contacts, result, pestType, actorId });
+    if (result.ok) {
+      await logPrepInteraction({ customer, config, contacts, result, pestType, actorId });
+      await settleHeldEnrollment(customer.id, config.emailTemplateKey);
+    }
     return result;
   }, { recordHealth: false, waitForSlot: false });
   if (wasLockSkipped(outcome)) return { ...result, reason: 'prep_send_busy' };
