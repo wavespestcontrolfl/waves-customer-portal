@@ -1023,6 +1023,16 @@ describe('Codex r1 on #3854', () => {
     expect((await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'requeue', approvedBy: 'Adam', followUp: true })).ok).toBe(true);
     expect(placement(t.db).follow_up_skipped_reason).toBeNull();
   });
+  test('audit: an AUTO follow-up whose LOCKED text no longer passes the follow-up\'s own review (a subject edited off "Re: …") is refused automatically; the owner may still send it', async () => {
+    const s = await conversation();
+    expect(followUpRow(s.db).level).toBe('AUTO_OUTREACH');
+    placement(s.db).follow_up_subject = 'One more resource for you';
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/no longer clean/) });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    expect(placement(s.db).follow_up_status).toBe('drafted');
+    gmail.sendMessage.mockResolvedValue({ id: 'msg2', threadId: 'thr1' });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(s.db)), now: LATER })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/no longer clean/) }); // an AUTO row: no approval binds an unclean text to it — the nightly re-decides it OWNER_OUTREACH first
+  });
   test('P2: a crashed follow-up send is aged from follow_up_attempted_at — a verifier bump of updated_at never hides it', async () => {
     const s = await conversation();
     Object.assign(placement(s.db), { follow_up_status: 'sending', follow_up_send_token: 'tok', follow_up_attempted_at: new Date(Date.now() - 60 * 60 * 1000), updated_at: new Date() }); // crashed an hour ago; the verifier touched the row just now

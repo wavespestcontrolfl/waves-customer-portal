@@ -620,7 +620,7 @@ async function sendAuthority(trx, { placement, path, policy, mode, draft, review
   // its decision open (a price the owner must enter, a signed agreement); a payment deferred past the send is not a hold
   const hold = await require('./link-authority-bridge').openOwnerHold(trx, { placement, path, exceptRowId: row.id });
   if (hold) return { ok: false, code: 'not_authorized', error: `another owner decision on this placement is still open (${hold.dimension}: ${hold.level}) — the send would clear its park; decide it on the card first` };
-  const level = sendLevel({ row, draft, review, mode });
+  const level = sendLevel({ row, placement, draft, review, mode, followUp });
   if (!level.ok) return level;
   if (!level.approvalLevel) return { ok: true, rowId: row.id, approvalId: null, level: row.level };
   const approval = await bindSendApproval(trx, { ...instance, placement, path, draft, review, approvalLevel: level.approvalLevel, approvedBy, now, followUp });
@@ -702,11 +702,14 @@ const stillAutoOutreach = (row, { path, domain, policy, score }, followUp = fals
  * approval: on an AUTO_OUTREACH row the click writes an OWNER_OUTREACH approval carrying the acknowledged match. An
  * owner level sends on the owner's click only. Returns { ok, approvalLevel } (null = nothing to write) or a refusal.
  */
-function sendLevel({ row, draft, review, mode }) {
+function sendLevel({ row, placement, draft, review, mode, followUp }) {
   const ownerResolvesMatch = mode === 'owner' && review.kind === 'ambiguous';
   if (row.level === P.LEVELS.AUTO_OUTREACH) {
-    // the LOCKED text of this send (the pitch, or the follow-up) is what the mandate re-reviews
-    if (!M.reviewDraft({ to: draft.outreach_to_email, subject: draft.outreach_subject, body: draft.outreach_body }).clean) return { ok: false, code: 'not_authorized', error: 'the draft changed since the automatic decision and is no longer clean — the nightly bridge re-decides it for the owner' };
+    // the LOCKED text of this send is what the mandate re-reviews — the follow-up by its OWN review (the follow-up's
+    // shape against the pitch's subject, the owner-routing marker), the pitch by the bare text (`draft` IS the locked
+    // row's columns in both cases)
+    const clean = followUp ? M.followUpReview(placement).clean : M.reviewDraft({ to: draft.outreach_to_email, subject: draft.outreach_subject, body: draft.outreach_body }).clean;
+    if (!clean) return { ok: false, code: 'not_authorized', error: 'the draft changed since the automatic decision and is no longer clean — the nightly bridge re-decides it for the owner' };
     return { ok: true, approvalLevel: ownerResolvesMatch ? P.LEVELS.OWNER_OUTREACH : null };
   }
   if (mode === 'auto') return { ok: false, code: 'not_authorized', error: `${row.level}: the owner's click is the send authority` };
