@@ -38,11 +38,17 @@ const SCAN_LIMIT = 200;
  * customer stored "OConnor" while missing one stored "O'Connor" — two such
  * customers must be two surname matches, not one (GH codex r4 P1). Hyphens
  * stay: a hyphen joins two surnames, whose suffix is a different surname.
+ * A letter NFD cannot fold to a-z (ß ø ł æ …) FAILS CLOSED to '': deleting
+ * it manufactured a surname too ("Groß" → "gro"), and no transliteration
+ * can be trusted to agree with the record ("Gross"? "Groß"?) — such a name
+ * offers no surname evidence (GH codex r7 P1).
  */
 function normalizeName(value) {
-  return String(value || '')
+  const folded = String(value || '')
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
+    .toLowerCase();
+  if (/\p{L}/u.test(folded.replace(/[a-z]/g, ''))) return '';
+  return folded
     .replace(/[^a-z0-9\- ]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -344,7 +350,10 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
  * customer's own row is a conflicting pair. True on a truncated scan (the
  * window can't be proven clean). The pair predicate repeats JS-side, as in
  * the main scan. Archived customers count (GH codex r6 P1), as in the main
- * scan.
+ * scan. An in-window LATEST click with NO stamped location counts too: its
+ * row is invisible to the main scan when the first pair is stamped for
+ * another location (GH codex r7 P1), and an unlocated tap could have landed
+ * on any form — ambiguity, not proof of elsewhere, but ambiguity is enough.
  */
 async function surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames }) {
   const rows = await conn('review_requests as rr')
@@ -352,21 +361,22 @@ async function surnameClickerElsewhere({ conn, reviewLocationId, windowStart, wi
     .whereNotNull('rr.redirected_at')
     .where('rr.google_review_clicked', true)
     .whereRaw(
-      '((rr.google_location IS NOT NULL AND rr.google_location != ? AND rr.redirected_at >= ? AND rr.redirected_at <= ?) OR (rr.last_google_location IS NOT NULL AND rr.last_google_location != ? AND rr.last_redirected_at >= ? AND rr.last_redirected_at <= ?))',
-      [reviewLocationId, windowStart, windowEnd, reviewLocationId, windowStart, windowEnd],
+      '((rr.google_location IS NOT NULL AND rr.google_location != ? AND rr.redirected_at >= ? AND rr.redirected_at <= ?) OR (rr.last_google_location IS NOT NULL AND rr.last_google_location != ? AND rr.last_redirected_at >= ? AND rr.last_redirected_at <= ?) OR (rr.last_google_location IS NULL AND rr.last_redirected_at >= ? AND rr.last_redirected_at <= ?))',
+      [reviewLocationId, windowStart, windowEnd, reviewLocationId, windowStart, windowEnd, windowStart, windowEnd],
     )
     .limit(SCAN_LIMIT)
     .select('rr.customer_id', 'rr.redirected_at', 'rr.last_redirected_at', 'rr.google_location', 'rr.last_google_location', 'rr.google_review_clicked', 'c.last_name');
   if (rows.length >= SCAN_LIMIT) return true;
-  const elsewhereInWindow = (ts, loc) => {
+  const inWindow = (ts) => {
     const at = ts ? new Date(ts) : null;
-    return Boolean(loc) && loc !== reviewLocationId
-      && Boolean(at) && !Number.isNaN(at.getTime()) && at >= windowStart && at <= windowEnd;
+    return Boolean(at) && !Number.isNaN(at.getTime()) && at >= windowStart && at <= windowEnd;
   };
+  const elsewhereInWindow = (ts, loc) => Boolean(loc) && loc !== reviewLocationId && inWindow(ts);
   return rows.some((row) => row.google_review_clicked === true
     && surnames.includes(normalizeName(row.last_name))
     && (elsewhereInWindow(row.redirected_at, row.google_location)
-      || elsewhereInWindow(row.last_redirected_at, row.last_google_location)));
+      || elsewhereInWindow(row.last_redirected_at, row.last_google_location)
+      || (!row.last_google_location && inWindow(row.last_redirected_at))));
 }
 
 // ── Confident auto-link (GATE_REVIEW_CLICK_AUTOLINK; the click_name rung also

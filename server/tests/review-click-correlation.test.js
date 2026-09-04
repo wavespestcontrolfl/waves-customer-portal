@@ -350,6 +350,11 @@ describe('reviewerSurnames', () => {
     // Digits stay: a handle suffix is not the surname it resembles (GH
     // codex r6 P1).
     expect(reviewerSurnames('Sunshine Smith2')).toEqual(['sunshine smith2', 'smith2']);
+    // A letter NFD cannot fold to a-z fails closed: no surname evidence at
+    // all, never a manufactured one ("gro") (GH codex r7 P1).
+    expect(reviewerSurnames('Pat Groß')).toEqual([]);
+    expect(reviewerSurnames('Søren Kierkegaard')).toEqual([]);
+    expect(reviewerSurnames('Łukasz Nowak')).toEqual([]);
     expect(reviewerSurnames('Dana B.')).toEqual(['dana b']);
     expect(reviewerSurnames('')).toEqual([]);
   });
@@ -430,6 +435,8 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect(clause[1].map((b) => (b instanceof Date ? b.toISOString() : b))).toEqual([
       'bradenton', '2026-08-04T18:00:00.000Z', '2026-08-08T00:00:00.000Z',
       'bradenton', '2026-08-04T18:00:00.000Z', '2026-08-08T00:00:00.000Z',
+      // the unlocated in-window latest-click arm (GH codex r7 P1)
+      '2026-08-04T18:00:00.000Z', '2026-08-08T00:00:00.000Z',
     ]);
     // The same row with its Parrish re-tap OUTSIDE the window is no clicker
     // elsewhere: the surname links.
@@ -444,6 +451,30 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect((await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'Sunshine Smith' }, { conn }))?.rung).toBe('click_name');
     expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'Sunshine Smith2' }, { conn })).toBeNull();
     expect((await findLikelyReviewers({ ...REVIEW, reviewer_name: 'Sunshine Smith2' }, { conn })).map((c) => c.nameMatch)).toEqual([false, false]);
+  });
+
+  test('a letter NFD cannot fold fails closed: "Pat Groß" never links a Gro clicker, and a "Groß" record never name-matches (GH codex r7 P1)', async () => {
+    const legacy = { last_redirected_at: null, last_google_location: null };
+    const conn = makeConn({ clickRows: [northgate({ last_name: 'Gro', ...legacy }), other({ last_name: 'Gross' })] });
+    expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'Pat Groß' }, { conn })).toBeNull();
+    expect((await findLikelyReviewers({ ...REVIEW, reviewer_name: 'Pat Groß' }, { conn })).map((c) => c.nameMatch)).toEqual([false, false]);
+    const stored = makeConn({ clickRows: [northgate({ last_name: 'Groß', ...legacy }), other()] });
+    expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'Pat Gro' }, { conn: stored })).toBeNull();
+  });
+
+  test('refuses when a same-surname row\'s first pair is stamped elsewhere OUT of the window and its latest tap is in-window but UNSTAMPED — invisible to the main scan, counted by the inverse one (GH codex r7 P1)', async () => {
+    const legacy = { last_redirected_at: null, last_google_location: null };
+    const hidden = northgate({
+      customer_id: 'cust-northgate-4', first_name: 'Blake',
+      google_location: 'parrish', redirected_at: '2026-08-01T12:00:00.000Z', // first pair: elsewhere, out of window
+      last_google_location: null, last_redirected_at: '2026-08-07T16:00:00.000Z', // latest: in window, unlocated
+    });
+    const conn = makeConn({ clickRows: [northgate(legacy), hidden, other()] });
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+    expect(conn.captured.whereRaw.some(([sql]) => String(sql).includes('rr.last_google_location IS NULL AND rr.last_redirected_at >= ?'))).toBe(true);
+    // The same row with its latest tap OUT of the window is no ambiguity.
+    const stale = makeConn({ clickRows: [northgate(legacy), { ...hidden, last_redirected_at: '2026-08-01T13:00:00.000Z' }, other()] });
+    expect((await findConfidentClickMatch(REVIEW, { conn: stale }))?.rung).toBe('click_name');
   });
 
   test('an ARCHIVED same-surname clicker still counts as ambiguity — unselectable, never suggested, never linked (GH codex r6 P1)', async () => {
