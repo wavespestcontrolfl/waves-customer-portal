@@ -412,6 +412,27 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
+  test('appointment: the pick skips a candidate the page would not render as upcoming — grouped state included — and takes the next one (GH Codex #3844 r14 P2)', async () => {
+    const NEXT_WEEK = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86_400_000));
+    const appointmentPublic = require('./../routes/appointment-public');
+    const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit');
+    try {
+      const grouped = { id: 'v-grp', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '08:00', status: 'confirmed', visit_id: 'grp-1' };
+      const later = { id: 'v-later', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '13:00', status: 'confirmed' };
+      spy.mockResolvedValueOnce({ state: 'pending_rebook', phase: null }).mockResolvedValueOnce({ state: 'upcoming', phase: null });
+      wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([grouped, later]) });
+      builders.buildAppointmentPageLink.mockResolvedValue({ url: 'https://wavespest.co/a/abc', line: 'x', appointment: { id: 'v-later' } });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'appointment' });
+        expect(res.status).toBe(200);
+      });
+      expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(expect.objectContaining({ id: 'v-later' }));
+      expect(spy).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 'v-grp', visit_id: 'grp-1' }));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('appointment: the route picks the soonest live visit and hands the row to the builder', async () => {
     // A week out in ET — a fixed near-today date rots into pageState 'past' (pre-push Codex P1).
     const NEXT_WEEK = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86_400_000));

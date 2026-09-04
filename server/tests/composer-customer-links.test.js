@@ -1103,6 +1103,27 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
     });
 
+    test('a scheduled-service prep page re-reads its visit\'s state at the send — not upcoming (or gone) refuses, upcoming passes; a project prep has no visit to check (GH Codex #3844 r14 P2)', async () => {
+      const TOMORROW = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+      resolvePrepSource.mockResolvedValue({ templateKey: 'prep.flea', customerId: 'c1', viewRow: { scheduled_service_id: 'v1' } });
+      for (const visit of [
+        { id: 'v1', customer_id: 'c1', status: 'cancelled' },
+        { id: 'v1', customer_id: 'c1', status: 'en_route' },
+        { id: 'v1', customer_id: 'c1', status: 'rescheduled' },
+        null,
+      ]) {
+        mockBuilders.scheduled_services = chainBuilder({ firstRow: visit });
+        expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/visit is no longer upcoming/);
+        expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ id: 'v1' });
+      }
+      mockBuilders.scheduled_services = chainBuilder({ firstRow: { id: 'v1', customer_id: 'c1', status: 'confirmed', scheduled_date: TOMORROW } });
+      expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).ok).toBe(true);
+      resolvePrepSource.mockResolvedValue({ templateKey: 'prep.project.termite', customerId: 'c1', viewRow: { project_id: 'p1' } });
+      mockBuilders.scheduled_services = chainBuilder({ firstRow: null });
+      expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).ok).toBe(true);
+      expect(mockBuilders.scheduled_services.where).not.toHaveBeenCalled();
+    });
+
     test('an expired (unresolvable) token refuses', async () => {
       resolvePrepSource.mockResolvedValue(null);
       expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/prep guide link has expired/);

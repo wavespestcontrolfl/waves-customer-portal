@@ -859,6 +859,20 @@ async function checkPrepLinks(ctx, preps) {
     // A page with no customer owner still shows a service address — nothing
     // can bind it to a recipient, so it never rides an SMS (pre-push Codex P0).
     if (!source.customerId) return refuseSend('This prep guide page has no customer on file — remove the prep link before sending.');
+    // A scheduled-service prep page stays resolvable until its token
+    // expires, so the visit's state is re-read NOW like the appointment
+    // seam's: a visit underway, completed, cancelled or moved to a pending
+    // rebook since the insert is not the "upcoming" treatment the text
+    // names (GH Codex #3844 r14 P2). Project preps carry no visit.
+    const serviceId = source.viewRow?.scheduled_service_id;
+    if (serviceId) {
+      const appointmentPublic = require('../routes/appointment-public');
+      const visit = await db('scheduled_services').where({ id: serviceId })
+        .first('id', 'customer_id', 'status', 'scheduled_date', 'window_start', 'window_end', 'source_action', 'customer_confirmed', 'visit_id');
+      if (!visit || appointmentPublic.dispatchOwnedUnreviewed(visit) || (await appointmentPublic.pageStateForVisit(visit)).state !== 'upcoming') {
+        return refuseSend('This prep guide\'s visit is no longer upcoming — remove the prep link and insert a fresh one.');
+      }
+    }
     const bad = await ownedByRecipient(ctx, source.customerId, 'prep guide link');
     if (bad) return bad;
     ctx.bearers += 1;

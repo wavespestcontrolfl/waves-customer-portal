@@ -1472,8 +1472,12 @@ async function soonestUpcomingVisit(customerIds, { statuses = ['pending', 'confi
       ])
       .limit(PAGE)
       .offset(offset)
-      .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status');
-    svc = candidates.find((c) => !skip(c)) || null;
+      .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status', 'visit_id', 'source_action', 'customer_confirmed');
+    // `skip` may be async (the composer's pick reads the grouped page state).
+    svc = null;
+    for (const c of candidates) {
+      if (!(await skip(c))) { svc = c; break; }
+    }
     if (svc || candidates.length < PAGE) break;
   }
   return svc;
@@ -1842,7 +1846,11 @@ function composerLinkBuilders() {
     // builder takes the picked row so the pick stays route-owned.
     appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids, {
     statuses: ['pending', 'confirmed'],
-    skip: (svc) => require('./appointment-public').pageState(svc).state !== 'upcoming',
+    // The state the page would render — grouped (a sibling in pending rebook
+    // or underway, or an unreadable membership) or the row's own — so the
+    // pick never inserts a link the send seam then refuses while a later
+    // genuinely upcoming visit goes unconsidered (GH Codex #3844 r14 P2).
+    skip: async (svc) => (await require('./appointment-public').pageStateForVisit(svc)).state !== 'upcoming',
     })),
     // The prep page shows its customer's name and address and the /sms
     // send requires the recipient to own it (GH Codex #3844 r3 P2), so
