@@ -44,12 +44,6 @@ async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKe
   // in a fixed order (codex #3834 r16 P2). Neither → never a duplicate.
   const serviceLabel = serviceKey ? null : String(serviceInterest || '').trim();
   if (!emailLc || phoneDigits.length !== 10 || !addressLc || (!serviceKey && !serviceLabel)) return null;
-  // Dark until GATE_WIZARD_LEAD_DEDUPE=true (read at call time): with the
-  // gate off no run is ever a duplicate target, so every run files as 'new'
-  // exactly as before this lane — the conversion side of a repeat lands in
-  // its own PR, and labelling ahead of it would leave accepted reruns
-  // crediting no lead.
-  if (!require('../config/feature-gates').gateEnvValue('GATE_WIZARD_LEAD_DEDUPE')) return null;
   const prior = await dbh('leads')
     .where(serviceKey ? { lead_type: 'quote_wizard', service_key: serviceKey } : { lead_type: 'quote_wizard', service_key: null, service_interest: serviceLabel })
     .whereNull('deleted_at')
@@ -1870,6 +1864,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const scopedToTypedIdentity = (qb) => qb
       .where({ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey, service_interest: serviceInterest })
       .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [observedExtraCount]);
+    // Repeat-run dedupe is DARK until GATE_WIZARD_LEAD_DEDUPE=true (read at
+    // call time). Off: no run is looked up as a repeat, so every run files
+    // as 'new' exactly as before this lane, and a row labelled while the
+    // gate was on keeps the marker it carries — the token path neither
+    // relabels nor re-validates it (the kill switch must not reopen the
+    // pipeline it labelled; pre-push P1). The conversion side of a repeat
+    // lands in its own PR; labelling ahead of it would leave accepted
+    // reruns crediting no lead.
+    const dedupeOn = require('../config/feature-gates').gateEnvValue('GATE_WIZARD_LEAD_DEDUPE');
     if (leadId) {
       // OWNERSHIP (atomic): leadId is a client-supplied id on a public,
       // PII-accepting write surface, so prove ownership the same way /upsell
@@ -1942,7 +1945,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // property-lookup stage stored counts too (the update above carried
         // it forward when this stage omitted the optional field, r12 P1).
         const widerInquiry = additionalProperties.length > 0 || (parseExtracted(lead.extracted_data)?.additional_properties?.length > 0);
-        duplicateOfLeadId = widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
+        duplicateOfLeadId = !dedupeOn ? stored : widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
         // Scoped to the status just read: a staff transition landing in
         // between (won / lost / contacted) wins, and this public retry
         // updates 0 rows instead of regressing it (codex #3834 r9 P1). On 0
@@ -2005,7 +2008,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // a trusted-path job (the office merge). Two concurrent first runs can
     // still both land 'new' — the office merges those by hand, as before.
     if (!lead && !additionalProperties.length) {
-      duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest });
+      duplicateOfLeadId = dedupeOn ? await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest }) : null;
     }
     if (!lead) {
       const rows = await db('leads').insert({
@@ -2044,7 +2047,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // declined / expired / archived estimate, identity), so the two cannot
     // drift — and reopen THIS row, scoped to the label it just received, so
     // a staff transition on this row in the meantime still wins.
-    if (duplicateOfLeadId) {
+    if (dedupeOn && duplicateOfLeadId) {
       const targetOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: duplicateOfLeadId });
       // A target that is no longer open because ITS OWN relabel landed in
       // flight (B picked A while A was filing as a repeat of O — the r10
