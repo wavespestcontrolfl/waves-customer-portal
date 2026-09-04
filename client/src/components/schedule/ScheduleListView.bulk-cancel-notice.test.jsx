@@ -8,6 +8,8 @@ import ScheduleListView from './ScheduleListView';
 const ROWS = [
   { id: 'svc-plan', customerName: 'Pat Plan', serviceType: 'Pest Control', scheduledDate: '2026-09-10', status: 'confirmed', isRecurring: true },
   { id: 'svc-once', customerName: 'Sam Once', serviceType: 'Flea Treatment', scheduledDate: '2026-09-11', status: 'confirmed', isRecurring: false },
+  // A booster: stored is_recurring=false but linked to its plan.
+  { id: 'svc-boost', customerName: 'Bo Booster', serviceType: 'Mosquito Booster', scheduledDate: '2026-09-12', status: 'confirmed', isRecurring: false, recurringParentId: 'svc-plan' },
 ];
 
 function mockFetch() {
@@ -47,6 +49,15 @@ describe('ScheduleListView bulk cancel — recurring plan notice', () => {
     chooseCancel();
     expect(screen.getByText(/1 of the selected visits is part of a recurring plan/)).toBeInTheDocument();
     expect(screen.getByText(/each plan continues/)).toBeInTheDocument();
+  });
+
+  it('counts a plan-linked booster even though it is not itself recurring', async () => {
+    await renderWithRows();
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[2]); // svc-once
+    fireEvent.click(boxes[3]); // svc-boost
+    chooseCancel();
+    expect(screen.getByText(/1 of the selected visits is part of a recurring plan/)).toBeInTheDocument();
   });
 
   it('shows nothing for a selection with no recurring visit', async () => {

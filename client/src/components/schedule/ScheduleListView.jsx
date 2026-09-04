@@ -58,6 +58,10 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
       // on other pages.
       scheduledDate: s.scheduledDate ? String(s.scheduledDate).split('T')[0] : '',
       isRecurring: !!(s.isRecurring ?? s.is_recurring),
+      // Plan membership for the bulk-cancel notice: boosters are stored
+      // is_recurring=false but carry recurring_parent_id, and cancelling
+      // one alone leaves its plan running just the same (Codex #3868 r1).
+      inPlan: !!(s.isRecurring ?? s.is_recurring) || !!(s.recurringParentId ?? s.recurring_parent_id),
     });
   };
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -188,7 +192,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   // meta ref is filled synchronously before setSelected, so keying the
   // memo on `selected` reads a complete map.
   const recurringSelectedCount = useMemo(
-    () => Array.from(selected).filter((id) => selectedMetaRef.current.get(id)?.isRecurring).length,
+    () => Array.from(selected).filter((id) => selectedMetaRef.current.get(id)?.inPlan).length,
     [selected],
   );
   const bulkCancelPlanNotice = recurringSelectedCount > 0
