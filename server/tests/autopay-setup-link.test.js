@@ -276,10 +276,12 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
     expect(calls.find((c) => c[0] === 'update')[1]).toEqual(expect.objectContaining({ status: 'expired' }));
   });
 
-  it('treats a live mid-completion row as live: reuses its token and never mints a second link', async () => {
+  it('treats a live mid-completion row as live: never mints a second link, and hands no inline link back while it completes', async () => {
     mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', expires_at: FUTURE }) };
     const r = await requestAutopaySetupLink({ customerId: 'cust-1' });
-    expect(r).toEqual(expect.objectContaining({ action: 'link_created', reason: 'request_exists', secureUrl: 'https://portal.test/secure/tok1' }));
+    // GH Codex #3812 r4 P2: an inline caller (Customers page copy, composer
+    // insert) would only be refused at send — surface the state now instead.
+    expect(r).toEqual(expect.objectContaining({ action: 'skipped', reason: 'completion_in_progress', secureUrl: 'https://portal.test/secure/tok1' }));
     const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
     expect(calls.some((c) => c[0] === 'insert')).toBe(false);
     expect(calls.some((c) => c[0] === 'update')).toBe(false);

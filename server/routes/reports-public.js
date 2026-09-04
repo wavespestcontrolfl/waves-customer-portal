@@ -2449,3 +2449,4 @@ module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
 module.exports.reportLimiter = reportLimiter;
 module.exports.storedRevisionMatches = storedRevisionMatches;
+module.exports.suppressedTypedReport = suppressedTypedReport;

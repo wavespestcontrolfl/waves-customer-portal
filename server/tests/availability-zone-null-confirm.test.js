@@ -154,6 +154,9 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
       windowStart: '09:00',
       windowEnd: '10:00',
       excludeServiceIds: [],
+      // Travel-gap pin (GATE_SLOT_TRAVEL_GAP): the customer's coords; the
+      // fixture has none → nulls (buffer-only when the gate is on).
+      travel: { lat: null, lng: null },
     });
 
     // The zone-null confirm WRITES behind the tech-blind gate, so it takes
@@ -208,6 +211,9 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
       windowStart: '09:00',
       windowEnd: '10:00',
       excludeServiceIds: [],
+      // Travel-gap pin (GATE_SLOT_TRAVEL_GAP): the customer's coords; the
+      // fixture has none → nulls (buffer-only when the gate is on).
+      travel: { lat: null, lng: null },
     });
     // The date-wide lock is unconditional (ORDERING CONTRACT rung 1) and is
     // granted BEFORE the probe reads.

@@ -257,6 +257,7 @@ const DISPUTE_RE = /\b(?:refund|lawsuit|attorney|legal|unpaid|balance due|credit
 // review / allowed names / location words) has no provenance — "Kevin was
 // glad to help" with no Kevin in the review is a false staff attribution.
 const SENTENCE_STARTERS = new Set(`
+  someone somebody something somewhere everyone everybody everything nobody none whoever whatever
 a about after again all also always an and any anyone anything appreciate appreciated as at
 be being both but by call can come could did do does doing don't either enjoy even every
 feel for from get getting give glad go good got great had happy has have having he hear hearing
@@ -343,6 +344,52 @@ const LEGACY_BRAND_RE = /\bwaves\s+lawn(?:\s*(?:&|and|\+|\/|-)\s*pest)?\b/i;
 // Lowercase-name backstop (codex r66): common first names that are not also
 // ordinary English words. Any occurrence, in any case, needs provenance.
 const COMMON_FIRST_NAMES = new Set(('kevin marcus james john robert michael william david richard joseph thomas charles christopher daniel matthew anthony donald steven paul andrew joshua kenneth brian george edward ronald timothy jason jeffrey ryan jacob gary nicholas eric jonathan stephen larry justin scott brandon benjamin samuel gregory alexander patrick raymond jack dennis jerry tyler aaron jose adam nathan henry douglas zachary peter kyle ethan walter noah jeremy christian keith roger terry austin sean gerald carl harold dylan arthur jordan jesse bryan billy bruce gabriel joe logan alan juan albert willie elijah wayne randy vincent ralph eugene russell bobby mason philip louis mary patricia jennifer linda elizabeth barbara susan jessica sarah karen lisa nancy betty sandra margaret ashley kimberly emily donna michelle carol amanda melissa deborah stephanie rebecca sharon laura cynthia kathleen amy angela shirley anna brenda pamela emma nicole helen samantha katherine christine debra rachel carolyn janet catherine maria heather diane olivia julie joyce victoria kelly christina lauren joan evelyn judith megan andrea cheryl hannah jacqueline martha gloria teresa ann sara madison frances kathryn janice jean abigail alice judy sophia julia denise amber danielle marilyn beverly charlotte natalie theresa diana brittany doris kayla alexis lori tiffany carlos luis miguel jorge ricardo eduardo fernando javier sergio roberto manuel pedro raul mario alejandro francisco antonio diego tony mike dave jim bob steve chris matt dan andy josh ben sam greg alex pat nick jon jeff tim jake tyler cody travis trevor shane chad derek dustin brett corey casey tanner colton hunter cole blake wyatt caleb connor evan garrett owen liam lucas oliver isaac levi carter jaxon grayson lincoln easton landon nolan hudson brooks brayden dominic jace jaden tristan kaden bryce marcos rafael ruben santiago hector oscar omar victor ivan cesar jesus angel gilbert lorenzo dean guy earl leo max sid ray ken don ron rick rich bill tom ed al lou pete art ted fred frank stan marty vince ernie chuck kim sue jan pam deb kate liz beth jen jess amy meg kay jo bea tina gina lena nina rosa ana luz ines elena sofia isabella mia ava ella chloe zoe lily grace layla nora aria ellie riley zoey hazel violet aurora savannah audrey bella claire skylar lucy paisley everly anna caroline nova genesis emilia kennedy maya willow kinsley naomi aaliyah elena sarah ariana allison gabriella alice madelyn cora ruby eva serenity autumn adeline hailey gianna valentina isla eliana quinn nevaeh ivy sadie piper lydia alexa josephine emery julia delilah arianna vivian kaylee sophie brielle madeline peyton rylee clara hadley melanie mackenzie reagan adalynn liliana aubrey jade katherine isabelle natalia raelynn maria athena ximena arya leilani taylor faith rose kylie alexandra mary margaret lyla ashley amaya eliza brianna bailey andrea khloe jocelyn angela cecilia leah').split(' '));
+// Common first names that are also ordinary English words, each paired with
+// the contexts in which it is that ordinary word: "the right guy", "no
+// surprise bill", "to be frank", "in good faith". Anything else — "bill did
+// a great job", "our pat", "the pat handled" — is a name.
+const DETERMINER_CONTEXT = 'the|a|an|no|any|some|this|that|each|every|another|one|surprise|extra|final|first|last|next|right|good|nice|great|solid|whole|long|hot';
+const DUAL_USE_CONTEXTS = {
+  guy: DETERMINER_CONTEXT,
+  bill: DETERMINER_CONTEXT,
+  jack: DETERMINER_CONTEXT,
+  art: DETERMINER_CONTEXT,
+  max: DETERMINER_CONTEXT,
+  summer: DETERMINER_CONTEXT,
+  frank: 'be|too|so|very|really|pretty|quite',
+  faith: 'good|great|real|pure|much|such',
+  grace: 'good|great|real|pure|much|such',
+  joy: 'good|great|real|pure|much|such',
+};
+const DUAL_USE_FIRST_NAMES = new Set(Object.keys(DUAL_USE_CONTEXTS));
+function inProseContext(body, idx, word) {
+  const ctx = DUAL_USE_CONTEXTS[word];
+  return !!ctx && new RegExp(`(?:^|\\s)(?:${ctx})\\s+$`, 'i').test(body.slice(Math.max(0, idx - 24), idx));
+}
+
+// Relationship / tenure wording an account's derived facts license. Shared by
+// the verifier and the prompt so the model is told the same rule it is
+// checked against.
+function relationshipAllowedTerms(account) {
+  const rel = account?.relationship;
+  const tenure = account?.tenure;
+  return [
+    ...(rel === 'recurring' ? ['recurring', 'regular', 'ongoing', 'again', 'coming back', 'come back', 'back again', 'returning', 'repeat', 'once again', 'as always', 'welcome back', 'have you back'] : []),
+    ...(rel === 'first_visit' ? ['first visit', 'first time', 'new customer'] : []),
+    ...(tenure === 'long_term' ? ['years', 'year', 'loyal', 'loyalty', 'long-time', 'longtime', 'since', 'over the years', 'through the years', 'all these years'] : []),
+  ];
+}
+
+// Phrases in the REVIEW that the reply may not repeat or paraphrase: banned
+// vocabulary (rank claims, guarantees, safety language) stays banned even in
+// the reviewer's own words. Told to the model up front so the first draft
+// does not echo "the best" or "bug free" back and burn a retry.
+function reviewEchoBans(reviewText) {
+  const out = new Set();
+  for (const m of String(reviewText || '').match(new RegExp(BANNED_RE.source, 'gi')) || []) out.add(m.trim().toLowerCase());
+  return [...out];
+}
+
 const COMMON_ENGLISH_AFTER_ATTRIBUTION = /^(?:someone|somebody|anybody|nobody|people|folks|others|management|ownership|leadership|dispatch|scheduling|billing|support|service|services|everyone|whoever|whomever|him|her|them|us|you|it|that|this|these|those|which|what|whom|about|know|see|hear|feel|understand|the|our|your|his|their|its|my|a|an|no|any|all|both|each|every|more|less|enough|plenty|nothing|something|anything|everything|there|here|now|then|soon|today|tomorrow|again|right|well|too|also|just|only|even|still|yet|already|back|out|over|up|down|off|on|in|at|to|of|for|by|with|from|and|or|but|so|if|as|than|when|where|why|how|be|been|being|is|are|was|were|has|have|had|do|does|did|done|will|would|can|could|should|may|might|must|shall|go|goes|going|went|gone|get|gets|got|gotten|make|makes|made|take|takes|took|taken|come|comes|came|give|gives|gave|given|put|puts|keep|keeps|kept|let|lets|say|says|said|tell|tells|told|ask|asks|asked|call|calls|called|reach|reached|contact|contacted|hear|hears|heard|know|knows|knew|known|thank|thanks|thanked|help|helps|helped|need|needs|needed|want|wants|wanted|time|times|word|words|note|notes|message|messages|feedback|review|reviews|praise|kudos|credit|thanks|shout|hat|hats|off)$/;
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
 
@@ -478,34 +525,38 @@ function splitReply(text, locationName) {
  * Deterministic verifier. Returns null when the reply is acceptable, else a
  * short reason code. Every rule the model is told is re-checked here.
  */
-function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
+function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {}) {
+  const reject = (code, span) => ({ code, span: span == null ? null : String(span).trim().slice(0, 120) });
   const locationName = grounding.locationName;
   const { body, signOff } = splitReply(text, locationName);
   const m = mode || classifyReplyMode(grounding);
   const rules = MODE_RULES[m] || MODE_RULES.service_quality;
 
-  if (!body) return 'empty';
-  if (!signOff) return 'missing_sign_off';
-  if (signOffFor(locationName) !== signOff) return 'missing_sign_off';
-  if (body.includes(signOffFor(locationName))) return 'duplicate_sign_off';
+  if (!body) return reject('empty');
+  if (!signOff) return reject('missing_sign_off');
+  if (signOffFor(locationName) !== signOff) return reject('missing_sign_off');
+  if (body.includes(signOffFor(locationName))) return reject('duplicate_sign_off');
   const words = normalizeWords(body);
-  if (words.length < 6) return 'too_short';
-  if (words.length > rules.maxWords) return 'too_long';
-  if (PLACEHOLDER_RE.test(body)) return 'placeholder';
-  if (EMOJI_RE.test(body)) return 'emoji';
-  if (body.includes('—') || body.includes('–')) return 'em_dash';
-  if (FIRST_PERSON_SINGULAR_RE.test(body)) return 'first_person_singular';
-  if (LEGACY_BRAND_RE.test(body)) return 'legacy_brand';
-  if (EMAIL_RE.test(body)) return 'email';
-  if (URL_RE.test(body)) return 'url';
-  if (PHONE_RE.test(body)) return 'phone';
-  if (MONEY_RE.test(body)) return 'money';
-  if (ADDRESS_RE.test(body)) return 'address';
-  if (BANNED_RE.test(body)) return 'banned_phrase';
-  if (DISPUTE_RE.test(body)) return 'dispute_words';
-  if (STOCK_PHRASE_RE.test(body)) return 'stock_phrase';
-  for (const phrase of body.match(new RegExp(DATE_CLAIM_RE.source, 'gi')) || []) {
-    if (!hasPhrase(grounding.review.text.toLowerCase(), phrase.toLowerCase())) return 'date_claim';
+  if (words.length < 6) return reject('too_short');
+  if (words.length > rules.maxWords) return reject('too_long', `${words.length} words, limit ${rules.maxWords}`);
+  if (PLACEHOLDER_RE.test(body)) return reject('placeholder');
+  if (EMOJI_RE.test(body)) return reject('emoji');
+  if (body.includes('—') || body.includes('–')) return reject('em_dash');
+  if (FIRST_PERSON_SINGULAR_RE.test(body)) return reject('first_person_singular');
+  if (LEGACY_BRAND_RE.test(body)) return reject('legacy_brand');
+  if (EMAIL_RE.test(body)) return reject('email', body.match(EMAIL_RE)[0]);
+  if (URL_RE.test(body)) return reject('url', body.match(URL_RE)[0]);
+  if (PHONE_RE.test(body)) return reject('phone', body.match(PHONE_RE)[0]);
+  if (MONEY_RE.test(body)) return reject('money', body.match(MONEY_RE)[0]);
+  if (ADDRESS_RE.test(body)) return reject('address', body.match(ADDRESS_RE)[0]);
+  if (BANNED_RE.test(body)) return reject('banned_phrase', body.match(BANNED_RE)[0]);
+  if (DISPUTE_RE.test(body)) return reject('dispute_words', body.match(DISPUTE_RE)[0]);
+  if (STOCK_PHRASE_RE.test(body)) return reject('stock_phrase', body.match(STOCK_PHRASE_RE)[0]);
+  // The greeting line is judged by the greeting rule below, not here: a
+  // reviewer named April, June or August is a name, not a date claim.
+  const afterGreeting = body.replace(/^[^\n,]*,/, '');
+  for (const phrase of afterGreeting.match(new RegExp(DATE_CLAIM_RE.source, 'gi')) || []) {
+    if (!hasPhrase(grounding.review.text.toLowerCase(), phrase.toLowerCase())) return reject('date_claim', phrase);
   }
 
   // Private-channel phrasing is allowed only when the reviewer used the same
@@ -513,7 +564,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   const reviewLower = grounding.review.text.toLowerCase();
   const priv = body.match(new RegExp(PRIVATE_CHANNEL_RE.source, 'gi')) || [];
   for (const phrase of priv) {
-    if (!hasPhrase(reviewLower, phrase.toLowerCase())) return 'private_channel';
+    if (!hasPhrase(reviewLower, phrase.toLowerCase())) return reject('private_channel', phrase);
   }
 
   // Provenance allowlist — names: only the reviewer's first name and tech
@@ -527,7 +578,16 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   ].map((n) => n.toLowerCase()));
   for (const name of knownNames) {
     if (allowedNames.has(name)) continue;
-    if (new RegExp(`\\b${escapeRe(name)}\\b`, 'i').test(body)) return 'forbidden_name';
+    // A prior reviewer greeted as "Bill" is a leak only as a name: lowercase
+    // "no surprise bill" is prose (span capture found this on a real review);
+    // "bill did a great job" is not. EVERY occurrence must be prose — "the
+    // long summer was nice; summer handled the visit" leaks on the second.
+    const nameRe = new RegExp(`\\b${escapeRe(name)}\\b`, 'gi');
+    let hit;
+    while ((hit = nameRe.exec(body)) !== null) {
+      if (DUAL_USE_FIRST_NAMES.has(name) && hit[0] === hit[0].toLowerCase() && inProseContext(body, hit.index, name)) continue;
+      return reject('forbidden_name', name);
+    }
   }
   // Allowlist provenance for ANY introduced proper noun: a capitalized word
   // that is not sentence-initial must be the reviewer's name, a tech name the
@@ -557,7 +617,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   while ((rn = roleNameRe.exec(body)) !== null) {
     const w = rn[1].toLowerCase();
     if (ROLE_FOLLOWERS.has(w) || allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || SENTENCE_STARTERS.has(w)) continue;
-    return 'unlisted_name';
+    return reject('unlisted_name', rn[0]);
   }
   // A lowercase name in an attribution slot ("make sure kevin hears", "pass
   // this along to kevin", "thanks to kevin") and any lowercase word that is
@@ -568,15 +628,22 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   while ((an = attributionRe.exec(body)) !== null) {
     const w = an[1].toLowerCase();
     if (ATTRIBUTION_FOLLOWERS.has(w) || ROLE_FOLLOWERS.has(w) || allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || SENTENCE_STARTERS.has(w) || cityWords.has(w)) continue;
-    if (COMMON_FIRST_NAMES.has(w)) return 'unlisted_name';
+    if (COMMON_FIRST_NAMES.has(w)) return reject('unlisted_name', an[0]);
     // Any other bare word in an attribution slot that is not a common
     // English word is a name we cannot source.
-    if (!/ing$/.test(w) && !COMMON_ENGLISH_AFTER_ATTRIBUTION.test(w)) return 'unlisted_name';
+    if (!/ing$/.test(w) && !COMMON_ENGLISH_AFTER_ATTRIBUTION.test(w)) return reject('unlisted_name', an[0]);
   }
-  for (const w of normalizeWords(body)) {
+  // A bare lowercase first name outside a name slot still needs provenance,
+  // unless it is ordinary English in a prose context: "the right guy", "no
+  // surprise bill", "to be frank" are not people.
+  const bareWordRe = /(?:^|[^\p{L}'])([a-z][a-z']*)(?![\p{L}'])/gu;
+  let bw;
+  while ((bw = bareWordRe.exec(body)) !== null) {
+    const w = bw[1];
     if (!COMMON_FIRST_NAMES.has(w)) continue;
     if (allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || cityWords.has(w)) continue;
-    return 'unlisted_name';
+    if (DUAL_USE_FIRST_NAMES.has(w) && inProseContext(body, bw.index + bw[0].length - w.length, w)) continue;
+    return reject('unlisted_name', w);
   }
   // Title-case words AND all-caps words ("KEVIN") both need provenance.
   const properNounRe = /(^|[^\p{L}'])(\p{Lu}[\p{Ll}'-]+|\p{Lu}{2,})/gu;
@@ -587,14 +654,23 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     // Sentence-initial = start of text, after terminal punctuation, or the
     // first word of a new line (the greeting line ends with a comma).
     const sentenceInitial = /(?:^|[.!?]|\n)\s*$/.test(before);
-    const w = pn[2].toLowerCase();
+    // "Adam's" is the allowed name in the possessive.
+    const w = pn[2].toLowerCase().replace(/'s?$/, '');
     if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || BRAND_WORDS.has(w)) continue;
+    // A sentence-initial inflection of the reviewer's own word ("Ants are"
+    // for "ant problems") is sourced when an ordinary-word follower proves
+    // the syntax — "Fields did a great job" is a surname even if the review
+    // mentioned a field — and the word is not itself a known name.
+    if (sentenceInitial && !COMMON_FIRST_NAMES.has(w) && !knownNames.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) {
+      const ws = stemOf(w);
+      if (ws.length >= 3 && [...reviewWords].some((rw) => stemOf(rw) === ws)) continue;
+    }
     // Sentence starts get the common-word exemption only; a capitalized
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.
     if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
     if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
-    return 'unlisted_name';
+    return reject('unlisted_name', pn[2]);
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
   // a rating-shaped phrase ("5 star", "5-star", "5/5", "5 out of 5") — never
@@ -605,7 +681,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     : body;
   const allowedDigits = new Set(grounding.allow.digits || []);
   for (const d of bodyForDigits.match(/\d+/g) || []) {
-    if (!allowedDigits.has(d)) return 'unlisted_digits';
+    if (!allowedDigits.has(d)) return reject('unlisted_digits', d);
   }
   // Cities: only the location's own area, the reviewer's words, or the
   // account city (already filtered to served cities).
@@ -613,7 +689,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   for (const city of SERVED_CITIES) {
     if (new RegExp(`\\b${escapeRe(city)}\\b`, 'i').test(body)
       && !allowedCities.has(city.toLowerCase())
-      && !reviewLower.includes(city.toLowerCase())) return 'unlisted_city';
+      && !reviewLower.includes(city.toLowerCase())) return reject('unlisted_city', city);
   }
 
   // Provenance for service / treatment claims: the reviewer's own words, or
@@ -656,7 +732,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     if (RESOLUTION_PARAPHRASE_RE.test(t) && !bodyNegates(t)) {
       const support = reviewSupports(t, canonPhrase(t));
       if (support === true || reviewStatesOutcome()) continue;
-      return support === 'negated' ? 'negated_review_claim' : 'unlisted_service_claim';
+      return reject(support === 'negated' ? 'negated_review_claim' : 'unlisted_service_claim', t);
     }
     // A phrase the reviewer wrote ("took care of" ↔ "take care of", "under
     // control") is sourced — canonical-phrase check before token matching.
@@ -667,7 +743,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     // ants". A bare topic noun ("ants", "treatment") inside a negated clause
     // is still a fine thing to name in the reply.
     const outcome = OUTCOME_TERM_RE.test(t);
-    if (support === 'negated' && outcome && !bodyNegates(t)) return 'negated_review_claim';
+    if (support === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
     if (support === 'negated') continue;
     const stem = stemOf(t);
     if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem)) continue;
@@ -678,38 +754,33 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     if (rooted) {
       const rootSupport = rootSupported(reviewLower, reviewWords, stem, t, reviewNeg);
       if (rootSupport === true) continue;
-      if (rootSupport === 'negated' && outcome && !bodyNegates(t)) return 'negated_review_claim';
+      if (rootSupport === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
       continue;
     }
-    return 'unlisted_service_claim';
+    return reject('unlisted_service_claim', t);
   }
   // Provenance for relationship / tenure claims: the reviewer's words or the
   // account's derived facts (recurring → "again"/"regular"; long_term → "years").
   const rel = grounding.account?.relationship;
-  const tenure = grounding.account?.tenure;
-  const relAllowed = new Set([
-    ...(rel === 'recurring' ? ['recurring', 'regular', 'ongoing', 'again', 'coming back', 'come back', 'back again', 'returning', 'repeat', 'once again', 'as always', 'welcome back', 'have you back'] : []),
-    ...(rel === 'first_visit' ? ['first visit', 'first time', 'new customer'] : []),
-    ...(tenure === 'long_term' ? ['years', 'year', 'loyal', 'loyalty', 'long-time', 'longtime', 'since', 'over the years', 'through the years', 'all these years'] : []),
-  ]);
+  const relAllowed = new Set(relationshipAllowedTerms(grounding.account));
   // Continuing-relationship wrappers ("continuing to count on us", "keep
   // choosing us", "still trust us", "sticking with us") are licensed only by
   // a recurring account (codex r45).
   const relAllowedRe = rel === 'recurring' ? /^(?:continu\w*|keeps? \w+|still \w+|stick\w* with|stuck with|renew\w*|another (?:year|season|visit))$/ : null;
   for (const term of body.match(QUANTIFIED_TENURE_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
-    if (!hasPhrase(reviewLower.replace(/\s+/g, ' '), t)) return 'unlisted_relationship_claim';
+    if (!hasPhrase(reviewLower.replace(/\s+/g, ' '), t)) return reject('unlisted_relationship_claim', t);
   }
   for (const term of body.match(RELATIONSHIP_CLAIM_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     if (relAllowed.has(t) || (relAllowedRe && relAllowedRe.test(t)) || hasPhrase(reviewLower, t) || reviewWords.has(t)) continue;
-    return 'unlisted_relationship_claim';
+    return reject('unlisted_relationship_claim', t);
   }
   // Staff credentials / awards: the reviewer's words only.
   for (const term of body.match(CREDENTIAL_CLAIM_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     if (hasPhrase(reviewLower, t) || reviewWords.has(t) || reviewWords.has(stemOf(t))) continue;
-    return 'unlisted_credential_claim';
+    return reject('unlisted_credential_claim', t);
   }
   // Visit-experience claims: the reviewer's words only (root-matched).
   for (const term of body.match(EXPERIENCE_CLAIM_RE) || []) {
@@ -724,31 +795,40 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
       return false;
     })();
     if (support === true) continue;
-    if (support === 'negated' && !bodyNegates(flat)) return 'negated_review_claim';
+    if (support === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
     if (support === 'negated') continue;
     if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) {
       const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
       if (rootSupport === true) continue;
-      if (rootSupport === 'negated' && !bodyNegates(flat)) return 'negated_review_claim';
+      if (rootSupport === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
       continue;
     }
-    return 'unlisted_experience_claim';
+    return reject('unlisted_experience_claim', t);
   }
 
   // The mandated greeting, deterministically: "Hi <reviewer first name>,"
   // or "Hello there," — nothing else may open a public reply.
   const greetingOk = /^hello there,/i.test(body)
     || (grounding.review.firstName && new RegExp(`^hi ${escapeRe(grounding.review.firstName)},`, 'iu').test(body));
-  if (!greetingOk) return 'missing_greeting';
+  if (!greetingOk) return reject('missing_greeting');
 
   // Non-repetition against the location's recent posted replies.
   const opening = words.slice(0, 5).join(' ');
   for (const prior of recentReplies) {
     const pw = normalizeWords(splitReply(prior, locationName).body);
-    if (pw.length && pw.slice(0, 5).join(' ') === opening) return 'repetitive_opening';
-    if (jaccard(words, pw) >= 0.6) return 'repetitive_body';
+    if (pw.length && pw.slice(0, 5).join(' ') === opening) return reject('repetitive_opening', opening);
+    if (jaccard(words, pw) >= 0.6) return reject('repetitive_body');
   }
   return null;
+}
+
+/**
+ * Reason-code form of the verifier (the runner, the admin route and the IB
+ * tool key on the code). Returns null when the reply is acceptable.
+ */
+function verifyReplyText(text, grounding, opts) {
+  const v = verifyReplyDetailed(text, grounding, opts);
+  return v ? v.code : null;
 }
 
 function buildSystemPrompt(mode, grounding) {
@@ -789,8 +869,13 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
     `Review text: ${r.hasText ? r.text : '(no comment, rating only)'}`,
     `Technician names the reviewer wrote: ${r.mentionedTechNames.length ? r.mentionedTechNames.join(', ') : '(none — do not name anyone)'}`,
   ];
-  if (!reviewOnly && grounding.account) {
-    const a = grounding.account;
+  const echoBans = reviewEchoBans(r.text);
+  if (echoBans.length) {
+    lines.push('', `DO NOT USE these words or phrases from the review, or any paraphrase of them (banned on our side even though the reviewer wrote them): ${echoBans.map((p) => `"${p}"`).join(', ')}. Thank them without restating the claim.`);
+  }
+  const account = !reviewOnly && grounding.account ? grounding.account : null;
+  if (account) {
+    const a = account;
     lines.push('', 'PUBLIC-SAFE ACCOUNT FACTS (tone only; never turn these into specific claims):');
     if (a.relationship) lines.push(`Relationship: ${a.relationship === 'recurring' ? 'recurring customer' : 'first visit'}`);
     if (a.tenure) lines.push(`Tenure: ${a.tenure.replace('_', ' ')}`);
@@ -799,6 +884,10 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
   } else {
     lines.push('', 'ACCOUNT FACTS: none available. Use only the review.');
   }
+  const relTerms = relationshipAllowedTerms(account);
+  lines.push(relTerms.length
+    ? `RELATIONSHIP WORDING ALLOWED: ${relTerms.join(', ')}. Nothing else that implies history or a future with us.`
+    : 'RELATIONSHIP WORDING: none. Do not imply they are a returning customer, that they will keep using us, or that we will keep looking after them; only words the reviewer wrote.');
   if (recentReplies.length) {
     lines.push('', 'RECENT REPLIES FROM THIS LOCATION (do NOT reuse their openings or phrasing):');
     // Greeted names are redacted before the model sees them — a prior
@@ -808,12 +897,26 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
       lines.push(`${i + 1}. ${redacted.replace(/\s+/g, ' ').slice(0, 400)}`);
     });
   }
-  if (feedback) {
-    lines.push('', `YOUR PREVIOUS ATTEMPT WAS REJECTED: ${feedback}. Write a new reply that fixes this.`);
+  if (Array.isArray(feedback) && feedback.length) {
+    lines.push('', 'YOUR PREVIOUS ATTEMPTS WERE REJECTED. Fix ALL of these in the new reply:');
+    feedback.forEach((f, i) => {
+      const why = FEEDBACK_FOR[f.code] || f.code;
+      lines.push(`- attempt ${i + 1}: ${why}${f.span ? ` (the words: "${f.span}")` : ''}`);
+    });
   }
   lines.push('', 'Write the reply now.');
   return lines.join('\n');
 }
+
+// Rejection codes whose span cannot carry a person BY CONSTRUCTION — a word
+// count, a fixed-vocabulary match (stock phrase, dispute word, private-channel
+// phrase, unsourced claim), a stray digit, a listed city — and so may be
+// stored on the row and the audit log. Every other span reaches the retry
+// prompt only: a name, a phone number, an email, an address, a link, the
+// opening (which starts with the greeting name), a date phrase, and a banned
+// phrase — BANNED_RE spans intervening words ("give ... stars", "take ...
+// off"), so its match can absorb any name the reviewer wrote.
+const STORED_SPAN_CODES = new Set(['too_long', 'dispute_words', 'stock_phrase', 'private_channel', 'unlisted_digits', 'unlisted_city', 'unlisted_service_claim', 'negated_review_claim', 'unlisted_relationship_claim', 'unlisted_credential_claim', 'unlisted_experience_claim']);
 
 const FEEDBACK_FOR = {
   too_long: 'too many words',
@@ -881,32 +984,91 @@ async function requestDraft(grounding, mode, recentReplies, feedback, opts) {
 async function draftReviewReply({ grounding, recentReplies = [] }) {
   const mode = classifyReplyMode(grounding);
   const rejections = [];
+  const rejectionDetails = [];
   let attempts = 0;
+  // Four model attempts. Every retry sees EVERY prior rejection with the
+  // exact words that tripped it (a last-reason-only retry fixed one thing
+  // and broke another — a real review parked that way). From the third attempt
+  // the account facts are withheld so the model has less to over-claim from.
   const ladder = [
-    { feedback: null, reviewOnly: false },
-    { feedback: 'previous', reviewOnly: false },
+    { reviewOnly: false },
+    { reviewOnly: false },
+    { reviewOnly: !!grounding.account },
+    { reviewOnly: !!grounding.account },
   ];
-  if (grounding.account) ladder.push({ feedback: 'previous', reviewOnly: true });
-
   for (const step of ladder) {
     attempts++;
-    const feedback = step.feedback === 'previous' && rejections.length
-      ? (FEEDBACK_FOR[rejections[rejections.length - 1]] || rejections[rejections.length - 1])
-      : null;
-
+    const feedback = rejectionDetails.length ? rejectionDetails.map((d) => ({ code: d.code, span: d.promptSpan })) : null;
     const res = await requestDraft(grounding, mode, recentReplies, feedback, { reviewOnly: step.reviewOnly });
     if (!res.ok) {
-      return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, reason: res.reason, error: res.error };
+      // Providers down. The runner retries on a backoff for a tailored reply;
+      // once its retries are exhausted it posts this provider-independent
+      // safe copy rather than parking a 4-5 star review as provider_down.
+      const fallbackText = safeCopyReply(grounding, mode, recentReplies);
+      return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: res.reason, error: res.error, fallbackText };
     }
     const normalized = splitReply(res.text, grounding.locationName).full;
-    const verdict = verifyReplyText(normalized, grounding, { recentReplies, mode });
+    const verdict = verifyReplyDetailed(normalized, grounding, { recentReplies, mode });
     if (!verdict) {
-      return { ok: true, text: normalized, mode, version: REPLY_VERSION, attempts, rejections, reviewOnly: step.reviewOnly };
+      return { ok: true, text: normalized, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reviewOnly: step.reviewOnly };
     }
-    rejections.push(verdict);
-    logger.info(`[review-reply-drafter] attempt ${attempts} rejected (${verdict}) review=${grounding.reviewId} mode=${mode}`);
+    rejections.push(verdict.code);
+    // Stored for diagnosis: attempt, code and — for phrase-class codes only —
+    // the words that tripped it. Never the whole rejected draft. The retry
+    // prompt is built from verdict.span directly.
+    rejectionDetails.push({ attempt: attempts, code: verdict.code, span: STORED_SPAN_CODES.has(verdict.code) ? verdict.span : null, promptSpan: verdict.span });
+    // Code only in the log: a span can be a phone number, an address or a
+    // name. The words live in rejectionDetails, stored on the review row.
+    logger.info(`[review-reply-drafter] attempt ${attempts} rejected (${verdict.code}) review=${grounding.reviewId} mode=${mode}`);
   }
-  return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, reason: 'verifier_reject' };
+  // Last rung: deterministic safe copy built only from facts the verifier
+  // already trusts, and verified like any other draft. A 4-5 star review
+  // gets a plain reply rather than a park (owner directive 2026-09-03: no
+  // review goes unanswered). Under-4 stars keep parking for a person.
+  const template = safeCopyReply(grounding, mode, recentReplies);
+  if (template) {
+    logger.info(`[review-reply-drafter] safe-copy reply used after ${attempts} rejected drafts review=${grounding.reviewId} mode=${mode}`);
+    return { ok: true, text: template, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reviewOnly: true, safeCopy: true };
+  }
+  return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: 'verifier_reject' };
+}
+const stored = (details) => details.map(({ attempt, code, span }) => ({ attempt, code, span }));
+
+/**
+ * Deterministic last-resort reply. Uses only the reviewer's first name and
+ * the location sign-off — nothing
+ * the verifier could call unsourced, and no wording that implies a past or
+ * future relationship (a first-visit reviewer gets none). Three phrasings so the non-repetition
+ * rule does not reject the third use at one location. Returns the first
+ * variant that passes verifyReplyDetailed, else null (the row parks).
+ */
+function safeCopyReply(grounding, mode, recentReplies = []) {
+  const r = grounding.review;
+  if (mode === 'low_rating' || !(Number(r.rating) >= 4)) return null;
+  // A first name the verifier itself cannot pass ("O'Neil" / "Mary-Jane"
+  // read as an unsourced proper noun) falls back to the generic greeting
+  // rather than to no reply at all.
+  const greetings = r.firstName ? [`Hi ${r.firstName},`, 'Hello there,'] : ['Hello there,'];
+  const noun = r.hasText ? 'the review' : (Number(r.rating) === 5 ? 'the five stars' : 'the rating');
+  // No technician name: a 4-star review can name a tech in a complaint, and
+  // nothing deterministic reads sentiment. The plain variant is safe for all.
+  // Each variant opens differently: the non-repetition rule compares the
+  // first five words of the body, greeting included.
+  const variants = [
+    `Thanks for ${noun}. Glad to be your pest and lawn team.`,
+    `We appreciate ${noun}. Glad you chose us.`,
+    `Much appreciated. Thanks for choosing us.`,
+  ];
+  const texts = greetings.flatMap((greeting) => variants.map((body) => `${greeting}\n\n${body}\n\n${signOffFor(grounding.locationName)}`));
+  // Prefer a variant the location has not used lately …
+  for (const text of texts) {
+    if (!verifyReplyDetailed(text, grounding, { recentReplies, mode })) return text;
+  }
+  // … but the non-repetition rule exists to keep model replies varied, not
+  // to starve the last rung: once every variant is recent, the first passing
+  // one is re-used. It still passes every other rule (no recent greeting name
+  // can be in it — it carries only this reviewer's first name).
+  return texts.find((text) => !verifyReplyDetailed(text, grounding, { recentReplies: [], mode })) || null;
 }
 
 module.exports = {
@@ -915,6 +1077,7 @@ module.exports = {
   signOffFor,
   classifyReplyMode,
   verifyReplyText,
+  verifyReplyDetailed,
   buildSystemPrompt,
   buildUserText,
   loadRecentPostedReplies,
@@ -922,4 +1085,7 @@ module.exports = {
   // tests
   splitReply,
   greetingName,
+  safeCopyReply,
+  reviewEchoBans,
+  relationshipAllowedTerms,
 };

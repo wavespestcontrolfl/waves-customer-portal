@@ -130,6 +130,20 @@ async function derivedOfficeNumber(row, recipientCustomerId, preloadedCustomer =
   }
 }
 
+const immediateOnlyLinkInDraft = (label) => `${label} links cannot go out through draft approval — send them from the composer, where the link is re-checked at delivery.`;
+// Presence only (customer-kind /secure links or a look-alike host, then the
+// other per-row bearers — statement pay, prep pages, appointment pages,
+// service reports): the composer-links seams do the lookups; a draft
+// never sends one at all (draft approve/revise dispatch straight into
+// sendCustomerMessage — no delivery re-check). Returns the refusal
+// message, or null.
+async function draftImmediateOnlyLinkRefusal(body) {
+  const { autopayLinkSendCheck, immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+  if ((await autopayLinkSendCheck(body, null)).present) return immediateOnlyLinkInDraft('Auto Pay setup');
+  const immediateOnly = await immediateOnlyLinkSendCheck(body);
+  return immediateOnly.present ? immediateOnlyLinkInDraft(immediateOnly.label) : null;
+}
+
 async function releaseDraftClaim(draftId, fields = {}) {
   await db('message_drafts').where({ id: draftId }).update({
     status: 'pending',
@@ -767,6 +781,26 @@ router.put('/:id/approve', async (req, res, next) => {
       return res.status(409).json({ error: 'Draft is no longer pending' });
     }
 
+    // An Auto Pay setup link never rides draft approval: only the composer's
+    // /sms carries the delivery seam (levers, liveness, ownership,
+    // reclassification) — refuse and hand the claim back (GH Codex #3812 r3 P1).
+    // The claim is already taken, so a lookup failure inside the check must
+    // hand it back too (GH Codex #3812 r4 P2) — never strand the draft.
+    let immediateOnlyRefusal = null;
+    try {
+      immediateOnlyRefusal = await draftImmediateOnlyLinkRefusal(draft.draft_response);
+    } catch (checkErr) {
+      logger.warn(`[drafts] Auto Pay link check failed for draft ${draft.id} — releasing claim: ${checkErr.message}`);
+      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id);
+      else await releaseDraftClaim(draft.id);
+      return res.status(503).json({ error: 'Pre-send check unavailable - draft left pending, try again' });
+    }
+    if (immediateOnlyRefusal) {
+      if (draft.intent === 'estimate_clarify') await releaseClarifyClaim(draft.id);
+      else await releaseDraftClaim(draft.id);
+      return res.status(409).json({ error: immediateOnlyRefusal });
+    }
+
     // Shared pre-send gate recheck (click-followup drafts only).
     const gateBlock = await guardClickFollowupSend(draft);
     if (gateBlock) {
@@ -901,6 +935,9 @@ router.put('/:id/revise', async (req, res, next) => {
   try {
     const { revisedResponse } = req.body;
     if (!revisedResponse) return res.status(400).json({ error: 'revisedResponse required' });
+    // Same rule as approve — judged before the claim, nothing to release.
+    const reviseRefusal = await draftImmediateOnlyLinkRefusal(revisedResponse);
+    if (reviseRefusal) return res.status(409).json({ error: reviseRefusal });
     const requestedFromNumber = req.body?.fromNumber || null;
     if (requestedFromNumber && !TWILIO_NUMBERS.findByNumber(requestedFromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });

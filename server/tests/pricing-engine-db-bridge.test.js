@@ -671,16 +671,6 @@ describe('pricing engine DB bridge', () => {
           },
           offers: [
             {
-              offerKey: 'flea_knockdown_single',
-              displayName: 'Flea Knockdown Visit',
-              visitCount: 1,
-              warrantyType: 'none',
-              baseInitial: 225,
-              floorInitial: 185,
-              packageFloor: 185,
-              exteriorAddOnMode: 'initial_only',
-            },
-            {
               offerKey: 'flea_elimination_two_visit',
               displayName: 'Flea Elimination Package',
               visitCount: 2,
@@ -714,12 +704,6 @@ describe('pricing engine DB bridge', () => {
     ]);
     expect(constants.SPECIALTY.flea.offers).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        offerKey: 'flea_knockdown_single',
-        baseInitial: 240,
-        floorInitial: 200,
-        packageFloor: 200,
-      }),
-      expect.objectContaining({
         offerKey: 'flea_elimination_two_visit',
         baseInitial: 240,
         baseFollowUp: 130,
@@ -748,13 +732,6 @@ describe('pricing engine DB bridge', () => {
     });
     expect(result.total).toBe(550);
     expect(result.recurringCustomerDiscountRate).toBe(0.20);
-
-    const knockdown = priceFlea({
-      services: { flea: { offerKey: 'flea_knockdown_single' } },
-      footprintSqFt: 2000,
-      lotSqFt: 7500,
-    });
-    expect(knockdown.total).toBe(240);
 
     const moderate = priceFlea({
       services: { flea: { fleaComplexity: 'moderate' } },

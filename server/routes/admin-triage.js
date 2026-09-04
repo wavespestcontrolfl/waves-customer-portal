@@ -29,6 +29,15 @@ const WRONG_FIELDS = ['name', 'address', 'service', 'scheduling', 'consent', 'sp
 // visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
 const { V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
 
+// A deny rejects the call's UNIT evidence only when it is a whole-call deny
+// (no wrong_fields) or names the address — a field-scoped deny (service,
+// scheduling, name …) leaves the customer's accepted unit standing, or a
+// later service-correction reprocess drafts the whole building (codex r15
+// P1 on #3804).
+function denyRejectsUnitEvidence(wrongFields) {
+  return wrongFields.length === 0 || wrongFields.includes('address');
+}
+
 function sanitizeWrongFields(input) {
   if (!Array.isArray(input)) return [];
   return [...new Set(input.filter((f) => WRONG_FIELDS.includes(f)))];
@@ -216,6 +225,16 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
         updated_at: new Date(),
       });
     if (updated === 0) return { outcome: 'conflict' };
+    if (item.reason_code === 'missing_unit_number' && nextStatus === 'dismissed' && item.call_log_id) {
+      // The human verdict outranks the SMS answer: dismissing the unit card
+      // (the whole building IS the service address, or the texted reply was
+      // wrong) retires the call-level unit-answer fence the clarify
+      // write-back stamped, so creators stop adopting the rejected unit and
+      // the operator's building-level correction can lift a hold (codex r3
+      // P1 on #3804). Atomic with the dismissal, under the call lock.
+      const { clearCallUnitAnswer } = require('../utils/estimate-claim-sql');
+      await clearCallUnitAnswer(trx, item.call_log_id);
+    }
     if (nextStatus === 'resolved' && emailReviewCard) {
       // A force-reprocess can leave BOTH an email_invalid and an
       // email_unverified card on the call (the partial unique index is
@@ -620,6 +639,18 @@ router.post('/:id/verdict', async (req, res) => {
       emailCardResolved = resolvedRows
         .some((r) => ['email_unverified', 'email_invalid'].includes(r?.reason_code));
       if (resolved === 0) return;
+      if (verdict === 'deny' && denyRejectsUnitEvidence(wrongFields) && resolvedRows.some((r) => r?.reason_code === 'missing_unit_number')) {
+        // The call-level Deny is the same human verdict the card's Dismiss
+        // is (transitionCore above): the texted unit is rejected, so the
+        // call-level fence the clarify write-back stamped retires with the
+        // card — otherwise a later reprocess adopts the rejected unit and a
+        // building-level correction can never lift the hold (codex r7 P1
+        // on #3804). Keyed on what this transaction ACTUALLY resolved,
+        // under the same call lock, and only when the deny rejects the
+        // address evidence (denyRejectsUnitEvidence).
+        const { clearCallUnitAnswer } = require('../utils/estimate-claim-sql');
+        await clearCallUnitAnswer(trx, item.call_log_id);
+      }
       if (emailCardResolved && holdsTable) {
         const now = new Date();
         if (verdict === 'deny' && !denyClearsEmailEarly) {
@@ -813,4 +844,4 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
 });
 
 module.exports = router;
-module.exports.__private = { sanitizeWrongFields, WRONG_FIELDS, VERDICTS };
+module.exports.__private = { sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS };

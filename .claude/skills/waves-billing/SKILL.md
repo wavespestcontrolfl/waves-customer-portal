@@ -150,6 +150,14 @@ payment path).
 - Claiming payment outcomes from code inspection alone.
 - Trusting client-submitted amounts.
 - Editing webhook ordering/idempotency without reading AGENTS.md first.
+- A fee-rail helper imported from a module every rail test `jest.mock`s.
+  `scheduledServiceApptTime` lived only on the reminders module's `_test`
+  bag for three weeks: the mocks supplied it, prod got `undefined`, and
+  every secured visit's cancel preview fell into the fail-closed "fee may
+  apply" branch (a $75 warning on a visit a week out, 2026-09-03). When a
+  rail destructures from a mocked module, keep a real-module export test
+  (`server/tests/appointment-reminders-exports.test.js`) and run the
+  preview once against a dev DB before calling the rail verified.
 
 ## Escalation
 Ask Adam before: changing any customer-visible amount, fee, or exemption;

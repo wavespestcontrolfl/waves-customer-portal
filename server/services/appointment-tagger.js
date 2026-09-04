@@ -11,6 +11,23 @@ const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
 
+// Structured-output contract for the AI WDO pre-inspection brief (llm/call.js
+// jsonSchema). Same six fields the deterministic template emits; the template
+// adds property_summary/property_data itself.
+const WDO_BRIEF_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['risk_score', 'risk_reason', 'top_3_priorities', 'top_3_unknowns', 'vulnerabilities', 'homeowner_questions'],
+  properties: {
+    risk_score: { type: 'string', enum: ['Low', 'Moderate', 'High'] },
+    risk_reason: { type: 'string', description: 'One sentence on the main driver of the risk score' },
+    top_3_priorities: { type: 'array', items: { type: 'string' }, description: 'The three inspection priorities for this property' },
+    top_3_unknowns: { type: 'array', items: { type: 'string' }, description: 'The three biggest unknowns to resolve on site' },
+    vulnerabilities: { type: 'array', items: { type: 'string' }, description: 'WDO vulnerabilities suggested by the property data' },
+    homeowner_questions: { type: 'array', items: { type: 'string' }, description: 'Questions to ask the homeowner before or during the inspection' },
+  },
+};
+
 // Pest types whose booking triggers an automatic prep guide email
 // (email_template_automations, appointment.booked trigger).
 const PREP_AUTOMATION_BY_PEST_TYPE = Object.freeze({
@@ -234,11 +251,13 @@ class AppointmentTagger {
   async generateWDOBriefAI(service, rc) {
     try {
       const resp = await dispatchWithFallback(MODELS.TEXT_POLICIES.deepAnalysis, {
+        laneId: 'wdo_appt_brief',
         // Documented DEEP floor — MODEL_DEEP may point at a thinking model
         // (fable line) where thinking spends from the same token budget.
         maxTokens: 4096,
         jsonMode: true,
-        system: 'You are a pre-inspection research assistant for a Florida pest control company. Analyze public property data and return a JSON WDO pre-inspection brief with: risk_score (Low/Moderate/High), risk_reason, top_3_priorities, top_3_unknowns, vulnerabilities, homeowner_questions. Return VALID JSON ONLY.',
+        jsonSchema: WDO_BRIEF_SCHEMA,
+        system: 'You are a pre-inspection research assistant for a Florida pest control company. Analyze public property data and produce a WDO pre-inspection brief: a risk score with its reason, the top 3 priorities, the top 3 unknowns, vulnerabilities, and homeowner questions.',
         text: `WDO brief for ${service.address_line1}, ${service.city}, FL ${service.zip}. Client: ${service.first_name} ${service.last_name}. Date: ${service.scheduled_date}.\n\nProperty data: ${JSON.stringify(rc)}`,
       });
       if (!resp.ok || !resp.json) throw new Error('WDO brief providers unavailable');

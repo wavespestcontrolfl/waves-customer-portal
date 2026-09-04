@@ -30,6 +30,9 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const ContextAggregator = require('../context-aggregator');
 const { executeToolCall } = require('./tools-expanded');
+const { AGENT_CONFIG } = require('./managed-agent-config');
+const { recordSessionUsage } = require('../llm-dispatch-metrics');
+const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
 
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MANAGED_AGENT_ID = process.env.MANAGED_AGENT_ID;
@@ -62,7 +65,7 @@ async function apiCall(method, path, body) {
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${err}`);
+    throw Object.assign(new Error(`Anthropic API ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
 
   return res.json();
@@ -84,7 +87,7 @@ async function* streamSessionEvents(sessionId) {
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Stream error ${res.status}: ${err}`);
+    throw Object.assign(new Error(`Stream error ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
 
   const reader = res.body.getReader();
@@ -148,8 +151,10 @@ class ManagedAssistant {
       channel,
     });
 
+    let sessionId = conversation.managed_session_id;
+    const turnStartedAt = Date.now();
+    let failure = null;
     try {
-      let sessionId = conversation.managed_session_id;
 
       // 4. Create or resume Managed Agent session
       if (!sessionId) {
@@ -183,7 +188,11 @@ class ManagedAssistant {
       }
 
       // 5. Stream events and handle custom tool calls
-      const reply = await this.processSessionEvents(sessionId, conversation, customerId);
+      const { reply, failure: streamFailure } = await this.processSessionEvents(sessionId, conversation, customerId);
+      // A stream that ended on an error event or on our event cap still
+      // hands back a reply to send; the turn itself failed, and the ledger
+      // row below says so.
+      failure = streamFailure;
 
       // 6. Save assistant reply
       await db('agent_messages').insert({
@@ -208,24 +217,45 @@ class ManagedAssistant {
       };
 
     } catch (err) {
+      failure = failure || err;
       logger.error(`[managed-assistant] Error: ${err.message}`);
       return {
         reply: "I'm having trouble right now. Let me connect you with our team. — Waves Pest Control",
         escalated: false,
       };
+    } finally {
+      // Call ledger (never throws): a conversation is ONE long-lived session,
+      // so every turn re-records the session's cumulative usage and the
+      // recorder updates that session's single row in place (latency = this
+      // turn). Runs on the error path too — a turn that threw mid-stream
+      // still consumed tokens, and marks the session row failed for good.
+      // Fire-and-forget ON PURPOSE (the recorder never throws): the
+      // customer's reply must not wait on a usage GET — up to 15 s on a slow
+      // provider — and this server process is long-lived, unlike the
+      // one-shot runners, which await it.
+      if (sessionId) void recordSessionUsage({ laneId: 'agent_assistant', sessionId, agentId: MANAGED_AGENT_ID, model: AGENT_CONFIG.model, startedAt: turnStartedAt, failure }).catch((err) => logger.error(`[managed-assistant] session ledger: ${err.message}`));
     }
   }
 
   /**
-   * Stream session events, execute custom tool calls, return final text.
+   * Stream session events, execute custom tool calls, return the final text
+   * with this turn's stream outcome. `failure` is null when the agent ended
+   * the turn, `session_error_event` when the stream emitted an error (the
+   * reply is then whatever text arrived first, else the fallback copy),
+   * `session_stream_eof` when the stream closed before any terminal event
+   * and `max_events` when our own event cap ended it. The caller sends the
+   * reply either way; the call ledger records the turn as failed.
    */
   async processSessionEvents(sessionId, conversation, customerId) {
     let finalReply = '';
+    let failure = null;
+    let sessionEnded = false; // set only by a terminal event: any other stream exit is a failure
     let maxIterations = 30; // expanded assistant needs more room for multi-step workflows
 
     for await (const { event, data } of streamSessionEvents(sessionId)) {
       if (--maxIterations <= 0) {
         logger.warn(`[managed-assistant] Hit max iterations for session ${sessionId}`);
+        failure = 'max_events';
         break;
       }
 
@@ -294,21 +324,30 @@ class ManagedAssistant {
       }
 
       // ── Session complete ──
-      if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') {
+      if (isSessionTerminal(event, data)) {
+        sessionEnded = true;
         break;
       }
 
       // ── Error from agent ──
-      if (event === 'error') {
+      if (isSessionError(event)) {
         logger.error(`[managed-assistant] Agent error: ${JSON.stringify(data)}`);
+        failure = 'session_error_event';
         if (!finalReply) {
           finalReply = "I'm having trouble right now. Let me connect you with our team. — Waves Pest Control";
         }
         break;
       }
     }
+    // The stream closed before the session said it ended: the customer still
+    // gets whatever was said, but the turn is not a success, whatever the
+    // session GET reports later.
+    if (!failure && !sessionEnded) {
+      logger.error(`[managed-assistant] Stream ended without a terminal event for session ${sessionId}`);
+      failure = 'session_stream_eof';
+    }
 
-    return finalReply || "I'm here to help! Could you tell me a bit more about what you need? — Waves Pest Control";
+    return { reply: finalReply || "I'm here to help! Could you tell me a bit more about what you need? — Waves Pest Control", failure };
   }
 
   /**

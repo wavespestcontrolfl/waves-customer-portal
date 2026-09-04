@@ -284,6 +284,7 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
   }
   const { createDeepMessage } = require('./llm/deep');
   const response = await createDeepMessage(client, {
+    laneId: 'voice_profile',
     max_tokens: 8192,
     system,
     messages: [{ role: 'user', content: user }],

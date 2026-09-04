@@ -3445,18 +3445,47 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
 // (/secure) rail — merged so the client confirm prompts work unchanged;
 // the lanes are mutually exclusive per visit (the appointment rail skips
 // any visit with a hold row).
+// Merge the two fee-rail previews into the one verdict the cancel UIs read.
+//   - A HELD hold answers outright — unless its own verdict is undetermined
+//     (state lookup failed, raced, or timeless): then the appointment rail is
+//     asked and wins ONLY with a stronger verdict — a fee event or its own
+//     undetermined answer (willCharge true / null). A "nothing will be
+//     charged" appointment verdict can't outrank an unknown hold state
+//     (pre-push P1s on #3800 r7).
+//   - A CLOSED hold (released / charged) must NOT short-circuit: the
+//     appointment rail may still carry an in-flight charge or a live
+//     consent for the same visit (pre-push P0 on #3800 r3). Its closed-
+//     state verdict stands only when the appointment rail has nothing of
+//     its own to say — no row, deferred to the hold lane, or DARK (no
+//     lookup at all — Codex #3800 r7 P1; the gates are independent).
+// `askAppointmentRail` is invoked lazily so an authoritative hold verdict
+// makes no second lookup.
+const APPT_RAIL_SILENT_CODES = new Set(['no_card', 'card_hold_lane', 'rail_dark']);
+async function mergeCardHoldPreviews(holdPreview, askAppointmentRail) {
+  const holdUnresolved = holdPreview.rule?.code === 'unresolved';
+  if (holdPreview.held && !holdUnresolved) return holdPreview;
+  const apptPreview = await askAppointmentRail();
+  if (holdUnresolved) return apptPreview.rule?.willCharge === false ? holdPreview : apptShape(apptPreview);
+  if (holdPreview.rule?.code !== 'no_card' && APPT_RAIL_SILENT_CODES.has(apptPreview.rule?.code)) return holdPreview;
+  return apptShape(apptPreview);
+}
+function apptShape(apptPreview) {
+  return {
+    held: apptPreview.secured === true,
+    feeApplies: apptPreview.feeApplies === true,
+    ...(apptPreview.feeAmount != null ? { feeAmount: apptPreview.feeAmount } : {}),
+    ...(apptPreview.unresolved ? { unresolved: true } : {}),
+    // Operator-facing rule (code + sentence): will the card be charged, and
+    // which rule decides it — rendered at the foot of the cancel card.
+    rule: apptPreview.rule,
+  };
+}
 router.get('/:serviceId/card-hold', async (req, res, next) => {
   try {
     const CardHolds = require('../services/estimate-card-holds');
     const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
-    if (holdPreview.held) return res.json(holdPreview);
     const ApptCardRequests = require('../services/appointment-card-request');
-    const apptPreview = await ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId);
-    res.json({
-      held: apptPreview.secured === true,
-      feeApplies: apptPreview.feeApplies === true,
-      ...(apptPreview.feeAmount != null ? { feeAmount: apptPreview.feeAmount } : {}),
-    });
+    res.json(await mergeCardHoldPreviews(holdPreview, () => ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId)));
   } catch (err) { next(err); }
 });
 
@@ -13603,6 +13632,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`[dispatch] Job form save failed (non-blocking): ${e.message}`); }
     }
 
+    // Yard-sign kit consumption (sign card + stake + sticker per completed
+    // visit). Runs on the resume path too — the partial unique index on
+    // product_inventory_movements makes it at-most-once per (product, visit).
+    // Skipped for an incomplete visit, for inspection_only /
+    // customer_declined closeouts and for an internal-only completion
+    // profile such as a Waves Assessment (no sign is left). Never throws. Runs
+    // BEFORE job costing so the initial cost calc sees the kit movements
+    // (pre-push codex P1).
+    try {
+      const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+      await consumeCompletionSupplies(db, {
+        scheduledServiceId: svc.id,
+        serviceRecordId: record?.id || null,
+        customerId: svc.customer_id || null,
+        technicianId: svc.technician_id || null,
+        isIncompleteVisit,
+        visitPerformed,
+        isInternalOnlyCompletion,
+        serviceLine: reportServiceLine,
+        serviceType: svc.service_type || null,
+      });
+    } catch (e) { logger.error(`[dispatch] completion supplies consumption failed: ${e.message}`); }
+
     // Job costing (non-blocking, fire-and-forget). Runs on FIRST RUN and on
     // RESUME (Codex P2, PR #2897 fix round 13): the required-mint throw can
     // 503 out of the mint try AFTER the record committed but BEFORE this
@@ -13637,6 +13689,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
       );
     } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
+
 
     // Follow-up suggestion for the RESPONSE (success-overlay CTA). On the
     // normal path this is the pre-transaction verdict whose alert already
@@ -14062,6 +14115,40 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
+    // Yard-sign kit consumption — the recap is the second production
+    // completion path for pest visits (GH codex r2 P1); same hook as
+    // /:serviceId/complete, same at-most-once index, never throws. A recap
+    // re-closing a NOT-performed visit (submitRecap's priorNonPerformed —
+    // the same verdict that blocks referral credit and the card charge)
+    // consumes nothing, matching the original closeout (GH codex r3 P2). A
+    // recap EDIT of a visit that was already completed (priorCompleted) is
+    // not a new visit — no kit was left, nothing is consumed (GH codex r4
+    // P2); the at-most-once index still covers a retry of the completing
+    // recap itself.
+    if (result.priorCompleted !== true) {
+      try {
+        const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+        const svcRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('customer_id', 'technician_id', 'service_type');
+        const consumption = await consumeCompletionSupplies(db, {
+          scheduledServiceId: req.params.serviceId,
+          serviceRecordId: result.recordId || null,
+          customerId: svcRow?.customer_id || null,
+          technicianId: svcRow?.technician_id || null,
+          isIncompleteVisit: false,
+          visitPerformed: result.priorNonPerformed !== true,
+          serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
+          serviceType: svcRow?.service_type || null,
+        });
+        // The recap path has no job-costing kickoff of its own; a kit
+        // movement carries cost_used, so recalc (idempotent UPSERT,
+        // fire-and-forget) whenever something was actually consumed (GH
+        // codex r4 P2).
+        if (consumption?.consumed?.length) {
+          const JobCosting = require('../services/job-costing');
+          void JobCosting.calculateJobCost(req.params.serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
+        }
+      } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }
+    }
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -14435,7 +14522,7 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
     });
     const generated = await dispatchWithFallback(
       MODELS.TEXT_POLICIES.visionAnalysis,
-      { text: basePrompt, images, jsonMode: false, maxTokens: 700, temperature: 0.2 },
+      { laneId: 'photo_scoring', text: basePrompt, images, jsonMode: false, maxTokens: 700, temperature: 0.2 },
       {
         validate: (candidate) => {
           const parsed = PhotoAnalysis.parsePhotoAnalysisResponse(candidate.text, { photoCount: photos.length });
@@ -17199,6 +17286,7 @@ module.exports = router;
 // its failed-send compensation is the same guarded re-arm this route uses
 // (never a diverging local copy).
 module.exports.captureReminderGuards = captureReminderGuards;
+module.exports.mergeCardHoldPreviews = mergeCardHoldPreviews;
 module.exports.applySeriesMoveEffects = applySeriesMoveEffects;
 module.exports.reconcileSeriesMoveEffects = reconcileSeriesMoveEffects;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;

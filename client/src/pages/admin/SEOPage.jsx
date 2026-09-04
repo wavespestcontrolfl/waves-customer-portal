@@ -55,13 +55,20 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       let message = `${r.status} ${r.statusText}`;
+      let code = null;
+      let review = null;
       try {
         const data = await r.clone().json();
         message = data?.error || message;
+        code = data?.code || null; // a structured refusal (the outreach send) keeps its code for the message map
+        review = data?.review || null; // …and the recipient review it was computed with (the owner acknowledges THAT hash)
       } catch {
         /* keep default message */
       }
-      throw new Error(message);
+      const err = new Error(message);
+      if (code) err.code = code;
+      if (review) err.review = review;
+      throw err;
     }
     if (r.status === 204) return null;
     return r.json();
@@ -2716,6 +2723,8 @@ function LinkBuildingBoard({ canRun }) {
 // OUTREACH APPROVALS — review drafts, approve + send, reconcile (Backlink M3b)
 // =========================================================================
 // Friendly text for the structured result codes the outreach routes return.
+// a refusal that means the recipient match the card showed is no longer the one the server would send against
+const REVIEW_RESET_CODES = new Set(["recipient_review_required", "customer_recipient", "recipient_changed", "draft_changed"]);
 const OUTREACH_CODE_MSG = {
   gate_off: "Outreach lane is OFF — set GATE_LINK_OUTREACH to enable sending.",
   gmail_not_connected: "Gmail isn't connected — authorize it first.",
@@ -2732,7 +2741,55 @@ const OUTREACH_CODE_MSG = {
   send_in_flight: "A send is currently in flight.",
   not_found: "Prospect not found.",
   bad_outcome: "Invalid reconcile outcome.",
+  not_authorized: "Not authorized to send yet — the nightly authority bridge decides it, or the inputs changed since.",
+  customer_recipient: "The recipient is a customer contact — outreach never goes to a customer. Re-draft to another address.",
+  recipient_review_required: "The recipient shares a domain with a customer or lead contact — review the match and acknowledge it before sending.",
+  recipient_lookup_failed: "The customer-recipient check failed — not sent. Try again.",
+  inbox_in_flight: "Another placement already has a conversation with this recipient — one conversation per inbox.",
+  recipient_changed: "The draft was re-addressed while you looked at it — reload and send again.",
+  draft_changed: "The draft changed while you looked at it — reload and read the current text before sending.",
+  draft_hash_required: "This card is stale — reload and send again.",
+  path_moved: "The acquisition path changed since the draft — reload and draft again.",
+  path_unlinked: "Not linked to an acquisition path yet — the registry catch-up links it within the hour.",
 };
+
+// §6.4 / §13 — what the owner sees before a send: the draft review (why it is
+// the owner's to send, not the policy's) and the recipient match to acknowledge.
+function RecipientReview({ review, acked, onAck, disabled }) {
+  if (!review) return null;
+  if (review.kind === "clear") return <div style={{ fontSize: 12, color: D.muted }}>Recipient: not a customer or lead contact.</div>;
+  if (review.kind === "customer") return <div style={{ fontSize: 12, color: D.amber }}>Recipient is a customer contact ({review.matched.map((m) => m.source).join(", ")}) — outreach never goes to a customer.</div>;
+  if (review.kind === "ambiguous") {
+    return (
+      <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12, color: D.amber, cursor: disabled ? "default" : "pointer" }}>
+        <input type="checkbox" checked={Boolean(acked)} disabled={disabled} onChange={(e) => onAck(e.target.checked)} style={{ marginTop: 2 }} />
+        <span>{`Shares a domain with ${review.matched.length} customer / lead contact${review.matched.length === 1 ? "" : "s"} (${[...new Set(review.matched.map((m) => m.source))].join(", ")}). I reviewed the match — this is a business inbox, not a customer.`}</span>
+      </label>
+    );
+  }
+  return <div style={{ fontSize: 12, color: D.amber }}>Recipient check unavailable ({review.error || "lookup failed"}) — the send re-runs it and fails closed.</div>;
+}
+function DraftReviewLine({ review }) {
+  if (!review || review.clean) return null;
+  const parts = [...(review.flags || []), ...(review.lint || []).map((l) => `lint: ${l.rule}`)];
+  return <div style={{ fontSize: 12, color: D.muted }}>{`Owner review: ${parts.join(", ") || review.reason}`}</div>;
+}
+
+// §3.6b — a send on an attested path attests to the publisher's agreement: the
+// owner reads it HERE before Approve & send, as the Owner queue card shows it.
+function LegalAttestationLine({ p }) {
+  if (!p.legal_attestation) return null;
+  return (
+    <div style={{ fontSize: 12, color: D.amber }}>
+      Legal attestation{p.authority_level ? ` (${p.authority_level})` : ""} — sending attests to the publisher's agreement:{" "}
+      {p.legal_terms_url ? (
+        <a href={p.legal_terms_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>read the agreement</a>
+      ) : (
+        "no agreement url in the evidence — re-investigate before sending"
+      )}
+    </div>
+  );
+}
 
 // Raw POST that returns the parsed body even on non-2xx, so we can read the
 // structured {code}. (adminFetch throws on non-2xx and loses the code.)
@@ -2762,6 +2819,7 @@ function OutreachApprovals({ canRun, onChange }) {
   const [busyId, setBusyId] = useState(null);
   const [msg, setMsg] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [acks, setAcks] = useState({}); // prospect id → the owner acknowledged the recipient match
 
   const load = () => {
     adminFetch("/admin/backlink-agent/prospects/outreach/pending")
@@ -2771,10 +2829,17 @@ function OutreachApprovals({ canRun, onChange }) {
   useEffect(load, []);
   const refresh = () => { load(); if (onChange) onChange(); };
 
-  const send = async (id) => {
+  const send = async (p) => {
+    const id = p.id;
     setBusyId(id); setMsg(null);
-    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/send`);
+    // the acknowledged match travels with the click (§13): the server sends only when the lookup still yields it
+    // the acknowledgement is bound to the hash it was given for: a reloaded card with a new match starts unacknowledged
+    const ackKey = `${id}:${p.recipient_review?.lookup_hash || ""}`;
+    // the click sends the text this card displayed (§3.6b): the server refuses a draft edited since
+    const body = { draft_hash: p.draft_hash || "", ...(acks[ackKey] && p.recipient_review?.lookup_hash ? { reviewed_lookup_hash: p.recipient_review.lookup_hash } : {}) };
+    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/send`, body);
     setMsg({ ok, text: ok ? "Outreach sent." : (OUTREACH_CODE_MSG[r.code] || r.error || "Send failed.") });
+    if (!ok && r.code === "recipient_review_required") setAcks((prev) => ({ ...prev, [ackKey]: false })); // the reload below shows the current match
     setBusyId(null); refresh();
   };
   const reconcile = async (id, outcome) => {
@@ -2799,7 +2864,7 @@ function OutreachApprovals({ canRun, onChange }) {
           color: data.gateOn ? D.green : D.amber }}>
           {data.gateOn ? "Outreach lane: ON" : "Outreach lane: OFF — sends disabled (GATE_LINK_OUTREACH)"}
         </span>
-        {cap != null && <span style={{ fontSize: 12, color: D.muted }}>Sent (24h): {sentToday}/{cap}</span>}
+        {cap != null && <span style={{ fontSize: 12, color: D.muted }}>Sent today (ET): {sentToday}/{cap}</span>}
       </div>
 
       {msg && (
@@ -2829,9 +2894,14 @@ function OutreachApprovals({ canRun, onChange }) {
                 <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email}</div>
                 <div style={{ fontSize: 12, color: D.text, marginTop: 4 }}><b>{p.outreach_subject}</b></div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 4, whiteSpace: "pre-wrap", maxHeight: 84, overflow: "hidden" }}>{p.outreach_body}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+                  <DraftReviewLine review={p.draft_review} />
+                  <LegalAttestationLine p={p} />
+                  <RecipientReview review={p.recipient_review} acked={acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`]} disabled={busyId === p.id} onAck={(v) => setAcks({ ...acks, [`${p.id}:${p.recipient_review?.lookup_hash || ""}`]: v })} />
+                </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-                <button onClick={() => send(p.id)} disabled={!canRun || busyId === p.id} style={outreachBtn(D.teal, true, busyId === p.id)}>
+                <button onClick={() => send(p)} disabled={!canRun || busyId === p.id || p.recipient_review?.kind === "customer" || (p.recipient_review?.kind === "ambiguous" && !acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`])} style={outreachBtn(D.teal, true, busyId === p.id || p.recipient_review?.kind === "customer" || (p.recipient_review?.kind === "ambiguous" && !acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`]))}>
                   {busyId === p.id ? "Sending…" : "Approve & send"}
                 </button>
                 <button onClick={() => setEditing(p)} disabled={busyId === p.id} style={outreachBtn(D.teal, false)}>Edit</button>
@@ -2934,7 +3004,9 @@ const REGISTRY_STATES = [
 ];
 const LANE_OWNED_STATES = ["ready_to_acquire", "acquiring", "acquired"];
 
-function BacklinkRegistryCard() {
+// refreshKey / onMutated: the registry card and the owner queue below it read the same domains — a mutation in
+// either (Acquire anyway parks cards; Reject / Watch hide them) bumps the shared key and both reload.
+function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
   const [rows, setRows] = useState([]);
   const [stateFilter, setStateFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -2974,9 +3046,30 @@ function BacklinkRegistryCard() {
       if (gen === loadGen.current) setLoading(false);
     }
   };
+  // detail carries the row id it answers — a slow response for a row the
+  // operator has since left never renders under the newly expanded one,
+  // and (via the ref check) never OVERWRITES the loaded detail of the row
+  // they moved to — that would strand the expanded row on "Loading…"
+  // …and only the LATEST request for that row may write: an expand still in flight when a mutation refetches the
+  // same id must not land last and overwrite the refreshed waiver / paths (same generation guard as the list)
+  const detailGen = useRef(0);
+  const loadDetail = async (id) => {
+    const gen = ++detailGen.current;
+    try {
+      const r = await adminFetch(`/admin/backlink-agent/registry/${id}`);
+      if (expandedRef.current !== id || gen !== detailGen.current) return;
+      setDetail({ forId: id, ...r });
+    } catch (e) {
+      if (expandedRef.current !== id || gen !== detailGen.current) return;
+      setDetail({ forId: id, error: e?.message || "Detail load failed" });
+    }
+  };
   useEffect(() => {
-    load();
-  }, []);
+    const c = controlsRef.current;
+    load(c.stateFilter, c.search, c.page);
+    // the expanded row's detail (waiver, paths, placements) moves with the same mutations — refetch it in place
+    if (expandedRef.current) loadDetail(expandedRef.current);
+  }, [refreshKey]);
 
   const toggleExpand = async (id) => {
     if (expandedId === id) {
@@ -2987,18 +3080,7 @@ function BacklinkRegistryCard() {
     setExpandedId(id);
     expandedRef.current = id;
     setDetail(null);
-    // detail carries the row id it answers — a slow response for a row the
-    // operator has since left never renders under the newly expanded one,
-    // and (via the ref check) never OVERWRITES the loaded detail of the row
-    // they moved to — that would strand the expanded row on "Loading…"
-    try {
-      const r = await adminFetch(`/admin/backlink-agent/registry/${id}`);
-      if (expandedRef.current !== id) return;
-      setDetail({ forId: id, ...r });
-    } catch (e) {
-      if (expandedRef.current !== id) return;
-      setDetail({ forId: id, error: e?.message || "Detail load failed" });
-    }
+    await loadDetail(id);
   };
 
   const doAction = async (id, action) => {
@@ -3011,10 +3093,40 @@ function BacklinkRegistryCard() {
       });
       // refresh with the CURRENT controls — this closure's stateFilter/
       // search/page are from the render the action started on
-      const c = controlsRef.current;
-      await load(c.stateFilter, c.search, c.page);
+      if (onMutated) onMutated();
+      else await load(controlsRef.current.stateFilter, controlsRef.current.search, controlsRef.current.page);
     } catch (e) {
       setError(e?.message || `${action} failed`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // "Acquire anyway" (plan v2 §6.3 1b, step 4 PR 2b): waives the quality floors
+  // the domain fails — an audited waiver, never an approval — and runs the
+  // bridge for this domain so its owner cards appear in the queue below.
+  const acquireAnyway = async (id) => {
+    setBusyId(id);
+    setError(null);
+    setRunResult(null);
+    try {
+      const r = await adminPost(`/admin/backlink-agent/registry/${id}/acquire-anyway`, {});
+      setRunResult({
+        acquireAnyway: true,
+        text: `${r.domain}: waived ${(r.floors || []).map((f) => `${f.floor} ${f.value} vs ${f.threshold}`).join(", ")} — ${
+          r.bridge?.gated
+            ? "recorded; GATE_LINK_AUTHORITY is off, so the bridge decides it when the gate is on"
+            : r.bridge?.skipped
+              ? "recorded; the nightly bridge decides it"
+              : r.summary_unavailable
+                ? "recorded; the Owner queue below shows what now awaits your decision"
+                : `${r.awaiting} step${r.awaiting === 1 ? "" : "s"} now await your decision in the Owner queue`
+        }`,
+      });
+      if (onMutated) onMutated();
+      else await load(controlsRef.current.stateFilter, controlsRef.current.search, controlsRef.current.page);
+    } catch (e) {
+      setError(e?.message || "Acquire anyway failed");
     } finally {
       setBusyId(null);
     }
@@ -3106,11 +3218,13 @@ function BacklinkRegistryCard() {
           style={{
             marginBottom: 8,
             fontSize: 12,
-            color: runResult.error ? D.red : runResult.gated ? D.amber : D.green,
+            color: runResult.error ? D.red : runResult.acquireAnyway ? D.text : runResult.gated ? D.amber : D.green,
           }}
         >
           {runResult.error
             ? runResult.error
+            : runResult.acquireAnyway
+              ? runResult.text
             : runResult.gated
               ? `Held by GATE_LINK_INVESTIGATOR (${runResult.selected} selected, nothing fetched)`
               : runResult.dryRun
@@ -3237,6 +3351,11 @@ function BacklinkRegistryCard() {
                             Reopen
                           </button>
                         )}
+                        {d.agent_state === "rejected" && d.waivable === true && (
+                          <button onClick={() => acquireAnyway(d.id)} disabled={busyId === d.id} style={smallBtn(busyId === d.id)} title="Waive the quality floors this domain fails (audited) and route it to the Owner queue">
+                            Acquire anyway
+                          </button>
+                        )}
                       </span>
                     )}
                   </td>
@@ -3250,6 +3369,11 @@ function BacklinkRegistryCard() {
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                           {d.score_reasons && (
                             <div style={{ fontSize: 12, color: D.muted }}>{d.score_reasons}</div>
+                          )}
+                          {detail.waiver && (
+                            <div style={{ fontSize: 12, color: D.amber }}>
+                              {`Floors waived by ${detail.waiver.approved_by} on ${formatETDate(detail.waiver.approved_at)}: ${(detail.waiver.overridden_floors || []).map((f) => `${f.floor} ${f.value} vs ${f.threshold}`).join(", ")}${detail.waiver.note ? ` — ${detail.waiver.note}` : ""}`}
+                            </div>
                           )}
                           <div>
                             <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
@@ -3351,6 +3475,362 @@ function BacklinkRegistryCard() {
 
 // §3.8 / §6.2 / §11 item 4 — the ONLY place authority/spend thresholds change
 // (step 4a). Every save is audited server-side; env may only tighten.
+// =========================================================================
+// Owner queue (plan v2 §11 item 3 / §3.6b / §6.3 1b — step 4 PR 2b): the
+// placements the nightly authority bridge parked awaiting the owner. Approve
+// is per dimension row and freezes exactly what is on the card; Reject and
+// Watch are domain decisions (the same writer as the Registry buttons). A
+// communication row's approval IS its send (step 4 PR 3a, §6.3 2c): the Send
+// button here and the board's Approve & send are the same authenticated click
+// — the sender writes the approval bound to the draft hash and the recipient
+// review the owner acknowledged, then sends.
+const DIMENSION_LABELS = { execution: "Execution", payment: "Payment", communication: "Message" };
+const ACTION_LABELS = {
+  acquire: "create the account / submit the listing",
+  accept_terms: "accept the agreement",
+  purchase: "pay the listing fee",
+  renewal: "pay the renewal",
+  outreach_send: "send the pitch",
+  outreach_followup: "send the follow-up",
+};
+const money = (cents) => (cents == null ? "—" : `$${(cents / 100).toFixed(2)}`);
+// "95", "95.5", "95.50" → 9500 / 9550 / 9550; "10.075", "-1", "abc", "" → null
+function dollarsToCents(raw) {
+  const m = /^\s*\$?\s*(\d{1,7})(?:\.(\d{1,2}))?\s*$/.exec(String(raw));
+  if (!m) return null;
+  const cents = Number(m[1]) * 100 + Number((m[2] || "").padEnd(2, "0"));
+  return cents > 0 ? cents : null;
+}
+const compact = (n) => (n == null ? "—" : n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
+
+function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [amounts, setAmounts] = useState({});
+  const [notes, setNotes] = useState({});
+  const [acks, setAcks] = useState({}); // row id → the owner acknowledged the recipient match (§13)
+  const [result, setResult] = useState(null);
+  const loadGen = useRef(0);
+
+  const load = async () => {
+    const gen = ++loadGen.current;
+    setError(null);
+    try {
+      const r = await adminFetch("/admin/backlink-agent/owner-queue");
+      if (gen !== loadGen.current) return;
+      setData(r);
+    } catch (e) {
+      if (gen !== loadGen.current) return;
+      setError(e?.message || "Owner queue load failed");
+    }
+  };
+  useEffect(() => {
+    load();
+  }, [refreshKey]);
+  // after a mutation: the parent refreshes every panel when it owns the key, else this panel reloads itself
+  const refresh = () => (onMutated ? onMutated() : load());
+
+  // what the inline bridge run did with the click — or why the nightly run will
+  const bridgeNote = (b) => {
+    if (!b) return "";
+    if (b.gated) return "recorded; GATE_LINK_AUTHORITY is off, so it takes effect when the gate is on";
+    if (b.skipped) return `recorded; the nightly bridge applies it (${b.skipped === "lease_held" ? "a bridge run is in progress" : b.skipped})`;
+    return `released ${b.released}, parked ${b.parked}, domain updates ${b.aggregateChanges}`;
+  };
+
+  // what the payment field SHOWS: the owner's edit (even a cleared one), else the quote
+  // (the server picks the quote THIS row authorizes — a renewal row shows the renewal price, never the initial fee;
+  // no applicable quote ⇒ blank ⇒ the click is refused until the owner types the amount)
+  const displayedAmount = (card, row) => (amounts[row.id] !== undefined ? amounts[row.id] : row.quote_cents != null ? (row.quote_cents / 100).toFixed(2) : "");
+
+  const approve = async (card, row) => {
+    setBusy(row.id);
+    setError(null);
+    setResult(null);
+    const body = {};
+    if (row.dimension === "payment") {
+      // a money authorization ALWAYS carries the amount the owner can see in the field — the server never
+      // defaults it for a click from this card. The decimal TOKEN becomes integer cents (never through a
+      // binary float — 10.075 * 100 rounds to 1007); a blank field or >2 decimals is refused, not defaulted.
+      const cents = dollarsToCents(displayedAmount(card, row));
+      if (cents === null) {
+        setError("Enter the amount in dollars with at most two decimals, greater than zero.");
+        setBusy(null);
+        return;
+      }
+      body.approved_amount_cents = cents;
+    }
+    if (notes[card.domain.id]) body.note = notes[card.domain.id];
+    try {
+      const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/approve`, { method: "POST", body });
+      setResult({ tone: D.green, text: `Approved ${DIMENSION_LABELS[row.dimension] || row.dimension} on ${card.domain.domain}${r.attached?.length > 1 ? ` (${r.attached.length} locations share the fee)` : ""} — ${bridgeNote(r.bridge)}` });
+      await refresh();
+    } catch (e) {
+      setError(e?.message || "Approve failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // the send click IS the approval of a communication row (§6.3 2c)
+  const send = async (card, row) => {
+    setBusy(row.id);
+    setError(null);
+    setResult(null);
+    const lookupHash = row.draft?.recipient_review?.lookup_hash || "";
+    const ackKey = `${row.id}:${lookupHash}`; // the acknowledgement is bound to the hash it was given for
+    // the click sends the text this card displayed (§3.6b): the server refuses a draft edited since
+    const body = { draft_hash: row.draft?.hash || "", ...(acks[ackKey] && lookupHash ? { reviewed_lookup_hash: lookupHash } : {}) };
+    try {
+      const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/send`, { method: "POST", body });
+      setResult({ tone: D.green, text: `Sent the pitch to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}` });
+      await refresh();
+    } catch (e) {
+      setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
+      // the match changed under the card (or the lookup now yields one): drop the stale acknowledgement and reload so
+      // the owner reviews the CURRENT match — the server sends only against the hash it just computed
+      if (REVIEW_RESET_CODES.has(e?.code)) {
+        setAcks((prev) => ({ ...prev, [ackKey]: false }));
+        await load();
+      }
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const decide = async (card, action) => {
+    setBusy(card.domain.id);
+    setError(null);
+    setResult(null);
+    try {
+      const r = await adminFetch(`/admin/backlink-agent/owner-queue/domains/${card.domain.id}/${action}`, { method: "POST", body: { note: notes[card.domain.id] || null } });
+      setResult({ tone: D.text, text: `${card.domain.domain} → ${String(r.agent_state).replace(/_/g, " ")}${r.watch_recheck_at ? `, rechecked ${formatETDate(r.watch_recheck_at)}` : ""}` });
+      await refresh();
+    } catch (e) {
+      setError(e?.message || `${action} failed`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const btn = (disabled, color) => ({
+    padding: "6px 12px",
+    minHeight: 32,
+    borderRadius: 8,
+    border: `1px solid ${D.border}`,
+    background: "#fff",
+    color: color || D.text,
+    fontSize: 12,
+    cursor: "pointer",
+    opacity: disabled ? 0.5 : 1,
+  });
+  const inputStyle = {
+    padding: "6px 8px",
+    borderRadius: 8,
+    border: `1px solid ${D.inputBorder}`,
+    background: "#fff",
+    color: D.text,
+    fontSize: 13,
+    fontFamily: MONO,
+  };
+
+  const cards = data?.cards || [];
+  return (
+    <Card style={{ marginBottom: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+          Owner queue{data ? ` · ${cards.length} card${cards.length === 1 ? "" : "s"}` : ""}
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>
+            {data ? (data.gateOn ? "GATE_LINK_AUTHORITY on" : "GATE_LINK_AUTHORITY off — nothing parks until it is on") : "…"}
+          </div>
+          <button onClick={load} disabled={busy !== null} style={btn(busy !== null)}>
+            Refresh
+          </button>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
+        Placements the nightly bridge parked for your decision. Approve freezes exactly the terms shown here; a changed price, agreement or policy
+        invalidates it and the card comes back. Reject and Watch apply to the whole domain. Send the pitch mails the draft shown on the card from
+        contact@ — that click is its approval. Nothing else here signs or pays — the runner does that later, against the approval.
+      </div>
+      {error && <div style={{ marginBottom: 8, fontSize: 12, color: D.red }}>{error}</div>}
+      {result && <div style={{ marginBottom: 8, fontSize: 12, color: result.tone }}>{result.text}</div>}
+      {!data && !error && <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>}
+      {data && cards.length === 0 && <div style={{ fontSize: 13, color: D.muted }}>Nothing awaits your decision.</div>}
+      {cards.map((c) => {
+        const domainBusy = busy === c.domain.id;
+        const p = c.path;
+        return (
+          <div key={c.placement.id} style={{ border: `1px solid ${D.border}`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, fontFamily: MONO }}>
+                {c.domain.domain}
+                {c.placement.location_key && c.placement.location_key !== "-" ? <span style={{ color: D.muted, fontWeight: 400 }}>{` · ${c.placement.location_key}`}</span> : ""}
+                {c.placement.status === "ready_for_payment" && <span style={{ color: D.amber, fontWeight: 400 }}>{" · at the publisher's checkout"}</span>}
+                {["placed", "live", "indexed"].includes(c.placement.status) && (() => {
+                  // the label is the PENDING payment action, never the status alone: a placed placement can still owe its initial fee
+                  const pending = c.rows.find((r) => r.dimension === "payment" && !r.satisfied_at); // approved-but-unsettled is still the obligation
+                  return <span style={{ color: D.amber, fontWeight: 400 }}>{` · ${c.placement.status} — ${pending && pending.action === "renewal" ? "renewal" : "initial fee"}`}</span>;
+                })()}
+              </div>
+              <div style={{ fontSize: 12, color: D.muted }}>
+                {`DR ${c.domain.domain_rating ?? "—"} · traffic ${compact(c.domain.organic_traffic)} · spam ${c.domain.spam_score ?? "—"} · score ${c.domain.score ?? "—"} · ${c.domain.competitors_linked ?? 0} competitor${c.domain.competitors_linked === 1 ? "" : "s"} linked · D30 ${c.d30_confidence == null ? "n/a" : c.d30_confidence}`}
+              </div>
+            </div>
+            {p && (
+              <div style={{ fontSize: 12, color: D.text, marginTop: 6 }}>
+                <span style={{ fontFamily: MONO }}>{p.acquisition_type}</span>
+                {` · ${p.expected_rel || "rel unknown"}`}
+                {p.payment_required
+                  ? ` · ${p.estimated_cost_cents != null ? money(p.estimated_cost_cents) : `price ${p.currency}`}${p.renewal_cost_cents != null ? ` · renews ${money(p.renewal_cost_cents)}${p.renewal_period && p.renewal_period !== "none" ? `/${p.renewal_period}` : ""}` : p.renewal_period === "none" ? " · one-time" : ""}${p.fee_scope === "account_wide" ? " · one fee for every location" : ""}`
+                  : " · free"}
+                {p.submission_url && (
+                  <>
+                    {" · "}
+                    <a href={p.submission_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>
+                      submission page
+                    </a>
+                  </>
+                )}
+                {p.payment_required && (
+                  <span style={{ fontFamily: MONO }}>
+                    {p.merchant_binding
+                      ? ` · pays ${p.merchant_binding.merchant_account_id || "?"} via ${p.merchant_binding.processor_host || "?"} at ${p.merchant_binding.checkout_origin || "?"}${p.merchant_binding.issuer_merchant_descriptor ? ` (${p.merchant_binding.issuer_merchant_descriptor})` : ""}`
+                      : " · no resolvable merchant — manual settlement only"}
+                  </span>
+                )}
+                {p.legal_attestation && (
+                  <>
+                    {" · "}
+                    {p.legal_terms_url ? (
+                      <a href={p.legal_terms_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>
+                        agreement
+                      </a>
+                    ) : (
+                      "agreement (no url)"
+                    )}
+                  </>
+                )}
+                {!p.on_best_path && <span style={{ color: D.amber }}> · not on the current best path — the nightly bridge rotates it</span>}
+              </div>
+            )}
+            {c.domain.score_reasons && <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{c.domain.score_reasons}</div>}
+            {c.waiver && (
+              <div style={{ fontSize: 12, color: D.amber, marginTop: 4 }}>
+                {`Floors waived by ${c.waiver.approved_by} on ${formatETDate(c.waiver.approved_at)}: ${(c.waiver.overridden_floors || []).map((f) => `${f.floor} ${f.value} vs ${f.threshold}`).join(", ")}`}
+              </div>
+            )}
+            <div style={{ overflowX: "auto", marginTop: 10 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={thStyle}>Step</th>
+                    <th style={thStyle}>Level</th>
+                    <th style={thStyle}>Why</th>
+                    <th style={thStyle}>Decision</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {c.rows.map((r) => {
+                    const rowBusy = busy === r.id;
+                    // the service's verdict, not the raw approval: a consumed approval on a still-unsatisfied row is spent — the card asks again
+                    const approvedBy = r.approved && r.approval ? r.approval : null;
+                    return (
+                      <tr key={r.id}>
+                        <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                          {DIMENSION_LABELS[r.dimension] || r.dimension}
+                          <div style={{ color: D.muted }}>{ACTION_LABELS[r.action] || r.action}</div>
+                        </td>
+                        <td style={tdStyle}>{r.level}</td>
+                        <td style={{ ...tdStyle, fontFamily: "inherit", color: D.muted }}>{r.reason || "—"}</td>
+                        <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                          {approvedBy ? (
+                            <span style={{ color: r.approval_stale ? D.amber : D.green }}>
+                              {`Approved by ${approvedBy.approved_by} ${formatETDateTime(approvedBy.approved_at)}`}
+                              {approvedBy.max_payable_cents != null ? ` · up to ${money(approvedBy.max_payable_cents)}` : ""}
+                              {r.approval_stale ? ` · ${r.approval_stale}` : ""}
+                            </span>
+                          ) : r.approvable && r.dimension === "communication" ? (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 260 }}>
+                              <div style={{ fontSize: 12, color: D.text }}>
+                                <span style={{ color: D.muted }}>To </span>{r.draft?.to || "—"}
+                                <div><b>{r.draft?.subject || "—"}</b></div>
+                                <div style={{ color: D.muted, whiteSpace: "pre-wrap", maxHeight: 84, overflow: "hidden" }}>{r.draft?.body || ""}</div>
+                              </div>
+                              <DraftReviewLine review={r.draft?.review} />
+                              <RecipientReview review={r.draft?.recipient_review} acked={acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]} disabled={rowBusy} onAck={(v) => setAcks({ ...acks, [`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]: v })} />
+                              <span>
+                                <button onClick={() => send(c, r)} disabled={rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`])} style={btn(rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]), D.green)}>
+                                  {rowBusy ? "Sending…" : "Send the pitch"}
+                                </button>
+                              </span>
+                            </div>
+                          ) : r.approvable ? (
+                            <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                              {r.dimension === "payment" && (
+                                <label style={{ display: "inline-flex", gap: 4, alignItems: "center", color: D.muted }}>
+                                  $
+                                  <input
+                                    type="number"
+                                    min="0.01"
+                                    step="0.01"
+                                    value={displayedAmount(c, r)}
+                                    disabled={rowBusy}
+                                    onChange={(e) => setAmounts({ ...amounts, [r.id]: e.target.value })}
+                                    style={{ ...inputStyle, width: 96 }}
+                                  />
+                                  {c.price_tolerance_cents > 0 ? `+${money(c.price_tolerance_cents)} tolerance` : "exact"}
+                                  {r.shared_fee ? ` · covers ${r.shared_fee.placements} locations` : ""}
+                                </label>
+                              )}
+                              <button onClick={() => approve(c, r)} disabled={rowBusy || domainBusy} style={btn(rowBusy || domainBusy, D.green)}>
+                                {rowBusy ? "Approving…" : "Approve"}
+                              </button>
+                            </span>
+                          ) : (
+                            <span style={{ color: D.muted }}>{r.why_not}</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+              <input
+                type="text"
+                placeholder="Note (optional, kept with the decision)"
+                value={notes[c.domain.id] || ""}
+                disabled={domainBusy}
+                onChange={(e) => setNotes({ ...notes, [c.domain.id]: e.target.value })}
+                style={{ ...inputStyle, fontFamily: "inherit", flex: "1 1 240px" }}
+              />
+              {c.decidable ? (
+                <>
+                  <button onClick={() => decide(c, "watch")} disabled={domainBusy} style={btn(domainBusy)}>
+                    Watch domain
+                  </button>
+                  <button onClick={() => decide(c, "reject")} disabled={domainBusy} style={btn(domainBusy, D.red)}>
+                    Reject domain
+                  </button>
+                </>
+              ) : (
+                <span style={{ fontSize: 12, color: D.muted }}>
+                  {`Domain is ${String(c.domain.agent_state).replace(/_/g, " ")} — a sibling placement is approved or in flight; reject or watch it from the Link Building board`}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </Card>
+  );
+}
+
 const POLICY_GROUPS = [
   { title: "Floors (any action, auto or owner-routed)", fields: ["min_score", "min_path_confidence", "max_spam_score"] },
   { title: "Automatic acquisition", fields: ["auto_free_acquisition", "auto_account_creation", "auto_submission_daily_cap", "membership_requires_owner", "legal_attestation_requires_owner"] },
@@ -3586,6 +4066,9 @@ function LinkPolicyPanel() {
 
 function BacklinkAgentPanel() {
   const [stats, setStats] = useState(null);
+  // one refresh key for the Registry card and the Owner queue: a mutation in either reloads both
+  const [linkRefresh, setLinkRefresh] = useState(0);
+  const bumpLinkRefresh = () => setLinkRefresh((n) => n + 1);
   const [queue, setQueue] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [targets, setTargets] = useState([]);
@@ -4052,7 +4535,9 @@ function BacklinkAgentPanel() {
           )}
         </Card>
         {/* Registry view + investigator (plan v2 step 3) */}
-        <BacklinkRegistryCard />
+        <BacklinkRegistryCard refreshKey={linkRefresh} onMutated={bumpLinkRefresh} />
+        {/* Owner queue — the cards the authority bridge parked (plan v2 step 4 PR 2b) */}
+        <OwnerQueuePanel refreshKey={linkRefresh} onMutated={bumpLinkRefresh} />
         {/* Acquisition authority policy (plan v2 step 4a) */}
         <LinkPolicyPanel />
         {/* Manual URL Input */}

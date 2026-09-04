@@ -3,6 +3,9 @@ const { parse: parseCsvSync } = require('csv-parse/sync');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { eligibleVendorPricing } = require('../services/vendor-pricing-eligibility');
+const { findLiveRestockRequest } = require('../services/procurement/live-restock-request');
+const { AUTO_REORDER_SOURCE } = require('../services/procurement/auto-reorder');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
@@ -580,6 +583,11 @@ function mapProduct(product, vendorPricing = []) {
     inventoryUnit: product.inventory_unit || null,
     lowStockThreshold,
     lowStock,
+    autoReorderEnabled: product.auto_reorder_enabled === true,
+    autoReorderVendorId: product.auto_reorder_vendor_id || null,
+    reorderQuantity: numberOrNull(product.reorder_quantity),
+    perCompletionUsage: numberOrNull(product.per_completion_usage),
+    perCompletionServiceLines: Array.isArray(product.per_completion_service_lines) ? product.per_completion_service_lines : null,
     vendorPricing: enrichedPricing,
     unitPrices,
     // Product Registry fields
@@ -3059,57 +3067,71 @@ router.get('/waveguard-forecast', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The forecast restock row, built from the LOCKED product and the request
+// body (validated by the caller). Pure — no decisions about whether to insert.
+function forecastRestockRow(product, body, { actor, actorName, requestedQuantity, unit }) {
+  const now = new Date();
+  return {
+    product_id: product.id,
+    status: 'open',
+    priority: String(body.priority || 'high').toLowerCase(),
+    requested_quantity: requestedQuantity,
+    unit,
+    current_stock: numberOrNull(product.inventory_on_hand),
+    target_stock: numberOrNull(body.targetStock),
+    vendor: product.best_vendor || null,
+    needed_by: body.neededBy || null,
+    reason: String(body.reason || '').trim() || `Forecasted WaveGuard inventory demand for ${product.name}`,
+    source: 'waveguard_inventory_forecast',
+    created_by: actor,
+    created_by_name: actorName,
+    metadata: {
+      forecastDays: numberOrNull(body.forecastDays),
+      committedDemand: numberOrNull(body.committedDemand),
+      projectedRemaining: numberOrNull(body.projectedRemaining),
+      firstShortDate: body.firstShortDate || null,
+    },
+    created_at: now,
+    updated_at: now,
+  };
+}
+
 // POST /waveguard-forecast/:productId/restock-request — create a restock request from projected demand.
 router.post('/waveguard-forecast/:productId/restock-request', async (req, res, next) => {
   try {
     if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
-    const product = await db('products_catalog').where({ id: req.params.productId }).first();
-    if (!product) return res.status(404).json({ error: 'Product not found' });
+    const body = req.body || {};
     const actor = req.technicianId || req.technician?.id || null;
     const actorName = req.technician?.name || req.technician?.email || null;
-    const requestedQuantity = numberOrNull(req.body?.requestedQuantity);
-    const unit = String(req.body?.unit || product.inventory_unit || product.rate_unit || '').trim();
-    if (!requestedQuantity || requestedQuantity <= 0 || !unit) {
-      return res.status(400).json({ error: 'Requested quantity and unit are required' });
-    }
-    assertSupportedInventoryUnit(unit);
+    // One transaction, product row LOCKED before the insert, then the SHARED
+    // any-source live-request check under that lock: every restock creator
+    // (this route, the readiness route, the Intelligence Bar tool, the
+    // auto-reorder sweep) runs the same read under the same row lock, so a
+    // writer that resumes after a concurrent commit hands back the request
+    // that already exists instead of raising its twin (Codex r8 P1, r9 P1).
+    // allowDuplicate lets staff stack a second STAFF request on purpose; it
+    // never stacks one on the sweep's automatic request.
+    const outcome = await db.transaction(async (trx) => {
+      const product = await trx('products_catalog').where({ id: req.params.productId }).forUpdate().first();
+      if (!product) return { status: 404, body: { error: 'Product not found' } };
+      const requestedQuantity = numberOrNull(body.requestedQuantity);
+      const unit = String(body.unit || product.inventory_unit || product.rate_unit || '').trim();
+      if (!requestedQuantity || requestedQuantity <= 0 || !unit) {
+        return { status: 400, body: { error: 'Requested quantity and unit are required' } };
+      }
+      assertSupportedInventoryUnit(unit);
 
-    const existing = await db('product_restock_requests')
-      .where({ product_id: product.id })
-      .whereIn('status', ['open', 'ordered'])
-      .where('source', 'waveguard_inventory_forecast')
-      .first();
-    if (existing && req.body?.allowDuplicate !== true) {
-      return res.json({ success: true, existing: true, restockRequest: existing });
-    }
+      const existing = await findLiveRestockRequest(trx, product.id);
+      if (existing && (body.allowDuplicate !== true || existing.source === AUTO_REORDER_SOURCE)) {
+        return { status: 200, body: { success: true, existing: true, restockRequest: existing } };
+      }
 
-    const now = new Date();
-    const [restockRequest] = await db('product_restock_requests')
-      .insert({
-        product_id: product.id,
-        status: 'open',
-        priority: String(req.body?.priority || 'high').toLowerCase(),
-        requested_quantity: requestedQuantity,
-        unit,
-        current_stock: numberOrNull(product.inventory_on_hand),
-        target_stock: numberOrNull(req.body?.targetStock),
-        vendor: product.best_vendor || null,
-        needed_by: req.body?.neededBy || null,
-        reason: String(req.body?.reason || '').trim() || `Forecasted WaveGuard inventory demand for ${product.name}`,
-        source: 'waveguard_inventory_forecast',
-        created_by: actor,
-        created_by_name: actorName,
-        metadata: {
-          forecastDays: numberOrNull(req.body?.forecastDays),
-          committedDemand: numberOrNull(req.body?.committedDemand),
-          projectedRemaining: numberOrNull(req.body?.projectedRemaining),
-          firstShortDate: req.body?.firstShortDate || null,
-        },
-        created_at: now,
-        updated_at: now,
-      })
-      .returning('*');
-    res.json({ success: true, existing: false, restockRequest });
+      const [restockRequest] = await trx('product_restock_requests')
+        .insert(forecastRestockRow(product, body, { actor, actorName, requestedQuantity, unit }))
+        .returning('*');
+      return { status: 200, body: { success: true, existing: false, restockRequest } };
+    });
+    res.status(outcome.status).json(outcome.body);
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     if (err.code === '23514') return res.status(400).json({ error: 'Invalid priority or request status' });
@@ -3194,6 +3216,12 @@ router.post('/unit-review/:productId/fix', async (req, res, next) => {
   }
 });
 
+function restockMeta(raw) {
+  if (!raw) return {};
+  if (typeof raw !== 'string') return raw;
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
+}
+
 // GET /restock-requests — product restock request queue.
 router.get('/restock-requests', async (req, res, next) => {
   try {
@@ -3240,6 +3268,10 @@ router.get('/restock-requests', async (req, res, next) => {
         inventoryUnit: row.inventory_unit,
         targetStock: row.target_stock != null ? Number(row.target_stock) : null,
         vendor: row.vendor || row.best_vendor || null,
+        // Auto-reorder requests carry the vendor SKU + product URL in
+        // metadata; the tab renders them as the order link (Codex r3 P2).
+        vendorSku: restockMeta(row.metadata).vendorSku || null,
+        vendorProductUrl: restockMeta(row.metadata).vendorProductUrl || null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,
@@ -3433,17 +3465,10 @@ async function recalcBestPriceLocked(productId, dbc) {
   // become the catalog best price — a pending or rejected scrape must never
   // feed best_price consumers. The control-layer migration backfilled all
   // legacy rows to approved/is_active=true, so this excludes nothing valid.
-  const rows = await dbc('vendor_pricing')
-    .where({ product_id: productId })
-    // Authoritative-first positivity (r21-push P1): the coalesced value the
-    // scorer actually uses must be positive — a positive legacy price must
-    // not admit a row whose authoritative price_amount is zero/negative.
-    .whereRaw('COALESCE(vendor_pricing.price_amount, vendor_pricing.price) > 0')
-    .where('vendor_pricing.is_active', true)
-    .whereIn('vendor_pricing.approval_status', ['approved', 'auto_approved'])
-    .where(function unexpired() {
-      this.whereNull('vendor_pricing.expires_at').orWhere('vendor_pricing.expires_at', '>', new Date());
-    })
+  // Eligibility (positivity, active, approval, expiry) is the shared
+  // vendor-pricing-eligibility predicate — the auto-reorder sweep applies the
+  // same one, so both read the same set of rows.
+  const rows = await eligibleVendorPricing(dbc('vendor_pricing').where({ product_id: productId }))
     .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
     .select('vendor_pricing.*', 'vendors.name as vendor_name');
   if (!rows || !rows.length) {
@@ -3636,6 +3661,44 @@ router.put('/service-usage/:id', async (req, res, next) => {
 // =========================================================================
 // PUT /:id — update product fields (inline editing)
 // =========================================================================
+// Auto-reorder + per-completion consumable fields of PUT /:id (supplies
+// lane), validated as one stage: the vendor must exist; quantities are
+// non-negative numbers or null (blank clears — a typo must never silently
+// disable auto-reorder by becoming null); service lines are detectServiceLine
+// ids, null = every line. Rejections throw statusCode 400.
+function badRequest(message) { const err = new Error(message); err.statusCode = 400; throw err; }
+function nonNegativeOrNull(raw, label) {
+  if (raw == null || raw === '') return null;
+  const n = numberOrNull(raw);
+  if (n == null || n < 0) badRequest(`${label} must be a number zero or more`);
+  return n;
+}
+function serviceLinesOrNull(raw) {
+  if (raw == null) return null;
+  const { SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
+  if (!Array.isArray(raw) || raw.some((l) => !SERVICE_LINE_IDS.includes(l))) badRequest(`Service lines must be a list of: ${SERVICE_LINE_IDS.join(', ')}`);
+  return JSON.stringify([...new Set(raw)]);
+}
+async function existingVendorIdOrNull(raw) {
+  const vendorId = raw || null;
+  if (vendorId && !(await db('vendors').where({ id: vendorId }).first().catch(() => null))) badRequest('Auto-reorder vendor not found');
+  return vendorId;
+}
+const AUTO_REORDER_FIELDS = [
+  ['autoReorderEnabled', 'auto_reorder_enabled', (v) => v === true],
+  ['reorderQuantity', 'reorder_quantity', (v) => nonNegativeOrNull(v, 'Reorder quantity')],
+  ['perCompletionUsage', 'per_completion_usage', (v) => nonNegativeOrNull(v, 'Per-visit usage')],
+  ['perCompletionServiceLines', 'per_completion_service_lines', serviceLinesOrNull],
+  ['autoReorderVendorId', 'auto_reorder_vendor_id', existingVendorIdOrNull],
+];
+async function autoReorderPatch(body) {
+  const upd = {};
+  for (const [field, column, parse] of AUTO_REORDER_FIELDS) {
+    if (body[field] !== undefined) upd[column] = await parse(body[field]);
+  }
+  return upd;
+}
+
 router.put('/:id', async (req, res, next) => {
   try {
     const product = await db('products_catalog').where({ id: req.params.id }).first();
@@ -3688,6 +3751,8 @@ router.put('/:id', async (req, res, next) => {
 
     if (req.body.inventoryUnit !== undefined) upd.inventory_unit = nextUnit;
     if (req.body.lowStockThreshold !== undefined) upd.low_stock_threshold = nextThreshold;
+
+    Object.assign(upd, await autoReorderPatch(req.body));
 
     const updated = await db.transaction(async (trx) => {
       const locked = await trx('products_catalog').where({ id: req.params.id }).forUpdate().first();

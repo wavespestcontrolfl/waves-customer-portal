@@ -52,6 +52,10 @@ const SWEEP_PROBABILITY = 0.04;
 const KEY_RECORDS = {
   hermes: { provider: 'hermes', secretEnv: 'LINK_WORKER_SECRET_HERMES', endpoints: ['claim', 'report'] },
   hermes_vendor: { provider: 'hermes', secretEnv: 'LINK_WORKER_SECRET_HERMES_VENDOR', endpoints: ['vendor_price', 'vendor_login'] },
+  // The external agent watchdog (docs/hermes/waves-agent-watchdog-skill.md):
+  // its own secret and a read-only capability, one identity per lane. HMAC
+  // only — the bearer transition below is deliberately NOT extended to it.
+  hermes_watchdog: { provider: 'hermes', secretEnv: 'LINK_WORKER_SECRET_HERMES_WATCHDOG', endpoints: ['watchdog'] },
 };
 
 // Transitional bearer identity (§1 ordered rollout): same provider record and
@@ -221,15 +225,22 @@ function linkWorkerAuth(endpoint) {
   };
 }
 
-/** Handler-side finalization of the pre-inserted audit row. Never throws. */
+/**
+ * Handler-side finalization of the pre-inserted audit row. Never throws;
+ * resolves true when the row was updated and false otherwise, so a caller for
+ * whom the row IS the payload (the watchdog heartbeat) can refuse to claim
+ * success — every existing caller ignores the value and stays best-effort.
+ */
 async function finalizeWorkerRequest(req, result, extra = {}) {
-  if (!req.linkWorkerRequestId) return;
+  if (!req.linkWorkerRequestId) return false;
   try {
-    await db('seo_link_worker_requests')
+    const updated = await db('seo_link_worker_requests')
       .where({ id: req.linkWorkerRequestId })
       .update({ result, ...extra });
+    return updated > 0;
   } catch (err) {
     logger.error('link-worker-auth audit finalize failed', { error: err.message, result });
+    return false;
   }
 }
 

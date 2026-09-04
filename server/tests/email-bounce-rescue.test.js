@@ -20,7 +20,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(() => Promise.resolve()) }));
-jest.mock('../services/llm/call', () => ({ callAnthropic: jest.fn() }));
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../services/email', () => ({ send: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: jest.fn(() => Promise.resolve({})) }));
 jest.mock('dns', () => ({ promises: { resolveMx: jest.fn() } }));
@@ -28,7 +28,7 @@ jest.mock('dns', () => ({ promises: { resolveMx: jest.fn() } }));
 const db = require('../models/db');
 const dns = require('dns').promises;
 const email = require('../services/email');
-const { callAnthropic } = require('../services/llm/call');
+const { dispatchWithFallback } = require('../services/llm/call');
 const rescue = require('../services/email-bounce-rescue');
 
 function makeChain(overrides = {}) {
@@ -265,7 +265,7 @@ describe('rescueBouncedAddress flow', () => {
     const r = await rescue.rescueBouncedAddress('janeboedmer@gmail.com', { dryRun: true });
     expect(r).toMatchObject({ dryRun: true, status: 'suggested', candidate: 'janebodmer@gmail.com', tier: 'transcript_decode' });
     expect(email.send).not.toHaveBeenCalled();
-    expect(callAnthropic).not.toHaveBeenCalled(); // deterministic decode sufficed
+    expect(dispatchWithFallback).not.toHaveBeenCalled(); // deterministic decode sufficed
   });
 
   it('NEVER auto-applies a transcript decode — tier boundary', async () => {
@@ -472,7 +472,7 @@ describe('codex r2 contracts', () => {
 
 describe('llm decode anchoring', () => {
   it('drops an LLM candidate whose supporting quote is not verbatim in the transcript', async () => {
-    callAnthropic.mockResolvedValue({ ok: true, json: { candidate_email: 'samsamohatb@gmail.com', supporting_quote: 'this quote was invented' } });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { candidate_email: 'samsamohatb@gmail.com', supporting_quote: 'this quote was invented' } });
     db.mockImplementation((name) => {
       if (name === 'customers') {
         const chain = makeChain();

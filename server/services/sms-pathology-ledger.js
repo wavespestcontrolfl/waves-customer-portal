@@ -201,6 +201,7 @@ async function classifyPathologies({ batchLimit = CLASSIFY_BATCH, dbi = db, anth
       const routed = await dispatchWithFallback(
         MODELS.TEXT_POLICIES.fastStructured,
         {
+          laneId: 'sms_pathology',
           text: buildClassifierPrompt({
             notes: row.notes,
             inbound: row.inbound_message,
@@ -351,6 +352,7 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
         .limit(25)
         .select('intent', 'prompt_version', 'verifier_missed', 'summary', 'id');
       const resp = await createDeepMessage(client, {
+        laneId: 'sms_pathology',
         max_tokens: 4096,
         messages: [{
           role: 'user',

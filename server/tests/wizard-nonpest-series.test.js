@@ -490,6 +490,16 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/require\('\.\.\/services\/scheduling\/occupancy'\)/);
     expect(booking).toMatch(/findConflictingVisits\(\{\s*\n\s*db: trx,/);
     expect(booking).toMatch(/office to place/);
+    // Travel gap (GATE_SLOT_TRAVEL_GAP, pre-push P1): the seeded sweep is a
+    // commit surface too — it must carry the follow-up's pin like the
+    // parent commit does, or a follow-up lands inside a neighbour's drive.
+    expect(booking).toMatch(/excludeServiceIds: sweepExcludeIds,[\s\S]{0,600}travel: seededRowPin\(row, offerLat, offerLng\)/);
+    // The pin helper must let a SQL NULL fall through to the booking pin —
+    // Number(null) is 0 (GH codex #3803 r2 P1).
+    expect(booking).toMatch(/function seededRowPin\([\s\S]{0,400}v != null && Number\.isFinite\(Number\(v\)\)/);
+    // The parent-extension guard is a commit surface too: the extended
+    // window must clear the travel gap with the same booking pin (r3 P1).
+    expect(booking).toMatch(/parentExtensionGuard\(\{[\s\S]{0,700}travel: \{\s*\n\s*lat: Number\.isFinite\(offerLat\)/);
   });
 
   test('activation takes rung-1 occupancy locks BEFORE the comms/row locks, from the pre-computed plan', () => {

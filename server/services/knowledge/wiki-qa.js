@@ -2,9 +2,18 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etDateString } = require('../../utils/datetime-et');
+const { dispatchWithFallback } = require('../llm/call');
 
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+// Structured-output contract for the routing step (llm/call.js jsonSchema).
+// The path list is still capped to 8 and resolved against knowledge_base.
+const ROUTING_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['paths'],
+  properties: {
+    paths: { type: 'array', items: { type: 'string', description: 'wiki article file path from the index' } },
+  },
+};
 
 // NOTE: WikiQA.query stays on FLAGSHIP, not DEEP — it serves interactive
 // surfaces (tech field lookup, admin Q&A, assistant tools) where a
@@ -35,31 +44,27 @@ class WikiQA {
       .map(r => `${r.path} [${r.category}]: ${r.title} — ${r.summary || ''}`)
       .join('\n');
 
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
+    if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
       // Fallback: keyword search
       return this.keywordSearch(question, context);
     }
 
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-    // Step 1: Route to relevant articles
+    // Step 1: Route to relevant articles (FLAGSHIP first, Sol on a miss)
     let paths = [];
     try {
-      const routingResponse = await anthropic.messages.create({
-        model: MODELS.FLAGSHIP,
-        max_tokens: 500,
-        messages: [{
-          role: 'user',
-          content: `Given this question about Waves Pest Control, which wiki articles should I read? Return ONLY a JSON array of file paths (max 8).
+      const routing = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+        text: `Given this question about Waves Pest Control, which wiki articles should I read? List the file paths (max 8).
 
 Question: ${question}
 
 Available articles:
-${liveIndex}`
-        }]
+${liveIndex}`,
+        jsonMode: true,
+        jsonSchema: ROUTING_SCHEMA,
+        maxTokens: 500,
       });
-
-      paths = JSON.parse(routingResponse.content[0].text.replace(/```json|```/g, '').trim());
+      if (!routing.ok || !Array.isArray(routing.json?.paths)) throw new Error(routing.reason || 'no_paths');
+      paths = routing.json.paths;
     } catch {
       // Fallback: search by keywords
       const keywords = question.toLowerCase().split(/\s+/).filter(w => w.length > 3);
@@ -87,21 +92,20 @@ ${liveIndex}`
       .whereIn('path', paths.slice(0, 8))
       .select('path', 'title', 'content');
 
-    // Step 3: Answer with full context
-    const answerResponse = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 2000,
+    // Step 3: Answer with full context (FLAGSHIP first, Sol on a miss; a
+    // two-leg miss throws like the SDK path did)
+    const answered = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
       system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.`,
-      messages: [{
-        role: 'user',
-        content: `Question: ${question}
+      text: `Question: ${question}
 
 Wiki articles:
-${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n')}`
-      }]
+${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n')}`,
+      jsonMode: false,
+      maxTokens: 2000,
     });
+    if (!answered.ok) throw new Error(`wiki answer failed: ${answered.reason}`);
 
-    const answer = answerResponse.content[0].text;
+    const answer = answered.text;
     await this.logQuery(question, answer, paths, context.source);
 
     return { answer, articlesUsed: paths, articleTitles: articles.map(a => ({ path: a.path, title: a.title })) };

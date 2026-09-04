@@ -15,7 +15,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { HQ, haversine, milesToDriveMinutes } = require('../route-optimizer');
+const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 
@@ -23,18 +23,9 @@ const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
 const DEFAULT_SERVICE_MIN = 60;
 
-/**
- * Drive minutes between two {lat,lng} points. Coordinate glue only — the
- * miles→minutes model itself is route-optimizer's and MUST NOT be re-derived
- * here, or this module and auto-dispatch would score on different scales.
- */
-function driveMin(a, b) {
-  if (!a || !b || a.lat == null || a.lng == null || b.lat == null || b.lng == null) return 0;
-  return milesToDriveMinutes(haversine(
-    parseFloat(a.lat), parseFloat(a.lng),
-    parseFloat(b.lat), parseFloat(b.lng)
-  ));
-}
+// driveMin is auto-dispatch/geo's — the one coordinate-glue over
+// route-optimizer's model, so this module and auto-dispatch score on the
+// same scale (a local copy lived here until the travel-gap lane).
 
 function timeToMinutes(hhmm) {
   if (!hhmm) return null;
@@ -105,7 +96,13 @@ async function findAvailableSlots(opts) {
     // candidate at/after the window start instead. Default 0 = no effect
     // (identical legacy behavior for every other caller).
     earliestStartMin = 0,
+    // Turnaround minutes between the new stop and a NEIGHBOURING STOP (never an
+    // HQ leg) on top of the modeled drive. Customer-facing callers pass
+    // travel-gap.js customerFacingBufferMinutes() (GATE_SLOT_TRAVEL_GAP);
+    // default 0 = legacy geometry for staff and optimizer callers.
+    bufferMinutes = 0,
   } = opts;
+  const stopBuffer = Math.max(0, Number(bufferMinutes) || 0);
   const excludeSet = new Set((excludeServiceIds || []).map(String));
 
   if (lat == null || lng == null) {
@@ -225,9 +222,11 @@ async function findAvailableSlots(opts) {
 
         // Earliest the new job could start: after prev.endMin + drive from
         // prev → new — floored at "now + lead" when the date is today.
+        const prevIsStop = prev.id !== 'HQ_START';
+        const nextIsStop = next.id !== 'HQ_END';
         const earliestStart = Math.max(
           dayOpen,
-          prev.endMin + driveMin(prev, newStop),
+          prev.endMin + driveMin(prev, newStop) + (prevIsStop ? stopBuffer : 0),
           date === todayEt ? todayFloorMin : 0,
           earliestStartMin, // honor a hard time-window lower bound (0 = no-op)
         );
@@ -239,7 +238,7 @@ async function findAvailableSlots(opts) {
           : earliestStart;
         const earliestEnd = startMin + durationMinutes;
         // Must allow drive from new → next before next.startMin
-        const latestEnd = next.startMin - driveMin(newStop, next);
+        const latestEnd = next.startMin - driveMin(newStop, next) - (nextIsStop ? stopBuffer : 0);
 
         if (earliestEnd > latestEnd) continue; // doesn't fit
         if (earliestEnd > dayClose) continue;  // past end of day

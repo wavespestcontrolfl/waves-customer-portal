@@ -358,6 +358,37 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
   const commercialIdentity = [primary?.engineKey, primary?.key, primary?.serviceKey, primary?.service_key, primary?.name, primary?.label, primary?.displayName]
     .filter(Boolean).join(' ');
   if (primary?.commercial || /commercial/i.test(commercialIdentity)) return null;
+  // A VERIFIED catalog key frozen on the line by a keyed public quote
+  // (the standalone cockroach package: cockroach_control's engine key
+  // pest_initial_roach is deliberately NOT in any row's engine_keys — the
+  // count is configuration-dependent for other callers, see
+  // 20260825000011 — so containment could never name the package row and
+  // the visit would fall to the generic profile, never scheduling the
+  // included second treatment). Exact key, same exactly-one rule, and NO
+  // fall-through to containment on a miss: the key named a product the
+  // catalog no longer carries, and a guessed identity is worse than none
+  // (codex #3842 r3 P1). Resolved WITHOUT an is_active filter: the key was
+  // verified selectable when the quote was made, and a row staff archive
+  // between the quote and the acceptance still names the product the
+  // customer was promised — dropping the identity there would silently
+  // lose the included second treatment (pre-push codex P0).
+  const catalogKey = String(primary?.catalogServiceKey || '').trim();
+  if (catalogKey) {
+    let byKey = null;
+    try {
+      await conn.transaction(async (sp) => {
+        const rows = await sp('services')
+          .where({ service_key: catalogKey })
+          .limit(2)
+          .select('id', 'name', 'service_key');
+        if (rows.length === 1) byKey = rows[0];
+        else if (rows.length > 1) logger.error(`[slot-reservation] catalog key "${catalogKey}" names MULTIPLE active rows — refusing to stamp service_id`);
+      });
+    } catch (err) {
+      logger.warn(`[slot-reservation] catalog lookup failed for catalog key "${catalogKey}": ${err.message}`);
+    }
+    return byKey;
+  }
   const isOneTime = serviceProfile?.serviceMode === 'one_time';
   const cadenceKey = cadenceCatalogKeyForProfile(primary, isOneTime);
   // The four cadence-family category keys intentionally span MULTIPLE
@@ -645,6 +676,12 @@ async function reserveSlot({
         err.code = 'ESTIMATE_NOT_FOUND';
         throw err;
       }
+      // The hold's pin, valid only while the LOCKED row still quotes the
+      // address the coords were geocoded from (codex #3244 r7) — used by
+      // both travel-gap probes and the insert's geo stamp alike, so a slot
+      // is never checked against a property the hold will not be stamped
+      // with (GH codex #3803 r1 P2).
+      const holdPin = holdCoords && holdCoordsAddress === String(estimate.address || '') ? holdCoords : null;
       if (estimate._expired) {
         const err = new Error('estimate expired');
         err.code = 'ESTIMATE_EXPIRED';
@@ -672,8 +709,19 @@ async function reserveSlot({
           } catch { return null; }
         })();
         const eng = reservationData?.estimatorEngine;
+        // The ONE off-customer-surface verdict (linkage marker OR clarify
+        // re-price hold) on the LOCKED row, before any hold is minted: a
+        // unit reply that stamped the hold after the route's snapshot must
+        // not still reserve capacity for a quote the renderer refuses
+        // (codex r11 P0 on #3804). Same generic not-found as the
+        // quarantine below.
+        const { callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
+        if (estimateOffCustomerSurface(estimate)) {
+          const err = new Error('estimate is off the customer surface (linkage marker or re-price hold)');
+          err.code = 'ESTIMATE_NOT_FOUND';
+          throw err;
+        }
         if (eng?.callLogId) {
-          const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
           // Lock the call row and HOLD it through the reservation commit
           // (codex P1, PR #3304 — generation-rework GH round), mirroring
           // the deposit-confirm and manual-acceptance paths: with only an
@@ -685,8 +733,7 @@ async function reserveSlot({
           // estimates → call_log; no leads lock is taken in this txn, so
           // no cycle with the processor's leads → call_log writers.
           await trx('call_log').where({ id: eng.callLogId }).forUpdate().first('id');
-          const blocked = estimate.archived_at || eng.linkage_invalidated_at
-            || eng.invalidation_pending_at
+          const blocked = estimate.archived_at
             || await callSideBlockForEstimateData(trx, reservationData);
           if (blocked) {
             const err = new Error('estimate is quarantined by a call-linkage correction');
@@ -899,6 +946,10 @@ async function reserveSlot({
           windowEnd,
           excludeServiceIds: [sameSlotHold.id],
           includeHolds: false,
+          // Travel gap (GATE_SLOT_TRAVEL_GAP): the same pin the fresh reserve
+          // and commitReservation measure with — a refresh that skipped it
+          // would hand back a hold the commit is guaranteed to reject.
+          travel: holdPin || { lat: null, lng: null },
         });
         if (refreshClash.length) {
           // Do NOT refresh a doomed hold — supersede it (same narrow
@@ -1025,6 +1076,9 @@ async function reserveSlot({
         windowStart,
         windowEnd,
         includeHolds: false,
+        // Travel gap (GATE_SLOT_TRAVEL_GAP): the hold's own pin, resolved
+        // above; null → buffer-only, never a skipped check.
+        travel: holdPin || { lat: null, lng: null },
       });
       if (committedClash.length) {
         const err = new Error('slot no longer available');
@@ -1070,8 +1124,7 @@ async function reserveSlot({
         // geocoded from — a concurrent revision that moved the property must
         // not anchor routing at the old location (codex #3244 r7). Address
         // drift drops the geo stamp; the hold books exactly as before.
-        ...(holdCoords && holdCoordsAddress === String(estimate.address || '')
-          ? { lat: holdCoords.lat, lng: holdCoords.lng } : {}),
+        ...(holdPin ? { lat: holdPin.lat, lng: holdPin.lng } : {}),
         ...(zoneSlugOf(reserveZone) ? { zone: zoneSlugOf(reserveZone) } : {}),
         // One-time accepts are a single visit — pin is_recurring=false so
         // dispatch job-classification and recurring-only sweeps never treat
@@ -1315,6 +1368,8 @@ async function commitReservation({
         windowEnd: probeWindowEnd,
         excludeServiceIds: [scheduledServiceId],
         includeHolds: false,
+        // Travel gap: the pin reserveSlot stamped on the hold row.
+        travel: { lat: row.lat ?? null, lng: row.lng ?? null },
       });
       if (committedClash.length) {
         const err = new Error('slot no longer available');

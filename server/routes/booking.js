@@ -7,6 +7,7 @@ const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
@@ -897,6 +898,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     durationMinutes: duration,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
+    // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
+    // against neighbouring stops; 0 when the gate is off.
+    bufferMinutes: customerFacingBufferMinutes(),
     // Relocating an existing visit (public self-reschedule): drop its own row
     // from the occupied-route set so it doesn't block the slot it's moving
     // out of. Default [] = identical behavior for every other caller.
@@ -1010,6 +1014,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // Public self-reschedule: the moving row must not block the slot it
       // is vacating — same exclusion findAvailableSlots already applies.
       excludeServiceIds,
+      // Guarded lat/lng for the travel-gap mirror below — only while the
+      // gate is on, so the dark query stays the legacy scan (no customers
+      // join) (GH codex #3803 r2 P2).
+      withCoords: travelGapEnabled(),
     });
     occupiedByDate = new Map();
     for (const row of occupiedRows) {
@@ -1043,6 +1051,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     if (occupiedByDate) {
       const dayOccupied = occupiedByDate.get(slot.date);
       if (dayOccupied && dayOccupied.some((b) => startMin < b.endMin && endMin > b.startMin)) return;
+      // Travel-gap mirror (GATE_SLOT_TRAVEL_GAP): the commit gate's
+      // findConflictingVisits `travel` probe rejects a window that merely
+      // touches a stop across a real drive; drop it here so it is never
+      // offered. Same soft-degrade as the overlap mirror (no map → skip).
+      if (dayOccupied && violatesTravelGap({ startMin, endMin, lat, lng }, dayOccupied)) return;
     }
     const startTime = fmt(startMin);
     if (!inTimeOfDay(startTime, timeOfDay)) return;
@@ -1372,6 +1385,20 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
 });
 
 // POST /api/booking/confirm
+// The pin a seeded follow-up's conflict sweep measures with: the row's own
+// stamped lat/lng when the seeder copied one from the parent, else the
+// booking pin the parent commit used. A SQL NULL must fall through — /book
+// parents are inserted without a stamp, and Number(null) is 0, which would
+// measure every follow-up from the Gulf of Guinea (GH codex #3803 r2 P1).
+function seededRowPin(row, offerLat, offerLng) {
+  const own = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+  const fallback = (v) => (Number.isFinite(v) ? v : null);
+  return {
+    lat: own(row?.lat) ?? fallback(offerLat),
+    lng: own(row?.lng) ?? fallback(offerLng),
+  };
+}
+
 // createSelfBooking — the booking-commit operation behind POST /api/booking/confirm,
 // extracted so non-HTTP callers (e.g. the voice agent's confirm_booking tool) run the
 // EXACT same path: customer resolution, advisory-locked conflict re-check, the two-row
@@ -2589,6 +2616,12 @@ async function createSelfBooking(payload = {}) {
         date: slotDateStr,
         windowStart: slot_start,
         windowEnd: endTime,
+        // Travel gap (GATE_SLOT_TRAVEL_GAP): the booking's own pin, resolved
+        // for the offer location key above; NaN → null → buffer-only.
+        travel: {
+          lat: Number.isFinite(offerLat) ? offerLat : null,
+          lng: Number.isFinite(offerLng) ? offerLng : null,
+        },
       });
       if (globalClash.length) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
@@ -3641,6 +3674,14 @@ async function createSelfBooking(payload = {}) {
               windowStart: slot_start,
               windowEnd: extendedEnd,
               excludeServiceIds: [seriesParentRow.id],
+              // Travel gap (GATE_SLOT_TRAVEL_GAP): the extended window must
+              // clear the same drive + buffer the offered one did — an
+              // extension can eat the gap without overlapping the next stop
+              // (GH codex #3803 r3 P1). Same booking pin as the commit probe.
+              travel: {
+                lat: Number.isFinite(offerLat) ? offerLat : null,
+                lng: Number.isFinite(offerLng) ? offerLng : null,
+              },
             });
             if (extensionClashes.length === 0) {
               await trx('scheduled_services')
@@ -3761,6 +3802,11 @@ async function createSelfBooking(payload = {}) {
               windowStart: row.window_start,
               windowEnd: row.window_end,
               excludeServiceIds: sweepExcludeIds,
+              // Travel gap (GATE_SLOT_TRAVEL_GAP): the follow-up's own
+              // stamped pin (the seeder copies the parent's lat/lng), else
+              // the booking pin the parent commit measured with — the
+              // mirrored guard every commit surface carries (pre-push P1).
+              travel: seededRowPin(row, offerLat, offerLng),
             });
             if (clashes.length > 0) {
               // Demote the colliding occurrence to the documented

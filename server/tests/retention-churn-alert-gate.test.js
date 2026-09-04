@@ -33,26 +33,24 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
-jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
+jest.mock('../config/models', () => ({
+  FLAGSHIP: 'test-model',
+  TEXT_POLICIES: { customerCopy: { name: 'customerCopy' } },
+}));
 jest.mock('../services/twilio', () => ({
   sendSMS: jest.fn(async () => ({ sent: true })),
 }));
-jest.mock('@anthropic-ai/sdk', () =>
-  jest.fn().mockImplementation(() => ({
-    messages: {
-      create: jest.fn(async () => ({
-        content: [{
-          text: JSON.stringify({
-            outreach_type: 'call',
-            strategy: 'personal_call',
-            message: 'Personal call from Adam recommended.',
-            urgency: 'today',
-          }),
-        }],
-      })),
+jest.mock('../services/llm/call', () => ({
+  dispatchWithFallback: jest.fn(async () => ({
+    ok: true,
+    json: {
+      outreach_type: 'call',
+      strategy: 'personal_call',
+      message: 'Personal call from Adam recommended.',
+      urgency: 'today',
     },
   })),
-);
+}));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
 }));

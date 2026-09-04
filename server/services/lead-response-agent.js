@@ -23,6 +23,9 @@ const db = require('../models/db');
 const { executeLeadTool } = require('./lead-response-tools');
 const { getBreaker } = require('./intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('./intelligence-bar/tool-events');
+const { LEAD_RESPONSE_AGENT_CONFIG } = require('./lead-response-agent-config');
+const { recordSessionUsage } = require('./llm-dispatch-metrics');
+const { isSessionTerminal, isSessionError } = require('./agent-control/session-events');
 
 const leadToolBreaker = getBreaker('lead-response-agent');
 
@@ -61,7 +64,7 @@ async function apiCall(method, path, body) {
   });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${err}`);
+    throw Object.assign(new Error(`Anthropic API ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
   return res.json();
 }
@@ -81,7 +84,7 @@ async function* streamSessionEvents(sessionId) {
   });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Stream error ${res.status}: ${err}`);
+    throw Object.assign(new Error(`Stream error ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
 
   const reader = res.body.getReader();
@@ -154,13 +157,17 @@ const LeadResponseAgent = {
     prompt += `\nTime is ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET.`;
     prompt += `\n\nFollow your workflow: analyze → gather context → draft response → decide auto-send vs queue → set up follow-up → save report.`;
 
+    let sessionId = null;
+    let failure = null;
+    // Set only by a terminal event: any other stream exit is a failure.
+    let sessionEnded = false;
     try {
       const session = await apiCall('POST', '/sessions', {
         agent: LEAD_AGENT_ID,
         environment_id: LEAD_AGENT_ENVIRONMENT_ID,
       });
 
-      const sessionId = session.id;
+      sessionId = session.id;
       logger.info(`[lead-agent] Session ${sessionId} for lead ${lead.leadId}`);
 
       await sendSessionEvents(sessionId, [{
@@ -175,7 +182,11 @@ const LeadResponseAgent = {
       const criticalFailures = [];
 
       for await (const { event, data } of streamSessionEvents(sessionId)) {
-        if (--maxIterations <= 0) break;
+        if (--maxIterations <= 0) {
+          logger.warn(`[lead-agent] Hit max iterations for session ${sessionId}`);
+          failure = 'max_events';
+          break;
+        }
 
         if (event === 'assistant' || event === 'text') {
           if (data.text) report += data.text;
@@ -286,12 +297,21 @@ const LeadResponseAgent = {
           }]);
         }
 
-        const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
-        if (event === 'done' || event === 'session_complete' || event === 'session.status_idle' || stopReason === 'end_turn') break;
-        if (event === 'error' || event === 'session.error') {
+        // session.status_idle is NOT terminal on its own (it arrives with
+        // requires_action while the agent waits for the tool result sent
+        // above) — the shared predicate reads only real terminals.
+        if (isSessionTerminal(event, data)) { sessionEnded = true; break; }
+        if (isSessionError(event)) {
           logger.error(`[lead-agent] Agent error: ${JSON.stringify(data)}`);
+          failure = 'session_error_event';
           break;
         }
+      }
+      // The stream closed before the session said it ended: not a success,
+      // whatever the session GET reports later.
+      if (!failure && !sessionEnded) {
+        logger.error(`[lead-agent] Stream ended without a terminal event for session ${sessionId}`);
+        failure = 'session_stream_eof';
       }
 
       const durationSeconds = Math.round((Date.now() - startTime) / 1000);
@@ -308,10 +328,17 @@ const LeadResponseAgent = {
       };
 
     } catch (err) {
+      failure = err;
       logger.error(`[lead-agent] Failed for lead ${lead.leadId}: ${err.message}`);
 
       // Non-fatal — the webhook already sent a basic auto-reply as fallback
       return null;
+    } finally {
+      // Call ledger (never throws): one session row with the session's token
+      // usage, written however the session ends — a stream that throws still
+      // consumed tokens — carrying this runner's own outcome. No session id =
+      // nothing was created, nothing to bill.
+      if (sessionId) await recordSessionUsage({ laneId: 'agent_lead', sessionId, agentId: LEAD_AGENT_ID, model: LEAD_RESPONSE_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
   },
 };

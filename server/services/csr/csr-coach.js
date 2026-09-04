@@ -1,10 +1,9 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { dispatchWithFallback } = require('../llm/call');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 let TwilioService;
 
@@ -28,15 +27,13 @@ class CSRCoach {
    * immediately before the insert, which is the only moment that matters.
    */
   async scoreCall({ csrName, customerId, callDirection, callSource, transcript, metadata, stillOwnsClaim }) {
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      return { error: 'Anthropic API not configured' };
-    }
-
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-    const response = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 3000,
+    // FLAGSHIP first, Sol on a miss. The explicit timeoutMs is the shared
+    // wall-clock ceiling across BOTH legs (llm/call.js), so the bound
+    // reasoned about below covers the whole scoring pass, not one provider.
+    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      maxTokens: 3000,
+      jsonMode: true,
+      timeoutMs: CSR_SCORE_TIMEOUT_MS,
       system: `You score customer service calls for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
 
 SCORING — 15 POINTS TOTAL:
@@ -111,9 +108,7 @@ Return JSON:
   "estimated_job_value": null or number,
   "follow_up_task": null or { "type": "call_back/send_sms/send_estimate", "recommended_action": "specific script", "deadline_hours": 4/24/48, "priority": "high/medium/low" }
 }`,
-      messages: [{
-        role: 'user',
-        content: `Score this ${callDirection} call:
+      text: `Score this ${callDirection} call:
 
 CSR: ${csrName}
 Source: ${callSource || 'unknown'}
@@ -123,25 +118,24 @@ ${metadata?.serviceInterest ? `Service interest: ${metadata.serviceInterest}` : 
 TRANSCRIPT/NOTES:
 ${transcript || 'No transcript available — score based on available metadata only.'}
 
-Score the call, grade the lead, and generate a follow-up task if applicable.`
-      }]
+Score the call, grade the lead, and generate a follow-up task if applicable.`,
     // BOUNDED. The call-recording pass AWAITS this while holding its
     // processing claim, and its heartbeat runs on a timer — so on the SDK's
     // defaults a hang here kept the claim alive and unreclaimable by both the
     // 3-minute human path and the 10-minute automatic one (codex #3677 P1).
     // Scoring is best-effort: failing after four minutes is strictly better
     // than pinning a call in 'processing'.
-      // maxRetries: 0 — the SDK applies the timeout per ATTEMPT and defaults
-      // to 2 retries, which would let a bounded call hold the caller's claim
-      // for three intervals (codex #3677 P2).
-    }, { timeout: CSR_SCORE_TIMEOUT_MS, maxRetries: 0 });
+    }, {
+      // The dispatcher's loose parse accepts any JSON value; the old
+      // utils/llm-json parser accepted only a non-array object. Keep that
+      // contract: a wrongly shaped answer is a rejected leg, not a stored row.
+      validate: (result) => (result.json && typeof result.json === 'object' && !Array.isArray(result.json) ? null : 'not_an_object'),
+    });
 
-    let score;
-    try {
-      score = JSON.parse(response.content[0].text.replace(/```json|```/g, '').trim());
-    } catch {
-      return { error: 'Failed to parse scoring output' };
+    if (!res.ok) {
+      return { error: `Failed to score call (${res.reason})` };
     }
+    const score = res.json;
 
     // Check if this is the first call from this lead
     let isFirstCall = false;

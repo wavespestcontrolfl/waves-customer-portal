@@ -853,9 +853,13 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(dropBlock).toContain('delete estData.priorQualifyingServices;');
     expect(dropBlock).not.toContain('setupWaiverPriorQualifyingServices');
     // Rodent bait prices from the footprint on both channels — the lot
-    // verification guard must not park it.
-    const publicQuoteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
-    expect(publicQuoteSrc).toMatch(/const lotPricedRequested = !!\(services\.mosquito \|\| services\.treeShrub\);/);
+    // verification guard must not park it. The guard's predicate is
+    // lotPricedServiceRequested (service-menu phase 2 added oneTimeMosquito
+    // to it); rodent must stay outside it on every channel.
+    const { lotPricedServiceRequested } = require('../routes/public-quote')._internals;
+    expect(lotPricedServiceRequested({ rodentBait: { tier: 'silver' } })).toBe(false);
+    expect(lotPricedServiceRequested({ rodentBait: {}, rodentInspection: {} })).toBe(false);
+    expect(lotPricedServiceRequested({ mosquito: {} })).toBe(true);
   });
 
   test('booking waiver read strict · Auto Pay page-load keeps the disclosure page · renewal defaults are coverage-only (codex #3591 r72 P1)', () => {

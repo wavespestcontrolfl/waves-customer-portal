@@ -20,7 +20,9 @@
  */
 
 const logger = require('../../logger');
+const { isSessionTerminal, isSessionError } = require('../../agent-control/session-events');
 const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint } = require('./brief-driven-tools');
+const { recordSessionUsage } = require('../../llm-dispatch-metrics');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const API_BASE = 'https://api.anthropic.com/v1';
@@ -150,7 +152,7 @@ async function apiCall(method, path, body) {
   });
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Anthropic ${res.status}: ${errText.slice(0, 400)}`);
+    throw Object.assign(new Error(`Anthropic ${res.status}: ${errText.slice(0, 400)}`), { status: res.status, code: `anthropic_${res.status}` });
   }
   return res.json();
 }
@@ -212,6 +214,18 @@ class AgentDispatcher {
     // module gate 3c uses, so the lint can never disagree with the gate
     // that parks runs. Cleared with clearDraft below.
     if (selfLintOptions) registerSessionLint(sessionId, selfLintOptions);
+    // Call ledger (never throws): one session row per created session, on
+    // every exit from here on — a failed initial message, a streaming
+    // failure or timeout, a session that never emitted a draft, and success
+    // all consumed (or reserved) tokens — carrying this exit's outcome.
+    // Upserted by session id, so calling it twice is safe. Awaited (it never
+    // throws) so a preview / CLI process cannot exit before the row lands.
+    const recordSession = (failure = null) => recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0, failure });
+
+    // The agent's own end — the recorder's usage GET after it (up to its
+    // 15 s timeout) is observability time, not agent time (Codex r12/r13);
+    // every exit stops this clock before it awaits the recorder.
+    let agentEndedAt;
 
     // Post the initial input to the session. Schema mirrors the
     // live Managed Agents contract used by lead-response-agent.js:
@@ -228,14 +242,19 @@ class AgentDispatcher {
       // Session state (lint options, attempts) was registered above — a
       // transient initial-message failure must not leak it into the
       // process-global maps.
+      agentEndedAt = Date.now();
+      await recordSession(err.code || 'initial_message_failed');
       clearDraft(sessionId);
-      return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId, agent_id: route.agent_id };
+      return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId, agent_id: route.agent_id, duration_ms: agentEndedAt - t0 };
     }
 
     // Stream events; execute tool calls; capture emit_draft / emit_metadata_only.
     try {
       await this._streamAndExecute(sessionId, sessionTimeoutMs);
+      agentEndedAt = Date.now();
     } catch (err) {
+      agentEndedAt = Date.now();
+      await recordSession(err.code || 'streaming_failed');
       const partial = getDraft(sessionId);
       clearDraft(sessionId);
       return {
@@ -244,11 +263,14 @@ class AgentDispatcher {
         session_id: sessionId,
         agent_id: route.agent_id,
         partial_draft: partial || null,
-        duration_ms: Date.now() - t0,
+        duration_ms: agentEndedAt - t0,
       };
     }
 
     const draft = getDraft(sessionId);
+    // `missing_draft` classifies as incomplete — the agent answered but not
+    // in the shape it was told to.
+    await recordSession(draft ? null : 'missing_draft');
     // Captured BEFORE clearDraft — clearing drops the session's checked-route
     // set alongside the draft.
     const checkedExistingRoutes = getCheckedRoutes(sessionId);
@@ -259,7 +281,7 @@ class AgentDispatcher {
         reason: 'agent_did_not_emit_draft',
         session_id: sessionId,
         agent_id: route.agent_id,
-        duration_ms: Date.now() - t0,
+        duration_ms: agentEndedAt - t0,
       };
     }
 
@@ -270,14 +292,18 @@ class AgentDispatcher {
       role: route.role,
       agent_id: route.agent_id,
       session_id: sessionId,
-      duration_ms: Date.now() - t0,
+      duration_ms: agentEndedAt - t0,
     };
   }
 
   /**
    * Internal: stream session events via SSE (same pattern as the
    * legacy content-agent.js), execute custom tool calls, stop when
-   * the agent emits draft / metadata OR the session completes.
+   * the session completes — the draft / metadata sink firing is the
+   * agent's work done, not the session's end (Codex r14 on #3846):
+   * it still processes that tool result and ends its turn, and the
+   * session ledger snapshots usage after this returns, so leaving on
+   * the sink would file every draft session short its final turn.
    *
    * Earlier iteration polled GET /sessions/{id}/events with an
    * `?after=` cursor and read `evt.type === 'tool_use'`. The Managed
@@ -288,77 +314,97 @@ class AgentDispatcher {
    */
   async _streamAndExecute(sessionId, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
-    for await (const { event, data } of streamSessionEvents(sessionId, deadline)) {
-      // Tool use surfaces in three shapes depending on the agent
-      // config: the legacy SDK tools emit `event: tool_use`, custom
-      // `type:'custom'` tools (which is what all three new agents
-      // declare) emit `event: agent.custom_tool_use`, and some
-      // server builds put the discriminator on the data payload
-      // instead of the event name. All three are accepted.
-      const isCustomToolUse =
-        event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
-      const isLegacyToolUse =
-        event === 'tool_use' || data?.type === 'tool_use';
-      if (isCustomToolUse || isLegacyToolUse) {
-        const toolName = data?.name;
-        const toolInput = data?.input || {};
-        const toolUseId = data?.id;
-        const result = await executeBriefTool(toolName, toolInput, { sessionId });
-        // Reply schema differs by tool kind:
-        //   - custom tools → user.custom_tool_result with custom_tool_use_id
-        //   - legacy tools → tool_result with tool_use_id, content blocks
-        // Mirrors managed-agents-2026-04-01 contract used by
-        // server/services/lead-response-agent.js.
-        if (isCustomToolUse) {
-          // Mirrors lead-response-agent.js:331-335 — events wrapped,
-          // content as text blocks, not a bare JSON string.
-          await apiCall('POST', `/sessions/${sessionId}/events`, {
-            events: [{
-              type: 'user.custom_tool_result',
-              custom_tool_use_id: toolUseId,
-              content: [{ type: 'text', text: JSON.stringify(result) }],
-            }],
-          });
-        } else {
-          await apiCall('POST', `/sessions/${sessionId}/events`, {
-            events: [{
-              type: 'tool_result',
-              tool_use_id: toolUseId,
-              content: [{ type: 'text', text: JSON.stringify(result) }],
-            }],
-          });
+    try {
+      for await (const { event, data } of streamSessionEvents(sessionId, deadline)) {
+        // Tool use surfaces in three shapes depending on the agent
+        // config: the legacy SDK tools emit `event: tool_use`, custom
+        // `type:'custom'` tools (which is what all three new agents
+        // declare) emit `event: agent.custom_tool_use`, and some
+        // server builds put the discriminator on the data payload
+        // instead of the event name. All three are accepted.
+        const isCustomToolUse =
+          event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
+        const isLegacyToolUse =
+          event === 'tool_use' || data?.type === 'tool_use';
+        if (isCustomToolUse || isLegacyToolUse) {
+          const toolName = data?.name;
+          const toolInput = data?.input || {};
+          const toolUseId = data?.id;
+          const result = await executeBriefTool(toolName, toolInput, { sessionId });
+          // Reply schema differs by tool kind:
+          //   - custom tools → user.custom_tool_result with custom_tool_use_id
+          //   - legacy tools → tool_result with tool_use_id, content blocks
+          // Mirrors managed-agents-2026-04-01 contract used by
+          // server/services/lead-response-agent.js.
+          if (isCustomToolUse) {
+            // Mirrors lead-response-agent.js:331-335 — events wrapped,
+            // content as text blocks, not a bare JSON string.
+            await apiCall('POST', `/sessions/${sessionId}/events`, {
+              events: [{
+                type: 'user.custom_tool_result',
+                custom_tool_use_id: toolUseId,
+                content: [{ type: 'text', text: JSON.stringify(result) }],
+              }],
+            });
+          } else {
+            await apiCall('POST', `/sessions/${sessionId}/events`, {
+              events: [{
+                type: 'tool_result',
+                tool_use_id: toolUseId,
+                content: [{ type: 'text', text: JSON.stringify(result) }],
+              }],
+            });
+          }
+          continue;
         }
-        if (getDraft(sessionId)) return; // sink fired; agent finished
-        continue;
+        // Terminal session/turn events — always exit the stream. If a
+        // draft was captured runWithBrief returns it; if not it returns
+        // agent_did_not_emit_draft.
+        //
+        // session.status_idle is intentionally NOT terminal on its own:
+        // Managed Agents emit it with stop_reason: requires_action while
+        // the agent waits for the tool_result we just sent. Treating it
+        // as terminal makes multi-tool runs (e.g. get_content_brief then
+        // emit_draft) exit after the first tool and report
+        // agent_did_not_emit_draft even though the agent was about to
+        // continue. Only end_turn (handled below) is the real terminal.
+        if (isSessionTerminal(event, data)) return;
+        if (isSessionError(event)) {
+          // Don't mask infrastructure failures as a content-quality
+          // outcome — throw so runWithBrief surfaces streaming_failed
+          // instead of agent_did_not_emit_draft.
+          const detail = typeof data === 'string' ? data : JSON.stringify(data).slice(0, 200);
+          logger.error(`[agent-dispatcher] session ${sessionId} error: ${detail}`);
+          // `code` is what the session ledger files the exit under (provider).
+          throw Object.assign(new Error(`session_error: ${detail}`), { code: 'session_error_event' });
+        }
       }
-      // Terminal session/turn events — always exit the stream. If a
-      // draft was captured runWithBrief returns it; if not it returns
-      // agent_did_not_emit_draft.
-      //
-      // session.status_idle is intentionally NOT terminal on its own:
-      // Managed Agents emit it with stop_reason: requires_action while
-      // the agent waits for the tool_result we just sent. Treating it
-      // as terminal makes multi-tool runs (e.g. get_content_brief then
-      // emit_draft) exit after the first tool and report
-      // agent_did_not_emit_draft even though the agent was about to
-      // continue. Only end_turn (handled below) is the real terminal.
-      const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
-      if (event === 'done' || event === 'session_complete' || event === 'turn_end' || event === 'session_end') return;
-      if (stopReason === 'end_turn') return;
-      if (event === 'error' || event === 'session.error') {
-        // Don't mask infrastructure failures as a content-quality
-        // outcome — throw so runWithBrief surfaces streaming_failed
-        // instead of agent_did_not_emit_draft.
-        const detail = typeof data === 'string' ? data : JSON.stringify(data).slice(0, 200);
-        logger.error(`[agent-dispatcher] session ${sessionId} error: ${detail}`);
-        throw new Error(`session_error: ${detail}`);
+      // The loop ended without a terminal event: the provider closed the
+      // stream early — the same session_stream_eof (→ provider) the other
+      // runners file. Our own deadline never reaches here: the reader throws
+      // session_timeout itself (Codex r11). After a captured draft it is the
+      // wind-down that was cut off, not the work.
+      if (getDraft(sessionId)) {
+        logger.warn(`[agent-dispatcher] session ${sessionId} stream closed after the draft, before its terminal event`);
+        return;
       }
+      throw Object.assign(new Error(`session ${sessionId} stream ended without a terminal event`), { code: 'session_stream_eof' });
+    } catch (err) {
+      // The agent had already delivered; only its wind-down outran the
+      // deadline. The draft ships as the success it was — the ledger row
+      // carries the timing.
+      if (err.code !== 'session_timeout' || !getDraft(sessionId)) throw err;
+      logger.warn(`[agent-dispatcher] session ${sessionId} delivered its draft; the wind-down ran past the deadline`);
     }
-    throw new Error(`session ${sessionId} timed out after ${timeoutMs}ms`);
   }
 }
 
 // ── SSE streaming helper (mirrors content-agent.js production pattern) ─
+
+// Our own deadline, not the provider's — the ledger files it as a timeout.
+function deadlineError(sessionId, deadline) {
+  return Object.assign(new Error(`session ${sessionId} timed out at its ${new Date(deadline).toISOString()} deadline`), { code: 'session_timeout' });
+}
 
 async function* streamSessionEvents(sessionId, deadline) {
   if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not set');
@@ -381,14 +427,14 @@ async function* streamSessionEvents(sessionId, deadline) {
     });
     if (!res.ok || !res.body) {
       const errText = res.body ? await res.text() : '';
-      throw new Error(`SSE open failed ${res.status}: ${errText.slice(0, 200)}`);
+      throw Object.assign(new Error(`SSE open failed ${res.status}: ${errText.slice(0, 200)}`), { status: res.status, code: `anthropic_${res.status}` });
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
     let currentEvent = 'message';
     while (true) {
-      if (Date.now() >= deadline) throw new Error('SSE deadline exceeded');
+      if (Date.now() >= deadline) throw deadlineError(sessionId, deadline);
       const { done, value } = await reader.read();
       if (done) return;
       buf += decoder.decode(value, { stream: true });
@@ -415,6 +461,11 @@ async function* streamSessionEvents(sessionId, deadline) {
         yield { event: evName, data };
       }
     }
+  } catch (err) {
+    // The AbortController firing at the deadline rejects reader.read() with
+    // an AbortError — our own timeout, filed as such (Codex r11).
+    if (err?.name === 'AbortError') throw deadlineError(sessionId, deadline);
+    throw err;
   } finally {
     clearTimeout(timer);
   }
