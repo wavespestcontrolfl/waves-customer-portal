@@ -509,8 +509,8 @@ email AND phone AND quoted address AND service (catalog `serviceKey`, or
 the normalized service-mix label for the direct `services` shape) equal an
 OPEN `quote_wizard` lead's (`OPEN_LEAD_STATUSES`) created inside 30 days,
 with no additional properties on either side and a live courtship (no
-FK-linked or mirrored `estimate_data.lead_id` estimate that is declined,
-expired or archived), is filed as `status = 'duplicate'` carrying
+FK-linked estimate that is declined, expired or archived, and the LATEST
+mirrored `estimate_data.lead_id` estimate, if any, is open), is filed as `status = 'duplicate'` carrying
 `extracted_data.duplicate_of_lead_id` = that original's id, instead of a
 second `new` lead. The token path (`leadId` + email) re-runs the exact
 predicate against its OWN row, excluding itself and looking only back
