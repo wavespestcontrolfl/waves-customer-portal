@@ -24,8 +24,8 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 
 const CANARY_ROUTES = [
-  { key: 'smsDraftDefault', route: MODELS.ROUTES.smsDraftDefault },
-  { key: 'smsDraftSaveSale', route: MODELS.ROUTES.smsDraftSaveSale },
+  { key: 'smsDraftDefault', route: MODELS.ROUTES.smsDraftDefault, laneId: 'sms_canary_default' },
+  { key: 'smsDraftSaveSale', route: MODELS.ROUTES.smsDraftSaveSale, laneId: 'sms_canary_save_sale' },
   // smsToneRewrite is intentionally not probed: same provider+model as
   // smsDraftSaveSale, so its canary would be a duplicate request.
 ];
@@ -62,9 +62,10 @@ async function alertAdmin(title, body) {
   }
 }
 
-async function probeRoute({ key, route }) {
+async function probeRoute({ key, route, laneId }) {
   const { dispatch } = require('./llm/call');
   const result = await dispatch(route, {
+    laneId,
     text: CANARY_PROMPT,
     jsonMode: false,
     maxTokens: 16,

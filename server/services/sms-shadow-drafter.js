@@ -698,7 +698,7 @@ function draftRouteFor({ intentName, inboundMessage } = {}) {
  * one that actually produced the draft, persisted on the row for the judge),
  * or null when both paths are unusable.
  */
-async function generateDraftOnce(client, system, userContent, route = MODELS.ROUTES.smsDraftDefault, { pinned = false, metricsLane } = {}) {
+async function generateDraftOnce(client, system, userContent, route = MODELS.ROUTES.smsDraftDefault, { pinned = false, metricsLane, laneId } = {}) {
   try {
     const { dispatchWithFallback } = require('./llm/call');
     // pinned = single-provider leg for the sealed exam: a cross-provider
@@ -721,7 +721,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
       // exam gates the live drafter, so it must measure the live cap —
       // sealed truncation noise belongs to the sealed-eval lane, not a
       // more permissive harness.
-      { system, text: userContent, jsonMode: false, maxTokens: 600, anthropicClient: client },
+      { laneId, system, text: userContent, jsonMode: false, maxTokens: 600, anthropicClient: client },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );
     if (routed.ok) return { parsed: parseShadowResponse(routed.text), model: routed.model };
@@ -745,7 +745,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane }) {
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -781,12 +781,16 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // one provider for every generation in the loop, fallback disabled.
   const pinned = Boolean(routeOverride);
   const route = routeOverride || draftRouteFor({ intentName: intent?.intent, inboundMessage });
+  // The call-ledger lane, spread into every generation's options: the
+  // caller's when it has one of its own (the estimate follow-up, the sealed
+  // exam), else the route decides — the save-the-sale route is its own lane.
+  const lane = { laneId: presetLaneId || (route === MODELS.ROUTES.smsDraftSaveSale ? 'sms_save_sale' : 'sms_draft') };
   // Stamp only what actually shaped the prompt (Codex r4): a fetched profile
   // that failed to compose (or sanitized to nothing) drafted on the BASE
   // prompt, and every cohort/exam consumer of this stamp must see that as
   // profile-free.
   const voiceProfileVersion = profileApplied ? (voiceProfile?.version ?? null) : null;
-  const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane });
+  const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return { parsed: null, passes: 1, converged: false, model: null, voiceProfileVersion };
   let { parsed, model } = first;
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
@@ -803,6 +807,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     let verdict;
     try {
       const vResp = await createDeepMessage(client, {
+        laneId: 'sms_verifier',
         model: verifier.VERIFIER_MODEL,
         max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
         system: verifier.buildVerifierSystemPrompt(),
@@ -829,7 +834,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
         system,
         `${userContent}\n\n${verifier.buildReviseAddendum(verdict.violations)}`,
         route,
-        { pinned, metricsLane }
+        { pinned, metricsLane, ...lane }
       );
     } catch (err) {
       // A revise call that times out / rate-limits must NOT drop the whole

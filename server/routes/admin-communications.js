@@ -1350,6 +1350,7 @@ router.post('/ai-draft', async (req, res, next) => {
     ).join('\n');
 
     const msg = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+      laneId: 'sms_suggest',
       maxTokens: 200,
       jsonMode: false,
       text: `You are responding as Waves Pest Control via SMS. Write a short, friendly reply (under 160 characters).
@@ -2239,7 +2240,7 @@ router.post('/rewrite-sms', async (req, res) => {
     // success still reaches the other provider.
     const routed = await require('../services/llm/call').dispatchWithFallback(
       { name: 'smsToneRewrite', primary: MODELS.ROUTES.smsToneRewrite, fallback: MODELS.TEXT_POLICIES.customerCopy.fallback },
-      { text: rewritePrompt, jsonMode: false, maxTokens: 500 },
+      { laneId: 'sms_tone', text: rewritePrompt, jsonMode: false, maxTokens: 500 },
       { validate: (result) => (String(result.text || '').trim() ? null : 'empty_response') },
     );
     const rewriteText = routed.ok ? routed.text : '';
