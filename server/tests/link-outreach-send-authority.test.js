@@ -1151,6 +1151,10 @@ describe('Codex r3 on #3854', () => {
     expect(Outreach.conversationOpen(placement(s.db))).toBe(false);
     expect(await conflict()).toBeNull();
     expect(s.db._raws.some((r) => /link_prospect_domain|advisory/i.test(String(r)))).toBe(true); // stamped under the per-domain lock
+    // the thread is read UNDER the locks (a reply landing after an unlocked read could not be missed by the stamp): the lock + FOR UPDATE precede the read
+    const order = s.db._raws.map(String);
+    expect(order.lastIndexOf('FOR UPDATE seo_link_prospects')).toBeGreaterThan(order.findIndex((r) => /link_prospect_domain|advisory/i.test(r)));
+    expect(gmail.getThread.mock.invocationCallOrder[0]).toBeGreaterThan(0);
     // closed rows leave the candidate set — no second thread read
     gmail.getThread.mockClear();
     expect(await Outreach.closeSilentConversations({ now: day(60) })).toEqual({ scanned: 0, closed: 0, open: 0, failed: 0 });
