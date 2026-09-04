@@ -1442,7 +1442,8 @@ class RelayConversation {
           { signal: this._controller.signal }
         );
         // First-token latency (test doubles expose only finalMessage).
-        stream.once?.('text', () => { stat.firstTokenAt = now(); });
+        // Once per ROUND — the turn keeps its FIRST token, not the last round's.
+        stream.once?.('text', () => { stat.firstTokenAt ??= now(); });
         msg = await stream.finalMessage();
         stat.rounds += 1;
       } catch (err) {
@@ -1458,6 +1459,8 @@ class RelayConversation {
         return;
       } finally {
         clearTimeout(streamTimer);
+        // Every path — success, timeout, barge-in abort, error — is model time.
+        stat.modelMs += now() - modelStartAt;
       }
 
       const text = msg.content

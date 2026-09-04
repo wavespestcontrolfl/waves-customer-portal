@@ -421,6 +421,47 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(spoken).toMatch(/anything else I can help/i);
   });
 
+  // Per-turn model telemetry across a tool round (pre-push hook on #3852 r2):
+  // the turn keeps its FIRST token stamp, and every model round's wall time
+  // lands on the stat.
+  test('a tool round keeps the first-token stamp and accumulates model time', async () => {
+    let IsolatedConvo;
+    let stat;
+    let firstStamp = null;
+    jest.isolateModules(() => {
+      let call = 0;
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
+        return {
+          messages: {
+            stream: () => ({
+              once: (event, cb) => { if (event === 'text') { cb(); if (firstStamp == null) firstStamp = stat.firstTokenAt; } },
+              finalMessage: async () => {
+                call += 1;
+                await new Promise((r) => setTimeout(r, 5));
+                return call === 1
+                  ? { content: [{ type: 'tool_use', id: 't1', name: 'get_availability', input: {} }], stop_reason: 'tool_use' }
+                  : { content: [{ type: 'text', text: 'Tuesday at nine works.' }], stop_reason: 'end_turn' };
+              },
+            }),
+          },
+        };
+      });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({
+        TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: jest.fn(async () => 'ok'),
+      }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const convo = new IsolatedConvo({ callSid: 'CA-model-time', from: '+19415551234', send: jest.fn() });
+    stat = { turn: 1, promptAt: 0, firstTokenAt: null, firstSendAt: null, modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0, timedOut: false, agentEntries: [] };
+    convo._currentTurn = stat;
+    await convo._runLoop('when can you come').catch(() => {});
+    expect(stat.rounds).toBe(2);
+    expect(stat.toolCount).toBe(1);
+    expect(firstStamp).not.toBeNull();
+    expect(stat.firstTokenAt).toBe(firstStamp); // round 2's first token did not overwrite it
+    expect(stat.modelMs).toBeGreaterThanOrEqual(8); // two ≥5ms rounds
+  });
+
   // ⭐ NO SPEECH BEFORE A WRITE'S RESULT IS KNOWN. A mixed text-plus-tool turn
   // around a write tool would speak "that's submitted!" BEFORE the write ran —
   // a false success when the tool then rejects a stale slot or fails. The
