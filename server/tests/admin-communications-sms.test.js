@@ -107,6 +107,7 @@ jest.mock('../services/review-request', () => ({
 // (skipped: no_connection), so run the body inline here.
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_key, fn) => fn()),
+  wasLockSkipped: (r) => !!(r && r.skipped === true),
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
@@ -701,6 +702,79 @@ describe('admin communications SMS route', () => {
         expect(res.status).toBe(409);
         expect((await res.json()).error).toMatch(/contract signing link is expired or no longer live/);
         expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
+    // A composer-carried prep guide link: the provider call and the tagger's
+    // replay marker run under the manual prep sender's per-customer lock, so
+    // a manual send of another guide cannot re-key the page's token while
+    // this text is in flight (GH Codex #3856 r22 P0).
+    describe('prep guide link in the body', () => {
+      const PREP_BODY = `Your prep guide: portal.wavespestcontrol.com/prep/${'a'.repeat(32)}`;
+      const PREPS = [{ customerId: 'cust-A', pestType: 'flea' }];
+      const ccl = () => require('../services/composer-customer-links');
+      const { runExclusive } = require('../utils/cron-lock');
+      let bearerSpy;
+      let markSpy;
+      beforeEach(() => {
+        bearerSpy = jest.spyOn(ccl(), 'bearerLinkSendCheck').mockResolvedValue({ ok: true, preps: PREPS });
+        markSpy = jest.spyOn(ccl(), 'markPrepGuidesSent').mockResolvedValue(undefined);
+        db.mockImplementation((table) => {
+          const first = jest.fn();
+          if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+          return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        });
+      });
+      afterEach(() => {
+        bearerSpy.mockRestore();
+        markSpy.mockRestore();
+        runExclusive.mockImplementation(async (_key, fn) => fn());
+      });
+
+      test('a real send: the provider call AND the replay marker run inside the prep-send lock', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM9', provider: 'twilio' });
+        const lockReleased = jest.fn();
+        runExclusive.mockImplementation(async (key, fn) => {
+          const out = await fn();
+          if (key.startsWith('prep-send:')) lockReleased(key);
+          return out;
+        });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
+          expect(res.status).toBe(200);
+          expect(runExclusive).toHaveBeenCalledWith('prep-send:cust-A', expect.any(Function), { recordHealth: false, waitForSlot: false });
+          const lockTaken = runExclusive.mock.invocationCallOrder[runExclusive.mock.calls.findIndex(([key]) => key === 'prep-send:cust-A')];
+          expect(lockTaken).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+          expect(markSpy).toHaveBeenCalledWith(PREPS, expect.anything());
+          expect(markSpy.mock.invocationCallOrder[0]).toBeLessThan(lockReleased.mock.invocationCallOrder[0]);
+        });
+      });
+
+      test('a held lease (a manual prep send mid-flight) refuses as not-sent — nothing dispatched, no marker', async () => {
+        runExclusive.mockImplementation(async (key, fn) => (key.startsWith('prep-send:') ? { skipped: true, reason: 'locked' } : fn()));
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
+          expect(res.status).toBe(422);
+          expect((await res.json()).error).toMatch(/prep guide is being sent to this customer right now/);
+          expect(sendCustomerMessage).not.toHaveBeenCalled();
+          expect(markSpy).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a throw the provider ACCEPTED still writes the marker; one it did not accept writes nothing', async () => {
+        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true } }));
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
+          expect(res.status).toBe(500);
+          expect(markSpy).toHaveBeenCalledWith(PREPS, expect.anything());
+        });
+        markSpy.mockClear();
+        sendCustomerMessage.mockRejectedValueOnce(new Error('provider down'));
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
+          expect(res.status).toBe(500);
+          expect(markSpy).not.toHaveBeenCalled();
+        });
       });
     });
 

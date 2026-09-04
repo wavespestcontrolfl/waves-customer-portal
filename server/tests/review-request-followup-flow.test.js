@@ -775,8 +775,11 @@ describe('review request follow-up flow', () => {
   describe('sendInlineEmailCopy', () => {
     const EmailLib = require('../services/email-template-library');
     let rrUpdate;
+    const CLAIM_STAMP = expect.objectContaining({ email_leg_owed_at: null, channel: 'both', sent_at: expect.anything() });
     const wire = ({ prefs, prefsThrow = false, email = 'megan@example.com', customerRow = {} } = {}) => {
       rrUpdate = jest.fn().mockResolvedValue(1);
+      // The claim's sent_at is COALESCE(sent_at, now) — a raw binding.
+      db.raw = (sql, bindings) => ({ sql, bindings });
       getServiceContact.mockReturnValue({ email, name: 'Megan Example' });
       db.mockImplementation((table) => {
         if (table === 'review_requests') {
@@ -808,11 +811,14 @@ describe('review request follow-up flow', () => {
       });
 
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
-      // The owed leg is cleared durably BEFORE dispatch (r9 P2), then the
-      // row texted AND emailed is recorded as channel 'both' so the outreach
-      // analytics count the email leg.
-      expect(rrUpdate).toHaveBeenNthCalledWith(1, { email_leg_owed_at: null });
-      expect(rrUpdate).toHaveBeenNthCalledWith(2, expect.objectContaining({ sent_at: expect.any(Date), channel: 'both' }));
+      // The owed leg is cleared durably BEFORE dispatch (r9 P2) — and the
+      // row texted AND emailed is recorded as channel 'both' + sent_at in
+      // that same write, so the outreach analytics count the email leg and
+      // the follow-up / cooldown clock can never be left on the text's date
+      // by a lost post-send stamp (r22 P2).
+      expect(rrUpdate).toHaveBeenNthCalledWith(1, CLAIM_STAMP);
+      const claimPatch = rrUpdate.mock.calls[0][0];
+      expect(claimPatch.sent_at).toEqual({ sql: 'COALESCE(sent_at, ?)', bindings: [expect.any(Date)] });
       // The dispatch claim itself carries the terminal + customer predicates.
       const rrQ = db.mock.results.map((r) => r.value).find((v) => v && v.whereExists && v.whereExists.mock.calls.length);
       expect(rrQ.whereNotIn).toHaveBeenCalledWith('status', ['completed', 'stopped', 'suppressed', 'failed', 'rated']);
@@ -835,7 +841,8 @@ describe('review request follow-up flow', () => {
       });
       expect(call.payload.first_name).toBe('Megan');
       expect(call.payload.review_url).toContain('tok-1');
-      expect(rrUpdate).toHaveBeenCalledTimes(2);
+      // No second write: nothing after the provider call is left to lose.
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
     });
 
     test('a failed pre-dispatch owed clear aborts the provider call — retryable, leg still owed (r9 P2)', async () => {
@@ -857,13 +864,19 @@ describe('review request follow-up flow', () => {
       expect(rrUpdate).toHaveBeenCalledTimes(1);
     });
 
-    test('the Both analytics stamp is retried once after a real send (r10 P2)', async () => {
+    test('a lost post-send write cannot strand a Both row on its text date: sent_at + channel are the pre-dispatch claim itself (r22 P2)', async () => {
       wire({ prefs: { review_request: true, email_enabled: true } });
-      rrUpdate.mockResolvedValueOnce(1).mockRejectedValueOnce(new Error('db blip'));
-      EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); return { sent: true }; });
-      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
-      expect(rrUpdate).toHaveBeenCalledTimes(3);
-      expect(rrUpdate).toHaveBeenNthCalledWith(3, expect.objectContaining({ sent_at: expect.any(Date), channel: 'both' }));
+      // The only write fails on its first try → the dispatch is aborted, the
+      // leg stays owed; there is no separate stamp left to lose after a send.
+      rrUpdate.mockRejectedValueOnce(new Error('db down'));
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        const keep = await opts.onQueued({ id: 'em-1' });
+        if (keep === false) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+        return { sent: true };
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
+      expect(rrUpdate).toHaveBeenCalledWith(CLAIM_STAMP);
     });
 
     test('refuses when review or email notifications are off, or prefs cannot be read (fail closed)', async () => {
@@ -899,9 +912,11 @@ describe('review request follow-up flow', () => {
         throw new Error('post-dispatch bookkeeping failed');
       });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_uncertain' });
-      // Cleared once, before dispatch — no second write after the throw.
+      // Cleared once, before dispatch — no second write after the throw. The
+      // provider may hold the email, so the claim's sent_at (the cooldown
+      // and follow-up anchor) stays: conservative.
       expect(rrUpdate).toHaveBeenCalledTimes(1);
-      expect(rrUpdate).toHaveBeenCalledWith({ email_leg_owed_at: null });
+      expect(rrUpdate).toHaveBeenCalledWith(CLAIM_STAMP);
     });
 
     test('_sendOutreachEmail (one-off): a post-dispatch throw is uncertain — counted as the ask, never "try again" (r9 P2)', async () => {
@@ -983,9 +998,11 @@ describe('review request follow-up flow', () => {
         throw err;
       });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
-      // Cleared pre-dispatch, restored on the definite rejection.
-      expect(rrUpdate).toHaveBeenNthCalledWith(1, { email_leg_owed_at: null });
-      expect(rrUpdate).toHaveBeenNthCalledWith(2, { email_leg_owed_at: expect.any(Date) });
+      // Cleared pre-dispatch, restored on the definite rejection — with the
+      // claim's analytics stamp reverted: no email went out, so the row is
+      // texted-only again (the mock row carries no channel → 'sms').
+      expect(rrUpdate).toHaveBeenNthCalledWith(1, CLAIM_STAMP);
+      expect(rrUpdate).toHaveBeenNthCalledWith(2, { email_leg_owed_at: expect.any(Date), channel: 'sms', sent_at: null });
       // Restore lost twice → this row cannot be retried from here (r17 P2).
       wire({ prefs: { review_request: true, email_enabled: true } });
       rrUpdate.mockResolvedValueOnce(1).mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down'));

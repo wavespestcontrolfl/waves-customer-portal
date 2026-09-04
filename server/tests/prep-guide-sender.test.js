@@ -707,6 +707,15 @@ describe('sendPrepToCustomer', () => {
     expect(excludedArgs).toEqual(expect.arrayContaining(['%inspect%', '%monitor%', '%wdo%', '%wood destroying%']));
   });
 
+  test('the lawn visit match excludes inspection and assessment visits — a "Lawn Health Inspection" gets no mow / irrigation / keep-off prep (GH Codex #3856 r22 P1)', async () => {
+    upcomingVisitRow = VISIT;
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'email' });
+    const excludedArgs = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls
+      .filter(([sql]) => sql === 'LOWER(service_type) NOT LIKE ?')
+      .map(([, args]) => args[0]));
+    expect(excludedArgs).toEqual(expect.arrayContaining(['%inspect%', '%assess%']));
+  });
+
   test('losing the prep-page claim (another guide keyed the row after the read) refuses the text', async () => {
     // The read sees an unkeyed row; the conditional claim then affects 0
     // rows because a concurrent send keyed it to interior pest.

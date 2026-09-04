@@ -198,6 +198,50 @@ async function resolveSmsLogCustomerFallbacks(rows) {
   return resolved;
 }
 
+// Composer-carried prep links: the provider call AND the tagger's replay
+// marker (markPrepGuidesSent — the evidence the prep sender's
+// reservationAbandoned reads) run under the manual sender's own
+// per-customer `prep-send:<customer>` lock. Between the bearer check and
+// that marker the only trace of this send is the 'sending' reservation row,
+// which the trace rightly ignores — so unlocked, a manual send of ANOTHER
+// guide could classify the visit's page as abandoned and re-key its token
+// mid-dispatch: the customer's text would name one guide and open another
+// (GH Codex #3856 r22 P0). A held lease is an operator-facing "try again",
+// never a wait — reported as a not-sent result so the route's own no-send
+// exit releases every claim taken before dispatch. A throw the provider
+// accepted (err.providerOutcome.sent === true) still writes the marker
+// before propagating; a lost marker never fails a text that already left.
+async function dispatchPrepLinkSend(preps, dispatch, actorId) {
+  const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+  const mark = async (label) => {
+    try {
+      await require('../services/composer-customer-links').markPrepGuidesSent(preps, actorId);
+    } catch (stampErr) {
+      logger.warn(`[communications] prep sent marker failed ${label}: ${stampErr.message}`);
+    }
+  };
+  const customerIds = [...new Set(preps.map((p) => p.customerId))];
+  const locked = async (i) => {
+    if (i < customerIds.length) {
+      return runExclusive(`prep-send:${customerIds[i]}`, () => locked(i + 1), { recordHealth: false, waitForSlot: false });
+    }
+    let result;
+    try {
+      result = await dispatch();
+    } catch (err) {
+      if (err?.providerOutcome?.sent === true) await mark('after a throw');
+      throw err;
+    }
+    if (result?.sent && require('../services/sms-auto-send').isRealProviderSend(result)) await mark('(text already sent)');
+    return result;
+  };
+  const outcome = await locked(0);
+  if (wasLockSkipped(outcome)) {
+    return { sent: false, blocked: false, reason: 'A prep guide is being sent to this customer right now — try again in a moment.' };
+  }
+  return outcome;
+}
+
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;
@@ -668,7 +712,7 @@ router.post('/sms', async (req, res, next) => {
     // blocked — and the claim released — where the funnel accepts it (GH
     // Codex #3844 r5 P1). The composer inserts the BASE template copy.
     const cardVisitIds = cardClaim ? cardClaim.cards.map((c) => c.scheduledServiceId) : [];
-    const result = await sendCustomerMessage({
+    const dispatch = () => sendCustomerMessage({
       to,
       body: cleanBody,
       channel: 'sms',
@@ -708,6 +752,9 @@ router.post('/sms', async (req, res, next) => {
         humanAuthored: !bodyIsUnchangedAgentDraft,
       },
     });
+    const result = prepLinkSends
+      ? await dispatchPrepLinkSend(prepLinkSends, dispatch, req.technicianId || null)
+      : await dispatch();
     // The reservation has done its job — the real provider row now exists (on
     // success) or no send happened (on failure). Clear it so it can't linger as
     // a stuck 'sending' row blocking auto-sends to the thread.
@@ -773,16 +820,6 @@ router.post('/sms', async (req, res, next) => {
         if (isRealProviderSend(result)) await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
       } catch (stampErr) {
         logger.warn(`[communications] statement sent stamp failed (text already sent): ${stampErr.message}`);
-      }
-    }
-    // Composer-carried prep links: a REAL send is a delivered prep text —
-    // the tagger's replay-guard marker, as the manual sender writes it.
-    if (prepLinkSends && result?.sent) {
-      try {
-        const { isRealProviderSend } = require('../services/sms-auto-send');
-        if (isRealProviderSend(result)) await require('../services/composer-customer-links').markPrepGuidesSent(prepLinkSends, req.technicianId || null);
-      } catch (stampErr) {
-        logger.warn(`[communications] prep sent marker failed (text already sent): ${stampErr.message}`);
       }
     }
     // Composer-carried contract signing links: a REAL provider send is the
@@ -1000,13 +1037,6 @@ router.post('/sms', async (req, res, next) => {
         await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
       } catch (stampErr) {
         logger.warn(`[communications] statement sent stamp failed after a throw: ${stampErr.message}`);
-      }
-    }
-    if (prepLinkSends && err?.providerOutcome?.sent === true) {
-      try {
-        await require('../services/composer-customer-links').markPrepGuidesSent(prepLinkSends, req.technicianId || null);
-      } catch (stampErr) {
-        logger.warn(`[communications] prep sent marker failed after a throw: ${stampErr.message}`);
       }
     }
     // And for the activated contract links: accepted → record, else hand back.
@@ -2091,6 +2121,9 @@ async function emailReviewAskNow(primaryId) {
 }
 
 const REVIEW_LINK_CHANNELS = ['sms', 'email', 'both'];
+// The channels on which the review ask is a SEND from /customer-link (the
+// owner must be unambiguous — resolveLinkOwner's emailSend).
+const EMAIL_SEND_CHANNELS = ['email', 'both'];
 
 // POST /api/admin/communications/customer-link  { phone, customerId?, kind }
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
@@ -2292,33 +2325,34 @@ const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', '
 
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
-    const kind = String(req.body?.kind || '');
+    const body = req.body || {};
+    const kind = String(body.kind || '');
     const builderByKind = composerLinkBuilders();
     if (!(kind in builderByKind)) {
       return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
     }
 
-    const last10 = fullPhoneLast10(req.body?.phone);
+    const last10 = fullPhoneLast10(body.phone);
     if (!last10) {
       return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
     }
     // Quick Links review channel (owner ruling 2026-09-03): sms | email | both.
-    const channel = kind === 'review_request' ? String(req.body?.channel || 'sms') : null;
+    const channel = kind === 'review_request' ? String(body.channel || 'sms') : undefined;
     if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) {
       return res.status(400).json({ error: 'channel must be one of sms, email, both' });
     }
     if (kind === 'statement') {
-      const { status, body } = await statementLinkInsert(require('../services/composer-customer-links'), last10, req.body?.customerId);
-      return res.status(status).json(body);
+      const answer = await statementLinkInsert(require('../services/composer-customer-links'), last10, body.customerId);
+      return res.status(answer.status).json(answer.body);
     }
 
-    const customerId = req.body?.customerId;
+    const { customerId } = body;
     const recipient = await resolveComposerRecipient(customerId, last10);
     if (recipient.error) return res.status(recipient.status).json({ error: recipient.error });
     const { customerIds } = recipient;
 
     const recipientFirstName = await firstNameForPhone(last10, customerIds);
-    const owner = await resolveLinkOwner(kind, customerIds, customerId, last10, { emailSend: channel === 'email' || channel === 'both' });
+    const owner = await resolveLinkOwner(kind, customerIds, customerId, last10, { emailSend: EMAIL_SEND_CHANNELS.includes(channel) });
     if (owner.error) return res.status(owner.status).json({ error: owner.error });
     const { primaryId } = owner;
 
@@ -2328,18 +2362,18 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       return res.status(answer.status).json(answer.body);
     }
 
-    const result = await builderByKind[kind](customerIds, primaryId);
+    const result = (await builderByKind[kind](customerIds, primaryId)) || {};
     // Auto Pay auto-secure: a consented saved card was enrolled instead of a
     // link being minted — a successful outcome with nothing to insert.
-    if (result?.autoSecured) {
+    if (result.autoSecured) {
       return res.json({ kind, url: null, line: '', autoSecured: true, firstName: recipientFirstName });
     }
-    if (!result?.url) {
-      return res.status(404).json({ error: result?.reason || 'Nothing to link for this customer' });
+    if (!result.url) {
+      return res.status(404).json({ error: result.reason || 'Nothing to link for this customer' });
     }
     res.json({
       kind,
-      channel: channel || undefined,
+      channel,
       url: stripSmsLinkScheme(result.url),
       line: stripSmsLinkScheme(result.line),
       firstName: recipientFirstName,

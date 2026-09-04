@@ -2026,7 +2026,14 @@ const ReviewService = {
             .whereNull("customers.deleted_at")
             .whereRaw("COALESCE(customers.has_left_google_review, false) = false");
         })
-        .update({ email_leg_owed_at: null });
+        // The Both analytics stamp (channel 'both', sent_at — the cooldown
+        // and follow-up anchor) rides on this same durable pre-dispatch
+        // write: stamped after the send it could be lost while the owed
+        // marker was already gone, leaving the row dated by its text alone —
+        // processFollowups would text a second solicitation and the cooldown
+        // would expire right after the email (GH Codex #3856 r22 P2). A
+        // definite provider rejection reverts all three together below.
+        .update({ email_leg_owed_at: null, channel: "both", sent_at: db.raw("COALESCE(sent_at, ?)", [new Date()]) });
     } catch (e) {
       logger.warn(`[review] inline email owed clear failed pre-dispatch (requestId=${requestId}): ${e.message}`);
       return false;
@@ -2092,15 +2099,9 @@ const ReviewService = {
       // after onQueued the provider call either succeeds or throws (the
       // uncertain path below) — there is no post-dispatch sent:false.
       if (!result?.sent) return { sent: false, reason: result?.reason || "email_blocked" };
-      // channel 'both': the row texted AND emailed — the outreach analytics
-      // count it as an email touch (channel IN ('email','both')), so the
-      // Both path no longer reads as SMS-only.
-      // The owed leg is already cleared, so nothing ever revisits this row —
-      // a lost stamp would under-count Both email delivery for good (r10 P2).
-      await stampWithRetry(
-        () => db("review_requests").where({ id: request.id }).whereNull("sent_at").update({ sent_at: new Date(), channel: "both" }),
-        `inline email sent_at stamp (requestId=${request.id})`,
-      );
+      // channel 'both' + sent_at were stamped in the dispatch claim (the
+      // outreach analytics count the row as an email touch, channel IN
+      // ('email','both'), and the cooldown / follow-up clock runs from it).
       return { sent: true };
     } catch (err) {
       logger.error(`[review] inline email copy failed (requestId=${requestId} errType=${err?.name || "Error"} dispatched=${dispatched})`);
@@ -2110,7 +2111,13 @@ const ReviewService = {
         // stamp keeps the retry window) so a corrected address can retry
         // on the same row — the text's cooldown would refuse a fresh ask.
         const restored = await stampWithRetry(
-          () => db("review_requests").where({ id: requestId }).whereNull("email_leg_owed_at").update({ email_leg_owed_at: request?.email_leg_owed_at || new Date() }),
+          () => db("review_requests").where({ id: requestId }).whereNull("email_leg_owed_at").update({
+            email_leg_owed_at: request?.email_leg_owed_at || new Date(),
+            // The claim's analytics stamp comes back with the owed leg: no
+            // email went out, so the row is texted-only again.
+            channel: request?.channel || "sms",
+            sent_at: request?.sent_at || null,
+          }),
           `inline email owed restore after a provider rejection (requestId=${requestId})`,
         );
         // Restore lost = this row can no longer be retried from Quick Links

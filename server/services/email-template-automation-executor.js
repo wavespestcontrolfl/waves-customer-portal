@@ -1198,8 +1198,15 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
       max_attempts: retryPolicy.maxAttempts,
     });
     // Final failure BEFORE dispatch on a fresh claim: nobody received the
-    // page — hand it back. After dispatch it may have been delivered: keep.
-    if (freshPrepClaim && !prepDispatched) await releaseFreshPrepClaim(claimedRun);
+    // page — hand it back. After dispatch it may have been delivered: keep —
+    // unless the provider conclusively rejected the payload (the shared
+    // SendGrid classifier: 400/401/403/404/405/413/415/422/429 — a timeout-
+    // style 408 and every 5xx stay ambiguous), which proves nothing left, so
+    // the page is handed back too; otherwise the failed email_messages row
+    // pins the visit's page to a guide nobody received (GH Codex #3856 r22 P2).
+    if (freshPrepClaim && (!prepDispatched || require('./sendgrid-mail').isDefiniteRejection(err))) {
+      await releaseFreshPrepClaim(claimedRun);
+    }
     return failed || { ...running, status: 'failed', last_error: err.message };
   }
 }

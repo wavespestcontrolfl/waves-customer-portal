@@ -81,6 +81,11 @@ const PREP_CONFIG = Object.freeze({
   lawn: {
     label: 'Lawn Treatment',
     serviceKeywords: ['lawn'],
+    // prep.lawn tells the customer to mow, shut off irrigation and keep
+    // children and pets off treated turf — a "Lawn Health Inspection" /
+    // "Lawn Inspect" evaluation (service library) or a lawn assessment
+    // applies nothing, so it gets no treatment prep (GH Codex #3856 r22 P1).
+    excludeKeywords: ['inspect', 'assess'],
     emailTemplateKey: 'prep.lawn',
     smsStandaloneKey: null,
   },

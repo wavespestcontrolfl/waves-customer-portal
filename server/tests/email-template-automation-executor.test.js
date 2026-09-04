@@ -1184,6 +1184,39 @@ describe('email template automation executor', () => {
     ]));
     EmailTemplates.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); throw new Error('post-dispatch bookkeeping'); });
     expect((await trigger()).results[0].run.status).toBe('failed');
+
+    // Post-dispatch DEFINITE provider rejection (SendGrid 4xx from the shared
+    // classifier): the payload was conclusively not accepted, so the fresh
+    // claim is handed back — otherwise the failed email_messages row would
+    // pin the visit's page to a guide nobody received (GH Codex #3856 r22 P2).
+    const rejectedRelease = chain({});
+    setDbQueues(queues([
+      chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+      chain({ returning: [{ id: 'svc-1' }] }),
+      rejectedRelease,
+    ]));
+    EmailTemplates.sendTemplate.mockImplementation(async (opts) => {
+      await opts.onQueued({ id: 'em-1' });
+      const err = new Error('SendGrid 400: bad address');
+      err.status = 400;
+      throw err;
+    });
+    expect((await trigger()).results[0].run.status).toBe('failed');
+    expect(rejectedRelease.update).toHaveBeenCalledWith({ prep_template_key: null });
+
+    // A 408 / 5xx stays ambiguous — the page is kept (a release would throw
+    // "Unexpected db table" here).
+    setDbQueues(queues([
+      chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+      chain({ returning: [{ id: 'svc-1' }] }),
+    ]));
+    EmailTemplates.sendTemplate.mockImplementation(async (opts) => {
+      await opts.onQueued({ id: 'em-1' });
+      const err = new Error('SendGrid 503');
+      err.status = 503;
+      throw err;
+    });
+    expect((await trigger()).results[0].run.status).toBe('failed');
   });
 
   describe('processDueRuns preview mode', () => {
