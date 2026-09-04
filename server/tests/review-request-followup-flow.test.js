@@ -747,13 +747,16 @@ describe('review request follow-up flow', () => {
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_off' });
       wire({ prefsThrow: true });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'prefs_unavailable' });
-      wire({ prefs: null, email: '' });
+      wire({ prefs: { review_request: true, email_enabled: true }, email: '' });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'no_email' });
+      // No prefs row = no recorded email consent (same as sendOutreachTouch's canEmail).
+      wire({ prefs: null });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_off' });
       expect(EmailLib.sendTemplate).not.toHaveBeenCalled();
     });
 
     test('a blocked send reports the library reason and never throws', async () => {
-      wire({ prefs: null });
+      wire({ prefs: { review_request: true, email_enabled: true } });
       EmailLib.sendTemplate.mockResolvedValue({ sent: false, reason: 'suppressed' });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'suppressed' });
       EmailLib.sendTemplate.mockRejectedValue(new Error('boom'));

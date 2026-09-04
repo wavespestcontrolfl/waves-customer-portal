@@ -1877,8 +1877,8 @@ const ReviewService = {
    * and the cap/cooldown count ONE ask (getDeliveredAskStats counts rows,
    * not channels). Never mints a row and never touches `status` (the SMS
    * leg owns it); on a real send it stamps `sent_at` once. Consent is the
-   * email half of sendOutreachTouch's rules: review_request off or
-   * email_enabled off refuses, a prefs read failure fails CLOSED.
+   * email half of sendOutreachTouch's rules: no prefs row, review_request
+   * off, or email_enabled off refuses; a prefs read failure fails CLOSED.
    * Returns { sent, reason } — never throws.
    */
   async sendInlineEmailCopy(requestId) {
@@ -1897,7 +1897,9 @@ const ReviewService = {
       } catch {
         return { sent: false, reason: "prefs_unavailable" };
       }
-      if (prefs && (prefs.review_request === false || prefs.email_enabled === false)) {
+      // Same rule as sendOutreachTouch's canEmail: no prefs row = no recorded
+      // email consent = no email (fail closed), not permissive defaults.
+      if (!prefs || prefs.review_request === false || prefs.email_enabled === false) {
         return { sent: false, reason: "email_off" };
       }
       const reviewUrl = await buildReviewUrl(request, customer.id);
