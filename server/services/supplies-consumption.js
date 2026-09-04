@@ -181,6 +181,22 @@ async function consumeCompletionSupplies(db, {
           .whereRaw("coalesce(metadata->>'source', '') <> ?", [SOURCE])
           .first('id');
         if (alreadyLogged) return { skipped: 'already_logged_by_tech' };
+        // Settlement is PER PRODUCT and lives in the rows themselves: an
+        // existing kit movement means this product is done (the r17 clear
+        // below then retires any stale bell); a hand-off bell that LANDED
+        // for this product — or the visit-wide lookup bell — means the
+        // office was told to adjust this count by hand, so a retry must not
+        // deduct on top of that correction. A partial delivery (A's bell
+        // landed, B's was lost) therefore retries only B (Codex r17 P1).
+        const alreadyConsumed = await trx('product_inventory_movements')
+          .where({ product_id: locked.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' })
+          .whereRaw("metadata->>'source' = ?", [SOURCE])
+          .first('id');
+        if (alreadyConsumed) return { skipped: 'already_consumed' };
+        const handedOff = await trx('notifications')
+          .whereRaw("metadata->>'dedupeKey' = ANY(?)", [[`supplies-consumption-failed:${locked.id}:${scheduledServiceId}`, `supplies-consumption-failed:lookup:${scheduledServiceId}`]])
+          .first('id');
+        if (handedOff) return { skipped: 'handed_off' };
 
         const costPerUnit = locked.cost_per_unit != null ? Number(locked.cost_per_unit) : null;
         const costUnitMatches = !locked.cost_unit || String(locked.cost_unit).toLowerCase() === String(unit).toLowerCase();

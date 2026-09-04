@@ -769,7 +769,15 @@ async function settleAfterError(conn, err, { ctx, vendor, submitted, placed, quo
   logger.error(`[order-dispatch] ${product.name}: ${err.message}`);
   try {
     if (submitted) {
-      return await park(conn, { ...ctx, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${placed?.amountCents != null ? ` (${dollars(placed.amountCents)})` : ''} was placed but recording it failed: ${err.message}.`, amountCents: placed?.amountCents ?? quoteCents ?? null, evidence: placed?.evidence || null, placed });
+      const parked = await park(conn, { ...ctx, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${placed?.amountCents != null ? ` (${dollars(placed.amountCents)})` : ''} was placed but recording it failed: ${err.message}.`, amountCents: placed?.amountCents ?? quoteCents ?? null, evidence: placed?.evidence || null, placed });
+      // The row had already left 'placing' (stale recovery / revoke while
+      // the vendor call ran) and the late-placement attachment itself
+      // failed: a skipped park would read as harmless while the confirmed
+      // number and amount are unrecorded and a revokedAt marker may still
+      // admit a replacement purchase. That is UNRECORDED — the run goes
+      // red on it (Codex r17 P1).
+      if (parked.skipped === 'already_settled') return { requestId: request.id, ledgerId: ledger.id, status: 'unrecorded', reason: 'persist_after_placement', externalOrderNumber: placed?.externalOrderNumber || null, error: `${err.message}; the row had already left placing and the late placement was not attached` };
+      return parked;
     }
     return await park(conn, { ...ctx, status: 'failed', reason: 'dispatch_error', message: err.message });
   } catch (parkErr) {
@@ -891,8 +899,9 @@ async function bellUndispatchable(conn, requestId, notify) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first();
   const product = request && await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
   if (!request || !product) return false;
-  await require('./auto-reorder').ringRestockBell({ notify, product, request });
-  return true;
+  // notifyAdmin resolves null when it could not persist the row: a null
+  // hand-off is NOT a delivered bell (Codex r17 P2).
+  return !!(await require('./auto-reorder').ringRestockBell({ notify, product, request }));
 }
 
 async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
@@ -901,7 +910,10 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry }));
   if (claim.skipped) {
     const belled = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : false;
-    return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...(belled ? { belled: true } : {}) };
+    // A lost hand-off bell is reported, not swallowed: the request stays open
+    // and unclaimed, so the next run re-rings it — and this run goes red.
+    const bellState = !HANDOFF_SKIPS.has(claim.skipped) ? {} : belled ? { belled: true } : { bellLost: true };
+    return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...bellState };
   }
   return dispatchClaimed(conn, claim, { registry, notify, now, env });
 }
@@ -1001,6 +1013,8 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
   if (recovered.unrecovered.length) problems.push(`${recovered.unrecovered.length} stale placing row(s) could not be parked (ledger ${recovered.unrecovered.join(', ')})`);
   // An undelivered bell is a parked order nobody knows about: red until it lands.
   if (bellsPending.length) problems.push(`${bellsPending.length} bell(s) not delivered, re-rung next run (ledger ${bellsPending.join(', ')})`);
+  const bellLost = results.filter((r) => r.bellLost);
+  if (bellLost.length) problems.push(`${bellLost.length} hand-off bell(s) not persisted, re-rung next run (request ${bellLost.map((r) => r.requestId).join(', ')})`);
   if (problems.length) throw new Error(`vendor order dispatch: ${problems.join('; ')}`);
   return { ...(gated ? { skipped: 'gated' } : {}), results, recovered: recovered.recovered, bells };
 }

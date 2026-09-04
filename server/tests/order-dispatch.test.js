@@ -509,6 +509,29 @@ test('vendor total over cap after placement → needs_review, request ordered, b
   expect(notify.mock.calls[0][2]).not.toMatch(/order manually/);
 });
 
+test('a DB failure inside the late-placement attachment (the row already left placing) is UNRECORDED, never a harmless skip (Codex r17 P1)', async () => {
+  const dbFn = require('../models/db');
+  const realTx = dbFn.transaction;
+  let n = 0;
+  dbFn.transaction = async (fn) => { n += 1; if (n === 3) throw new Error('late placement audit lost connection'); return fn(dbFn); };
+  try {
+    const a = mockAdapter();
+    const inner = a.place;
+    a.place = jest.fn(async (...args) => { const out = await inner(...args); mockState.ledgerSettled = true; return out; }); // stale recovery parked the row while the vendor call was out
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'unrecorded', reason: 'persist_after_placement', externalOrderNumber: 'SM-1' });
+    expect(r.skipped).toBeUndefined();
+  } finally { dbFn.transaction = realTx; }
+});
+
+test('an undispatchable request whose hand-off bell was not persisted reports bellLost, never belled (Codex r17 P2)', async () => {
+  mockState.vendor = { ...mockState.vendor, active: false };
+  notify = jest.fn(async () => null);
+  const r = await run(mockAdapter());
+  expect(r).toMatchObject({ skipped: 'no_adapter', bellLost: true });
+  expect(r.belled).toBeUndefined();
+});
+
 test('a DB failure after the vendor call parks as persist_after_placement, never failed', async () => {
   const dbFn = require('../models/db');
   const realTx = dbFn.transaction;

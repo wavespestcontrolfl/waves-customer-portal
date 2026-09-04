@@ -14170,6 +14170,10 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
         // P1): clear the owed marker. Only a miss whose hand-off bell did
         // NOT land keeps it, so the next retry re-runs the at-most-once
         // consume (pre-push P1); a failed clear leaves it set for the same reason.
+        // Settlement itself is per product: a retry skips any product whose
+        // hand-off bell already landed (supplies-consumption reads the bell
+        // row), so a partial delivery re-runs only the products whose bell
+        // was lost (Codex r17 P1).
         const handoffLost = (consumption?.errors || []).some((e) => e.reason === 'failure_bell_not_sent');
         if (result.recordId && !handoffLost) await db('service_records').where({ id: result.recordId }).update({ field_flags: db.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
       } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }

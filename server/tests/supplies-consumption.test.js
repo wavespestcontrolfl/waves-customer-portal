@@ -23,7 +23,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 const { consumeCompletionSupplies, appliesToLine } = require('../services/supplies-consumption');
 const { notifyAdmin } = require('../services/notification-service');
 
-function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false }) {
+function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false }) {
   const updates = [];
   const inserts = [];
   const trx = (table) => {
@@ -31,7 +31,11 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
     q.where = () => q;
     q.whereRaw = () => q;
     q.forUpdate = () => q;
-    q.first = async () => (table === 'product_inventory_movements' ? (techLogged ? { id: 'mv-tech' } : null) : products[0]);
+    q.first = async () => {
+      if (table === 'product_inventory_movements') return techLogged ? { id: 'mv-tech' } : null;
+      if (table === 'notifications') return handedOff ? { id: 'bell-1' } : null;
+      return products[0];
+    };
     q.update = async (row) => { updates.push({ table, row }); return 1; };
     q.whereNull = () => q;
     q.insert = (row) => ({
@@ -155,6 +159,15 @@ test('movement carries unit_cost / cost_used from cost_per_unit in the inventory
   await consumeCompletionSupplies(mismatch.db, args);
   expect(mismatch.inserts).toHaveLength(1);
   expect(mismatch.inserts[0]).toMatchObject({ unit_cost: null, cost_used: null });
+});
+
+test('a product whose hand-off bell landed on an earlier attempt is NOT deducted on the retry — the office adjusts it by hand; no movement, no decrement, bell left alone (Codex r17 P1)', async () => {
+  const { db, updates, inserts } = fakeDb({ products: [sign], handedOff: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.consumed).toHaveLength(0);
+  expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'handed_off' }]);
+  expect(inserts).toHaveLength(0);
+  expect(updates).toHaveLength(0);
 });
 
 test('duplicate (index ignored the insert) → no decrement', async () => {
