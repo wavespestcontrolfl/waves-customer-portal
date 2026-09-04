@@ -437,6 +437,8 @@ describe('sendPrepToCustomer', () => {
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' }))
       .toMatchObject({ ok: false, reason: 'prep_link_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // The fresh claim made before the failed mint is handed back.
+    expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
 
     // Email after a failed mint: goes out with the portal link, but the row
     // is never stamped as a delivered guide (no token = no page owned).

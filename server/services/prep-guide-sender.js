@@ -192,21 +192,26 @@ async function resolvePrepVisit(customer, config) {
       takenBy: guideLabelForTemplateKey(visit.prep_template_key),
     };
   }
+  // Claim BEFORE the mint: ensureServicePrepToken initializes an unset key
+  // itself, so a claim after it could never be fresh and a failed first
+  // send would reserve the page forever (pre-push Codex P1 on cd6de743e).
+  let claim = null;
   try {
-    const token = await ensureServicePrepToken(visit.id, config.emailTemplateKey);
-    const claim = await claimPrepPage(visit.id, config.emailTemplateKey);
+    claim = await claimPrepPage(visit.id, config.emailTemplateKey);
     if (!claim.owned) {
       return {
         visit, prepUrl: null, ownsPage: false, linkReason: 'prep_page_taken',
         takenBy: guideLabelForTemplateKey(claim.takenBy),
       };
     }
+    const token = await ensureServicePrepToken(visit.id, config.emailTemplateKey);
     return { visit, prepUrl: portalUrl(`/prep/${token}`), ownsPage: true, freshClaim: claim.fresh, linkReason: null };
   } catch (tokenErr) {
-    // No token or no claim = no page to own: the email still goes out
-    // (portal link, dated by the visit) but never stamps the row as a
-    // delivered guide (pre-push Codex P1 on c3398fd21).
+    // No token = no page to own: the email still goes out (portal link,
+    // dated by the visit) but never stamps the row as a delivered guide
+    // (pre-push Codex P1 on c3398fd21); a fresh claim is handed back.
     logger.warn(`[prep-guide-sender] prep token mint failed for service ${visit.id}: ${tokenErr.message}`);
+    if (claim?.fresh) await releasePrepPage(visit.id, config.emailTemplateKey);
     return { visit, prepUrl: null, ownsPage: false, linkReason: 'prep_link_failed' };
   }
 }
