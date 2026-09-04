@@ -480,6 +480,12 @@ describe('Google Business review sync', () => {
     db.__state.rows.notifications = [];
     await service._notifyDegradedSync({ ...loc, id: 'sarasota', name: 'Sarasota' }, trip);
     expect(notify.mock.calls[1][2]).toMatch(/will attempt the Places sample fallback/);
+    // A breaker trip before any row stored uses the `(0 stored; last: …)`
+    // format — the body must not claim the stored reviews are current (codex r11 P2).
+    db.__state.rows.notifications = [];
+    await service._notifyDegradedSync({ ...loc, id: 'venice', name: 'Venice' }, trip.replace('(2 stored;', '(0 stored;'));
+    expect(notify.mock.calls[2][2]).toMatch(/NO review from this pull was stored/);
+    expect(notify.mock.calls[1][2]).toMatch(/The stored reviews are current/);
     if (saved === undefined) delete process.env.GOOGLE_MAPS_API_KEY; else process.env.GOOGLE_MAPS_API_KEY = saved;
     notify.mockRestore();
   });
