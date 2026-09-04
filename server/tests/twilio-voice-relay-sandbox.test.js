@@ -18,7 +18,9 @@ const voiceRouter = require('../routes/twilio-voice-webhook');
 const { isSandboxCall, sandboxRelayXml, RELAY_COMPLETE_ACTION_SANDBOX, RELAY_SANDBOX_CELL_ACTION } = voiceRouter._test;
 const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
 
-const SANDBOX = '+19412691697';
+// An UNREGISTERED number: a registered Waves line is refused as the sandbox target.
+const SANDBOX = '+19415550199';
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 function handlerFor(path) {
   const layer = voiceRouter.stack.find((l) => l.route && l.route.path === path);
@@ -58,10 +60,32 @@ beforeEach(() => {
   delete process.env.VOICE_RELAY_SANDBOX_ATTRS;
 });
 
+describe('sandboxNumber — a registered live line is never the sandbox (hook P1)', () => {
+  afterEach(() => { TWILIO_NUMBERS.unassigned.length = 0; TWILIO_NUMBERS._ownedLast10 = null; });
+
+  test('the Google Ads — Pest tracking line (and every registered line) is refused', async () => {
+    const ga = TWILIO_NUMBERS.paidTracking.googleAdsPest.number;
+    process.env.VOICE_RELAY_SANDBOX_NUMBER = ga;
+    expect(isSandboxCall({ body: { To: ga } })).toBe(false);
+    const res = mockRes();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-live', From: '+19415550100', To: ga } }, res);
+    expect(res.statusCode).toBe(403);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/REGISTERED Waves line/));
+  });
+
+  test('a line parked under unassigned is sandbox-eligible', () => {
+    const parked = '+19415550177';
+    TWILIO_NUMBERS.unassigned.push({ number: parked, formatted: '(941) 555-0177' });
+    TWILIO_NUMBERS._ownedLast10 = null; // the owned set is cached once
+    process.env.VOICE_RELAY_SANDBOX_NUMBER = parked;
+    expect(isSandboxCall({ body: { To: parked } })).toBe(true);
+  });
+});
+
 describe('isSandboxCall — the number is the whole authority', () => {
   test('matches the configured number in any format; refuses everything else', () => {
     expect(isSandboxCall({ body: { To: SANDBOX } })).toBe(true);
-    expect(isSandboxCall({ body: { To: '(941) 269-1697' } })).toBe(true);
+    expect(isSandboxCall({ body: { To: '(941) 555-0199' } })).toBe(true);
     expect(isSandboxCall({ body: { To: '+19415550100' } })).toBe(false);
     expect(isSandboxCall({ body: {} })).toBe(false);
   });
@@ -75,7 +99,7 @@ describe('POST /relay-sandbox', () => {
   test('a production number ⇒ 403 hangup, no row', async () => {
     const { insert } = primeInsert();
     const res = mockRes();
-    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-0', From: '+19415550100', To: '+19415550199' } }, res);
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-0', From: '+19415550100', To: '+19415550188' } }, res);
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.body).toContain('<Hangup/>');
     expect(insert).not.toHaveBeenCalled();
@@ -235,7 +259,7 @@ describe('POST /relay-sandbox/cell', () => {
 
   test('a production number ⇒ 403', async () => {
     const res = mockRes();
-    await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-8', To: '+19415550199', Digits: '03' } }, res);
+    await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-8', To: '+19415550188', Digits: '03' } }, res);
     expect(res.status).toHaveBeenCalledWith(403);
   });
 });

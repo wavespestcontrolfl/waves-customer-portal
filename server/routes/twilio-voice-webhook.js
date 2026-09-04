@@ -1542,8 +1542,26 @@ const RELAY_SANDBOX_CELL_ACTION = '/api/webhooks/twilio/relay-sandbox/cell';
 const RELAY_COMPLETE_ACTION_SANDBOX = `${RELAY_COMPLETE_ACTION}?sandbox=1`;
 const SANDBOX_CELL_GATHER_TIMEOUT_SEC = 3;
 
+// ⭐ FAIL CLOSED ON A LIVE LINE. The sandbox is a DRY RUN: a registered Waves
+// number pointed here would silently swallow genuine callers (no lead, no
+// booking, no KPI). A number is sandbox-eligible only if the registry does
+// not own it, or owns it as `unassigned` — the parking spot a retired line
+// moves to (config/twilio-numbers.js). The AI toll-free line reports as a
+// location, so it is refused like any other owned line.
+let sandboxNumberWarned = null;
 function sandboxNumber() {
-  return toE164(process.env.VOICE_RELAY_SANDBOX_NUMBER || '') || null;
+  const n = toE164(process.env.VOICE_RELAY_SANDBOX_NUMBER || '') || null;
+  if (!n) return null;
+  const last10 = (p) => String(p || '').replace(/\D/g, '').slice(-10);
+  const parked = (TWILIO_NUMBERS.unassigned || []).some((u) => last10(u.number) === last10(n));
+  if (TWILIO_NUMBERS.isOwnedNumber(n) && !parked) {
+    if (sandboxNumberWarned !== n) {
+      sandboxNumberWarned = n;
+      logger.error(`[relay-sandbox] VOICE_RELAY_SANDBOX_NUMBER ${maskPhone(n)} is a REGISTERED Waves line — sandbox refused (park it under twilio-numbers.unassigned or pick an unregistered number)`);
+    }
+    return null;
+  }
+  return n;
 }
 
 function isSandboxCall(req) {
