@@ -460,9 +460,18 @@ async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLo
   const attemptAt = now || new Date();
   const reviewed = await reviewRecipient(trx, { prospectId, recipient: draft.outreach_to_email, mode, reviewedLookupHash });
   if (!reviewed.ok) {
-    // §13 on an AUTOMATIC follow-up: a shared business domain is a STABLE refusal (only the owner's click acknowledges
-    // the match) — marked on the row so the nightly re-decides the follow-up OWNER_OUTREACH and the card offers it,
-    // rather than retrying an invisible AUTO row every night (the pitch's counterpart is the board's drafts list)
+    // §13 on a follow-up — the recipient is the THREAD's and cannot be replaced (the pitch's counterpart is re-addressed
+    // on the board): an identified customer / lead contact is a hard block for everyone, so the follow-up ENDS
+    // (skipped, the conversation completes and the closure sweep releases the inbox) rather than staying a drafted row
+    // the nightly retries and the card can never send
+    if (followUp && reviewed.code === 'customer_recipient') {
+      await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'customer_recipient', updated_at: attemptAt });
+      logger.info(`[link-outreach] follow-up for ${prospectId} skipped: the thread's recipient is a customer contact`);
+      return { ...reviewed, error: `${reviewed.error} — the follow-up is closed (the thread's recipient cannot change)` };
+    }
+    // …a shared business domain is a STABLE refusal of an AUTOMATIC attempt (only the owner's click acknowledges the
+    // match) — marked on the row so the nightly re-decides the follow-up OWNER_OUTREACH and the card offers it,
+    // rather than retrying an invisible AUTO row every night
     if (followUp && mode === 'auto' && reviewed.code === 'recipient_review_required') {
       await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_skipped_reason: M.RECIPIENT_REVIEW_REQUIRED, updated_at: attemptAt });
       return { ...reviewed, error: `${reviewed.error} — routed to the owner` };

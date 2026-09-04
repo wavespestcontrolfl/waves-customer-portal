@@ -1107,6 +1107,17 @@ describe('Codex r1 on #3854', () => {
     expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(s.db)), reviewedLookupHash: first.review.lookup_hash, now: LATER })).toMatchObject({ ok: true, authority: { level: 'OWNER_OUTREACH' } });
     expect(placement(s.db)).toMatchObject({ follow_up_status: 'sent', follow_up_skipped_reason: null });
   });
+  test('P2: the thread\'s recipient became a customer contact — the follow-up ENDS (skipped, customer_recipient) on either mode: nothing to re-address, the conversation completes', async () => {
+    const s = await conversation();
+    s.db._tables.customers.push({ id: 'c8', email: 'editor@example.org', service_contact_email: null, service_contact2_email: null, service_contact3_email: null });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'customer_recipient', error: expect.stringMatching(/follow-up is closed/) });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', outreach_status: 'sent', follow_up_status: 'skipped', follow_up_skipped_reason: 'customer_recipient' });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    // not actionable any more — by the owner either; the nightly has nothing to dispatch
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(s.db)), now: LATER })).toMatchObject({ ok: false, code: 'no_draft' }); // a skipped follow-up has no draft to send
+    const r = await nightly(s.db, { now: new Date(LATER.getTime() + DAY), autoSend: true, send: jest.fn(async () => ({ ok: true })) });
+    expect(r.autoSend).toEqual({ attempted: 0, sent: 0, skipped: [] });
+  });
   test('P2: a follow-up drafted against a path later revised IN PLACE is settled at the send: back to due, the draft cleared, re-leased against the current route', async () => {
     const s = await conversation();
     Object.assign(storedPath(s.db), { revision: 2, revision_communication: 2, updated_at: new Date(LATER.getTime() + 1000) }); // the investigator revised the route after the draft was accepted

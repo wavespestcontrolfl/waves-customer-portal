@@ -581,7 +581,7 @@ describe('lost-link recovery', () => {
     expect(scorer.scoreCandidates).not.toHaveBeenCalled();
     // the re-pitch is a NEW outreach cycle (§6.4): the previous cycle's follow-up state and the stale Gmail thread go
     // with the pitch's, and the follow-up's attempt joins the same append-only ledger the cap counts
-    expect(updates[0].patch).toEqual(expect.objectContaining({ outreach_thread_ref: null, follow_up_status: 'none', follow_up_due_at: null, follow_up_subject: null, follow_up_body: null, follow_up_send_token: null, follow_up_attempted_at: null, follow_up_sent_at: null, follow_up_skipped_reason: null }));
+    expect(updates[0].patch).toEqual(expect.objectContaining({ outreach_thread_ref: null, follow_up_status: 'none', follow_up_due_at: null, follow_up_subject: null, follow_up_body: null, follow_up_send_token: null, follow_up_attempted_at: null, follow_up_sent_at: null, follow_up_skipped_reason: null, follow_up_attempts: 0 }));
     expect(updates[0].patch.quality_signals.__raw).toMatch(/\|\| COALESCE\(to_jsonb\(follow_up_attempted_at\), '\[\]'::jsonb\)/);
   });
 

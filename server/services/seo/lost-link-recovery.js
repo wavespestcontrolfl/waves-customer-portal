@@ -226,7 +226,7 @@ async function queueOne(loss, out, scoreMod) {
           // the follow-up is per OUTREACH CYCLE (§6.4: one per pitch): the re-pitch schedules its own once it sends,
           // so the previous cycle's follow-up state goes with the pitch's — its attempt joins the same ledger below
           follow_up_status: 'none', follow_up_due_at: null, follow_up_subject: null, follow_up_body: null,
-          follow_up_send_token: null, follow_up_attempted_at: null, follow_up_sent_at: null, follow_up_skipped_reason: null,
+          follow_up_send_token: null, follow_up_attempted_at: null, follow_up_sent_at: null, follow_up_skipped_reason: null, follow_up_attempts: 0,
           // the reopened conversation re-enters the one-conversation-per-inbox guard (plan §13): its closure stamp goes
           conversation_closed_at: null,
           quality_signals: trx.raw(
