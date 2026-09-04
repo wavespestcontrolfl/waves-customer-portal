@@ -32,6 +32,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { etCalendarDayOf } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 
 // Estimate statuses that count as "open" for a composer insert: delivered or
@@ -1015,10 +1016,10 @@ async function markStatementsSent(statementIds) {
 // so there is exactly one "next visit" definition across the sheet.
 // ---------------------------------------------------------------------------
 
-function dateOnly(value) {
-  if (!value) return null;
-  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
-}
+// Date-only columns (scheduled_date, service_date) read as their calendar
+// day through the canonical helper — never via toISOString, which would
+// shift an Eastern wall-clock timestamp a day (pre-push Codex P1).
+const dateOnly = (value) => (value ? etCalendarDayOf(value) : null);
 
 const NO_UPCOMING_VISIT = 'No upcoming appointment for this customer';
 
