@@ -404,13 +404,15 @@ async function associatedRadio(page, option) {
   return (await radio.count().catch(() => 0)) ? radio : null;
 }
 
-// Checkout tender: no card / MFA / terms prompt (the bot never answers them),
+// Checkout tender: no MFA / terms prompt (the bot never answers them),
 // bill-to-account offered AND confirmed CHECKED — the click is not proof; a
 // checkout defaulting to a saved card shows no card field (Codex r1 P1).
+// The card field is judged AFTER the bill-to option is selected: a checkout
+// that defaults to card entry shows the field until the tender is switched,
+// and only a field still demanded afterwards refuses (Codex r6 P1).
 async function verifyBillToAccount(page, { evidence, upload }) {
   const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
   if (await visible(page, SELECTORS.mfaField)) await refuse('mfa_required', 'SiteOne checkout asks for a verification code — bot never supplies it');
-  if (await visible(page, SELECTORS.cardField)) await refuse('card_required', 'SiteOne checkout asks for card entry — bot never supplies it');
   const terms = page.locator(SELECTORS.termsCheckbox).first();
   if (await terms.count()) {
     // Fail CLOSED on an unreadable state (Codex r4 P2): unknown ≠ accepted.
@@ -424,6 +426,7 @@ async function verifyBillToAccount(page, { evidence, upload }) {
   try { await bill.click({ timeout: 5000 }); }
   catch (e) { await refuse('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`); }
   await page.waitForTimeout(1500);
+  if (await visible(page, SELECTORS.cardField)) await refuse('card_required', 'SiteOne checkout still asks for card entry with bill-to-account selected — bot never supplies it');
   // Proof is on the radio ASSOCIATED with the option just clicked (the
   // click target may be its label — Codex PR3 r1 + r3 P1): that radio's own
   // checked state, read directly, must be true and it must be visible; and

@@ -58,3 +58,25 @@ describe('vendorCredentialKey', () => {
     expect(vendorCredentialKeys()).toEqual([]);
   });
 });
+
+describe('getVendorLoginCredentials — decrypt failures (Codex #3853 r6 P1)', () => {
+  const { getVendorLoginCredentials, isInfrastructureError } = require('../services/vendor-credentials');
+  const row = { login_username: 'u', login_email: 'e@x.y', account_number: '1', login_url: null, login_password_encrypted: '-----BEGIN PGP MESSAGE-----' };
+  const fakeConn = (rawImpl) => { const c = () => ({ where: () => ({ first: async () => row }) }); c.raw = rawImpl; return c; };
+  beforeAll(() => { process.env.VENDOR_CREDENTIAL_KEY = 'k1'; });
+  afterAll(() => { delete process.env.VENDOR_CREDENTIAL_KEY; });
+
+  test('a wrong key (pgcrypto 39000) is data: password null, no throw', async () => {
+    const creds = await getVendorLoginCredentials(fakeConn(async () => { const e = new Error('Wrong key or corrupt data'); e.code = '39000'; throw e; }), 'v1');
+    expect(creds).toMatchObject({ email: 'e@x.y', password: null });
+  });
+
+  test('a database failure during decrypt is rethrown, never read as "no password"', async () => {
+    await expect(getVendorLoginCredentials(fakeConn(async () => { const e = new Error('terminating connection'); e.code = '57P01'; throw e; }), 'v1')).rejects.toThrow('terminating connection');
+    await expect(getVendorLoginCredentials(fakeConn(async () => { throw new Error('Connection terminated unexpectedly'); }), 'v1')).rejects.toThrow('Connection terminated');
+    expect(isInfrastructureError({ code: '08006' })).toBe(true);
+    expect(isInfrastructureError({ code: 'ECONNRESET' })).toBe(true);
+    expect(isInfrastructureError({ code: '39000' })).toBe(false);
+    expect(isInfrastructureError({ code: '22023' })).toBe(false);
+  });
+});

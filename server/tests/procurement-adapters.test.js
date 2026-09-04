@@ -222,7 +222,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.cartRemove) return el({ count: st.cart.length && st.removable ? 1 : 0, onClick: () => { st.cart.shift(); } });
       if (sel === S.cartTotal) return el({ count: 1, text: '$99.00' });
       if (sel === S.checkoutButton) return el({ count: 1 });
-      if (sel === S.mfaField || sel === S.cardField) return el();
+      if (sel === S.mfaField) return el();
+      // cardUntilBillTo: the checkout defaults to card entry and hides the field once bill-to-account is selected
+      if (sel === S.cardField) return st.cardUntilBillTo ? el({ count: 1, visible: !st.accountChecked }) : el();
       if (sel === S.termsCheckbox) return el(st.termsUnreadable ? { count: 1 } : {}); // count 1 with no `checked` → isChecked throws
       // `checked` is a live getter: a real locator re-resolves, so the option clicked a moment ago reads its CURRENT state
       // The option: a radio input, or (billIsLabel) a wrapping label whose radio is the sub-locator
@@ -393,6 +395,16 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ orderNumberText: 'Thank you for your order' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.placeClicked).toBe(1);
+  });
+
+  test('a checkout that defaults to card entry is switched to bill-to-account before the card field is judged (r6 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ cardUntilBillTo: true });
+    const r = await s1.place(args(), deps);
+    expect(r).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.placeClicked).toBe(1);
+    const stuck = fakeSiteOne({ cardUntilBillTo: true, accountSelectable: false });
+    await expect(s1.place(args(), stuck.deps)).rejects.toMatchObject({ refuse: expect.stringMatching(/card_required|bill_to_account/) });
+    expect(stuck.st.placeClicked).toBe(0);
   });
 
   test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {
