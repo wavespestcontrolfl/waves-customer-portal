@@ -117,6 +117,10 @@ describe('POST /relay-sandbox', () => {
     await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-2', From: '+19415550100', To: SANDBOX } }, res);
     expect(res.body).toContain('speechModel="nova-3-general"');
     expect(res.body).toContain('<Parameter name="relay_profile" value="nova_hints_v1" />');
+    // The answer document's relay (no digits) opens with the production
+    // profile — stamped on the row before it opens (codex r8 P2).
+    const stamp = db.mock.results.map((r) => r.value).find((v) => v && v.where && v.where.mock.calls.length);
+    expect(JSON.parse(stamp.where().update.mock.calls[0][0].metadata.bindings[0]).relay_profile_id).toBe('nova_hints_v1');
   });
 
   test('a CallSid whose row is NOT sandbox-sourced is refused — never a production session through the sandbox door (hook P0)', async () => {
@@ -200,7 +204,7 @@ describe('POST /relay-sandbox/cell', () => {
     const res = mockRes();
     await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-5b', To: SANDBOX, Digits: '09' } }, res);
     expect(res.body).toContain('<ConversationRelay');
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/cell stamp failed/));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/profile stamp failed/));
   });
 
   test('99 renders the raw sandbox attrs; an unknown code falls back to the production profile', async () => {
@@ -215,7 +219,18 @@ describe('POST /relay-sandbox/cell', () => {
     await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-7', To: SANDBOX, Digits: '77' } }, res);
     expect(res.body).not.toContain('speechModel=');
     expect(res.body).toMatch(/<ConversationRelay [^>]*\/><\/Connect>/);
-    expect(update).not.toHaveBeenCalled(); // production profile: the session's own version stamps cover it
+    expect(update).not.toHaveBeenCalled(); // no production profile configured: nothing to attribute
+  });
+
+  test('an unknown code under an active production profile stamps THAT profile before the relay opens (codex r8 P2)', async () => {
+    process.env.VOICE_RELAY_PROFILE = 'nova_hints_v1';
+    const { update } = primeStamp();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-8', To: SANDBOX, Digits: '77' } }, res);
+    expect(res.body).toContain('<Parameter name="relay_profile" value="nova_hints_v1" />');
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({
+      relay_profile_id: 'nova_hints_v1', relay_attrs: expect.objectContaining({ speechModel: 'nova-3-general' }),
+    });
   });
 
   test('a production number ⇒ 403', async () => {

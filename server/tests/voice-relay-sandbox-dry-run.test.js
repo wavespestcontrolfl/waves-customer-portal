@@ -58,9 +58,20 @@ describe('executeTool on a sandbox session', () => {
     const out = await executeTool('capture_lead', { first_name: 'Pat', call_summary: 'Caller asked about ants.', lead_quality: 'warm' }, ctx);
     expect(out).toMatch(/Sandbox test call: capture_lead was NOT run/);
     expect(out).toMatch(/nothing was written/);
-    expect(markCaptured).toHaveBeenCalledWith({ leadCreated: false });
+    expect(markCaptured).toHaveBeenCalledWith({ leadCreated: false, holdOpen: false });
     expect(noteCallSummary).toHaveBeenCalledWith('Caller asked about ants.');
     expect(noteLeadId).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
+  });
+
+  test('an incomplete estimate capture still holds the call open and names what is missing on a sandbox call (codex r8 P2)', async () => {
+    const markCaptured = jest.fn();
+    const ctx = { sandbox: true, callSid: 'CA-sb-6', from: '+19415551234', markCaptured, noteCallSummary: jest.fn() };
+    const out = await executeTool('capture_lead', { first_name: 'Pat', call_summary: 'Wants a quote.', estimate_requested: true }, ctx);
+    expect(out).toMatch(/Sandbox test call: capture_lead was NOT run/);
+    expect(out).toMatch(/NOT queued yet — still missing/);
+    expect(markCaptured).toHaveBeenCalledWith({ leadCreated: false, holdOpen: true });
     expect(db).not.toHaveBeenCalled();
     expect(createLeadFromExtraction).not.toHaveBeenCalled();
   });
@@ -78,7 +89,7 @@ describe('executeTool on a sandbox session', () => {
     const out = await executeTool('request_reservice', { lane: 'pest', issue: 'ants are back in the kitchen' }, ctx);
     expect(out).toMatch(/Sandbox test call: request_reservice was NOT run/);
     expect(db.transaction).not.toHaveBeenCalled();
-    expect(markCaptured).toHaveBeenCalledWith({ leadCreated: false });
+    expect(markCaptured).toHaveBeenCalledWith({ leadCreated: false, holdOpen: false });
     expect(markReserviceFiled).not.toHaveBeenCalled(); // nothing was filed
     db.mockImplementation(() => { throw new Error('db must not be touched'); });
     delete db.transaction;
@@ -146,7 +157,6 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
   const SAFE = {
     // Writers and per-row processors keyed by id / CallSid / a marker only
     // the recording processor stamps — none of them lists inbound calls.
-    'services/call-recording-processor.js': 'requires a recording; the sandbox has none',
     'routes/twilio-voice-webhook.js': 'writer keyed by CallSid (and the sandbox insert itself)',
     'routes/collections-voice-webhook.js': 'collections outbound rows, keyed by callLogId',
     'services/collections/outbound-voice/collections-conversation.js': 'collections outbound rows, keyed by CallSid',
@@ -199,13 +209,14 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/promised-estimate-watcher.js': 'requires an enriched quote_promised extraction',
     'services/unworked-comms-watcher.js': 'requires disposition = callback_task_created, which only extraction sets',
     'scripts/backfill-resolution-artifacts.js': 'requires ai_extraction_enriched, which the relay never writes',
+    'scripts/backfill-call-route-decisions.js': 'requires a processing_status only the recording processor sets',
     'scripts/speaker-label-eval.js': 'requires transcript_structured, which only the recording processor writes',
     'scripts/v2-promotion-readiness.js': 'requires v2_extraction_status, which only extraction sets',
     'scripts/verify-v2-shadow-path.js': 'requires processing_status = processed, which only the recording processor sets',
   };
   // A query keyed by a row id, CallSid, call_log_id, customer_id (a sandbox
   // row never gains one) or the processor's token: knex form or raw SQL.
-  const KEYED_RE = /(where|whereIn|andWhere|whereNotNull|first)\(\s*(\{\s*)?['"]?(call_log\.|cl\.|c\.)?(id|twilio_call_sid|call_log_id|customer_id|processing_token)['"]?\s*[:,)]|\b(call_log\.|cl\.)?(id|twilio_call_sid|call_log_id)\s*(=|IN)\s*(\?|\$\d|\(|ANY)/;
+  const KEYED_RE = /(where|whereIn|andWhere|first)\(\s*(\{\s*)?['"]?(call_log\.|cl\.|c\.)?(id|twilio_call_sid|call_log_id|customer_id|processing_token)['"]?\s*[:,)]|whereNotNull\(\s*['"](call_log\.|cl\.|c\.)?customer_id['"]\s*\)|\b(call_log\.|cl\.)?(id|twilio_call_sid|call_log_id)\s*(=|IN)\s*(\?|\$\d|\(|ANY)/;
   // The statement holding a query: from the start of its line to the ';'
   // that closes it at paren/brace depth zero (callbacks carry their own ';';
   // line comments are skipped).

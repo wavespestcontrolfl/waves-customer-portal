@@ -1562,6 +1562,28 @@ function sandboxRelayXml({ callSid, cell }) {
   });
 }
 
+// The profile the relay is about to open with lands on the sandbox row BEFORE
+// the relay opens: a profile whose attributes make Twilio reject
+// <ConversationRelay> never reaches the WS setup frame, so no session exists
+// to stamp it at close — and that is exactly the profile a bake-off must be
+// able to attribute. The fallback (production) profile counts too. Fail-soft:
+// a stamp failure must not cost the caller the call.
+async function stampSandboxProfile(callSid, opts) {
+  if (!opts || !opts.relayProfileId) return;
+  try {
+    await db('call_log')
+      .where({ twilio_call_sid: callSid })
+      .update({
+        metadata: db.raw(
+          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ relay_profile_id: opts.relayProfileId, relay_attrs: opts.relayAttrs || {} })],
+        ),
+      });
+  } catch (stampErr) {
+    logger.warn(`[relay-sandbox] profile stamp failed ${maskSid(callSid)}: ${stampErr.message}`);
+  }
+}
+
 // The call_log row for this CallSid exists AND carries the sandbox source —
 // the row-level proof the WS upgrade will later trust.
 async function sandboxRowOwned(callSid) {
@@ -1635,6 +1657,8 @@ router.post('/relay-sandbox', async (req, res) => {
     });
     gather.play(wavesGreetingUrl());
     const gatherInner = twiml.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
+    // No digits ⇒ this document's relay opens with the production profile.
+    await stampSandboxProfile(CallSid, activeRelayTwiMLOptions());
     const relayXml = sandboxRelayXml({ callSid: CallSid });
     logger.info(`[relay-sandbox] answering ${maskSid(CallSid)} from=${maskPhone(From)}`);
     return res.type('text/xml').send(relayXml.replace('<Response>', `<Response>${gatherInner}`));
@@ -1656,25 +1680,7 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
     const cell = resolveSandboxCell(digits);
     logger.info(`[relay-sandbox] cell "${digits}" → ${cell ? cell.relayProfileId : 'production profile'} ${maskSid(CallSid)}`);
-    // The selected cell lands on the row BEFORE the relay opens: a profile
-    // whose attributes make Twilio reject <ConversationRelay> never reaches
-    // the WS setup frame, so no session exists to stamp it at close — and
-    // that is exactly the profile a bake-off must be able to attribute.
-    // Fail-soft: a stamp failure must not cost the caller the call.
-    if (cell) {
-      try {
-        await db('call_log')
-          .where({ twilio_call_sid: CallSid })
-          .update({
-            metadata: db.raw(
-              "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
-              [JSON.stringify({ relay_profile_id: cell.relayProfileId, relay_attrs: cell.relayAttrs })],
-            ),
-          });
-      } catch (stampErr) {
-        logger.warn(`[relay-sandbox] cell stamp failed ${maskSid(CallSid)}: ${stampErr.message}`);
-      }
-    }
+    await stampSandboxProfile(CallSid, cell || activeRelayTwiMLOptions());
     // A digit INTERRUPTS the disclosure nested in the answer <Gather> (same
     // rule as the language menu above), and Twilio does not report whether
     // the <Play> completed — so the continuation replays the complete

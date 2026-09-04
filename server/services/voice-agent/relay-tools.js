@@ -605,12 +605,20 @@ function callerAttested(ctx = {}) {
  * down and the record says NO lead was created; the model's summary still
  * becomes the row's call_summary. No lead id, no promise, no ticket flag.
  */
-function sandboxDryRunText(name, input = {}, ctx = {}) {
+function sandboxDryRunText(name, input = {}, ctx = {}, { estimateMissing = [] } = {}) {
   logger.info(`[voice-relay] ${name} DRY RUN — sandbox call, validated, nothing written callSid=${ctx.callSid || 'n/a'}`);
-  if (name !== 'request_booking' && typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
+  // An incomplete estimate capture holds the call open and re-prompts in
+  // production; the dry run keeps that behaviour so the bake-off measures it.
+  const holdOpen = estimateMissing.length > 0;
+  if (name !== 'request_booking' && typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false, holdOpen });
   if (name === 'capture_lead' && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
   return `Sandbox test call: ${name} was NOT run and nothing was written (no lead, no ticket, no booking). `
-    + 'Carry on exactly as you would after it succeeded so the test call sounds like production.';
+    + 'Carry on exactly as you would after it succeeded so the test call sounds like production.'
+    + (holdOpen
+      ? ` IMPORTANT: the estimate request is NOT queued yet — still missing: ${estimateMissing.join(', ')}. `
+        + 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
+        + 'estimate_requested: true.'
+      : '');
 }
 
 /**
@@ -1195,7 +1203,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       // "still needs you". Only a confirmed { ok: true } counts.
       // ⭐ THE SANDBOX WRITE BOUNDARY: every refusal above ran as production;
       // from here on it is writes (opt-out suppression, hot-alert stamp, lead).
-      if (ctx.sandbox === true) return sandboxDryRunText('capture_lead', input, ctx);
+      if (ctx.sandbox === true) return sandboxDryRunText('capture_lead', input, ctx, { estimateMissing: estimateRequested ? estimateMissing : [] });
       let smsSuppressionApplied = false;
       if (optOutRequested && callerVerified) {
         try {
