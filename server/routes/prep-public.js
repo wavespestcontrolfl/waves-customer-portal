@@ -322,29 +322,32 @@ router.get('/:token', async (req, res) => {
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
 
   try {
-    let source = await resolvePrepSource(token);
-    if (!source) return res.status(404).json({ error: 'Not found' });
-    let guide = await renderGuideForSource(source);
-    if (!guide) return res.status(404).json({ error: 'Not found' });
-    if (source.stampView) {
-      // Render first, then stamp the view of THAT key. A miss means the key
-      // moved between the read and the stamp — resolve and render once more
-      // so the customer sees the guide the row now carries.
-      let stamped = 0;
+    // Render first, then stamp the view of THAT key (a scheduled-service
+    // source). A 0-row stamp means the key moved between the read and the
+    // stamp — resolve and render again so the customer sees the guide the
+    // row now carries, and stamp THAT; every attempt is awaited and fenced,
+    // never fire-and-forget (pre-push Codex P1 on bd85be714). A row still
+    // churning after a few rounds is answered 503 rather than with a page
+    // that could change or vanish behind the customer.
+    let source = null;
+    let guide = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      source = await resolvePrepSource(token);
+      if (!source) return res.status(404).json({ error: 'Not found' });
+      guide = await renderGuideForSource(source);
+      if (!guide) return res.status(404).json({ error: 'Not found' });
+      if (!source.stampView) break;
+      let stamped;
       try {
         stamped = Number(await source.stampView());
       } catch (err) {
         logger.warn(`[prep-public] view stamp failed: ${err.message}`);
-        stamped = -1; // unknown — do not re-resolve on a DB blip
+        stamped = -1; // unknown — a DB blip, not a moved key: serve the render
       }
-      if (stamped === 0) {
-        source = await resolvePrepSource(token);
-        if (!source) return res.status(404).json({ error: 'Not found' });
-        guide = await renderGuideForSource(source);
-        if (!guide) return res.status(404).json({ error: 'Not found' });
-        void source.stampView?.().catch((err) => logger.warn(`[prep-public] view re-stamp failed: ${err.message}`));
-      }
+      if (stamped !== 0) break;
+      source = null;
     }
+    if (!source) return res.status(503).json({ error: 'Try again in a moment' });
     const { customer } = source;
     const {
       customerFirstName, typeLabel, serviceDate, techName, propertyAddress, renderedBlocks,

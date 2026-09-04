@@ -2000,9 +2000,23 @@ const ReviewService = {
   async _claimInlineEmailDispatch(requestId) {
     let cleared;
     try {
+      // The final pre-provider claim re-applies the terminal predicates
+      // (the customer may have answered, been stopped, reviewed or been
+      // removed since the recipient check) so it fails closed (pre-push
+      // Codex P1 on bd85be714).
       cleared = await db("review_requests")
         .where({ id: requestId })
         .whereNotNull("email_leg_owed_at")
+        .whereNotIn("status", INLINE_RETRY_TERMINAL_STATUSES)
+        .whereNull("submitted_at")
+        .whereNull("rated_at")
+        .whereNull("redirected_at")
+        .whereExists(function eligibleCustomer() {
+          this.select(db.raw("1")).from("customers")
+            .whereRaw("customers.id = review_requests.customer_id")
+            .whereNull("customers.deleted_at")
+            .whereRaw("COALESCE(customers.has_left_google_review, false) = false");
+        })
         .update({ email_leg_owed_at: null });
     } catch (e) {
       logger.warn(`[review] inline email owed clear failed pre-dispatch (requestId=${requestId}): ${e.message}`);

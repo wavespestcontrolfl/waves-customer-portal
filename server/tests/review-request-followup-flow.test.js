@@ -807,6 +807,11 @@ describe('review request follow-up flow', () => {
       // analytics count the email leg.
       expect(rrUpdate).toHaveBeenNthCalledWith(1, { email_leg_owed_at: null });
       expect(rrUpdate).toHaveBeenNthCalledWith(2, expect.objectContaining({ sent_at: expect.any(Date), channel: 'both' }));
+      // The dispatch claim itself carries the terminal + customer predicates.
+      const rrQ = db.mock.results.map((r) => r.value).find((v) => v && v.whereExists && v.whereExists.mock.calls.length);
+      expect(rrQ.whereNotIn).toHaveBeenCalledWith('status', ['completed', 'stopped', 'suppressed', 'failed', 'rated']);
+      expect(rrQ.whereNull).toHaveBeenCalledWith('submitted_at');
+      expect(rrQ.whereExists).toHaveBeenCalledWith(expect.any(Function));
       const call = EmailLib.sendTemplate.mock.calls[0][0];
       expect(call).toMatchObject({
         templateKey: 'review_request_email',
