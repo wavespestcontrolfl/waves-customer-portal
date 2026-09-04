@@ -513,13 +513,17 @@ function claimIneligibility({ product, request, vendor }) {
  * the claim ({ request, vendor, adapterKey, product, ledger, pricing, order }).
  */
 // The request's vendor must be active, have an adapter, and be gated on.
-async function resolveClaimVendor(trx, { request, registry }) {
+async function resolveClaimVendor(trx, { request, registry, deadAdapters = null }) {
   const m = meta(request.metadata);
   if (!m.vendorId) return { skipped: 'no_vendor' };
   const vendor = await trx('vendors').where({ id: m.vendorId }).first('id', 'name', 'code', 'active');
   const adapterKey = adapterKeyFor(vendor);
   if (!vendor || vendor.active === false || !adapterKey || !registry[adapterKey]) return { skipped: 'no_adapter' };
   if (!gateEnvValue(VENDOR_GATE[adapterKey])) return { skipped: 'vendor_gated' };
+  // An adapter that already failed run-level THIS run (its DNS, browser or
+  // credential store is down) gets no further claims this run — the request
+  // stays open for tomorrow, no ledger row is written (Codex r8 P1).
+  if (deadAdapters && deadAdapters.has(adapterKey)) return { skipped: 'adapter_down' };
   return { vendor, adapterKey, m };
 }
 
@@ -597,7 +601,7 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   return { ledger, pricing, order };
 }
 
-async function claimRequest(trx, { requestId, registry }) {
+async function claimRequest(trx, { requestId, registry, deadAdapters = null }) {
   // The product's pricing advisory lock FIRST — the lock every
   // vendor_pricing writer holds to commit — then the request row, then the
   // product row: the sweep's order (auto-reorder.js lockProductPricing), so
@@ -610,7 +614,7 @@ async function claimRequest(trx, { requestId, registry }) {
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request) return { skipped: 'not_found' };
   if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
-  const resolved = await resolveClaimVendor(trx, { request, registry });
+  const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters });
   if (resolved.skipped) return resolved;
   const { vendor, adapterKey, m } = resolved;
   const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit');
@@ -847,7 +851,9 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     if (overCap) return overCap;
     return await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
   } catch (err) {
-    if (err.runLevel) throw err;
+    // Run-level failures are scoped to THIS adapter for the batch loop: the
+    // other vendors' requests still dispatch (Codex r8 P1).
+    if (err.runLevel) { err.adapterKey = adapterKey; throw err; }
     return settleAfterError(conn, err, { ctx, vendor, submitted, placed, quoteCents });
   }
 }
@@ -866,10 +872,10 @@ async function bellUndispatchable(conn, requestId, notify) {
   return true;
 }
 
-async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
+async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env, deadAdapters = null } = {}) {
   if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated' };
   const registry = adapters || loadAdapters();
-  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry }));
+  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters }));
   if (claim.skipped) {
     const belled = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : false;
     return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...(belled ? { belled: true } : {}) };
@@ -938,26 +944,32 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
   const gated = !gateEnvValue(GATE);
   const results = [];
   let runLevelError = null;
+  // A run-level failure is scoped to the adapter that raised it (err.adapterKey
+  // — SiteOne's DNS / Chromium / credential store): that adapter gets no more
+  // claims this run, the OTHER vendors' requests still dispatch, and the run
+  // still goes red at the end (Codex #3853 r8 P1). A run-level error with no
+  // adapter (the registry itself) aborts the batch as before.
+  const deadAdapters = new Set();
   // Rescan before releasing the lease (Codex r3 P2): a request another
   // replica's sweep raised while a slow vendor order was in flight is
   // picked up now, not tomorrow. Bounded; a pass that finds nothing new ends.
   const seen = new Set();
   let rows = [];
-  for (let pass = 0; pass < 3 && !runLevelError && !gated; pass += 1) {
+  for (let pass = 0; pass < 3 && !(runLevelError && !runLevelError.adapterKey) && !gated; pass += 1) {
     rows = (await findDispatchable(conn)).filter((r) => !seen.has(r.id));
     if (!rows.length) break;
     for (const row of rows) {
       seen.add(row.id);
       try {
-        results.push(await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env }));
+        results.push(await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env, deadAdapters }));
       } catch (err) {
-        // Run-level: the environment is broken for every remaining request —
-        // stop here (claims released), let job_health record it, retry tomorrow.
-        runLevelError = err;
-        logger.error(`[order-dispatch] run-level failure, batch aborted: ${err.message}`);
-        break;
+        runLevelError = runLevelError || err;
+        if (!err.adapterKey) { logger.error(`[order-dispatch] run-level failure, batch aborted: ${err.message}`); break; }
+        deadAdapters.add(err.adapterKey);
+        logger.error(`[order-dispatch] run-level failure for ${err.adapterKey}, its remaining requests wait for the next run: ${err.message}`);
       }
     }
+    if (runLevelError && !runLevelError.adapterKey) break;
   }
   const failed = results.filter((r) => r.status === 'failed');
   const bellsPending = [...bells.pending, ...recovered.bellPending, ...results.filter((r) => r.bellPending).map((r) => r.ledgerId)];

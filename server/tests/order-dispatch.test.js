@@ -72,7 +72,7 @@ jest.mock('../models/db', () => {
       return [saved];
     };
     q.insert = (r) => { row = r; return { onConflict: () => ({ ignore: () => ({ returning }), merge: () => ({ whereRaw: () => ({ returning }), returning }) }), returning }; };
-    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : []).then(ok, err);
+    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : (table.startsWith('product_restock_requests') ? (mockState.dispatchable || []) : [])).then(ok, err);
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(String(table)));
@@ -233,6 +233,20 @@ test('definite adapter error → failed + bell', async () => {
   expect(await run(mockAdapter({ place: jest.fn(async () => { throw new Error('boom'); }) }))).toMatchObject({ status: 'failed', reason: 'adapter_error' });
   expect(ledgerStatus()).toBe('failed');
   expect(notify).toHaveBeenCalledTimes(1);
+});
+
+test('a run-level failure is scoped to its adapter: that adapter gets no more claims this run (no ledger row), the run still goes red (Codex #3853 r8 P1)', async () => {
+  const err = new Error('siteone bot: DNS unavailable'); err.runLevel = true;
+  const a = mockAdapter({ place: jest.fn(async () => { throw err; }) });
+  mockState.dispatchable = [{ id: 'req-1' }, { id: 'req-2' }];
+  await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } })).rejects.toThrow('DNS unavailable');
+  expect(err.adapterKey).toBe('stickermule');
+  expect(a.place).toHaveBeenCalledTimes(1); // the second request of the dead adapter was never claimed
+  expect(mockState.deletes).toEqual(['vendor_orders']); // exactly one claim, released
+  mockState.dispatchable = null;
+  const ledgerRowsBefore = mockState.ledgerRows.length;
+  expect(await run(mockAdapter(), { deadAdapters: new Set(['stickermule']) })).toMatchObject({ skipped: 'adapter_down' });
+  expect(mockState.ledgerRows).toHaveLength(ledgerRowsBefore); // no claim written for a dead adapter
 });
 
 test('run-level error releases the claim and propagates', async () => {
