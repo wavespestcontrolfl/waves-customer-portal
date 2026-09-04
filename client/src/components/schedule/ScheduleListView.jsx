@@ -99,7 +99,12 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
   // cancel defaults to texting (matching the appointment sidebar).
   const [bulkNotify, setBulkNotify] = useState('none');
 
+  // Only the newest request commits rows, meta and loading: a slower
+  // filter/page response landing after the save-driven refresh must not
+  // restore pre-edit meta (pre-push hook P1).
+  const fetchSeqRef = useRef(0);
   const fetchList = useCallback(async (editedId = null) => {
+    const seq = ++fetchSeqRef.current;
     setLoading(true);
     try {
       const params = new URLSearchParams();
@@ -113,6 +118,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
       params.set('page', page);
       params.set('limit', 50);
       const data = await adminFetch(`/admin/schedule/list?${params}`);
+      if (seq !== fetchSeqRef.current) return;
       setServices(data.services || []);
       setTotal(data.total || 0);
       // A selected row edited meanwhile (e.g. made recurring in the Edit
@@ -130,6 +136,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
         setSelected((prev) => { const next = new Set(prev); next.delete(editedId); return next; });
       }
     } catch {
+      if (seq !== fetchSeqRef.current) return;
       setServices([]); setTotal(0);
       // Save-driven refresh failed: the edited row cannot be verified, so
       // it leaves the selection (fail closed, Codex #3868 r4).

@@ -88,6 +88,26 @@ describe('ScheduleListView bulk cancel — recurring plan notice', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Apply' })).not.toBeDisabled());
   });
 
+  it('ignores a slower earlier fetch that lands after the save-driven refresh', async () => {
+    const view = await renderWithRows({ refreshKey: 0 });
+    fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once, one-time
+    chooseCancel();
+    const pending = [];
+    global.fetch = vi.fn(() => new Promise((resolve) => { pending.push(resolve); }));
+    // A filter fetch starts first (will answer with the pre-edit row)…
+    fireEvent.change(screen.getByPlaceholderText('Name or service…'), { target: { value: 'Sam' } });
+    await waitFor(() => expect(pending.length).toBe(1));
+    // …then the Edit modal saves it as recurring and the host bumps the key.
+    const fresh = BASE_ROWS.map((r) => (r.id === 'svc-once' ? { ...r, isRecurring: true } : r));
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} />);
+    await waitFor(() => expect(pending.length).toBe(2));
+    pending[1]({ ok: true, json: async () => ({ services: fresh, total: fresh.length }) });
+    await screen.findByText(/belong to a recurring plan: 1\./);
+    pending[0]({ ok: true, json: async () => ({ services: BASE_ROWS, total: BASE_ROWS.length }) });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Apply' })).not.toBeDisabled());
+    expect(screen.getByText(/belong to a recurring plan: 1\./)).toBeInTheDocument();
+  });
+
   it('re-reads a selected row when the host bumps refreshKey after an edit', async () => {
     const view = await renderWithRows({ refreshKey: 0 });
     fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once, one-time at select time
