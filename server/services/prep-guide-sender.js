@@ -71,7 +71,7 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
   try {
     // Paged like the reschedule pick (a fixed limit could hide a valid
     // upcoming visit behind elapsed same-day rows — pre-push Codex P1).
-    const { pageState } = require('../routes/appointment-public');
+    const { pageStateForVisit } = require('../routes/appointment-public');
     const PAGE = 10;
     for (let offset = 0; ; offset += PAGE) {
       const rows = await db('scheduled_services')
@@ -102,15 +102,20 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
         ])
         .limit(PAGE)
         .offset(offset)
-        .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'service_type', 'prep_template_key', 'prep_expires_at');
+        .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'service_type', 'prep_template_key', 'prep_expires_at', 'visit_id', 'source_action', 'customer_confirmed');
       // A same-day row still pending/confirmed after its quoted window is a
       // visit that came and went — the appointment page renders it 'past';
       // prep for it is prep for nothing, so walk on to the next matching
       // visit (GH Codex #3844 r10 P2). One predicate: the page's own.
-      // Only what the page renders as upcoming: a visit already underway
-      // (en_route / on_site) is too late to prep for and would hide the
-      // customer's later treatment (GH Codex #3844 r13 P2).
-      const row = rows.find((r) => pageState(r).state === 'upcoming');
+      // Only what the page renders as upcoming — grouped (a sibling in
+      // pending rebook or underway, or an unreadable membership) or the
+      // row's own: a visit already underway is too late to prep for and
+      // would hide the customer's later treatment (GH Codex #3844 r13 P2,
+      // pre-push r14 P1).
+      let row = null;
+      for (const r of rows) {
+        if ((await pageStateForVisit(r)).state === 'upcoming') { row = r; break; }
+      }
       if (row || rows.length < PAGE) return row || null;
     }
   } catch (err) {
