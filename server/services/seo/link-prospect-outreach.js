@@ -394,6 +394,14 @@ const deliver = ({ draft, claimed, thread }) => (thread
   ? gmailClient.sendMessage(draft.outreach_to_email, draft.outreach_subject, textToHtml(draft.outreach_body), claimed.outreach_thread_ref, thread.inReplyTo)
   : gmailClient.sendMessage(draft.outreach_to_email, draft.outreach_subject, textToHtml(draft.outreach_body)));
 
+// The follow-up a confirmed PITCH schedules (§6.4: one, ten ET days out) — under the authority contract ONLY: with
+// GATE_LINK_AUTHORITY off no follow-up can ever send (sendAuthority refuses it, the bridge decides nothing), so a
+// scheduled one would sit none / due forever and the closure sweep (sent / skipped only) would never release the inbox
+// or the domain — it is settled skipped at once instead
+const followUpSchedule = (sentAt) => (isEnabled('linkAuthority')
+  ? { follow_up_status: 'none', follow_up_due_at: M.followUpDueAt(sentAt), follow_up_skipped_reason: null }
+  : { follow_up_status: 'skipped', follow_up_due_at: null, follow_up_skipped_reason: 'GATE_LINK_AUTHORITY off — follow-ups send under the authority contract only' });
+
 // Finalize ONLY our own claim (the send token still matches). The token is private
 // to the send path, so this can't be stranded by an unrelated updated_at write.
 // The communication instance is satisfied and its approval consumed in the
@@ -412,7 +420,7 @@ async function finalizeSend({ prospectId, sendToken, claimed, authority, threadR
       r = await own().update({ ...release, follow_up_status: 'sent', follow_up_sent_at: now, follow_up_send_token: null, follow_up_skipped_reason: null }).returning('*'); // an owner-routing marker is spent by the send
     } else {
       // the initial pitch schedules its ONE follow-up (+10 days, §6.4); the draft for it is leased once it is due
-      const sent = { ...release, outreach_status: 'sent', outreach_sent_at: now, outreach_thread_ref: threadRef, outreach_send_token: null, follow_up_status: 'none', follow_up_due_at: M.followUpDueAt(now) };
+      const sent = { ...release, outreach_status: 'sent', outreach_sent_at: now, outreach_thread_ref: threadRef, outreach_send_token: null, ...followUpSchedule(now) };
       // a row still awaiting its conversation leaves the park by the send itself (→ contacted); a lifecycle the admin
       // advanced while Gmail was being called (lost / watching / placed …) is the later decision and stays — the send
       // stamp alone lands on it (the reconcile keeps a hand-advanced lifecycle the same way)
@@ -581,7 +589,20 @@ async function lockedSendRow(trx, { prospectId, prospect, mode, inbox, followUp 
   if (current.target_domain !== prospect.target_domain) return { ok: false, code: 'not_actionable', error: 'the placement moved to another domain while you looked at it — reload and send again' };
   if (!current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
   const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first();
-  if (!pathStanding(onPath)) return { ok: false, code: 'path_moved' };
+  if (!pathStanding(onPath)) {
+    // a drafted FOLLOW-UP on a path the investigator SUPERSEDED after the draft was accepted: a sent conversation is
+    // pinned to its path (the mover never re-paths it) and the drafter reclaims none / due only, so the draft could
+    // only ever refuse here — it RETIRES (skipped, as claimFollowUps retires a due one), the conversation completes
+    // and the closure sweep releases the inbox. A path not standing for another reason (a disproof, a human-step
+    // ruling) may recover: the plain refusal stands and the draft waits
+    if (followUp && onPath && onPath.superseded_by) {
+      await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted', path_id: current.path_id })
+        .update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'acquisition path superseded before the follow-up', updated_at: new Date() });
+      logger.info(`[link-outreach] follow-up for ${prospectId} retired — its acquisition path was superseded after the draft`);
+      return { ok: false, code: 'path_moved', error: 'the acquisition path was superseded after the follow-up was drafted; the follow-up is retired' };
+    }
+    return { ok: false, code: 'path_moved' };
+  }
   if (!boundToRevision(current, onPath)) {
     // a drafted FOLLOW-UP bound to an earlier revision of a path that is still standing: the route changed in place
     // (terms, lane, URL) after the draft was accepted. The mover never touches a sent conversation and the drafter
@@ -871,7 +892,7 @@ async function reconcileInitial({ prospect, outcome, approvedBy }) {
   // the confirmed pitch schedules its follow-up like a clean send does (§6.4) — ONLY when the send left a Gmail thread
   // reference for the reply check to read (an errored send captured none, and the reconcile cannot supply one): a
   // pitch confirmed from the Sent folder without a thread grows no follow-up; its silence is the owner's read
-  const schedule = prospect.outreach_thread_ref ? { follow_up_status: 'none', follow_up_due_at: M.followUpDueAt(sentAt) } : {};
+  const schedule = prospect.outreach_thread_ref ? followUpSchedule(sentAt) : {};
   const patch = outcome === 'sent'
     ? {
         ...(SENDABLE_STATUSES.includes(prospect.status) ? { status: 'contacted', parked_from_status: null } : {}),

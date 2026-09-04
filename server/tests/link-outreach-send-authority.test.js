@@ -346,6 +346,13 @@ describe('sendOutreach under the contract', () => {
     const r = await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' });
     expect(r).toMatchObject({ ok: true, authority: null });
     expect(approvals(s.db)).toHaveLength(0);
+    // no follow-up is scheduled outside the contract (nothing could ever send it): settled skipped so the conversation
+    // can complete and the closure sweep release the inbox (Codex r12 P1); the reconcile schedules the same way
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', outreach_status: 'sent', follow_up_status: 'skipped', follow_up_due_at: null, follow_up_skipped_reason: expect.stringMatching(/GATE_LINK_AUTHORITY/) });
+    const u = scenario();
+    Object.assign(placement(u.db), { outreach_status: 'send_error', outreach_send_token: null, outreach_thread_ref: 'thr-x' });
+    expect((await Outreach.reconcileSendError({ prospectId: u.row.id, outcome: 'sent', approvedBy: 'Adam' })).ok).toBe(true);
+    expect(placement(u.db)).toMatchObject({ outreach_status: 'sent', follow_up_status: 'skipped', follow_up_due_at: null });
     // a placement the bridge PARKED keeps its open decisions: the gate-off click never clears that park unchecked
     const parked = scenario({ placement: { status: 'awaiting_owner', parked_from_status: 'prospect' } });
     expect(await Outreach.sendOutreach({ prospectId: parked.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/parked by the authority bridge/) });
@@ -1180,6 +1187,17 @@ describe('Codex r2 on #3854', () => {
     storedPath(s.db).superseded_by = null;
     [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
     expect(await worker.report({ prospect_id: s.row.id, outcome: 'drafted', lease_token: l.lease_token, outreach_subject: 'Re: A resource for your readers', outreach_body: FOLLOW_UP_BODY })).toMatchObject({ ok: true, follow_up_status: 'drafted' });
+  });
+  test('P2: a path SUPERSEDED after the follow-up was DRAFTED retires it at the send (skipped) — a disproof alone keeps the plain refusal', async () => {
+    const s = await conversation();
+    storedPath(s.db).superseded_by = uid();
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'path_moved', error: expect.stringMatching(/retired/) });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', outreach_status: 'sent', follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/superseded/) });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    const t = await conversation();
+    storedPath(t.db).confidence = 0; // disproven, not superseded: may be re-assessed — the draft waits
+    expect(await Outreach.sendOutreach({ prospectId: t.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'path_moved' });
+    expect(placement(t.db).follow_up_status).toBe('drafted');
   });
   test('P2: a path SUPERSEDED during the ten-day wait retires the follow-up at the lease (skipped) — the pinned conversation completes instead of holding its inbox forever', async () => {
     const s = await conversation({ decide: false });
