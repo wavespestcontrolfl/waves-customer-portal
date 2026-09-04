@@ -238,6 +238,26 @@ describe('llm call ledger', () => {
     });
   });
 
+  describe('empty text-mode answers', () => {
+    it('every adapter fails an empty text-mode answer as empty_text (→ incomplete) — recorded AND returned, bare dispatch included', async () => {
+      const { call } = load();
+      global.fetch = fetchJson({ ...OPENAI_BODY, output_text: '   ' });
+      expect(await call.callOpenAI({ model: 'o', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'empty_text' });
+      global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '' }] } }] });
+      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'empty_text' });
+      mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, content: [{ type: 'text', text: ' ' }] });
+      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'empty_text' });
+      await flush();
+      expect(callRows().map((r) => [r.provider, r.ok, r.error_code, r.error_class])).toEqual([
+        ['openai', false, 'empty_text', 'incomplete'], ['gemini', false, 'empty_text', 'incomplete'], ['anthropic', false, 'empty_text', 'incomplete'],
+      ]);
+      expect(mockUpdate).not.toHaveBeenCalled();
+      // JSON mode is untouched: an empty body there is still empty_json.
+      global.fetch = fetchJson({ ...OPENAI_BODY, output_text: '   ' });
+      expect(await call.callOpenAI({ model: 'o', text: 't' })).toEqual({ ok: false, reason: 'empty_json' });
+    });
+  });
+
   describe('callGemini — blocked answers', () => {
     it('a SAFETY finish and a prompt-level block are gemini_refusal (→ instruction) in both modes; another non-STOP finish is its own code', async () => {
       const { call } = load();
@@ -451,7 +471,7 @@ describe('llm call ledger', () => {
       expect(ledgerRows().find((r) => r.row_kind === 'chain')).toMatchObject({ ok: false, error_class: 'incomplete' });
     });
 
-    it('a chain rejection (validate hook / empty_text) flips the adapter\'s ok call row to that code, so both ledgers agree the leg failed', async () => {
+    it('a chain rejection (validate hook) flips the adapter\'s ok call row to that code, so both ledgers agree the leg failed', async () => {
       mockUpdate.mockClear();
       global.fetch = fetchJson(OPENAI_BODY);
       mockAnthropicCreate.mockResolvedValue(ANTHROPIC_MESSAGE);
@@ -466,12 +486,6 @@ describe('llm call ledger', () => {
         ['llm_dispatch_log', true, { ok: false, error_code: 'trade_name', error_class: 'instruction' }],
         ['llm_dispatch_log', true, { ok: false, error_code: 'trade_name', error_class: 'instruction' }],
       ]);
-      mockUpdate.mockClear();
-      // empty_text in text mode is the dispatcher's own rejection — same flip.
-      global.fetch = fetchJson({ ...OPENAI_BODY, output_text: '   ' });
-      await call.dispatchWithFallback({ name: 'ledgerEmpty', primary: { provider: 'openai', model: 'o' }, fallback: { provider: 'anthropic', model: 'a' } }, { text: 't', jsonMode: false });
-      await flush();
-      expect(mockUpdate.mock.calls[0][2]).toEqual({ ok: false, error_code: 'empty_text', error_class: 'incomplete' });
       // off-gate: the adapter never recorded a row, so there is nothing to flip.
       mockUpdate.mockClear();
       delete process.env.GATE_LLM_CALL_LEDGER;

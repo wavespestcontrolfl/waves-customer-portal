@@ -191,8 +191,8 @@ function providerErrorReason(provider, err) {
 const nowMs = () => performance.now();
 const elapsedMs = (t0) => Math.round(performance.now() - t0);
 // The ledger row id of an adapter result the chain may still reject (the
-// validate hook, empty_text): keyed by the result object so nothing rides on
-// the value callers receive.
+// validate hook): keyed by the result object so nothing rides on the value
+// callers receive.
 const ledgerIdOf = new WeakMap();
 function recordLedgerCall(base, outcome) {
   try {
@@ -312,6 +312,14 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'openai_refusal', response: refusal });
       return { ok: false, reason: 'openai_refusal' };
     }
+    // A text-mode answer with nothing in it is a failed leg (Codex r15 on
+    // #3846): the chain rejected it as `empty_text` before, but a bare
+    // dispatch never reached that check — its call row said ok while the
+    // sms canary / sealed eval called the same result a provider failure.
+    if (!jsonMode && !String(out || '').trim()) {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_text', response: out });
+      return { ok: false, reason: 'empty_text' };
+    }
     const json = jsonMode ? parseLooseJson(out) : null;
     if (jsonMode && !json) {
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json', response: out });
@@ -383,6 +391,14 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
       recordLedgerCall(base, { ...served, ok: false, errorCode: code, response: out });
       return { ok: false, reason: code };
     }
+    // A text-mode answer with nothing in it is a failed leg (Codex r15 on
+    // #3846): the chain rejected it as `empty_text` before, but a bare
+    // dispatch never reached that check — its call row said ok while the
+    // sms canary / sealed eval called the same result a provider failure.
+    if (!jsonMode && !String(out || '').trim()) {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_text', response: out });
+      return { ok: false, reason: 'empty_text' };
+    }
     const json = jsonMode ? parseLooseJson(out) : null;
     if (jsonMode && !json) {
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json', response: out });
@@ -453,6 +469,14 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
       logger.warn(`[llm] Anthropic response stopped at max_tokens (${maxTokens})`);
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'anthropic_incomplete' });
       return { ok: false, reason: 'anthropic_incomplete' };
+    }
+    // A text-mode answer with nothing in it is a failed leg (Codex r15 on
+    // #3846): the chain rejected it as `empty_text` before, but a bare
+    // dispatch never reached that check — its call row said ok while the
+    // sms canary / sealed eval called the same result a provider failure.
+    if (!jsonMode && !String(out || '').trim()) {
+      recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_text' });
+      return { ok: false, reason: 'empty_text' };
     }
     if (jsonMode && !json) {
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'empty_json' });
@@ -554,12 +578,12 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
       continue;
     }
 
-    let rejection = payload.jsonMode === false && !String(result.text || '').trim()
-      ? 'empty_text'
-      : null;
-    // The caller's validate hook owns its codes (`too_long`, `trade_name`,
-    // `missing_summary`…): a rejection from it is a model-quality failure,
-    // so the failure entry carries that provenance for classifyFailure.
+    // Empty text-mode answers fail in the adapters (`empty_text`), so an ok
+    // result here has content. The caller's validate hook owns its codes
+    // (`too_long`, `trade_name`, `missing_summary`…): a rejection from it is
+    // a model-quality failure, so the failure entry carries that provenance
+    // for classifyFailure.
+    let rejection = null;
     let fromValidator = false;
     if (typeof validate === 'function') {
       fromValidator = true;
