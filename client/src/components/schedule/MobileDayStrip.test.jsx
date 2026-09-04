@@ -24,6 +24,7 @@ describe('MobileDayStrip', () => {
     expect(isoOf(selected[0])).toBe('2026-09-04');
     expect(selected[0]).toHaveTextContent('Fri');
     expect(selected[0]).toHaveTextContent('4');
+    expect(selected[0]).toHaveAccessibleName('Friday, September 4, 2026');
   });
 
   it('shows the month and year of the selected date', () => {

@@ -46,6 +46,15 @@ function buildDays(start, end) {
       firstOfMonth: d.getUTCDate() === 1,
       weekday: d.toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short' }),
       monthShort: d.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short' }),
+      // Accessible name: "Fri 4" repeats every few weeks in a 181-day list,
+      // so screen readers get the whole date.
+      label: d.toLocaleDateString('en-US', {
+        timeZone: 'UTC',
+        weekday: 'long',
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+      }),
     });
   }
   return out;
@@ -140,6 +149,24 @@ export default function MobileDayStrip({ date, onSelect }) {
 
   useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
 
+  // The strip's width can change without a remount (rotation, split view,
+  // a resize that stays under the breakpoint); scrollLeft was computed for
+  // the old width, so re-center the selection on a real size change.
+  const dateRef = useRef(date);
+  dateRef.current = date;
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || typeof ResizeObserver === 'undefined') return undefined;
+    let width = list.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (list.clientWidth === width) return;
+      width = list.clientWidth;
+      centerOn(dateRef.current, false);
+    });
+    ro.observe(list);
+    return () => ro.disconnect();
+  }, [centerOn]);
+
   const handleScroll = () => {
     cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(updateVisibleMonth);
@@ -189,7 +216,7 @@ export default function MobileDayStrip({ date, onSelect }) {
         role="listbox"
         aria-label="Pick a day"
       >
-        {days.map(({ iso, dayNum, weekend, firstOfMonth, weekday, monthShort }) => {
+        {days.map(({ iso, dayNum, weekend, firstOfMonth, weekday, monthShort, label }) => {
           const selected = iso === date;
           return (
             <button
@@ -198,6 +225,7 @@ export default function MobileDayStrip({ date, onSelect }) {
               role="option"
               aria-selected={selected}
               tabIndex={selected ? 0 : -1}
+              aria-label={label}
               data-iso={iso}
               onClick={() => onSelect(iso)}
               className={cn(
