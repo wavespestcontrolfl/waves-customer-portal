@@ -102,44 +102,39 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
   // filter/page response landing after the save-driven refresh must not
   // restore pre-edit meta (pre-push hook P1).
   const fetchSeqRef = useRef(0);
+  const pendingSaveRef = useRef(null);
   const fetchList = useCallback(async (editedId = null) => {
     const seq = ++fetchSeqRef.current;
     setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (filterFrom) params.set('from', filterFrom);
-      if (filterTo) params.set('to', filterTo);
-      if (filterStatus) params.set('status', filterStatus);
-      if (filterTech) params.set('techId', filterTech);
-      if (filterService) params.set('serviceType', filterService);
-      if (filterPrepaid) params.set('prepaid', filterPrepaid);
-      if (filterSearch) params.set('search', filterSearch);
-      params.set('page', page);
-      params.set('limit', 50);
-      const data = await adminFetch(`/admin/schedule/list?${params}`);
-      if (seq !== fetchSeqRef.current) return;
-      setServices(data.services || []);
-      setTotal(data.total || 0);
-      // A selected row edited meanwhile (e.g. made recurring in the Edit
-      // modal) comes back changed — refresh its meta from the fresh page
-      // so the bulk pre-flights read the saved row (Codex #3868 r2 P2).
-      (data.services || []).forEach((s) => { if (selectedMetaRef.current.has(s.id)) rememberSelectedMeta(s); });
-      // The row the host just saved may have left the filtered page
-      // (date/status/tech/service changed). Its cached meta is then
-      // unverifiable, so drop it from the selection rather than bulk-act
-      // on a pre-edit snapshot (Codex #3868 r3 P2). Other-page selections
-      // are untouched: only the saved id is checked, and only on the
-      // refresh that save triggers.
-      if (editedId && selectedMetaRef.current.has(editedId) && !(data.services || []).some((s) => s.id === editedId)) {
-        selectedMetaRef.current.delete(editedId);
-        setSelected((prev) => { const next = new Set(prev); next.delete(editedId); return next; });
-      }
-    } catch {
-      if (seq !== fetchSeqRef.current) return;
-      setServices([]); setTotal(0);
-      // Save-driven refresh failed: the edited row cannot be verified, so
-      // it leaves the selection (fail closed, Codex #3868 r4).
-      if (editedId) {
+    const params = new URLSearchParams();
+    if (filterFrom) params.set('from', filterFrom);
+    if (filterTo) params.set('to', filterTo);
+    if (filterStatus) params.set('status', filterStatus);
+    if (filterTech) params.set('techId', filterTech);
+    if (filterService) params.set('serviceType', filterService);
+    if (filterPrepaid) params.set('prepaid', filterPrepaid);
+    if (filterSearch) params.set('search', filterSearch);
+    params.set('page', page);
+    params.set('limit', 50);
+    // A failed fetch commits an empty page (existing behaviour), which
+    // also makes the saved-row check below fail closed (Codex #3868 r4).
+    const data = await adminFetch(`/admin/schedule/list?${params}`).catch(() => null);
+    if (seq !== fetchSeqRef.current) return;
+    const rows = data?.services || [];
+    setServices(rows);
+    setTotal(data?.total || 0);
+    // A selected row edited meanwhile (e.g. made recurring in the Edit
+    // modal) comes back changed — refresh its meta from the fresh page
+    // so the bulk pre-flights read the saved row (Codex #3868 r2 P2).
+    rows.forEach((s) => { if (selectedMetaRef.current.has(s.id)) rememberSelectedMeta(s); });
+    // The row the host just saved may have left the filtered page
+    // (date/status/tech/service changed) or the refresh may have failed.
+    // Its cached meta is then unverifiable, so drop it from the selection
+    // rather than bulk-act on a pre-edit snapshot (Codex #3868 r3 P2).
+    // Other-page selections are untouched: only the saved id is checked.
+    if (editedId) {
+      pendingSaveRef.current = null;
+      if (selectedMetaRef.current.has(editedId) && !rows.some((s) => s.id === editedId)) {
         selectedMetaRef.current.delete(editedId);
         setSelected((prev) => { const next = new Set(prev); next.delete(editedId); return next; });
       }
@@ -154,11 +149,14 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
   // followed by the real edit counts twice); only that row is re-verified
   // against the fresh page — a generic bump or a dismissed modal never
   // drops a selection (Codex r3/r5 + pre-push hook P1s).
+  // The saved id stays pending until a request carrying it commits: a
+  // filter/page fetch started during the save-driven refresh supersedes
+  // it (fetchSeqRef) and must verify the row instead (Codex r6).
   const seenSaveRef = useRef(lastSave);
   useEffect(() => {
-    const saved = lastSave && lastSave !== seenSaveRef.current ? lastSave.id : null;
+    if (lastSave && lastSave !== seenSaveRef.current) pendingSaveRef.current = lastSave.id;
     seenSaveRef.current = lastSave;
-    fetchList(saved);
+    fetchList(pendingSaveRef.current);
   }, [fetchList, refreshKey, lastSave]);
 
   const sorted = useMemo(() => {

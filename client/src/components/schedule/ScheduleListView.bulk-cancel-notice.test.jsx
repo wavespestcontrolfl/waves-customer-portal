@@ -155,6 +155,26 @@ describe('ScheduleListView bulk cancel — recurring plan notice', () => {
     await screen.findByText('1 selected');
   });
 
+  it('still verifies the saved row when a filter fetch supersedes the save-driven refresh', async () => {
+    const view = await renderWithRows({ refreshKey: 0, lastSave: null });
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[1]); // svc-plan
+    fireEvent.click(boxes[2]); // svc-once, saved out of the window
+    const pending = [];
+    global.fetch = vi.fn(() => new Promise((resolve) => { pending.push(resolve); }));
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} lastSave={{ id: 'svc-once' }} />);
+    await waitFor(() => expect(pending.length).toBe(1));
+    // A filter change while that refresh is in flight starts a newer request…
+    fireEvent.change(screen.getByPlaceholderText('Name or service…'), { target: { value: 'Pat' } });
+    await waitFor(() => expect(pending.length).toBe(2));
+    const without = BASE_ROWS.filter((r) => r.id !== 'svc-once');
+    // …which commits first; the superseded save-driven response is dropped.
+    pending[1]({ ok: true, json: async () => ({ services: without, total: without.length }) });
+    await screen.findByText('1 selected');
+    pending[0]({ ok: true, json: async () => ({ services: without, total: without.length }) });
+    await waitFor(() => expect(screen.getByText('1 selected')).toBeInTheDocument());
+  });
+
   it('shows nothing for a selection with no recurring visit', async () => {
     await renderWithRows();
     fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once only
