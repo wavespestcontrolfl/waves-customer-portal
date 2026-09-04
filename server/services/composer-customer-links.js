@@ -746,12 +746,17 @@ const digitsLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
 // Per-ROW binding: the row's customer must own the recipient number and —
 // when the route trusts a customer id — be that customer.
 async function ownedByRecipient({ toLast10, trustedCustomerId }, customerId, label) {
-  const owner = await db('customers').where({ id: customerId }).first('id', 'phone');
+  // A LIVE owner only (pre-push Codex P0): a deleted row's stale phone must
+  // not authorize its page to whoever holds the number now.
+  const owner = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
   const ownerLast10 = digitsLast10(owner?.phone);
   if (!ownerLast10 || ownerLast10 !== toLast10) {
     return refuseSend(`This ${label} belongs to a different customer — remove it before sending.`);
   }
-  if (trustedCustomerId !== undefined && String(trustedCustomerId || '') !== String(customerId)) {
+  // /sms passes null for "no customer selected" — that is no trusted id
+  // (pre-push Codex P1 on r9): the row's owner rides on to the seam-wide
+  // owner rule, which adopts a unique live owner and refuses an ambiguous one.
+  if (trustedCustomerId != null && String(trustedCustomerId) !== String(customerId)) {
     return refuseSend(`Pick this customer from the search dropdown before sending a ${label}.`);
   }
   return null;

@@ -1038,6 +1038,18 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       expect(loadTemplateByKey).toHaveBeenCalledWith('prep.flea');
     });
 
+    test('a pasted prep link with no selected customer adopts the one live owner of the number (null is no trusted id — pre-push Codex P1 on r9); a selected customer who is not the owner refuses', async () => {
+      mockBuilders.customers = chainBuilder({ firstRow: { id: 'c1', phone: '+1 (941) 555-0100' }, rows: [{ id: 'c1' }] });
+      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea' }], customerId: 'c1' });
+      expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c2' })).error).toMatch(/Pick this customer/);
+      expect(mockBuilders.customers.whereNull).toHaveBeenCalledWith('deleted_at');
+    });
+
+    test('a prep page whose owning customer was deleted refuses — a stale phone never authorizes the page (pre-push Codex P0)', async () => {
+      mockBuilders.customers = chainBuilder({ firstRow: null, rows: [] });
+      expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
+    });
+
     test('an expired (unresolvable) token refuses', async () => {
       resolvePrepSource.mockResolvedValue(null);
       expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/prep guide link has expired/);
