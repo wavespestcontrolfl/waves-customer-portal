@@ -486,6 +486,16 @@ test('a quotesAtPlace vendor whose confirmed total is at or under the reserved c
   expect(await run(a)).toMatchObject({ status: 'placed' });
 });
 
+test('an over-cap confirmed total that lands after stale recovery parked the claim is attached as a late placement — number and amount recorded, request ordered (pre-push P0)', async () => {
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { expect(await beforeSubmit(9900)).toEqual({ ok: true }); mockState.ledgerSettled = true; return { externalOrderNumber: 'S1-13', amountCents: 60000, evidence: { totalSource: 'vendor' } }; }) });
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: 'S1-13', amountCents: 60000 });
+  const late = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.external_order_number === 'S1-13' && !u.row.status);
+  expect(late.row.amount_cents).toBe(60000);
+  expect(mockState.updates.some((u) => u.table === 'product_restock_requests' && u.row.status === 'ordered')).toBe(true);
+  expect(auditVendorOrder).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed_after_stale_park', amount_cents: 60000 }));
+});
+
 test('vendor total over cap after placement → needs_review, request ordered, bell says do NOT re-order', async () => {
   const a = mockAdapter({ place: jest.fn(async () => ({ externalOrderNumber: 'SM-2', amountCents: 60000, response: {}, evidence: { totalSource: 'vendor' } })) });
   const r = await run(a);

@@ -808,7 +808,15 @@ async function parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, 
   if (finalCents <= (admitted ?? 0)) return null;
   const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { env });
   if (finalCap.ok) return null;
-  return park(conn, { ...ctx, markRequestOrdered: true, reason: 'over_cap_after_placement', message: `${vendor.name} charged ${dollars(finalCents)} for order ${placed.externalOrderNumber || '?'}: ${finalCap.message}.`, amountCents: finalCents, evidence: placed.evidence || null, placed });
+  // The row already left 'placing' (stale recovery parked or the operator
+  // revoked it while the vendor call ran): the order still EXISTS at this
+  // higher total, so it must land as a late placement — number, amount,
+  // request back to ordered, revoke marker replaced — exactly as the green
+  // path does, never dropped by a skipped park (pre-push P0).
+  const late = () => recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
+  if (finalCap.reason === 'claim_lost') return late();
+  const parked = await park(conn, { ...ctx, markRequestOrdered: true, reason: 'over_cap_after_placement', message: `${vendor.name} charged ${dollars(finalCents)} for order ${placed.externalOrderNumber || '?'}: ${finalCap.message}.`, amountCents: finalCents, evidence: placed.evidence || null, placed });
+  return parked.skipped === 'already_settled' ? late() : parked;
 }
 
 // The amount a PLACED order is recorded and cap-counted at: the vendor's
