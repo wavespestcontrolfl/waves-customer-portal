@@ -17,7 +17,9 @@ test('template declares exactly the variables autopay-setup-link.js sends, with 
   expect(row).toEqual(expect.objectContaining({
     status: 'active',
     audience: 'customer',
-    send_stream: 'transactional_required',
+    // Operational outreach, like autopay.setup_invitation — honors that unsubscribe.
+    send_stream: 'service_operational',
+    suppression_group_key: 'service_operational',
     default_cta_url_variable: 'secure_link',
     from_email: 'contact@wavespestcontrol.com',
   }));
@@ -26,4 +28,6 @@ test('template declares exactly the variables autopay-setup-link.js sends, with 
   expect(body).toMatch(/each completed service is paid automatically/);
   expect(body).toMatch(/Nothing is charged today/);
   expect(body).not.toMatch(/each visit/);
+  // Tender-neutral: the page is card-only unless ACH capture is on and healthy.
+  expect(body).not.toMatch(/bank account/i);
 });

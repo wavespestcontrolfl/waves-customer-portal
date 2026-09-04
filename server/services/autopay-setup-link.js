@@ -255,13 +255,16 @@ function isEmailLike(value) {
 async function emailSetupLink({ customer, customerId, request, secureUrl, trigger }) {
   const to = String(customer.email || '').trim();
   if (!isEmailLike(to)) return skip('no_customer_email');
-  const prefs = await db('notification_prefs')
-    .where({ customer_id: customerId })
-    .first()
-    .catch((err) => {
-      logger.warn(`[autopay-setup-link] notification_prefs lookup failed for customer ${customerId}: ${err.message}`);
-      return null;
-    });
+  // Fail closed: an unreadable preference is not an enabled one (GH Codex
+  // #3867 P2) — an opted-out customer must never get this optional email
+  // because the prefs read blipped. Retryable skip instead.
+  let prefs;
+  try {
+    prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] notification_prefs lookup failed for customer ${customerId}: ${err.message}`);
+    return skip('email_prefs_check_uncertain');
+  }
   if (prefs?.email_enabled === false) return skip('email_opted_out');
 
   const EmailTemplateLibrary = require('./email-template-library');
@@ -280,11 +283,16 @@ async function emailSetupLink({ customer, customerId, request, secureUrl, trigge
       recipientType: 'customer',
       recipientId: customerId,
       // Every office click is a deliberate (re)send — a customer who lost the
-      // email gets it again — so the key is per click, not per row.
+      // email gets it again — so the key is per click (UUID, never a clock
+      // value two clicks can share), not per row.
       triggerEventId: `autopay_setup_link_email:${request.id}:${trigger}`,
-      idempotencyKey: `autopay_setup_link_email:${request.id}:${Date.now()}`,
-      suppressionGroupKey: 'transactional_required',
+      idempotencyKey: `autopay_setup_link_email:${request.id}:${crypto.randomUUID()}`,
+      // Stream / suppression group come from the template row
+      // (service_operational — an invitation is operational outreach and
+      // must honor that unsubscribe, like autopay.setup_invitation).
       categories: ['autopay_setup_link', 'payment_setup'],
+      // Provider rejections echo the recipient address — never log them raw.
+      suppressProviderErrorLog: true,
     });
   } catch (sendErr) {
     if (isTemplateLeverError(sendErr)) return skip('email_template_inactive');

@@ -14,6 +14,7 @@ describe('describeAutopaySetupLinkResult — delivery channels', () => {
   it('maps every email skip reason to an actionable line', () => {
     expect(describeAutopaySetupLinkResult({ action: 'skipped', reason: 'no_customer_email' })).toEqual({ tone: 'bad', text: 'No email address on file for this customer' });
     expect(describeAutopaySetupLinkResult({ action: 'skipped', reason: 'email_opted_out' }).tone).toBe('muted');
+    expect(describeAutopaySetupLinkResult({ action: 'skipped', reason: 'email_prefs_check_uncertain' })).toEqual({ tone: 'bad', text: expect.stringMatching(/try again/) });
     expect(describeAutopaySetupLinkResult({ action: 'skipped', reason: 'email_template_inactive' }).text).toMatch(/Auto Pay setup email is inactive/);
     expect(describeAutopaySetupLinkResult({ action: 'skipped', reason: 'send_outcome_uncertain' }).text).toMatch(/uncertain/);
   });

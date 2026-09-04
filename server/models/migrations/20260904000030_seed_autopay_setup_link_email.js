@@ -7,9 +7,15 @@
  * through the email template library (audited email_messages row,
  * suppressions, provider retry).
  *
- * Copy mirrors the lane-neutral SMS body (each completed service is paid
- * automatically; nothing is charged today; card numbers are never taken by
- * phone). Same upsert shape as the other seeded service templates.
+ * Copy mirrors the lane- and tender-neutral SMS body (each completed service
+ * is paid automatically; "payment method", since the page is card-only
+ * unless GATE_ACCEPT_ACH_CAPTURE is on AND the customer's ACH state is
+ * healthy; nothing is charged today; card numbers are never taken by phone).
+ *
+ * Classified service_operational, like autopay.setup_invitation: an
+ * invitation is operational outreach, not a required transactional record,
+ * so it honors the operational unsubscribe. Same upsert shape as the other
+ * seeded service templates.
  */
 
 const SERVICE_FROM = 'contact@wavespestcontrol.com';
@@ -37,7 +43,7 @@ const TEMPLATES = [
     cta: 'Set up Auto Pay',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}},' },
-      { type: 'paragraph', content: 'Here is your secure link to set up Auto Pay for your Waves service. Save a card or bank account once and each completed service is paid automatically — no invoices to chase and nothing to remember.' },
+      { type: 'paragraph', content: 'Here is your secure link to set up Auto Pay for your Waves service. Save a payment method once and each completed service is paid automatically — no invoices to chase and nothing to remember.' },
       { type: 'paragraph', content: 'Nothing is charged today. Your payment details go straight to our payment processor, Stripe — we never take card numbers by phone or email.' },
       { type: 'details', rows: [{ label: 'Link expires', value: '{{expires_on}}' }] },
       { type: 'cta', label: 'Set up Auto Pay', url_variable: 'secure_link' },
@@ -64,10 +70,10 @@ function templateRow(t) {
     purpose: 'billing',
     legal_classification: 'transactional_relationship',
     audience: 'customer',
-    message_priority: 'high',
+    message_priority: 'normal',
     content_sensitivity: 'financial',
-    send_stream: 'transactional_required',
-    suppression_group_key: 'transactional_required',
+    send_stream: 'service_operational',
+    suppression_group_key: 'service_operational',
     layout_wrapper_id: 'service_default_v1',
     from_name: 'Waves Pest Control',
     from_email: SERVICE_FROM,
@@ -80,25 +86,6 @@ function templateRow(t) {
     status: 'active',
     updated_at: new Date(),
   };
-}
-
-async function ensureTransactionalGroup(knex) {
-  if (!(await knex.schema.hasTable('email_preference_groups'))) return;
-  const row = {
-    key: 'transactional_required',
-    name: 'Required account notices',
-    description: 'Security, payment, legal, and account notices that must reach the customer.',
-    send_stream: 'transactional_required',
-    user_can_unsubscribe: false,
-    sort_order: 10,
-    updated_at: new Date(),
-  };
-  const existing = await knex('email_preference_groups').where({ key: row.key }).first();
-  if (existing) {
-    await knex('email_preference_groups').where({ key: row.key }).update(row);
-  } else {
-    await knex('email_preference_groups').insert({ ...row, created_at: new Date() });
-  }
 }
 
 async function upsertTemplate(knex, t) {
@@ -184,7 +171,6 @@ exports.up = async function up(knex) {
     && await knex.schema.hasTable('email_template_fixtures');
   if (!hasTables) return;
 
-  await ensureTransactionalGroup(knex);
   for (const t of TEMPLATES) {
     await upsertTemplate(knex, t);
   }

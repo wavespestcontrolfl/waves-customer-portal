@@ -387,27 +387,38 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
       payload: expect.objectContaining({ first_name: 'Pat', secure_link: r.secureUrl, expires_on: expect.any(String) }),
       recipientType: 'customer',
       recipientId: 'cust-1',
-      suppressionGroupKey: 'transactional_required',
+      suppressProviderErrorLog: true,
     }));
+    // Stream + suppression group belong to the template row (service_operational).
+    expect(mockSendTemplate.mock.calls[0][0].suppressionGroupKey).toBeUndefined();
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     const stamp = touches('appointment_card_requests').find((c) => c.calls.some((x) => x[0] === 'update' && x[1].sent_at));
     expect(stamp.calls.find((x) => x[0] === 'update')[1]).toEqual({ sent_at: expect.any(Date) });
     expect(stamp.calls.find((x) => x[0] === 'where')[1]).toEqual(expect.objectContaining({ status: 'pending' }));
   });
 
-  it('email: every office click is a fresh send (idempotency key is per click, never per row)', async () => {
+  it('email: every office click is a fresh send (UUID idempotency key per click, never per row or clock tick)', async () => {
     await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
     mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING }) };
     await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
     const keys = mockSendTemplate.mock.calls.map((c) => c[0].idempotencyKey);
     expect(keys).toHaveLength(2);
     expect(keys[0]).not.toBe(keys[1]);
+    for (const k of keys) expect(k).toMatch(/^autopay_setup_link_email:req-[^:]+:[0-9a-f-]{36}$/);
   });
 
   it('email: no email on file skips the send but still returns the link for copy/paste', async () => {
     mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, email: '  ' }) };
     const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
     expect(r.reason).toBe('no_customer_email');
+    expect(r.secureUrl).toMatch(/\/secure\//);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('email: an unreadable email preference fails CLOSED — retryable skip, nothing sent', async () => {
+    mockTableHandlers.notification_prefs = { first: () => { throw new Error('db blip'); } };
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+    expect(r.reason).toBe('email_prefs_check_uncertain');
     expect(r.secureUrl).toMatch(/\/secure\//);
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
