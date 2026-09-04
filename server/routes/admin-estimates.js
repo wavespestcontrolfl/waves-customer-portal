@@ -568,6 +568,20 @@ async function pricedPropertyAddress(propertyId) {
 // delivered: false = this attempt handed nothing to the customer (a
 // suppressed send — SMS gate or template off — leaves lastDeliveredAt where
 // it was), so the prior send's scope stamp is carried forward untouched.
+// The scope THIS delivery stamps, plus the revision history it extends:
+// scopeHistory keeps every delivered scope with its handoff time, oldest
+// first, capped like deliveryState.deliveredAt. A resend overwrites
+// sendSnapshot.scope, so without the history a complete quote delivered
+// after a call and then edited and resent before the nightly sweep would
+// leave only the incomplete latest scope for the triage sweep to judge
+// (codex #3811 r32 P2). Malformed prior entries are dropped.
+function scopeRevision(priorSendSnapshot, scope, deliveredAt) {
+  const prior = Array.isArray(priorSendSnapshot?.scopeHistory)
+    ? priorSendSnapshot.scopeHistory.filter((h) => h && typeof h === 'object' && typeof h.deliveredAt === 'string' && h.scope && typeof h.scope === 'object')
+    : [];
+  return { scope, scopeHistory: [...prior, { deliveredAt, scope }].slice(-DELIVERY_HISTORY_MAX) };
+}
+
 async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { delivered = true } = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data) || {};
   const estimateDataForBundle = { ...estimateData };
@@ -589,7 +603,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // undelivered content under the old witness (pre-push hook P1).
   // Independent of the bundle build below — it is content, not pricing.
   if (delivered) {
-    sendSnapshot.scope = deliveredEstimateScope({ ...estimate, estimate_data: estimateDataForBundle, ...(await pricedPropertyAddress(estimate.property_id)) });
+    Object.assign(sendSnapshot, scopeRevision(sendSnapshot, deliveredEstimateScope({ ...estimate, estimate_data: estimateDataForBundle, ...(await pricedPropertyAddress(estimate.property_id)) }), snapshotAt));
   }
 
   try {
@@ -1922,7 +1936,7 @@ async function recordTerminalSiblingDelivery(sibling, snapshot, { delivered, sen
       await db('estimates').where({ id: sibling.id }).update({
         estimate_data: db.raw(
           "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{sendSnapshot}', COALESCE(estimate_data -> 'sendSnapshot', '{}'::jsonb) || ?::jsonb, true) || ?::jsonb",
-          [JSON.stringify({ scope: snapshot.sendSnapshot.scope }), JSON.stringify(deliveryStatePatch)],
+          [JSON.stringify({ scope: snapshot.sendSnapshot.scope, scopeHistory: snapshot.sendSnapshot.scopeHistory }), JSON.stringify(deliveryStatePatch)],
         ),
         updated_at: db.fn.now(),
       });
@@ -2512,10 +2526,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     if (stampChannels.length) {
       try {
         const scope = deliveredEstimateScope({ ...estimate, ...(await pricedPropertyAddress(estimate.property_id)) });
+        const revision = scopeRevision(parseEstimateData(estimate.estimate_data)?.sendSnapshot, scope, lastDeliveredAt || now().toISOString());
         await db('estimates').where({ id: estimate.id }).update({
           estimate_data: db.raw(
             "jsonb_set(COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb, '{sendSnapshot}', COALESCE(estimate_data -> 'sendSnapshot', '{}'::jsonb) || ?::jsonb, true)",
-            [JSON.stringify(deliveryStatePatch), JSON.stringify({ scope })],
+            [JSON.stringify(deliveryStatePatch), JSON.stringify(revision)],
           ),
           updated_at: db.fn.now(),
         });

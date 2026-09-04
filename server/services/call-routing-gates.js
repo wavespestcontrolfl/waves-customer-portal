@@ -516,6 +516,7 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
 
 module.exports = {
   SUPERSEDE_KEPT_REASON_CODES,
+  onFileAddressSnapshot,
   computeAppointmentIdempotencyKey,
   computeAddressHash,
   checkTcpaConsent,

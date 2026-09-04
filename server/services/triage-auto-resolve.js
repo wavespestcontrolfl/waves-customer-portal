@@ -1348,13 +1348,24 @@ function deliveredEstimateScope(row) {
   return { lines: estimateLines(row), address: typeof row.address === 'string' && row.address.trim() ? row.address : null, property };
 }
 
-// The scope a row's LAST send stamped, or null: a row with no stamp (sent
-// before the stamp existed, or a sibling never in a group send) has no
-// delivered content to judge — fail closed, the card parks for the owner.
-function deliveredScopeOf(row) {
-  const data = require('./estimate-service-lines').parseEstimateData(row.estimate_data) || {};
-  const scope = data.sendSnapshot?.scope;
-  return scope && typeof scope === 'object' && Array.isArray(scope.lines) ? scope : null;
+// The scopes a row delivered AFTER the card, oldest first: the stamp's
+// scopeHistory entries past the boundary — a resend overwrites
+// sendSnapshot.scope, so the latest scope alone cannot vouch for an
+// earlier complete delivery that a later edit-and-resend narrowed before
+// the sweep ran (codex r32 P2). A row with no revision past the boundary
+// (stamped before the history existed, or witnessed by an acceptance of
+// an earlier delivery) is judged on its latest scope, as before; a row
+// with no stamp at all (sent before the stamp existed, or a sibling never
+// in a group send) has no delivered content to judge — fail closed, the
+// card parks for the owner.
+function deliveredScopesOf(row, after) {
+  const snap = (require('./estimate-service-lines').parseEstimateData(row.estimate_data) || {}).sendSnapshot;
+  const valid = (scope) => Boolean(scope && typeof scope === 'object' && Array.isArray(scope.lines));
+  const revisions = (Array.isArray(snap?.scopeHistory) ? snap.scopeHistory : [])
+    .filter((h) => h && typeof h === 'object' && valid(h.scope) && strictlyAfter(h.deliveredAt, after))
+    .map((h) => h.scope);
+  if (revisions.length) return revisions;
+  return valid(snap?.scope) ? [snap.scope] : [];
 }
 
 // A delivered scope as the address-bearing record the booking rules
@@ -1409,16 +1420,21 @@ function estimateCoversAsk(item, row, siblings = []) {
   // two-property ask is judged property by property — every named
   // property served, by the estimate or a delivered sibling at it (codex
   // r24 P2).
-  const citedScope = deliveredScopeOf(row);
-  const cited = citedScope ? estimateAsVisit(citedScope) : null;
-  if (!cited || !bookingAtRequestedAddress(item, cited, new Map())) return false;
   const at = (scope, readings) => {
     const visit = estimateAsVisit(scope);
     return Boolean(visit) && bookingAtReadings(item, visit, new Map(), readings);
   };
-  const group = [citedScope, ...siblings.map(deliveredScopeOf).filter(Boolean)];
-  return asked.every((readings) => coveredByDistinct(requirements,
-    group.filter((scope) => at(scope, readings)).flatMap((scope) => scope.lines.map((l) => ({ ...l, words: lineWords(l) }))).filter((l) => intentAnswered(rule, l)), (l) => l.words));
+  // Each revision the cited row delivered after the card is judged as ITS
+  // OWN complete quote (revisions never pool — two incomplete ones are not
+  // one complete one); a sibling contributes its latest post-card scope.
+  const siblingScopes = siblings.map((s) => deliveredScopesOf(s, item.created_at).at(-1)).filter(Boolean);
+  return deliveredScopesOf(row, item.created_at).some((citedScope) => {
+    const cited = estimateAsVisit(citedScope);
+    if (!cited || !bookingAtRequestedAddress(item, cited, new Map())) return false;
+    const group = [citedScope, ...siblingScopes];
+    return asked.every((readings) => coveredByDistinct(requirements,
+      group.filter((scope) => at(scope, readings)).flatMap((scope) => scope.lines.map((l) => ({ ...l, words: lineWords(l) }))).filter((l) => intentAnswered(rule, l)), (l) => l.words));
+  });
 }
 
 // Bookings and completed visits for the not_confirmed / address arms.

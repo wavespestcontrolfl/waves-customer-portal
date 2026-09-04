@@ -229,7 +229,10 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     const scopeMerge = db.raw.mock.calls.find(([sql, bindings]) => /'\{sendSnapshot\}'/.test(String(sql)) && Array.isArray(bindings) && bindings.length === 2);
     expect(scopeMerge).toBeTruthy();
     expect(JSON.parse(scopeMerge[1][0]).deliveryState.firstDeliveredAt).toBeTruthy();
-    expect(JSON.parse(scopeMerge[1][1])).toEqual({ scope: { lines: [{ names: [], recurring: true, oneTime: false }], address: null, property: null } });
+    const scope = { lines: [{ names: [], recurring: true, oneTime: false }], address: null, property: null };
+    // The scope rides with its revision history — one entry per real
+    // delivery, stamped with the handoff time (codex #3811 r32 P2).
+    expect(JSON.parse(scopeMerge[1][1])).toEqual({ scope, scopeHistory: [{ deliveredAt: expect.any(String), scope }] });
   });
 });
 

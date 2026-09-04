@@ -596,6 +596,19 @@ describe('evidence helpers', () => {
     const fleaOnlyStamp = deliveredEstimateScope({ address: '77 Oak Street, Bradenton, FL 34205', estimate_data: { result: { oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } } } });
     expect(estimateCoversAsk(card({}), { ...est({}), estimate_data: { ...est({}).estimate_data, sendSnapshot: { scope: fleaOnlyStamp } } })).toBe(false);
     expect(estimateCoversAsk(card({}), { ...est({}), estimate_data: { ...est({}).estimate_data, sendSnapshot: {} } })).toBe(false);
+    // A resend overwrites the latest scope; the stamp's scopeHistory keeps
+    // the earlier complete revision, judged on its own — and a revision
+    // delivered BEFORE the card never counts (codex r32 P2).
+    const full = deliveredEstimateScope(est({}));
+    const later = new Date(new Date(FRESH).getTime() + 3600 * 1000).toISOString();
+    const earlier = new Date(new Date(FRESH).getTime() - 3600 * 1000).toISOString();
+    const revised = (scopeHistory) => ({ ...est({}), estimate_data: { ...est({}).estimate_data, sendSnapshot: { scope: fleaOnlyStamp, scopeHistory } } });
+    expect(estimateCoversAsk(card({}), revised([{ deliveredAt: later, scope: full }, { deliveredAt: later, scope: fleaOnlyStamp }]))).toBe(true);
+    expect(estimateCoversAsk(card({}), revised([{ deliveredAt: earlier, scope: full }, { deliveredAt: later, scope: fleaOnlyStamp }]))).toBe(false);
+    expect(estimateCoversAsk(card({}), revised([{ deliveredAt: earlier, scope: full }]))).toBe(false);
+    // Two incomplete revisions never pool into one complete quote.
+    const lawnOnlyStamp = deliveredEstimateScope({ address: '77 Oak Street, Bradenton, FL 34205', estimate_data: { result: { oneTime: { items: [{ service: 'One-Time Lawn Treatment', price: 90 }] } } } });
+    expect(estimateCoversAsk(card({}), revised([{ deliveredAt: later, scope: fleaOnlyStamp }, { deliveredAt: later, scope: lawnOnlyStamp }]))).toBe(false);
     // A generic pest program is not the flea treatment, and the engine's
     // input flag beside typed lines selects a service without pricing it.
     const generic = { result: { recurring: { services: [{ name: 'Pest Control', mo: 40 }, { name: 'Lawn Care Program', mo: 60 }] }, oneTime: { items: [{ service: 'One-Time Lawn Treatment', price: 90 }] } } };

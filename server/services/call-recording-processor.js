@@ -7108,6 +7108,9 @@ const CallRecordingProcessor = {
     const onFileAddress = knownCaller
       ? { address_line1: knownCaller.addressLine1, address_line2: knownCaller.addressLine2, city: knownCaller.addressCity, zip: knownCaller.addressZip }
       : null;
+    // Every card this pass files is created after this instant — the
+    // canonical re-stamp after Step 3 below is scoped to them.
+    const cardsFiledSince = new Date();
     // Cross-call threading context: the latest other call from this number in
     // the last week, so a continuation call completes the earlier record
     // instead of restarting from nothing. Fail-open — extraction proceeds
@@ -8948,6 +8951,29 @@ const CallRecordingProcessor = {
     // truthy but say nothing about the caller — without the usability gate
     // they'd open bogus "save this number" cards and suppress legitimate
     // backfills (pre-push audit P1).
+    // The on-file address this pass stamped on its cards followed the
+    // PRELIMINARY phone lookup; Step 3 may have resolved a different
+    // customer (transcript-name / shared-phone reconciliation, an operator
+    // link, an existing call.customer_id) or minted one FROM this call (no
+    // on-file address at all). Re-stamp the pass's own cards from the
+    // CANONICAL customer — still filing time, the same pass — so the
+    // evidence sweep judges the ask against the property the call is
+    // actually linked to (codex r32 P2). Fail-soft: the cards stand.
+    if (customerId) {
+      try {
+        const { onFileAddressSnapshot } = require('./call-routing-gates');
+        const canonical = createdCustomerFromCall
+          ? null
+          : await db('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+        await db('triage_items')
+          .where({ call_log_id: call.id, status: 'open' })
+          .where('created_at', '>=', cardsFiledSince)
+          .update({ payload: db.raw("jsonb_set(COALESCE(payload, '{}'::jsonb), '{on_file_address}', ?::jsonb, true)", [JSON.stringify(onFileAddressSnapshot(canonical))]) });
+      } catch (e) {
+        logger.warn(`[call-proc] on-file address re-stamp skipped for ${maskSid(callSid)}: ${e.message}`);
+      }
+    }
+
     const verifiableAni = firstExternalPhone(call.from_phone);
     if (customerId && verifiableAni && !createdCustomerFromCall && !isOutboundCall(call)) {
       try {
