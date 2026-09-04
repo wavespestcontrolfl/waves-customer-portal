@@ -75,17 +75,26 @@ async function findLowStockCandidates(conn = db) {
 
 // THE eligibility predicate recalcBestPriceLocked uses (shared module):
 // a zero-priced, deactivated, unapproved or expired row must not steer an
-// order (Codex r4 P2, r8 P1). Any query failure (older schema) degrades to
-// "no link", never throws.
+// order (Codex r4 P2, r8 P1). Runs inside the caller's transaction, so a
+// failure propagates — swallowing it would leave the transaction aborted
+// and the next write failing anyway (Codex r10 P2); the sweep's per-product
+// catch records it.
 async function vendorPricingFor(conn, productId, vendorId) {
   if (!vendorId) return null;
-  try {
-    return await eligibleVendorPricing(conn('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }))
-      .orderBy('is_best_price', 'desc')
-      .first();
-  } catch {
-    return null;
-  }
+  return eligibleVendorPricing(conn('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }))
+    .orderBy('is_best_price', 'desc')
+    .first();
+}
+
+// The product's pricing advisory lock — the one every vendor_pricing writer
+// (manual price edit, approval, Hermes report, recalcBestPrice) takes FIRST
+// and holds to commit. Taken here BEFORE the product row lock, in the
+// repository's lock order (advisory, then rows), so the pricing row read
+// under it is the committed state no in-flight edit can still change
+// (Codex r10 P1): a writer holding this lock has not touched the product
+// row yet, and a writer waiting on it sees our request committed first.
+async function lockProductPricing(trx, productId) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(productId)]);
 }
 
 // The bell says exactly what the request row says (see the header).
@@ -149,16 +158,18 @@ function learnedVendorFields(request, vendor) {
 // Vendor configured after the request was raised (the seeded sticker starts
 // unpriced): carry the vendor/SKU/URL onto the open request so the tab and
 // the refreshed bell show it. Request AND product are locked in one
-// transaction — request FIRST, then product: the repository's lock order
-// (the Restock action route, the Intelligence Bar tool and the dispatcher
-// all take the request row before the product row), so this cannot deadlock
-// against them (pre-push P1). The vendor is re-derived from the locked
+// transaction — the pricing advisory lock, then request, then product: the
+// repository's lock order (advisory before rows; the Restock action route,
+// the Intelligence Bar tool and the dispatcher all take the request row
+// before the product row), so this cannot deadlock against them (pre-push
+// P1, Codex r10 P1). The vendor is re-derived from the locked
 // product (an admin edit between the scan and here must not pin the request
 // to the old vendor), and a request that left 'open' meanwhile is neither
 // updated nor re-belled. Returns the request as the bell must see it, or
 // null when it is no longer an open auto request.
 async function refreshOpenRequest(ctx, p, existing) {
   return ctx.conn.transaction(async (trx) => {
+    await lockProductPricing(trx, p.id);
     const request = await trx('product_restock_requests').where({ id: existing.id }).forUpdate().first();
     if (!request || request.status !== 'open' || request.source !== SOURCE) return null;
     const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('auto_reorder_vendor_id');
@@ -211,6 +222,7 @@ async function lockedVendor(trx, p, fresh) {
 // the lock rather than racing past it.
 async function createRequestLocked(conn, p) {
   return conn.transaction(async (trx) => {
+    await lockProductPricing(trx, p.id);
     const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate()
       .first('inventory_on_hand', 'low_stock_threshold', 'auto_reorder_enabled', 'active', 'reorder_quantity', 'auto_reorder_vendor_id', 'inventory_unit');
     if (!fresh || !stillLow(fresh)) return { deduped: 'no_longer_low' };

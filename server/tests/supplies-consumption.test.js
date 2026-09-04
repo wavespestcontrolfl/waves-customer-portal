@@ -149,9 +149,10 @@ test('movement carries unit_cost / cost_used from cost_per_unit in the inventory
   const res = await consumeCompletionSupplies(db, args);
   expect(inserts[0]).toMatchObject({ unit_cost: 0.5356, cost_used: 0.5356 });
   expect(res.consumed[0].costUsed).toBe(0.5356);
-  const { inserts: noCost } = fakeDb({ products: [{ ...sign, cost_per_unit: '12', cost_unit: 'gal' }] });
-  await consumeCompletionSupplies(fakeDb({ products: [{ ...sign, cost_per_unit: '12', cost_unit: 'gal' }] }).db, args);
-  expect(noCost).toHaveLength(0);
+  const mismatch = fakeDb({ products: [{ ...sign, cost_per_unit: '12', cost_unit: 'gal' }] });
+  await consumeCompletionSupplies(mismatch.db, args);
+  expect(mismatch.inserts).toHaveLength(1);
+  expect(mismatch.inserts[0]).toMatchObject({ unit_cost: null, cost_used: null });
 });
 
 test('duplicate (index ignored the insert) → no decrement', async () => {
