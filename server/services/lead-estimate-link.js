@@ -3,7 +3,7 @@ const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
 const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString } = require('../utils/datetime-et');
-const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
+const { bridgeLeadFunnelStage, FUNNEL_STAGE_RANK } = require('./lead-funnel-bridge');
 const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
@@ -89,7 +89,12 @@ const sameContactIdentity = (read, current) => ['customer_id', 'phone', 'email']
 // now, or already at booked / completed from an earlier settlement, so a
 // replayed conversion never inserts a second row for the deal, codex r28
 // P1 — or the lead is not a wizard repeat: every other lead with no row has
-// none on purpose, codex r22 P2 / r24 P1).
+// none on purpose, codex r22 P2 / r24 P1). The root's advance is conditioned
+// in SQL on the root still being the row validated here — identity, status,
+// estimate link — so a staff edit between the read and the write makes it
+// lose and the repeat carries its own row (codex r29 P1); and once the root's
+// row carries the win, a lead-stage row the repeat kept because /calculate's
+// own delete failed is dropped, so the deal is never counted twice (r29 P2).
 async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {}) {
   const repeat = await database('leads').where('id', leadId).first();
   if (!duplicateMarkerOf(repeat) || repeat.lead_type !== 'quote_wizard') return null;
@@ -98,9 +103,12 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
     && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
     && !(root.estimate_id && repeat.estimate_id && String(root.estimate_id) !== String(repeat.estimate_id));
   if (!rootOurs) return repeat;
-  await bridgeLeadFunnelStage(root.id, 'won', database);
-  const rootRow = await database('ad_service_attribution').where({ lead_id: root.id }).first('id');
-  return rootRow ? null : repeat;
+  const bridged = await bridgeLeadFunnelStage(root.id, 'won', database, { onlyIfLead: { ...identityOf(root), status: root.status } });
+  const rootRow = bridged.updated ? null : await database('ad_service_attribution').where({ lead_id: root.id }).first('funnel_stage');
+  const settled = !!bridged.updated || (!!rootRow && FUNNEL_STAGE_RANK[rootRow.funnel_stage] >= FUNNEL_STAGE_RANK.booked);
+  if (!settled) return repeat;
+  await database('ad_service_attribution').where({ lead_id: repeat.id }).whereNot({ funnel_stage: 'completed' }).del();
+  return null;
 }
 
 // The ancestry a repeat belongs to, for grouping repeats of one inquiry: the
@@ -853,7 +861,12 @@ async function markLinkedLeadEstimateAccepted({
     // check made before the awaited conversion, r12 / r27 P1); otherwise
     // the named row gets the row its own run would have stamped, at booked
     // (r14 P2). One row either way.
-    if (named.status === 'duplicate' && !named.deleted_at && !creditedOnOriginal) await convert(named, DUPLICATE_LEAD_CLAIM);
+    // ...and only an UNLINKED named row: a repeat staff linked to another
+    // estimate since its run is that deal's lead (a link to THIS estimate
+    // would have been the FK branch above), and converting it here would
+    // write this acceptance's customer and value hints onto it (codex #3834
+    // r29 P1).
+    if (named.status === 'duplicate' && !named.deleted_at && !named.estimate_id && !creditedOnOriginal) await convert(named, DUPLICATE_LEAD_CLAIM);
     return;
   }
 

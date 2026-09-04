@@ -123,17 +123,31 @@ function runStageUpdate(db, target, scopeRows) {
 }
 
 /**
- * bridgeLeadFunnelStage(leadId, leadStatus, database?)
+ * bridgeLeadFunnelStage(leadId, leadStatus, database?, { onlyIfLead }?)
  * Advance the funnel row linked to `leadId` to the stage `leadStatus` maps to.
+ * `onlyIfLead` (column → value on `leads`): the advance is conditioned IN
+ * THE SAME STATEMENT on the lead row still matching it — a caller that
+ * validated a lead as its opportunity pins the identity / status / estimate
+ * link it validated, so a staff edit landing between that read and this
+ * write makes the advance lose instead of booking a row that is no longer
+ * that opportunity's (codex #3834 r29 P1).
  * Returns { updated, stage } or { updated: 0, reason }.
  */
-async function bridgeLeadFunnelStage(leadId, leadStatus, database = null) {
+async function bridgeLeadFunnelStage(leadId, leadStatus, database = null, { onlyIfLead = null } = {}) {
   const db = database || require('../models/db');
   try {
     const target = LEAD_STATUS_TO_FUNNEL_STAGE[leadStatus];
     if (!leadId || !target) return { updated: 0, reason: 'no_mapping' };
 
-    const updated = await runStageUpdate(db, target, (q) => q.where({ lead_id: leadId }));
+    const updated = await runStageUpdate(db, target, (q) => {
+      q.where({ lead_id: leadId });
+      if (onlyIfLead) {
+        q.whereExists(function leadStillMatches() {
+          this.select(1).from('leads').whereRaw('leads.id = ad_service_attribution.lead_id').where(onlyIfLead).whereNull('deleted_at');
+        });
+      }
+      return q;
+    });
     return { updated, stage: target };
   } catch (err) {
     logger.warn(`[lead-funnel-bridge] stage bridge failed for lead ${leadId} (${leadStatus}): ${err.message}`);

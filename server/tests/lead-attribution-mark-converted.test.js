@@ -71,10 +71,11 @@ describe('markConverted claims', () => {
     expect(mockCalls.some((c) => c[0] === 'lead_activities')).toBe(true);
   });
 
-  test('a win the bridge DID land needs no settling', async () => {
+  test('a win the bridge DID land is still settled — a row the repeat kept when /calculate\'s delete failed is reconciled against its root (codex r29 P2)', async () => {
     bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 1, stage: 'booked' });
+    mockRepeatRow = null;
     await markConverted('lead-bridged', { customerId: 'c1' });
-    expect(settleRepeatFunnelRow).not.toHaveBeenCalled();
+    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-bridged', { customerId: 'c1' });
     expect(stampLeadFunnelRow).not.toHaveBeenCalled();
   });
 
