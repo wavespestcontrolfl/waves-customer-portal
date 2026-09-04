@@ -372,6 +372,23 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.placeClicked).toBe(0);
   });
 
+  test('a transient failure followed by SiteOne rejecting the login parks as login_rejected — the stale transient error is not read as run-level (r4 P1)', async () => {
+    const { st, deps, browser } = fakeSiteOne({ gotoFailOnce: true, loginRejects: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_rejected' });
+    expect(st.placeClicked).toBe(0);
+    expect(browser.close).toHaveBeenCalled();
+  });
+
+  test('a cap refusal carries the vendor total it refused: the checkout total, not the earlier cart total (r4 P2)', async () => {
+    const { st, deps } = fakeSiteOne();
+    let calls = 0;
+    const beforeSubmit = async (cents) => { calls += 1; return calls === 1 ? { ok: true } : { ok: false, reason: 'over_cap', message: `${cents} over the per-order cap` }; };
+    await expect(s1.place(args({ beforeSubmit }), deps)).rejects.toMatchObject({ refuse: 'over_cap', cents: 10593 });
+    expect(st.placeClicked).toBe(0);
+    const first = fakeSiteOne();
+    await expect(s1.place(args({ beforeSubmit: async () => ({ ok: false, reason: 'over_cap' }) }), first.deps)).rejects.toMatchObject({ refuse: 'over_cap', cents: 9900 });
+  });
+
   test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {
     const { st, deps } = fakeSiteOne({ gotoFailOnce: true });
     const r = await s1.place(args(), deps);

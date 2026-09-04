@@ -478,7 +478,7 @@ export default function InventoryPage() {
       )}
       {tab === "forecast" && <WaveGuardForecastTab showToast={showToast} onUpdate={loadStats} />}
       {tab === "unit-review" && <UnitReviewTab showToast={showToast} />}
-      {tab === "restock" && <RestockRequestsTab showToast={showToast} onUpdate={loadStats} />}
+      {tab === "restock" && <RestockRequestsTab showToast={showToast} onUpdate={loadStats} canAuthor={isAdminRole} />}
       {tab === "margins" && <MarginsTab showToast={showToast} />}
       {tab === "scrape" && <ScrapeTab showToast={showToast} />}
       <div
@@ -2771,7 +2771,7 @@ function ProductsTab({
   );
 }
 
-function RestockRequestsTab({ showToast, onUpdate }) {
+function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
   const [requests, setRequests] = useState([]);
   const [status, setStatus] = useState("active");
   const [loading, setLoading] = useState(true);
@@ -2933,6 +2933,8 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                           {request.order.status !== "placed" && request.order.error && (
                             <div style={{ color: D.muted, marginTop: 2, maxWidth: 260 }}>{request.order.error}</div>
                           )}
+                          {/* Owner-only: the screenshots show the billing account + totals; the route is requireAdmin. */}
+                          {canAuthor && (
                           <div style={{ marginTop: 4, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                             {evidence[request.id] ? (
                               evidence[request.id].map((s) => (
@@ -2946,6 +2948,7 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                               </button>
                             )}
                           </div>
+                          )}
                         </div>
                       )}
                       {request.status === "open" && request.order?.status !== "placing" && (

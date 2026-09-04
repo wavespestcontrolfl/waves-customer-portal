@@ -636,7 +636,10 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
 // What an adapter.place() rejection means. Run-level errors are the caller's
 // (claim released, batch aborts); everything else is this request's park.
 function parkForPlaceError(conn, err, { ctx, vendor, quoteCents }) {
-  if (err.refuse) return park(conn, { ...ctx, reason: err.refuse, message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
+  // A refusal that names the vendor total it was decided on (a cap
+  // refusal at the cart or checkout stage) parks with THAT amount — the
+  // ledger must show the binding total, not an earlier quote (Codex r4 P2).
+  if (err.refuse) return park(conn, { ...ctx, reason: err.refuse, message: err.message, amountCents: err.cents ?? quoteCents, evidence: err.evidence || null });
   if (err.ambiguous) return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.`, amountCents: quoteCents, evidence: err.evidence || null });
   return park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
 }

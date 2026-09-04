@@ -44,10 +44,10 @@ const STAFF_INVENTORY_REQUEST = (req) => {
     // projection on GET / (codex P0). Techs use /tech/protocols for
     // protocol reference.
     return p === '/' || p === '/stats' || p === '/waveguard-forecast'
-      || p === '/unit-review' || p === '/restock-requests'
-      // Presigned adapter screenshots for a request's order — read-only
-      // diagnostics for the same staff who see the Restock tab.
-      || /^\/restock-requests\/[^/]+\/order-evidence$/.test(p);
+      || p === '/unit-review' || p === '/restock-requests';
+    // NOTE: /restock-requests/:id/order-evidence (adapter checkout
+    // screenshots — billing account, totals) is owner-only, like every
+    // other cost-bearing read here; the tab shows its button to admins only.
   }
   // NOTE: /service-usage MUTATIONS are protocol CONFIG (products +
   // application rates that drive COGS/pricing) — owner-only. Per-job usage

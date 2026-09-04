@@ -107,7 +107,10 @@ const DEFAULT_LOGIN_URL = 'https://www.siteone.com/en/login';
 const EVIDENCE_PREFIX = 'procurement-evidence/';
 
 class RefusedError extends Error {
-  constructor(reason, message, evidence) { super(message || reason); this.refuse = reason; if (evidence) this.evidence = evidence; }
+  // cents: the vendor total the refusal was decided on (a cap refusal) —
+  // the dispatcher parks the ledger row with THIS amount, not an earlier
+  // cart or history quote (Codex r4 P2).
+  constructor(reason, message, evidence, cents = null) { super(message || reason); this.refuse = reason; if (evidence) this.evidence = evidence; if (cents != null) this.cents = cents; }
 }
 function runLevel(message) { const e = new Error(message); e.runLevel = true; return e; }
 
@@ -243,7 +246,11 @@ async function login(page, creds) {
     // A transient navigation / wait failure is one failed attempt of three;
     // an off-host redirect or missing fields is run-level at once (Codex r4
     // P2).
-    try { ok = await attempt(); }
+    // An attempt that RETURNS (SiteOne answered, login form still up)
+    // clears an earlier attempt's transient error: the exhaustion verdict
+    // below must read the LAST outcome — a rejected login parks, only three
+    // network failures are run-level (Codex r4 P1).
+    try { ok = await attempt(); lastError = null; }
     catch (e) { if (e.runLevel) throw e; lastError = e; logger.warn(`[siteone-bot] login attempt ${i + 1} failed: ${String(e.message).slice(0, 120)}`); }
   }
   if (ok) return;
@@ -527,7 +534,7 @@ async function place(
     let verdict;
     try { verdict = await beforeSubmit(cents); }
     catch (e) { throw runLevel(`siteone bot: cap check failed before the ${what}: ${String(e.message).slice(0, 120)}`); }
-    if (!verdict || verdict.ok !== true) throw new RefusedError(verdict?.reason || 'over_cap', verdict?.message || `cap check refused the ${what}`, evidence);
+    if (!verdict || verdict.ok !== true) throw new RefusedError(verdict?.reason || 'over_cap', verdict?.message || `cap check refused the ${what}`, evidence, cents);
   };
   let browser = null;
   let page = null;
