@@ -143,6 +143,30 @@ describe('POST /relay-sandbox', () => {
     expect(xml).not.toContain('<Parameter');
   });
 
+  // ⭐ THE SOCKET OPENS ON THIS DEPLOY (codex r14 P1): SERVER_DOMAIN, else the
+  // Railway public domain, else the signed request's Host — production only as
+  // the last resort, never for a preview whose DB has no sandbox row.
+  test('the sandbox relay socket points at the current deploy, not production, when SERVER_DOMAIN is unset', async () => {
+    const saved = process.env.SERVER_DOMAIN;
+    delete process.env.SERVER_DOMAIN;
+    try {
+      process.env.RAILWAY_PUBLIC_DOMAIN = 'pr-42.up.railway.app';
+      primeInsert();
+      let res = mockRes();
+      await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-host1', From: '+19415550100', To: SANDBOX }, headers: { host: 'ignored.example.com' } }, res);
+      expect(res.body).toContain('wss://pr-42.up.railway.app/ws/voice-agent');
+      delete process.env.RAILWAY_PUBLIC_DOMAIN;
+      primeInsert();
+      res = mockRes();
+      await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-host2', From: '+19415550100', To: SANDBOX }, headers: { host: 'preview.example.com:8443' } }, res);
+      expect(res.body).toContain('wss://preview.example.com/ws/voice-agent');
+      expect(res.body).not.toContain('portal.wavespestcontrol.com');
+    } finally {
+      process.env.SERVER_DOMAIN = saved;
+      delete process.env.RAILWAY_PUBLIC_DOMAIN;
+    }
+  });
+
   test('the production profile applies to a human sandbox caller (what a customer would hear)', async () => {
     primeInsert();
     process.env.VOICE_RELAY_PROFILE = 'nova_hints_v1';
@@ -191,6 +215,21 @@ describe('POST /relay-sandbox', () => {
     const adopted = primeInsert({ existing: { id: 9, source: null } });
     await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-att2', From: '+19415550100', To: SANDBOX, StirVerstat: 'TN-Validation-Passed-A' } }, mockRes());
     expect(JSON.parse(adopted.update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_sandbox: true, stir_verstat: 'TN-Validation-Passed-A' });
+    // …and into a sandbox-sourced row /call-status wrote first (no StirVerstat on a status callback) — codex r14 P2.
+    const owned = primeInsert({ existing: { id: 10, source: VOICE_RELAY_SANDBOX_SOURCE } });
+    const res = mockRes();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-att3', From: '+19415550100', To: SANDBOX, StirVerstat: 'TN-Validation-Passed-A' } }, res);
+    expect(owned.insert).not.toHaveBeenCalled();
+    expect(JSON.parse(owned.update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_sandbox: true, stir_verstat: 'TN-Validation-Passed-A' });
+    expect(res.body).toContain('<ConversationRelay');
+  });
+
+  test('a failed sandbox /call-status raises no Twilio failure alert (codex r14 P2)', async () => {
+    const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
+    isFailureStatus.mockReturnValueOnce(true);
+    primeInsert({ existing: undefined, source: null });
+    await handlerFor('/call-status')({ body: { CallSid: 'CA-sb-fail', From: '+19415550100', To: SANDBOX, CallStatus: 'failed', Direction: 'inbound' } }, mockRes());
+    expect(alertTwilioFailure).not.toHaveBeenCalled();
   });
 
   test('relay not attached ⇒ the row still lands, stamped relay_failed, then a spoken notice + hangup', async () => {
@@ -242,6 +281,9 @@ describe('POST /relay-sandbox', () => {
     update.mockClear();
     await stampRelayProfile('CA-prod-2', {});
     expect(update).not.toHaveBeenCalled();
+    // The Spanish leg clears a pre-stamped English profile when its own options resolve empty (codex r14 P2).
+    await stampRelayProfile('CA-prod-2', {}, { clearWhenEmpty: true });
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_profile_id: null, relay_attrs: null });
     db.mockImplementation(() => { throw new Error('pool down'); });
     await expect(stampRelayProfile('CA-prod-3', { relayProfileId: 'nova_hints_v1' })).resolves.toBeUndefined(); // fail-soft
   });

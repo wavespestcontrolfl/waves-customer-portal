@@ -138,7 +138,9 @@ function validateRelayAttrs(input) {
   }
   const attrs = {};
   for (const [key, raw] of Object.entries(input)) {
-    const validator = RELAY_ATTR_VALIDATORS[key];
+    // Own keys only: `toString` / `constructor` resolve to inherited functions
+    // and would validate as truthy (codex r14 P2 on #3852).
+    const validator = Object.prototype.hasOwnProperty.call(RELAY_ATTR_VALIDATORS, key) ? RELAY_ATTR_VALIDATORS[key] : null;
     if (!validator) return { ok: false, error: `unknown attribute "${key}"` };
     let value = raw;
     if (key === 'hints' && value === HINTS_DEFAULT) {

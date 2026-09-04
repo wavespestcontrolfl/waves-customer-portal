@@ -1240,7 +1240,9 @@ router.post('/voice', async (req, res) => {
             // Profile stamped before the relay opens — same reason as the
             // English legs (codex r13 P2).
             const relayOpts = spanishRelayOptions();
-            await withDeadline(stampRelayProfile(CallSid, relayOpts));
+            // The English answer already stamped the active profile; an empty
+            // Spanish resolution (English-only profile dropped) clears it.
+            await withDeadline(stampRelayProfile(CallSid, relayOpts, { clearWhenEmpty: Boolean(activeRelayTwiMLOptions().relayProfileId) }));
             return res.type('text/xml').send(buildSpanishRelayTwiML({ vestibule: spanishLeg, callSid: CallSid, relayOpts }));
           }
           logger.warn(`[voice] Spanish chosen but no Spanish session can start (${handoffKind}) for ${maskSid(CallSid)} — continuing in English`);
@@ -1588,9 +1590,19 @@ function isSandboxCall(req) {
   return !!target && toE164(req.body?.To || '') === target;
 }
 
-function sandboxRelayXml({ callSid, cell }) {
+// The relay socket must open on THIS deploy: a branch bake-off on a Railway
+// preview whose SERVER_DOMAIN is unset must not hand the call to production's
+// socket, whose database has no sandbox row for it (codex r14 P1). The
+// request's Host is Twilio-signature-covered, so it is trustworthy here.
+function sandboxRelayHost(req) {
+  return process.env.SERVER_DOMAIN
+    || process.env.RAILWAY_PUBLIC_DOMAIN
+    || (req && req.headers && String(req.headers.host || '').replace(/:\d+$/, ''))
+    || 'portal.wavespestcontrol.com';
+}
+function sandboxRelayXml({ callSid, cell, req = null }) {
   const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
-  const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
+  const domain = sandboxRelayHost(req);
   return buildRelayTwiML({
     wsUrl: `wss://${domain}${RELAY_WS_PATH}`,
     callSid,
@@ -1605,16 +1617,21 @@ function sandboxRelayXml({ callSid, cell }) {
 // to stamp it at close — and that is exactly the profile a bake-off must be
 // able to attribute. The fallback (production) profile counts too. Fail-soft:
 // a stamp failure must not cost the caller the call.
-async function stampRelayProfile(callSid, opts) {
-  if (!opts || !opts.relayProfileId) return;
+// `clearWhenEmpty`: the Spanish leg follows an English response that already
+// stamped the active profile; when the Spanish options resolve to nothing
+// (an English-only profile was dropped) the row must say so, or the untuned
+// leg is attributed to a profile it never used (codex r14 P2).
+async function stampRelayProfile(callSid, opts, { clearWhenEmpty = false } = {}) {
+  const has = Boolean(opts && opts.relayProfileId);
+  if (!has && !clearWhenEmpty) return;
+  const stamp = has
+    ? { relay_profile_id: opts.relayProfileId, relay_attrs: opts.relayAttrs || {} }
+    : { relay_profile_id: null, relay_attrs: null };
   try {
     await db('call_log')
       .where({ twilio_call_sid: callSid })
       .update({
-        metadata: db.raw(
-          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
-          [JSON.stringify({ relay_profile_id: opts.relayProfileId, relay_attrs: opts.relayAttrs || {} })],
-        ),
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stamp)]),
       });
   } catch (stampErr) {
     logger.warn(`[voice-relay] profile stamp failed ${maskSid(callSid)}: ${stampErr.message}`);
@@ -1670,7 +1687,10 @@ router.post('/relay-sandbox', async (req, res) => {
           source: VOICE_RELAY_SANDBOX_SOURCE,
           metadata: JSON.stringify(sandboxMeta),
         });
-      } else if (existing.source == null) {
+      } else if (existing.source == null || existing.source === VOICE_RELAY_SANDBOX_SOURCE) {
+        // NULL = /call-status's generic fallback row (adopt); sandbox-sourced =
+        // /call-status saw the sandbox number first and wrote the row without
+        // StirVerstat (merge the attestation in). Either way the row is ours.
         await trx('call_log').where({ id: existing.id }).update({
           source: VOICE_RELAY_SANDBOX_SOURCE,
           customer_id: null,
@@ -1718,7 +1738,7 @@ router.post('/relay-sandbox', async (req, res) => {
     const gatherInner = twiml.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
     // No digits ⇒ this document's relay opens with the production profile.
     await stampRelayProfile(CallSid, activeRelayTwiMLOptions());
-    const relayXml = sandboxRelayXml({ callSid: CallSid });
+    const relayXml = sandboxRelayXml({ callSid: CallSid, req });
     logger.info(`[relay-sandbox] answering ${maskSid(CallSid)} from=${maskPhone(From)}`);
     return res.type('text/xml').send(relayXml.replace('<Response>', `<Response>${gatherInner}`));
   } catch (err) {
@@ -1747,7 +1767,7 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     const replay = new VoiceResponse();
     replay.play(wavesGreetingUrl());
     const replayInner = replay.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
-    return res.type('text/xml').send(sandboxRelayXml({ callSid: CallSid, cell }).replace('<Response>', `<Response>${replayInner}`));
+    return res.type('text/xml').send(sandboxRelayXml({ callSid: CallSid, cell, req }).replace('<Response>', `<Response>${replayInner}`));
   } catch (err) {
     logger.error(`[relay-sandbox] cell error: ${err.message}`);
     return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
@@ -2760,7 +2780,9 @@ router.post('/call-status', async (req, res) => {
       scheduleRecordingRecovery(CallSid);
     }
 
-    if (isFailureStatus(CallStatus)) {
+    // A failed/busy/no-answer bake-off is its own artifact (the sandbox row),
+    // never an admin bell (codex r14 P2).
+    if (isFailureStatus(CallStatus) && !isSandboxCall(req)) {
       notifyTwilioFailure({
         channel: 'voice',
         direction: isOutbound ? 'outbound' : 'inbound',

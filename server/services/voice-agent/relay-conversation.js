@@ -707,6 +707,7 @@ class RelayConversation {
   /** Retire every utterance still queued as playing (a new caller turn began). */
   _drainPlaying() {
     for (const entry of this._playing) entry.done = true;
+    if (this._playing.length) this._retiredPlanned = this._playing[this._playing.length - 1].planned;
     this._playing = [];
   }
 
@@ -740,6 +741,10 @@ class RelayConversation {
     }
     if (!target) {
       if (!this._playing.length) return;
+      // A repeat of an utterance that already retired (Twilio re-sent its
+      // completion) must not land on the NEXT utterance (codex r14 P2).
+      const retired = String(this._retiredPlanned || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (retired && retired.startsWith(norm(text))) return;
       target = this._playing[0];
       idx = 0;
     }
@@ -751,6 +756,7 @@ class RelayConversation {
     this._syncPlayedEntry(target);
     if (norm(target.played) === norm(target.planned)) {
       target.done = true;
+      this._retiredPlanned = target.planned;
       this._playing.shift();
     }
   }

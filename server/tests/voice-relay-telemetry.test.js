@@ -187,6 +187,19 @@ describe('per-turn stats', () => {
     expect(agentEntries(again.convo)[0].played).toBe('Hello there,');
   });
 
+  test('a re-sent completion for an already-retired utterance never lands on the next one (codex r14 P2)', () => {
+    const { convo } = convoWithSpokenTurn();
+    convo.say('Let me check that for you.');
+    convo.say('Your next visit is Tuesday.');
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'Let me check that for you.' }); // retires #1
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'Let me check that for you.' }); // Twilio repeats it
+    const [filler, answer] = agentEntries(convo);
+    expect(filler.done).toBe(true);
+    expect(answer.played).toBeNull(); // untouched by the repeat
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'Your next visit' });
+    expect(answer.played).toBe('Your next visit'); // later valid tokens still match
+  });
+
   // ⭐ ONE CALLER TURN, TWO UTTERANCES. A read-tool round speaks its filler,
   // the tool runs, then the answer is spoken. Tokens belong to the utterance
   // they fit, never to "the latest one".

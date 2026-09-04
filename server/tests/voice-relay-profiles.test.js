@@ -101,6 +101,15 @@ describe('the shipped profiles', () => {
   });
 });
 
+describe('validateRelayAttrs — inherited keys', () => {
+  test('an Object-prototype key is an unknown attribute, not a validator (codex r14 P2)', () => {
+    const { validateRelayAttrs } = require('../services/voice-agent/relay-profiles');
+    expect(validateRelayAttrs({ toString: 'x' })).toEqual({ ok: false, error: 'unknown attribute "toString"' });
+    expect(validateRelayAttrs({ constructor: 'x' }).ok).toBe(false);
+    expect(validateRelayAttrs({ speechModel: 'flux' }).ok).toBe(true);
+  });
+});
+
 describe('activeRelayProfile — VOICE_RELAY_PROFILE, fail closed', () => {
   test('unset ⇒ null and no TwiML options (byte-identical relay)', () => {
     expect(activeRelayProfile()).toBeNull();
