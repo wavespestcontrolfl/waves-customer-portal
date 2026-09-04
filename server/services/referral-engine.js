@@ -288,10 +288,79 @@ async function enrollPromoter(customerId, { conn = null, settings: presetSetting
   return runEnroll();
 }
 
+/**
+ * Enroll — or resolve — the promoter a customer profile shares from. The
+ * ONE path for every caller that needs a promoter for a customerId
+ * (portal Refer tab, report/estimate share taps, composer links).
+ *
+ * enrollPromoter stays strictly per-customer (codex #3379 r5). Multi-
+ * property siblings share a phone while referral_promoters.customer_phone
+ * stays unique, so a sibling profile's first enroll loses the insert to
+ * that constraint (23505) — resolve the HOUSEHOLD promoter read-only
+ * instead, scoped to the same account_id (phone alone is not identity:
+ * recycled/shared numbers cross unrelated customers, and handing over a
+ * foreign code would credit rewards to the wrong account). No account-
+ * scoped match = a genuine cross-account collision → rethrow for manual
+ * resolution, never a guessed attribution. Callers log err.code only — PG
+ * constraint violations quote the conflicting phone number.
+ *
+ * conn: an outer transaction. The enroll runs in a SAVEPOINT on it (knex
+ * nests transactions as savepoints) so a 23505 rolls back only the
+ * savepoint and the fallback can still read the outer transaction — a
+ * unique violation otherwise aborts the whole Postgres transaction (25P02).
+ * settings: live settings the caller already read on that connection.
+ */
+async function resolvePromoter(customerId, { conn = null, settings = null, database = db } = {}) {
+  const dbx = conn || database;
+  try {
+    return await (conn
+      ? conn.transaction((sp) => enrollPromoter(customerId, { conn: sp, settings }))
+      : enrollPromoter(customerId));
+  } catch (err) {
+    if (err?.code !== '23505') throw err;
+    const household = await findHouseholdPromoter(customerId, dbx);
+    if (!household) throw err;
+    // Hand back the OWNER's enrollment rather than the raw row: enrollPromoter's
+    // existing-row branch repairs a legacy promoter's missing code/link (the
+    // unification backfill left nullable ones) under the same lock discipline
+    // (GH codex #3850 r1 P2) — the sibling shares whatever the owner shares.
+    const { promoter } = await (conn
+      ? conn.transaction((sp) => enrollPromoter(household.customer_id, { conn: sp, settings }))
+      : enrollPromoter(household.customer_id));
+    return { promoter, alreadyEnrolled: true, household: true };
+  }
+}
+
+/**
+ * Read-only household resolution: the promoter another profile on the SAME
+ * account enrolled with this customer's phone. What resolvePromoter hands
+ * a sibling on 23505 — and what read paths that never enroll (the portal's
+ * /stats card) show, so every portal surface agrees on the sibling's
+ * promoter. null when the customer has no phone or account, or no
+ * same-account promoter shares the phone (a cross-account collision is
+ * never resolved here).
+ */
+async function findHouseholdPromoter(customerId, dbx = db) {
+  const profile = await dbx('customers')
+    .where({ id: customerId })
+    .first('id', 'phone', 'account_id');
+  if (!profile?.phone || !profile?.account_id) return null;
+  const promoter = await dbx('referral_promoters as rp')
+    .join('customers as c', 'rp.customer_id', 'c.id')
+    .where('rp.customer_phone', profile.phone)
+    .where('c.account_id', profile.account_id)
+    .first('rp.*');
+  return promoter || null;
+}
+
 // ---------------------------------------------------------------------------
 // 2. submitReferral
 // ---------------------------------------------------------------------------
-async function submitReferral(promoterId, { name, phone, email, address, notes, source = 'portal' }) {
+// referrerName: the person who actually submitted — a multi-property sibling
+// shares the household promoter (resolvePromoter) but the friend should hear
+// from the sibling, not the promoter's owner (GH codex #3850 r3 P2).
+// Attribution (promoter, code, link) stays the promoter's.
+async function submitReferral(promoterId, { name, phone, email, address, notes, source = 'portal', referrerName = null }) {
   if (!name || !phone) throw new Error('Name and phone are required');
 
   // Strip control chars + HTML angle brackets so referral data can never carry
@@ -302,6 +371,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   email = email ? sanitize(email, 254) : null;
   address = address ? sanitize(address, 300) : null;
   notes = notes ? sanitize(notes, 500) : null;
+  referrerName = referrerName ? sanitize(referrerName, 100) : null;
 
   if (!name) throw new Error('Name is required');
 
@@ -426,7 +496,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   // --- Send invite SMS ---
   const smsBody = await renderReferralSms('referral_invite', {
     referee_name: firstName,
-    referrer_name: promoter.first_name || 'your neighbor',
+    referrer_name: referrerName || promoter.first_name || 'your neighbor',
     referral_link: referralLink,
   }, settings.invite_sms_template, {
     workflow: 'referral_invite',
@@ -1368,6 +1438,8 @@ async function getProgramAnalytics(startDate, endDate) {
 
 module.exports = {
   enrollPromoter,
+  resolvePromoter,
+  findHouseholdPromoter,
   submitReferral,
   convertReferral,
   updateReferralStatus,

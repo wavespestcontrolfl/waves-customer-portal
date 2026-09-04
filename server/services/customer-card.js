@@ -58,22 +58,32 @@ function memberSinceYearET(customer = {}) {
 /**
  * Share/referral destination for a customer — shared by the card payload and
  * the Wallet pass so the two surfaces can't drift (Codex P2 #2592).
- * Attribution order: promoter row → rebuild from customers.referral_code →
- * only then the generic portal refer tab. Never the personal card token.
+ * Attribution order: own promoter row → the household promoter a
+ * multi-property sibling shares (account-scoped, referral-engine.
+ * findHouseholdPromoter — the same row the Refer tab resolves for it) →
+ * rebuild from customers.referral_code → only then the generic portal refer
+ * tab. Never the personal card token.
  */
 async function referralShareUrl(customer) {
   let referralUrl = null;
+  let code = null;
   try {
     const promoter = await db('referral_promoters')
       .where({ customer_id: customer.id })
-      .first('referral_link');
+      .first('referral_link', 'referral_code')
+      || await require('./referral-engine').findHouseholdPromoter(customer.id);
     if (promoter?.referral_link) referralUrl = promoter.referral_link;
+    // A legacy row may carry a backfilled code with no link (the unification
+    // migration was best-effort) — rebuild from the code below (GH codex
+    // #3850 r2 P2) before ever falling back to the generic tab.
+    code = promoter?.referral_code || null;
   } catch { /* table optional in older envs */ }
-  if (!referralUrl && customer.referral_code) {
+  code = code || customer.referral_code || null;
+  if (!referralUrl && code) {
     try {
       const { getPromoterReferralLink, getSettings } = require('./referral-engine');
       const settings = await getSettings().catch(() => ({}));
-      referralUrl = getPromoterReferralLink({ referral_code: customer.referral_code }, settings) || null;
+      referralUrl = getPromoterReferralLink({ referral_code: code }, settings) || null;
     } catch { /* settings/table unavailable — generic fallback below */ }
   }
   return referralUrl || `${publicPortalUrl()}/?tab=refer`;
@@ -206,10 +216,11 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
     if (!card) return null;
 
     // Make sure a referral link exists so the card's Share action has a real
-    // destination. enrollPromoter is get-or-create with no sends.
+    // destination. resolvePromoter is get-or-create with no sends (a
+    // multi-property sibling resolves the household promoter).
     try {
-      const { enrollPromoter } = require('./referral-engine');
-      await enrollPromoter(customerId);
+      const { resolvePromoter } = require('./referral-engine');
+      await resolvePromoter(customerId);
     } catch (err) {
       // PII: error class/code only — a unique-violation message here can echo
       // customer phone/email values from Postgres details (Codex P1 #2588 r2).

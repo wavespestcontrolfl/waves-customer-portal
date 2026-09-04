@@ -90,6 +90,7 @@ ${description || '(none)'}`;
   // A miss on both legs throws, exactly like the old SDK path: normalized_at
   // stays NULL and the cron retries the row.
   const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    laneId: 'events_editorial',
     system: systemPrompt,
     text: userPrompt,
     jsonMode: true,

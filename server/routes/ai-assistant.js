@@ -376,6 +376,10 @@ router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, re
         'c.phone as customer_phone',
         'c.waveguard_tier'
       )
+      // Voice-agent sandbox calls (the dead GA# test number) are test
+      // records, never customer calls — same exclusion the unified inbox
+      // applies in conversations.syncVoiceMessageForCall.
+      .modify((qb) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(qb, 'cl.source'))
       .orderBy('cl.created_at', 'desc');
 
     if (exactId) {

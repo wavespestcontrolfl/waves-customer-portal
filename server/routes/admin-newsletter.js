@@ -1366,6 +1366,7 @@ ${audience ? `Audience: ${audience}` : ''}
 ${tone ? `Tone: ${tone}` : ''}`;
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      laneId: 'newsletter',
       maxTokens: 2000,
       jsonMode: true,
       system: systemPrompt,

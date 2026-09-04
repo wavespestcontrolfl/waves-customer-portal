@@ -115,6 +115,7 @@ async function runScreen(app) {
   const r = await dispatchWithFallback(
     MODELS.TEXT_POLICIES.fastStructured,
     {
+      laneId: 'job_screen',
       system: SCREEN_SYSTEM_PROMPT,
       text: buildUserMessage(app),
       jsonMode: true,

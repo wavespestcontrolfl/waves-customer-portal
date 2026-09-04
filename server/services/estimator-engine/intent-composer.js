@@ -219,6 +219,7 @@ async function composeIntent(context, propertyFacts) {
   let lastErrors = [];
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const response = await createDeepMessage(client, {
+      laneId: 'intent_composer',
       model: process.env.ESTIMATOR_ENGINE_MODEL || MODELS.DEEP,
       max_tokens: MAX_TOKENS,
       system: buildSystemPrompt(),

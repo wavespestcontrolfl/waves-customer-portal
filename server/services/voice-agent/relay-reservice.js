@@ -171,7 +171,8 @@ async function requestReserviceText(input = {}, ctx = {}) {
     // in-transaction guard below): a voice-filed row with no alert receipt is
     // a ticket whose page died with a process — re-fire and stamp rather than
     // letting this correct refusal be where the retry dies too.
-    if (openRequest.source === VOICE_REQUEST_SOURCE && !openRequest.owner_alerted_at) {
+    // …never from a sandbox session: the retry is a WRITE (claim stamp + page).
+    if (openRequest.source === VOICE_REQUEST_SOURCE && !openRequest.owner_alerted_at && ctx.sandbox !== true) {
       await fireReserviceAlertsAndStamp({
         row: openRequest, lane, covered: false, unverifiedRequester, unverifiedNote, ctx,
       }).catch(() => {});
@@ -259,6 +260,9 @@ async function requestReserviceText(input = {}, ctx = {}) {
   // held for the transaction, re-read the dedupe INSIDE it, and insert there.
   // Same doctrine as the booking writer's rung-2 lock: the lock is what makes a
   // read-then-insert safe.
+  // ⭐ THE SANDBOX WRITE BOUNDARY: gate, identity, lane, issue and the
+  // already-open dedupe all ran as production; only the ticket write is skipped.
+  if (ctx.sandbox === true) return require('./relay-tools').sandboxDryRunText('request_reservice', input, ctx);
   const filedTicket = await db.transaction(async (trx) => {
     // ⭐ THE SHARED LANE LOCK, NOT A PRIVATE ONE. A namespace only this module
     // takes serializes this module against ITSELF and nothing else — and the

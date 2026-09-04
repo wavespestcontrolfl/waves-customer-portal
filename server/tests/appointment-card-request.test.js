@@ -740,6 +740,26 @@ describe('the send', () => {
     );
   });
 
+  test('a sent marker that matches NO pending row parks the claim too — a zero-row update is not success (pre-push Codex P1 on #3844)', async () => {
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.sent_at ? 0 : 1);
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.action).toBe('sent');
+    const parked = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.card_link_sent_at instanceof Date && p.card_link_sent_at.getTime() > Date.now() + 365 * 24 * 3600 * 1000);
+    expect(parked).toBeTruthy();
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringContaining('marker failed'), expect.stringContaining('parked'), expect.anything());
+  });
+
+  test('a park write that matches no row (the claim is no longer ours) is reported NOT parked', async () => {
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => { if (patch.sent_at) throw new Error('db down'); return 1; };
+    mockTableHandlers.scheduled_services.update = (chain, patch) => (patch.card_link_sent_at instanceof Date && patch.card_link_sent_at.getTime() > Date.now() + 365 * 24 * 3600 * 1000 ? 0 : 1);
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.action).toBe('sent');
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringContaining('marker failed'), expect.stringContaining('could not be parked'), expect.objectContaining({ metadata: expect.objectContaining({ claim_parked: false }) }));
+  });
+
   test('the template dark lever gates auto-secure enrollment too', async () => {
     mockGetTemplate.mockResolvedValueOnce(null);
     mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-1', stripe_payment_method_id: 'pm_x' });

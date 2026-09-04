@@ -224,6 +224,7 @@ function extractSpelledContexts(transcription) {
 async function llmDecodeCandidate({ contexts, bouncedEmail, transcription }) {
   if (!contexts.length) return null;
   const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    laneId: 'bounce_rescue',
     system: [
       'You reconstruct email addresses that a phone-call transcriber mis-heard.',
       'The stored address is KNOWN WRONG (it hard-bounced). Use only the spelled',
@@ -329,6 +330,7 @@ async function callSightings(phone) {
   if (!phone) return { sightings: [], calls: [] };
   const calls = await db('call_log')
     .where((q) => q.where('from_phone', phone).orWhere('to_phone', phone))
+    .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a test call's spoken email is not evidence
     .whereNotNull('transcription')
     .orderBy('created_at')
     .select('id', 'created_at', 'transcription', 'ai_extraction')

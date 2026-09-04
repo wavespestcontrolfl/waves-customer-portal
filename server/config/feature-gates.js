@@ -40,6 +40,8 @@
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
+ *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
+ *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
@@ -332,6 +334,18 @@ const gates = {
   // creation) and issued /visit/:token links keep resolving. Fail-closed
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
+
+  // Quote-wizard repeat-run dedupe (#3834 split, PR A′): a tokenless
+  // /calculate rerun of an OPEN quote_wizard lead (same email + phone +
+  // address + service, 30 days) files as status 'duplicate' carrying
+  // extracted_data.duplicate_of_lead_id instead of a second 'new' lead —
+  // label only, the public route never writes the original. OFF (default,
+  // every environment): every run files as 'new', byte-identical to before.
+  // Flip only once the conversion side (PR B′: accept-time and self-booking
+  // resolution of a repeat to its root) has merged, or accepted reruns
+  // credit no lead as won. Kill switch: unset. This entry is for
+  // logGateStatus; the route reads gateEnvValue at CALL time.
+  wizardLeadDedupe: gateEnvValue('GATE_WIZARD_LEAD_DEDUPE'),
 
   // Booking stamping contract (Tier 2 consolidation): the shared
   // field-stamping authority in services/booking/create-scheduled-service.js
@@ -637,6 +651,17 @@ const gates = {
   // relay endpoint + `spanishMenuEnabled` in the call_routing settings row —
   // the vestibule is never offered when no Spanish session could start.
   voiceSpanishMenu: process.env.GATE_VOICE_SPANISH_MENU === 'true',
+
+  // Sandy PR 1B — interruption-aware conversation context. On, a barge-in
+  // rewrites the cut reply in the model's history to what the caller actually
+  // heard (the played-text record, "… [interrupted]") and prefixes the next
+  // caller message with `[Caller interrupted you after: "…"]`, so the model
+  // resumes from there instead of repeating the unheard clause. Off ⇒ a
+  // barge-in only aborts the generation; the model's messages are
+  // byte-identical to today. Read at CALL time in
+  // services/voice-agent/relay-conversation.js (a flip needs no redeploy);
+  // this entry is the status/log listing. Kill switch: unset.
+  voiceRelayInterruptContext: gateEnvValue('GATE_VOICE_RELAY_INTERRUPT_CONTEXT'),
 
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
@@ -1855,6 +1880,15 @@ const gates = {
   // logGateStatus, and the sweep can never disagree.
   visionDelta: gateEnvValue('GATE_VISION_DELTA'),
 
+  // Supplies auto-reorder sweep (6:10 ET daily): a product with
+  // auto_reorder_enabled at/below its low_stock_threshold gets ONE open
+  // product_restock_requests row (source auto_reorder) + one deduped office
+  // bell. Off → the sweep returns {skipped:'gated'} before any DB read.
+  // CALL-time gateEnvValue in the sweep (same parser as this entry); kill
+  // switch = unset. No order is ever placed by this gate — that is PR 2's
+  // GATE_AUTO_ORDER.
+  autoReorder: gateEnvValue('GATE_AUTO_REORDER'),
+
   // Auto property-lookup on call-pipeline property creation — each NEWLY
   // created customer_properties row from a call fires one full property
   // lookup (county + LLM trio + satellite vision: real per-call spend) and
@@ -2266,6 +2300,25 @@ const gates = {
   // logGateStatus; the service reads gateEnvValue('GATE_AGENT_ACTIVITY')
   // at CALL time (the techTips idiom), so a flip needs no redeploy.
   agentActivity: gateEnvValue('GATE_AGENT_ACTIVITY'),
+
+  // LLM call ledger — services/llm-dispatch-metrics.js recordCall. ON: every
+  // provider call through the llm adapters (call.js, deep.js) and every
+  // Managed Agents session writes one row_kind=call / session row to
+  // llm_dispatch_log with token usage, latency, the model actually served
+  // and the ambient agent-control lane / run / step ids. OFF (default, dev
+  // AND prod): no row, no DB touch — the chain rows GATE_LLM_DISPATCH_METRICS
+  // governs are unaffected either way. Kill switch: unset. This entry is for
+  // logGateStatus; the recorder reads gateEnvValue at CALL time.
+  llmCallLedger: gateEnvValue('GATE_LLM_CALL_LEDGER'),
+
+  // LLM call traces — services/llm-dispatch-metrics.js recordTrace. ON: for
+  // lanes whose agent-control runtime policy sets trace: true, the REDACTED
+  // system / prompt / response bodies (pii-redactor, 8 KB cap each) are kept
+  // in llm_call_traces for 7 days, keyed to the call row — so it needs the
+  // ledger gate too. Inbound lanes skip low-confidence redactions. OFF
+  // (default, dev AND prod): nothing is written. Kill switch: unset. Read at
+  // CALL time via gateEnvValue.
+  llmCallTraces: gateEnvValue('GATE_LLM_CALL_TRACES'),
 
   // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
   // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become

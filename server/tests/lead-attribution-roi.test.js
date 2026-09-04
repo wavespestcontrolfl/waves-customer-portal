@@ -14,6 +14,7 @@ jest.mock('../models/db', () => {
       whereNull(...args) { mockWhereCalls.push([table, 'whereNull', ...args]); return builder; },
       whereIn(...args) { mockWhereCalls.push([table, 'whereIn', args[0]]); return builder; },
       whereNotIn(...args) { mockWhereCalls.push([table, 'whereNotIn', ...args]); return builder; },
+      whereRaw(...args) { mockWhereCalls.push([table, 'whereRaw', ...args]); return builder; },
       modify(fn) { fn(builder); return builder; },
       first: async () => (Array.isArray(rows) ? (rows[0] ?? null) : (rows ?? null)),
       select: async () => (Array.isArray(rows) ? rows : []),
@@ -75,6 +76,62 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     const exclusion = mockWhereCalls.find((c) => c[0] === 'leads' && c[1] === 'whereNotIn');
     expect(exclusion).toBeTruthy();
     expect(exclusion[3]).toEqual(['adam martinez']);
+  });
+
+  test('non-engaged rows (spam / cancelled / auto-filed duplicate) are excluded from the source population', async () => {
+    setup({ costs: [{ cost_amount: 3 }], leads: [], invoices: [] });
+    await calculateSourceROI('src-1', start, end);
+    const statusExclusion = mockWhereCalls.find((c) => c[0] === 'leads' && c[1] === 'whereNotIn' && c[2] === 'status');
+    expect(statusExclusion).toBeTruthy();
+    // A converted repeat keeps its ancestry marker: it is excluded only as a
+    // SECOND win — when its original is won too (pre-push r13); a won repeat
+    // whose original is lost / foreign / gone is the deal's only won row and
+    // counts (codex r14 P2).
+    const { SECOND_WIN_SQL } = require('../services/lead-statuses');
+    const secondWin = mockWhereCalls.find((c) => c[0] === 'leads' && c[1] === 'whereRaw' && /duplicate_of_lead_id/.test(c[2]));
+    expect(secondWin[2]).toBe(SECOND_WIN_SQL);
+    // The walk resolves the whole marker chain (B → A → O), bounded and
+    // through live duplicate hops only, on the uuid primary key.
+    expect(SECOND_WIN_SQL).toMatch(/WITH RECURSIVE chain AS/);
+    expect(SECOND_WIN_SQL).toMatch(/WHERE chain\.status = 'duplicate' AND chain\.deleted_at IS NULL AND chain\.depth < 8/);
+    // ...and a won root is a second win only for the SAME opportunity by the
+    // accept path's rule: same customer when both are linked, else the
+    // root's current phone or email still matches (codex r15 P2, r16 P2).
+    expect(SECOND_WIN_SQL).toMatch(/WHEN chain\.customer_id IS NOT NULL AND leads\.customer_id IS NOT NULL THEN chain\.customer_id = leads\.customer_id/);
+    expect(SECOND_WIN_SQL).toMatch(/right\(regexp_replace\(COALESCE\(chain\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\) = right\(regexp_replace\(COALESCE\(leads\.phone, ''\), '\[\^0-9\]', '', 'g'\), 10\)/);
+    expect(SECOND_WIN_SQL).toMatch(/LOWER\(TRIM\(chain\.email\)\) = LOWER\(TRIM\(leads\.email\)\)/);
+    // ...and never through a DIFFERENT estimate: a root won on estimate X
+    // while the repeat won on estimate Y is a different deal, exactly as the
+    // accept path promotes it (codex r17 P2).
+    expect(SECOND_WIN_SQL).toMatch(/AND NOT \(chain\.estimate_id IS NOT NULL AND leads\.estimate_id IS NOT NULL AND chain\.estimate_id <> leads\.estimate_id\)/);
+    expect(SECOND_WIN_SQL).toMatch(/SELECT o\.status, o\.deleted_at, o\.customer_id, o\.estimate_id, o\.phone, o\.email/);
+    // The sources summary counts (GET /leads/sources) splice the same scope
+    // into every COUNT subquery, so the client-derived source conversion
+    // rate agrees with the ROI (codex r16 P2).
+    const { PROSPECT_SCOPE_SQL } = require('../services/lead-statuses');
+    expect(PROSPECT_SCOPE_SQL).toBe(`leads.status NOT IN ('cancelled', 'spam', 'duplicate') AND ${SECOND_WIN_SQL}`);
+    const adminLeadsSrc = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-leads.js'), 'utf8');
+    expect((adminLeadsSrc.match(/leads\.deleted_at IS NULL AND \$\{PROSPECT_SCOPE_SQL\}/g) || []).length).toBe(4);
+    // The dashboard breakdowns (leads-by-source over `leads as l`, channel-mix)
+    // apply the same scope — alias-aware, so every outer reference follows
+    // the alias and none is left on the bare table name (codex r18 P2).
+    const { scopeToProspects } = require('../services/lead-statuses');
+    const aliased = [];
+    const qb = { whereNotIn: (...a) => { aliased.push(['whereNotIn', ...a]); return qb; }, whereRaw: (...a) => { aliased.push(['whereRaw', ...a]); return qb; } };
+    scopeToProspects(qb, 'l');
+    expect(aliased[0]).toEqual(['whereNotIn', 'l.status', expect.arrayContaining(['duplicate', 'spam', 'cancelled'])]);
+    expect(aliased[1][1]).toMatch(/^\(l\.status IS DISTINCT FROM 'won' OR NOT EXISTS/);
+    expect(aliased[1][1]).not.toMatch(/\bleads\.(status|extracted_data|customer_id|estimate_id|phone|email)\b/);
+    expect(aliased[1][1]).toMatch(/FROM chain JOIN leads p ON/); // the inner walk still names the table
+    // The cross-source winner map (calculateAllSourceROI) is built over the
+    // same population, so a second win never claims a customer its own
+    // source cannot credit (codex r20 P2).
+    const attributionSrc = require('fs').readFileSync(require('path').join(__dirname, '../services/lead-attribution.js'), 'utf8');
+    expect(attributionSrc).toMatch(/\.whereNotNull\('customer_id'\)\n\s+\.modify\(\(qb\) => applyNameExclusion\(qb, excludeCustomerNames\)\)\n(\s+\/\/.*\n)*\s+\.modify\(scopeToProspects\)\n\s+\.orderByRaw\('COALESCE\(converted_at, \?\) ASC', \[start\]\)/);
+    const dashboardSrc = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dashboard.js'), 'utf8');
+    expect(dashboardSrc).toMatch(/\.whereNull\('l\.deleted_at'\)\n\s+\.modify\(\(qb\) => scopeToProspects\(qb, 'l'\)\),/);
+    expect(dashboardSrc).toMatch(/applyETTimestampWindow\(db\('leads'\)\.whereNull\('deleted_at'\)\.modify\(scopeToProspects\), 'first_contact_at', win\.from, win\.to\)/);
+    expect(statusExclusion[3]).toEqual(expect.arrayContaining(['duplicate', 'spam', 'cancelled']));
   });
 
   test('bounds the invoice query to the period end (created_at <= end)', async () => {

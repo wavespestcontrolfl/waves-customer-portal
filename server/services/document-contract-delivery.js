@@ -1165,6 +1165,10 @@ module.exports = {
   processDueDocumentReminders,
   processDocumentWorkflow,
   requestStatus,
+  // The one predicate for "this contract is a marketing customer guide" —
+  // shared with the composer's contract seam, which must never carry one
+  // (the consent + opt-out footer live in this module's delivery).
+  isMarketingCustomerGuide,
   _internals: {
     deliveryOptionsForContract,
     emailPayload,

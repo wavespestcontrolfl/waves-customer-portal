@@ -32,12 +32,41 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
 jest.mock('../services/autopay-setup-link', () => ({ KIND: 'customer', setupLinkIneligibility: jest.fn() }));
+// The card funnel + its marker finalizer, re-run / invoked by the composer send.
+jest.mock('../services/appointment-card-request', () => ({
+  LIVE_VISIT_STATUSES: ['pending', 'confirmed'],
+  TEMPLATE_KEY: 'secure_appointment_card',
+  PLAN_TEMPLATE_KEY: 'secure_appointment_card_plans',
+  planInviteApplies: jest.fn(async () => false),
+  renderTemplate: jest.fn(async () => null),
+  startInvitationEmailLeg: jest.fn(),
+  requestCardForAppointment: jest.fn(async () => ({ requested: false, action: 'link_created', reason: 'request_exists', secureUrl: 'https://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY' })),
+  markCardLinkSendOutcome: jest.fn(async () => true),
+  // The service claim, observed through the route: NULL → stamp on the db mock.
+  claimCardLinkSend: jest.fn(async (visitId, stamp) => {
+    const db = require('../models/db');
+    const updated = await db('scheduled_services').where({ id: visitId }).whereNull('card_link_sent_at').update({ card_link_sent_at: stamp, updated_at: stamp });
+    return updated === 1;
+  }),
+}));
+jest.mock('../services/payer-statement-email', () => ({ markStatementSent: jest.fn() }));
+// The share-link writer's send-time half (activate before the provider call,
+// restore on a no-send exit, record after a real send) — its own suite covers
+// the writes; the route tests pin WHEN the route calls each.
+jest.mock('../routes/admin-contracts', () => ({
+  activatePreparedShareLinks: jest.fn(async (links) => ({ ok: true, activations: links.map((l) => ({ ...l, customerId: 'cust-A', previous: { status: 'draft', shared_at: null } })) })),
+  restorePreparedShareLinks: jest.fn(async () => {}),
+  recordPreparedShareLinkSends: jest.fn(async () => {}),
+  unsignableContractReason: jest.fn(async () => null),
+  shareLinkWritableStatuses: (c) => (c?.contract_type === 'document_template' ? ['draft', 'sent', 'viewed', 'expired'] : ['draft', 'sent', 'viewed']),
+}));
 jest.mock('../services/sms-media', () => ({
   mediaFromOutboundAttachments: jest.fn(() => []),
   signMediaForClient: jest.fn(async (media) => media),
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({
-  alertTwilioFailure: jest.fn(),
+  // Returns a promise like the real one — the /sms catch path chains .catch on it.
+  alertTwilioFailure: jest.fn(async () => {}),
 }));
 // Inert suggest-mode plumbing: the route fails CLOSED if pre-send parking
 // throws (503), and the bare db mock above can't run the real park
@@ -83,6 +112,7 @@ jest.mock('../services/short-url', () => ({
   existingShortUrlFor: jest.fn(async () => null),
   createTrackedShortLink: jest.fn(async (url) => ({ code: null, shortUrl: url })),
   invoiceShortCodePrefix: jest.fn(() => 'wpc'),
+  shortLinkBaseUrl: () => 'https://wavespest.co',
 }));
 // Controllable gates: the auto-send interlock (claim check + reservation row)
 // is gated on smsAutoSend, OFF by default so the manual send path is unchanged
@@ -430,6 +460,186 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    // Visit-lane card request in the body: the composer send runs the
+    // service's own one-text mechanics — claim the visit BEFORE the
+    // provider call, mark the request after a real send, release otherwise.
+    const CARD = { id: 'r9', kind: 'visit', status: 'pending', customer_id: 'cust-A', scheduled_service_id: 'v-77', sent_at: null, token: 'abcDEF123_-xyz789QWERTY' };
+    function wireCardDb({ claimResult = 1 } = {}) {
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+        else if (table === 'appointment_card_requests') first.mockResolvedValue(CARD);
+        else if (table === 'scheduled_services') first.mockResolvedValue({ id: 'v-77', customer_id: 'cust-A', service_type: 'Flea Treatment', scheduled_date: '2026-09-08' });
+        // The Auto Pay seam's token lookup sees the same visit-lane row and leaves it alone.
+        const select = jest.fn(async () => (table === 'appointment_card_requests' ? [{ token: 'abcDEF123_-xyz789QWERTY', ...CARD }] : []));
+        const update = jest.fn(async (payload) => {
+          stamps.push({ table, payload, sent: sendCustomerMessage.mock.calls.length });
+          return table === 'scheduled_services' && payload.card_link_sent_at instanceof Date ? claimResult : 1;
+        });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select, update };
+      });
+    }
+
+    test('a live visit-lane card request link: the visit is claimed BEFORE the provider call, the send is the card request itself (purpose, template key, operator-initiated — GH Codex #3844 r5 P1), the request marked and the email twin started after a real send', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM2' });
+      const { startInvitationEmailLeg } = require('../services/appointment-card-request');
+      startInvitationEmailLeg.mockClear();
+      wireCardDb();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(200);
+        expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+          purpose: 'card_request',
+          customerId: 'cust-A',
+          identityTrustLevel: 'phone_matches_customer',
+          operatorInitiated: true,
+          metadata: expect.objectContaining({ original_message_type: 'secure_appointment_card', scheduled_service_id: 'v-77', trigger: 'admin' }),
+        }));
+        expect(startInvitationEmailLeg).toHaveBeenCalledWith({
+          visit: expect.objectContaining({ id: 'v-77', customer_id: 'cust-A' }),
+          secureUrl: expect.stringMatching(/\/secure\/abcDEF123_-xyz789QWERTY$/),
+          planChoice: false,
+        });
+        const claim = stamps.find((s) => s.table === 'scheduled_services');
+        expect(Object.keys(claim.payload).sort()).toEqual(['card_link_sent_at', 'updated_at']);
+        expect(claim.sent).toBe(0); // claimed before dispatch
+        // The canonical funnel was re-run at the send, then the service's own finalizer marked the request.
+        const { requestCardForAppointment, markCardLinkSendOutcome } = require('../services/appointment-card-request');
+        expect(requestCardForAppointment).toHaveBeenCalledWith({ scheduledServiceId: 'v-77', trigger: 'admin', delivery: 'inline' });
+        expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v-77', claim.payload.card_link_sent_at);
+        expect(stamps.filter((s) => s.table === 'scheduled_services')).toHaveLength(1); // never released
+      });
+    });
+
+    test('the funnel refusing at the send (visit repriced to $0 meanwhile) refuses BEFORE any claim or provider call', async () => {
+      const { requestCardForAppointment } = require('../services/appointment-card-request');
+      requestCardForAppointment.mockResolvedValueOnce({ requested: false, action: 'skipped', reason: 'zero_price_visit' });
+      wireCardDb();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/nothing to secure/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        expect(stamps.find((s) => s.table === 'scheduled_services')).toBeUndefined();
+      });
+    });
+
+    test('a verified statement link: a real send stamps finalized → sent through the email delivery\'s writer; a suppressed send does not', async () => {
+      const STMT_BODY = `Pay here: portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`;
+      const { markStatementSent } = require('../services/payer-statement-email');
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'finalized' });
+        else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+      });
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM3' });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(200);
+        expect(markStatementSent).toHaveBeenCalledWith(31);
+      });
+      markStatementSent.mockClear();
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, suppressed: true });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(200);
+        expect(markStatementSent).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a lost claim (another send owns the visit, or a text already went) refuses BEFORE any provider call', async () => {
+      wireCardDb({ claimResult: 0 });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/already being sent, or was already texted/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a suppressed (non-provider) send releases the claim, never marks the request and starts no email twin', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, suppressed: true });
+      const { startInvitationEmailLeg } = require('../services/appointment-card-request');
+      startInvitationEmailLeg.mockClear();
+      wireCardDb();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(200);
+        expect(startInvitationEmailLeg).not.toHaveBeenCalled();
+        const visitWrites = stamps.filter((s) => s.table === 'scheduled_services');
+        expect(visitWrites).toHaveLength(2);
+        expect(visitWrites[1].payload.card_link_sent_at).toBeNull();
+        expect(stamps.find((s) => s.table === 'appointment_card_requests')).toBeUndefined();
+      });
+    });
+
+    test('a RETRYABLE provider outcome (timeout / 5xx / 429 — the provider may hold the text) keeps the claim: the maybe-sent marker lands, no release, no email twin (GH Codex #3851 r4 P1)', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, code: 'PROVIDER_FAILURE', retryable: true, deferred: true });
+      const { startInvitationEmailLeg, markCardLinkSendOutcome } = require('../services/appointment-card-request');
+      startInvitationEmailLeg.mockClear();
+      markCardLinkSendOutcome.mockClear();
+      wireCardDb();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(422);
+        const visitWrites = stamps.filter((s) => s.table === 'scheduled_services');
+        expect(visitWrites).toHaveLength(1); // the claim — never released
+        expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v-77', visitWrites[0].payload.card_link_sent_at);
+        expect(startInvitationEmailLeg).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a THROW carrying a retryable provider outcome (audit write failed after a Twilio timeout) holds the claim the same way — marker stamped, never released (GH Codex #3851 r5 P1)', async () => {
+      const ambiguous = new Error('audit row failed');
+      ambiguous.providerOutcome = { sent: false, retryable: true, providerErrorCode: 'ETIMEDOUT' };
+      sendCustomerMessage.mockRejectedValueOnce(ambiguous);
+      const { startInvitationEmailLeg, markCardLinkSendOutcome } = require('../services/appointment-card-request');
+      startInvitationEmailLeg.mockClear();
+      markCardLinkSendOutcome.mockClear();
+      wireCardDb();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(500);
+        const visitWrites = stamps.filter((s) => s.table === 'scheduled_services');
+        expect(visitWrites).toHaveLength(1);
+        expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v-77', visitWrites[0].payload.card_link_sent_at);
+        expect(startInvitationEmailLeg).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a blocked send releases the claim', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, reason: 'quiet hours' });
+      wireCardDb();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(422);
+        const visitWrites = stamps.filter((s) => s.table === 'scheduled_services');
+        expect(visitWrites).toHaveLength(2);
+        expect(visitWrites[1].payload.card_link_sent_at).toBeNull();
+        expect(stamps.find((s) => s.table === 'appointment_card_requests')).toBeUndefined();
+      });
+    });
+
+    test('schedule-sms refuses a body carrying a live visit-lane card request link — only /sms consumes the claim', async () => {
+      const card = { id: 'r9', kind: 'visit', status: 'pending', customer_id: 'cust-A', scheduled_service_id: 'v-77' };
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'appointment_card_requests') first.mockResolvedValue(card);
+        const select = jest.fn(async () => (table === 'appointment_card_requests' ? [{ token: 'abcDEF123_-xyz789QWERTY', ...card }] : []));
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select, update: jest.fn(async () => 1) };
+      });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: SECURE_BODY, messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/Card request links are re-checked at delivery/);
+      });
+    });
+
     test('schedule-sms refuses a body carrying a live Auto Pay link — immediate sends only', async () => {
       wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'cust-A' } });
       await withServer(async (baseUrl) => {
@@ -440,6 +650,248 @@ describe('admin communications SMS route', () => {
         });
         expect(res.status).toBe(400);
         expect((await res.json()).error).toMatch(/send them now/);
+      });
+    });
+
+    test('/sms refuses a contract signing link whose token matches no live contract (rotated or expired) — fail closed before sending', async () => {
+      wireAutopayDb({ row: null });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { customerId: 'cust-A', body: 'Please sign: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/contract signing link is expired or no longer live/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
+    // A prepared (composer-inserted) contract link in the body: activated
+    // BEFORE the provider call, restored on every no-send exit, recorded
+    // after a real send (GH Codex #3844 r3 P1).
+    describe('prepared contract signing link in the body', () => {
+      const CONTRACT_BODY = 'Please sign: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY';
+      const { hashContractToken } = jest.requireActual('../services/contracts');
+      const TOKEN_HASH = hashContractToken('abcDEF123_-xyz789QWERTY');
+      const contracts = () => require('../routes/admin-contracts');
+      function wireContractDb() {
+        db.mockImplementation((table) => {
+          const first = jest.fn();
+          if (table === 'customer_contracts') first.mockResolvedValue({ id: 'k1', customer_id: 'cust-A', status: 'draft', share_token_expires_at: null });
+          else if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+          return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        });
+      }
+      beforeEach(() => {
+        contracts().activatePreparedShareLinks.mockClear();
+        contracts().restorePreparedShareLinks.mockClear();
+        contracts().recordPreparedShareLinkSends.mockClear();
+      });
+
+      test('a real send: activated BEFORE the provider call, recorded after it, never restored', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM7', provider: 'twilio' });
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(200);
+          const { activatePreparedShareLinks, recordPreparedShareLinkSends, restorePreparedShareLinks } = contracts();
+          expect(activatePreparedShareLinks).toHaveBeenCalledWith([{ id: 'k1', tokenHash: TOKEN_HASH, delivered: true }], expect.anything());
+          expect(activatePreparedShareLinks.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+          expect(recordPreparedShareLinkSends).toHaveBeenCalledWith(
+            [expect.objectContaining({ id: 'k1', tokenHash: TOKEN_HASH })], expect.anything(), expect.objectContaining({ providerMessageId: 'SM7' }),
+          );
+          expect(restorePreparedShareLinks).not.toHaveBeenCalled();
+        });
+      });
+
+      test('an unwritten composer insert: the body\'s minted token + the composer\'s contractId reach activation as delivered:false', async () => {
+        const CONTRACT_UUID = 'aaaa1111-0000-4000-8000-000000000001';
+        const MINTED = require('../utils/composer-contract-token').mintComposerContractToken(CONTRACT_UUID);
+        sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM7', provider: 'twilio' });
+        // Every db(table) call is a fresh builder — count contract lookups
+        // across them: by hash → nothing stored; by id → the composer's contract.
+        let contractLookups = 0;
+        db.mockImplementation((table) => {
+          const first = jest.fn();
+          if (table === 'customer_contracts') first.mockImplementation(async () => (contractLookups++ === 0 ? null : { id: CONTRACT_UUID, customer_id: 'cust-A', status: 'draft' }));
+          else if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+          return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', contractId: CONTRACT_UUID, body: `Please sign: portal.wavespestcontrol.com/contract/${MINTED}` });
+          expect(res.status).toBe(200);
+          expect(contracts().activatePreparedShareLinks).toHaveBeenCalledWith([{ id: CONTRACT_UUID, tokenHash: hashContractToken(MINTED), delivered: false }], expect.anything());
+          expect(contracts().activatePreparedShareLinks.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+        });
+      });
+
+      test('activation refused (rotated meanwhile) → 409 before any provider call', async () => {
+        contracts().activatePreparedShareLinks.mockResolvedValueOnce({ ok: false, error: 'This contract signing link is no longer live — remove it and insert a fresh one.' });
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(409);
+          expect((await res.json()).error).toMatch(/no longer live/);
+          expect(sendCustomerMessage).not.toHaveBeenCalled();
+        });
+      });
+
+      test.each([
+        ['blocked', { sent: false, blocked: true, reason: 'quiet hours' }, 422],
+        ['suppressed (non-provider)', { sent: true, blocked: false, suppressed: true }, 200],
+      ])('a %s send hands the prepared link back and records nothing', async (_label, outcome, status) => {
+        sendCustomerMessage.mockResolvedValue(outcome);
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(status);
+          expect(contracts().restorePreparedShareLinks).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })], expect.anything(), expect.objectContaining({ reason: expect.any(String) }));
+          expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a RETRYABLE provider outcome keeps the prepared link activated — never restored, nothing recorded (GH Codex #3851 r4 P1)', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, code: 'PROVIDER_FAILURE', retryable: true, deferred: true });
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(422);
+          expect(contracts().restorePreparedShareLinks).not.toHaveBeenCalled();
+          expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a THROW carrying a retryable provider outcome keeps the prepared link activated too (GH Codex #3851 r5 P1)', async () => {
+        const ambiguous = new Error('audit row failed');
+        ambiguous.providerOutcome = { sent: false, retryable: true };
+        sendCustomerMessage.mockRejectedValueOnce(ambiguous);
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(500);
+          expect(contracts().restorePreparedShareLinks).not.toHaveBeenCalled();
+          expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a throw AFTER provider acceptance records the delivery; a throw before it restores', async () => {
+        const accepted = new Error('audit row failed');
+        accepted.providerOutcome = { sent: true, providerMessageId: 'SM8', provider: 'twilio' };
+        sendCustomerMessage.mockRejectedValueOnce(accepted);
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(500);
+          expect(contracts().recordPreparedShareLinkSends).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })], expect.anything(), accepted.providerOutcome);
+          expect(contracts().restorePreparedShareLinks).not.toHaveBeenCalled();
+        });
+        contracts().recordPreparedShareLinkSends.mockClear();
+        sendCustomerMessage.mockRejectedValueOnce(new Error('provider down'));
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(500);
+          expect(contracts().restorePreparedShareLinks).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })], expect.anything(), expect.anything());
+          expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
+        });
+      });
+    });
+
+    test('a service report link is bound to the recipient\'s account at /sms: on the account → sent; off it → 409 before any provider call (pre-push Codex P0)', async () => {
+      const REPORT_BODY = `Here is your latest service report: portal.wavespestcontrol.com/report/${'b'.repeat(32)}`;
+      const wireReport = ({ recipientRows }) => db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567', account_id: null });
+        else if (table === 'service_records') first.mockResolvedValue({ id: 'r1', customer_id: 'cust-A', structured_notes: null });
+        const select = jest.fn(async () => (table === 'customers' ? recipientRows : []));
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereNotNull: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select, update: jest.fn(async () => 1) };
+      });
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM5' });
+      wireReport({ recipientRows: [{ id: 'cust-A', account_id: null }] });
+      await withServer(async (baseUrl) => {
+        expect((await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY })).status).toBe(200);
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      });
+      sendCustomerMessage.mockClear();
+      wireReport({ recipientRows: [] });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/different customer/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a bearer send with no selected customer adopts the one live owner of the number as the trusted customer — the recipient\'s own consent policy, not the lead one (GH Codex #3844 r9 P1); several owners refuse', async () => {
+      const STMT_BODY = `Pay here: portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`;
+      const wireOwners = (owners) => db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'sent' });
+        else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => (table === 'customers' ? owners : [])), update: jest.fn(async () => 1) };
+      });
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM9' });
+      wireOwners([{ id: 'cust-A' }]);
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(200);
+        expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+          audience: 'customer', customerId: 'cust-A', identityTrustLevel: 'phone_matches_customer',
+        }));
+      });
+      // A +44 destination whose last ten digits are the payer's US number is a
+      // different phone: the bearer never goes there (GH Codex #3844 r10 P1).
+      sendCustomerMessage.mockClear();
+      wireOwners([{ id: 'cust-A' }]);
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY, to: '+445551234567' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/US number/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+      sendCustomerMessage.mockClear();
+      wireOwners([{ id: 'cust-A' }, { id: 'cust-B' }]);
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/more than one customer/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a statement link on a throw AFTER provider acceptance is still stamped finalized → sent (GH Codex #3844 r3 P1); a throw before it is not', async () => {
+      const STMT_BODY = `Pay here: portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`;
+      const { markStatementSent } = require('../services/payer-statement-email');
+      markStatementSent.mockClear();
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'finalized' });
+        else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+      });
+      const accepted = new Error('audit row failed');
+      accepted.providerOutcome = { sent: true, providerMessageId: 'SM9' };
+      sendCustomerMessage.mockRejectedValueOnce(accepted);
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(500);
+        expect(markStatementSent).toHaveBeenCalledWith(31);
+      });
+      markStatementSent.mockClear();
+      sendCustomerMessage.mockRejectedValueOnce(new Error('provider down'));
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY });
+        expect(res.status).toBe(500);
+        expect(markStatementSent).not.toHaveBeenCalled();
+      });
+    });
+
+    test('schedule-sms refuses a body carrying a contract signing link — the same immediate-only fence', async () => {
+      wireAutopayDb({ row: null });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Please sign: portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY', messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/^Contract signing links are re-checked at delivery/);
       });
     });
 

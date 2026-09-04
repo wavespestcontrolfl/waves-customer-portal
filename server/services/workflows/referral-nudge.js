@@ -33,7 +33,7 @@ class ReferralNudge {
     let referralCode = null;
     try {
       const referralEngine = require('../referral-engine');
-      const { promoter } = await referralEngine.enrollPromoter(customerId);
+      const { promoter } = await referralEngine.resolvePromoter(customerId);
       referralLink = promoter.referral_link;
       referralCode = promoter.referral_code;
     } catch (enrollErr) {

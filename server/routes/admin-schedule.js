@@ -15156,6 +15156,7 @@ async function generateReportCopyWithFallback({
       let result;
       try {
         result = await provider.call({
+          laneId: 'report_copy',
           model: provider.model,
           system: systemPrompt,
           text: userMessage,

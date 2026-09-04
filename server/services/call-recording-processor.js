@@ -266,14 +266,11 @@ Street names in addresses are real words or proper names — prefer a plausible 
 When a caller spells something letter-by-letter or with phonetic markers like "B as in boy", write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
 // Literal keyword hints for the gpt-transcribe family (the gpt-4o-transcribe
-// generation rejects the parameter, hence the model guard below). These are
-// the proper nouns prod transcripts have actually misheard — service-area
-// place names ("Englewood" → "Inglewood") and product/brand terms.
-const DEFAULT_TRANSCRIPTION_KEYWORDS = [
-  'Waves Pest Control', 'WaveGuard', 'Sentricon', 'Termidor', 'WDO',
-  'Bradenton', 'Sarasota', 'Venice', 'Parrish', 'Palmetto', 'Ellenton',
-  'Englewood', 'North Port', 'Port Charlotte', 'Lakewood Ranch', 'Myakka',
-];
+// generation rejects the parameter, hence the model guard below). The list
+// itself lives in config/transcription-vocabulary — shared with the live
+// ConversationRelay `hints` attribute so both recognizers learn the same
+// proper nouns.
+const DEFAULT_TRANSCRIPTION_KEYWORDS = require('../config/transcription-vocabulary').STT_HINTS;
 const ENV_TRANSCRIPTION_KEYWORDS = String(process.env.OPENAI_TRANSCRIPTION_KEYWORDS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
@@ -1057,7 +1054,9 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db,
     // Both directions: an office CALLBACK stores the contact's number in
     // to_phone (Waves line in from_phone) — that conversation is prior
     // context for the contact's next inbound call too.
-    const q = conn('call_log')
+    // A bake-off call is not prior context for a real caller — modifier
+    // called on the chain (the conn may be a where-family-only double).
+    const q = require('./voice-agent/relay-protocol').whereNotSandboxCall(conn('call_log'))
       .whereRaw(
         "(right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ? OR right(regexp_replace(coalesce(to_phone,''),'\\D','','g'),10) = ?)",
         [digits, digits],
@@ -3348,6 +3347,7 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
       // rejection will reconcile it.
       const eq = (a, b) => (a ?? null) === (b ?? null);
       const successors = (await trx('call_log')
+        .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
         .whereRaw("metadata->>'lead_id' = ?", [stampedLeadId])
         .whereNot('id', call.id)
         .select('id', 'metadata'))
@@ -6079,6 +6079,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   // them), so the primary's repeat-stability rests on the reasoning model's
   // default decoding.
   const res = await dispatchWithFallback(CALL_EXTRACTION_ROUTE, {
+    laneId: 'call_extraction',
     text: prompt,
     jsonMode: true,
     maxTokens: 16384,
@@ -10783,6 +10784,7 @@ const CallRecordingProcessor = {
                 // re-parenting). Allocation is race-free because every
                 // stamper holds this lead's row lock.
                 const seqRow = await trx('call_log')
+                  .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
                   .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
                   .select(db.raw("COALESCE(MAX((metadata->>'lead_stamp_seq')::bigint), 0) + 1 AS next_seq"))
                   .first();
@@ -15805,6 +15807,7 @@ const CallRecordingProcessor = {
     // with duration_seconds fallback, since the call-status webhook may not have populated
     // the latter yet — earlier filter on duration_seconds alone excluded fresh recordings.
     const pending = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
       .where(function () {
         this.where(function () {
           this.where('recording_url', '!=', '').whereNotNull('recording_url');
@@ -16033,6 +16036,7 @@ const CallRecordingProcessor = {
     const { MIN_DURATION_SECONDS: ALERT_MIN_SECONDS, GRACE_MINUTES: ALERT_GRACE_MINUTES, EXEMPT_ANSWERED_BY: ALERT_EXEMPT } = require('./unrecorded-call-watchdog');
     const exemptList = [...ALERT_EXEMPT].map((v) => `'${String(v).replace(/'/g, "''")}'`).join(', ');
     let candidates = db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
       .select('twilio_call_sid', 'direction', 'duration_seconds', 'recording_sid', 'recording_url',
         'answered_by', 'call_outcome', 'from_phone', 'to_phone', 'customer_id', 'created_at')
       .where({ direction: 'inbound', status: 'completed' })
@@ -16076,6 +16080,7 @@ const CallRecordingProcessor = {
     let quarantineRetries = [];
     try {
       quarantineRetries = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
         .select('twilio_call_sid')
         .whereNotNull('twilio_call_sid')
         .whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
@@ -16153,7 +16158,9 @@ const CallRecordingProcessor = {
    * Get processing stats.
    */
   async getStats() {
-    const [totals] = await db('call_log').select(
+    const [totals] = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
+      .select(
       db.raw("COUNT(*) FILTER (WHERE recording_url IS NOT NULL) as total_recordings"),
       db.raw("COUNT(*) FILTER (WHERE processing_status = 'processed') as processed"),
       db.raw("COUNT(*) FILTER (WHERE processing_status IS NULL OR processing_status = 'pending') as pending"),
@@ -16197,6 +16204,7 @@ const CallRecordingProcessor = {
 
     // Source analytics: calls grouped by receiving number
     const sourceBreakdown = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
       .select('to_phone')
       .count('* as call_count')
       .whereNotNull('recording_url')
