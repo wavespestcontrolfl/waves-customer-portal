@@ -1,7 +1,7 @@
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-04T00:37:56.720Z. Constants source: **constants.js (in-code defaults)**.
-Scenarios: 1835 · independent-vs-engine matches: 1778 · mismatches: 2 · expected a price but the engine returned none: 0 · engine-only observations: 55 (1778 + 2 + 0 + 55 = 1835) · commercial engine errors: 0 · P0/P1 findings without a row: 0
+Generated 2026-09-04T01:19:07.732Z. Constants source: **constants.js (in-code defaults)**.
+Scenarios: 1845 · independent-vs-engine matches: 1782 · mismatches: 2 · expected a price but the engine returned none: 0 · engine-only observations: 61 (1782 + 2 + 0 + 61 = 1845) · commercial engine errors: 0 · P0/P1 findings without a row: 0
 
 ## Findings raised by this run
 
@@ -101,6 +101,12 @@ Recorded span = check-in → check-out, which often includes driving to the next
 - [specialty] palm {"treatmentType":"combo","palmCount":3}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"palmSize is required for this palm treatment","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"fungal","palmCount":2,"diagnosisConfirmed":false,"selectedProduct":"PHOSPHO-Jet","appsPerYear":2}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"diagnosisConfirmed must be true for fungal palm treatment pricing","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"fungal","palmCount":2,"diagnosisConfirmed":true,"selectedProduct":"PHOSPHO-Jet"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"fungal palm treatment pricing requires appsPerYear or intervalMonths","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"fungal","palmCount":2,"diagnosisConfirmed":true,"selectedProduct":"PHOSPHO-Jet","appsPerYear":0}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"appsPerYear must be a positive number","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"fungal","palmCount":2,"diagnosisConfirmed":true,"selectedProduct":"PHOSPHO-Jet","appsPerYear":-2}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"appsPerYear must be a positive number","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"fungal","palmCount":2,"diagnosisConfirmed":true,"selectedProduct":"PHOSPHO-Jet","appsPerYear":null}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"appsPerYear must be a positive number","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"fungal","palmCount":2,"diagnosisConfirmed":true,"selectedProduct":"PHOSPHO-Jet","appsPerYear":"2"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"appsPerYear must be a positive number","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"fungal","palmCount":1,"diagnosisConfirmed":true,"selectedProduct":"PHOSPHO-Jet","intervalMonths":0}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"intervalMonths must be a positive number","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"fungal","palmCount":1,"diagnosisConfirmed":true,"selectedProduct":"PHOSPHO-Jet","intervalMonths":"4"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"intervalMonths must be a positive number","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"lethalBronzing","palmCount":2,"palmStatus":"symptomatic"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"Palm is not eligible for lethal bronzing injection pricing and should be handled outside this service","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"treeAge","palmCount":2,"dbhInches":25}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"customPricePerPalm is required for Tree-Age pricing above 20 DBH inches","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"insecticide","palmCount":2,"palmSize":"large","highDose":true}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"customPricePerPalm is required for quote-based insecticide palm pricing","palmSizeUsed":null}

@@ -565,13 +565,16 @@ function expectTopDressing(lawnSqFt, depth = 'eighth', hasRecurringLawn = false)
   const price = Math.max(cfg.floor, Math.round((material + labor) / cfg.marginDivisor));
   return { lawnEst: Math.round(lawnEst), material: round2(material), laborMin: round2(laborMin), labor: round2(labor), price, targetMargin: 1 - cfg.marginDivisor };
 }
-function expectPlugging(lawnSqFt, spacing = 12) {
+function expectPlugging(lawnSqFt, spacing = 12, urgency = 'ROUTINE', afterHours = false) {
   const cfg = constants.SPECIALTY.plugging;
   const ppsf = cfg.spacingRates[`${spacing}inch`] || cfg.spacingRates['12inch'];
   const plugs = Math.ceil(lawnSqFt * ppsf);
   const cost = plugs * cfg.costPerPlug + (plugs / cfg.laborPerPlugs) * constants.GLOBAL.LABOR_RATE;
-  const price = Math.max(250, Math.round(cost / 0.55));
-  return { plugs, cost: round2(cost), price, targetMargin: 0.45 };
+  // Urgency applies AFTER the floor, then re-rounds (pricePlugging →
+  // applyUrgency) — the same ladder foam drill uses (codex r30 P2).
+  const mult = urgency === 'SOON' ? (afterHours ? 1.5 : 1.25) : urgency === 'URGENT' ? (afterHours ? 2 : 1.5) : 1;
+  const price = Math.round(Math.max(250, Math.round(cost / 0.55)) * mult);
+  return { plugs, cost: round2(cost), price, urgencyMult: mult, targetMargin: 0.45 };
 }
 // Every supported treatment family (codex r14 P2): fixed, tiered, fungal (quote:
 // floor / custom, apps from appsPerYear or 12/intervalMonths), lethal bronzing
@@ -1283,6 +1286,14 @@ function runSpecialtyMatrix() {
     const li = line(runEngine({ ...BASE, lawnSqFt: sqft, services: { plugging: { area: sqft, spacing } } }).result, 'plugging');
     record(section, `plugging ${sqft}sf ${spacing}in`, { sqft, spacing }, exp.price, li ? li.price : null, { extra: { plugs: exp.plugs, cost: exp.cost } });
   }
+  // Plugging urgency / after-hours ladder (codex r30 P2): estimate-engine.js
+  // forwards services.plugging.urgency / afterHours and pricePlugging applies
+  // 1.25–2× after the floor — a dropped forward or multiplier must surface.
+  for (const [urgency, afterHours] of [['SOON', false], ['SOON', true], ['URGENT', false], ['URGENT', true]]) {
+    const exp = expectPlugging(4500, 12, urgency, afterHours);
+    const li = line(runEngine({ ...BASE, lawnSqFt: 4500, services: { plugging: { area: 4500, spacing: 12, urgency, afterHours } } }).result, 'plugging');
+    record(section, `plugging 4500sf 12in urgency=${urgency} afterHours=${afterHours}`, { sqft: 4500, spacing: 12, urgency, afterHours }, exp.price, li ? li.price : null, { extra: { plugs: exp.plugs, cost: exp.cost, urgencyMult: exp.urgencyMult } });
+  }
   // Palm injection
   const palmCases = [{ treatmentType: 'nutrition', palmCount: 1 }, { treatmentType: 'nutrition', palmCount: 2 }, { treatmentType: 'nutrition', palmCount: 3 }, { treatmentType: 'insecticide', palmCount: 5, palmSize: 'large' }, { treatmentType: 'combo', palmCount: 10, palmSize: 'small' }, { treatmentType: 'nutrition', palmCount: 0 }, { treatmentType: 'nutrition', palmCount: -2 }, { treatmentType: 'nutrition', palmCount: 2.5 }, { treatmentType: 'combo', palmCount: 3 },
     // fungal: floor, custom above / below the floor, interval-derived apps, refusals (codex r14 P2)
@@ -1369,6 +1380,10 @@ function runBundleAndDiscountMatrix() {
       services[k] = k === 'pest' ? { frequency: 'quarterly' } : k === 'lawn' ? { track: 'st_augustine', tier: 'enhanced' } : k === 'mosquito' ? { tier: 'seasonal9' } : k === 'treeShrub' ? { tier: 'standard', treeCount: 6 } : k === 'palmInjection' ? { treatmentType: 'nutrition', palmCount: 3 } : k === 'termite' ? { system: 'trelona' } : {};
     }
     const r = runEngine({ ...BASE, bedArea: 2000, services });
+    // A throwing WaveGuard bundle is a counted discrepancy, never a crash before
+    // the artifacts are written — same guard as the prepay bundle loop (codex
+    // r30 P2).
+    if (!r.ok) { record(section, `tier for ${combo.join('+')}: engine threw`, { combo }, 1, null, { extra: { engineError: r.error } }); findings.push({ severity: 'P1', section, name: `tier for ${combo.join('+')}`, detail: `generateEstimate threw: ${r.error}` }); continue; }
     const res = r.result;
     const exp = expectTier(combo.map((k) => keyMap[k]));
     const tierRow = { section, name: `tier for ${combo.join('+')}`, expected: exp.tier, actual: res.waveGuard.tier, status: exp.tier === res.waveGuard.tier ? 'match' : 'MISMATCH', extra: { expectedDiscount: exp.discount, actualDiscount: res.waveGuard.discount } };
