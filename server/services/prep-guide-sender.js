@@ -129,7 +129,7 @@ async function nextUpcomingVisit(customerId, config) {
     // email would say "To be confirmed" despite a real upcoming appointment.
     .where('scheduled_date', '>=', etDateString())
     .orderBy('scheduled_date', 'asc')
-    .first('id', 'scheduled_date', 'prep_template_key', 'prep_sent_at');
+    .first('id', 'scheduled_date', 'prep_template_key', 'prep_sent_at', 'prep_token');
   return row || null;
 }
 
@@ -138,12 +138,48 @@ async function nextUpcomingVisit(customerId, config) {
 // send stamps prep_sent_at). A reservation whose lane then skipped, blocked
 // or failed would otherwise refuse every other guide for that visit forever
 // (GH Codex #3856 r11 P2). Abandoned = never delivered AND no lane can still
-// deliver it: no live transactional run for this visit + key, and no live
+// deliver it: no live transactional run for this visit + key, no live
 // sequence enrolment whose first step stamps this key (the runner's
-// PREP_TEMPLATE_BY_SEQUENCE_KEY, mirrored here). Unknown (a read failed) is
-// NOT abandoned — fail closed on the delivered URL.
+// PREP_TEMPLATE_BY_SEQUENCE_KEY, mirrored here), AND no trace of a MANUAL
+// delivery of that key: a manual send keeps its key without prep_sent_at
+// when its email threw after dispatch (uncertain) or its delivered stamp
+// was lost — that page may be in the customer's hands (GH Codex #3856 r13
+// P0). Manual evidence = an email_messages row for this customer + key
+// that got past the dispatch boundary (anything but blocked / aborted-
+// before-dispatch — a post-dispatch 'failed' MAY have reached SendGrid),
+// an outbound sms_log row carrying the visit's /prep/:token link, or the
+// interaction marker a confirmed manual text writes. Unknown (a read
+// failed) is NOT abandoned — fail closed on the delivered URL.
 const LIVE_ENROLLMENT_STATUSES = ['queued', 'active'];
 const SEQUENCE_KEY_BY_PREP_TEMPLATE = Object.freeze({ 'prep.bed_bug': 'bed_bug', 'prep.cockroach': 'cockroach', 'prep.flea': 'flea' });
+// Any trace that a MANUAL send of takenKey reached (or may have reached)
+// the customer on this visit — see reservationAbandoned. Throws on a read
+// failure (the caller fails closed).
+async function manualDeliveryTrace(visit, takenKey, customerId) {
+  const email = await db('email_messages')
+    .where({ trigger_event_id: `manual_prep:${customerId}:${takenKey}` })
+    .whereNot('status', 'blocked')
+    .whereRaw("COALESCE(error_message, '') <> ?", ['aborted_by_caller_before_dispatch'])
+    .first('id');
+  if (email) return true;
+  if (visit.prep_token) {
+    const text = await db('sms_log')
+      .where('direction', 'outbound')
+      .whereNotIn('status', ['sending', 'failed', 'undelivered', 'blocked', 'canceled'])
+      .where('message_body', 'like', `%/prep/${visit.prep_token}%`)
+      .first('id');
+    if (text) return true;
+  }
+  const pestType = Object.keys(PREP_CONFIG).find((k) => PREP_CONFIG[k].emailTemplateKey === takenKey);
+  if (pestType) {
+    const marker = await db('customer_interactions')
+      .where({ customer_id: customerId, interaction_type: 'sms_outbound', subject: `${pestType} prep info sent` })
+      .first('id');
+    if (marker) return true;
+  }
+  return false;
+}
+
 async function reservationAbandoned(visit, takenKey, customerId) {
   if (visit.prep_sent_at) return false;
   try {
@@ -163,7 +199,7 @@ async function reservationAbandoned(visit, takenKey, customerId) {
         .first('id');
       if (enrollment) return false;
     }
-    return true;
+    return !(await manualDeliveryTrace(visit, takenKey, customerId));
   } catch (err) {
     logger.warn(`[prep-guide-sender] prep reservation liveness check failed for service ${visit.id}: ${err.message}`);
     return false;

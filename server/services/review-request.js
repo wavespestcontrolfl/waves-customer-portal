@@ -3360,11 +3360,14 @@ const ReviewService = {
    */
   async _outreachEmailThrowOutcome({ request, manageRetryVia, dispatched }) {
     if (dispatched && manageRetryVia !== "sequence") {
-      await stampWithRetry(
+      const stamped = await stampWithRetry(
         () => db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() }),
         `uncertain outreach email cooldown stamp (requestId=${request.id})`,
       );
-      return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_uncertain" };
+      // No stamp = no cooldown guard in the DB: the row is an unscheduled
+      // pending ask the gates cannot see, so the OPERATOR is the guard — a
+      // distinct reason says so ("do not send it again"; r13 P2).
+      return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: stamped ? "email_uncertain" : "email_uncertain_unrecorded" };
     }
     await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
     if (manageRetryVia === "sequence") {
@@ -4906,7 +4909,9 @@ const ReviewService = {
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
       .whereRaw(ASK_TOUCH_SQL)
       .select("template_key", "sequence_id", "sms_sent_at", "sent_at")
-      .orderByRaw("COALESCE(sms_sent_at, sent_at) DESC")
+      // The LATER channel: a Both row whose email leg was retried on day 29
+      // restarts the cooldown from the email, not the text (r13 P2).
+      .orderByRaw("GREATEST(sms_sent_at, sent_at) DESC")
       .limit(200);
     const exempt = new Set(exemptSequenceIds);
     const counted = rows.filter((r) => !(
@@ -4915,7 +4920,7 @@ const ReviewService = {
     ));
     const windowStartMs = Date.now() - ASK_CAP_WINDOW_DAYS * 86400000;
     const times = counted
-      .map((r) => new Date(r.sms_sent_at || r.sent_at).getTime())
+      .map((r) => Math.max(...[r.sms_sent_at, r.sent_at].filter(Boolean).map((v) => new Date(v).getTime())))
       .filter((t) => Number.isFinite(t));
     return {
       count: times.filter((t) => t >= windowStartMs).length,
@@ -4938,8 +4943,8 @@ const ReviewService = {
       .groupBy("customer_id")
       .select(
         "customer_id",
-        db.raw("COUNT(*) FILTER (WHERE COALESCE(sms_sent_at, sent_at) >= ?) AS count", [windowStart]),
-        db.raw("MAX(COALESCE(sms_sent_at, sent_at)) AS last_at"),
+        db.raw("COUNT(*) FILTER (WHERE GREATEST(sms_sent_at, sent_at) >= ?) AS count", [windowStart]),
+        db.raw("MAX(GREATEST(sms_sent_at, sent_at)) AS last_at"),
       );
     const map = {};
     rows.forEach((r) => {

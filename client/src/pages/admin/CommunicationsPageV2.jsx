@@ -1752,6 +1752,74 @@ function SmsTab() {
   // auto-sends), the customer's next insert reuses it, and only a claimed
   // /sms send delivers it.
 
+  // Email channel: the server sent the review email — nothing to insert,
+  // and a Text/Both review link still in the draft comes OUT: the email
+  // started the ask's cooldown, so the composer send would be refused for
+  // the stale reviewRequestId (GH Codex #3856 r2 P2).
+  const applyEmailedReviewAsk = (kind, d) => {
+    const staleUrl = insertedCustomerLinks[kind]?.url || null;
+    if (staleUrl) {
+      setMsgBody((b) => stripLinkLines(b, staleUrl));
+      setInsertedCustomerLinks((m) => {
+        const { [kind]: _dropped, ...rest } = m;
+        return rest;
+      });
+    }
+    setSendResult({
+      ok: true,
+      text: `Review request emailed${d.firstName ? ` to ${d.firstName}` : ""}.${staleUrl ? " The review link was removed from the text." : ""}`,
+    });
+  };
+
+  // Auto Pay hands back the resolved owner: adopt it as the selected
+  // customer when none was picked, so the send carries customerId and the
+  // link's owner policy applies (server refuses otherwise). The phone did
+  // not change — links already minted for this recipient with no selected
+  // customer adopt the resolved owner too, or the recipient-change effects
+  // would strip them (r4 P2).
+  const adoptResolvedOwner = (d, requestCustomerId, requestRecipientKey) => {
+    if (requestCustomerId || !d.customerId) return;
+    const adopt = (e) => (
+      e && e.recipientKey === requestRecipientKey && e.customerId == null
+        ? { ...e, customerId: d.customerId }
+        : e
+    );
+    setSelectedCustomerId(d.customerId);
+    setInsertedResched(adopt);
+    setInsertedReservice(adopt);
+    setInsertedCustomerLinks((m) => Object.fromEntries(Object.entries(m).map(([k, e]) => [k, adopt(e)])));
+  };
+
+  // The minted line goes into the draft. Replace-don't-stack per kind (same
+  // rule as the reschedule insert): a replaced review link's row is NOT
+  // canceled — reuse means the fresh insert hands back the same shared row
+  // anyway. A standalone line (Auto Pay: the reviewed SMS template, already
+  // greeted) goes in as-is; the generic prefill wraps the others.
+  const insertCustomerLinkLine = ({ kind, channel, d, requestRecipientKey, linkCustomerId }) => {
+    const clause = String(d.line || "").trim() || `${d.url}`;
+    const prefill = d.standalone ? clause : buildCustomerLinkPrefill({ firstName: d.firstName, clause });
+    const prevUrl = insertedCustomerLinks[kind]?.url || null;
+    setMsgBody((b) => {
+      const base = prevUrl ? stripLinkLines(b, prevUrl) : b;
+      return base.trim()
+        ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+        : prefill || clause;
+    });
+    setInsertedCustomerLinks((m) => ({
+      ...m,
+      [kind]: {
+        url: d.url,
+        recipientKey: requestRecipientKey,
+        customerId: linkCustomerId,
+        requestId: d.requestId || null,
+        // Both: the send posts reviewRequestEmail so the same ask is
+        // emailed once the text has really gone out.
+        emailToo: channel === "both",
+      },
+    }));
+    setSendResult({ ok: true, text: (CUSTOMER_LINK_NOTES[kind] || (() => "Link added."))({ ...d, channel }) });
+  };
+
   const handleInsertCustomerLink = async (kind, channel = null) => {
     const requestRecipient = toNumber.trim();
     if (!requestRecipient || insertingCustomerLink) return;
@@ -1792,22 +1860,7 @@ function SmsTab() {
         return;
       }
       if (d.sent && channel === "email") {
-        // Email channel: the server sent the review email — nothing to
-        // insert, and a Text/Both review link still in the draft comes OUT:
-        // the email started the ask's cooldown, so the composer send would
-        // be refused for the stale reviewRequestId (GH Codex #3856 r2 P2).
-        const staleUrl = insertedCustomerLinks[kind]?.url || null;
-        if (staleUrl) {
-          setMsgBody((b) => stripLinkLines(b, staleUrl));
-          setInsertedCustomerLinks((m) => {
-            const { [kind]: _dropped, ...rest } = m;
-            return rest;
-          });
-        }
-        setSendResult({
-          ok: true,
-          text: `Review request emailed${d.firstName ? ` to ${d.firstName}` : ""}.${staleUrl ? " The review link was removed from the text." : ""}`,
-        });
+        applyEmailedReviewAsk(kind, d);
         return;
       }
       if (d.autoSecured) {
@@ -1816,52 +1869,8 @@ function SmsTab() {
         setSendResult({ ok: true, text: "A consented card was already on file — Auto Pay is now enrolled, no link needed." });
         return;
       }
-      const clause = String(d.line || "").trim() || `${d.url}`;
-      // A standalone line (Auto Pay: the reviewed SMS template, already
-      // greeted) goes in as-is; the generic prefill wraps the others.
-      const prefill = d.standalone ? clause : buildCustomerLinkPrefill({ firstName: d.firstName, clause });
-      // Auto Pay hands back the resolved owner: adopt it as the selected
-      // customer when none was picked, so the send carries customerId and
-      // the link's owner policy applies (server refuses otherwise).
-      const linkCustomerId = d.customerId || requestCustomerId;
-      if (!requestCustomerId && d.customerId) {
-        // The phone did not change — links already minted for this
-        // recipient with no selected customer adopt the resolved owner too,
-        // or the recipient-change effects would strip them (r4 P2).
-        const adopt = (e) => (
-          e && e.recipientKey === requestRecipientKey && e.customerId == null
-            ? { ...e, customerId: d.customerId }
-            : e
-        );
-        setSelectedCustomerId(d.customerId);
-        setInsertedResched(adopt);
-        setInsertedReservice(adopt);
-        setInsertedCustomerLinks((m) => Object.fromEntries(Object.entries(m).map(([k, e]) => [k, adopt(e)])));
-      }
-      // Replace-don't-stack per kind (same rule as the reschedule insert).
-      // A replaced review link's row is NOT canceled: reuse means the fresh
-      // insert hands back the same shared row anyway.
-      const prevEntry = insertedCustomerLinks[kind] || null;
-      const prevUrl = prevEntry?.url || null;
-      setMsgBody((b) => {
-        const base = prevUrl ? stripLinkLines(b, prevUrl) : b;
-        return base.trim()
-          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
-          : prefill || clause;
-      });
-      setInsertedCustomerLinks((m) => ({
-        ...m,
-        [kind]: {
-          url: d.url,
-          recipientKey: requestRecipientKey,
-          customerId: linkCustomerId,
-          requestId: d.requestId || null,
-          // Both: the send posts reviewRequestEmail so the same ask is
-          // emailed once the text has really gone out.
-          emailToo: channel === "both",
-        },
-      }));
-      setSendResult({ ok: true, text: (CUSTOMER_LINK_NOTES[kind] || (() => "Link added."))({ ...d, channel }) });
+      adoptResolvedOwner(d, requestCustomerId, requestRecipientKey);
+      insertCustomerLinkLine({ kind, channel, d, requestRecipientKey, linkCustomerId: d.customerId || requestCustomerId });
     } catch (e) {
       if (!contextChanged()) {
         setSendResult({ ok: false, text: e.message });

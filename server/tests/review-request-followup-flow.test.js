@@ -902,6 +902,13 @@ describe('review request follow-up flow', () => {
       EmailLib.sendTemplate.mockResolvedValueOnce({ sent: true });
       expect(await ReviewService._sendOutreachEmail({ ...args, manageRetryVia: 'sequence' })).toMatchObject({ ok: true, sent: true });
 
+      // Lost twice: no cooldown guard in the DB → the distinct reason tells
+      // the operator not to send again (r13 P2).
+      rrUpdateOneOff.mockClear();
+      rrUpdateOneOff.mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down'));
+      EmailLib.sendTemplate.mockImplementationOnce(async (opts) => { await opts.onQueued({ id: 'em-10' }); throw new Error('post-dispatch'); });
+      expect(await ReviewService._sendOutreachEmail(args)).toMatchObject({ terminal: true, reason: 'email_uncertain_unrecorded' });
+
       // The cooldown stamp is the duplicate guard: retried once (r11 P2).
       rrUpdateOneOff.mockClear();
       rrUpdateOneOff.mockRejectedValueOnce(new Error('db blip'));

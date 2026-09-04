@@ -1817,6 +1817,7 @@ const EMAIL_LEG_REASONS = {
   // The email WENT but the row could not be stamped (twice): the ask is
   // invisible to the cooldown, so the operator must not click again.
   email_sent_unrecorded: 'The review email was sent, but it could not be recorded — do not send it again',
+  email_uncertain_unrecorded: "The review email may or may not have gone out and could not be recorded — do not send it again; check the customer's email log",
 };
 
 async function emailReviewAskNow(primaryId) {
@@ -1881,21 +1882,57 @@ const REVIEW_LINK_CHANNELS = ['sms', 'email', 'both'];
 // 'email' sends the ask now instead (emailReviewAskNow); 'sms' and 'both'
 // mint the inline row as before — for 'both' the composer's send carries
 // reviewRequestEmail so the email goes out with the text.
+// The request's own validation: { kind, last10, channel } or { status, error }.
+function parseCustomerLinkRequest(body) {
+  const kind = String(body.kind || '');
+  if (!CUSTOMER_LINK_KINDS.includes(kind)) {
+    return { status: 400, error: `kind must be one of ${CUSTOMER_LINK_KINDS.join(', ')}` };
+  }
+  const last10 = fullPhoneLast10(body.phone);
+  if (!last10) return { status: 400, error: 'Enter a full 10-digit phone number first' };
+  const channel = kind === 'review_request' ? String(body.channel || 'sms') : null;
+  if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) {
+    return { status: 400, error: 'channel must be one of sms, email, both' };
+  }
+  return { kind, last10, channel };
+}
+
+// A builder's outcome as the composer's response: { status, body }.
+function customerLinkResponse({ kind, channel, result, primaryId, recipientFirstName }) {
+  // Auto Pay auto-secure: a consented saved card was enrolled instead of a
+  // link being minted — a successful outcome with nothing to insert.
+  if (result.autoSecured) {
+    return { status: 200, body: { kind, url: null, line: '', autoSecured: true, firstName: recipientFirstName } };
+  }
+  if (!result.url) return { status: 404, body: { error: result.reason || 'Nothing to link for this customer' } };
+  return {
+    status: 200,
+    body: {
+      kind,
+      channel: channel || undefined,
+      url: stripSmsLinkScheme(result.url),
+      line: stripSmsLinkScheme(result.line),
+      firstName: recipientFirstName,
+      requestId: result.requestId || undefined,
+      balance: result.balance || undefined,
+      estimate: result.estimate || undefined,
+      expiresAt: result.expiresAt || undefined,
+      // Auto Pay: the resolved owner rides back so the composer can select
+      // it — the /sms send then carries customerId and the link's owner
+      // policy applies (GH Codex #3812 r3 P1). standalone: the line is a
+      // complete greeted message, inserted as-is.
+      customerId: kind === 'autopay_setup' ? primaryId : undefined,
+      standalone: result.standalone || undefined,
+    },
+  };
+}
+
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
     const body = req.body || {};
-    const kind = String(body.kind || '');
-    if (!CUSTOMER_LINK_KINDS.includes(kind)) {
-      return res.status(400).json({ error: `kind must be one of ${CUSTOMER_LINK_KINDS.join(', ')}` });
-    }
-    const last10 = fullPhoneLast10(body.phone);
-    if (!last10) {
-      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
-    }
-    const channel = kind === 'review_request' ? String(body.channel || 'sms') : null;
-    if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) {
-      return res.status(400).json({ error: 'channel must be one of sms, email, both' });
-    }
+    const parsed = parseCustomerLinkRequest(body);
+    if (parsed.error) return res.status(parsed.status).json({ error: parsed.error });
+    const { kind, last10, channel } = parsed;
 
     const target = await resolveLinkTarget({ kind, customerId: body.customerId, last10 });
     if (target.error) return res.status(target.status).json({ error: target.error });
@@ -1919,31 +1956,8 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       autopay_setup: () => builders.buildAutopaySetupLink(primaryId),
     };
     const result = (await builderByKind[kind]()) || {};
-    // Auto Pay auto-secure: a consented saved card was enrolled instead of a
-    // link being minted — a successful outcome with nothing to insert.
-    if (result.autoSecured) {
-      return res.json({ kind, url: null, line: '', autoSecured: true, firstName: recipientFirstName });
-    }
-    if (!result.url) {
-      return res.status(404).json({ error: result.reason || 'Nothing to link for this customer' });
-    }
-    res.json({
-      kind,
-      channel: channel || undefined,
-      url: stripSmsLinkScheme(result.url),
-      line: stripSmsLinkScheme(result.line),
-      firstName: recipientFirstName,
-      requestId: result.requestId || undefined,
-      balance: result.balance || undefined,
-      estimate: result.estimate || undefined,
-      expiresAt: result.expiresAt || undefined,
-      // Auto Pay: the resolved owner rides back so the composer can select
-      // it — the /sms send then carries customerId and the link's owner
-      // policy applies (GH Codex #3812 r3 P1). standalone: the line is a
-      // complete greeted message, inserted as-is.
-      customerId: kind === 'autopay_setup' ? primaryId : undefined,
-      standalone: result.standalone || undefined,
-    });
+    const answer = customerLinkResponse({ kind, channel, result, primaryId, recipientFirstName });
+    res.status(answer.status).json(answer.body);
   } catch (err) {
     logger.error(`customer-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
