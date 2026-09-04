@@ -125,36 +125,40 @@ async function bellOrWarn(ctx, product, request, bucket) {
 // fields are filled, and everything comes from ONE vendor — a request pinned
 // to a vendor the product has since left keeps its identity and gets no
 // mixed SKU/link (Codex r8 P2). Null = nothing to write.
+function requestOwnsVendor(request, meta, vendor) {
+  if (meta.vendorId) return meta.vendorId === vendor.vendorId;
+  return !request.vendor || request.vendor === vendor.vendorName;
+}
 function learnedVendorFields(request, vendor) {
   const meta = parseMeta(request.metadata);
-  const sameVendor = meta.vendorId ? meta.vendorId === vendor.vendorId : (!request.vendor || request.vendor === vendor.vendorName);
-  if (!sameVendor) return null;
+  if (!requestOwnsVendor(request, meta, vendor)) return null;
   const name = request.vendor || vendor.vendorName || null;
   const learned = {
     vendorId: meta.vendorId || vendor.vendorId || null,
     vendorSku: meta.vendorSku || vendor.pricing?.vendor_sku || null,
     vendorProductUrl: meta.vendorProductUrl || vendor.pricing?.vendor_product_url || null,
   };
-  const changed = name !== (request.vendor || null)
-    || learned.vendorId !== (meta.vendorId || null)
-    || learned.vendorSku !== (meta.vendorSku || null)
-    || learned.vendorProductUrl !== (meta.vendorProductUrl || null);
+  const changed = name !== (request.vendor || null) || Object.keys(learned).some((k) => learned[k] !== (meta[k] || null));
   return changed ? { vendor: name, metadata: { ...meta, ...learned } } : null;
 }
 
 // Vendor configured after the request was raised (the seeded sticker starts
 // unpriced): carry the vendor/SKU/URL onto the open request so the tab and
-// the refreshed bell show it. Product AND request are locked in one
-// transaction: the vendor is re-derived from the locked product (an admin
-// edit between the scan and here must not pin the request to the old
-// vendor), and a request that left 'open' meanwhile is neither updated nor
-// re-belled (pre-push P1). Returns the request as the bell must see it, or
+// the refreshed bell show it. Request AND product are locked in one
+// transaction — request FIRST, then product: the repository's lock order
+// (the Restock action route, the Intelligence Bar tool and the dispatcher
+// all take the request row before the product row), so this cannot deadlock
+// against them (pre-push P1). The vendor is re-derived from the locked
+// product (an admin edit between the scan and here must not pin the request
+// to the old vendor), and a request that left 'open' meanwhile is neither
+// updated nor re-belled. Returns the request as the bell must see it, or
 // null when it is no longer an open auto request.
 async function refreshOpenRequest(ctx, p, existing, scanPricing) {
   return ctx.conn.transaction(async (trx) => {
-    const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('auto_reorder_vendor_id');
     const request = await trx('product_restock_requests').where({ id: existing.id }).forUpdate().first();
-    if (!fresh || !request || request.status !== 'open' || request.source !== SOURCE) return null;
+    if (!request || request.status !== 'open' || request.source !== SOURCE) return null;
+    const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('auto_reorder_vendor_id');
+    if (!fresh) return null;
     const learned = learnedVendorFields(request, await lockedVendor(trx, p, fresh, scanPricing));
     if (!learned) return request;
     await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ vendor: learned.vendor, metadata: JSON.stringify(learned.metadata), updated_at: new Date() });
