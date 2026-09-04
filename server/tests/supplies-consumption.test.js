@@ -380,20 +380,23 @@ describe('recap consumption hook — retry window (source contract)', () => {
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
-  const hook = src.slice(src.indexOf("router.post('/:serviceId/pest-recap'"), src.indexOf('recap supplies consumption failed'));
+  const hook = src.slice(src.indexOf('async function recapSuppliesOwed('), src.indexOf("router.post('/:serviceId/pest-recap'"));
+  const route = src.slice(src.indexOf("router.post('/:serviceId/pest-recap'"), src.indexOf('router.post(', src.indexOf("router.post('/:serviceId/pest-recap'") + 10));
 
   test('the retry signal is the durable completion_supplies_owed marker the recap transition wrote, read and cleared by the hook — never record age', () => {
     const recapSrc = fs.readFileSync(path.join(__dirname, '../services/pest-recap.js'), 'utf8');
     expect(recapSrc.match(/completion_supplies_owed: true/g)).toHaveLength(2); // update branch + insert branch, both gated on !recapPriorCompleted
     expect(recapSrc).toMatch(/\.\.\.\(recapPriorCompleted \? \{\} : \{ field_flags: trx\.raw/);
-    expect(hook).toMatch(/let consumeNow = result\.priorCompleted !== true;/);
+    expect(hook).toMatch(/if \(result\.priorCompleted !== true\) return true;/);
     expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('field_flags'\)/);
-    expect(hook).toMatch(/if \(flags\.completion_supplies_owed === true\) consumeNow = true;/);
+    expect(hook).toMatch(/return flags\.completion_supplies_owed === true;/);
     // Cleared unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell means staff adjust by hand, so a retry must not deduct again.
     expect(hook).toMatch(/const handoffLost = \(consumption\?\.errors \|\| \[\]\)\.some\(\(e\) => e\.reason === 'failure_bell_not_sent'\);/);
     expect(hook).toMatch(/if \(result\.recordId && !handoffLost\) await db\('service_records'\)/);
     expect(hook).toMatch(/- 'completion_supplies_owed'/); // cleared after the at-most-once consume
     expect(hook).not.toMatch(/RECAP_RETRY_WINDOW_MS|created_at/);
-    expect(hook).toMatch(/if \(consumeNow\) \{/);
+    expect(hook).toMatch(/if \(!\(await recapSuppliesOwed\(result\)\)\) return;/);
+    expect(route).toMatch(/await settleRecapSupplies\(req\.params\.serviceId, result\);/); // the recap route runs the settlement after submitRecap
+    expect(route).toMatch(/if \(!result\.ok\) return res\.status\(recapStatusForReason\(result\.reason\)\)/);
   });
 });

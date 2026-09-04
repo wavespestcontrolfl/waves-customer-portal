@@ -48,7 +48,7 @@ jest.mock('../models/db', () => {
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
       if (cols[0] === 'evidence' && table === 'vendor_orders') return { evidence: mockState.parkedEvidence || {} }; // attachLatePlacement
-      if (cols[0] === 'amount_cents' && table === 'vendor_orders') { const r = [...mockState.updates].reverse().find((u) => u.table === 'vendor_orders' && u.row.amount_cents != null); return { amount_cents: r ? r.row.amount_cents : null }; } // settledFinalCents: the reserved amount
+      if (cols[0] === 'amount_cents' && table === 'vendor_orders') { const r = [...mockState.updates].reverse().find((u) => u.table === 'vendor_orders' && u.row.amount_cents != null); return { amount_cents: r ? r.row.amount_cents : null, created_at: mockState.reservedAt || null }; } // settledFinalCents: the reserved amount
       if (table === 'product_restock_requests') {
         if (cols[0] === 'status') return { status: mockState.freshRequestStatus };
         if (cols[0] === 'id') return mockState.sibling; // the sibling live-request probe
@@ -481,6 +481,18 @@ test('a quotesAtPlace vendor whose confirmed total exceeds the reserved checkout
   const r = await run(a);
   expect(r).toMatchObject({ status: 'needs_review', reason: 'over_cap_after_placement' });
   expect(requestStatus()).toBe('ordered');
+});
+
+test('a higher confirmed total re-checked after placement keeps the reservation’s cap-accounting month — created_at is not re-stamped (Codex r19 P2)', async () => {
+  mockState.reservedAt = new Date('2026-08-31T23:30:00Z');
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { await beforeSubmit(9900); return { externalOrderNumber: 'S1-14', amountCents: 12000, evidence: { totalSource: 'vendor' } }; }) });
+  try {
+    expect(await run(a)).toMatchObject({ status: 'placed', amountCents: 12000 });
+    const reservations = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.amount_cents != null && !u.row.status);
+    expect(reservations.map((u) => u.row.amount_cents)).toEqual([9900, 12000]);
+    expect(reservations[0].row.created_at).toBeInstanceOf(Date); // the initial reservation stamps the month
+    expect(reservations[1].row.created_at).toBeUndefined(); // the re-check does not
+  } finally { mockState.reservedAt = null; }
 });
 
 test('a quotesAtPlace vendor whose confirmed total is at or under the reserved checkout figure is recorded placed', async () => {

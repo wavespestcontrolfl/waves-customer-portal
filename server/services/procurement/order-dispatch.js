@@ -337,18 +337,23 @@ async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = 
 // `now` is evaluated HERE, per reservation — never a run-start clock passed
 // through: a run that crosses the ET month boundary reserves against the
 // month it is in (pre-push P0). The reservation re-stamps the row's
-// created_at (its cap-accounting month) at the same instant.
-async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env } = {}) {
+// created_at (its cap-accounting month) at the same instant. A post-placement
+// re-check of a higher confirmed total passes `accountingAt` — the month the
+// order was reserved in stays its month (the documented fixed-at-reservation
+// policy): the increase is checked against THAT month's headroom and
+// created_at is left alone (Codex r19 P2).
+async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env, accountingAt = null } = {}) {
   const now = new Date();
+  const monthAnchor = accountingAt || now;
   const { perOrder, monthly } = caps(env);
   if (perOrder == null || monthly == null) return { ok: false, reason: 'caps_unconfigured', message: 'AUTO_ORDER_MAX_PER_ORDER_CENTS and AUTO_ORDER_MAX_MONTHLY_CENTS must both be set' };
   if (!Number.isFinite(cents) || cents <= 0) return { ok: false, reason: 'no_binding_total', message: 'no positive vendor total to reserve' };
   if (cents > perOrder) return { ok: false, reason: 'over_per_order_cap', message: `${dollars(cents)} exceeds the per-order cap ${dollars(perOrder)}` };
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAPS_LOCK_KEY]);
-    const spent = await monthlySpentCents(trx, { now, excludeId: ledgerId });
+    const spent = await monthlySpentCents(trx, { now: monthAnchor, excludeId: ledgerId });
     if (spent + cents > monthly) return { ok: false, reason: 'over_monthly_cap', message: `${dollars(cents)} would take this month to ${dollars(spent + cents)}, over the monthly cap ${dollars(monthly)}` };
-    const n = await trx('vendor_orders').where({ id: ledgerId, status: 'placing' }).update({ amount_cents: cents, created_at: now, updated_at: now });
+    const n = await trx('vendor_orders').where({ id: ledgerId, status: 'placing' }).update({ amount_cents: cents, ...(accountingAt ? {} : { created_at: now }), updated_at: now });
     if (n !== 1) return { ok: false, reason: 'claim_lost', message: 'this order\'s claim was parked by stale recovery while the vendor call ran — nothing submitted; see the Restock tab' };
     return { ok: true };
   });
@@ -812,9 +817,10 @@ function parkIfUnpriced(conn, { ctx, pricing, order, vendor, product }) {
 // quoted one (pre-push P0): no adapter kind skips the detector.
 async function parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, finalCents, quoteCents, env }) {
   if (finalCents == null) return null;
-  const admitted = positiveCents(quoteCents) ?? await reservedCents(conn, ledger);
+  const reservation = await ledgerReservation(conn, ledger);
+  const admitted = positiveCents(quoteCents) ?? reservation.cents;
   if (finalCents <= (admitted ?? 0)) return null;
-  const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { env });
+  const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { env, accountingAt: reservation.createdAt });
   if (finalCap.ok) return null;
   // The row already left 'placing' (stale recovery parked or the operator
   // revoked it while the vendor call ran): the order still EXISTS at this
@@ -833,13 +839,14 @@ async function parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, 
 // overwrite the reservation and drop the order from the monthly cap
 // (pre-push P0). null = nothing positive anywhere: the caller parks.
 const positiveCents = (v) => (Number.isInteger(v) && v > 0 ? v : null);
-// The amount beforeSubmit reserved on the ledger row (null = nothing reserved).
-async function reservedCents(conn, ledger) {
-  const row = await conn('vendor_orders').where({ id: ledger.id }).first('amount_cents');
-  return positiveCents(row?.amount_cents == null ? null : Number(row.amount_cents));
+// What the ledger row holds from the reservation: the amount beforeSubmit
+// reserved (null = nothing reserved) and the cap-accounting month stamp.
+async function ledgerReservation(conn, ledger) {
+  const row = await conn('vendor_orders').where({ id: ledger.id }).first('amount_cents', 'created_at');
+  return { cents: positiveCents(row?.amount_cents == null ? null : Number(row.amount_cents)), createdAt: row?.created_at ? new Date(row.created_at) : null };
 }
 async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
-  return positiveCents(placed?.amountCents) ?? positiveCents(quoteCents) ?? reservedCents(conn, ledger);
+  return positiveCents(placed?.amountCents) ?? positiveCents(quoteCents) ?? (await ledgerReservation(conn, ledger)).cents;
 }
 
 // Stages after a committed claim: price → binding total → vendor call →
