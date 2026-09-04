@@ -1251,9 +1251,14 @@ router.post('/voice', async (req, res) => {
             // hand-built relay XML. CallSid binds the upgrade token to THIS
             // call (relay-protocol): the ws endpoint accepts no reusable
             // credential.
+            // The profile is stamped on the row BEFORE the relay opens (bounded,
+            // fail-soft): a setup Twilio rejects never reaches the ws frame that
+            // would otherwise record it (codex r12 P2).
+            const relayOpts = activeRelayTwiMLOptions();
+            await withDeadline(stampRelayProfile(CallSid, relayOpts));
             const relayXml = buildRelayTwiML({
               wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
-              ...activeRelayTwiMLOptions(),
+              ...relayOpts,
             });
             const inner = vestibuleInnerXml({ greetingUrl, vestibule });
             return res.type('text/xml').send(inner ? relayXml.replace('<Response>', `<Response>${inner}`) : relayXml);
@@ -1407,9 +1412,12 @@ router.post('/call-complete', async (req, res) => {
                 .update({ answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
                 .catch(() => {});
               // CallSid binds the upgrade token to THIS call (relay-protocol).
+              // Profile stamped before the relay opens — same reason as /voice.
+              const relayOpts = activeRelayTwiMLOptions();
+              await withDeadline(stampRelayProfile(CallSid, relayOpts));
               return res.type('text/xml').send(buildRelayTwiML({
                 wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
-                ...activeRelayTwiMLOptions(),
+                ...relayOpts,
               }));
             }
             if (handoffKind === 'dial') {
@@ -1588,7 +1596,7 @@ function sandboxRelayXml({ callSid, cell }) {
 // to stamp it at close — and that is exactly the profile a bake-off must be
 // able to attribute. The fallback (production) profile counts too. Fail-soft:
 // a stamp failure must not cost the caller the call.
-async function stampSandboxProfile(callSid, opts) {
+async function stampRelayProfile(callSid, opts) {
   if (!opts || !opts.relayProfileId) return;
   try {
     await db('call_log')
@@ -1600,7 +1608,7 @@ async function stampSandboxProfile(callSid, opts) {
         ),
       });
   } catch (stampErr) {
-    logger.warn(`[relay-sandbox] profile stamp failed ${maskSid(callSid)}: ${stampErr.message}`);
+    logger.warn(`[voice-relay] profile stamp failed ${maskSid(callSid)}: ${stampErr.message}`);
   }
 }
 
@@ -1695,7 +1703,7 @@ router.post('/relay-sandbox', async (req, res) => {
     gather.play(wavesGreetingUrl());
     const gatherInner = twiml.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
     // No digits ⇒ this document's relay opens with the production profile.
-    await stampSandboxProfile(CallSid, activeRelayTwiMLOptions());
+    await stampRelayProfile(CallSid, activeRelayTwiMLOptions());
     const relayXml = sandboxRelayXml({ callSid: CallSid });
     logger.info(`[relay-sandbox] answering ${maskSid(CallSid)} from=${maskPhone(From)}`);
     return res.type('text/xml').send(relayXml.replace('<Response>', `<Response>${gatherInner}`));
@@ -1717,7 +1725,7 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
     const cell = resolveSandboxCell(digits);
     logger.info(`[relay-sandbox] cell "${digits}" → ${cell ? cell.relayProfileId : 'production profile'} ${maskSid(CallSid)}`);
-    await stampSandboxProfile(CallSid, cell || activeRelayTwiMLOptions());
+    await stampRelayProfile(CallSid, cell || activeRelayTwiMLOptions());
     // A digit INTERRUPTS the disclosure nested in the answer <Gather> (same
     // rule as the language menu above), and Twilio does not report whether
     // the <Play> completed — so the continuation replays the complete
@@ -2732,7 +2740,9 @@ router.post('/call-status', async (req, res) => {
       });
     });
 
-    if (!isOutbound && CallStatus === 'completed') {
+    // A sandbox call has no recording and must never be handed account-level
+    // recording audio by the CallSid-keyed recovery lookup (codex r12 P2).
+    if (!isOutbound && CallStatus === 'completed' && !isSandboxCall(req)) {
       scheduleRecordingRecovery(CallSid);
     }
 
@@ -2770,6 +2780,7 @@ router.post('/call-status', async (req, res) => {
 });
 
 router._test = {
+  stampRelayProfile,
   decideRecordingAttach,
   nextCallStatus,
   builtinTranscriptMayReplace,

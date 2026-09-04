@@ -153,7 +153,10 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
   const fs = require('fs');
   const path = require('path');
   const ROOT = path.join(__dirname, '..');
-  const QUERY_RE = /(db|trx|knex|dbc|conn)\(['"]call_log( as [a-z]+)?['"]\)|from\(['"]call_log['"]\)|\.table\(['"]call_log['"]\)|\bFROM call_log\b(?![.\w])|\bJOIN call_log\b(?![.\w])/gi;
+  // ANY handle name — the repo injects knex as db/trx/conn/dbi/dbh/database/
+  // runner/sp/q… (codex r5 + r12); a query is a call with the table literal,
+  // whatever the local variable is called.
+  const QUERY_RE = /\b[A-Za-z_$][\w$]*\(['"]call_log( as [a-z]+)?['"]\)|\bFROM call_log\b(?![.\w])|\bJOIN call_log\b(?![.\w])/gi;
   const SAFE = {
     // Writers and per-row processors keyed by id / CallSid / a marker only
     // the recording processor stamps — none of them lists inbound calls.
@@ -216,7 +219,10 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
   };
   // A query keyed by a row id, CallSid, call_log_id, customer_id (a sandbox
   // row never gains one) or the processor's token: knex form or raw SQL.
-  const KEYED_RE = /(where|whereIn|andWhere|first)\(\s*(\{\s*)?['"]?(call_log\.|cl\.|c\.)?(id|twilio_call_sid|call_log_id|customer_id|processing_token)['"]?\s*[:,)]|whereNotNull\(\s*['"](call_log\.|cl\.|c\.)?customer_id['"]\s*\)|\b(call_log\.|cl\.)?(id|twilio_call_sid|call_log_id)\s*(=|IN)\s*(\?|\$\d|\(|ANY)/;
+  // Keyed = where/first on id / CallSid / call_log_id / customer_id /
+  // processing_token (object, shorthand `{ id }`, or positional), a bound
+  // raw equality, or a correlated join `cl.id = <table>.call_log_id`.
+  const KEYED_RE = /(where|whereIn|andWhere|first)\(\s*(\{\s*)?['"]?(call_log\.|cl\.|c\.)?(id|twilio_call_sid|call_log_id|customer_id|processing_token)['"]?\s*[:,)}]|whereNotNull\(\s*['"](call_log\.|cl\.|c\.)?customer_id['"]\s*\)|\b(call_log\.|cl\.)?(id|twilio_call_sid|call_log_id)\s*(=|IN)\s*(\?|\$\d|\(|ANY)|\bcl\.id\s*=\s*[a-z_]+\.call_log_id\b/;
   // The statement holding a query: from the start of its line to the ';'
   // that closes it at paren/brace depth zero (callbacks carry their own ';';
   // line comments are skipped).
@@ -277,7 +283,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/intelligence-bar/comms-tools.js', 'services/dashboard-alerts.js',
     'services/ads/google-call-bridge.js', 'services/email-bounce-rescue.js',
     'services/agent-estimate-context.js', 'services/estimator-engine/context-builder.js',
-    '../scripts/twilio/audit-inbound-routing.js',
+    '../scripts/twilio/audit-inbound-routing.js', 'services/call-retranscription-backfill.js',
   ])('%s applies whereNotSandboxCall', (rel) => {
     expect(fs.readFileSync(path.join(ROOT, rel), 'utf8')).toMatch(/whereNotSandboxCall\(/);
   });

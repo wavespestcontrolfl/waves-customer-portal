@@ -5,17 +5,20 @@
  * source (calls tab, unified inbox).
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(), isFailureStatus: jest.fn(() => false), maskSid: (s) => String(s || '').slice(-4) }));
+jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(() => Promise.resolve()), isFailureStatus: jest.fn(() => false), maskSid: (s) => String(s || '').slice(-4) }));
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(), syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/voice-agent/relay-server', () => ({ isRelayAttached: jest.fn(() => true) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../services/call-recording-processor', () => ({ recoverRecordingForCall: jest.fn() }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { isRelayAttached } = require('../services/voice-agent/relay-server');
 const voiceRouter = require('../routes/twilio-voice-webhook');
-const { isSandboxCall, sandboxRelayXml, RELAY_COMPLETE_ACTION_SANDBOX, RELAY_SANDBOX_CELL_ACTION } = voiceRouter._test;
+const { isSandboxCall, sandboxRelayXml, stampRelayProfile, RELAY_COMPLETE_ACTION_SANDBOX, RELAY_SANDBOX_CELL_ACTION } = voiceRouter._test;
+const { recordTouchpoint } = require('../services/conversations');
+const { recoverRecordingForCall } = require('../services/call-recording-processor');
 const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
 
 // An UNREGISTERED number: a registered Waves line is refused as the sandbox target.
@@ -33,6 +36,7 @@ function mockRes() {
   res.status = jest.fn((code) => { res.statusCode = code; return res; });
   res.type = jest.fn(() => res);
   res.send = jest.fn((body) => { res.body = body; return res; });
+  res.sendStatus = jest.fn((code) => { res.statusCode = code; return res; });
   return res;
 }
 
@@ -188,6 +192,46 @@ describe('POST /relay-sandbox', () => {
     expect(where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-sb-3' });
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', call_outcome: 'relay_failed' }));
     expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_sandbox_failed: 'relay_not_attached' });
+  });
+
+  // ⭐ /call-status FOR THE SANDBOX NUMBER (codex r10 P1 + r12 P2): when the
+  // status callback beats /relay-sandbox it writes the sandbox-sourced row
+  // itself — no customer lookup, no touchpoint — and a completed sandbox call
+  // never schedules the CallSid-keyed recording recovery.
+  test('a completed /call-status for the sandbox number writes the sandbox row, records no touchpoint and schedules no recording recovery', async () => {
+    jest.useFakeTimers();
+    try {
+      const { insert } = primeInsert({ existing: undefined, source: null });
+      const res = mockRes();
+      await handlerFor('/call-status')({ body: { CallSid: 'CA-sb-status', From: '+19415550100', To: SANDBOX, CallStatus: 'completed', CallDuration: '42', Direction: 'inbound' } }, res);
+      const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
+      expect(alertTwilioFailure.mock.calls.map((c) => c[0].errorMessage)).toEqual([]); // the handler must not have thrown
+      expect(insert).toHaveBeenCalledWith(expect.objectContaining({ twilio_call_sid: 'CA-sb-status', source: VOICE_RELAY_SANDBOX_SOURCE, status: 'completed' }));
+      expect(insert.mock.calls[0][0].customer_id).toBeUndefined();
+      expect(JSON.parse(insert.mock.calls[0][0].metadata)).toEqual({ relay_sandbox: true, source: 'status_callback' });
+      expect(recordTouchpoint).not.toHaveBeenCalled();
+      jest.runAllTimers();
+      await Promise.resolve();
+      expect(recoverRecordingForCall).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // The production relay legs (/voice answers-first, /call-complete backstop)
+  // stamp the chosen profile on the row BEFORE the relay opens, so a setup
+  // Twilio rejects stays attributable (codex r12 P2). Fail-soft, no-op without
+  // a profile.
+  test('stampRelayProfile merges the profile onto the CallSid row, and is a no-op without one', async () => {
+    const { update, where } = primeInsert();
+    await stampRelayProfile('CA-prod-1', { relayProfileId: 'flux_balanced_v1', relayAttrs: { speechModel: 'flux' } });
+    expect(where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-prod-1' });
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_profile_id: 'flux_balanced_v1', relay_attrs: { speechModel: 'flux' } });
+    update.mockClear();
+    await stampRelayProfile('CA-prod-2', {});
+    expect(update).not.toHaveBeenCalled();
+    db.mockImplementation(() => { throw new Error('pool down'); });
+    await expect(stampRelayProfile('CA-prod-3', { relayProfileId: 'nova_hints_v1' })).resolves.toBeUndefined(); // fail-soft
   });
 
   test('a DB failure still answers with valid TwiML (hangup), never a 500 into the call', async () => {
