@@ -802,6 +802,12 @@ function callEndedAt(call) {
 // on bafc4c4ae, codex r20 P2).
 const isoInstantSql = (text) => `(CASE WHEN pg_input_is_valid(${text}, 'timestamptz') THEN (${text})::timestamptz END)`;
 const OWN_HANDOFF_SQL = isoInstantSql("estimates.estimate_data #>> '{deliveryState,lastDeliveredAt}'");
+// The FIRST real handoff is retained across resends (admin-estimates
+// carries deliveryState.firstDeliveredAt forward while lastDeliveredAt
+// advances): a delivery inside the window followed by a resend after it
+// must keep counting as the kept promise, or refreshFulfillment would
+// clear an association hint the facts still support (codex r29 P2).
+const FIRST_HANDOFF_SQL = isoInstantSql("estimates.estimate_data #>> '{deliveryState,firstDeliveredAt}'");
 // Acceptance is a witness only when the CUSTOMER accepted: a manual accept
 // (mark-accepted — an admin recording a verbal yes) stamps accepted_at and
 // locks the price as 'manual_accept' with no document delivered, so it
@@ -829,6 +835,7 @@ const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWi
   const within = (expr) => `(${expr} > ?${until ? ` AND ${expr} <= ?` : ''})`;
   const bind = until ? [after, until] : [after];
   this.whereRaw(within(OWN_HANDOFF_SQL), bind)
+    .orWhereRaw(within(FIRST_HANDOFF_SQL), bind)
     .orWhereRaw(within(ANCHOR_HANDOFF_SQL), bind)
     .orWhereRaw(within(ACCEPT_WITNESS_SQL), bind);
 });
@@ -841,12 +848,12 @@ const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWi
 const handoffOrder = (conn, after, until = null) => {
   const inWindow = (expr) => `CASE WHEN ${expr} > ?${until ? ` AND ${expr} <= ?` : ''} THEN ${expr} END`;
   const bind = until ? [after, until] : [after];
-  return conn.raw(`LEAST(${inWindow(OWN_HANDOFF_SQL)}, ${inWindow(ANCHOR_HANDOFF_SQL)}, ${inWindow(ACCEPT_WITNESS_SQL)}) asc`, [...bind, ...bind, ...bind]);
+  return conn.raw(`LEAST(${inWindow(OWN_HANDOFF_SQL)}, ${inWindow(FIRST_HANDOFF_SQL)}, ${inWindow(ANCHOR_HANDOFF_SQL)}, ${inWindow(ACCEPT_WITNESS_SQL)}) asc`, [...bind, ...bind, ...bind, ...bind]);
 };
-const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${OWN_HANDOFF_SQL} as handed_off_at`), conn.raw(`${ANCHOR_HANDOFF_SQL} as anchor_handed_off_at`), conn.raw(`${ACCEPT_WITNESS_SQL} as accept_witness_at`)];
+const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${OWN_HANDOFF_SQL} as handed_off_at`), conn.raw(`${FIRST_HANDOFF_SQL} as first_handed_off_at`), conn.raw(`${ANCHOR_HANDOFF_SQL} as anchor_handed_off_at`), conn.raw(`${ACCEPT_WITNESS_SQL} as accept_witness_at`)];
 // The EARLIEST post-boundary witness time on a fetched row, or null.
 const witnessAt = (row, after) => {
-  const times = [row.handed_off_at, row.anchor_handed_off_at, row.accept_witness_at]
+  const times = [row.handed_off_at, row.first_handed_off_at, row.anchor_handed_off_at, row.accept_witness_at]
     .map((t) => (t ? new Date(t) : null))
     .filter((d) => d && !Number.isNaN(d.getTime()) && d > after);
   return times.length ? new Date(Math.min(...times.map((d) => d.getTime()))) : null;

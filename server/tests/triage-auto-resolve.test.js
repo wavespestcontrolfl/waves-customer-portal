@@ -33,10 +33,18 @@ const CUSTOMER_AFTER = new Date(new Date(CALL_AT).getTime() + 20 * 60 * 1000).to
 // Extraction with no address supplied — the moot-eligible shape.
 const NO_ADDR_EXTRACTION = { property: { service_address: { raw_text: null, street_line_1: null, city: null, postal_code: null } } };
 
+// The on-file address the card snapshotted at filing (payload.on_file_address)
+// — the evidence arms read it, never the customer_* columns; fixtures that
+// set the columns get the same address snapshotted unless they say otherwise.
+const onFileOf = (over) => (over.customer_address_line1
+  ? { address_line1: over.customer_address_line1, address_line2: over.customer_address_line2 ?? null, city: over.customer_city ?? null, zip: over.customer_zip ?? null }
+  : null);
 function item(over = {}) {
+  const payload = typeof over.payload === 'string' ? over.payload : { flag: 'address_unverifiable', confidence: 0.5, ...(over.payload || {}) };
+  if (typeof payload === 'object' && payload.on_file_address === undefined) payload.on_file_address = onFileOf(over);
   return {
     id: 't1', call_log_id: 'call-1', reason_code: 'address_unverifiable',
-    status: 'open', severity: 'advisory', created_at: FRESH, payload: { flag: 'address_unverifiable', confidence: 0.5 },
+    status: 'open', severity: 'advisory', created_at: FRESH,
     call_created_at: CALL_AT, customer_created_at: CUSTOMER_BEFORE,
     customer_pipeline_stage: 'active_customer', customer_deleted_at: null,
     call_extraction: NO_ADDR_EXTRACTION,
@@ -44,6 +52,7 @@ function item(over = {}) {
     customer_address_line1: null, customer_zip: null,
     customer_first_name: 'Pat', customer_last_name: null,
     ...over,
+    payload,
   };
 }
 const noBookings = { evidence: new Map() };
@@ -801,6 +810,16 @@ describe('evidence helpers', () => {
     expect(bookingAtRequestedAddress(card({ ...none, raw_text: '5 Pine Ave, Sarasota FL 34236' }), atOther, places)).toBe(true);
     // A second-property ask binds nothing.
     expect(bookingAtRequestedAddress(card({ ...none, additional_properties: 1 }), atOnFile, places)).toBe(false);
+    // The on-file address is the one the card SNAPSHOTTED at filing: a
+    // customer moved to 5 Pine Ave since the card does not turn a booking
+    // there into the answer to the implicit 77 Oak ask, and a card filed
+    // without the snapshot binds nothing (codex r29 P1).
+    const moved = { ...base, reason_code: 'not_confirmed', created_at: FRESH, customer_address_line1: '5 Pine Ave', customer_city: 'Sarasota', customer_zip: '34236', payload: { on_file_address: { address_line1: '77 Oak St', address_line2: null, city: 'Bradenton', zip: '34205' }, scheduling_window: { requested_date_range_start: '2026-07-30', requested_service_categories: ['pest_control'], requested_service_intent: 'preventative_one_time', requested_address: none } } };
+    expect(bookingAtRequestedAddress(item(moved), atOnFile, places)).toBe(true);
+    expect(bookingAtRequestedAddress(item(moved), atOther, places)).toBe(false);
+    const unsnapshotted = { ...moved, payload: { ...moved.payload, on_file_address: null } };
+    expect(bookingAtRequestedAddress(item(unsnapshotted), atOther, places)).toBe(false);
+    expect(bookingAtRequestedAddress(item(unsnapshotted), atOnFile, places)).toBe(false);
     // Through the booking arm: this call's own booking at the wrong address
     // (a reprocess that moved the property) does not close the original ask.
     expect(bookingCoversRequest(card(none), [atOther], { singleProperty: true, places })).toBe(false);

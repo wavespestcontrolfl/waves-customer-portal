@@ -281,6 +281,24 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(await cc.resolveFulfillment(db, { kind: 'call_back' }, call)).toMatchObject({ kind: 'inbound_call', record_id: inboundLater.id, strength: 'association' });
   });
 
+  test('a delivery inside the window keeps counting after a resend outside it — firstDeliveredAt is the retained witness (codex #3811 r29 P2)', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const inWindow = new Date(call.created_at.getTime() + 2 * 24 * 60 * 60 * 1000);
+    const resent = new Date(call.created_at.getTime() + (cc.ASSOCIATION_WINDOW_DAYS + 5) * 24 * 60 * 60 * 1000);
+    const [est] = await db('estimates').insert({
+      status: 'sent', customer_phone: PHONE, sent_at: resent, created_at: inWindow,
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: inWindow.toISOString(), lastDeliveredAt: resent.toISOString() } }),
+    }).returning('id');
+    try {
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'association', matched_at: inWindow });
+      // A resend-only row (first and last both outside the window) is not a hint.
+      await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: resent.toISOString(), lastDeliveredAt: resent.toISOString() } }) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+    } finally {
+      await db('estimates').where({ id: est.id }).del();
+    }
+  });
+
   test('an association outside the window is not a hint at all', async () => {
     const call = await db('call_log').where({ id: callId }).first();
     const [late] = await db('sms_log').insert({

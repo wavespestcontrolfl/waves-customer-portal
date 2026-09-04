@@ -224,7 +224,19 @@ function unitOf(line1, line2) {
   const { unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
   return unitKey(line2) || streetEmbeddedUnitKey(line1) || '';
 }
-const onFileUnit = (item) => unitOf(item.customer_address_line1, item.customer_address_line2);
+// The on-file address the EVIDENCE arms compare against: the one the card
+// snapshotted at filing (payload.on_file_address, call-routing-gates —
+// the linked customer's columns at that moment), never the customer's
+// current columns: a record moved from property A to B after the card
+// must not let evidence at B close the call's implicit property-A ask
+// (codex r29 P1). A card filed without the snapshot (the backlog) has no
+// on-file address for these arms — fail closed. address_moot (the record
+// NOW carries an address) keeps reading the live columns by design.
+function onFileAddress(item) {
+  const a = parseMaybeJson(item.payload)?.on_file_address;
+  return a && typeof a === 'object' && String(a.address_line1 || '').trim() ? a : null;
+}
+const onFileUnit = (item) => { const a = onFileAddress(item); return a ? unitOf(a.address_line1, a.address_line2) : ''; };
 
 // A heard reading's unit must equal the on-file unit when it names one (a
 // unit the file lacks cannot be established); a reading without a unit
@@ -241,14 +253,14 @@ function localityAgrees(file, { city, zip }) {
   if (heardCity && heardCity !== cityKey(file.city)) return false;
   return true;
 }
-const localityMatches = (item, reading) => localityAgrees({ city: item.customer_city, zip: item.customer_zip }, reading);
+const localityMatches = (item, reading) => localityAgrees(onFileAddress(item) || {}, reading);
 
 // Readings come ONLY from the card: payload.address_as_heard and the
 // heard_address snapshot call-routing-gates stamps at filing. Never the
 // call's rolling extraction columns — a force-reprocess rewrites those while
 // the open card keeps its ask. A card with neither fails closed.
 function heardAddressMatchesOnFile(item) {
-  const onFile = addressKey(item.customer_address_line1);
+  const onFile = addressKey(onFileAddress(item)?.address_line1);
   if (!onFile) return false;
   const heard = [];
   const payload = parseMaybeJson(item.payload);
@@ -271,7 +283,7 @@ function heardAddressMatchesOnFile(item) {
 
 // One heard reading against the on-file address: street key, locality, unit.
 function readingMatchesOnFile(item, reading) {
-  const onFile = addressKey(item.customer_address_line1);
+  const onFile = addressKey(onFileAddress(item)?.address_line1);
   return Boolean(onFile) && addressKey(reading.text) === onFile
     && localityMatches(item, reading) && heardUnitMatches(item, reading);
 }
@@ -1059,7 +1071,7 @@ async function loadContactEvidence(conn, items, flag) {
 // where service happens. The unit is part of the identity: Unit B is not
 // Unit A, and a unit-less stamp cannot prove a unit.
 function visitAtOnFileAddress(item, visit, places) {
-  const onFile = addressKey(item.customer_address_line1);
+  const onFile = addressKey(onFileAddress(item)?.address_line1);
   if (!onFile) return false;
   const place = bookingPlace(visit, places);
   if (!place) return false;

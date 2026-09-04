@@ -7835,6 +7835,12 @@ const CallRecordingProcessor = {
       try {
         const v2Extraction = v2Result?.extraction || null;
         const v2Valid = v2Result?.status === 'valid' && v2Extraction && isV2Extraction(v2Extraction);
+        // The linked customer's address AT FILING, snapshotted on every
+        // routing card (buildTriageItem.onFileAddress) — the evidence sweep
+        // reads it instead of the customer's current columns.
+        const onFileAddress = knownCaller
+          ? { address_line1: knownCaller.addressLine1, address_line2: knownCaller.addressLine2, city: knownCaller.addressCity, zip: knownCaller.addressZip }
+          : null;
 
         if (!v2Valid) {
           // Fail closed: block appointment + triage, but keep customer/lead
@@ -7938,7 +7944,7 @@ const CallRecordingProcessor = {
             if (flag === 'missing_unit_number') clarifyUnitOwed = true;
             await db('triage_items')
               .insert(buildTriageItem({
-                callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory', addressValidation,
+                callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress,
                 // The surname card's filing-time names include the merged V1
                 // extraction's — what backfillCustomerFromAppointmentContact
                 // writes onto the record (codex r18 P1).
@@ -8038,7 +8044,7 @@ const CallRecordingProcessor = {
               : [routingResult.reason || 'routing_rejected'];
             const triageReasons = blockingReasons;
             for (const flag of triageReasons.slice(0, 10)) {
-              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation });
+              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
             }
             // Demoted flags survive a block by ANOTHER gate (codex round-4
@@ -8051,7 +8057,7 @@ const CallRecordingProcessor = {
             for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
               try {
                 await db('triage_items')
-                  .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation }))
+                  .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
               } catch (fe) {
                 logger.warn(`[call-proc-v2] blocked-branch fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
@@ -8073,7 +8079,7 @@ const CallRecordingProcessor = {
               for (const f of routingResult.failedOpenFlags) {
                 try {
                   await db('triage_items')
-                    .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation }))
+                    .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
                     .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
                 } catch (fe) {
                   logger.warn(`[call-proc-v2] fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);

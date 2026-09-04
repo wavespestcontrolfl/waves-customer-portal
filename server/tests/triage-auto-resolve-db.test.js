@@ -74,7 +74,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const [card] = await db('triage_items').insert({
       call_log_id: call.id, category: 'time_ambiguous', severity: 'blocking', reason_code: 'not_confirmed',
       status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
-      payload: JSON.stringify({ flag: 'not_confirmed', scheduling_window: {
+      payload: JSON.stringify({ flag: 'not_confirmed', on_file_address: { address_line1: '1234 Fixture Ave', address_line2: null, city: null, zip: '34205' }, scheduling_window: {
         status: confirmedHour ? 'confirmed' : 'requested',
         confirmed_start_at: confirmedHour ? `${requestedDay}T${confirmedHour}:00:00-04:00` : null,
         requested_date_range_start: requestedDay, requested_service_categories: categories, requested_service_intent: intent, preferred_time_of_day: preferredTimeOfDay,
@@ -116,7 +116,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const [card] = await db('triage_items').insert({
       call_log_id: call.id, category: 'time_ambiguous', severity: 'blocking', reason_code: 'quote_promised',
       status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
-      payload: JSON.stringify({ flag: 'quote_promised', quote_scope: { requested_service_categories: estimateScope.endsWith('_sibling') ? ['pest_control', 'lawn_care'] : ['pest_control'], requested_specific_service: null, requested_service_intent: 'preventative_one_time', requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 } } }),
+      payload: JSON.stringify({ flag: 'quote_promised', on_file_address: { address_line1: '1234 Fixture Ave', address_line2: null, city: null, zip: '34205' }, quote_scope: { requested_service_categories: estimateScope.endsWith('_sibling') ? ['pest_control', 'lawn_care'] : ['pest_control'], requested_specific_service: null, requested_service_intent: 'preventative_one_time', requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 } } }),
     }).returning('id');
     const groupId = estimateScope.endsWith('_sibling') ? require('crypto').randomUUID() : null;
     // Each sent row carries the scope stamp its send wrote (codex r25 P1).
@@ -312,7 +312,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const [card] = await db('triage_items').insert({
       call_log_id: call.id, category: 'address_review', severity: 'blocking', reason_code: 'address_unverified',
       status: 'open', summary: 'fixture', created_at: cardAt, updated_at: cardAt,
-      payload: JSON.stringify({ flag: 'address_unverified', scheduling_status: 'confirmed', scheduling_window: {
+      payload: JSON.stringify({ flag: 'address_unverified', scheduling_status: 'confirmed', on_file_address: { address_line1: '1234 Fixture Ave', address_line2: null, city: null, zip: '34205' }, scheduling_window: {
         status: 'confirmed', confirmed_start_at: null, requested_date_range_start: null,
         requested_service_categories: ['pest_control'], requested_service_intent: 'preventative_one_time', preferred_time_of_day: null,
         requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 },
