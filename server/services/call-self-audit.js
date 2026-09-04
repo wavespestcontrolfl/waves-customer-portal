@@ -40,11 +40,12 @@ async function runSelfAudit(depsIn = {}) {
   if (!deps.createMessage) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return { skipped: 'no_anthropic_client' };
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: MODEL_TIMEOUT_MS, maxRetries: 1 });
-    deps.createMessage = (params) => createDeepMessage(client, params);
+    deps.createMessage = (params) => createDeepMessage(client, { laneId: 'call_self_audit', ...params });
   }
 
   const calls = await db('call_log')
     .where('direction', 'inbound')
+    .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // bake-off calls are not audited
     .whereIn('processing_status', ['processed', 'voicemail', 'spam'])
     .whereRaw("LENGTH(COALESCE(transcription, '')) > 200")
     .where('created_at', '>', db.raw("NOW() - INTERVAL '3 days'"))

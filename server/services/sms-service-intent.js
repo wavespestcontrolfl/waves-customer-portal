@@ -109,6 +109,7 @@ Rules:
 - Customers phrase these intents in unseen ways; match the meaning at the least-specific reading that fits, not keywords.`;
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+      laneId: 'sms_intent',
       text: prompt,
       jsonMode: true,
       jsonSchema: INTENT_SCHEMA,

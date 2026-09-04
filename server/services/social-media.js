@@ -1050,6 +1050,7 @@ Article summary: ${safeDesc}`,
   // Terra backup — never the content-drafting lane, so a WORKHORSE
   // tune/canary can't silently move live captions off the brand voice.
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+    laneId: 'social_copy',
     text: prompt,
     jsonMode: false,
     maxTokens: 500,
@@ -1130,6 +1131,7 @@ ${grounding}`,
   // Terra backup — same lane as the blog-share path above.
   const { HUMAN_PROSE_RULES: campaignProseRules } = require('./llm/human-prose-rules');
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+    laneId: 'social_copy',
     text: `${prompts[platform] || prompts.facebook}\n\n${campaignProseRules}`,
     jsonMode: false,
     maxTokens: 600,

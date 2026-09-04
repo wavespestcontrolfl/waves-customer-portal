@@ -250,6 +250,7 @@ ${cleanAudience ? `\nAudience: ${cleanAudience}` : ''}
 ${cleanTone ? `\nTone: ${cleanTone}` : ''}`;
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      laneId: 'content_misc',
       maxTokens: 1500,
       jsonMode: true,
       system: systemPrompt,

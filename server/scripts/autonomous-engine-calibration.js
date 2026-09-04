@@ -376,6 +376,7 @@ async function pickCustomerClusters() {
     if (!consentColumnPresent) {
       // Count and reject without ever reading lead_synopsis.
       const count = await db('call_log')
+        .modify((q) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(q)) // bake-off calls are not data
         .where('direction', 'inbound')
         .where('created_at', '>=', new Date(Date.now() - THRESHOLDS.customerClusterRecencyDays * 86400_000))
         .whereNotNull('lead_synopsis')
@@ -386,6 +387,7 @@ async function pickCustomerClusters() {
       if (n > 0) eligibility.excluded.consent_column_missing = n;
     } else {
       const calls = await db('call_log')
+        .modify((q) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(q)) // bake-off calls are not data
         .where('direction', 'inbound')
         .where('created_at', '>=', new Date(Date.now() - THRESHOLDS.customerClusterRecencyDays * 86400_000))
         .whereNotNull('lead_synopsis')

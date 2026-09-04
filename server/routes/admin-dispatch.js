@@ -14522,7 +14522,7 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
     });
     const generated = await dispatchWithFallback(
       MODELS.TEXT_POLICIES.visionAnalysis,
-      { text: basePrompt, images, jsonMode: false, maxTokens: 700, temperature: 0.2 },
+      { laneId: 'photo_scoring', text: basePrompt, images, jsonMode: false, maxTokens: 700, temperature: 0.2 },
       {
         validate: (candidate) => {
           const parsed = PhotoAnalysis.parsePhotoAnalysisResponse(candidate.text, { photoCount: photos.length });

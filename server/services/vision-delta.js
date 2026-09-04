@@ -108,6 +108,7 @@ async function callVisionModel(prePhoto, postPhoto) {
   const result = await dispatchWithFallback(
     MODELS.TEXT_POLICIES.visionAnalysis,
     {
+      laneId: 'vision_delta',
       text: PROMPT,
       images: [
         { data: prePhoto.data, mimeType: prePhoto.mimeType },

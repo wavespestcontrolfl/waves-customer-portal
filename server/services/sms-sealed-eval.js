@@ -309,6 +309,7 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
     factsBlock: item.facts_block, // frozen day-of snapshot — never a live context
     routeOverride: route, // pinned leg, cross-provider fallback disabled
     voiceProfile, // pinned at run creation — null means drafted profile-free
+    laneId: 'sealed_eval', // exam traffic is its own ledger lane, never the live drafter's
   });
   if (!parsed) {
     logger.warn(`[sealed-eval] draft failed for item ${String(item.id).slice(0, 8)} (leg ${run.provider_leg}); left pending`);
@@ -555,7 +556,7 @@ async function providerAnswersControlProbe({ route, run }) {
     const { dispatch } = require('./llm/call');
     const result = await dispatch(
       { provider: route.provider, model: route.model },
-      { text: 'Reply with the single word OK.', jsonMode: false, maxTokens: 16, timeoutMs: 20000 },
+      { laneId: 'sealed_eval', text: 'Reply with the single word OK.', jsonMode: false, maxTokens: 16, timeoutMs: 20000 },
     );
     // Bare `dispatch` has no empty-text rejection (that lives in
     // dispatchWithFallback), and ok-with-empty-output is exactly the failure

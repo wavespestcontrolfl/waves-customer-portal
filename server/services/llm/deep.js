@@ -40,8 +40,11 @@ function stripThinkingBlocks(response) {
 // in the call ledger; the Anthropic leg records through ledgerCall (request
 // bodies handed over for a trace, should the lane opt in), the OpenAI leg
 // records inside callOpenAI.
-async function createDeepMessage(client, params = {}) {
-  return agentContext.withChain(() => createDeepMessageInChain(client, params));
+// `laneId` labels the call-ledger rows of BOTH legs — the option
+// dispatchWithFallback's payload takes — and never reaches the wire.
+async function createDeepMessage(client, { laneId, ...params } = {}) {
+  const run = () => agentContext.withChain(() => createDeepMessageInChain(client, params));
+  return laneId ? agentContext.runInLane(laneId, run) : run();
 }
 
 async function createDeepMessageInChain(client, params) {

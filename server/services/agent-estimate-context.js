@@ -128,6 +128,7 @@ async function loadCalls(lead, phoneKey) {
     // newer call. Stamped rows rank after the anchor, before phone history.
     if (rows.length < 3) {
       const stampedRows = await db('call_log')
+        .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q))
         .whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
         // SETTLED stamps only — same rule as every stamp consumer (#3303),
         // and the FULL settled test, not just a cleared token (codex P1,
@@ -169,6 +170,7 @@ async function loadCalls(lead, phoneKey) {
         // PR #3304 r3): a stamped call that also matches by phone would
         // otherwise re-consume limit slots before the id-dedup, shrinking
         // the pack below three even when more history exists.
+        .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q)) // a bake-off call is not phone history
         .modify((q) => {
           if (lead.twilio_call_sid && rows.length) {
             q.where(function notAnchor() {
@@ -334,6 +336,7 @@ const IDENTITY_PROBE_LIMIT = 10;
 async function loadIdentityCandidate(lead) {
   try {
     const rows = await db('call_log')
+      .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q))
       .where(function ownedByLead() {
         // The stamp arm requires a SETTLED call — token NULL AND a
         // durable successful pass (codex P1, PR #3304 GH r9: a cleared

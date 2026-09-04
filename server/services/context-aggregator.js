@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
@@ -867,6 +868,9 @@ class ContextAggregator {
     try {
       const rows = await db('call_log')
         .where({ customer_id: customerId })
+        // A sandbox test call from a number that matches an account must never
+        // ground a reply to that account.
+        .modify((qb) => whereNotSandboxCall(qb))
         // v10: 60-day window, 4 calls — customers reference calls older than
         // a month ("when we talked last month about the ants…").
         .where('created_at', '>', new Date(Date.now() - 60 * 86400000))

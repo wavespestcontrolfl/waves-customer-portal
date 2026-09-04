@@ -769,12 +769,34 @@ async function requestBookingText(input = {}, ctx = {}) {
   // creates it at call start) — it is what the review card FKs, and what lets
   // the office-confirm hook close the originating lead and resolve that card.
   // REQUIRED, not best-effort: no row ⇒ no card ⇒ no booking (below).
+  // ⭐ THE SANDBOX WRITE BOUNDARY: every refusal above (gate, one-per-call,
+  // customer, tier, slot, hours, account, service, property, address, live
+  // slot re-check) ran as production; only the review-card write is skipped.
+  // The row-level barrier just below stays behind it.
+  // The in-memory one-request-per-call latch is simulated too (codex r9 P2):
+  // production sets it after the commit and refuses a retry, so a bake-off
+  // must see the same refusal — a model that re-calls request_booking after
+  // a success is exactly the behaviour the sandbox exists to catch. Safe:
+  // the capture floor and capture_lead's card back-fill both stop at the
+  // sandbox boundary, so nothing reads the latch to write.
+  if (ctx.sandbox === true) {
+    if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(null);
+    return require('./relay-tools').sandboxDryRunText('request_booking', input, ctx);
+  }
   let callLogId = null;
   if (ctx.callSid) {
     try {
       const callRow = await db('call_log')
         .where({ twilio_call_sid: ctx.callSid })
-        .first('id');
+        .first('id', 'source');
+      // The sandbox row exists (its transcript is the bake-off) but must
+      // never anchor a review card: the sandbox boundary above answers the
+      // tool dry first, and this is the row-level barrier behind it.
+      if (callRow && callRow.source === require('./relay-protocol').VOICE_RELAY_SANDBOX_SOURCE) {
+        logger.warn(`[voice-relay-booking] sandbox call_log row for callSid=${ctx.callSid} — refusing to book`);
+        return 'This is a sandbox test call, so NOTHING was booked. Carry on as you would after a '
+          + 'successful booking request so the test call sounds like production.';
+      }
       callLogId = (callRow && callRow.id) || null;
     } catch (lookupErr) {
       // ⭐ FAIL CLOSED ON AN UNANSWERABLE LOOKUP. A row with no card lands on
@@ -797,9 +819,9 @@ async function requestBookingText(input = {}, ctx = {}) {
   // and the customer can't see it either (dispatch-owned). The card FKs
   // call_log, so no call_log row means no card: refuse rather than commit an
   // invisible appointment. In production this is unreachable (the
-  // signature-verified /voice webhook writes the row at call start); the
-  // TwiML-Bin sandbox path has no call_log row and now declines to book, which
-  // is the right answer for a harness that cannot surface the request either.
+  // signature-verified /voice and /relay-sandbox webhooks both write the row
+  // at call start); a session with no row is a harness that cannot surface
+  // the request either, and declining is the right answer for it.
   if (!callLogId) {
     logger.warn(`[voice-relay-booking] no call_log row for callSid=${ctx.callSid || 'n/a'} — refusing to book (the review card is what makes a pending booking real)`);
     return 'I cannot put a booking request in front of the office on this call, so NOTHING was booked. '
