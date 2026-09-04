@@ -327,8 +327,10 @@ router.get('/:token', async (req, res) => {
     // stamp — resolve and render again so the customer sees the guide the
     // row now carries, and stamp THAT; every attempt is awaited and fenced,
     // never fire-and-forget (pre-push Codex P1 on bd85be714). A row still
-    // churning after a few rounds is answered 503 rather than with a page
-    // that could change or vanish behind the customer.
+    // churning after a few rounds, or a stamp that FAILS, is answered 503
+    // rather than with a page that could change or vanish behind the
+    // customer — an unstamped view is invisible to the manual sender's
+    // re-key / release fences (pre-push Codex P1 on 514bc1fd2).
     let source = null;
     let guide = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -342,9 +344,9 @@ router.get('/:token', async (req, res) => {
         stamped = Number(await source.stampView());
       } catch (err) {
         logger.warn(`[prep-public] view stamp failed: ${err.message}`);
-        stamped = -1; // unknown — a DB blip, not a moved key: serve the render
+        return res.status(503).json({ error: 'Try again in a moment' });
       }
-      if (stamped !== 0) break;
+      if (stamped > 0) break;
       source = null;
     }
     if (!source) return res.status(503).json({ error: 'Try again in a moment' });
