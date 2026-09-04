@@ -312,6 +312,15 @@ describe('recordServiceContactChanges', () => {
       consent_text_version: 'portal-2026-07-22',
       changed_fields: [],
     }));
+    // The keyed fingerprint is exact and format-independent, and never the
+    // number itself.
+    const { phoneFingerprint } = require('../services/service-contact-events');
+    expect(metadata.phone_fingerprint).toBe(phoneFingerprint('+1 (555) 123-1234'));
+    if (metadata.phone_fingerprint !== null) {
+      expect(metadata.phone_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+      expect(phoneFingerprint('5551231235')).not.toBe(metadata.phone_fingerprint);
+    }
+    expect(phoneFingerprint('123')).toBeNull();
   });
 
   test('admin saves stamp admin_user_id and the admin source label', async () => {

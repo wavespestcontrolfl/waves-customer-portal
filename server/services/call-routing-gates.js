@@ -145,6 +145,182 @@ function buildRouteDecision({
   };
 }
 
+// The filing-time snapshot of WHAT and WHERE the caller asked for — the
+// evidence sweep matches later bookings (scheduling_window) and delivered
+// estimates (quote_scope) against THIS, never the call's rolling
+// ai_extraction_enriched: a force-reprocess overwrites that while the open
+// card keeps its original ask.
+function askSnapshot(extraction) {
+  const request = extraction?.service_request || {};
+  const address = extraction?.property?.service_address || {};
+  const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const list = (v) => (Array.isArray(v) ? v : []);
+  return {
+    // The requested categories (primary + secondaries), the specific
+    // catalog service the caller named (a coarse category — pest_general
+    // for a flea treatment — is not the ask, and a generic booking in that
+    // category must not answer it), and the cadence asked for (a recurring-
+    // plan inquiry and a one-time request both reduce to the same category,
+    // and a one-time booking must never answer the plan ask).
+    requested_service_categories: [request.primary_service_category, ...list(request.secondary_categories)].filter((c) => text(c)),
+    requested_specific_service: text(request.specific_service_name),
+    requested_service_intent: text(request.service_intent),
+    // WHERE the caller asked for service: the sweep's same-customer booking
+    // arm applies only when the ask named no address or exactly the on-file
+    // one.
+    requested_address: {
+      street_line_1: address.street_line_1 ?? null,
+      street_line_2: address.street_line_2 ?? null,
+      city: address.city ?? null,
+      postal_code: address.postal_code ?? null,
+      raw_text: address.raw_text ?? null,
+      // The OTHER properties the call named: how many, and each one with a
+      // street as the sweep's readings — a two-property ask is judged
+      // property by property, and a named property the snapshot cannot
+      // read fails closed (codex r24 P2).
+      additional_properties: list(extraction?.property?.additional_properties).length,
+      additional: list(extraction?.property?.additional_properties)
+        .filter((p) => p && typeof p === 'object' && text(p.street_line_1))
+        .map((p) => ({ street_line_1: text(p.street_line_1), street_line_2: p.street_line_2 ?? null, city: p.city ?? null, postal_code: p.postal_code ?? null, raw_text: p.raw_text ?? null })),
+    },
+  };
+}
+
+// The on-file address a card snapshots (see buildTriageItem.onFileAddress):
+// the customers columns by name, or null without a street.
+function onFileAddressSnapshot(a) {
+  const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  if (!a || typeof a !== 'object' || !text(a.address_line1)) return null;
+  return { address_line1: text(a.address_line1), address_line2: text(a.address_line2), city: text(a.city), zip: text(a.zip) };
+}
+
+// secondary_contact_captured items are only useful if the row carries the
+// contact to confirm. Several sites insert this flag (the enforce-mode
+// deterministic-flags loop first, the processor's payload-rich insert
+// second) and the open-row unique index makes the FIRST insert win — so
+// attach the extraction's own secondary_contact here, where every insert
+// site flows through, instead of relying on the caller to pass it.
+function secondaryContactPayload(extraction) {
+  if (!extraction?.secondary_contact) return {};
+  return {
+    secondary_contact: extraction.secondary_contact,
+    // Full multi-party list (1.4.0) so the card shows EVERY named party.
+    ...(Array.isArray(extraction?.secondary_contacts) && extraction.secondary_contacts.length > 1
+      ? { secondary_contacts: extraction.secondary_contacts }
+      : {}),
+    // 4th+ parties exist beyond the array — cue the office to re-listen.
+    ...(extraction?.other_parties_mentioned === true ? { other_parties_mentioned: true } : {}),
+  };
+}
+
+// Scheduling-shaped cards carry the model's captured window fields so the
+// office can book "Tuesday, first slot" from the card instead of re-listening
+// to the recording — plus the filing-time service snapshot, so the
+// evidence sweep matches later bookings (scheduling_window) and delivered
+// quotes against what THIS call asked for, never the rolling extraction.
+function schedulingWindowSnapshot(extraction) {
+  const s = extraction.scheduling;
+  return {
+    status: s.status ?? null,
+    confirmed_start_at: s.confirmed_start_at ?? null,
+    requested_date_range_start: s.requested_date_range_start ?? null,
+    requested_date_range_end: s.requested_date_range_end ?? null,
+    preferred_time_of_day: s.preferred_time_of_day ?? null,
+    // Days the caller EXCLUDED from the requested range ("Tuesday to
+    // Thursday, not Wednesday"): a booking on one does not answer the ask
+    // (codex r16 P1).
+    blackout_dates: Array.isArray(s.blackout_dates) ? s.blackout_dates.filter((d) => typeof d === 'string' && d.trim()) : [],
+    callback_window_start: s.callback_window_start ?? null,
+    callback_window_end: s.callback_window_end ?? null,
+    scheduling_notes_raw: s.scheduling_notes_raw ?? null,
+    ...askSnapshot(extraction),
+  };
+}
+const SCHEDULING_PAYLOAD_FLAGS = new Set([
+  'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
+  'reschedule_or_cancel', 'cancellation_request',
+  'existing_appointment_coordination', 'auto_booking_skipped_after_approval',
+  // The off-hour card's whole job is to show the agreed time so the office
+  // can place it on an hour boundary — it needs the scheduling payload.
+  'off_hour_start',
+  // The authorization card keeps its filing-time scheduling status: the
+  // evidence sweep must never clear it while the call's CONFIRMED
+  // appointment is still unbooked, and a reprocess can rewrite the
+  // rolling extraction's status underneath the open card.
+  'caller_not_authorized',
+  // Address-review cards too: when a confirmed call is held solely on its
+  // address card, the sweep's completed-visit rule must keep the card
+  // until a booking answers the snapshotted ask.
+  'missing_service_address', 'low_confidence_address', 'address_unverifiable',
+  'address_unverified', 'address_validation_unavailable',
+  'address_not_validated',
+]);
+
+// Address-review cards carry the address the call NAMED, snapshotted at
+// filing: the evidence sweep proves "a visit completed at the address this
+// call named" against THIS, never the call's rolling extraction columns
+// (a force-reprocess rewrites those while the open card keeps its ask).
+const ADDRESS_SNAPSHOT_FLAGS = new Set([
+  'missing_service_address', 'low_confidence_address', 'address_unverifiable',
+  'address_unverified', 'address_validation_unavailable',
+  'address_not_validated',
+]);
+function heardAddressSnapshot(extraction) {
+  const sa = extraction?.property?.service_address || {};
+  return { street_line_1: sa.street_line_1 ?? null, street_line_2: sa.street_line_2 ?? null, city: sa.city ?? null, postal_code: sa.postal_code ?? null, raw_text: sa.raw_text ?? null };
+}
+
+// "Ask which unit" is useless without saying which building — and the
+// enforce lane files this card through the generic deterministic-flags
+// loop, which passes no extraPayload. Same argument as the secondary
+// contact above: attach it HERE, where every insert site flows through
+// (the open-row unique index makes the first insert win). The shadow
+// bridge passes its own extraPayload to override this with the LEGACY V1
+// address, which is what the record holds in that mode.
+// Prefer GOOGLE's resolved building over the extraction's. A verdict can
+// carry `hasReplaced` (a corrected street or ZIP) alongside the missing
+// subpremise, and deriveStatus returns `ambiguous` for it — so nothing
+// downstream adopts the correction, and stamping the extraction would
+// print the misheard street on a card whose entire job is to say WHICH
+// building needs a unit (codex r17 P2). The normalized form is the
+// building Google actually resolved.
+function unitAskBuilding(extraction, addressValidation) {
+  const sa = extraction?.property?.service_address || {};
+  const n = addressValidation?.normalized || {};
+  return {
+    street_line_1: n.street_line_1 || sa.street_line_1 || null,
+    city: n.city || sa.city || null,
+    postal_code: n.postal_code || sa.postal_code || sa.zip || null,
+  };
+}
+
+// Flag → the payload it carries, ONE table (codex r29 P2): every stamp
+// whose flag set contains the card's flag is merged into the payload, in
+// this order. Adding a card type is a row here, not a branch in the
+// constructor.
+const FLAG_PAYLOAD_STAMPS = [
+  { flags: new Set(['secondary_contact_captured']), stamp: ({ extraction }) => secondaryContactPayload(extraction) },
+  // Multi-property cards previously carried no addresses — the one surface
+  // built to tell the office "there's a second property" required transcript
+  // archaeology to learn WHICH property.
+  { flags: new Set(['multi_property_call']),
+    stamp: ({ extraction }) => (Array.isArray(extraction?.property?.additional_properties) && extraction.property.additional_properties.length
+      ? { additional_properties: extraction.property.additional_properties } : {}) },
+  { flags: SCHEDULING_PAYLOAD_FLAGS, stamp: ({ extraction }) => (extraction?.scheduling ? { scheduling_window: schedulingWindowSnapshot(extraction) } : {}) },
+  // A promised quote is a promise about SPECIFIC services at ONE address:
+  // the delivered estimate must cover those services and price that
+  // address before the card closes (codex r17 P1). Same snapshot as the
+  // scheduling cards, under its own key — quote cards carry no window.
+  { flags: new Set(['quote_promised']), stamp: ({ extraction }) => ({ quote_scope: askSnapshot(extraction) }) },
+  // The surname card's provenance evidence: the names THIS call heard, at
+  // filing (codex r18 P1). The merged V1 names the surname backfill writes
+  // from arrive as extraPayload.heard_name_v1 from the processor.
+  { flags: new Set(['missing_last_name']),
+    stamp: ({ extraction }) => ({ heard_name: { first_name: extraction?.caller?.first_name ?? null, last_name: extraction?.caller?.last_name ?? null } }) },
+  { flags: ADDRESS_SNAPSHOT_FLAGS, stamp: ({ extraction }) => ({ heard_address: heardAddressSnapshot(extraction) }) },
+  { flags: new Set(['missing_unit_number']), stamp: ({ extraction, addressValidation }) => ({ unit_ask_building: unitAskBuilding(extraction, addressValidation) }) },
+];
+
 function buildTriageItem({
   callLogId,
   flag,
@@ -157,6 +333,16 @@ function buildTriageItem({
   // The AV verdict behind this card, when the caller has one. Only the
   // unit-ask stamp reads it — see below.
   addressValidation = null,
+  // The linked customer's on-file address AT FILING (the processor's
+  // known-caller lookup), stamped on every card as payload.on_file_address
+  // — null when the call had no linked customer with a street. The
+  // evidence sweep judges "the ask named no address" and "the ask named
+  // exactly the on-file one" against THIS, never the customer's current
+  // columns: a record moved from property A to B after the card would
+  // otherwise let a booking or estimate at B close the call's implicit
+  // property-A ask (codex r29 P1). A card filed without it (the backlog)
+  // gets no on-file evidence — fail closed.
+  onFileAddress = null,
 }) {
   const flagToCategoryMap = {
     out_of_service_area: 'out_of_service_area',
@@ -287,80 +473,9 @@ function buildTriageItem({
   };
 
   const synopsis = extraction?.meta?.call_summary || null;
-
-  // secondary_contact_captured items are only useful if the row carries the
-  // contact to confirm. Several sites insert this flag (the enforce-mode
-  // deterministic-flags loop first, the processor's payload-rich insert
-  // second) and the open-row unique index makes the FIRST insert win — so
-  // attach the extraction's own secondary_contact here, where every insert
-  // site flows through, instead of relying on the caller to pass it.
-  const flagPayload = (flag === 'secondary_contact_captured' && extraction?.secondary_contact)
-    ? {
-      secondary_contact: extraction.secondary_contact,
-      // Full multi-party list (1.4.0) so the card shows EVERY named party.
-      ...(Array.isArray(extraction?.secondary_contacts) && extraction.secondary_contacts.length > 1
-        ? { secondary_contacts: extraction.secondary_contacts }
-        : {}),
-      // 4th+ parties exist beyond the array — cue the office to re-listen.
-      ...(extraction?.other_parties_mentioned === true ? { other_parties_mentioned: true } : {}),
-    }
-    : {};
-
-  // Multi-property cards previously carried no addresses — the one surface
-  // built to tell the office "there's a second property" required transcript
-  // archaeology to learn WHICH property.
-  if (flag === 'multi_property_call' && Array.isArray(extraction?.property?.additional_properties) && extraction.property.additional_properties.length) {
-    flagPayload.additional_properties = extraction.property.additional_properties;
-  }
-
-  // Scheduling-shaped cards carry the model's captured window fields so the
-  // office can book "Tuesday, first slot" from the card instead of re-listening
-  // — these fields were extracted all along but had zero readers.
-  const SCHEDULING_PAYLOAD_FLAGS = new Set([
-    'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
-    'reschedule_or_cancel', 'cancellation_request',
-    'existing_appointment_coordination', 'auto_booking_skipped_after_approval',
-    // The off-hour card's whole job is to show the agreed time so the office
-    // can place it on an hour boundary — it needs the scheduling payload.
-    'off_hour_start',
-  ]);
-  if (SCHEDULING_PAYLOAD_FLAGS.has(flag) && extraction?.scheduling) {
-    const s = extraction.scheduling;
-    flagPayload.scheduling_window = {
-      status: s.status ?? null,
-      confirmed_start_at: s.confirmed_start_at ?? null,
-      requested_date_range_start: s.requested_date_range_start ?? null,
-      requested_date_range_end: s.requested_date_range_end ?? null,
-      preferred_time_of_day: s.preferred_time_of_day ?? null,
-      callback_window_start: s.callback_window_start ?? null,
-      callback_window_end: s.callback_window_end ?? null,
-      scheduling_notes_raw: s.scheduling_notes_raw ?? null,
-    };
-  }
-
-  // "Ask which unit" is useless without saying which building — and the
-  // enforce lane files this card through the generic deterministic-flags
-  // loop, which passes no extraPayload. Same argument as the secondary
-  // contact above: attach it HERE, where every insert site flows through
-  // (the open-row unique index makes the first insert win). The shadow
-  // bridge passes its own extraPayload to override this with the LEGACY V1
-  // address, which is what the record holds in that mode.
-  if (flag === 'missing_unit_number') {
-    // Prefer GOOGLE's resolved building over the extraction's. A verdict can
-    // carry `hasReplaced` (a corrected street or ZIP) alongside the missing
-    // subpremise, and deriveStatus returns `ambiguous` for it — so nothing
-    // downstream adopts the correction, and stamping the extraction would
-    // print the misheard street on a card whose entire job is to say WHICH
-    // building needs a unit (codex r17 P2). The normalized form is the
-    // building Google actually resolved.
-    const sa = extraction?.property?.service_address || {};
-    const n = addressValidation?.normalized || {};
-    flagPayload.unit_ask_building = {
-      street_line_1: n.street_line_1 || sa.street_line_1 || null,
-      city: n.city || sa.city || null,
-      postal_code: n.postal_code || sa.postal_code || sa.zip || null,
-    };
-  }
+  const flagPayload = Object.assign({}, ...FLAG_PAYLOAD_STAMPS
+    .filter(({ flags }) => flags.has(flag))
+    .map(({ stamp }) => stamp({ extraction, addressValidation })));
 
   return {
     call_log_id: callLogId,
@@ -372,7 +487,11 @@ function buildTriageItem({
     payload: JSON.stringify({
       flag,
       confidence: extraction?.confidence?.overall,
-      scheduling_status: extraction?.scheduling?.status,
+      // Always present (null = the call made no scheduling claim): the
+      // evidence sweep's confirmed-unbooked guard fails closed on a card
+      // with no status key at all.
+      scheduling_status: extraction?.scheduling?.status ?? null,
+      on_file_address: onFileAddressSnapshot(onFileAddress),
       ...flagPayload,
       ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {}),
     }),
@@ -397,6 +516,7 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
 
 module.exports = {
   SUPERSEDE_KEPT_REASON_CODES,
+  onFileAddressSnapshot,
   computeAppointmentIdempotencyKey,
   computeAddressHash,
   checkTcpaConsent,

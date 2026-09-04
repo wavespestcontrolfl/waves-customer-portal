@@ -191,6 +191,58 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     expect(patches[0].deliveryState.lastDeliveredAt).toBe(last);
   });
 
+  test('a REAL group handoff appends each already-published sibling\'s frozen scope at the GROUP instant, pricing snapshot untouched (codex #3811 r34 P2)', async () => {
+    // The triage sweep pairs a cited revision only with sibling revisions
+    // of the same handoff instant; a sibling stamped only at its own
+    // earlier send would drop out of a genuinely complete group quote.
+    const anchor = estimateRow({ estimate_group_id: 'grp-1' });
+    const frozenScope = { lines: [{ names: ['Lawn Care'], recurring: true, oneTime: false }], address: '77 Oak St, Bradenton, FL 34205', property: null };
+    const earlier = '2026-06-01T09:00:00.000Z';
+    const sibling = {
+      id: 'est-sib', status: 'sent', estimate_group_id: 'grp-1',
+      estimate_data: JSON.stringify({ sendSnapshot: { pricingBundle: { frozen: true }, scope: frozenScope, scopeHistory: [{ deliveredAt: earlier, scope: frozenScope }] } }),
+    };
+    // One builder shape for every query the group send issues: the live
+    // (sent/viewed) sibling read resolves the sibling; the mid-send and
+    // blocking-sibling probes and the claimable-sibling read find nothing.
+    db.mockImplementation(() => {
+      const b = makeBuilder(anchor);
+      let live = false; let probe = false;
+      b.where = jest.fn((clause) => { if (clause && typeof clause === 'object' && clause.estimate_group_id && clause.id !== anchor.id) probe = true; return b; });
+      b.whereNot = jest.fn(() => b);
+      b.whereRaw = jest.fn(() => b);
+      b.modify = jest.fn((fn) => { fn(b); return b; });
+      b.whereIn = jest.fn((col, vals) => { if (col === 'status' && vals.includes('viewed')) live = true; return b; });
+      b.first = jest.fn(async () => (probe ? null : anchor));
+      b.select = jest.fn(() => Promise.resolve(live ? [sibling] : []));
+      b.then = (resolve, reject) => Promise.resolve(live ? [sibling] : []).then(resolve, reject);
+      return b;
+    });
+    const result = await router.sendEstimateNow(anchor, 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    const groupInstant = deliveryPatches()[0].deliveryState.lastDeliveredAt;
+    expect(groupInstant).toBeTruthy();
+    // The flag/expiry reconciliation still merges only the publisher id…
+    const siblingPatch = db.raw.mock.calls
+      .filter(([sql, bindings]) => /jsonb/.test(String(sql)) && Array.isArray(bindings))
+      .map(([, bindings]) => { try { return JSON.parse(bindings[0]); } catch { return null; } })
+      .find((patch) => patch && patch.groupPublishedByEstimateId === anchor.id);
+    expect(siblingPatch).toEqual({ groupPublishedByEstimateId: anchor.id });
+    // …and the scope stamp is ONE jsonb_set on the history key alone, at
+    // the group instant, reading the row's own scope at write time — never
+    // a rebuilt snapshot that could restore pricing a concurrent customer
+    // selection dropped (codex r35 P1).
+    const stamp = db.raw.mock.calls.find(([sql]) => /jsonb_set\(estimate_data, '\{sendSnapshot,scopeHistory\}'/.test(String(sql)));
+    expect(stamp).toBeTruthy();
+    expect(stamp[0]).toMatch(/estimate_data->'sendSnapshot'->'scope'\)/);
+    expect(stamp[1]).toEqual([groupInstant, groupInstant, 25]);
+    // Only the anchor's own finalize writes a snapshot; no sibling-bound JSON patch carries one.
+    const siblingJsonPatches = db.raw.mock.calls.filter(([sql, bindings]) => /\|\| \?::jsonb/.test(String(sql)) && Array.isArray(bindings) && /groupPublishedByEstimateId/.test(String(bindings[0])));
+    expect(siblingJsonPatches.length).toBe(1);
+    expect(String(siblingJsonPatches[0][1][0])).not.toMatch(/sendSnapshot/);
+    expect(sibling.estimate_data).toContain(earlier); // the fixture's own history was never rewritten client-side
+  });
+
   test('a REAL provider send advances lastDeliveredAt past the prior stamp', async () => {
     const last = '2026-07-03T09:00:00.000Z';
     const row = estimateRow({
@@ -222,6 +274,17 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     expect(witnessMerge).toBeTruthy();
     const patches = deliveryPatches();
     expect(patches.some((p) => p.deliveryState.firstDeliveredAt)).toBe(true);
+    // ...and the scope this send delivered rides along, merged UNDER
+    // sendSnapshot (the accepted row's bundle is not replaced) so the
+    // triage sweep can pair it with the witness (pre-push hook P1 on
+    // #3811 1b4240350).
+    const scopeMerge = db.raw.mock.calls.find(([sql, bindings]) => /'\{sendSnapshot\}'/.test(String(sql)) && Array.isArray(bindings) && bindings.length === 2);
+    expect(scopeMerge).toBeTruthy();
+    expect(JSON.parse(scopeMerge[1][0]).deliveryState.firstDeliveredAt).toBeTruthy();
+    const scope = { lines: [{ names: [], recurring: true, oneTime: false }], address: null, property: null };
+    // The scope rides with its revision history — one entry per real
+    // delivery, stamped with the handoff time (codex #3811 r32 P2).
+    expect(JSON.parse(scopeMerge[1][1])).toEqual({ scope, scopeHistory: [{ deliveredAt: expect.any(String), scope }] });
   });
 });
 
@@ -432,6 +495,25 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     data.estimatorEngine.invalidation_pending_to = 'lead-C';
     state.row = { ...state.row, estimate_data: JSON.stringify(data), ...extra };
   }
+
+  test('the send snapshot freezes the delivered scope — priced lines at their cadence and the address (codex r25 P1 on #3811)', async () => {
+    // The triage sweep binds a quote_promised card to THIS stamp, never to
+    // the live row a later in-place re-author may have widened.
+    const snapshot = await router.buildEstimateSendSnapshot(estimateRow({ service_interest: 'Pest Control', address: '77 Oak St, Bradenton, FL 34205' }));
+    expect(snapshot.sendSnapshot.scope).toEqual({
+      lines: [{ names: expect.arrayContaining(['Pest Control']), recurring: true, oneTime: false }],
+      address: '77 Oak St, Bradenton, FL 34205',
+      property: null,
+    });
+    // A suppressed attempt (nothing really handed off — lastDeliveredAt
+    // stays) carries the PRIOR send's stamp forward untouched, and stamps
+    // nothing where there was none (pre-push hook P1).
+    const prior = { lines: [{ names: ['Lawn Care'], recurring: false, oneTime: true }], address: '5 Pine Ave, Sarasota, FL 34236', property: null };
+    const suppressed = await router.buildEstimateSendSnapshot(estimateRow({ service_interest: 'Pest Control', address: '77 Oak St, Bradenton, FL 34205', estimate_data: JSON.stringify({ sendSnapshot: { scope: prior } }) }), undefined, { delivered: false });
+    expect(suppressed.sendSnapshot.scope).toEqual(prior);
+    const neverDelivered = await router.buildEstimateSendSnapshot(estimateRow({ service_interest: 'Pest Control' }), undefined, { delivered: false });
+    expect(neverDelivered.sendSnapshot.scope).toBeUndefined();
+  });
 
   test('a PENDING invalidation recorded during delivery is COMPLETED by the claim release', async () => {
     const { state, estimateUpdates, leadUpdates } = statefulMock();
