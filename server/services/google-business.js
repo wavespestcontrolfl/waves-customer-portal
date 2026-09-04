@@ -1554,6 +1554,10 @@ class GoogleBusinessService {
               totalSynced += gbpErr.partial.stored;
               errors.push(...gbpErr.partial.errors.map((e) => ({ location: loc.name, ...e })));
               partialStoredIds = gbpErr.partial.storedIds;
+              // Rows landed from the GBP feed this run: the location is not
+              // "nothing synced" if the Places sample then lands nothing
+              // (codex r10 P2). A landed sample still upgrades to places_fallback.
+              if (gbpErr.partial.stored > 0) sources[loc.id] = 'gbp_partial';
             }
             // A breaker trip is a database-write failure: the pull itself
             // succeeded, so the alert and the health line must say so instead
@@ -1589,10 +1593,10 @@ class GoogleBusinessService {
             // by the sample but not counted again (codex r6 P2).
             totalSynced += sample.synced - (sample.alreadyCounted || 0);
             totalNew += sample.new;
-            sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
+            sources[loc.id] = sample.synced > 0 ? 'places_fallback' : (sources[loc.id] || 'none');
             logger.info(`[gbp] Synced ${sample.synced} review sample rows for ${loc.name} via Places API fallback`);
           } else {
-            sources[loc.id] = 'none';
+            sources[loc.id] = sources[loc.id] || 'none';
           }
         }
         await this._notifyRestoredReviews(locRestored);
@@ -1652,7 +1656,9 @@ class GoogleBusinessService {
    *
    * Classes:
    *   feed_down     FIX  nothing synced this run (no GBP, no Places sample)
-   *   feed_degraded ACT  GBP creds broken; running on the ~5-review sample
+   *   feed_degraded ACT  GBP creds broken; running on the ~5-review sample —
+   *                      or a breaker trip that stored part of the GBP feed
+   *                      and no Places sample landed (source gbp_partial)
    *   silent_empty  ACT  GBP pull succeeds but the feed has ZERO reviews
    *                      (the Venice wipe class — mechanically "healthy")
    *   ingest_stale  ACT  Google shows more reviews than we ever ingested and
@@ -1673,6 +1679,12 @@ class GoogleBusinessService {
     const failedWhat = writeFailure ? `the review writes failed: ${failureText.replace(/^review upsert failed: /, '')}` : `the GBP pull failed: ${failureText}`;
     if (source === 'none') {
       return { cls: 'feed_down', severity: 'FIX', detail: `nothing synced this run — ${failureText ? failedWhat : 'the GBP pull failed'} and no Places sample landed` };
+    }
+    if (source === 'gbp_partial') {
+      // The breaker aborted the location after some GBP rows stored and the
+      // Places sample landed nothing: the durable writes are real, so this is
+      // degraded, not down (codex r10 P2).
+      return { cls: 'feed_degraded', severity: 'ACT', detail: `${failedWhat} — part of the GBP feed stored before the abort, no Places sample landed; removals were not reconciled this run` };
     }
     if (source === 'places_fallback') {
       // Say what actually failed: a 503 from Google, a pool timeout, or a
@@ -1901,7 +1913,9 @@ class GoogleBusinessService {
     const stored = reviews.length - rowFailures.length;
     let cause = null;
     if (rowFailures.length) {
-      cause = `${rowFailures.length} of ${reviews.length} review row(s) failed to store (${stored} stored) — first: ${rowFailures[0].error}`;
+      // Name the row: a unique-violation message often omits the value, and
+      // the alert is what the operator inspects (codex r10 P2).
+      cause = `${rowFailures.length} of ${reviews.length} review row(s) failed to store (${stored} stored) — first: ${rowFailures[0].review}: ${rowFailures[0].error}`;
       errors.push({ error: cause, source: 'gbp_row' });
     }
     return { stored, inserted, failedReviewNames: rowFailures.map((f) => f.review), cause, errors };
@@ -2189,7 +2203,7 @@ class GoogleBusinessService {
         const body = reconcileFailure
           ? `Review sync for ${loc.name} pulled the GBP feed, but the ${cause}. New reviews are still syncing; REMOVALS will not be detected until the reconcile succeeds.`
           : upsertFailure
-            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored\)/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; ${breakerTrip ? 'the location aborted before its removal reconcile, so nothing is misreported as removed and the sync will attempt the Places sample fallback' : `the failed rows were excluded from this run's removal reconcile so they are not misreported as removed${reconcileFailed ? ' (and that reconcile FAILED — see its own alert)' : ' (the rest of the location reconciled normally)'}`}. This is a database write error, not a credentials problem — read the error and the code.`
+            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored\)/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; ${breakerTrip ? `the location aborted before its removal reconcile, so nothing is misreported as removed; ${process.env.GOOGLE_MAPS_API_KEY ? 'the sync will attempt the Places sample fallback' : 'no Places fallback is available (GOOGLE_MAPS_API_KEY is not set)'}` : `the failed rows were excluded from this run's removal reconcile so they are not misreported as removed${reconcileFailed ? ' (and that reconcile FAILED — see its own alert)' : ' (the rest of the location reconciled normally)'}`}. This is a database write error, not a credentials problem — read the error and the code.`
             : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
         await NotificationService.notifyAdmin(
           'review',

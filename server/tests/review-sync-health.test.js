@@ -68,6 +68,12 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
     expect(trip.detail).toMatch(/^the review writes failed: 3 review rows failed on connection-class errors/);
     expect(trip.detail).not.toMatch(/pull failed|credentials/);
     expect(classify({ source: 'none', gbpFailure: 'review upsert failed: 3 review rows failed on connection-class errors this run — aborting the location (0 stored; last: read ECONNRESET)' }).detail).toMatch(/^nothing synced this run — the review writes failed: 3 review rows/);
+    // Part of the feed stored before the abort and the sample landed nothing:
+    // degraded, never "nothing synced" (codex r10 P2).
+    const partial = classify({ source: 'gbp_partial', gbpFailure: 'review upsert failed: 3 review rows failed on connection-class errors this run — aborting the location (2 stored; last: read ECONNRESET)' });
+    expect(partial).toMatchObject({ cls: 'feed_degraded', severity: 'ACT' });
+    expect(partial.detail).toMatch(/^the review writes failed: 3 review rows.*part of the GBP feed stored before the abort, no Places sample landed/);
+    expect(partial.detail).not.toMatch(/nothing synced/);
   });
 
   test('GBP pull succeeds on an EMPTY feed → silent_empty ACT (the Venice class)', () => {

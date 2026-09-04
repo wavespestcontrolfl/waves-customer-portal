@@ -358,7 +358,8 @@ describe('Google Business review sync', () => {
     expect(places).not.toHaveBeenCalled();
     // The failed row never advanced synced_at — reconcile runs for the rest of the location with that row excluded.
     expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.any(Date), { excludeReviewNames: ['accounts/1/locations/2/reviews/rev-bad'] });
-    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringContaining('1 of 2 review row(s) failed to store') })]);
+    // The cause names the row, not only the error text (codex r10 P2).
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringMatching(/1 of 2 review row\(s\) failed to store \(1 stored\) — first: accounts\/1\/locations\/2\/reviews\/rev-bad: /) })]);
     expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^review upsert failed: 1 of 2 .*duplicate key value/), { reconcileFailed: false });
     // Alerted AFTER the reconcile, so the body can state its outcome truthfully.
     expect(reconcile.mock.invocationCallOrder[0]).toBeLessThan(degraded.mock.invocationCallOrder[0]);
@@ -459,7 +460,28 @@ describe('Google Business review sync', () => {
     expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringMatching(/^review upsert failed: 3 review rows failed on connection-class errors this run.*\(2 stored; last: read ECONNRESET\)/) })]);
     expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^review upsert failed: 3 review rows failed on connection-class errors/));
     expect(places).toHaveBeenCalledTimes(1);
+    // Two GBP rows stored and the sample landed nothing: the run is partial,
+    // not "none" (codex r10 P2).
+    expect(result.sources.bradenton).toBe('gbp_partial');
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
+  test('a breaker-trip alert says no Places fallback runs when GOOGLE_MAPS_API_KEY is unset (codex r10 P2)', async () => {
+    const NotificationService = require('../services/notification-service');
+    const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
+    const trip = 'review upsert failed: 3 review rows failed on connection-class errors this run — aborting the location (2 stored; last: read ECONNRESET)';
+    const loc = { id: 'bradenton', name: 'Bradenton' };
+    const saved = process.env.GOOGLE_MAPS_API_KEY;
+    delete process.env.GOOGLE_MAPS_API_KEY;
+    await service._notifyDegradedSync(loc, trip);
+    expect(notify.mock.calls[0][2]).toMatch(/no Places fallback is available \(GOOGLE_MAPS_API_KEY is not set\)/);
+    expect(notify.mock.calls[0][2]).not.toMatch(/will attempt/);
+    process.env.GOOGLE_MAPS_API_KEY = 'test-key';
+    db.__state.rows.notifications = [];
+    await service._notifyDegradedSync({ ...loc, id: 'sarasota', name: 'Sarasota' }, trip);
+    expect(notify.mock.calls[1][2]).toMatch(/will attempt the Places sample fallback/);
+    if (saved === undefined) delete process.env.GOOGLE_MAPS_API_KEY; else process.env.GOOGLE_MAPS_API_KEY = saved;
+    notify.mockRestore();
   });
 
   test('a connection-class failure inside a post-write step counts toward the breaker (codex r5 P1)', async () => {
