@@ -30,6 +30,7 @@ class ResponseDrafter {
     const result = await dispatchWithFallback(
       highStakes ? MODELS.TEXT_POLICIES.highStakes : MODELS.TEXT_POLICIES.customerCopy,
       {
+        laneId: highStakes ? 'response_drafter_high_stakes' : 'response_drafter',
         maxTokens: 500,
         jsonMode: false,
         system: `You are Adam Benetti's AI assistant for Waves Pest Control. Draft SMS replies Adam will review before sending. Write as Adam — direct, knowledgeable, friendly. Keep under 300 chars when possible. Reference actual service data. Sign off "- Adam" or "- Waves". Plain keyboard punctuation only: straight quotes and hyphens, never curly quotes, em dashes, or the ellipsis character (they force UCS-2 encoding and multiply SMS segments). FLAGS:\n${flagsSummary}`,

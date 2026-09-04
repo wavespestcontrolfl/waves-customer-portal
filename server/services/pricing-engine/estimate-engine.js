@@ -1009,6 +1009,11 @@ function generateEstimate(input) {
         modifiers,
         stationCount: services.mosquito.stationCount,
         dunkCount: services.mosquito.dunkCount,
+        // Same caller contract as commercial + one-time mosquito (owner
+        // ruling 2026-09-03: no mosquito quote prices off a guessed lot): a
+        // synthesized lot arrives as lotSizeMeasured:false and routes the
+        // line to review. Undefined = admin / measured lot, unchanged.
+        lotSizeMeasured: input.lotSizeMeasured,
       });
       result.annual = Math.round(result.annual);
       result.monthly = Math.round(result.annual / 12 * 100) / 100;
@@ -1364,6 +1369,11 @@ function generateEstimate(input) {
       stationCount: services.oneTimeMosquito.stationCount,
       dunkCount: services.oneTimeMosquito.dunkCount,
       isRecurringCustomer,
+      // Same caller contract as commercial mosquito: a synthesized lot
+      // (public wizard sqft×4, lead automation default) arrives as
+      // lotSizeMeasured:false and routes the line to review rather than
+      // pricing a fabricated treatable area. Undefined = admin / measured.
+      lotSizeMeasured: input.lotSizeMeasured,
     });
     lineItems.push(result);
   }
@@ -1421,6 +1431,7 @@ function generateEstimate(input) {
         ...pestInitialRoachOptions,
         roachType: standaloneRoachMeta.roachType,
         standalone: true,
+        buildingSizeMeasured: input.buildingSizeMeasured,
         source: pestInitialRoachOptions.source || 'standalone_native_cockroach_treatment',
       });
       if (result) lineItems.push(result);
@@ -1511,6 +1522,8 @@ function generateEstimate(input) {
       services: {
         ...(property.services || {}),
         flea: {
+          // Passed through so priceFlea can route a retired single-visit
+          // request to review (it never changes the priced offer).
           offerKey: fleaOptions.offerKey ?? fleaOptions.fleaOfferKey ?? services.fleaOfferKey ?? input.fleaOfferKey,
           fleaExterior: fleaOptions.fleaExterior ?? services.fleaExterior ?? input.fleaExterior,
           fleaComplexity: fleaOptions.fleaComplexity ?? services.fleaComplexity ?? input.fleaComplexity,
@@ -1518,7 +1531,6 @@ function generateEstimate(input) {
         },
         fleaExterior: fleaOptions.fleaExterior ?? services.fleaExterior ?? input.fleaExterior,
       },
-      fleaOfferKey: fleaOptions.offerKey ?? fleaOptions.fleaOfferKey ?? services.fleaOfferKey ?? input.fleaOfferKey,
       fleaComplexity: fleaOptions.fleaComplexity ?? services.fleaComplexity ?? input.fleaComplexity,
       fleaExteriorSourceSuspected: fleaOptions.exteriorSourceSuspected ?? services.fleaExteriorSourceSuspected ?? input.fleaExteriorSourceSuspected,
       fleaExteriorAreaSqFt: fleaOptions.fleaExteriorAreaSqFt ?? services.fleaExteriorAreaSqFt ?? input.fleaExteriorAreaSqFt,

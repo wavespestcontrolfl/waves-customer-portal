@@ -15,7 +15,6 @@
 // Reuses the portal's own mechanism end to end: enrollPromoter +
 // getPromoterReferralLink, never a parallel code generator.
 
-const db = require('../models/db');
 
 const REFERRAL_CARD_COPY = Object.freeze({
   headline: 'Know someone who could use Waves?',
@@ -44,20 +43,15 @@ function formatRefereeAmount(cents) {
  * generic 404), throws on failures (callers answer 503, logging err.code
  * only — PG constraint violations quote the conflicting phone number).
  *
- * enrollPromoter is strictly per-customer. Multi-property siblings share a
- * phone while referral_promoters.customer_phone stays unique, so a sibling
- * profile's first tap loses the insert to that constraint (23505) — resolve
- * the HOUSEHOLD promoter read-only instead, scoped to the same account_id
- * (phone alone is not identity: recycled/shared numbers cross unrelated
- * customers, and handing over a foreign code would credit rewards to the
- * wrong account). No account-scoped match = a genuine cross-account
- * collision → rethrow for manual resolution, never a guessed attribution.
+ * Enrollment goes through referral-engine.resolvePromoter: strictly
+ * per-customer, with the account-scoped household fallback for a
+ * multi-property sibling whose phone already backs another sibling's
+ * promoter (23505); a cross-account collision rethrows.
  */
 // conn: an outer transaction (the estimate tap holds the estimate row lock
 // and the call-side verdict through enrollment); every read and the enroll
 // ride it when given.
 async function buildReferralShareForCustomer(customerId, {
-  database = db,
   referralEngine = require('./referral-engine'),
   conn = null,
 } = {}) {
@@ -67,32 +61,10 @@ async function buildReferralShareForCustomer(customerId, {
   const settings = conn ? await referralEngine.getLiveSettings(conn) : await referralEngine.getLiveSettings();
   if (!settings?.program_active) return null;
 
-  const dbx = conn || database;
-  let promoter;
-  try {
-    // Under an outer transaction the enroll runs in a SAVEPOINT (knex nests
-    // transactions as savepoints): a 23505 from the unique customer_phone
-    // constraint rolls back only the savepoint, so the household fallback
-    // below can still query the outer transaction — a unique violation
-    // otherwise aborts the whole Postgres transaction (25P02) (pre-push
-    // codex P1).
-    ({ promoter } = await (conn
-      ? conn.transaction((sp) => referralEngine.enrollPromoter(customerId, { conn: sp, settings }))
-      : referralEngine.enrollPromoter(customerId)));
-  } catch (err) {
-    if (err?.code !== '23505') throw err;
-    const profile = await dbx('customers')
-      .where({ id: customerId })
-      .first('id', 'phone', 'account_id');
-    promoter = profile?.phone && profile?.account_id
-      ? await dbx('referral_promoters as rp')
-        .join('customers as c', 'rp.customer_id', 'c.id')
-        .where('rp.customer_phone', profile.phone)
-        .where('c.account_id', profile.account_id)
-        .first('rp.*')
-      : null;
-    if (!promoter) throw err;
-  }
+  // Enroll-or-resolve: a multi-property sibling sharing the household
+  // phone resolves the household promoter read-only, scoped to the account
+  // (referral-engine.resolvePromoter — the savepoint + fallback live there).
+  const { promoter } = await referralEngine.resolvePromoter(customerId, { conn, settings });
   const code = String(promoter?.referral_code || '').trim();
   const link = referralEngine.getPromoterReferralLink(promoter, settings);
   if (!code || !link) return { unavailable: true };

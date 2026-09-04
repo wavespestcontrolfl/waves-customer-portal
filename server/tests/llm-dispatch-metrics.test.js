@@ -189,6 +189,29 @@ describe('llm-dispatch-metrics', () => {
       expect(labels).toEqual(['liveLane', 'replayedLane:replay']);
     });
 
+    it('stamps chain rows with row_kind=chain, the ambient chain id, and an error_class on failure', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      // Same isolated registry as the service, or the context instances differ.
+      let recordDispatch;
+      let context;
+      jest.isolateModules(() => {
+        ({ recordDispatch } = require('../services/llm-dispatch-metrics'));
+        context = require('../services/agent-control/context');
+      });
+      await context.withChain(async () => {
+        recordDispatch(MODELS.TEXT_POLICIES.report, { ok: true, provider: 'openai', model: 'model-x' });
+        recordDispatch(MODELS.TEXT_POLICIES.report, {
+          ok: false,
+          reason: 'all_providers_failed',
+          failures: [{ provider: 'openai', model: 'model-y', reason: 'openai_429' }, { provider: 'anthropic', model: 'model-z', reason: 'error' }],
+        });
+      });
+      const [okRow, failRow] = mockInsert.mock.calls.map((c) => c[0]);
+      expect(okRow).toMatchObject({ row_kind: 'chain', error_class: null });
+      expect(okRow.chain_id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(failRow).toMatchObject({ row_kind: 'chain', error_class: 'provider', chain_id: okRow.chain_id });
+    });
+
     it('records failed chains without a provider and never throws on DB errors', () => {
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       mockInsert.mockReturnValue(Promise.reject(new Error('db down')));
@@ -376,6 +399,15 @@ describe('llm-dispatch-metrics', () => {
       expect(chain.insert).toHaveBeenCalledWith(expect.objectContaining({ policy: HEARTBEAT_POLICY, ok: true }));
     });
 
+    it('stamps row_kind=heartbeat so the digest counts it by kind, not by policy label', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const chain = makeChain([]);
+      mockDb.mockReturnValueOnce(chain);
+      const { recordHeartbeat } = load();
+      await recordHeartbeat();
+      expect(chain.insert).toHaveBeenCalledWith(expect.objectContaining({ row_kind: 'heartbeat' }));
+    });
+
     it('throws on failure so the cron logs it (not the hot path)', async () => {
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       mockDb.mockReturnValueOnce(makeChain([], 0, { insertError: 'disk full' }));
@@ -416,8 +448,9 @@ describe('llm-dispatch-metrics', () => {
 
   describe('runLlmDispatchDigest', () => {
     // db() call order in runLlmDispatchDigest: retention prune FIRST (it runs
-    // even when the gate is off), then yesterday stats, prior-week stats, and
-    // the heartbeat count for the day being summarized. `heartbeats` defaults
+    // even when the gate is off), then the llm_call_traces prune (same
+    // gate-independence), then yesterday stats, prior-week stats, and the
+    // heartbeat count for the day being summarized. `heartbeats` defaults
     // to a healthy day; 0 means the recorder was dead during that day.
     function armDb({
       yesterdayRows, priorRows, recentRows = null, delCount = 3,
@@ -425,8 +458,10 @@ describe('llm-dispatch-metrics', () => {
     }) {
       const prune = makeChain([], delCount);
       if (pruneError) prune.del = jest.fn(() => Promise.reject(new Error(pruneError)));
+      const tracesPrune = makeChain([], 0);
       mockDb
         .mockReturnValueOnce(prune)
+        .mockReturnValueOnce(tracesPrune)
         .mockReturnValueOnce(makeChain(yesterdayRows, 0, { selectError: statsError }))
         .mockReturnValueOnce(makeChain(priorRows))
         // Recent-window stats for the bursty gone-silent check; defaults to
@@ -434,17 +469,21 @@ describe('llm-dispatch-metrics', () => {
         .mockReturnValueOnce(makeChain(recentRows || yesterdayRows))
         .mockReturnValueOnce(makeChain([], 0, { first: { n: String(heartbeats) } }))
         .mockReturnValueOnce(makeChain([], 0, { first: { n: String(priorHeartbeats) } }));
-      return { prune };
+      return { prune, tracesPrune };
     }
 
     it('skips stats and email while the gate is off, but STILL prunes retention', async () => {
       const prune = makeChain([], 7);
-      mockDb.mockReturnValueOnce(prune);
+      const tracesPrune = makeChain([], 2);
+      mockDb.mockReturnValueOnce(prune).mockReturnValueOnce(tracesPrune);
       const { runLlmDispatchDigest } = load();
       await expect(runLlmDispatchDigest()).resolves.toEqual({ skipped: 'gate_off', pruned: 7 });
-      // Exactly one db call (the prune) — no stats queries, no email.
-      expect(mockDb).toHaveBeenCalledTimes(1);
+      // Exactly two db calls (the ledger prune + the traces prune) — no stats
+      // queries, no email.
+      expect(mockDb).toHaveBeenCalledTimes(2);
+      expect(mockDb).toHaveBeenNthCalledWith(2, 'llm_call_traces');
       expect(prune.del).toHaveBeenCalled();
+      expect(tracesPrune.del).toHaveBeenCalled();
       expect(mockEmailSend).not.toHaveBeenCalled();
     });
 
@@ -510,6 +549,7 @@ describe('llm-dispatch-metrics', () => {
       const hb = makeChain([], 0, { first: { n: '10' } });
       mockDb
         .mockReturnValueOnce(makeChain([], 1))
+        .mockReturnValueOnce(makeChain([], 0)) // traces prune
         .mockReturnValueOnce(makeChain([]))
         .mockReturnValueOnce(makeChain([{ policy: 'report', total: '300', fallbacks: '0', failed: '0' }]))
         .mockReturnValueOnce(makeChain([])) // recent-window stats
@@ -678,6 +718,26 @@ describe('llm-dispatch-metrics', () => {
       const out = await runLlmDispatchDigest();
       expect(out).toMatchObject({ emailed: false });
       expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+
+    it('reads chain rows only and counts heartbeats by row_kind — call/session ledger rows never reach the stats', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const yesterday = makeChain([]);
+      const prior = makeChain([]);
+      const hb = makeChain([], 0, { first: { n: '24' } });
+      mockDb
+        .mockReturnValueOnce(makeChain([], 0))
+        .mockReturnValueOnce(makeChain([], 0))
+        .mockReturnValueOnce(yesterday)
+        .mockReturnValueOnce(prior)
+        .mockReturnValueOnce(makeChain([]))
+        .mockReturnValueOnce(hb)
+        .mockReturnValueOnce(makeChain([], 0, { first: { n: '168' } }));
+      const { runLlmDispatchDigest } = load();
+      await runLlmDispatchDigest();
+      expect(yesterday.where).toHaveBeenCalledWith('row_kind', 'chain');
+      expect(prior.where).toHaveBeenCalledWith('row_kind', 'chain');
+      expect(hb.andWhere).toHaveBeenCalledWith('row_kind', 'heartbeat');
     });
 
     it('stays silent on a green day', async () => {

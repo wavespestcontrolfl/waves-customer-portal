@@ -18,7 +18,8 @@ import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import CancelFlow from '../components/portal/CancelFlow';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
-import { etDateString } from '../lib/timezone';
+import { etDateString, formatETDateTime } from '../lib/timezone';
+import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { getStripe } from '../lib/stripeLoader';
 import {
   buildSetupIntentReturnUrl,
@@ -5520,17 +5521,33 @@ function BillingTab({ customer, refreshCustomer }) {
   const handleRemoveCard = async (cardId) => {
     const target = cards.find((c) => String(c.id) === String(cardId));
     const verifiedBank = !!target && isBankMethod(target.methodType) && target.achStatus === 'verified';
+    // GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE (owner ruling 2026-09-03): the
+    // card is holding a future secured visit — say so before it goes. The
+    // visit and the agreed late-cancel fee survive removal (removal is
+    // revocation on the charge path, so the office bills the fee another
+    // way); the way out is a call or a reschedule, and the card stays
+    // removable — the customer can always withdraw a stored card.
+    const hold = target?.holdsAppointment || null;
     const confirmed = await showCustomerConfirm(
-      verifiedBank
+      hold ? (
+        <>
+          This card is holding your {hold.serviceType || 'service'} visit on{' '}
+          {formatETDateTime(hold.start, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}. Removing it does not cancel the visit or the
+          {' '}{hold.feeAmount != null ? `${fmtMoney(hold.feeAmount)} ` : ''}late-cancel fee you agreed to.
+          To change or cancel the visit, call us at{' '}
+          <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: 'inherit', fontWeight: 600, textDecoration: 'underline', textUnderlineOffset: 2, whiteSpace: 'nowrap' }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>
+          {hold.rescheduleUrl ? (
+            <> or <a href={hold.rescheduleUrl} style={{ color: 'inherit', fontWeight: 600, textDecoration: 'underline', textUnderlineOffset: 2 }}>reschedule online</a></>
+          ) : null}.
+        </>
+      ) : verifiedBank
         // ACH authorization copy: revocation takes up to 3 business days
         // to stop a scheduled debit (copy only — no enforced delay).
         ? 'Remove this bank account? Bank authorizations can take up to 3 business days to stop.'
         : 'Remove this payment method?',
-      {
-        title: 'Remove payment method?',
-        confirmLabel: 'Remove',
-        danger: true,
-      },
+      hold
+        ? { title: 'This card holds an appointment', confirmLabel: 'Remove anyway', cancelLabel: 'Keep card', danger: true }
+        : { title: 'Remove payment method?', confirmLabel: 'Remove', danger: true },
     );
     if (!confirmed) return;
     try {

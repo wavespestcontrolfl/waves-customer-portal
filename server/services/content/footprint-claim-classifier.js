@@ -91,6 +91,7 @@ async function classifyFootprintEvidence({ city, clause } = {}) {
   const result = await dispatchWithFallback(
     MODELS.TEXT_POLICIES.fastStructured,
     {
+      laneId: 'footprint_claim',
       maxTokens: 200,
       jsonMode: true,
       jsonSchema: VERDICT_SCHEMA,

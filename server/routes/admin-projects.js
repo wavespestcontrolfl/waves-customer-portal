@@ -309,18 +309,6 @@ function propertyProfileLines(profile) {
   return lines.length ? lines.join('\n') : '[no property facts found]';
 }
 
-function parseAiJsonObject(text) {
-  const cleaned = String(text || '').replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  try {
-    const parsed = JSON.parse(match[0]);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
 function normalizeWdoIntelligenceResult(raw, fallbackAddress, options = {}) {
   const { hasPreviousTreatmentContext = false, propertyProfile = null } = options;
   const suggested = raw?.suggestedFindings || raw?.findings || {};
@@ -518,15 +506,7 @@ Fields:
 - previous_treatment_evidence: "Yes" only if the photo clearly shows prior-treatment evidence (sticker, notice, tag, drill holes, bait stations). "No" only if the photo clearly shows a relevant area with no treatment indicators. Leave blank if the photo is unclear or unrelated.
 - previous_treatment_notes: 1-4 short sentences written for the report's "Previous treatment observations" field. If a sticker or notice is present, state what it is, the company, where it appears if identifiable, and every legible detail: date of WDO inspection, date(s) of treatment, materials/products used, organism treated for, and any lot or permit number. If only physical evidence is visible, describe it and its location. Do not speculate beyond what is visible.
 
-Respond with exactly this JSON shape:
-{
-  "suggestedFindings": {
-    "previous_treatment_evidence": "Yes|No|",
-    "previous_treatment_notes": "<field text or blank>"
-  },
-  "confidence": "high|medium|low",
-  "reviewNotes": ["<operator review note>", "..."]
-}`;
+Give suggestedFindings (previous_treatment_evidence as "Yes", "No", or blank; previous_treatment_notes as the field text or blank), your confidence (high, medium, or low), and any operator reviewNotes.`;
 }
 
 function normalizeWdoTreatmentPhotoResult(raw) {
@@ -546,35 +526,43 @@ function normalizeWdoTreatmentPhotoResult(raw) {
   };
 }
 
+// Structured-output contract for the treatment-photo read (llm/call.js
+// jsonSchema). normalizeWdoTreatmentPhotoResult still decides what is kept.
+const WDO_TREATMENT_PHOTO_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['suggestedFindings', 'confidence', 'reviewNotes'],
+  properties: {
+    suggestedFindings: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['previous_treatment_evidence', 'previous_treatment_notes'],
+      properties: {
+        previous_treatment_evidence: { type: 'string', enum: ['Yes', 'No', ''] },
+        previous_treatment_notes: { type: 'string' },
+      },
+    },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    reviewNotes: { type: 'array', items: { type: 'string' } },
+  },
+};
+
 async function extractWdoTreatmentPhoto({ photo, propertyAddress }) {
-  const Anthropic = require('@anthropic-ai/sdk');
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const msg = await anthropic.messages.create({
-    model: MODELS.VISION,
-    max_tokens: 700,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'text', text: buildWdoTreatmentPhotoPrompt(propertyAddress) },
-        {
-          type: 'image',
-          source: {
-            type: 'base64',
-            media_type: photo.mediaType,
-            data: photo.buffer.toString('base64'),
-          },
-        },
-      ],
-    }],
+  // VISION first, OpenAI Terra on a miss — the same policy the WDO brief
+  // rides when a photo is attached.
+  const msg = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
+    text: buildWdoTreatmentPhotoPrompt(propertyAddress),
+    images: [{ data: photo.buffer.toString('base64'), mimeType: photo.mediaType }],
+    jsonMode: true,
+    jsonSchema: WDO_TREATMENT_PHOTO_SCHEMA,
+    maxTokens: 700,
   });
-  const text = (msg.content || []).filter((block) => block.type === 'text').map((block) => block.text).join('\n');
-  const parsed = parseAiJsonObject(text);
-  if (!parsed) {
+  if (!msg.ok || !msg.json) {
     const err = new Error('AI returned an unreadable treatment-photo response');
     err.status = 502;
     throw err;
   }
-  return normalizeWdoTreatmentPhotoResult(parsed);
+  return normalizeWdoTreatmentPhotoResult(msg.json);
 }
 
 // Section-1 administrative fields the WDO property lookup auto-fills on its own.
@@ -1145,6 +1133,7 @@ async function draftProjectReport({ typeCfg, findings, rawRecommendations, custo
     archivedFeeValues,
   });
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.report, {
+    laneId: 'project_report',
     text: prompt,
     images,
     jsonMode: false,
@@ -1913,7 +1902,11 @@ router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), asyn
 // ---------------------------------------------------------------------------
 router.post('/wdo-treatment-photo', upload.single('previous_treatment_photo'), async (req, res, next) => {
   try {
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+    // visionAnalysis is two-provider: only bail when NEITHER key exists (same
+    // posture as /wdo-intelligence).
+    if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
+      return res.status(400).json({ error: 'AI not configured' });
+    }
     if (!req.file) return res.status(400).json({ error: 'Previous-treatment photo required' });
     if (req.file.buffer.length > AI_PHOTO_MAX_BYTES) {
       return res.status(400).json({ error: 'Prior-treatment photo is too large for AI review' });

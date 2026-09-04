@@ -15,6 +15,8 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { callOpenAI } = require('./call');
+const agentContext = require('../agent-control/context');
+const { ledgerCall } = require('../llm-dispatch-metrics');
 
 // The refusal fallback reuses the caller's client, whose `timeout` applies
 // per request — so a refusal + retry could run ~2× the caller's budget (the
@@ -34,12 +36,25 @@ function stripThinkingBlocks(response) {
   return response;
 }
 
-async function createDeepMessage(client, params = {}) {
+// Both legs (Opus, then the OpenAI backup) share one agent-control chain id
+// in the call ledger; the Anthropic leg records through ledgerCall (request
+// bodies handed over for a trace, should the lane opt in), the OpenAI leg
+// records inside callOpenAI.
+// `laneId` labels the call-ledger rows of BOTH legs — the option
+// dispatchWithFallback's payload takes — and never reaches the wire.
+async function createDeepMessage(client, { laneId, ...params } = {}) {
+  const run = () => agentContext.withChain(() => createDeepMessageInChain(client, params));
+  return laneId ? agentContext.runInLane(laneId, run) : run();
+}
+
+async function createDeepMessageInChain(client, params) {
   const model = params.model || MODELS.DEEP;
   const startedAt = Date.now();
   let response;
   try {
-    response = await client.messages.create({ ...params, model });
+    response = await ledgerCall('anthropic', model, () => client.messages.create({ ...params, model }), {
+      trace: { system: systemText(params.system) || null, prompt: messageText(params.messages) || null },
+    });
   } catch (err) {
     // Same remaining-budget guard as the refusal path below. Without it, an
     // Anthropic request that THROWS after consuming its budget (e.g. its own
@@ -112,6 +127,9 @@ async function callOpenAIDeepFallback(params, timeoutMs) {
     role: 'assistant',
     stop_reason: 'end_turn',
     content: [{ type: 'text', text: result.text }],
+    // Real numbers for DEEP callers that read response.usage (same
+    // input_tokens / output_tokens keys as an Anthropic Message).
+    usage: result.usage || null,
   };
 }
 

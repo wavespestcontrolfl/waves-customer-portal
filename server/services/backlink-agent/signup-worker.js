@@ -175,6 +175,7 @@ async function processSignup(queueItem) {
     const screenshot1 = (await page.screenshot({ fullPage: false, type: 'png' })).toString('base64');
 
     const findResponse = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      laneId: 'signup_worker',
       jsonMode: true,
       jsonSchema: FIND_SIGNUP_SCHEMA,
       maxTokens: 1024,
@@ -212,6 +213,7 @@ I need to create an account/profile on this site. Find the signup, register, or 
     const password = PROFILE.generatePassword();
 
     const fillResponse = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      laneId: 'signup_worker',
       jsonMode: true,
       jsonSchema: FILL_FORM_SCHEMA,
       maxTokens: 2048,
@@ -308,6 +310,7 @@ Important:
     const resultScreenshot = (await page.screenshot({ fullPage: false, type: 'png' })).toString('base64');
 
     const verifyResponse = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      laneId: 'signup_worker',
       jsonMode: true,
       jsonSchema: VERIFY_SIGNUP_SCHEMA,
       maxTokens: 512,

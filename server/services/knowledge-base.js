@@ -226,6 +226,7 @@ const KnowledgeBaseService = {
     for (const entry of entries) {
       try {
         const response = await createDeepMessage(client, {
+          laneId: 'kb_audit',
           model: MODELS.DEEP,
           max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the visible answer
           messages: [{

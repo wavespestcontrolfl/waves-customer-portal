@@ -25,6 +25,7 @@
 const logger = require('../logger');
 const {
   RELAY_WS_PATH, parsePrompt, isRelayEnabled, maskPhone, verifyCallToken, CALL_TOKEN_TTL_MS,
+  VOICE_RELAY_SANDBOX_SOURCE,
 } = require('./relay-protocol');
 
 // VOICE_RELAY_ENABLED check lives in relay-protocol (single source of truth,
@@ -197,12 +198,17 @@ function attachVoiceRelay(httpServer) {
       // An unreadable source still rejects (fail closed, the burn's
       // envelope); the read is idempotent so the ordering is safe.
       let collectionsCall = false;
+      let sandboxCall = false;
       try {
         const db = require('../../models/db');
         const row = await db('call_log')
           .where({ twilio_call_sid: callSid })
           .first('source');
         collectionsCall = Boolean(row && row.source === 'collections_voice');
+        // The sandbox number's calls persist like any inbound call (their
+        // transcript / latency record IS the bake-off); the session that
+        // answers them must write nothing else — see RelayConversation.sandbox.
+        sandboxCall = Boolean(row && row.source === VOICE_RELAY_SANDBOX_SOURCE);
       } catch (e) {
         logger.warn(`[voice-relay] rejected ws upgrade: source resolution failed callSid=${callSid}: ${e.message}`);
         try { socket.destroy(); } catch { /* socket already gone */ }
@@ -215,6 +221,7 @@ function attachVoiceRelay(httpServer) {
         return;
       }
       req.authenticatedCollectionsCall = collectionsCall;
+      req.authenticatedSandboxCall = sandboxCall;
       // ⭐ THE AUTHENTICATED CallSid RIDES WITH THE SOCKET. The token was
       // verified against THIS CallSid, and the setup frame that follows is
       // unverified input: honouring the frame's own callSid would let a valid
@@ -249,6 +256,8 @@ function attachVoiceRelay(httpServer) {
     // Resolved at UPGRADE time from the call_log row (gh prb-r11) — the
     // routing truth for the setup frame, never the frame's own label.
     const authenticatedCollectionsCall = Boolean(req && req.authenticatedCollectionsCall);
+    // Same upgrade-time proof: a sandbox session runs its write tools dry.
+    const authenticatedSandboxCall = Boolean(req && req.authenticatedSandboxCall);
     const relaySessionKey = (req && req.relaySessionKey) || null;
     const relaySessionGeneration = (req && req.relaySessionGeneration) || null;
 
@@ -290,10 +299,12 @@ function attachVoiceRelay(httpServer) {
     sessionTimer.unref?.();
     bumpIdle();
 
-    const send = (text) => {
+    // `last` defaults to true — one utterance per frame, as every caller sends
+    // today. A streaming renderer passes false for the non-final chunks.
+    const send = (text, last = true) => {
       if (ws.readyState === ws.OPEN) {
         try {
-          ws.send(textFrame(text, true));
+          ws.send(textFrame(text, last));
         } catch (e) {
           logger.error(`[voice-relay] ws send failed: ${e.message}`);
         }
@@ -383,6 +394,12 @@ function attachVoiceRelay(httpServer) {
             from: msg.from || p.from || null,
             to: msg.to || p.to || null,
             language: msg.lang || p.lang || null,
+            // Telemetry labels only (the TwiML that rendered this call put
+            // them on the <Parameter>s); nothing acts on them.
+            relayProfileId: typeof p.relay_profile === 'string' ? p.relay_profile : null,
+            ttsVoice: typeof p.tts_voice === 'string' ? p.tts_voice : null,
+            // Proven from the call_log row at upgrade — never the frame.
+            sandbox: authenticatedSandboxCall,
             send,
             endSession,
           });
@@ -393,14 +410,28 @@ function attachVoiceRelay(httpServer) {
           if (!convo) return;
           // Ignore interim/partial STT frames — only act on the FINAL prompt, so
           // the agent never responds to (or runs tools on) a half-spoken phrase
-          // and then re-processes the completed utterance.
-          if (msg.last === false) break;
+          // and then re-processes the completed utterance. Counted, so a
+          // profile that enables Flux partials can be measured without ever
+          // being acted on.
+          if (msg.last === false) {
+            if (typeof convo.notePartialPrompt === 'function') convo.notePartialPrompt();
+            break;
+          }
           const text = parsePrompt(msg);
           if (text) convo.handlePrompt(text);
           break;
         }
         case 'interrupt': {
-          if (convo) convo.interrupt();
+          // The frame's fields are what the caller heard before barging in —
+          // our own agent text, plus the played duration. Sessions that take a
+          // detail record them; passing an object marks a real barge-in (a
+          // bare interrupt() is end()'s own abort).
+          if (convo) {
+            convo.interrupt({
+              utteranceUntilInterrupt: typeof msg.utteranceUntilInterrupt === 'string' ? msg.utteranceUntilInterrupt : '',
+              durationUntilInterruptMs: msg.durationUntilInterruptMs,
+            });
+          }
           break;
         }
         case 'error': {
@@ -420,9 +451,19 @@ function attachVoiceRelay(httpServer) {
           }
           break;
         }
-        // others: ignored in Phase 0
-        default:
+        default: {
+          // The `events` attribute (relay-profiles) adds speaker / tokens-played
+          // notifications whose payload Twilio does not document. Sessions that
+          // define handleRelayEvent classify them; everything else stays
+          // ignored — byte-identical to Phase 0 when no profile is set. A
+          // classifier fault must never take the call down.
+          if (convo && typeof convo.handleRelayEvent === 'function') {
+            try { convo.handleRelayEvent(msg); } catch (e) {
+              logger.warn(`[voice-relay] relay event handling failed callSid=${convo.callSid}: ${e.message}`);
+            }
+          }
           break;
+        }
       }
     });
 

@@ -66,12 +66,16 @@ const inviteEmailSchema = Joi.object({
 router.get('/', async (req, res, next) => {
   try {
     // Auto-enroll as promoter if not already
-    const { promoter } = await engine.enrollPromoter(req.customerId);
+    const { promoter } = await engine.resolvePromoter(req.customerId);
 
+    // Legacy rows (promoter_id never backfilled) key on referrer_customer_id:
+    // for a household sibling that is the OWNER's id as well as the acting
+    // customer's (GH codex #3850 r2 P2).
+    const legacyReferrerIds = [...new Set([req.customerId, promoter.customer_id].filter(Boolean))];
     const referrals = await db('referrals')
       .where(function () {
         this.where({ promoter_id: promoter.id })
-          .orWhere({ referrer_customer_id: req.customerId });
+          .orWhereIn('referrer_customer_id', legacyReferrerIds);
       })
       .orderBy('created_at', 'desc');
 
@@ -140,7 +144,12 @@ router.get('/', async (req, res, next) => {
 // =========================================================================
 router.get('/stats', async (req, res, next) => {
   try {
-    const promoter = await db('referral_promoters').where({ customer_id: req.customerId }).first();
+    // Own row first; a multi-property sibling sharing the household phone
+    // shows the household promoter GET / resolves for it (same account-
+    // scoped rule, read-only — the stats card never enrolls), so the two
+    // portal surfaces agree.
+    const promoter = await db('referral_promoters').where({ customer_id: req.customerId }).first()
+      || await engine.findHouseholdPromoter(req.customerId);
 
     if (!promoter) {
       return res.json({
@@ -176,11 +185,15 @@ router.post('/', submitLimiter, async (req, res, next) => {
     if (error) return res.status(400).json({ error: error.details[0].message });
     const { name, phone, email, address, notes } = value;
 
-    // Ensure enrolled
-    const { promoter } = await engine.enrollPromoter(req.customerId);
+    // Ensure enrolled (a household sibling shares the household promoter)
+    const { promoter } = await engine.resolvePromoter(req.customerId);
+    // The friend hears from the person who submitted, not the household
+    // promoter's owner (GH codex #3850 r3 P2).
+    const self = await db('customers').where({ id: req.customerId }).first('first_name').catch(() => null);
 
     const referral = await engine.submitReferral(promoter.id, {
       name, phone, email, address, notes, source: 'portal',
+      referrerName: self?.first_name || null,
     });
 
     res.status(201).json({
@@ -211,9 +224,12 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
     if (error) return res.status(400).json({ error: error.details[0].message });
     const { phone, friendName } = value;
 
-    const { promoter } = await engine.enrollPromoter(req.customerId);
+    const { promoter } = await engine.resolvePromoter(req.customerId);
     const settings = await engine.getSettings();
     const referralLink = engine.getPromoterReferralLink(promoter, settings);
+    // The friend hears from the person who tapped, not the household
+    // promoter's owner (GH codex #3850 r2 P2); the code stays the household's.
+    const self = await db('customers').where({ id: req.customerId }).first('first_name').catch(() => null);
 
     // Cooldown: same promoter+phone within 24 hours = no-op (idempotent double-tap protection)
     const cleanPhone = phone.replace(/\s+/g, '');
@@ -231,7 +247,7 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
     const friendly = friendName ? friendName.replace(/[<>]/g, '') : 'there';
     const body = await renderRequiredSmsTemplate('referral_invite', {
       referee_name: friendly,
-      referrer_name: promoter.first_name || 'your neighbor',
+      referrer_name: self?.first_name || promoter.first_name || 'your neighbor',
       referral_link: referralLink,
     }, {
       workflow: 'referral_invite',
@@ -301,7 +317,7 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
     const { email, friendName } = value;
     const cleanEmail = email.trim().toLowerCase();
 
-    const { promoter } = await engine.enrollPromoter(req.customerId);
+    const { promoter } = await engine.resolvePromoter(req.customerId);
     const settings = await engine.getSettings();
     const referralLink = engine.getPromoterReferralLink(promoter, settings);
 
@@ -390,7 +406,8 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
         to: cleanEmail,
         payload: {
           friend_name: friendly || 'there',
-          referrer_name: promoter.first_name || 'A Waves customer',
+          // The acting customer's name, not the household promoter owner's.
+          referrer_name: selfCustomer?.first_name || promoter.first_name || 'A Waves customer',
           referral_url: referralLink,
           referral_offer_line: engine.buildRefereeOfferLine(settings),
         },

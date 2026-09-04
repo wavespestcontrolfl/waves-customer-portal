@@ -450,12 +450,9 @@ function buildRows() {
         fleaExteriorAreaSqFt,
       })),
     ]),
-    // Selectable single-visit knockdown offer (lower entry price).
-    { fleaOfferKey: 'flea_knockdown_single' },
     // The pricer applies the recurring-customer perk INTERNALLY (respecting
     // its package floor) — swept via the flag, never multiplied externally.
     { isRecurringCustomer: true },
-    { fleaOfferKey: 'flea_knockdown_single', isRecurringCustomer: true },
   ];
   add('flea_elimination', () => rangeRow({
     key: 'flea_elimination',
@@ -472,7 +469,7 @@ function buildRows() {
       ])].flatMap((f) => FLEA_PROFILES.map((p) => ({ f, p }))),
       ({ f, p }) => sp.priceFlea({ footprint: f, ...p }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.total)),
-    notes: 'Single-visit knockdown or 2-visit elimination package; priced by home size, infestation severity, and optional exterior treatment area.',
+    notes: '2-visit elimination package; priced by home size, infestation severity, and optional exterior treatment area.',
   }));
 
   const formatSetupFee = (v) => {

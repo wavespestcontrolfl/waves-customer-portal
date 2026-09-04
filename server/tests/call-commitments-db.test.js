@@ -541,6 +541,20 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect((await cc.recordRelayCommitments(db, { ...args, sessionKey: 'nonce-unverified' })).written).toBeGreaterThan(0);
   });
 
+  test('a voice-agent SANDBOX call never records commitments — a test promise is not office work', async () => {
+    const sid = 'CA' + '9'.repeat(30) + 'sb';
+    const [sandbox] = await db('call_log').insert({
+      twilio_call_sid: sid, direction: 'inbound', from_phone: PHONE, to_phone: OUR_NUMBER, status: 'completed',
+      processing_status: null, source: 'voice_relay_sandbox', metadata: JSON.stringify({ relay_sandbox: true }),
+    }).returning('id');
+    cleanup.callIds.push(sandbox.id);
+    const out = await cc.recordRelayCommitments(db, {
+      callSid: sid, transcript: 'Agent: Someone from the office will call you back tomorrow.\nCaller: Thanks.', estimateQueued: true,
+    });
+    expect(out).toEqual({ found: 0, written: 0, sandbox: true });
+    expect(await db('call_commitments').where({ call_log_id: sandbox.id })).toHaveLength(0);
+  });
+
   test('an untouched AI row the latest pass withdrew leaves the queue; a human-confirmed one stays', async () => {
     const [c] = await db('call_log').insert({
       twilio_call_sid: 'CA' + '8'.repeat(30) + 'q9', direction: 'inbound', from_phone: PHONE, to_phone: OUR_NUMBER, status: 'completed',

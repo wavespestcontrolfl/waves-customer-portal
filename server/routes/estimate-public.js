@@ -8,7 +8,7 @@ const { createDefaultCustomerRows } = require('../services/customer-default-rows
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
 // shared with the admin routes so every whole-blob write applies the same
 // rule (dependency-free module: partial test mocks can't blank a guard).
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL, callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -36,6 +36,7 @@ function acceptBookingGateToken(estimate) {
   return token ? `&accept_token=${encodeURIComponent(token)}` : '';
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
+const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -527,7 +528,9 @@ function isEstimateAskAnswerable(estimate = {}, now = new Date()) {
   // invalidation_pending_at the row is not yet archived, and this endpoint
   // would keep answering questions about — and disclosing — the wrong
   // lead's estimate content.
-  if (estimateLinkageInvalidated(estimate)) return false;
+  // Same for a clarify re-price hold: the held row is off the customer
+  // surface, so its ask token answers nothing about it either.
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
@@ -4325,6 +4328,17 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   ]);
 
   const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
+  // One-time-ONLY estimate whose rows all resolve to one service copy pack
+  // (roach cleanout, flea, wasp, bed bug, …): the card describes THAT
+  // service instead of the generic "reviewed your property" line. Mixed
+  // one-time quotes and anything with a recurring service keep the
+  // category branches below.
+  // Structural one-time-only check, not "no recurring rows were passed":
+  // a caller can hand in an empty recurringServices for a plan estimate
+  // (codex pre-push P1).
+  const oneTimeOnlyCopy = recurringServices.length === 0 && isStructuralOneTimeOnlyEstimate(parsedData, estimate)
+    ? oneTimeOnlyIntelligenceCopy(intelligenceOneTimeItems)
+    : null;
   const intelligenceTitle = isLawnOnly
     ? 'Waves AI reviewed your lawn before pricing this estimate'
     : (isTreeShrubOnly
@@ -4359,8 +4373,8 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
               : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.')))));
   return {
     eyebrow: 'Waves AI',
-    title: intelligenceTitle,
-    body: intelligenceBody,
+    title: oneTimeOnlyCopy?.aiTitle || intelligenceTitle,
+    body: oneTimeOnlyCopy?.aiBody || intelligenceBody,
     satelliteUrl,
     metrics,
     signals: [],
@@ -4693,6 +4707,18 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `${germanRoachVisitPhrase(germanRoachCleanoutItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`
     : '';
   const germanRoachGuaranteeCopy = '100% guaranteed with the Waves Guarantee.';
+  // Service copy pack (estimate-one-time-copy.js) — the hero note takes the
+  // pack only when EVERY billable row resolves to the same key (a mixed
+  // roach + wasp quote must not read as a roach cleanout — codex pre-push
+  // P1) and never on a regulated certificate surface.
+  // Single-service check spans the raw rows AND the normalized breakdown
+  // (whose residual positive one_time_adjustment is a billable unknown
+  // charge) — the same superset the React /data contract reads, so both
+  // renderers agree on when a quote is mixed (codex #3823 r8 P0).
+  const oneTimeIntelligenceRows = [...oneTimeItems, ...boraCareOneTimeRows];
+  const oneTimeHeroCopy = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems) && oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows)
+    ? oneTimeItems.map(resolveOneTimeServiceCopy).find(Boolean) || null
+    : null;
   const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
   const storedBaseMonthly = Number(recurringMonthlyParts.baseMonthly || est.monthlyTotal || 0);
 
@@ -5566,7 +5592,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           <span class="per">one-time</span>
         </div>
         <div class="onetime-note">
-          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (hasOnlyBoraCareServices ? boraCareCopy.note : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.')))}
+          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (hasOnlyBoraCareServices ? boraCareCopy.note : (oneTimeHeroCopy ? oneTimeHeroCopy.outcome : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.'))))}
         </div>
       </div>
     `;
@@ -5647,12 +5673,24 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // One-time-ONLY pages no longer render a hero price card (owner
   // 2026-08-27, mirrors the React OneTimeBreakdownCard-leads layout), so
   // the lone row keeps its dollars — it is the only place the price shows.
-  const realOneTimeRows = billableOneTimeItems.map((it) => {
+  // Row copy is suppressed on a regulated certificate surface (WDO) — the
+  // page stays narrative-free, not just the WDO row (codex pre-push P0).
+  const oneTimeRowCopyAllowed = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
+  // One copy per logical job, included (service-credit) rows skipped — the
+  // same helper the React contract uses (codex #3823 r3 P2s).
+  const oneTimeRowCopies = oneTimeRowCopyAllowed ? resolveOneTimeRowCopies(billableOneTimeItems) : [];
+  const realOneTimeRows = billableOneTimeItems.map((it, rowIndex) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
     const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
-    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceCell}</td></tr>`;
+    // What the visit involves — same outcome + bullet + terms shape the
+    // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
+    const rowCopy = oneTimeRowCopies[rowIndex] || null;
+    const rowCopyHtml = rowCopy
+      ? `<div class="onetime-outcome">${escapeHtml(rowCopy.outcome)}</div><details class="onetime-includes-wrap"><summary>See everything included (${rowCopy.includes.length})</summary><ul class="onetime-includes">${rowCopy.includes.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></details>${rowCopy.terms ? `<div class="onetime-terms">${escapeHtml(rowCopy.terms)}</div>` : ''}`
+      : '';
+    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}${rowCopyHtml}</td><td style="text-align:right">${priceCell}</td></tr>`;
   }).join('');
   const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
     ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">−${fmtMoney(manualOneTimeDiscount)}</td></tr>`
@@ -5896,12 +5934,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // nested-result estimates still surface service-specific chips like
   // "What does Bora-Care treat?". Duplicates are harmless — every chip is added on
   // a boolean, never per row.
-  const askPrompts = buildEstimateAskPrompts(
-    recurring,
-    [...oneTimeItems, ...boraCareOneTimeRows],
-    pestRecurring,
-    hasPestOneTime,
-  );
+  // One-time-only service copy pack chips lead (roach, flea, wasp, bed
+  // bug, …) — same source the React contract's askChips reads.
+  const oneTimeOnlyAskCopy = isOneTimeOnly && !isRegulatedCertificateSurface ? oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows) : null;
+  const askPrompts = oneTimeOnlyAskCopy?.askChips?.length
+    ? oneTimeOnlyAskCopy.askChips.slice(0, 6)
+    : buildEstimateAskPrompts(
+      recurring,
+      [...oneTimeItems, ...boraCareOneTimeRows],
+      pestRecurring,
+      hasPestOneTime,
+    );
   const estimateAskEnabled = !isRegulatedCertificateSurface && isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
@@ -5983,8 +6026,21 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : quoteRequired
     ? { h1: `Hello ${firstName}, your custom quote is in the works.`, eyebrow: 'Your custom quote' }
     : null;
-  const heroH1 = stateHero?.h1 || `Hello ${firstName}, your estimate is ready!`;
-  const heroEyebrow = stateHero?.eyebrow || `Your estimate · ${escapeHtml(quotedServicesLabel)}`;
+  // One-time-only service copy pack hero (roach cleanout, flea, …) — the
+  // eyebrow/headline/subline name the service actually quoted. Terminal
+  // states outrank it, same as the React TERMINAL_HERO rule.
+  const heroCity = (/,\s*([^,]+),\s*FL\b/i.exec(String(est.address || '')) || [])[1]?.trim() || null;
+  const fillOneTimeHero = (str) => escapeHtml(String(str || '')
+    .replace(/\{first\}/g, (est.customerName || '').split(' ')[0] || 'there')
+    .replace(/\s+in \{city\}/gi, heroCity ? ` in ${heroCity}` : '')
+    .replace(/\{city\}/g, heroCity || '')
+    .replace(/ {2,}/g, ' '));
+  const oneTimeHero = !stateHero && oneTimeOnlyAskCopy?.hero ? oneTimeOnlyAskCopy.hero : null;
+  const heroH1 = stateHero?.h1 || (oneTimeHero ? fillOneTimeHero(oneTimeHero.h1) : `Hello ${firstName}, your estimate is ready!`);
+  const heroEyebrow = stateHero?.eyebrow || (oneTimeHero ? escapeHtml(oneTimeHero.eyebrow) : `Your estimate · ${escapeHtml(quotedServicesLabel)}`);
+  // A review-gated quote (trenching review card, no self-booking) drops the
+  // pack subline rather than promise online approval (codex pre-push P1).
+  const heroSubHtml = oneTimeHero?.sub && !hasOnlyTermiteTrenchingServices ? `<p class="hero-sub">${fillOneTimeHero(oneTimeHero.sub)}</p>` : '';
 
   return `<!doctype html>
 <html lang="en"><head>
@@ -6007,6 +6063,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   h3{font-size:18px;font-weight:600}
   p{margin:0 0 12px}
   .eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#475569;font-weight:600;margin-bottom:6px;font-family:Inter,system-ui,sans-serif}
+  .hero-sub{font-size:16px;line-height:1.5;color:#3F4A65;margin:8px 0 12px;max-width:62ch}
   .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
   .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
   .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
@@ -6270,6 +6327,16 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   tr:last-child td{border-bottom:0}
   td.val{text-align:right;font-weight:500;color:#1B2C5B}
   .sub{font-size:12px;color:#475569;margin-top:2px}
+  .onetime-outcome{font-size:15px;font-weight:400;color:#3F4A65;margin-top:6px;line-height:1.5}
+  .onetime-includes-wrap{margin-top:8px}
+  .onetime-includes-wrap summary{cursor:pointer;font-size:14px;font-weight:600;color:#0369a1;list-style:none;user-select:none}
+  .onetime-includes-wrap summary::-webkit-details-marker{display:none}
+  .onetime-includes-wrap summary::after{content:" ▾"}
+  .onetime-includes-wrap[open] summary::after{content:" ▴"}
+  .onetime-includes{list-style:none;margin:10px 0 0;padding:10px 0 0;border-top:1px solid #E6EEF6;display:grid;gap:8px}
+  .onetime-includes li{position:relative;padding-left:18px;font-size:14px;font-weight:600;color:#3F4A65;line-height:1.35}
+  .onetime-includes li::before{content:"";position:absolute;left:0;top:7px;width:6px;height:6px;border-radius:999px;background:#1B2C5B}
+  .onetime-terms{font-size:14px;color:#6B7590;margin-top:10px;line-height:1.5}
   .cta{display:block;width:100%;padding:14px 22px;background:#1B2C5B;color:#fff;border:none;border-radius:10px;font-family:Inter,system-ui,sans-serif;font-weight:500;font-size:16px;cursor:pointer;transition:all .15s;text-align:center;text-decoration:none}
   .cta:hover:not([disabled]){background:#121E3D}
   .cta.secondary{background:transparent;color:#1B2C5B;border:1px solid #1B2C5B}
@@ -6402,6 +6469,7 @@ ${shellTopBar()}
   <div class="hero">
     <div class="eyebrow">${heroEyebrow}</div>
     <h1>${heroH1}</h1>
+    ${heroSubHtml}
     ${est.estimateSlug ? `<div class="hero-contact">Estimate ${escapeHtml(est.estimateSlug)}</div>` : ''}
     ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
@@ -6694,6 +6762,9 @@ ${shellQuestionsBar()}
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const roundMoney = (n) => Math.round(Number(n || 0) * 100) / 100;
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
+  // A closed <details> prints nothing — open every one-time inclusion list
+  // before the browser captures the page (React RowInclusions does the same).
+  window.addEventListener('beforeprint', () => { document.querySelectorAll('details.onetime-includes-wrap').forEach((d) => { d.open = true; }); });
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
   // Subtle click pulse on any button — fires once per click, self-removes after animation
   document.addEventListener('click', (ev) => {
@@ -8581,7 +8652,11 @@ async function handleEstimateView(req, res, next) {
     if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
       || estimate.archived_at
       || estimate.status === 'send_failed'
-      || estimateLinkageInvalidated(estimate)
+      // Linkage markers AND the clarify re-price hold (isEstimateCustomerViewable
+      // parity): a V1/holdback link opened while the hold sits on a
+      // 'sending' row would otherwise render the stale whole-building
+      // quote (codex r4 P1 on #3804).
+      || estimateOffCustomerSurface(estimate)
       // The DURABLE call-side verdict too (codex P1, PR #3304 GH r9):
       // when the estimate-side marker could not be written, the block
       // lives on the CALL — and this page would otherwise keep serving a
@@ -9112,6 +9187,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.error(`[estimate-accept] already-accepted payload rebuild failed for estimate ${estimate.id}: ${e.message}`);
         return res.json({ success: true, alreadyAccepted: true });
       }
+    }
+    // The documented re-price response first (codex r6 P0 on #3804): a
+    // browser opened before the hold landed must see the contract's 409
+    // copy, not the generic "no longer active" the accept-active preflight
+    // now returns for a held row. The locked read below re-checks it.
+    if (require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) {
+      return res.status(409).json({ error: 'This estimate is being re-priced — please try again in a few minutes' });
     }
     if (!isEstimateAcceptActive(estimate)) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
@@ -14048,6 +14130,10 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -14341,6 +14427,10 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       // Compare-and-swap on the read snapshot (pre-push P0): any concurrent
       // write — an accept, a preference toggle, another bond switch — makes
       // this update 0-row and the caller reloads server truth. Millisecond
@@ -14603,6 +14693,10 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -15387,6 +15481,10 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+        // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+        // marker off) a held row — the ms-truncated CAS below does not exclude
+        // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         // Same ms-truncated CAS as the bond/interior writes: any concurrent
         // write — an accept, a preference toggle, another opt-out — makes this
         // a zero-row update and the caller reloads server truth.
@@ -15612,6 +15710,10 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
       .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // A clarify re-price hold: never mutate (or whole-blob-overwrite the
+      // marker off) a held row — the ms-truncated CAS below does not exclude
+      // a same-millisecond hold stamp (pre-push codex P0 on #3804).
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .modify((q) => {
         if (estimate.updated_at) {
           q.andWhere(db.raw(
@@ -16045,6 +16147,11 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       .where({ id: estimate.id })
       .whereNull('extension_auto_granted_at')
       .where(DEDUPE_OPEN)
+      // A clarify re-price hold that landed after the eligibility read
+      // must not burn the grant (codex r7 P0 on #3804): the zero-row
+      // falls through to the notify-office path — a human hears, no link
+      // goes out.
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .update({
         extension_requested_at: db.fn.now(),
         extension_auto_granted_at: db.fn.now(),
@@ -16130,12 +16237,22 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     }
 
     // Step 2 — cap already burned (or the auto claim lost a race and burned
-    // the dedupe window): try the plain 24h notify-only claim.
+    // the dedupe window): try the plain 24h notify-only claim. The hold
+    // predicate rides this claim too (codex r10 P0 on #3804): a hold that
+    // landed after the eligibility read zero-rows the auto claim above and
+    // must not fall through to a 201 that pages the office — the row is off
+    // the surface, so the answer is the same generic 404 as an unknown
+    // token (no enumeration). A zero row is re-read to tell the two apart.
     const claimed = await db('estimates')
       .where({ id: estimate.id })
       .where(DEDUPE_OPEN)
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .update({ extension_requested_at: db.fn.now() });
     if (!claimed) {
+      const fresh = await db('estimates').where({ id: estimate.id }).first('id', 'estimate_data');
+      if (!fresh || estimateOffCustomerSurface(fresh)) {
+        return res.status(404).json({ error: 'Estimate not found' });
+      }
       return res.json({ success: true, alreadyRequested: true });
     }
 
@@ -16308,6 +16425,10 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
         .whereNull('archived_at')
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+        // …and the clarify re-price hold (codex r4 P1 on #3804): a hold
+        // stamped between the pre-read and this write parks the decline
+        // on the guard's 409 via the re-read below.
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         .update({
           status: 'declined',
@@ -16767,6 +16888,26 @@ function oneTimeItemsForRender(estResult, estData) {
     reason: row.reason || null,
     customQuoteReason: row.customQuoteReason || null,
     ...(row.kind === 'included' ? { serviceSpecificDiscountApplied: true } : {}),
+    // Sold-scope metadata the one-time copy pack reads (codex #3823 pre-push
+    // P1): without it an engine-backed estimate's SSR page under-describes
+    // purchased scope (exterior flea, wasp removal, guarantees).
+    offerKey: row.offerKey || null,
+    visits: row.visits || null,
+    warrantyType: row.warrantyType || null,
+    guaranteeWindowDaysAfterFollowUp: Number(row.guaranteeWindowDaysAfterFollowUp) > 0 ? Number(row.guaranteeWindowDaysAfterFollowUp) : null,
+    maxIncludedRetreats: Number(row.maxIncludedRetreats) > 0 ? Number(row.maxIncludedRetreats) : null,
+    exteriorStatus: row.exteriorStatus || null,
+    warrantyEligible: row.warrantyEligible === true,
+    nestRemovalSelected: row.nestRemovalSelected === true,
+    chemistryType: row.chemistryType || null,
+    warrantyTier: row.warrantyTier || null,
+    debrisRemovalIncluded: row.debrisRemovalIncluded === true,
+    creditableWithinDays: row.creditableWithinDays || null,
+    includesScreening: row.includesScreening === true,
+    includedScope: row.includedScope || null,
+    retainerBilling: row.retainerBilling || null,
+    atticSqFt: row.atticSqFt ?? null,
+    surfaceSqFt: row.surfaceSqFt ?? null,
   }));
 }
 
@@ -17199,6 +17340,14 @@ function normalizeOneTimeBreakdown(estData) {
         warrantyExtendedSelected: item.warrantyExtendedSelected === true,
         offerKey: item.offerKey || null,
         visits: item.visits || null,
+        // Verified catalog identity frozen on a keyed public line (the
+        // standalone cockroach package): the one-time profile carries it
+        // so the accept path stamps service_id by exact key, where engine-key
+        // containment is deliberately blind (codex #3842 r3 P1).
+        // Only the dedicated field — the engine's own `serviceKey` is a
+        // family token (flea → 'flea'), never a catalog key (codex #3842 r5 P1).
+        catalogServiceKey: item.catalogServiceKey || null,
+        treatments: Number.isInteger(item.treatments) && item.treatments > 0 ? item.treatments : null,
         warrantyType: item.warrantyType || null,
         warrantyLabel: item.warrantyLabel || null,
         guaranteeScope: item.guaranteeScope || null,
@@ -17209,6 +17358,20 @@ function normalizeOneTimeBreakdown(estData) {
         prepChecklistRequired: item.prepChecklistRequired === true,
         petSourceAttestationRequired: item.petSourceAttestationRequired === true,
         exteriorStatus: item.exteriorStatus || null,
+        // Sold-scope flags the one-time copy pack keys off (codex #3823 r1):
+        // trenching chemistry (repellent barriers get no colony-transfer
+        // claim) and whether wasp nest removal was actually priced.
+        chemistryType: item.chemistryType || null,
+        warrantyTier: item.warrantyTier || null,
+        nestRemovalSelected: item.nestRemovalSelected === true || Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal,
+        warrantyEligible: item.warrantyEligible === true,
+        debrisRemovalIncluded: item.debrisRemovalIncluded === true,
+        creditableWithinDays: Number(item.creditableWithinDays) > 0 ? Number(item.creditableWithinDays) : null,
+        includesScreening: item.includesScreening === true || /\+screening\b/.test(String(item.detail || item.det || '')),
+        includedScope: item.includedScope || null,
+        retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
+        atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
+        surfaceSqFt: Number(item.surfaceSqFt) > 0 ? Number(item.surfaceSqFt) : null,
       });
     }
   };
@@ -18139,7 +18302,12 @@ function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   // A pending or full linkage invalidation kills acceptance the moment the
   // marker lands — accepting wrong-lead content creates the money-bearing
   // terminal state the deferred-invalidation finalizer must then preserve.
-  if (estimateLinkageInvalidated(estimate)) return false;
+  // A clarify re-price hold is the same verdict: the row is off the customer
+  // surface, so no public mutation (tier / bond / interior / preferences /
+  // service mix) may run on it either — their whole-blob writes would
+  // otherwise erase the marker (pre-push codex P0 on #3804). Accept refuses
+  // it again under its locked read.
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
   // acceptable through the public link. The legacy server-HTML page short-
@@ -18173,11 +18341,19 @@ function estimateLinkageInvalidated(estimate = {}) {
   return !!(eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at));
 }
 
+// The "off the customer surface" verdict (linkage marker OR clarify
+// re-price hold) is estimate-claim-sql.estimateOffCustomerSurface — shared
+// with the services that judge a locked row (the add-service request), so
+// the route's pre-read and the service's locked read can never disagree.
+// Every public predicate below calls it, never the pieces.
+
 function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
   // Before the accepted/declined early-allow: acceptance does not change
-  // whose data the row was composed from — an invalidated row never renders.
-  if (estimateLinkageInvalidated(estimate)) return false;
+  // whose data the row was composed from — an invalidated row never
+  // renders, and a held row staff flip to 'declined' must not render again
+  // (codex r5 P0 on #3804).
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return true;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (['expired', 'send_failed'].includes(estimate.status)) return false;
@@ -18206,7 +18382,11 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   // auto-extension would revive the expired token's frozen dollars with no
   // recompute in the loop.
   if (String(estimate.source || '') === 'plan_restart') return false;
-  if (estimateLinkageInvalidated(estimate)) return false;
+  // A held row (clarify re-price) is ineligible too — the renderer refuses
+  // it, so an auto-grant would re-send a link that 404s (codex r7 P0 on
+  // #3804); the extension writes carry the same predicate for the window
+  // between this read and the claim.
+  if (estimateOffCustomerSurface(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (!estimate.sent_at && !estimate.viewed_at) return false;
@@ -18236,6 +18416,16 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   // itself carries matching marker predicates for the TOCTOU window.
   if (estimate.estimate_data !== undefined && estimateLinkageInvalidated(estimate)) {
     return { ok: false, status: 404, error: 'Estimate not found' };
+  }
+  // A clarify re-price hold refuses the decline the way accept refuses it
+  // (same 409 + copy): a browser that loaded the estimate before the hold
+  // landed would otherwise flip the held row to 'declined' — a terminal
+  // that renders again in full at the stale price and can no longer be
+  // corrected. Checked BEFORE alreadyDeclined so the order matches the
+  // UPDATE's predicate (codex r4 P1 on #3804).
+  if (estimate.estimate_data !== undefined
+    && require('../services/estimate-clarify-asks').repricePendingActive(parseEstimateDataSafe(estimate)?.estimatorEngine)) {
+    return { ok: false, status: 409, error: 'This estimate is being re-priced — please try again in a few minutes' };
   }
   if (estimate.status === 'declined') {
     return { ok: true, alreadyDeclined: true };
@@ -22565,12 +22755,43 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // row objects, or the client's exclusion identity (service|label|amount)
   // mismatches across the raw-key/friendly label boundary and an embedded
   // row totals twice in the standalone card.
+  // Row copy never rides a regulated certificate surface (WDO in the aligned
+  // OR raw rows — the aligned breakdown can drop the WDO row): the whole
+  // page stays narrative-free, not just the WDO row (codex pre-push P0).
+  const rawContractRows = normalizeOneTimeBreakdown(estData)?.items || [];
+  const rowCopyAllowed = !hasRegulatedCertificateServiceMix([], [
+    ...(basePayload.oneTimeBreakdown?.items || []),
+    ...rawContractRows,
+  ]);
+  // The aligned one-time-choice breakdown (show_one_time_option) keeps only
+  // service/label/amount/detail per row, so the copy pack would read a
+  // unit-band pest choice as full-perimeter and a flea / wasp / Bora-Care
+  // add-on as scope-less. Resolve each row against its authoritative raw
+  // counterpart (same service key, label-matched when the key repeats):
+  // the raw row supplies the sold-scope flags, the aligned row keeps its
+  // own label/amount (codex #3823 r9 P1). The contract row itself is
+  // unchanged — only the resolver input is enriched.
+  const rawRowFor = (row) => {
+    const service = String(row?.service || '').toLowerCase();
+    if (!service) return null;
+    const candidates = rawContractRows.filter((raw) => String(raw?.service || '').toLowerCase() === service);
+    if (!candidates.length) return null;
+    return candidates.find((raw) => String(raw.label || '') === String(row.label || '')) || candidates[0];
+  };
   const contractPayload = basePayload.oneTimeBreakdown && Array.isArray(basePayload.oneTimeBreakdown.items)
     ? {
       ...basePayload,
       oneTimeBreakdown: {
         ...basePayload.oneTimeBreakdown,
-        items: basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel),
+        items: (() => {
+          const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel);
+          if (!rowCopyAllowed) return labeled;
+          const copies = resolveOneTimeRowCopies(labeled.map((row) => {
+            const raw = rawRowFor(row);
+            return raw ? { ...raw, ...row } : row;
+          }));
+          return labeled.map((row, i) => (copies[i] ? { ...row, copy: copies[i] } : row));
+        })(),
       },
     }
     : basePayload;
@@ -22638,14 +22859,31 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // Regulated check sees the RAW normalized rows too: the contract's aligned
   // breakdown (show_one_time_option) can drop a WDO row, and the Ask bar must
   // not surface on an FDACS certificate surface (pre-push codex P1).
-  const askChips = hasRegulatedCertificateServiceMix(services, [
+  // One-time-ONLY estimate on a single service copy pack: the Waves AI card
+  // and chips describe that service (mirrors the SSR askPrompts branch and
+  // buildWaveGuardIntelligencePayload). Regulated surfaces still get none.
+  // Regulated check sees the RAW normalized rows too (the aligned breakdown
+  // can drop a WDO row) — neither chips nor page copy may mint on an FDACS
+  // certificate surface (codex pre-push P1).
+  const rawOneTimeRows = normalizeOneTimeBreakdown(estData)?.items || [];
+  const regulatedSurface = hasRegulatedCertificateServiceMix(services, [
     ...oneTimeBreakdownItems,
-    ...(normalizeOneTimeBreakdown(estData)?.items || []),
-  ])
+    ...rawOneTimeRows,
+  ]);
+  // Single-service check spans the aligned AND raw rows: alignment can omit
+  // a raw billable row, and a mixed quote must never inherit the retained
+  // row's hero/AI/chips (codex pre-push P0).
+  const oneTimeServiceCopy = !regulatedSurface
+    && (contractPayload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate))
+    ? oneTimeOnlyIntelligenceCopy([...oneTimeBreakdownItems, ...rawOneTimeRows])
+    : null;
+  const askChips = regulatedSurface
     ? []
-    : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
-      ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
-      : askChipsBase;
+    : oneTimeServiceCopy?.askChips?.length
+      ? oneTimeServiceCopy.askChips.slice(0, 6)
+      : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
+        ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
+        : askChipsBase;
   // (Breakdown labels were normalized up top, before sections were built —
   // the embedded contribution rows and this breakdown are the same objects.)
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
@@ -22662,6 +22900,10 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
       ...(manualDiscountItemizedInSections ? { manualDiscountItemizedInSections: true } : {}),
     },
     askChips,
+    // Invariant (docs/public-route-contracts.md): oneTimeServiceCopy.askChips
+    // IS pricing.askChips — hero-only packs carry the category chips the
+    // page actually renders, never an empty list beside a populated one.
+    ...(oneTimeServiceCopy ? { oneTimeServiceCopy: { ...oneTimeServiceCopy, askChips } } : {}),
     oneTimeBreakdown: contractPayload.oneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
   };
@@ -24607,6 +24849,17 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     const contact = await resolveEstimateContactFields(estimate);
     const firstName = String(contact.customerName || estimate.customer_name || '').trim().split(/\s+/)[0] || 'there';
     const serviceTitle = SERVICE_DETAILS_COPY[serviceKey].title.replace(/ — Service Details$/, '');
+    // The pre-read verdict above is re-asserted IMMEDIATELY before each
+    // provider handoff (codex r14 P0 on #3804): a clarify re-price hold —
+    // or a linkage invalidation — stamped between the pre-read and the
+    // SendGrid/Twilio call would otherwise deliver a stale packet and an
+    // estimate link the renderer now refuses. Same generic 404 as the
+    // pre-read, the family's door; a fresh row, never the stale object.
+    const stillOnCustomerSurface = async () => {
+      const fresh = await db('estimates').where({ id: estimate.id }).first();
+      if (!fresh || !isEstimateCustomerViewable(fresh)) return false;
+      return !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(fresh)));
+    };
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
     const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
@@ -24616,6 +24869,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       const content = await buildServiceDetailsContent(serviceKey, estimate);
       const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
       const buffer = await renderServiceDetailsPdf(content);
+      if (!(await stillOnCustomerSurface())) return res.status(404).json({ error: 'Estimate not found' });
       const EmailTemplateLibrary = require('../services/email-template-library');
       let result;
       try {
@@ -24728,6 +24982,9 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           return { success: true, deduped: true };
         }
       } catch (e) { logger.warn(`[estimate-public] service-details SMS dedup check skipped: ${e.message}`); }
+      // Last read before the handoff — inside the claim, so a withheld send
+      // releases it below and a later legitimate retap can send.
+      if (!(await stillOnCustomerSurface())) return { success: false, withheld: true };
       return TwilioService.sendSMS(
         contact.customerPhone,
         `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
@@ -24777,6 +25034,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // claim would reopen the duplicate window it is guarding.
       if (smsResult?.claimHeldElsewhere) serviceDetailsSmsClaims.delete(dedupKey);
       else releaseClaims();
+      if (smsResult?.withheld) return res.status(404).json({ error: 'Estimate not found' });
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     // Confirmed success only: start the dedup window and prune stale entries
@@ -24942,7 +25200,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const docPinViewBypass = docRenderPin !== null
       && !estimate.archived_at
       && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
-      && !estimateLinkageInvalidated(estimate);
+      && !estimateOffCustomerSurface(estimate);
     // Call-side verdict check runs alongside the estimate-side gate (codex
     // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
     // a pinned document render of a blocked estimate is the same
@@ -26013,6 +26271,7 @@ module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmen
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.estimateLinkageInvalidated = estimateLinkageInvalidated;
+module.exports.estimateOffCustomerSurface = estimateOffCustomerSurface;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;

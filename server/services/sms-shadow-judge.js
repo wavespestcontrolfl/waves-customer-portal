@@ -229,6 +229,7 @@ async function judgeOne(draft, humanReply) {
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const resp = await createDeepMessage(client, {
+    laneId: 'shadow_judge',
     model: MODELS.DEEP,
     // DEEP: thinking spends from max_tokens. 4096 proved too tight on items
     // with large facts blocks — thinking exhausted the budget before the

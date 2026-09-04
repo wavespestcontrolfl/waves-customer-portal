@@ -1513,7 +1513,7 @@ async function applyTypedReportNarrative(input = {}, deps = {}) {
   const callModel = deps.callModel
     || ((payload) => dispatchWithFallback(
       MODELS.TEXT_POLICIES.report,
-      { jsonMode: true, maxTokens: 700, ...payload },
+      { laneId: 'rodent_narrative', jsonMode: true, maxTokens: 700, ...payload },
     ));
 
   let value = fallback;

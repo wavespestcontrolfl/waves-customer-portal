@@ -178,6 +178,7 @@ const WHEN_SCHEMA = {
 
 async function parseWithAI(query, now) {
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    laneId: 'parse_when',
     maxTokens: 300,
     jsonMode: true,
     jsonSchema: WHEN_SCHEMA,

@@ -1101,7 +1101,10 @@ class SmartRebooker {
 
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
-    const windowEnd = win.end || service.window_end;
+    // clearWindowEnd (office Combine compensation, pre-push codex #3843
+    // P1): an open-ended row that was moved onto a materialized end must
+    // be put back open-ended — `end: null` alone keeps the current end.
+    const windowEnd = win.end || (options.clearWindowEnd === true ? null : service.window_end);
 
     // Same-day target whose window already elapsed in ET is just as
     // unreachable as yesterday — a stale morning option accepted in the
@@ -1126,11 +1129,16 @@ class SmartRebooker {
         ? null
         : occupancyProbeEnd(win.start || service.window_start, null, service.estimated_duration_minutes)
     );
+    // keepStatus (office Combine, GH codex #3843 r1 P1): the abut move is
+    // incidental to grouping, so the row keeps its own status — the unit
+    // mover's sibling rule — instead of landing on 'confirmed'; a failed
+    // Combine then has nothing to un-confirm. A live row still rewinds.
+    const landedStatus = options.keepStatus === true && !lifecycleRewound ? service.status : 'confirmed';
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
       window_end: windowEnd,
-      status: 'confirmed',
+      status: landedStatus,
       ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
       // A this-visit-only DATE move of a cadence visit is a deliberate
       // exception to the series — see dateExceptionStamp.
@@ -1435,11 +1443,11 @@ class SmartRebooker {
         });
       }
 
-      if (service.status !== 'confirmed') {
+      if (service.status !== landedStatus) {
         await trx('job_status_history').insert({
           job_id: serviceId,
           from_status: service.status,
-          to_status: 'confirmed',
+          to_status: landedStatus,
           transitioned_by: null,
         });
       }

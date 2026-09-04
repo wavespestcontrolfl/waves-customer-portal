@@ -38,6 +38,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { redactText } = require('./agent-decision-training');
 const { redact: redactPii } = require('./content/pii-redactor');
 const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
@@ -235,6 +236,7 @@ async function mineSmsPairs({ since, until, skipped }) {
 function eligibleCallTranscriptsQuery({ since }) {
   return db('call_log')
     .where('direction', 'inbound')
+    .modify((qb) => whereNotSandboxCall(qb)) // voice-agent bake-off calls never reach a corpus
     // Recency = the call happened in the window OR its recording was just
     // re-transcribed by the backfill (old calls upgraded to diarized
     // transcripts would otherwise sit forever outside the mining window).
