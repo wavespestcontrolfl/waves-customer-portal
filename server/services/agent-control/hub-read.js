@@ -87,12 +87,32 @@ function resolveWindow(preset = '7d', now = new Date()) {
 
 // ── Ledger SQL ───────────────────────────────────────────────────────
 
+// Only live work counts: a replay / sealed / backfill evaluator keeps the
+// production lane_id with its workload stamped, and would otherwise inflate
+// the lane's calls, tokens and error rate (Codex r1 P1). null = a call made
+// outside any agent-control scope = live.
+const LIVE_WORKLOAD = "(workload IS NULL OR workload = 'live')";
+
+// When a row happened. A call row happens at created_at. A session row is
+// ONE row per Managed Agents session, re-recorded after every turn with
+// cumulative usage and latency_ms = GREATEST(now - startedAt) — the session
+// duration — while created_at stays the first write; its activity is the
+// end of that span, so a session that crosses ET midnight lands in the
+// window it last moved in, not the one it started in (Codex r1 P2).
+const ACTIVITY_AT = "(CASE WHEN row_kind = 'session' THEN created_at + COALESCE(latency_ms, 0) * interval '1 millisecond' ELSE created_at END)";
+// Index-friendly pre-filter for the activity window: a session lives at most
+// its hard_timeout (1 h, lane-policies AGENT_SESSION), so created_at can be
+// at most that far before its activity — 2 h keeps a margin.
+const SESSION_LOOKBACK_MS = 2 * 60 * 60 * 1000;
+
 function ledgerRows(from, to) {
   return db(TABLE)
     .whereIn('row_kind', ['call', 'session'])
     .whereNotNull('lane_id')
-    .where('created_at', '>=', from)
-    .andWhere('created_at', '<', to);
+    .whereRaw(LIVE_WORKLOAD)
+    .where('created_at', '>=', new Date(from.getTime() - SESSION_LOOKBACK_MS))
+    .andWhere('created_at', '<', to)
+    .whereRaw(`${ACTIVITY_AT} >= ? AND ${ACTIVITY_AT} < ?`, [from, to]);
 }
 
 // Per-lane aggregates over [from, to).
@@ -107,7 +127,7 @@ function laneAggregates(from, to) {
     db.raw('COALESCE(SUM(reasoning_tokens), 0)::bigint AS reasoning_tokens'),
     db.raw('(percentile_disc(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE latency_ms IS NOT NULL))::int AS p50_latency_ms'),
     db.raw('(percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE latency_ms IS NOT NULL))::int AS p95_latency_ms'),
-    db.raw('MAX(created_at) AS last_active_at'),
+    db.raw(`MAX(${ACTIVITY_AT}) AS last_active_at`),
   );
 }
 
@@ -129,6 +149,7 @@ function chainAggregates(from, to) {
   return db(TABLE)
     .where('row_kind', 'chain')
     .whereNotNull('lane_id')
+    .whereRaw(LIVE_WORKLOAD)
     .where('created_at', '>=', from)
     .andWhere('created_at', '<', to)
     .groupBy('lane_id')
@@ -144,7 +165,7 @@ function chainAggregates(from, to) {
 // timestamptz — one AT TIME ZONE yields the ET wall clock (waves-db §2).
 function bucketRows(from, to, unit) {
   const fmt = unit === 'hour' ? 'YYYY-MM-DD"T"HH24' : 'YYYY-MM-DD';
-  const bucket = db.raw(`to_char(date_trunc(?, created_at AT TIME ZONE ?), ?)`, [unit, TZ, fmt]);
+  const bucket = db.raw(`to_char(date_trunc(?, ${ACTIVITY_AT} AT TIME ZONE ?), ?)`, [unit, TZ, fmt]);
   // GROUP BY the output alias: binding the expression twice would number
   // its parameters differently and Postgres would not match the two.
   return ledgerRows(from, to)
@@ -167,8 +188,10 @@ function areaLatency(from, to, laneArea) {
     .joinRaw(`JOIN (VALUES ${values}) AS m(lane_id, area) ON m.lane_id = ${TABLE}.lane_id`, laneArea.flat())
     .whereIn('row_kind', ['call', 'session'])
     .whereNotNull('latency_ms')
-    .where('created_at', '>=', from)
+    .whereRaw(LIVE_WORKLOAD)
+    .where('created_at', '>=', new Date(from.getTime() - SESSION_LOOKBACK_MS))
     .andWhere('created_at', '<', to)
+    .whereRaw(`${ACTIVITY_AT} >= ? AND ${ACTIVITY_AT} < ?`, [from, to])
     .groupBy('m.area')
     .select(
       'm.area',
@@ -421,6 +444,11 @@ function basisFor(window) {
   return {
     source: TABLE,
     rowKinds: ['call', 'session'],
+    workloads: ['live'],
+    // A session row is attributed to the window of its last activity; its
+    // latency_ms is the session duration, so a session lane's p50 / p95 read
+    // as session durations.
+    sessionAttribution: 'last_activity',
     // Off = no new rows are being written; what is shown is history.
     ledgerRecording: gateEnvValue('GATE_LLM_CALL_LEDGER'),
     window: { key: window.key, from: window.from.toISOString(), to: window.to.toISOString(), unit: window.unit },
