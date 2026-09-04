@@ -59,35 +59,63 @@
  * + extraction keep their own providers in call-recording-processor.js.
  */
 
-const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || 'claude-opus-4-8';
-const WORKHORSE = process.env.MODEL_WORKHORSE || 'claude-sonnet-5';
-const FAST      = process.env.MODEL_FAST      || 'claude-sonnet-5';
-const VOICE     = process.env.MODEL_VOICE     || 'claude-sonnet-5';
+// Code defaults for every env-overridable selector, in one place so the admin
+// switchboard can say what a selector returns to when its Railway override is
+// deleted. Each const below reads `process.env.X || DEFAULTS.KEY`.
+const DEFAULTS = Object.freeze({
+  FLAGSHIP: 'claude-opus-4-8',
+  WORKHORSE: 'claude-sonnet-5',
+  FAST: 'claude-sonnet-5',
+  VOICE: 'claude-sonnet-5',
+  VISION: 'claude-opus-4-8',
+  DEEP: 'claude-opus-4-8',
+  EXTREME: 'claude-fable-5',
+  LAWN_CHALLENGE: 'claude-opus-4-8',
+  CALL_RESEARCH_ANTHROPIC: 'claude-opus-4-8',
+  CALL_EXTRACTION_ANTHROPIC: 'claude-opus-4-8',
+  OPENAI_BALANCED: 'gpt-5.6-terra',
+  OPENAI_FAST: 'gpt-5.6-luna',
+  OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
+  GEMINI_VISION_BEST: 'gemini-3.5-flash',
+  GEMINI_TEXT_BEST: 'gemini-3.5-flash',
+  GEMINI_VISION_FALLBACK: 'gemini-2.5-flash',
+  OPENAI_EMBEDDING: 'text-embedding-3-small',
+  SMS_SONNET: 'claude-sonnet-5',
+  GEMINI_IMAGE_BEST: 'gemini-3.1-flash-image-preview',
+  GEMINI_IMAGE_STABLE: 'gemini-2.5-flash-image',
+  GEMINI_VIDEO_FAST: 'veo-3.1-fast-generate-preview',
+  GEMINI_VIDEO_QUALITY: 'veo-3.1-generate-preview',
+});
+
+const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || DEFAULTS.FLAGSHIP;
+const WORKHORSE = process.env.MODEL_WORKHORSE || DEFAULTS.WORKHORSE;
+const FAST      = process.env.MODEL_FAST      || DEFAULTS.FAST;
+const VOICE     = process.env.MODEL_VOICE     || DEFAULTS.VOICE;
 // Owner 2026-07-21 (T&S report dry-run): photo scoring drives customer-facing
 // health scores and report claims — best model is the live model.
-const VISION    = process.env.MODEL_VISION    || 'claude-opus-4-8';
+const VISION    = process.env.MODEL_VISION    || DEFAULTS.VISION;
 
 // Automatic deep-review work stays on Opus. Fable is available only through
 // the explicit EXTREME tier so routine verifiers/fact checks cannot silently
 // incur its latency, refusal semantics, and premium token rate.
-const DEEP = process.env.MODEL_DEEP || 'claude-opus-4-8';
-const EXTREME = process.env.MODEL_EXTREME || 'claude-fable-5';
+const DEEP = process.env.MODEL_DEEP || DEFAULTS.DEEP;
+const EXTREME = process.env.MODEL_EXTREME || DEFAULTS.EXTREME;
 
 // Lawn-diagnostic adversarial-challenge reasoner. Pinned independently of FLAGSHIP
 // (which stays Opus 4.7) so the lawn pipeline can run Opus 4.8 without moving the whole
 // app. Lives here (not in the service) so every Anthropic ID stays in the central
 // registry. Override via MODEL_LAWN_CHALLENGE (registry convention) or LAWN_CHALLENGE_MODEL.
-const LAWN_CHALLENGE = process.env.MODEL_LAWN_CHALLENGE || process.env.LAWN_CHALLENGE_MODEL || 'claude-opus-4-8';
+const LAWN_CHALLENGE = process.env.MODEL_LAWN_CHALLENGE || process.env.LAWN_CHALLENGE_MODEL || DEFAULTS.LAWN_CHALLENGE;
 
 // Call-research miner's Anthropic leg (fallback by default). Pinned here per
 // the registry convention rather than riding FLAGSHIP: extraction-model
 // changes must be deliberate (they mix corpus provenance without a
 // prompt-version bump), so tier/report env changes must not move this.
-const CALL_RESEARCH_ANTHROPIC = process.env.MODEL_CALL_RESEARCH_ANTHROPIC || 'claude-opus-4-8';
+const CALL_RESEARCH_ANTHROPIC = process.env.MODEL_CALL_RESEARCH_ANTHROPIC || DEFAULTS.CALL_RESEARCH_ANTHROPIC;
 
 // V2 call-extraction's Anthropic fallback leg — same pinning rationale, own
 // env so extraction and the research miner can diverge deliberately.
-const CALL_EXTRACTION_ANTHROPIC = process.env.MODEL_CALL_EXTRACTION_ANTHROPIC || 'claude-opus-4-8';
+const CALL_EXTRACTION_ANTHROPIC = process.env.MODEL_CALL_EXTRACTION_ANTHROPIC || DEFAULTS.CALL_EXTRACTION_ANTHROPIC;
 
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
@@ -98,8 +126,8 @@ const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMIN
 // scripts/check-models.js intentionally skips them (it validates Anthropic only).
 const OPENAI_BALANCED      = process.env.MODEL_OPENAI_BALANCED
   || process.env.MODEL_OPENAI_BEST
-  || 'gpt-5.6-terra';
-const OPENAI_FAST          = process.env.MODEL_OPENAI_FAST          || 'gpt-5.6-luna';
+  || DEFAULTS.OPENAI_BALANCED;
+const OPENAI_FAST          = process.env.MODEL_OPENAI_FAST          || DEFAULTS.OPENAI_FAST;
 // Backwards-compatible export for older callers/env configuration. New routes
 // should select BALANCED or FAST explicitly instead of treating one model as
 // universally "best".
@@ -108,22 +136,22 @@ const OPENAI_BEST          = OPENAI_BALANCED;
 // writing-model upgrade does not silently move classification / Q&A lanes.
 // The completed-service report uses this model first, then Claude Opus whenever
 // OpenAI is unavailable, overloaded, empty, or fails the copy-safety gate.
-const OPENAI_REPORT_WRITER = process.env.MODEL_OPENAI_REPORT_WRITER || 'gpt-5.6-sol';
-const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || 'gemini-3.5-flash';
+const OPENAI_REPORT_WRITER = process.env.MODEL_OPENAI_REPORT_WRITER || DEFAULTS.OPENAI_REPORT_WRITER;
+const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
 // experimental third leg drafts with it so Gemini can be ranked against the
 // two live SMS providers on identical frozen items. No live text lane routes
 // to it (generated text stays on the two-provider Claude/OpenAI policies);
 // promoting it would be a deliberate registry change, not a fallback edit.
-const GEMINI_TEXT_BEST = process.env.MODEL_GEMINI_TEXT || 'gemini-3.5-flash';
+const GEMINI_TEXT_BEST = process.env.MODEL_GEMINI_TEXT || DEFAULTS.GEMINI_TEXT_BEST;
 
 // Gemini vision FALLBACK — the prior GA model the customer vision services
 // (pest-identification.js, lawn-assessment.js) retry when GEMINI_VISION_BEST
 // misses, so a live-model entitlement/availability issue never costs the
 // Gemini scorer. Lives here (not in the services) so every model ID stays
 // discoverable in the central registry.
-const GEMINI_VISION_FALLBACK = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
+const GEMINI_VISION_FALLBACK = process.env.GEMINI_VISION_FALLBACK_MODEL || DEFAULTS.GEMINI_VISION_FALLBACK;
 
 // Knowledge-index embedding model (hybrid knowledge search, lane A2).
 // SINGLE provider BY DESIGN — an embedding space is only comparable to
@@ -134,7 +162,7 @@ const GEMINI_VISION_FALLBACK = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemi
 // ingestion leaves rows pending for the next nightly run. Changing this
 // model requires re-embedding the whole corpus
 // (scripts/backfill-knowledge-embeddings.js after truncating embeddings).
-const OPENAI_EMBEDDING = process.env.MODEL_OPENAI_EMBEDDING || 'text-embedding-3-small';
+const OPENAI_EMBEDDING = process.env.MODEL_OPENAI_EMBEDDING || DEFAULTS.OPENAI_EMBEDDING;
 const EMBEDDING_DIMS = 1536; // must match knowledge_embeddings vector(1536)
 
 // SMS reply-drafting split (owner directive 2026-07-05):
@@ -146,23 +174,52 @@ const EMBEDDING_DIMS = 1536; // must match knowledge_embeddings vector(1536)
 // model drafting, the verify loop is the safety net, so it gets the
 // deepest-reasoning model (falls back to FLAGSHIP on refusal).
 const OPENAI_SMS_DRAFT = process.env.MODEL_OPENAI_SMS_DRAFT || OPENAI_FAST;
-const SMS_SONNET       = process.env.MODEL_SMS_SONNET       || 'claude-sonnet-5';
+const SMS_SONNET       = process.env.MODEL_SMS_SONNET       || DEFAULTS.SMS_SONNET;
 
 // Gemini image-GENERATION models (the "Nano Banana" line) — consumed by
 // content/image-generator.js MODEL_MAP for the social creative engine's scene
 // backgrounds. BEST is the newest image model; STABLE is the GA fallback the
 // chain drops to if the newer ID 404s (preview IDs get retired), so an ID
 // retirement degrades quality, never availability.
-const GEMINI_IMAGE_BEST   = process.env.MODEL_GEMINI_IMAGE        || 'gemini-3.1-flash-image-preview';
-const GEMINI_IMAGE_STABLE = process.env.MODEL_GEMINI_IMAGE_STABLE || 'gemini-2.5-flash-image';
+const GEMINI_IMAGE_BEST   = process.env.MODEL_GEMINI_IMAGE        || DEFAULTS.GEMINI_IMAGE_BEST;
+const GEMINI_IMAGE_STABLE = process.env.MODEL_GEMINI_IMAGE_STABLE || DEFAULTS.GEMINI_IMAGE_STABLE;
 
 // Gemini video-GENERATION models (Veo line) — consumed by
 // content/video-generator.js for the social creative engine's Reels clips.
 // FAST is the default (≈$0.15/s vs $0.40/s, generates in under a minute);
 // QUALITY is the full model the chain can step up to via env. Both are
 // env-overridable so a retired preview ID is a config change, not a deploy.
-const GEMINI_VIDEO_FAST    = process.env.MODEL_GEMINI_VIDEO         || 'veo-3.1-fast-generate-preview';
-const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || 'veo-3.1-generate-preview';
+const GEMINI_VIDEO_FAST    = process.env.MODEL_GEMINI_VIDEO         || DEFAULTS.GEMINI_VIDEO_FAST;
+const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || DEFAULTS.GEMINI_VIDEO_QUALITY;
+
+// ── Model catalog (Agents → Models tab) ─────────────────────────────
+// Every model id the admin switchboard may OFFER, with the metadata the
+// picker needs. Lives here so all model ids stay in the registry (the
+// domain-rules check fails on a `claude-*` literal anywhere else).
+// Models the picker may offer. No prices here on purpose (owner 2026-09-03:
+// prices are pulled weekly into a table, never hand-typed). `status`:
+// current | legacy | unavailable (no adapter — listed so the option can be
+// shown disabled).
+const MODEL_CATALOG = {
+  'claude-opus-5': { label: 'Claude Opus 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  'claude-opus-4-8': { label: 'Claude Opus 4.8', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy' },
+  'claude-sonnet-5': { label: 'Claude Sonnet 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  // Fable's thinking blocks + refusal semantics are handled only by
+  // services/llm/deep.js, so only DEEP / EXTREME selectors may take it.
+  'claude-fable-5-1': { label: 'Claude Fable 5.1', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep' },
+  'claude-fable-5': { label: 'Claude Fable 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy', requires: 'deep' },
+  'claude-haiku-4-5-20251001': { label: 'Claude Haiku 4.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5.6-sol': { label: 'GPT-5.6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5.6-luna': { label: 'GPT-5.6 Luna', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5.5': { label: 'GPT-5.5', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5-mini': { label: 'GPT-5 mini', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gemini-3.8-flash': { label: 'Gemini 3.8 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
+  'gemini-3.5-flash': { label: 'Gemini 3.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
+  'gemini-2.5-pro': { label: 'Gemini 2.5 Pro', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
+  'gemini-2.5-flash': { label: 'Gemini 2.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
+  'muse-spark-1.3': { label: 'Muse Spark 1.3', provider: 'unknown', caps: ['text'], status: 'unavailable' },
+};
 
 // Per-feature routes: { provider, model }. services/llm/call.js#dispatch switches
 // on .provider. These are the LIVE provider for each feature; each call site falls
@@ -272,6 +329,9 @@ module.exports = {
   GEMINI_IMAGE_STABLE,
   GEMINI_VIDEO_FAST,
   GEMINI_VIDEO_QUALITY,
+  // Admin switchboard picker catalog (services/model-switchboard.js)
+  MODEL_CATALOG,
+  DEFAULTS,
   // Backwards-compatible default export for quick imports
   DEFAULT: FLAGSHIP,
 };

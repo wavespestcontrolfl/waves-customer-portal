@@ -32,6 +32,7 @@
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
+ *   GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE=true (portal GET /api/billing/cards stamps holdsAppointment on a card holding a future secured visit, so Remove opens the call-us disclaimer; removal itself is never blocked — off = field absent, payload unchanged)
  *   GATE_PAYMENT_METHOD_CHANGE_EMAILS=true (customer lifecycle emails for Auto Pay turned OFF and saved method REMOVED — portal, and Stripe-dashboard detaches via webhook)
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
@@ -39,6 +40,8 @@
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
+ *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
+ *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
@@ -56,10 +59,12 @@
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
+ *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
+ *   GATE_HERMES_WATCHDOG=true (external agent watchdog: GET /api/integrations/watchdog-worker/status serves the PII-free health snapshot to the hermes_watchdog key and the 23-min liveness cron bells when the watchdog stops polling; off = 404 + cron no-op; kill = unset)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
@@ -126,6 +131,17 @@ const gates = {
   // remove + best-effort, non-transactional Auto Pay disable). Customer-
   // facing money surface — fail-closed ==='true' in every environment.
   portalMethodRemovalGuard: process.env.GATE_PORTAL_METHOD_REMOVAL_GUARD === 'true',
+
+  // Portal card-removal hold notice (owner ruling 2026-09-03): a saved card
+  // that secures a FUTURE visit (held estimate_card_holds row, or a fee-
+  // agreed appointment_card_requests row) is stamped holdsAppointment on
+  // GET /api/billing/cards, and the portal's Remove opens a disclaimer —
+  // the visit and its agreed late-cancel fee survive removal, call us or
+  // reschedule. Removal is NEVER refused (card-network stored-credential
+  // rules: the customer can always withdraw consent). Off = field absent,
+  // payload byte-identical. Customer-facing money surface — fail-closed
+  // ==='true' in every environment.
+  portalCardRemovalHoldNotice: process.env.GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE === 'true',
 
   // Negative lifecycle emails (payment.autopay_disabled /
   // payment.method_removed) — the positive counterparts have shipped for
@@ -824,6 +840,28 @@ const gates = {
   // attaches to, so it FAILS CLOSED (explicit opt-in in every environment)
   // until the owner verifies the first customer-wide match end-to-end.
   estimateExistingApptCustomerWide: process.env.GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE === 'true',
+  // Estimate accept may adopt a visit that is already en_route/on_site —
+  // the on-site accept: the tech is at the door, the customer accepts the
+  // sent estimate from the phone, and the in-progress visit must become the
+  // plan's first (priced) application instead of minting a duplicate
+  // pending row. Same fail-closed opt-in as the customer-wide gate above
+  // (changes which visit an acceptance attaches to). The decision point
+  // re-reads the env through gateEnvValue so a var flip is a live kill
+  // (GH codex #3814 r1 P1); this entry is the inventory/boot-log row.
+  estimateAdoptInProgressVisit: gateEnvValue('GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT'),
+  // Call-pipeline booking confirmation carries the customer's open estimate
+  // link: a phone booking against an unaccepted (sent/viewed) estimate is
+  // unpriced by design — the recurring rate is plan billing, and the
+  // per-visit price depends on the frequency the customer picks at accept.
+  // The link lets them accept, pick the plan, and add the card before the
+  // visit instead of on the doorstep. Customer-facing copy → dark until
+  // the owner approves the wording; `false`/unset is the kill, read at
+  // call time through gateEnvValue (GH codex #3814 r1 P1). PREREQUISITE:
+  // GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE — the link is sent only when
+  // the accept page would adopt the call-booked visit, which an unlinked
+  // row reaches through that customer-wide fallback alone; with it off the
+  // link gate is inert (warns per booking).
+  callConfirmationEstimateLink: gateEnvValue('GATE_CALL_CONFIRMATION_ESTIMATE_LINK'),
 
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
@@ -1030,8 +1068,10 @@ const gates = {
   // that building; otherwise the building + unit as a property row on the
   // account (owner ruling 2026-09-03). Off → the reply is stamped on the
   // Triage Inbox card only (the office enters it by hand). Reads
-  // GATE_ESTIMATE_CLARIFY_ASKS' lane; meaningless alone. The call's
-  // estimate is NOT re-drafted by this lane (PR C2 of the #3775 split).
+  // GATE_ESTIMATE_CLARIFY_ASKS' lane; meaningless alone. The answer is
+  // stamped on the call row as a fence every draft creator checks, and the
+  // call's unsent building-level draft(s) are HELD for the operator (PR
+  // C2a of the #3775 split); the automatic re-draft is PR C2b.
   clarifyUnitWriteback: process.env.GATE_CLARIFY_UNIT_WRITEBACK === 'true',
 
   // Ads Budget Live Push — allow the 2-hourly capacity-based budget cron
@@ -1793,6 +1833,16 @@ const gates = {
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
 
+  // Slot Travel Gap — the customer-facing pickers (estimate, one-tap, /book,
+  // reschedule, re-service, voice, rain-out, AI assistant) and every commit
+  // gate behind them require modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES
+  // (default 15) between a candidate window and its neighbouring stops. Off →
+  // pure half-open overlap, byte for byte (back-to-back windows across a
+  // 30-minute drive were offered and reserved — 2026-09-03 field report).
+  // Consumers read gateEnvValue at CALL time (services/scheduling/travel-gap.js)
+  // so a flip needs no redeploy; kill switch: unset GATE_SLOT_TRAVEL_GAP.
+  slotTravelGap: gateEnvValue('GATE_SLOT_TRAVEL_GAP'),
+
   // Vision Delta Scoring — one VISION-tier call per treatment outcome's best
   // before/after photo pair (server/services/vision-delta.js); the verdict
   // feeds the agronomic wiki as photo-verified visual change. Paid vision
@@ -2186,10 +2236,22 @@ const gates = {
   // Ops queue (2026-09-02): the Agents hub "Queue" tab — a read-only
   // projection of every long-running lane's persisted state (pending /
   // parked / failed) in one place. No actions live there. OFF unless set,
-  // dev AND prod — GET /api/admin/agents/queue/availability answers
-  // { available: false }, /queue is 404, and the tab is not rendered.
+  // dev AND prod — GET /api/admin/agents/control/hub (features.queue) answers
+  // features.queue false, /queue is 404, and the tab is not rendered.
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   adminOpsQueue: gateEnvValue('GATE_ADMIN_OPS_QUEUE'),
+
+  // External agent watchdog — routes/integrations-watchdog-worker.js +
+  // services/agent-watchdog-liveness.js. ON: the hermes_watchdog key can read
+  // GET /api/integrations/watchdog-worker/status (job_health classes, ops-queue
+  // COUNTS, link-worker lease state — never item titles), and the 23-min
+  // liveness cron rings one bell per ET day when the watchdog stops polling.
+  // OFF (default, dev AND prod): /status answers 404 { error: 'watchdog lane
+  // disabled' } and the cron is a no-op. Kill switch: unset. This entry is for
+  // logGateStatus; both readers use gateEnvValue('GATE_HERMES_WATCHDOG') at
+  // CALL time, so a flip needs no redeploy. Still requires GATE_HERMES_WORKER
+  // (the shared link-worker auth gate) to reach the router at all.
+  hermesWatchdog: gateEnvValue('GATE_HERMES_WATCHDOG'),
   // Intelligence Bar tool activity (2026-09-02): POST /query answers carry a
   // `toolActivity` list — one operator-facing line per tool call the exchange
   // ran (label, done / error / proposed, duration, round) — and the ⌘K
@@ -2227,6 +2289,25 @@ const gates = {
   // logGateStatus; the service reads gateEnvValue('GATE_AGENT_ACTIVITY')
   // at CALL time (the techTips idiom), so a flip needs no redeploy.
   agentActivity: gateEnvValue('GATE_AGENT_ACTIVITY'),
+
+  // LLM call ledger — services/llm-dispatch-metrics.js recordCall. ON: every
+  // provider call through the llm adapters (call.js, deep.js) and every
+  // Managed Agents session writes one row_kind=call / session row to
+  // llm_dispatch_log with token usage, latency, the model actually served
+  // and the ambient agent-control lane / run / step ids. OFF (default, dev
+  // AND prod): no row, no DB touch — the chain rows GATE_LLM_DISPATCH_METRICS
+  // governs are unaffected either way. Kill switch: unset. This entry is for
+  // logGateStatus; the recorder reads gateEnvValue at CALL time.
+  llmCallLedger: gateEnvValue('GATE_LLM_CALL_LEDGER'),
+
+  // LLM call traces — services/llm-dispatch-metrics.js recordTrace. ON: for
+  // lanes whose agent-control runtime policy sets trace: true, the REDACTED
+  // system / prompt / response bodies (pii-redactor, 8 KB cap each) are kept
+  // in llm_call_traces for 7 days, keyed to the call row — so it needs the
+  // ledger gate too. Inbound lanes skip low-confidence redactions. OFF
+  // (default, dev AND prod): nothing is written. Kill switch: unset. Read at
+  // CALL time via gateEnvValue.
+  llmCallTraces: gateEnvValue('GATE_LLM_CALL_TRACES'),
 
   // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
   // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become

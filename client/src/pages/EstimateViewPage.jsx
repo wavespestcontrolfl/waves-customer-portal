@@ -30,7 +30,7 @@ import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
-import PriceCard from '../components/estimate/PriceCard';
+import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
@@ -61,6 +61,7 @@ import {
   glassDayLinesFor,
   glassEstimateCopyFor,
   glassOneTimeHeroOverlay,
+  glassPackWithOneTimeHero,
   glassServiceSlug,
   glassTierDisplay,
   setCommercialGlass,
@@ -1911,6 +1912,30 @@ export function OneTimePriceCard({ oneTimePrice, breakdown }) {
   );
 }
 
+// Service copy pack (server: estimate-one-time-copy.js, delivered as
+// item.copy on the /data contract) — the same outcome + bullet + terms
+// shape the recurring PriceCard rows carry, so a one-time service reads
+// like a plan card (owner 2026-09-03). Shared by the standalone
+// OneTimeBreakdownCard and the rows embedded in a service section.
+function OneTimeRowCopy({ copy }) {
+  if (!copy) return null;
+  return (
+    <>
+      <div style={{ fontSize: 15, color: '#3F4A65', marginTop: 6, lineHeight: 1.5 }}>
+        {copy.outcome}
+      </div>
+      {Array.isArray(copy.includes) && copy.includes.length ? (
+        <RowInclusions items={copy.includes} collapsible />
+      ) : null}
+      {copy.terms ? (
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 10, lineHeight: 1.5 }}>
+          {copy.terms}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 // Stable identity for a one-time breakdown row — the exclusion handshake
 // between the embedded per-service rows and the standalone card below.
 // The identity is the FULL row (service + label + amount + quote state),
@@ -1989,6 +2014,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                     {item.detail}
                   </div>
                 ) : null}
+                <OneTimeRowCopy copy={item.copy} />
                 {quoteNote ? (
                   <div style={{ fontSize: 12, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     {quoteNote}
@@ -4202,6 +4228,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
                 <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
                   {amount} gets every station in the ground.
                 </div>
+                <OneTimeRowCopy copy={item.copy} />
               </div>
             );
           }
@@ -4212,6 +4239,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
                 {item.detail ? (
                   <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
                 ) : null}
+                <OneTimeRowCopy copy={item.copy} />
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                 {amount}
@@ -6767,9 +6795,20 @@ function EstimateViewPageInner() {
     'termite_trenching', 'pre_slab_termiticide', 'bora_care',
     'wdo_inspection', 'termite_foam', 'trap_only',
   ]).has(serviceCategory);
-  const glassPack = estimate.isOneTimeOnly === true
+  const baseGlassPack = estimate.isOneTimeOnly === true
     ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking, preserveServiceHero: serviceSpecificOneTimeHero })
     : glassEstimateCopyFor(serviceCategory);
+  // One-time-only service copy (server contract pricing.oneTimeServiceCopy —
+  // roach cleanout, flea, wasp, bed bug, …): its hero names the service
+  // actually quoted, replacing the category hero ("your service quote is
+  // ready" / "One visit, priced from…") that misdescribed a multi-visit
+  // program. Same pack the server-rendered hero reads.
+  const oneTimeServiceCopy = estimate.isOneTimeOnly === true && pricing.oneTimeServiceCopy?.hero
+    ? pricing.oneTimeServiceCopy
+    : null;
+  // Applied with or without the category glass pack — the server-rendered
+  // page applies the service hero unconditionally (codex #3823 deferred P2).
+  const glassPack = glassPackWithOneTimeHero(baseGlassPack, oneTimeServiceCopy, { reviewBeforeBooking });
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
@@ -6805,12 +6844,19 @@ function EstimateViewPageInner() {
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
   // intelligence payload itself — metrics/signals/satellite stay untouched.
+  // The same one-time pack outranks the glass hero pack for the Waves AI
+  // card (where it carries AI copy) and the Ask Waves chips, so the card
+  // describes the service actually quoted instead of the generic pest plan.
   const intelligenceDisplay = isRegulatedCertificateSurface
     ? null
-    : glassPack && estimate.intelligence
+    : oneTimeServiceCopy?.aiTitle && estimate.intelligence
+    ? { ...estimate.intelligence, title: oneTimeServiceCopy.aiTitle, body: oneTimeServiceCopy.aiBody }
+    : glassPack?.aiTitle && estimate.intelligence
     ? { ...estimate.intelligence, title: fillGlassTokens(glassPack.aiTitle), body: glassPack.aiBody }
     : estimate.intelligence;
-  const askChips = glassPack?.askChips || pricing.askChips;
+  const askChips = oneTimeServiceCopy?.askChips?.length
+    ? oneTimeServiceCopy.askChips
+    : (glassPack?.askChips || pricing.askChips);
   const headerContactProps = {
     customerFirstName: estimate.customerFirstName,
     customerName: estimate.customerName,

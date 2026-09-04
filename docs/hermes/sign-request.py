@@ -22,7 +22,8 @@ Contract (must match server/middleware/link-worker-auth.js):
   canonical_target = path + "?" + query params sorted by key (percent-encoded);
   body_sha256 = sha256 of the RAW request bytes (empty-byte hash for GET).
 Key ids: "hermes" (backlink claim/report) reads /data/workspace/.waves-link-worker-secret;
-"hermes_vendor" (vendor price/login) reads /data/workspace/.waves-link-worker-secret-vendor.
+"hermes_vendor" (vendor price/login) reads /data/workspace/.waves-link-worker-secret-vendor;
+"hermes_watchdog" (agent watchdog /status) reads /data/workspace/.waves-link-worker-secret-watchdog.
 """
 import hashlib
 import hmac
@@ -34,6 +35,7 @@ from urllib.parse import urlsplit, parse_qsl, quote
 SECRET_FILES = {
     "hermes": "/data/workspace/.waves-link-worker-secret",
     "hermes_vendor": "/data/workspace/.waves-link-worker-secret-vendor",
+    "hermes_watchdog": "/data/workspace/.waves-link-worker-secret-watchdog",
 }
 
 

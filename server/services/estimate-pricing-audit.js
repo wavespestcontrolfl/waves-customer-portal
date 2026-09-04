@@ -789,7 +789,11 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
       : 0;
     // Cadence persists under several names: palm as appsPerYear, and the
     // public-quote projection's `frequency` can itself be numeric.
-    const visitsPerYear = [item.visitsPerYear, item.visits, item.appsPerYear, item.frequency]
+    // `treatments` is the roach package's included-visit count (the
+    // standalone two-treatment package persists treatments: 2, visit 2 at
+    // no charge) — the second visit's per-visit cost belongs in COGS
+    // (codex #3842 r4 P1).
+    const visitsPerYear = [item.visitsPerYear, item.visits, item.appsPerYear, item.treatments, item.frequency]
       .map(num)
       .find((v) => Number.isFinite(v) && v > 0)
       // Already-persisted wizard rows can carry cadence only as TEXT

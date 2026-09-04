@@ -149,7 +149,10 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
 
     case 'check_availability': {
       const Availability = require('../../services/availability');
-      const result = await Availability.getAvailableSlots(input.city, input.estimate_id);
+      // The session / supplied customer rides along so the travel-gap mirror
+      // (GATE_SLOT_TRAVEL_GAP) measures offers with the same pin
+      // book_appointment → confirmBooking measures with.
+      const result = await Availability.getAvailableSlots(input.city, input.estimate_id, { customerId });
 
       // Simplify for the agent — just dates and slots
       return {

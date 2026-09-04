@@ -222,7 +222,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.cartRemove) return el({ count: st.cart.length && st.removable ? 1 : 0, onClick: () => { st.cart.shift(); } });
       if (sel === S.cartTotal) return el({ count: 1, text: '$99.00' });
       if (sel === S.checkoutButton) return el({ count: 1 });
-      if (sel === S.mfaField) return el();
+      // mfaHiddenFirst: a responsive duplicate — the first matching node is hidden, the second is the visible prompt
+      if (sel === S.mfaField) return st.mfaHiddenFirst ? el({ count: 2, nth: (i) => el({ count: 1, visible: i === 1 }) }) : el();
       // cardUntilBillTo: the checkout defaults to card entry and hides the field once bill-to-account is selected
       if (sel === S.cardField) return st.cardUntilBillTo ? el({ count: 1, visible: !st.accountChecked }) : el();
       if (sel === S.termsCheckbox) return el(st.termsUnreadable ? { count: 1 } : {}); // count 1 with no `checked` → isChecked throws
@@ -395,6 +396,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ orderNumberText: 'Thank you for your order' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.placeClicked).toBe(1);
+  });
+
+  test('a visible MFA prompt behind a hidden duplicate node still refuses — every match is checked, not the first (r11 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ mfaHiddenFirst: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'mfa_required' });
+    expect(st.placeClicked).toBe(0);
   });
 
   test('a checkout that defaults to card entry is switched to bill-to-account before the card field is judged (r6 P1)', async () => {

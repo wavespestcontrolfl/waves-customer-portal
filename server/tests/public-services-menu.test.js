@@ -7,7 +7,7 @@
  *  - lead intake accepts an optional serviceKey, shape-checked, and the
  *    handler keeps it only when the catalog says it is publicly selectable.
  */
-const { loadPublicServicesMenu, isPublicSelectableServiceKey, publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS } = require('../services/public-services-menu');
+const { loadPublicServicesMenu, isPublicSelectableServiceKey, publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, cockroachPackageCountVerified } = require('../services/public-services-menu');
 
 function fakeConn(rows, { hasColumn = true, throws = false } = {}) {
   const conn = () => {
@@ -16,11 +16,11 @@ function fakeConn(rows, { hasColumn = true, throws = false } = {}) {
       where(cond) { filters = { ...filters, ...cond }; return q; },
       orderBy() { return q; },
       async select() { if (throws) throw new Error('db down'); return rows.filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v)).map((r) => ({ ...r })); },
-      async first() { if (throws) throw new Error('db down'); const r = rows.find((r) => Object.entries(filters).every(([k, v]) => r[k] === v)); return r ? { id: r.id, service_key: r.service_key, name: r.name, billing_type: r.billing_type, visits_per_year: r.visits_per_year, frequency: r.frequency, booking_enabled: r.booking_enabled } : null; },
+      async first() { if (throws) throw new Error('db down'); const r = rows.find((r) => Object.entries(filters).every(([k, v]) => r[k] === v)); return r ? { id: r.id, service_key: r.service_key, name: r.name, billing_type: r.billing_type, visits_per_year: r.visits_per_year, frequency: r.frequency, booking_enabled: r.booking_enabled, public_quote_selectable: r.public_quote_selectable, ...(r.config_key ? { data: r.data } : {}) } : null; },
     };
     return q;
   };
-  conn.schema = { hasColumn: async () => hasColumn };
+  conn.schema = { hasColumn: async () => hasColumn, hasTable: async () => true };
   return conn;
 }
 const row = (o) => ({ id: 'id-' + o.service_key, is_active: true, is_archived: false, public_quote_selectable: true, category: 'pest_control', billing_type: 'one_time', frequency: null, visits_per_year: null, description: null, engine_keys: ['secret_engine_key'], ...o });
@@ -73,10 +73,22 @@ describe('keyed leads', () => {
     expect((await publicSelectableService('wdo_inspection', fakeConn([row({ service_key: 'wdo_inspection', name: 'WDO Inspection Service', booking_enabled: false })]))).booking_enabled).toBe(false);
     expect(await publicSelectableService('pest_re_service', fakeConn(rows))).toBeNull();
   });
+  test('a key the menu used to advertise still resolves as quote-on-request, never instant (cached pages, stale snapshot)', async () => {
+    const rows = [
+      row({ service_key: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4, public_quote_selectable: false }),
+      row({ service_key: 'pest_general_semiannual', name: 'Semiannual Pest Control Service', public_quote_selectable: false, is_archived: true, is_active: false }),
+    ];
+    expect(await publicSelectableService('lawn_care_quarterly', fakeConn(rows))).toEqual({ service_key: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', instant: false, booking_enabled: true });
+    // Archived rows are gone for good — the compat window is for hidden rows only.
+    expect(await publicSelectableService('pest_general_semiannual', fakeConn(rows))).toBeNull();
+    // A hidden row that WAS instant is not instant any more.
+    const wasInstant = [row({ service_key: 'pest_general_bimonthly', name: 'Bi-Monthly Pest Control Service', billing_type: 'recurring', frequency: 'bimonthly', visits_per_year: 6 })];
+    expect((await publicSelectableService('pest_general_bimonthly', fakeConn(wasInstant))).instant).toBe(true);
+  });
 });
 
 describe('instant-quote set stays in step with the public quote engine', () => {
-  const { PUBLIC_QUOTE_SERVICE_KEYS } = require('../routes/public-quote');
+  const { PUBLIC_QUOTE_SERVICE_KEYS, KEYED_ONLY_SERVICE_KEYS } = require('../routes/public-quote');
   const { generateEstimate } = require('../services/pricing-engine');
   const BASE = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005 };
   test('every instant service_key expands to a /calculate request the route accepts', () => {
@@ -84,7 +96,9 @@ describe('instant-quote set stays in step with the public quote engine', () => {
       const services = quoteServicesForKey(key);
       const paths = Object.keys(services);
       expect({ key, paths }).toEqual({ key, paths: [expect.any(String)] });
-      expect({ key, accepted: PUBLIC_QUOTE_SERVICE_KEYS.includes(paths[0]) }).toEqual({ key, accepted: true });
+      // Site-composable, or keyed-only (the route strips those from a direct
+      // body and reaches them solely through the verified catalog key).
+      expect({ key, accepted: PUBLIC_QUOTE_SERVICE_KEYS.includes(paths[0]) || KEYED_ONLY_SERVICE_KEYS.includes(paths[0]) }).toEqual({ key, accepted: true });
     }
   });
   test('the expansion is lossless: cadence/tier keys select exactly that product', () => {
@@ -101,7 +115,7 @@ describe('instant-quote set stays in step with the public quote engine', () => {
     expect(PUBLIC_QUOTE_REQUESTS.pest_general_bimonthly.pest.frequency).toBe('bimonthly');
   });
   test('products with no complete public engine request are never advertised as instant', () => {
-    for (const k of ['mosquito_one_time', 'wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid',
+    for (const k of ['wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid',
       'palm_injection', 'bed_bug_treatment', 'dethatching', 'termite_trenching', 'termite_slab_pretreat',
       'lawn_care_one_time', 'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy', 'bee_wasp_removal',
       'plugging', 'top_dressing', 'rodent_exclusion_only']) {
@@ -122,10 +136,28 @@ describe('instant-quote set stays in step with the public quote engine', () => {
       expect({ key, priced: priced.length > 0 }).toEqual({ key, priced: true });
     }
   });
-  test('flea_tick prices the SINGLE-visit knockdown, not the two-visit package', () => {
+  test('phase 2: one-time mosquito and lawn pest knockdown price from the lookup alone', () => {
+    const mosq = generateEstimate({ ...BASE, services: quoteServicesForKey('mosquito_one_time') });
+    expect(mosq.lineItems.map((l) => l.service)).toEqual(['one_time_mosquito']);
+    expect(mosq.lineItems[0].price).toBeGreaterThan(0);
+    const lawnPest = generateEstimate({ ...BASE, estimatedTurfSf: 4500, services: quoteServicesForKey('lawn_pest_knockdown') });
+    expect(lawnPest.lineItems.map((l) => l.name)).toEqual(['Lawn Pest Knockdown Service']);
+    expect(lawnPest.lineItems[0].track).toBe('st_augustine');
+  });
+  test('the site-collected grass track reaches the lawn pest knockdown request, nothing else does', () => {
+    const merged = mergeKeyedRequestOptions(quoteServicesForKey('lawn_pest_knockdown'), { lawn: { track: 'bahia', tier: 'premium' }, lawnPestControl: { urgency: 'EMERGENCY' } });
+    expect(merged).toEqual({ lawnPestControl: { track: 'bahia' } });
+    expect(mergeKeyedRequestOptions(quoteServicesForKey('lawn_pest_knockdown'), { lawn: { track: 'paspalum' } })).toEqual({ lawnPestControl: {} });
+    expect(mergeKeyedRequestOptions(quoteServicesForKey('mosquito_one_time'), { lawn: { track: 'bahia' }, oneTimeMosquito: { stationCount: 9 } })).toEqual({ oneTimeMosquito: {} });
+    // Site-collected flea complexity rides the flea request; anything else stays out.
+    expect(mergeKeyedRequestOptions(quoteServicesForKey('flea_tick'), { flea: { fleaComplexity: 'heavy', offerKey: 'flea_knockdown_single' } })).toEqual({ flea: { fleaComplexity: 'heavy' } });
+    expect(mergeKeyedRequestOptions(quoteServicesForKey('flea_tick'), { flea: { fleaComplexity: 'extreme' } })).toEqual({ flea: {} });
+  });
+  test('flea_tick prices the two-visit package — flea is sold only that way (owner ruling 2026-09-03)', () => {
     const estimate = generateEstimate({ ...BASE, services: quoteServicesForKey('flea_tick') });
-    expect(estimate.lineItems.map((l) => l.service)).toContain('flea_knockdown_single');
-    expect(estimate.lineItems.map((l) => l.service)).not.toContain('flea_package');
+    const flea = estimate.lineItems.find((l) => l.service === 'flea_package');
+    expect(flea).toMatchObject({ visits: 2, warrantyType: 'conditional_retreat' });
+    expect(estimate.lineItems.map((l) => l.service)).not.toContain('flea_knockdown_single');
   });
 });
 
@@ -136,6 +168,22 @@ describe('catalog drift never leaks into an instant quote', () => {
     expect(menuItem(pest6()).public_instant_quote).toBe(true);
     // admin edits the row to 4 visits — the map still says bimonthly → not instant
     expect(requestMatchesCatalogRow('pest_general_bimonthly', pest6({ visits_per_year: 4 }))).toBe(false);
+    // cockroach_control is a two-treatment package: a row edited away from
+    // two visits stops advertising an instant price (pre-push codex P1).
+    const roach = (over = {}) => row({ service_key: 'cockroach_control', name: 'Cockroach Treatment Service', visits_per_year: 2, ...over });
+    expect(requestMatchesCatalogRow('cockroach_control', roach())).toBe(true);
+    expect(requestMatchesCatalogRow('cockroach_control', roach({ visits_per_year: 1 }))).toBe(false);
+    expect(requestMatchesCatalogRow('cockroach_control', roach({ visits_per_year: 3 }))).toBe(false);
+    expect(requestMatchesCatalogRow('cockroach_control', roach({ visits_per_year: null }))).toBe(false);
+    expect(requestMatchesCatalogRow('cockroach_control', roach({ billing_type: 'recurring', frequency: 'semiannual' }))).toBe(false);
+    // The persisted display count is the second authority, read from the
+    // pricing_config row itself: only an explicit 2 advertises instant —
+    // 3, a missing key, a missing row, or a failed read all fail closed
+    // (codex #3842 r1/r3/r4/r5). Every other product ignores it.
+    expect(menuItem(roach(), { packageCountVerified: true }).public_instant_quote).toBe(true);
+    expect(menuItem(roach()).public_instant_quote).toBe(false);
+    expect(menuItem(roach(), { packageCountVerified: false }).public_instant_quote).toBe(false);
+    expect(menuItem(row({ service_key: 'rodent_inspection', category: 'inspection' })).public_instant_quote).toBe(true);
     expect(menuItem(pest6({ visits_per_year: 4 })).public_instant_quote).toBe(false);
     // admin edits only the frequency word — still not instant
     expect(requestMatchesCatalogRow('pest_general_bimonthly', pest6({ frequency: 'quarterly' }))).toBe(false);
@@ -153,6 +201,21 @@ describe('catalog drift never leaks into an instant quote', () => {
   });
   test('publicSelectableService reports instant from the live row so /calculate can answer quote-on-request', async () => {
     expect((await publicSelectableService('pest_general_bimonthly', fakeConn([pest6()]))).instant).toBe(true);
+    // cockroach_control: the persisted count decides, end to end.
+    const cfg = (treatments) => ({ config_key: 'pest_base', data: { initial_roach: { display: { regular_standalone: { name: 'Cockroach Treatment Service', ...(treatments == null ? {} : { treatments }) } } } } });
+    const roachRow = row({ service_key: 'cockroach_control', name: 'Cockroach Treatment', visits_per_year: 2 });
+    expect(await cockroachPackageCountVerified(fakeConn([cfg(2)]))).toBe(true);
+    expect(await cockroachPackageCountVerified(fakeConn([cfg(3)]))).toBe(false);
+    expect(await cockroachPackageCountVerified(fakeConn([cfg(null)]))).toBe(false);
+    expect(await cockroachPackageCountVerified(fakeConn([]))).toBe(false);
+    expect(await cockroachPackageCountVerified(fakeConn([cfg(2)], { throws: true }))).toBe(false);
+    expect(await cockroachPackageCountVerified(fakeConn([{ config_key: 'pest_base', data: JSON.stringify(cfg(2).data) }]))).toBe(true);
+    expect((await publicSelectableService('cockroach_control', fakeConn([roachRow, cfg(2)]))).instant).toBe(true);
+    expect((await publicSelectableService('cockroach_control', fakeConn([roachRow, cfg(3)]))).instant).toBe(false);
+    expect((await publicSelectableService('cockroach_control', fakeConn([roachRow]))).instant).toBe(false);
+    const menu = await loadPublicServicesMenu(fakeConn([roachRow, cfg(2)]));
+    expect(menu.find((i) => i.service_key === 'cockroach_control').public_instant_quote).toBe(true);
+    expect((await loadPublicServicesMenu(fakeConn([roachRow, cfg(3)]))).find((i) => i.service_key === 'cockroach_control').public_instant_quote).toBe(false);
     expect((await publicSelectableService('pest_general_bimonthly', fakeConn([pest6({ visits_per_year: 4 })]))).instant).toBe(false);
   });
 });

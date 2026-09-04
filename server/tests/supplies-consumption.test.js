@@ -23,7 +23,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 const { consumeCompletionSupplies, appliesToLine } = require('../services/supplies-consumption');
 const { notifyAdmin } = require('../services/notification-service');
 
-function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false }) {
+function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false, settledAfterBell = false }) {
   const updates = [];
   const inserts = [];
   const trx = (table) => {
@@ -31,7 +31,11 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
     q.where = () => q;
     q.whereRaw = () => q;
     q.forUpdate = () => q;
-    q.first = async () => (table === 'product_inventory_movements' ? (techLogged ? { id: 'mv-tech' } : null) : products[0]);
+    q.first = async () => {
+      if (table === 'product_inventory_movements') return techLogged ? { id: 'mv-tech' } : null;
+      if (table === 'notifications') return handedOff ? { id: 'bell-1' } : null;
+      return products[0];
+    };
     q.update = async (row) => { updates.push({ table, row }); return 1; };
     q.whereNull = () => q;
     q.insert = (row) => ({
@@ -53,6 +57,7 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
     for (const m of ['whereNotNull', 'where', 'whereRaw', 'whereNull']) q[m] = () => q;
     q.select = async () => products;
     q.update = async (row) => { updates.push({ table, row }); return 1; };
+    q.first = async () => (table === 'product_inventory_movements' && settledAfterBell ? { id: 'mv-race' } : null); // the post-bell settled re-check
     return q;
   };
   db.transaction = async (fn) => fn(trx);
@@ -157,12 +162,32 @@ test('movement carries unit_cost / cost_used from cost_per_unit in the inventory
   expect(mismatch.inserts[0]).toMatchObject({ unit_cost: null, cost_used: null });
 });
 
+test('a product whose hand-off bell landed on an earlier attempt is NOT deducted on the retry — the office adjusts it by hand; no movement, no decrement, bell left alone (Codex r17 P1)', async () => {
+  const { db, updates, inserts } = fakeDb({ products: [sign], handedOff: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.consumed).toHaveLength(0);
+  expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'handed_off' }]);
+  expect(inserts).toHaveLength(0);
+  expect(updates).toHaveLength(0);
+});
+
+test('a failure bell that lands after a concurrent retry already deducted the kit is retired right away (Codex r18 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = fakeDb({ products: [sign], throwOnInsert: true, settledAfterBell: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ productId: 'prod-sign', message: 'insert boom' }]);
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  const retired = updates.filter((u) => u.table === 'notifications');
+  expect(retired).toHaveLength(1);
+  expect(retired[0].row.read_at).toBeInstanceOf(Date);
+});
+
 test('duplicate (index ignored the insert) → no decrement', async () => {
   const { db, updates } = fakeDb({ products: [sign], duplicate: true });
   const res = await consumeCompletionSupplies(db, args);
   expect(res.consumed).toHaveLength(0);
   expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'already_consumed' }]);
-  expect(updates).toHaveLength(0);
+  expect(updates.filter((u) => u.table === 'products_catalog')).toHaveLength(0);
 });
 
 describe('service-line scope', () => {
@@ -184,12 +209,15 @@ describe('service-line scope', () => {
     expect(appliesToLine({ pest: true }, 'pest')).toBe(false);
   });
 
-  test('a product whose scope is malformed is skipped with a recorded error, no movement', async () => {
+  test('a product whose scope is malformed is skipped with a recorded error, no movement — and handed to staff by the per-product bell (Codex #3832 hook P1)', async () => {
+    notifyAdmin.mockClear();
     const { db, inserts } = fakeDb({ products: [{ ...sign, per_completion_service_lines: 'not json' }] });
     const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' });
     expect(res.errors).toEqual([{ productId: 'prod-sign', reason: 'invalid_service_lines' }]);
     expect(res.consumed).toHaveLength(0);
     expect(inserts).toHaveLength(0);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('supplies-consumption-failed:prod-sign:svc-1');
   });
 
   test('a pest visit consumes the kit item', async () => {
@@ -269,6 +297,13 @@ test('a successful deduction retires the failure bells an earlier attempt rang f
   expect(retired[0].row.read_at).toBeInstanceOf(Date);
 });
 
+test('an already_consumed retry (the movement exists) still retires the stale failure bells (Codex r17 P2)', async () => {
+  const { db, updates } = fakeDb({ products: [sign], duplicate: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'already_consumed' }]);
+  expect(updates.filter((u) => u.table === 'notifications')).toHaveLength(1);
+});
+
 test('a successful deduction rings no bell', async () => {
   notifyAdmin.mockClear();
   const { db } = fakeDb({ products: [sign] });
@@ -345,18 +380,23 @@ describe('recap consumption hook — retry window (source contract)', () => {
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
-  const hook = src.slice(src.indexOf("router.post('/:serviceId/pest-recap'"), src.indexOf('recap supplies consumption failed'));
+  const hook = src.slice(src.indexOf('async function recapSuppliesOwed('), src.indexOf("router.post('/:serviceId/pest-recap'"));
+  const route = src.slice(src.indexOf("router.post('/:serviceId/pest-recap'"), src.indexOf('router.post(', src.indexOf("router.post('/:serviceId/pest-recap'") + 10));
 
   test('the retry signal is the durable completion_supplies_owed marker the recap transition wrote, read and cleared by the hook — never record age', () => {
     const recapSrc = fs.readFileSync(path.join(__dirname, '../services/pest-recap.js'), 'utf8');
     expect(recapSrc.match(/completion_supplies_owed: true/g)).toHaveLength(2); // update branch + insert branch, both gated on !recapPriorCompleted
     expect(recapSrc).toMatch(/\.\.\.\(recapPriorCompleted \? \{\} : \{ field_flags: trx\.raw/);
-    expect(hook).toMatch(/let consumeNow = result\.priorCompleted !== true;/);
+    expect(hook).toMatch(/if \(result\.priorCompleted !== true\) return true;/);
     expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('field_flags'\)/);
-    expect(hook).toMatch(/if \(flags\.completion_supplies_owed === true\) consumeNow = true;/);
-    expect(hook).toMatch(/if \(result\.recordId && !consumption\?\.errors\?\.length\) await db\('service_records'\)/); // cleared only when nothing errored
+    expect(hook).toMatch(/return flags\.completion_supplies_owed === true;/);
+    // Cleared unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell means staff adjust by hand, so a retry must not deduct again.
+    expect(hook).toMatch(/const handoffLost = \(consumption\?\.errors \|\| \[\]\)\.some\(\(e\) => e\.reason === 'failure_bell_not_sent'\);/);
+    expect(hook).toMatch(/if \(result\.recordId && !handoffLost\) await db\('service_records'\)/);
     expect(hook).toMatch(/- 'completion_supplies_owed'/); // cleared after the at-most-once consume
     expect(hook).not.toMatch(/RECAP_RETRY_WINDOW_MS|created_at/);
-    expect(hook).toMatch(/if \(consumeNow\) \{/);
+    expect(hook).toMatch(/if \(!\(await recapSuppliesOwed\(result\)\)\) return;/);
+    expect(route).toMatch(/await settleRecapSupplies\(req\.params\.serviceId, result\);/); // the recap route runs the settlement after submitRecap
+    expect(route).toMatch(/if \(!result\.ok\) return res\.status\(recapStatusForReason\(result\.reason\)\)/);
   });
 });

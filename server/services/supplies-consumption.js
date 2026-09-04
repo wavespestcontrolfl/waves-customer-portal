@@ -78,13 +78,43 @@ function appliesToLine(rawLines, serviceLine) {
   return !!serviceLine && lines.includes(String(serviceLine));
 }
 
+// Why the LOCKED row is not deductible now, or null. Eligibility is
+// re-derived from the locked row: a retire or a service-line edit between
+// the scan and the lock must not deduct (pre-push codex P1).
+function lockedSkipReason(locked, serviceLine) {
+  if (locked.active === false) return 'retired';
+  if (!appliesToLine(locked.per_completion_service_lines, serviceLine)) return 'service_line_excluded';
+  const usage = Number(locked.per_completion_usage);
+  if (!Number.isFinite(usage) || usage <= 0) return 'no_usage';
+  if (locked.inventory_on_hand == null || locked.inventory_on_hand === '') return 'no_on_hand';
+  if (!Number.isFinite(Number(locked.inventory_on_hand))) return 'non_numeric_on_hand';
+  return null;
+}
+
+// Settlement of (product, visit), read under the product lock and living in
+// the rows themselves: a usage movement the tech logged in the picker, an
+// existing kit movement (this product is done — the clear after the
+// transaction retires any stale bell), or a hand-off bell that LANDED for
+// this product or the visit-wide lookup (the office was told to adjust this
+// count by hand; a retry must not deduct on top of that correction — a
+// partial delivery retries only the lost-bell product, Codex r17 P1).
+// Returns the skip reason, or null when the kit is still owed.
+async function settledReason(trx, { productId, scheduledServiceId }) {
+  const usageRows = () => trx('product_inventory_movements').where({ product_id: productId, scheduled_service_id: scheduledServiceId, movement_type: 'usage' });
+  if (await usageRows().whereRaw("coalesce(metadata->>'source', '') <> ?", [SOURCE]).first('id')) return 'already_logged_by_tech';
+  if (await usageRows().whereRaw("metadata->>'source' = ?", [SOURCE]).first('id')) return 'already_consumed';
+  const keys = [`supplies-consumption-failed:${productId}:${scheduledServiceId}`, `supplies-consumption-failed:lookup:${scheduledServiceId}`];
+  if (await trx('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).first('id')) return 'handed_off';
+  return null;
+}
+
 // The miss is never silent: one deduped bell so the office adjusts the
 // count by hand — per (product, visit), or per visit when the product
 // lookup itself failed (Codex r3 P2, r14 P2). notifyAdmin resolves NULL
 // when it could not persist the notification, so the resolved row is
 // checked like a throw: a lost bell is an error-level log and an errors
 // entry, never a silent success (Codex r11 P2).
-async function ringMissedDeductionBell(result, { scheduledServiceId, product = null, reason }) {
+async function ringMissedDeductionBell(db, result, { scheduledServiceId, product = null, reason }) {
   const title = product ? `Inventory: ${product.name} was not deducted for a completed visit` : 'Inventory: yard-sign supplies were not deducted for a completed visit';
   // The lookup bell names no product: which kit items this visit should
   // have consumed is decided only after the lookup (service-line scope), so
@@ -96,6 +126,13 @@ async function ringMissedDeductionBell(result, { scheduledServiceId, product = n
   try {
     const bell = await require('./notification-service').notifyAdmin('system', title, body, { bell: true, link: '/admin/inventory', dedupeKey, metadata: { productId: product?.id || null, scheduledServiceId } });
     if (!bell) throw new Error('notification not persisted');
+    // Race (Codex r18 P1): a concurrent retry may have deducted this product
+    // between our failed transaction and this insert — its bell clear ran
+    // before our bell existed. Re-check the settled movement AFTER the bell
+    // persisted and retire our own bell when the kit is in fact deducted.
+    if (product && await db('product_inventory_movements').where({ product_id: product.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).whereRaw("metadata->>'source' = ?", [SOURCE]).first('id')) {
+      await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id });
+    }
   } catch (bellErr) {
     logger.error(`[supplies-consumption] failure bell NOT sent for ${product ? product.name : 'the visit'} on visit ${scheduledServiceId}: ${bellErr.message}`);
     result.errors.push({ productId: product?.id || null, reason: 'failure_bell_not_sent', message: bellErr.message });
@@ -141,14 +178,18 @@ async function consumeCompletionSupplies(db, {
   } catch (err) {
     logger.warn(`[supplies-consumption] product lookup failed (non-blocking): ${err.message}`);
     result.errors.push({ reason: 'lookup_failed', message: err.message });
-    await ringMissedDeductionBell(result, { scheduledServiceId, reason: err.message });
+    await ringMissedDeductionBell(db, result, { scheduledServiceId, reason: err.message });
     return result;
   }
 
   for (const product of products) {
     if (parseLines(product.per_completion_service_lines) === INVALID_LINES) {
+      // A corrupt scope is a hand-off like any other miss: the deduction
+      // is not retried (the config would fail again), so staff must hear
+      // about it (Codex #3832 hook P1).
       logger.warn(`[supplies-consumption] ${product.name}: per_completion_service_lines is not a list — nothing consumed (fix it on the Inventory page)`);
       result.errors.push({ productId: product.id, reason: 'invalid_service_lines' });
+      await ringMissedDeductionBell(db, result, { scheduledServiceId, product, reason: 'per_completion_service_lines is not a list — fix the product, then adjust the count' });
       continue;
     }
     if (!appliesToLine(product.per_completion_service_lines, serviceLine)) {
@@ -159,24 +200,14 @@ async function consumeCompletionSupplies(db, {
       const outcome = await db.transaction(async (trx) => {
         const locked = await trx('products_catalog').where({ id: product.id }).forUpdate().first();
         if (!locked) return { skipped: 'missing' };
-        // Eligibility is re-derived from the LOCKED row: a retire or a
-        // service-line edit between the scan and the lock must not deduct
-        // (pre-push codex P1).
-        if (locked.active === false) return { skipped: 'retired' };
-        if (!appliesToLine(locked.per_completion_service_lines, serviceLine)) return { skipped: 'service_line_excluded' };
+        const ineligible = lockedSkipReason(locked, serviceLine);
+        if (ineligible) return { skipped: ineligible };
+        const settled = await settledReason(trx, { productId: locked.id, scheduledServiceId });
+        if (settled) return { skipped: settled };
         const usage = Number(locked.per_completion_usage);
-        if (!Number.isFinite(usage) || usage <= 0) return { skipped: 'no_usage' };
-        if (locked.inventory_on_hand == null || locked.inventory_on_hand === '') return { skipped: 'no_on_hand' };
         const before = Number(locked.inventory_on_hand);
-        if (!Number.isFinite(before)) return { skipped: 'non_numeric_on_hand' };
         const after = Number((before - usage).toFixed(4));
         const unit = locked.inventory_unit || 'each';
-
-        const alreadyLogged = await trx('product_inventory_movements')
-          .where({ product_id: locked.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' })
-          .whereRaw("coalesce(metadata->>'source', '') <> ?", [SOURCE])
-          .first('id');
-        if (alreadyLogged) return { skipped: 'already_logged_by_tech' };
 
         const costPerUnit = locked.cost_per_unit != null ? Number(locked.cost_per_unit) : null;
         const costUnitMatches = !locked.cost_unit || String(locked.cost_unit).toLowerCase() === String(unit).toLowerCase();
@@ -207,14 +238,18 @@ async function consumeCompletionSupplies(db, {
         await trx('products_catalog').where({ id: locked.id }).update({ inventory_on_hand: after, updated_at: new Date() });
         return { consumed: { productId: locked.id, name: locked.name, usage, unit, before, after, costUsed } };
       });
-      if (outcome.consumed) { result.consumed.push(outcome.consumed); await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id }); }
+      if (outcome.consumed) result.consumed.push(outcome.consumed);
       else result.skipped.push({ productId: product.id, reason: outcome.skipped });
+      // The kit IS deducted (now, or by an earlier attempt whose bell clear
+      // failed transiently): retire the stale hand-off bells either way
+      // (Codex r17 P2).
+      if (outcome.consumed || outcome.skipped === 'already_consumed') await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id });
     } catch (err) {
       logger.warn(`[supplies-consumption] ${product.name} failed for visit ${scheduledServiceId} (non-blocking): ${err.message}`);
       result.errors.push({ productId: product.id, message: err.message });
       // Not retried (the closeout must never depend on a supplies write and
       // stock is advisory) — but not silent either (ringMissedDeductionBell).
-      await ringMissedDeductionBell(result, { scheduledServiceId, product, reason: err.message });
+      await ringMissedDeductionBell(db, result, { scheduledServiceId, product, reason: err.message });
     }
   }
   return result;

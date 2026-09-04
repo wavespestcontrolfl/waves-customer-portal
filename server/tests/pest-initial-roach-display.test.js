@@ -198,7 +198,8 @@ describe('pest_initial_roach display config', () => {
     expect(synced).toBe(true);
     expect(constants.PEST.pestInitialRoach.display.regular).toEqual({ name: 'Roach Rescue', treatments: 2 });
     expect(constants.PEST.pestInitialRoach.display.german).toEqual({ name: 'German Cockroach Treatment', treatments: 1 });
-    expect(constants.PEST.pestInitialRoach.display.regular_standalone).toEqual({ name: 'Cockroach Treatment Service', treatments: 1 });
+    // Untouched scale keys keep the in-code default (standalone = the two-treatment package, owner ruling 2026-09-03).
+    expect(constants.PEST.pestInitialRoach.display.regular_standalone).toEqual({ name: 'Cockroach Treatment Service', treatments: 2 });
   });
 });
 

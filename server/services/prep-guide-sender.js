@@ -27,6 +27,7 @@ const { resolveProjectEmailRecipient, ensureServicePrepToken, markServicePrepSen
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -62,22 +63,63 @@ function isSupportedPestType(pestType) {
 
 // Soonest upcoming visit of this pest family, so the emailed guide's "Service
 // date" row references the real appointment and the prep token can hang off
-// the visit row. Null when there is no matching upcoming visit.
-async function nextUpcomingVisit(customerId, serviceKeyword) {
+// the visit row. Null when there is no matching upcoming visit. Takes one
+// customer id or an account's ids (the composer's prep-guide insert looks
+// across siblings).
+async function nextUpcomingVisit(customerIds, serviceKeyword) {
+  const ids = [].concat(customerIds).filter(Boolean);
   try {
-    const row = await db('scheduled_services')
-      .where({ customer_id: customerId })
-      .whereRaw('LOWER(service_type) LIKE ?', [`%${serviceKeyword}%`])
-      .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
-      // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
-      // midnight ET "today's" visit would fall before the UTC date and the
-      // email would say "To be confirmed" despite a real upcoming appointment.
-      .where('scheduled_date', '>=', etDateString())
-      .orderBy('scheduled_date', 'asc')
-      .first('id', 'scheduled_date');
-    return row || null;
+    // Paged like the reschedule pick (a fixed limit could hide a valid
+    // upcoming visit behind elapsed same-day rows — pre-push Codex P1).
+    const { pageStateForVisit } = require('../routes/appointment-public');
+    const PAGE = 10;
+    for (let offset = 0; ; offset += PAGE) {
+      const rows = await db('scheduled_services')
+        .whereIn('customer_id', ids)
+        .whereRaw('LOWER(service_type) LIKE ?', [`%${serviceKeyword}%`])
+        .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
+        // A call-created follow-up still pending and never customer-confirmed
+        // is dispatch-owned: its tentative date is hidden from the customer
+        // schedule and every other visit-backed link until the office
+        // confirms it, so neither the guide email's "Service date" nor a prep
+        // page may present it either — the same null-safe predicate
+        // /api/schedule uses (GH Codex #3844 r5 P1).
+        .where((qb) => qb
+          .whereNull('source_action')
+          .orWhereNotIn('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+          .orWhereNot('status', 'pending')
+          .orWhere('customer_confirmed', true))
+        // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
+        // midnight ET "today's" visit would fall before the UTC date and the
+        // email would say "To be confirmed" despite a real upcoming appointment.
+        .where('scheduled_date', '>=', etDateString())
+        // Soonest by date THEN window, with a stable id tie-breaker — two
+        // same-day visits must not pick arbitrarily (pre-push Codex P1).
+        .orderBy([
+          { column: 'scheduled_date', order: 'asc' },
+          { column: 'window_start', order: 'asc' },
+          { column: 'id', order: 'asc' },
+        ])
+        .limit(PAGE)
+        .offset(offset)
+        .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'service_type', 'prep_template_key', 'prep_expires_at', 'visit_id', 'source_action', 'customer_confirmed');
+      // A same-day row still pending/confirmed after its quoted window is a
+      // visit that came and went — the appointment page renders it 'past';
+      // prep for it is prep for nothing, so walk on to the next matching
+      // visit (GH Codex #3844 r10 P2). One predicate: the page's own.
+      // Only what the page renders as upcoming — grouped (a sibling in
+      // pending rebook or underway, or an unreadable membership) or the
+      // row's own: a visit already underway is too late to prep for and
+      // would hide the customer's later treatment (GH Codex #3844 r13 P2,
+      // pre-push r14 P1).
+      let row = null;
+      for (const r of rows) {
+        if ((await pageStateForVisit(r)).state === 'upcoming') { row = r; break; }
+      }
+      if (row || rows.length < PAGE) return row || null;
+    }
   } catch (err) {
-    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${customerId}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${ids.join(',')}: ${err.message}`);
     return null;
   }
 }
@@ -254,4 +296,4 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', actorId = nul
   return result;
 }
 
-module.exports = { sendPrepToCustomer, isSupportedPestType, PREP_CONFIG };
+module.exports = { sendPrepToCustomer, isSupportedPestType, nextUpcomingVisit, PREP_CONFIG };

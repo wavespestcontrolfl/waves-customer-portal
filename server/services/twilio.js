@@ -439,6 +439,30 @@ const TwilioService = {
         };
       }
 
+      // A Waves-owned number is never a customer. A public-form submission
+      // carrying our own main line (lead "Waves", 2026-08-29) queued a
+      // booking-invite text whose To equalled its From — Twilio failed it
+      // with 21266 and the queue row settled as blocked with no SID, so the
+      // watch saw a provider failure with no local row. Every SMS funnels
+      // through this method (the only messages.create in the repo), so this
+      // is the one seam that covers all 69 direct callers. Internal alerts
+      // were already redirected to a bell above; anything left addressed
+      // to a tracking/office/main line is a wrong-recipient send.
+      const TWILIO_NUMBERS = require("../config/twilio-numbers");
+      if (TWILIO_NUMBERS.isOwnedNumber(to)) {
+        logger.error(
+          `[twilio] blocked SMS to a Waves-owned number ${maskPhone(to)} (messageType=${options.messageType || "n/a"}, bodyLen=${body?.length || 0})`,
+        );
+        return {
+          success: false,
+          sid: null,
+          blocked: true,
+          guardBlocked: true,
+          code: "OWNED_NUMBER_RECIPIENT",
+          error: "Recipient is a Waves-owned Twilio number, not a customer (would fail Twilio 21266)",
+        };
+      }
+
       const { isEnabled } = require("../config/feature-gates");
       if (!isEnabled("twilioSms")) {
         logger.info(

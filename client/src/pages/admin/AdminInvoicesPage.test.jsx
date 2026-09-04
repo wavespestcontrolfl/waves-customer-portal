@@ -11,9 +11,34 @@ import {
   invoiceDepositCreditTotal,
   invoiceListRowDate,
   isAllowedAttachmentFile,
+  noticeCandidateLabel,
+  orderNoticeCandidates,
   persistedSendDisposition,
   validateAttachmentFiles,
 } from "./AdminInvoicesPage.jsx";
+
+describe("AdminInvoicesPage Zelle notice candidates", () => {
+  const near = { invoice_id: "n", invoice_number: "WPC-2026-0003", customer_name: "Sam Roe", amount_due_cents: 12000, exact_amount: false, name_match: false };
+  const exact = { invoice_id: "e", invoice_number: "WPC-2026-0002", customer_name: "Pat Roe", amount_due_cents: 11700, exact_amount: true, name_match: false };
+  const best = { invoice_id: "b", invoice_number: "WPC-2026-0001", customer_name: "Pat Doe", amount_due_cents: 11700, exact_amount: true, name_match: true };
+  const nameOnly = { invoice_id: "m", invoice_number: "WPC-2026-0004", customer_name: "Pat Doe", amount_due_cents: 9900, exact_amount: false, name_match: true };
+
+  it("orders exact+name, then exact amount, then name-only, then the rest — stable within a band", () => {
+    expect(orderNoticeCandidates([near, nameOnly, exact, best]).map((c) => c.invoice_id)).toEqual(["b", "e", "m", "n"]);
+    const twoExact = orderNoticeCandidates([{ ...exact, invoice_id: "e1" }, { ...exact, invoice_id: "e2" }]);
+    expect(twoExact.map((c) => c.invoice_id)).toEqual(["e1", "e2"]);
+  });
+
+  it("tolerates a missing or malformed candidate list", () => {
+    expect(orderNoticeCandidates(undefined)).toEqual([]);
+    expect(orderNoticeCandidates("nope")).toEqual([]);
+  });
+
+  it("labels a candidate with number, customer, amount due and its match flags", () => {
+    expect(noticeCandidateLabel(best)).toBe("WPC-2026-0001 · Pat Doe · $117.00 (exact amount, name match)");
+    expect(noticeCandidateLabel(near)).toBe("WPC-2026-0003 · Sam Roe · $120.00");
+  });
+});
 
 describe("AdminInvoicesPage customer handoff", () => {
   it("passes the customer context through to the invoice list endpoint", () => {

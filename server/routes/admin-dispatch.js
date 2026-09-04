@@ -3445,18 +3445,47 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
 // (/secure) rail — merged so the client confirm prompts work unchanged;
 // the lanes are mutually exclusive per visit (the appointment rail skips
 // any visit with a hold row).
+// Merge the two fee-rail previews into the one verdict the cancel UIs read.
+//   - A HELD hold answers outright — unless its own verdict is undetermined
+//     (state lookup failed, raced, or timeless): then the appointment rail is
+//     asked and wins ONLY with a stronger verdict — a fee event or its own
+//     undetermined answer (willCharge true / null). A "nothing will be
+//     charged" appointment verdict can't outrank an unknown hold state
+//     (pre-push P1s on #3800 r7).
+//   - A CLOSED hold (released / charged) must NOT short-circuit: the
+//     appointment rail may still carry an in-flight charge or a live
+//     consent for the same visit (pre-push P0 on #3800 r3). Its closed-
+//     state verdict stands only when the appointment rail has nothing of
+//     its own to say — no row, deferred to the hold lane, or DARK (no
+//     lookup at all — Codex #3800 r7 P1; the gates are independent).
+// `askAppointmentRail` is invoked lazily so an authoritative hold verdict
+// makes no second lookup.
+const APPT_RAIL_SILENT_CODES = new Set(['no_card', 'card_hold_lane', 'rail_dark']);
+async function mergeCardHoldPreviews(holdPreview, askAppointmentRail) {
+  const holdUnresolved = holdPreview.rule?.code === 'unresolved';
+  if (holdPreview.held && !holdUnresolved) return holdPreview;
+  const apptPreview = await askAppointmentRail();
+  if (holdUnresolved) return apptPreview.rule?.willCharge === false ? holdPreview : apptShape(apptPreview);
+  if (holdPreview.rule?.code !== 'no_card' && APPT_RAIL_SILENT_CODES.has(apptPreview.rule?.code)) return holdPreview;
+  return apptShape(apptPreview);
+}
+function apptShape(apptPreview) {
+  return {
+    held: apptPreview.secured === true,
+    feeApplies: apptPreview.feeApplies === true,
+    ...(apptPreview.feeAmount != null ? { feeAmount: apptPreview.feeAmount } : {}),
+    ...(apptPreview.unresolved ? { unresolved: true } : {}),
+    // Operator-facing rule (code + sentence): will the card be charged, and
+    // which rule decides it — rendered at the foot of the cancel card.
+    rule: apptPreview.rule,
+  };
+}
 router.get('/:serviceId/card-hold', async (req, res, next) => {
   try {
     const CardHolds = require('../services/estimate-card-holds');
     const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
-    if (holdPreview.held) return res.json(holdPreview);
     const ApptCardRequests = require('../services/appointment-card-request');
-    const apptPreview = await ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId);
-    res.json({
-      held: apptPreview.secured === true,
-      feeApplies: apptPreview.feeApplies === true,
-      ...(apptPreview.feeAmount != null ? { feeAmount: apptPreview.feeAmount } : {}),
-    });
+    res.json(await mergeCardHoldPreviews(holdPreview, () => ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId)));
   } catch (err) { next(err); }
 });
 
@@ -14049,6 +14078,67 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
 });
 
 // POST /:serviceId/pest-recap — commit the recap (complete, no bill).
+// Whether this recap must consume the kit: a first completion always; a
+// priorCompleted recap only when it is the RETRY of the completing recap —
+// the durable completion_supplies_owed marker the transition wrote is still
+// set (submitRecap commits the status before the consumption call, so a
+// process death in between must not lose the kit). Never record age.
+async function recapSuppliesOwed(result) {
+  if (result.priorCompleted !== true) return true;
+  if (!result.recordId) return false;
+  try {
+    const rec = await db('service_records').where({ id: result.recordId }).first('field_flags');
+    const flags = typeof rec?.field_flags === 'string' ? JSON.parse(rec.field_flags) : (rec?.field_flags || {});
+    return flags.completion_supplies_owed === true;
+  } catch (err) {
+    // This is the marker's only production reader and the client gets a 200
+    // either way, so "not owed" on a failed read would strand the kit for
+    // good. Fail TOWARD consuming: the at-most-once movement index makes a
+    // double deduction impossible and a handed-off product is skipped by
+    // settlement (Codex r20 P2).
+    logger.warn(`[dispatch] recap supplies-owed read failed — consuming anyway: ${err.message}`);
+    return true;
+  }
+}
+
+// The consume itself (same hook as /:serviceId/complete, same at-most-once
+// index) plus the job-cost recalc a kit movement's cost_used warrants
+// (idempotent UPSERT, fire-and-forget — GH codex r4 P2).
+async function consumeRecapSupplies(serviceId, result) {
+  const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+  const svcRow = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'technician_id', 'service_type');
+  const consumption = await consumeCompletionSupplies(db, {
+    scheduledServiceId: serviceId,
+    serviceRecordId: result.recordId || null,
+    customerId: svcRow?.customer_id || null,
+    technicianId: svcRow?.technician_id || null,
+    isIncompleteVisit: false,
+    visitPerformed: result.priorNonPerformed !== true,
+    serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
+    serviceType: svcRow?.service_type || null,
+  });
+  if (consumption?.consumed?.length) {
+    const JobCosting = require('../services/job-costing');
+    void JobCosting.calculateJobCost(serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
+  }
+  return consumption;
+}
+
+// Recap consumable settlement: consume when owed, then clear the owed marker
+// — unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell
+// means staff adjust by hand, so a retry must not deduct the same kit again
+// on top of their correction; only a miss nobody was told about keeps the
+// marker so the next retry re-runs the at-most-once consume (pre-push P1).
+// Never throws: the recap response never waits on a supplies write.
+async function settleRecapSupplies(serviceId, result) {
+  if (!(await recapSuppliesOwed(result))) return;
+  try {
+    const consumption = await consumeRecapSupplies(serviceId, result);
+    const handoffLost = (consumption?.errors || []).some((e) => e.reason === 'failure_bell_not_sent');
+    if (result.recordId && !handoffLost) await db('service_records').where({ id: result.recordId }).update({ field_flags: db.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
+  } catch (err) { logger.error(`[dispatch] recap supplies consumption failed: ${err.message}`); }
+}
+
 router.post('/:serviceId/pest-recap', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
@@ -14086,62 +14176,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
-    // Yard-sign kit consumption — the recap is the second production
-    // completion path for pest visits (GH codex r2 P1); same hook as
-    // /:serviceId/complete, same at-most-once index, never throws. A recap
-    // re-closing a NOT-performed visit (submitRecap's priorNonPerformed —
-    // the same verdict that blocks referral credit and the card charge)
-    // consumes nothing, matching the original closeout (GH codex r3 P2). A
-    // recap EDIT of a visit that was already completed (priorCompleted) is
-    // not a new visit — no kit was left, nothing is consumed (GH codex r4
-    // P2). One exception (PR 2 pre-push P1 / GH codex r3 P1): submitRecap
-    // commits the completed status BEFORE this call, so a process death in
-    // between makes the client's retry read priorCompleted=true with no kit
-    // movement written. The completing transition therefore stamps
-    // field_flags.completion_supplies_owed on the service record INSIDE its
-    // transaction (pest-recap.js); this hook consumes whenever that marker is
-    // set, and clears it afterwards. Durable evidence of the transition, not
-    // record age: a first recap added to a historical completion and any
-    // later edit carry no marker and consume nothing; the at-most-once
-    // movement index still makes a genuine double-consume impossible.
-    let consumeNow = result.priorCompleted !== true;
-    if (!consumeNow && result.recordId) {
-      try {
-        const rec = await db('service_records').where({ id: result.recordId }).first('field_flags');
-        const flags = typeof rec?.field_flags === 'string' ? JSON.parse(rec.field_flags) : (rec?.field_flags || {});
-        if (flags.completion_supplies_owed === true) consumeNow = true;
-      } catch (e) { logger.warn(`[dispatch] recap supplies-owed read failed: ${e.message}`); }
-    }
-    if (consumeNow) {
-      try {
-        const { consumeCompletionSupplies } = require('../services/supplies-consumption');
-        const svcRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('customer_id', 'technician_id', 'service_type');
-        const consumption = await consumeCompletionSupplies(db, {
-          scheduledServiceId: req.params.serviceId,
-          serviceRecordId: result.recordId || null,
-          customerId: svcRow?.customer_id || null,
-          technicianId: svcRow?.technician_id || null,
-          isIncompleteVisit: false,
-          visitPerformed: result.priorNonPerformed !== true,
-          serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
-          serviceType: svcRow?.service_type || null,
-        });
-        // The recap path has no job-costing kickoff of its own; a kit
-        // movement carries cost_used, so recalc (idempotent UPSERT,
-        // fire-and-forget) whenever something was actually consumed (GH
-        // codex r4 P2).
-        if (consumption?.consumed?.length) {
-          const JobCosting = require('../services/job-costing');
-          void JobCosting.calculateJobCost(req.params.serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
-        }
-        // The kit is settled (consumed, or skipped for a deterministic reason
-        // a retry would repeat): clear the owed marker. A consumption that
-        // ERRORED (a deduction failed and rang its bell) keeps the marker so
-        // the next retry re-runs the at-most-once consume (pre-push P1); a
-        // failed clear leaves it set for the same reason.
-        if (result.recordId && !consumption?.errors?.length) await db('service_records').where({ id: result.recordId }).update({ field_flags: db.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
-      } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }
-    }
+    await settleRecapSupplies(req.params.serviceId, result);
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -17279,6 +17314,7 @@ module.exports = router;
 // its failed-send compensation is the same guarded re-arm this route uses
 // (never a diverging local copy).
 module.exports.captureReminderGuards = captureReminderGuards;
+module.exports.mergeCardHoldPreviews = mergeCardHoldPreviews;
 module.exports.applySeriesMoveEffects = applySeriesMoveEffects;
 module.exports.reconcileSeriesMoveEffects = reconcileSeriesMoveEffects;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;

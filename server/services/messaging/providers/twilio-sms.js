@@ -142,17 +142,23 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
     if (!result) {
       return { sent: false, provider: 'twilio', error: 'twilio.sendSMS returned undefined' };
     }
-    if (result.preSendBlocked) {
-      // The caller's preSendCheck refused the send at the provider handoff
-      // (send-window boundary race). Not a provider failure: surface it as a
-      // BLOCK carrying the check's own deferral contract so sendCustomerMessage
-      // maps it back onto the QUIET_HOURS_HOLD vocabulary callers reschedule on.
+    // sendSMS's own coded refusals are BLOCKS, not provider failures:
+    //  - preSendBlocked: the caller's preSendCheck refused at the provider
+    //    handoff (send-window boundary race) and carries its own deferral
+    //    contract, so sendCustomerMessage maps it back onto the
+    //    QUIET_HOURS_HOLD vocabulary callers reschedule on;
+    //  - guardBlocked + code: the owned-number recipient guard (a Waves
+    //    line is never a customer). Without this branch the generic
+    //    success:false path below would record PROVIDER_FAILURE and the
+    //    queued-send lanes would retry a send that can never succeed.
+    if (result.preSendBlocked || (result.guardBlocked && result.code)) {
       return {
         sent: false,
         provider: 'twilio',
         blocked: true,
         code: result.code,
         error: result.error,
+        validator: result.preSendBlocked ? 'check_send_window_boundary' : 'check_owned_number_recipient',
         retryable: result.retryable === true,
         deferred: result.deferred === true,
         nextAllowedAt: result.nextAllowedAt,

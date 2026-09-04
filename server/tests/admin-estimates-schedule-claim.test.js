@@ -85,9 +85,9 @@ function estimateRow(overrides = {}) {
 
 // Recording builder: .first() resolves the row; .update() resolves the
 // configured claim count; grouped callbacks replay against the recorder.
-function makeBuilder(row, { updateResult = 1 } = {}) {
+function makeBuilder(row, { updateResult = 1, selectResult = null } = {}) {
   const b = {};
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotIn', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereIn', 'orWhereNull', 'orWhereNotNull', 'orWhereRaw', 'andWhere', 'whereNot', 'forUpdate', 'select', 'orderBy', 'limit']) {
     b[m] = jest.fn((...args) => {
       if (typeof args[0] === 'function') args[0].call(b, b);
       return b;
@@ -96,6 +96,8 @@ function makeBuilder(row, { updateResult = 1 } = {}) {
   // The scheduled claim re-asserts the pricing-authority gate through
   // .modify() (SEC-002) — the fake runs the modifier like knex does.
   b.modify = jest.fn((fn) => { fn(b); return b; });
+  // A group anchor's sibling preflight awaits .select(...) — hand it rows.
+  if (selectResult) b.select = jest.fn(async () => selectResult);
   b.first = jest.fn(async () => row);
   b.update = jest.fn(async () => updateResult);
   return b;
@@ -133,10 +135,34 @@ describe('schedule-send atomic claim', () => {
       // The claim carries the same filters as the immediate-send path.
       expect(builder.whereNull).toHaveBeenCalledWith('price_locked_at');
       expect(builder.whereNotIn).toHaveBeenCalledWith('status', ['sending', 'accepted', 'declined', 'expired']);
+      // …and re-asserts the clarify re-price hold ON the claim (codex r13
+      // P2 on #3804): a hold landing after the pre-read 409s instead of
+      // reporting "scheduled" for a row the cron will refuse.
+      expect(builder.whereRaw).toHaveBeenCalledWith(require('../utils/estimate-claim-sql').REPRICE_PENDING_ABSENT_SQL);
       expect(builder.update).toHaveBeenCalledWith(expect.objectContaining({
         status: 'scheduled',
         scheduled_send_attempts: 0,
       }));
+    });
+  });
+
+  test('409s at REQUEST time when a grouped sibling is held for a clarify re-price — never a "scheduled" the cron parks later (codex r16 P2 on #3804)', async () => {
+    const held = { id: 'sib-1', status: 'draft', price_locked_at: null, pricing_authority: 'SERVER', estimate_data: { estimatorEngine: { reprice_pending_at: new Date().toISOString(), reprice_attempt: 'att-1' } } };
+    const builder = makeBuilder(estimateRow({ estimate_group_id: 'grp-1' }), { updateResult: 1, selectResult: [held] });
+    db.mockImplementation(() => builder);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sendMethod: 'both', scheduledAt: FUTURE }),
+      });
+      const body = await res.json();
+      expect([res.status, body]).toEqual([409, expect.objectContaining({ code: 'REPRICE_PENDING' })]);
+      expect(body.siblingEstimateId).toBe('sib-1');
+      expect(body.error).toMatch(/held for a re-price/);
+      // The anchor was never claimed as scheduled.
+      expect(builder.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
     });
   });
 

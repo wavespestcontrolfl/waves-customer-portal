@@ -1683,6 +1683,21 @@ function pricePestInitialRoach(property, options = {}) {
     autoFiredFromRecurringPest = false,
     source,
     priceOverride,
+    // Public keyed package (catalog cockroach_control): the treatment count
+    // the customer was promised and the verified catalog identity ride the
+    // engine INPUT — the wizard draft freezes that input and every send /
+    // view regenerates from it, so the promise and the identity survive a
+    // later admin display-config edit (codex #3842 r3 P1 ×2). Absent for
+    // every other caller, where the display config stays live.
+    packageTreatments,
+    catalogServiceKey,
+    // Public route signal: the lookup found no real building size and the
+    // route substituted its synthetic 2,000 sqft, which resolvePestFootprint
+    // cannot tell from a measurement (the engine derives property.footprint
+    // from it). Same decisive override priceCommercialPest honors: the
+    // bracket is a guess — manual review, never a firm price (codex #3842
+    // r4 P1). Staff paths never set the flag and are unchanged.
+    buildingSizeMeasured,
   } = options;
   const roachMeta = normalizeRoachType(requestedRoachTypeInput);
   const severityMeta = normalizeRoachSeverity(requestedSeverityInput);
@@ -1723,8 +1738,10 @@ function pricePestInitialRoach(property, options = {}) {
   const margin = price > 0 ? (price - incrementalCost) / price : 0;
 
   const isGerman = roachType === 'german';
+  const unmeasuredFootprint = buildingSizeMeasured === false;
   const manualReviewReasons = uniqueList([
     ...footprintResolution.manualReviewReasons,
+    ...(unmeasuredFootprint ? ['building_size_unmeasured_pest_footprint'] : []),
     ...(severityMeta.severity === 'severe' && !isGerman
       ? ['severe_native_roach_activity_manual_review']
       : []),
@@ -1749,9 +1766,11 @@ function pricePestInitialRoach(property, options = {}) {
   const label = typeof displayConfig.name === 'string' && displayConfig.name.trim()
     ? displayConfig.name.trim()
     : (isGerman ? 'German Cockroach Treatment' : 'Cockroach Treatment');
-  const treatments = Number.isFinite(Number(displayConfig.treatments)) && Number(displayConfig.treatments) > 0
-    ? Math.round(Number(displayConfig.treatments))
-    : 1;
+  const frozenTreatments = Number.isInteger(packageTreatments) && packageTreatments > 0 ? packageTreatments : null;
+  const treatments = frozenTreatments
+    ?? (Number.isFinite(Number(displayConfig.treatments)) && Number(displayConfig.treatments) > 0
+      ? Math.round(Number(displayConfig.treatments))
+      : 1);
   const treatmentsNote = `Includes ${treatments} treatment visit${treatments === 1 ? '' : 's'}.`;
   const baseDetail = isGerman
     ? 'Heavier treatment for German roaches (the small indoor / kitchen kind) — interior spray, gel bait at hot spots, and a growth regulator to break the breeding cycle.'
@@ -1761,6 +1780,10 @@ function pricePestInitialRoach(property, options = {}) {
     label,
     detail: `${baseDetail} ${treatmentsNote}`,
     treatments,
+    // Emitted under its OWN name: `serviceKey` is an engine-family field
+    // other pricers already use (priceFlea → 'flea'), never a catalog key
+    // (codex #3842 r5 P1).
+    ...(typeof catalogServiceKey === 'string' && catalogServiceKey.trim() ? { catalogServiceKey: catalogServiceKey.trim() } : {}),
     price,
     bracketPrice,
     priceOverridden: overrideValid,
@@ -4496,6 +4519,12 @@ function priceMosquito(property, options = {}) {
   const manualReviewReasons = uniqueList([
     ...areaResolution.manualReviewReasons,
     ...categoryResolution.manualReviewReasons,
+    // A synthetic/default lot (caller passed lotSizeMeasured:false) is not a
+    // treatable-area measurement — resolveMosquitoTreatableArea grades any
+    // positive lot MEDIUM, so the flag is the only thing that distinguishes
+    // a parcel from a guess (same contract as priceCommercialMosquito and
+    // priceOneTimeMosquito; owner ruling 2026-09-03).
+    options.lotSizeMeasured === false ? 'mosquito_treatable_area_unverified' : null,
     pressureBeforeCap > MOSQUITO.pressureCap ? 'pressure_cap_reached' : null,
     marginFloorOk ? null : 'margin_below_floor',
     stationQty >= 6 ? 'high_station_count' : null,
@@ -5088,6 +5117,8 @@ function priceTrapOnlyRetainer(options = {}) {
     name: plan.label,
     trapOnlyRetainerPlan: planKey,
     trapOnlyRetainerBilling: billing,
+    // Customer-facing terms read the billing mode off the row (codex #3823 r8 P1).
+    retainerBilling: billing,
     trapOnlyRetainerAnnualPrice: plan.annualPrice,
     trapOnlyRetainerMonthlyPrice: plan.monthlyPrice,
     trapOnlyScheduledVisitsIncluded: plan.scheduledVisitsIncluded,
@@ -5116,6 +5147,7 @@ function priceTrapOnlyRetainer(options = {}) {
         name: `${plan.label} - ${billing === 'annual' ? 'Annual prepaid' : 'Monthly, 12-month agreement'}`,
         price: retainerPrice,
         discountEligible: false,
+        retainerBilling: billing,
         detail: billing === 'annual'
           ? `$${plan.annualPrice}/year. Includes ${plan.scheduledVisitsIncluded} scheduled checks and ${plan.responseCallbacksIncluded} response callbacks per year.`
           : `$${plan.monthlyPrice}/month with 12-month agreement. Includes ${plan.scheduledVisitsIncluded} scheduled checks and ${plan.responseCallbacksIncluded} response callbacks per year.`,
@@ -5823,6 +5855,11 @@ function priceOneTimeMosquito(property, options = {}) {
   if (dunkCount > 0) detailParts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOnTotal)})`);
   const manualReviewReasons = uniqueList([
     ...areaResolution.manualReviewReasons,
+    // A synthetic/default lot (caller passed lotSizeMeasured:false) is not
+    // a treatable-area measurement — resolveMosquitoTreatableArea grades any
+    // positive lot MEDIUM, so the flag is the only thing that distinguishes a
+    // parcel from a guess (same contract as priceCommercialMosquito).
+    options.lotSizeMeasured === false ? 'mosquito_treatable_area_unverified' : null,
     base.requiresManualReview ? 'over_acre_mosquito_treatment' : null,
     stationCount >= 6 ? 'high_station_count' : null,
     dunkCount >= 10 ? 'high_dunk_count' : null,
@@ -7037,7 +7074,10 @@ function bedBugCommonResult(normalized, fields) {
     requiresInspection: true,
     requiresPrepChecklist: true,
     requiresCustomerAcknowledgement: true,
-    warrantyEligible: false,
+    // Owner ruling 2026-09-03: bed bug treatment IS guaranteed (the site's
+    // written 30-day guarantee on the treated areas); the copy pack reads
+    // this flag. Metadata only — no billing path consumes it.
+    warrantyEligible: true,
     warnings,
     discountHandledByPricingFunction: true,
     recurringCustomerDiscountRate: 0,
@@ -7436,12 +7476,6 @@ function fleaAdjustment(initial = 0, followUp = 0) {
   return { initial: Math.round(Number(initial) || 0), followUp: Math.round(Number(followUp) || 0) };
 }
 
-function normalizeFleaOfferKey(value) {
-  const raw = String(value || '').trim().toLowerCase();
-  if (['flea_knockdown_single', 'knockdown', 'single', 'one_visit'].includes(raw)) return 'flea_knockdown_single';
-  return 'flea_elimination_two_visit';
-}
-
 function normalizeFleaComplexity(value) {
   const raw = String(value || '').trim().toLowerCase();
   if (['moderate', 'heavy'].includes(raw)) return raw;
@@ -7458,51 +7492,52 @@ function fleaComplexityAdjustment(complexity, config = {}) {
   return fleaAdjustment(0, 0);
 }
 
-function fleaOfferConfig(cfg, offerKey) {
+// Flea is sold ONLY as the two-visit Elimination Package (owner ruling
+// 2026-09-03); a requested offer key is ignored — the single-visit knockdown
+// offer no longer exists in the config or the defaults.
+const FLEA_OFFER_KEY = 'flea_elimination_two_visit';
+const RETIRED_FLEA_SINGLE_KEYS = new Set(['flea_knockdown_single', 'knockdown', 'single', 'one_visit']);
+
+function fleaOfferConfig(cfg) {
   const configured = Array.isArray(cfg.offers)
-    ? cfg.offers.find(offer => offer?.offerKey === offerKey || offer?.offer_key === offerKey)
+    ? cfg.offers.find(offer => offer?.offerKey === FLEA_OFFER_KEY || offer?.offer_key === FLEA_OFFER_KEY)
     : null;
-  const defaults = offerKey === 'flea_knockdown_single'
-    ? {
-      service: 'flea_knockdown_single',
-      displayName: 'Flea Knockdown Visit',
-      visitCount: 1,
-      warrantyType: 'none',
-      baseInitial: 225,
-      floorInitial: 185,
-      baseFollowUp: 0,
-      floorFollowUp: 0,
-      packageFloor: 185,
-      exteriorAddOnMode: 'initial_only',
-    }
-    : {
-      service: 'flea_package',
-      displayName: 'Flea Elimination Package',
-      visitCount: 2,
-      warrantyType: 'conditional_retreat',
-      baseInitial: cfg.initial?.base ?? 225,
-      floorInitial: cfg.initial?.floor ?? 185,
-      baseFollowUp: cfg.followUp?.base ?? 125,
-      floorFollowUp: cfg.followUp?.floor ?? 95,
-      packageFloor: (cfg.initial?.floor ?? 185) + (cfg.followUp?.floor ?? 95),
-      guaranteeWindowDaysAfterFollowUp: 30,
-      maxIncludedRetreats: 1,
-      exteriorAddOnMode: 'two_visit',
-    };
+  const defaults = {
+    service: 'flea_package',
+    displayName: 'Flea Elimination Package',
+    visitCount: 2,
+    warrantyType: 'conditional_retreat',
+    baseInitial: cfg.initial?.base ?? 225,
+    floorInitial: cfg.initial?.floor ?? 185,
+    baseFollowUp: cfg.followUp?.base ?? 125,
+    floorFollowUp: cfg.followUp?.floor ?? 95,
+    packageFloor: (cfg.initial?.floor ?? 185) + (cfg.followUp?.floor ?? 95),
+    guaranteeWindowDaysAfterFollowUp: 30,
+    maxIncludedRetreats: 1,
+    exteriorAddOnMode: 'two_visit',
+  };
   if (!configured) return defaults;
   return {
     ...defaults,
     ...configured,
-    service: configured.service || configured.serviceKey || configured.service_key || defaults.service,
     displayName: configured.displayName || configured.display_name || defaults.displayName,
-    visitCount: Number(configured.visitCount ?? configured.visit_count ?? defaults.visitCount) || defaults.visitCount,
-    warrantyType: configured.warrantyType || configured.warranty_type || defaults.warrantyType,
+    // Package-DEFINING fields are pinned, not configurable: the public
+    // menu, the flea_tick completion profile (engine key flea_package), and
+    // the customer copy all promise two visits with the conditional retreat
+    // guarantee, so an admin edit of the row can move the prices but never
+    // turn the package back into a one-visit sale or re-name the line's
+    // service identity (GH codex #3845 r1 P1, r3 P1).
+    service: defaults.service,
+    visitCount: defaults.visitCount,
+    warrantyType: defaults.warrantyType,
+    guaranteeWindowDaysAfterFollowUp: defaults.guaranteeWindowDaysAfterFollowUp,
+    maxIncludedRetreats: defaults.maxIncludedRetreats,
+    exteriorAddOnMode: defaults.exteriorAddOnMode,
     baseInitial: configured.baseInitial ?? configured.base_initial ?? defaults.baseInitial,
     floorInitial: configured.floorInitial ?? configured.floor_initial ?? defaults.floorInitial,
     baseFollowUp: configured.baseFollowUp ?? configured.base_follow_up ?? defaults.baseFollowUp,
     floorFollowUp: configured.floorFollowUp ?? configured.floor_follow_up ?? defaults.floorFollowUp,
     packageFloor: configured.packageFloor ?? configured.package_floor ?? defaults.packageFloor,
-    exteriorAddOnMode: configured.exteriorAddOnMode || configured.exterior_add_on_mode || defaults.exteriorAddOnMode,
   };
 }
 
@@ -7510,14 +7545,16 @@ function priceFlea(property = {}) {
   const cfg = SPECIALTY.flea;
   const services = property.services || {};
   const fleaOptions = typeof services.flea === 'object' && services.flea !== null ? services.flea : {};
-  const offerKey = normalizeFleaOfferKey(
-    property.fleaOfferKey
-    ?? property.offerKey
-    ?? services.fleaOfferKey
-    ?? fleaOptions.offerKey
-    ?? fleaOptions.fleaOfferKey
-  );
-  const offer = fleaOfferConfig(cfg, offerKey);
+  const offerKey = FLEA_OFFER_KEY;
+  const offer = fleaOfferConfig(cfg);
+  // A caller that still asks for the retired single-visit knockdown is not
+  // silently repriced: the package prices, but the line routes to review so
+  // a person confirms the two-visit scope before it reaches a customer
+  // (pre-push codex P0). Absent/unknown keys are the ordinary default.
+  const requestedOfferKey = String(
+    property.fleaOfferKey ?? property.offerKey ?? services.fleaOfferKey ?? fleaOptions.offerKey ?? fleaOptions.fleaOfferKey ?? ''
+  ).trim().toLowerCase();
+  const singleVisitRequested = RETIRED_FLEA_SINGLE_KEYS.has(requestedOfferKey);
   const footprintResolution = resolvePestFootprint({
     ...property,
     homeSqFt: property.homeSqFt
@@ -7603,10 +7640,14 @@ function priceFlea(property = {}) {
   if (exterior.requiresCustomQuote) {
     manualReviewReasons.push('flea_exterior_area_custom_quote_required');
   }
+  if (singleVisitRequested) {
+    manualReviewReasons.push('flea_single_visit_offer_retired');
+  }
   const warnings = uniqueList([
     ...footprintResolution.warnings,
     ...(exteriorSelected ? (exterior.warnings || []) : []),
     ...(exteriorSourceSuspected && !exteriorSelected ? ['Exterior flea source suspected; guarantee scope is limited to treated interior areas.'] : []),
+    ...(singleVisitRequested ? ['A single-visit flea knockdown was requested; flea is sold only as the two-visit Elimination Package — confirm the scope before sending.'] : []),
   ]);
   const guaranteeScope = exteriorSelected && hasPricedExteriorFleaSpray
     ? 'interior_and_treated_exterior_zones'
@@ -7620,9 +7661,15 @@ function priceFlea(property = {}) {
   const warrantyLabel = offer.warrantyType === 'conditional_retreat'
     ? 'Conditional retreat guarantee'
     : 'No retreat warranty included';
+  // Top-level `name` like every sibling one-time pricer (roach, mosquito,
+  // bed bug): the public breakdown labels a raw engine line from its
+  // top-level fields and maps a bare service key to the category label,
+  // so a display-only name rendered the row as "One-Time Pest Control".
+  const packageName = 'Flea Elimination Package — 2 visits';
 
   return {
     service: offer.service,
+    name: packageName,
     serviceKey: 'flea',
     billingCadence: 'one_time',
     offerKey,
@@ -7642,11 +7689,11 @@ function priceFlea(property = {}) {
     },
     modifiers: { urgencyMultiplier, recurringCustomerMultiplier, rushPremium },
     display: {
-      name: offer.visitCount > 1 ? 'Flea Elimination Package — 2 visits' : 'Flea Knockdown Visit',
-      detail: offer.visitCount > 1 ? `$${initial} initial + $${followUp} follow-up` : '1 visit, no retreat warranty',
+      name: packageName,
+      detail: `$${initial} initial + $${followUp} follow-up`,
       exteriorDetail,
     },
-    detail: offer.visitCount > 1 ? `$${initial} initial + $${followUp} follow-up` : '1 visit, no retreat warranty',
+    detail: `$${initial} initial + $${followUp} follow-up`,
     exteriorDetail,
     scope: 'Exterior flea treatment is applied to eligible targeted outdoor areas where flea activity is likely, such as shaded pet resting areas, under decks, kennels, foundation edges, mulch beds, and other approved areas. Final treatment area is subject to technician confirmation and product label directions.',
     requiresCustomQuote: !!exterior.requiresCustomQuote,
@@ -7655,7 +7702,7 @@ function priceFlea(property = {}) {
     reason: exterior.customQuoteReason || null,
     warning: warnings[0] || null,
     warnings,
-    requiresManualReview: footprintResolution.requiresManualReview || !!(exteriorSelected && (exterior.needsConfirmation || exterior.requiresCustomQuote)),
+    requiresManualReview: footprintResolution.requiresManualReview || singleVisitRequested || !!(exteriorSelected && (exterior.needsConfirmation || exterior.requiresCustomQuote)),
     manualReviewReasons: uniqueList(manualReviewReasons),
     areaSource: exterior.source,
     footprintUsed: footprint,
@@ -8778,6 +8825,9 @@ function calculateExclusionPrice(config = {}) {
     estimatedPoints, tier,
     estimatedHours: Math.round(laborMinutes / 60 * 10) / 10,
     multiVisit: laborMinutes > 240,
+    // Sold-scope flag the customer estimate's copy pack reads (codex #3823
+    // r5 P1): vent screening is promised only when it was priced.
+    includesScreening: includesScreening === true,
   };
 }
 

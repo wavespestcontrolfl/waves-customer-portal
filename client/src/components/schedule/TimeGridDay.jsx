@@ -97,6 +97,17 @@ function adminFetch(path, options = {}) {
   });
 }
 
+// adminFetch throws the raw response body; the visit routes answer JSON
+// { error } — show the sentence, not the envelope.
+function friendlyServerError(err) {
+  const raw = String((err && err.message) || err || '');
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.error) return String(parsed.error);
+  } catch { /* not JSON */ }
+  return raw;
+}
+
 function parseHHMM(s) {
   if (!s || typeof s !== 'string') return null;
   const m = s.match(/^(\d{1,2}):(\d{2})/);
@@ -302,7 +313,24 @@ function NowLine() {
   );
 }
 
-function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect, routeOrder, accent }) {
+// Completed visit whose closeout (invoice / report / completion text) is
+// still owed — the dispatch page's owesCompletion predicate decides; this
+// is the only visible cue on the grid that the visit still needs a resume.
+function CloseoutOwedChip({ onClick }) {
+  const className = 'inline-flex items-center h-4 px-1 rounded-xs bg-alert-bg text-alert-fg text-10 font-medium uppercase tracking-label whitespace-nowrap';
+  if (onClick) {
+    // All-day strip: the stop's own button opens the customer profile, so
+    // the chip carries the resume action itself (Codex #3799 r1).
+    return (
+      <button type="button" onClick={onClick} className={cn(className, 'u-focus-ring')} title="Resume closeout">
+        Closeout owed
+      </button>
+    );
+  }
+  return <span className={className}>Closeout owed</span>;
+}
+
+function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -467,6 +495,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         >
           {service.customerName || 'Unassigned'}
         </button>
+        {owesCompletion?.(service) && <CloseoutOwedChip />}
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && effectiveHeight >= SLOT_HEIGHT * 2 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
@@ -553,7 +582,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
+function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -669,7 +698,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
                 onEdit={onEdit}
                 onProtocol={onProtocol}
                 onTreatmentPlan={onTreatmentPlan}
-                onViewAudit={onViewAudit}
+                onViewAudit={onViewAudit} owesCompletion={owesCompletion}
                 onViewCustomer={onViewCustomer}
                 onResize={onResize}
                 isSelected={selection?.has(svc.id)}
@@ -717,7 +746,7 @@ function TimeAxis() {
   );
 }
 
-function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer }) {
+function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion }) {
   if (services.length === 0) return null;
   return (
     <div
@@ -742,6 +771,7 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
           >
             {svc.customerName || 'Unassigned'} · {serviceDisplayName(svc)}
           </button>
+          {owesCompletion?.(svc) && <CloseoutOwedChip onClick={() => onEdit?.(svc)} />}
           {isLawnService(svc) && onTreatmentPlan && (
             <button
               type="button"
@@ -784,7 +814,7 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
   );
 }
 
-function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect }) {
+function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -834,6 +864,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
       >
         {service.customerName || 'Unassigned'}
       </button>
+      {owesCompletion?.(service) && <div className="mt-0.5"><CloseoutOwedChip /></div>}
       {serviceDisplayName(service) && (
         <div className="truncate opacity-90">{serviceDisplayName(service)}</div>
       )}
@@ -883,7 +914,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
   );
 }
 
-function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, selection, onToggleSelect }) {
+function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, selection, onToggleSelect }) {
   const [open, setOpen] = useState(true);
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
@@ -942,7 +973,7 @@ function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewA
                 onEdit={onEdit}
                 onProtocol={onProtocol}
                 onTreatmentPlan={onTreatmentPlan}
-                onViewAudit={onViewAudit}
+                onViewAudit={onViewAudit} owesCompletion={owesCompletion}
                 onViewCustomer={onViewCustomer}
                 isSelected={selection?.has(svc.id)}
                 onToggleSelect={onToggleSelect}
@@ -955,7 +986,7 @@ function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewA
   );
 }
 
-function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassign, onClear, busy }) {
+function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassign, onClear, busy, combine, onCombine, separate, onSeparate }) {
   const [targetDate, setTargetDate] = useState(defaultDate);
   useEffect(() => { setTargetDate(defaultDate); }, [defaultDate]);
   // Advisory overlap summary for the picked landing date — each selected
@@ -1002,6 +1033,40 @@ function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassig
       >
         Unassign all
       </button>
+      {/* Visit group office actions (visit-group-scope.md §3): Combine
+          groups the selected same-customer rows into one stop — a later
+          row moves to abut the earlier one when their windows are apart
+          (no customer text); Separate splits a grouped row back out. */}
+      {combine && (
+        <>
+          <span className="mx-1 text-zinc-500">·</span>
+          <button
+            type="button"
+            onClick={onCombine}
+            disabled={busy}
+            className="px-3 py-1 rounded-sm text-11 text-white disabled:opacity-40"
+            style={{ border: '1px solid #52525B' }}
+            title="Group the selected services into one stop"
+          >
+            Combine
+          </button>
+        </>
+      )}
+      {separate && (
+        <>
+          <span className="mx-1 text-zinc-500">·</span>
+          <button
+            type="button"
+            onClick={onSeparate}
+            disabled={busy}
+            className="px-3 py-1 rounded-sm text-11 text-white disabled:opacity-40"
+            style={{ border: '1px solid #52525B' }}
+            title="Split this service out of its visit"
+          >
+            Separate
+          </button>
+        </>
+      )}
       <div className="flex-1" />
       <button
         type="button"
@@ -1031,11 +1096,16 @@ export default function TimeGridDay({
   onProtocol,
   onTreatmentPlan,
   onViewAudit,
+  owesCompletion,
   onViewCustomer,
   onChange,
   onCreateSlot,
   onDateChange,
   hideUnassignedRail = false,
+  // GATE_VISIT_GROUPS as the day list reports it: Combine is hidden while
+  // grouping is off (the group route 404s); Separate stays available on
+  // visits that already exist.
+  canGroup = false,
 }) {
   const todayIso = toISODate(new Date());
   const handleCreateSlot = useCallback((slot) => {
@@ -1395,6 +1465,62 @@ export default function TimeGridDay({
     }
   }, [selection, allServices, onChange, clearSelection]);
 
+  const selectedRows = useMemo(
+    () => allServices.filter((s) => selection.has(s.id)),
+    [allServices, selection],
+  );
+  const customerOf = (s) => s.customerId || s.customer_id || null;
+  // Combine: two or more rows of ONE customer, none terminal. The server
+  // owns every other rule (family, tech, autopay, artifacts, windows) and
+  // answers with its 409 text.
+  const canCombine = canGroup
+    && selectedRows.length >= 2
+    && !!customerOf(selectedRows[0])
+    && selectedRows.every((s) => customerOf(s) === customerOf(selectedRows[0]))
+    && selectedRows.every((s) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(s.status));
+  // Separate: exactly one grouped row.
+  const separable = selectedRows.length === 1 && selectedRows[0].visit
+    && Number(selectedRows[0].visit.serviceCount) > 1 && selectedRows[0].visit.id
+    ? selectedRows[0] : null;
+
+  const handleCombine = useCallback(async () => {
+    if (!canCombine) return;
+    setBusy(true);
+    try {
+      const result = await adminFetch('/admin/visits/group', {
+        method: 'POST',
+        body: JSON.stringify({ serviceIds: selectedRows.map((s) => s.id) }),
+      });
+      const moved = Array.isArray(result?.moved) ? result.moved : [];
+      if (moved.length) {
+        alert(`Combined into one stop. Moved ${moved.length} service${moved.length === 1 ? '' : 's'} to follow the earlier one: ${moved.map((m) => `${minutesToLabel(parseHHMM(m.start))}–${minutesToLabel(parseHHMM(m.end))}`).join(', ')}. No text was sent; the standing reminders use the new time.`);
+      }
+      clearSelection();
+    } catch (err) {
+      alert('Combine failed: ' + friendlyServerError(err));
+    } finally {
+      setBusy(false);
+      onChange?.();
+    }
+  }, [canCombine, selectedRows, onChange, clearSelection]);
+
+  const handleSeparate = useCallback(async () => {
+    if (!separable) return;
+    setBusy(true);
+    try {
+      await adminFetch(`/admin/visits/${separable.visit.id}/split`, {
+        method: 'POST',
+        body: JSON.stringify({ serviceId: separable.id }),
+      });
+      clearSelection();
+    } catch (err) {
+      alert('Separate failed: ' + friendlyServerError(err));
+    } finally {
+      setBusy(false);
+      onChange?.();
+    }
+  }, [separable, onChange, clearSelection]);
+
   if (techList.length === 0 && unassignedInRail.length === 0) {
     return (
       <div
@@ -1415,11 +1541,15 @@ export default function TimeGridDay({
       style={{ border: '1px solid #E4E4E7' }}
     >
       {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
-      <AllDayStrip services={allDay} onEdit={onEdit} onProtocol={onProtocol} onTreatmentPlan={onTreatmentPlan} onViewAudit={onViewAudit} onViewCustomer={onViewCustomer} />
+      <AllDayStrip services={allDay} onEdit={onEdit} onProtocol={onProtocol} onTreatmentPlan={onTreatmentPlan} onViewAudit={onViewAudit} owesCompletion={owesCompletion} onViewCustomer={onViewCustomer} />
       {selection.size > 0 && (
         <BulkActionBar
           count={selection.size}
           defaultDate={date}
+          combine={canCombine}
+          onCombine={handleCombine}
+          separate={!!separable}
+          onSeparate={handleSeparate}
           selectedServices={allServices
             .filter((s) => selection.has(s.id))
             .map((s) => {
@@ -1445,7 +1575,7 @@ export default function TimeGridDay({
               onEdit={onEdit}
               onProtocol={onProtocol}
               onTreatmentPlan={onTreatmentPlan}
-              onViewAudit={onViewAudit}
+              onViewAudit={onViewAudit} owesCompletion={owesCompletion}
               onViewCustomer={onViewCustomer}
               selection={selection}
               onToggleSelect={toggleSelection}
@@ -1467,7 +1597,7 @@ export default function TimeGridDay({
                     onEdit={onEdit}
                     onProtocol={onProtocol}
                     onTreatmentPlan={onTreatmentPlan}
-                    onViewAudit={onViewAudit}
+                    onViewAudit={onViewAudit} owesCompletion={owesCompletion}
                     onViewCustomer={onViewCustomer}
                     onCreateSlot={onCreateSlot ? handleCreateSlot : undefined}
                     onResize={handleResize}

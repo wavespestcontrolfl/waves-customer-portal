@@ -442,6 +442,12 @@ async function findEstimateByTokenForUpdate(database, estimateToken) {
 
 function isEstimateAddServiceRequestable(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
+  // Off the customer surface (a linkage marker or a clarify re-price hold):
+  // the token renders nothing, so it requests nothing either — BEFORE the
+  // accepted early-allow, a held row staff flipped must not become a
+  // service request, a customer record, and a pricing revision at the
+  // stale terms (codex r10 P0 on #3804). Judged on the LOCKED row.
+  if (require('../utils/estimate-claim-sql').estimateOffCustomerSurface(estimate)) return false;
   // Accepted estimates stay requestable (owner ask 2026-07-09): the accepted
   // page upsells add-on services, and a customer who already said yes is the
   // warmest add-service lead there is. Acceptance froze the QUOTE — the

@@ -107,8 +107,10 @@ const OUTCOME = {
   vision_score_attempts: 0,
 };
 
+// Mirrors the real dispatcher: jsonMode replies carry the parsed object in
+// json alongside the raw text.
 function verdictResponse(verdict) {
-  return { ok: true, text: JSON.stringify(verdict), model: 'test-model' };
+  return { ok: true, text: JSON.stringify(verdict), json: verdict, model: 'test-model' };
 }
 
 const GOOD_VERDICT = {
@@ -290,8 +292,7 @@ describe('scoreOutcome', () => {
   test('a fallback-leg success (Anthropic outage → OpenAI) persists normally', async () => {
     const state = useDb({ treatment_outcomes: [OUTCOME] });
     global.__visionDispatch = jest.fn(async () => ({
-      ok: true,
-      text: JSON.stringify(GOOD_VERDICT),
+      ...verdictResponse(GOOD_VERDICT),
       model: 'test-openai',
       fallbackUsed: true,
     }));
@@ -306,7 +307,7 @@ describe('scoreOutcome', () => {
 
   test('unparseable model output counts as a failed attempt', async () => {
     const state = useDb({ treatment_outcomes: [OUTCOME] });
-    global.__visionDispatch = jest.fn(async () => ({ ok: true, text: 'not json' }));
+    global.__visionDispatch = jest.fn(async () => ({ ok: true, text: 'not json', json: null }));
     const res = await VisionDelta.scoreOutcome('o1');
     expect(res.ok).toBe(false);
     expect(state.updates.treatment_outcomes).toEqual([{ vision_score_attempts: 1 }]);

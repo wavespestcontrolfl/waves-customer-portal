@@ -119,3 +119,24 @@ describe('TimeGridDays bookable rows', () => {
     expect(isBookableSlotIdx(IDX_19, 120)).toBe(false);
   });
 });
+
+describe('TimeGridDays closeout-owed chip', () => {
+  it('flags a completed week row that still owes its closeout and opens it through onEdit', async () => {
+    const onEdit = vi.fn();
+    const payload = week('2026-07-13', 'Owed Customer');
+    payload.days[0].services[0] = { ...payload.days[0].services[0], id: 'svc-owed', status: 'completed', has_service_record: false };
+    payload.days[0].services.push({ id: 'svc-done', customerName: 'Done Customer', status: 'completed', has_service_record: true, windowStart: '10:00', windowEnd: '11:00', technicianId: 'tech-1', technicianName: 'Alex Tech' });
+    fetch.mockResolvedValueOnce(response(payload));
+    render(
+      <TimeGridDays
+        date="2026-07-13"
+        dayCount={7}
+        owesCompletion={(svc) => svc.status === 'completed' && svc.has_service_record === false}
+        onEdit={onEdit}
+      />,
+    );
+    expect(await screen.findAllByText('Closeout owed')).toHaveLength(1);
+    fireEvent.click(screen.getByTitle(/Owed Customer/));
+    expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-owed' }));
+  });
+});

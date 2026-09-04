@@ -2,7 +2,7 @@
  * procurement/order-dispatch.js — the auto-order dispatcher.
  *
  * Contract:
- *   - master gate off → {skipped:'gated'} before any DB read
+ *   - master gate off → {skipped:'gated', belled} — no claim, the request is handed off
  *   - vendor gate off / no adapter → skipped, NO ledger row
  *   - the ledger claim (status placing) is inserted BEFORE the adapter is
  *     called; a conflicting claim skips (already_claimed) with no call
@@ -15,8 +15,8 @@
  *   - RefusedError → needs_review (reason = refuse code); ambiguous →
  *     needs_review 'ambiguous_after_submit'; other error → failed + bell
  *   - run-level error → claim released (row deleted), error propagates
- *   - a request closed while the vendor call was in flight stays closed,
- *     the ledger is still placed, and ONE reconcile bell rings
+ *   - a request cancelled while the vendor call was in flight goes back to
+ *     ordered, the ledger is placed, and ONE reconcile bell rings
  *   - canAutoOrder mirrors the gates + adapter map + vendor active
  *   - the claim re-checks the sweep's eligibility (active, enabled, still
  *     low) and CANCELS a request the catalog no longer authorizes
@@ -49,6 +49,7 @@ jest.mock('../models/db', () => {
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
       if (cols[0] === 'evidence' && table === 'vendor_orders') return { evidence: mockState.parkedEvidence || {} }; // attachLatePlacement
+      if (cols[0] === 'amount_cents' && table === 'vendor_orders') { const r = [...mockState.updates].reverse().find((u) => u.table === 'vendor_orders' && u.row.amount_cents != null); return { amount_cents: r ? r.row.amount_cents : null, created_at: mockState.reservedAt || null }; } // settledFinalCents: the reserved amount
       if (table === 'product_restock_requests') {
         if (cols[0] === 'status') return { status: mockState.freshRequestStatus };
         if (cols[0] === 'id') return mockState.sibling; // the sibling live-request probe
@@ -62,7 +63,7 @@ jest.mock('../models/db', () => {
     q.sum = () => q;
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
     // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
-    q.update = async (row) => { mockState.updates.push({ table, row }); return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
+    q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); mockState.updates.push({ table, row }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
     q.delete = async () => { mockState.deletes.push(table); return 1; };
     let row;
     const returning = async () => {
@@ -84,7 +85,7 @@ jest.mock('../models/db', () => {
 const { auditVendorOrder } = require('../services/audit-log');
 const dispatch = require('../services/procurement/order-dispatch');
 
-const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', GATE_AUTO_ORDER_SITEONE: 'true', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
+const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', GATE_AUTO_ORDER_SITEONE: 'true', STICKERMULE_API_KEY: 'test-key', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
 const baseRequest = () => ({ id: 'req-1', product_id: 'prod-sticker', status: 'open', source: 'auto_reorder', requested_quantity: '500', unit: 'each', metadata: { vendorId: 'vend-sm', vendorSku: '4242' } });
 const stickerMule = { id: 'vend-sm', name: 'Sticker Mule', code: 25, active: true };
 const sticker = { id: 'prod-sticker', name: 'Yard sign sticker', active: true, auto_reorder_enabled: true, inventory_on_hand: '40', low_stock_threshold: '100', auto_reorder_vendor_id: 'vend-sm', reorder_quantity: '500', inventory_unit: 'each' };
@@ -109,10 +110,12 @@ const lastLedgerPatch = () => mockState.updates.filter((u) => u.table === 'vendo
 const ledgerStatus = () => mockState.updates.filter((u) => u.table === 'vendor_orders').map((u) => u.row.status).filter(Boolean).pop();
 const requestStatus = () => mockState.updates.filter((u) => u.table === 'product_restock_requests').map((u) => u.row.status).pop();
 
-test('master gate off → skipped before any claim', async () => {
+test('master gate off → no claim; the request is handed off with the sweep\'s deduped bell (Codex r18 P2)', async () => {
   process.env.GATE_AUTO_ORDER = 'false';
   const a = mockAdapter();
-  expect(await run(a)).toEqual({ requestId: 'req-1', skipped: 'gated' });
+  expect(await run(a)).toEqual({ requestId: 'req-1', skipped: 'gated', belled: true });
+  expect(notify).toHaveBeenCalledTimes(1);
+  expect(notify.mock.calls[0][3].dedupeKey).toMatch(/^auto-reorder:/);
   expect(mockState.ledgerRows).toHaveLength(0);
   expect(a.place).not.toHaveBeenCalled();
 });
@@ -186,7 +189,7 @@ test('monthly cap counts non-failed rows already in the ledger', async () => {
   expect(a.place).not.toHaveBeenCalled();
 });
 
-test('the monthly cap buckets by PURCHASE month (placed_at, else the reservation-stamped created_at) and the reservation re-stamps created_at (pre-push P0)', async () => {
+test('the monthly cap buckets by the RESERVATION-stamped created_at (fixed accounting month) and the reservation re-stamps created_at (pre-push P0, Codex r14 P1)', async () => {
   const dbFn = require('../models/db');
   const orig = dbFn.getMockImplementation();
   const raws = [];
@@ -194,10 +197,81 @@ test('the monthly cap buckets by PURCHASE month (placed_at, else the reservation
   const before = Date.now();
   expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
   dbFn.mockImplementation(orig);
-  expect(raws.some((a) => /COALESCE\(placed_at, created_at\) >= \?/.test(String(a[0])))).toBe(true);
+  expect(raws.some((a) => /COALESCE\(placed_at, created_at\)/.test(String(a[0])))).toBe(false); // the bucket is the reservation stamp, never placed_at (Codex r14 P1)
   const reservation = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.amount_cents === 31400 && u.row.created_at);
   expect(reservation).toBeTruthy();
   expect(reservation.row.created_at.getTime()).toBeGreaterThanOrEqual(before);
+});
+
+test('the claim retires the request\'s manual bell in its own transaction; a failed retire aborts the claim — nothing ordered (Codex r20 P1)', async () => {
+  const a = mockAdapter();
+  expect(await run(a)).toMatchObject({ status: 'placed' });
+  const retired = mockState.updates.filter((u) => u.table === 'notifications');
+  expect(retired).toHaveLength(2); // the request's manual bell + the ledger's (dry-run) bell keyspace
+  expect(retired.every((u) => u.row.read_at instanceof Date)).toBe(true);
+  mockState.updates = []; mockState.ledgerRows = [];
+  mockState.bellRetireThrows = true;
+  const b = mockAdapter();
+  try {
+    await expect(run(b)).rejects.toThrow('bell retire lost connection');
+    expect(b.place).not.toHaveBeenCalled();
+    expect(mockState.ledgerRows).toHaveLength(0);
+  } finally { mockState.bellRetireThrows = false; }
+});
+
+test('a handback (gate off after the claim marked the bell read) reopens the deduped bell (Codex r20 P2)', async () => {
+  mockState.vendor = { ...mockState.vendor, active: false };
+  const r = await run(mockAdapter());
+  expect(r).toMatchObject({ skipped: 'no_adapter', belled: true });
+  const reopened = mockState.updates.find((u) => u.table === 'notifications' && u.row.read_at === null);
+  expect(reopened).toBeTruthy();
+});
+
+test('an adapter without its credential does not own requests: canAutoOrder is false until STICKERMULE_API_KEY is set (Codex r20 P2)', async () => {
+  const key = process.env.STICKERMULE_API_KEY;
+  delete process.env.STICKERMULE_API_KEY;
+  try {
+    expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(false);
+  } finally { process.env.STICKERMULE_API_KEY = key; }
+  expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(true);
+});
+
+test('re-arming a dry-run row retires its "nothing was submitted" bell inside the claim (pre-push P0)', async () => {
+  const dry = mockAdapter({ place: jest.fn(async () => ({ dryRun: true, amountCents: 31400, evidence: { dryRun: true } })) });
+  expect(await run(dry)).toMatchObject({ status: 'needs_review', reason: 'dry_run' });
+  mockState.updates = []; mockState.ledgerRows = [];
+  expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
+  const retired = mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at instanceof Date);
+  expect(retired.length).toBeGreaterThanOrEqual(2); // the request's manual bell + the ledger's dry-run bell
+});
+
+test('an adapter without its credential does not CLAIM either: handed back with the bell, no ledger row, manual bell untouched (Codex r21 P2)', async () => {
+  const a = { ...mockAdapter(), configured: () => false };
+  const r = await dispatch.dispatchRestockOrder('req-1', { notify, adapters: { stickermule: a, siteone: a } });
+  expect(r).toMatchObject({ skipped: 'adapter_unconfigured', belled: true });
+  expect(mockState.ledgerRows).toHaveLength(0);
+  expect(a.place).not.toHaveBeenCalled();
+  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at instanceof Date)).toHaveLength(0);
+});
+
+test('the claim stamps the SKU + link it actually authorized onto the request when the eligible price row changed since the sweep (Codex r21 P2)', async () => {
+  mockState.request = { ...baseRequest(), metadata: { vendorId: 'vend-sm', vendorSku: 'OLD-1', vendorProductUrl: 'https://old.example/1' } };
+  mockState.pricing = { vendor_sku: '4242', price: '314.00', quantity: '500', vendor_product_url: 'https://stickermule.com/4242' };
+  expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
+  const stamped = mockState.updates.find((u) => u.table === 'product_restock_requests' && u.row.metadata);
+  expect(JSON.parse(stamped.row.metadata)).toMatchObject({ vendorId: 'vend-sm', vendorSku: '4242', vendorProductUrl: 'https://stickermule.com/4242' });
+  // …a row whose new SKU has no URL clears the old link (Codex r22 P2)
+  mockState.updates = []; mockState.ledgerRows = [];
+  mockState.request = { ...baseRequest(), metadata: { vendorId: 'vend-sm', vendorSku: 'OLD-1', vendorProductUrl: 'https://old.example/1' } };
+  mockState.pricing = { vendor_sku: '4242', price: '314.00', quantity: '500', vendor_product_url: null };
+  expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
+  expect(JSON.parse(mockState.updates.find((u) => u.table === 'product_restock_requests' && u.row.metadata).row.metadata)).toMatchObject({ vendorSku: '4242', vendorProductUrl: null });
+  // …and an unchanged row writes nothing
+  mockState.updates = []; mockState.ledgerRows = [];
+  mockState.pricing = { vendor_sku: '4242', price: '314.00', quantity: '500', vendor_product_url: 'https://stickermule.com/4242' };
+  mockState.request = { ...baseRequest(), metadata: { vendorId: 'vend-sm', vendorSku: '4242', vendorProductUrl: 'https://stickermule.com/4242' } };
+  expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
+  expect(mockState.updates.find((u) => u.table === 'product_restock_requests' && u.row.metadata)).toBeUndefined();
 });
 
 test('a request the claim finds undispatchable (vendor deactivated / gated after the sweep stood down) is handed off with the sweep\'s deduped bell (Codex r12 P2)', async () => {
@@ -206,6 +280,24 @@ test('a request the claim finds undispatchable (vendor deactivated / gated after
   expect(r).toMatchObject({ skipped: 'no_adapter', belled: true });
   expect(notify).toHaveBeenCalledTimes(1);
   expect(notify.mock.calls[0][3].dedupeKey).toMatch(/^auto-reorder:/);
+});
+
+test('a placed order with no confirmed total is recorded at the amount beforeSubmit reserved — never null over the reservation (pre-push P0)', async () => {
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { await beforeSubmit(10593); return { externalOrderNumber: 'S1-9', amountCents: null, evidence: {} }; }) });
+  expect(await run(a)).toMatchObject({ status: 'placed' });
+  const placedRow = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'placed');
+  expect(placedRow.row.amount_cents).toBe(10593);
+});
+
+test('a placed order with no positive total anywhere parks post-submit as no_final_total, request ordered (pre-push P0)', async () => {
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async () => ({ externalOrderNumber: 'S1-9', amountCents: 0, evidence: {} })) });
+  expect(await run(a)).toMatchObject({ status: 'needs_review', reason: 'no_final_total' });
+  expect(mockState.updates.some((u) => u.table === 'product_restock_requests' && u.row.status === 'ordered')).toBe(true);
+  const parked = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review');
+  expect(parked.row.placed_at).toBeInstanceOf(Date); // post-submit: cap-counted, guarded, do-not-reorder bell
+  expect(parked.row.amount_cents).toBe(50000); // ENV per-order cap: a placed order with no figure is never $0 against the month (Codex r23 P1)
+  expect(parked.row.error).toMatch(/counted against the monthly cap at the per-order cap/);
+  expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
 });
 
 test('adapter refusal → needs_review with the refuse code', async () => {
@@ -221,6 +313,24 @@ test('an ambiguous submit that names the checkout total parks with THAT amount, 
   expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
   const parked = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').map((u) => u.row.amount_cents);
   expect(parked).toContain(10593);
+});
+
+test('an ambiguous submit with NO known total — no click figure, no quote, nothing reserved — parks at the per-order cap, never $0 (pre-push P1)', async () => {
+  const err = new Error('siteone submit outcome unknown'); err.ambiguous = true;
+  const r = await run(mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async () => { throw err; }) }));
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
+  const parkedRow = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').pop().row;
+  expect(parkedRow.amount_cents).toBe(50000); // ENV per-order cap
+  expect(parkedRow.error).toMatch(/counted against the monthly cap at the per-order cap/);
+});
+
+test('an ambiguous submit whose vendor response carried no order number persists that response as response_payload (Codex r23 P2)', async () => {
+  const err = new Error('Sticker Mule accepted the order but returned no order number'); err.ambiguous = true; err.body = { status: 'queued', id: 'q-77' };
+  const r = await run(mockAdapter({ place: jest.fn(async () => { throw err; }) }));
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
+  const parkedRow = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').pop().row;
+  expect(JSON.parse(parkedRow.response_payload)).toEqual({ status: 'queued', id: 'q-77' });
+  expect(parkedRow.external_order_number).toBeNull();
 });
 
 test('ambiguous post-submit error → needs_review, never retried', async () => {
@@ -247,6 +357,24 @@ test('a run-level failure is scoped to its adapter: that adapter gets no more cl
   const ledgerRowsBefore = mockState.ledgerRows.length;
   expect(await run(mockAdapter(), { deadAdapters: new Set(['stickermule']) })).toMatchObject({ skipped: 'adapter_down' });
   expect(mockState.ledgerRows).toHaveLength(ledgerRowsBefore); // no claim written for a dead adapter
+});
+
+test('an unscoped run-level error after an adapter-scoped one replaces it and aborts the batch (Codex #3853 r11 P2)', async () => {
+  const dbFn = require('../models/db');
+  const origTransaction = dbFn.transaction;
+  let scopedThrown = false;
+  // The claim transaction of the NEXT request fails batch-wide (no adapterKey) once the first adapter died.
+  dbFn.transaction = async (fn) => { if (scopedThrown) throw new Error('pool exhausted'); return origTransaction(fn); };
+  try {
+    const err = new Error('siteone bot: DNS unavailable'); err.runLevel = true;
+    const a = mockAdapter({ place: jest.fn(async () => { scopedThrown = true; throw err; }) });
+    mockState.dispatchable = [{ id: 'req-1' }, { id: 'req-2' }, { id: 'req-3' }];
+    await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } })).rejects.toThrow('pool exhausted');
+    expect(a.place).toHaveBeenCalledTimes(1);
+  } finally {
+    dbFn.transaction = origTransaction;
+    mockState.dispatchable = null;
+  }
 });
 
 test('run-level error releases the claim and propagates', async () => {
@@ -309,14 +437,15 @@ test('vendor call outlives a stale park the operator already REVOKED and cancell
   expect(notify.mock.calls[0][2]).toMatch(/record the revoke again/);
 });
 
-test('request closed mid-flight: ledger still placed, request untouched, one reconcile bell', async () => {
+test('request cancelled mid-flight: ledger placed, request back to ordered (receive / revoke can close it), one reconcile bell (Codex r23 P1)', async () => {
   mockState.freshRequestStatus = 'cancelled';
   const r = await run(mockAdapter());
   expect(r.status).toBe('placed');
   expect(ledgerStatus()).toBe('placed');
-  expect(requestStatus()).toBeUndefined();
+  expect(mockState.updates.find((u) => u.table === 'product_restock_requests').row).toMatchObject({ status: 'ordered', closed_at: null });
   expect(notify).toHaveBeenCalledTimes(1);
   expect(notify.mock.calls[0][1]).toMatch(/cancelled request/);
+  expect(notify.mock.calls[0][2]).toMatch(/back to ordered/);
 });
 
 test('an adapter with no static quote (quotesAtPlace) gets the cap check as beforeSubmit and a dry run parks', async () => {
@@ -470,10 +599,47 @@ test('the cap check is an advisory-locked reservation written before the vendor 
   expect(a.place).toHaveBeenCalled();
 });
 
+test('a quotesAtPlace vendor whose confirmed total exceeds the reserved checkout figure past a cap parks post-submit, request ordered (pre-push P0)', async () => {
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { expect(await beforeSubmit(9900)).toEqual({ ok: true }); return { externalOrderNumber: 'S1-11', amountCents: 60000, evidence: { totalSource: 'vendor' } }; }) });
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'over_cap_after_placement' });
+  expect(requestStatus()).toBe('ordered');
+});
+
+test('a higher confirmed total re-checked after placement keeps the reservation’s cap-accounting month — created_at is not re-stamped (Codex r19 P2)', async () => {
+  mockState.reservedAt = new Date('2026-08-31T23:30:00Z');
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { await beforeSubmit(9900); return { externalOrderNumber: 'S1-14', amountCents: 12000, evidence: { totalSource: 'vendor' } }; }) });
+  try {
+    expect(await run(a)).toMatchObject({ status: 'placed', amountCents: 12000 });
+    const reservations = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.amount_cents != null && !u.row.status);
+    expect(reservations.map((u) => u.row.amount_cents)).toEqual([9900, 12000]);
+    expect(reservations[0].row.created_at).toBeInstanceOf(Date); // the initial reservation stamps the month
+    expect(reservations[1].row.created_at).toBeUndefined(); // the re-check does not
+  } finally { mockState.reservedAt = null; }
+});
+
+test('a quotesAtPlace vendor whose confirmed total is at or under the reserved checkout figure is recorded placed', async () => {
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { await beforeSubmit(9900); return { externalOrderNumber: 'S1-12', amountCents: 9900, evidence: {} }; }) });
+  expect(await run(a)).toMatchObject({ status: 'placed' });
+});
+
+test('an over-cap confirmed total that lands after stale recovery parked the claim is attached as a late placement — number and amount recorded, request ordered (pre-push P0)', async () => {
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { expect(await beforeSubmit(9900)).toEqual({ ok: true }); mockState.ledgerSettled = true; return { externalOrderNumber: 'S1-13', amountCents: 60000, evidence: { totalSource: 'vendor' } }; }) });
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: 'S1-13', amountCents: 60000 });
+  const late = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.external_order_number === 'S1-13' && !u.row.status);
+  expect(late.row.amount_cents).toBe(60000);
+  expect(mockState.updates.some((u) => u.table === 'product_restock_requests' && u.row.status === 'ordered')).toBe(true);
+  expect(auditVendorOrder).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed_after_stale_park', amount_cents: 60000 }));
+});
+
 test('vendor total over cap after placement → needs_review, request ordered, bell says do NOT re-order', async () => {
   const a = mockAdapter({ place: jest.fn(async () => ({ externalOrderNumber: 'SM-2', amountCents: 60000, response: {}, evidence: { totalSource: 'vendor' } })) });
   const r = await run(a);
   expect(r).toMatchObject({ status: 'needs_review', reason: 'over_cap_after_placement' });
+  // The ACTUAL charge is written under the cap lock before the park — no gap where a concurrent reservation reads the lower quote (pre-push P0).
+  const amounts = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.amount_cents != null).map((u) => ({ cents: u.row.amount_cents, parked: !!u.row.status }));
+  expect(amounts).toEqual([{ cents: 31400, parked: false }, { cents: 60000, parked: false }, { cents: 60000, parked: true }]);
   expect(requestStatus()).toBe('ordered');
   const ledger = lastLedgerPatch();
   expect(ledger).toMatchObject({ status: 'needs_review', external_order_number: 'SM-2', amount_cents: 60000 });
@@ -481,6 +647,43 @@ test('vendor total over cap after placement → needs_review, request ordered, b
   expect(notify).toHaveBeenCalledTimes(1);
   expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
   expect(notify.mock.calls[0][2]).not.toMatch(/order manually/);
+});
+
+test('a higher final total whose post-placement re-check finds the claim lost lands as a late placement UNDER the cap lock, at the actual charge (Codex r23 P1)', async () => {
+  const dbFn = require('../models/db');
+  dbFn.raw.mockClear();
+  mockState.parkedEvidence = { bell: { title: 'x', body: 'y' }, bellAt: '2026-09-03T10:00:00Z' };
+  const a = mockAdapter({ place: jest.fn(async () => { mockState.ledgerSettled = true; return { externalOrderNumber: 'SM-2', amountCents: 60000, response: {}, evidence: { totalSource: 'vendor' } }; }) }); // stale recovery parked the row while the vendor call was out
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: 'SM-2', amountCents: 60000 });
+  const capLocks = dbFn.raw.mock.calls.filter((c) => /pg_advisory_xact_lock/.test(c[0]) && c[1] && c[1][0] === 'vendor-order-caps');
+  expect(capLocks).toHaveLength(3); // the pre-submit reservation, the post-placement re-check, then the record transaction that attached the late placement
+  const attached = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.external_order_number === 'SM-2' && u.row.amount_cents === 60000);
+  expect(attached).toBeDefined();
+  expect(mockState.updates.find((u) => u.table === 'product_restock_requests').row).toMatchObject({ status: 'ordered', closed_at: null });
+});
+
+test('a DB failure inside the late-placement attachment (the row already left placing) is UNRECORDED, never a harmless skip (Codex r17 P1)', async () => {
+  const dbFn = require('../models/db');
+  const realTx = dbFn.transaction;
+  let n = 0;
+  dbFn.transaction = async (fn) => { n += 1; if (n === 3) throw new Error('late placement audit lost connection'); return fn(dbFn); };
+  try {
+    const a = mockAdapter();
+    const inner = a.place;
+    a.place = jest.fn(async (...args) => { const out = await inner(...args); mockState.ledgerSettled = true; return out; }); // stale recovery parked the row while the vendor call was out
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'unrecorded', reason: 'persist_after_placement', externalOrderNumber: 'SM-1' });
+    expect(r.skipped).toBeUndefined();
+  } finally { dbFn.transaction = realTx; }
+});
+
+test('an undispatchable request whose hand-off bell was not persisted reports bellLost, never belled (Codex r17 P2)', async () => {
+  mockState.vendor = { ...mockState.vendor, active: false };
+  notify = jest.fn(async () => null);
+  const r = await run(mockAdapter());
+  expect(r).toMatchObject({ skipped: 'no_adapter', bellLost: true });
+  expect(r.belled).toBeUndefined();
 });
 
 test('a DB failure after the vendor call parks as persist_after_placement, never failed', async () => {
@@ -577,6 +780,16 @@ test('a bell that fails to send is persisted with the park, reported, and re-run
   expect(run2.bells).toEqual({ rung: ['ledger-1'], pending: [] });
   expect(notify).toHaveBeenLastCalledWith('system', evidence.bell.title, evidence.bell.body, expect.objectContaining({ dedupeKey: `auto-order:ledger-1:${evidence.bell.v}` }));
   expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.evidence)).toBe(true);
+});
+
+test('a delivered bell whose version stamp hits zero rows (the bell was replaced meanwhile) is NOT a delivery — the replacement stays pending, run red (hook P1)', async () => {
+  mockState.bellStampMiss = true;
+  mockState.pendingBells = [{ id: 'ledger-9', evidence: { bell: { title: 'Auto-order needs review: x', body: 'y', v: 'v1' } }, request_id: 'req-9', product_name: 'x', vendor_name: 'v' }];
+  mockState.request = { ...baseRequest(), status: 'ordered' };
+  await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
+  mockState.bellStampMiss = false;
+  // The just-inserted v1 notification is retired — staff never read v1's instructions beside v2 (Codex r23 P1).
+  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(1);
 });
 
 test('the run goes red while a bell is undelivered', async () => {

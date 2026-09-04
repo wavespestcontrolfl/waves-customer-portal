@@ -164,8 +164,16 @@ async function shot(page, label, evidence, upload) {
   } catch (e) { logger.warn(`[siteone-bot] screenshot ${label} failed: ${e.message}`); }
 }
 
+// Any VISIBLE match, not the first: SiteOne renders responsive duplicates,
+// and a hidden node ahead of the visible one must not read as "no blocker"
+// (the MFA / card / unavailable checks fail closed — Codex #3853 r11 P1).
 async function visible(page, selector) {
-  try { return (await page.locator(selector).first().isVisible({ timeout: 1500 })); } catch { return false; }
+  try {
+    const els = page.locator(selector);
+    const n = await els.count();
+    for (let i = 0; i < n; i += 1) if (await els.nth(i).isVisible({ timeout: 1500 })) return true;
+    return false;
+  } catch { return false; }
 }
 
 // Case- and whitespace-insensitive comparison text for checkout labels.

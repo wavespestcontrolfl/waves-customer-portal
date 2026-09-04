@@ -176,6 +176,22 @@ describe('Twilio messaging provider adapter', () => {
     expect(res.providerErrorCode).toBeUndefined();
   });
 
+  test('maps the owned-number recipient guard onto the blocked contract, never a provider failure', async () => {
+    TwilioService.sendSMS.mockResolvedValue({
+      success: false,
+      sid: null,
+      blocked: true,
+      guardBlocked: true,
+      code: 'OWNED_NUMBER_RECIPIENT',
+      error: 'Recipient is a Waves-owned Twilio number, not a customer (would fail Twilio 21266)',
+    });
+    const res = await sendViaTwilio(baseInput({ to: '+19412975749' }));
+    expect(res).toMatchObject({ sent: false, blocked: true, code: 'OWNED_NUMBER_RECIPIENT', validator: 'check_owned_number_recipient' });
+    expect(res.retryable).toBe(false);
+    expect(res.deferred).toBe(false);
+    expect(res.providerErrorCode).toBeUndefined();
+  });
+
   test('exposes the same media authorization logic for direct unit coverage', () => {
     expect(_internals.providerMediaUrls(baseInput({
       metadata: { mediaUrls: ['https://example.com/a.jpg'] },

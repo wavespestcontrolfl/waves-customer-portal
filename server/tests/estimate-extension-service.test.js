@@ -9,9 +9,11 @@ jest.mock('../config/feature-gates', () => {
 });
 jest.mock('../models/db', () => {
   const mockDeletes = [];
+  const mockRaws = [];
   const dbFn = jest.fn((table) => {
-    const b = { _table: table, _whereIn: null };
+    const b = { _table: table, _whereIn: null, _whereRaw: [] };
     for (const m of ['where', 'whereNull', 'whereNotNull']) b[m] = jest.fn(() => b);
+    b.whereRaw = jest.fn((sql) => { b._whereRaw.push(sql); mockRaws.push({ table, sql }); return b; });
     b.whereIn = jest.fn((...args) => { b._whereIn = args; return b; });
     b.update = jest.fn(() => Promise.resolve(1));
     b.del = jest.fn(() => {
@@ -22,6 +24,7 @@ jest.mock('../models/db', () => {
   });
   dbFn.fn = { now: jest.fn(() => 'NOW()') };
   dbFn._deletes = mockDeletes;
+  dbFn._raws = mockRaws;
   return dbFn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -156,6 +159,19 @@ describe('extendEstimate post-write: engine expiring re-arm (codex 2736 r9)', ()
       { table: 'estimate_followup_jobs', whereIn: ['rule_key', ['expiring_engaged', 'expiring_never_viewed']] },
       { table: 'estimate_followup_sends', whereIn: ['rule_key', ['expiring_engaged', 'expiring_never_viewed']] },
     ]);
+  });
+
+  it('the guarded expiry update refuses a row under a clarify re-price hold (codex r7 P0 on #3804)', async () => {
+    db._raws.length = 0;
+    await extendEstimate({
+      estimate: { id: 'est-10', status: 'send_failed', archived_at: null, expires_at: PAST, viewed_at: PAST },
+      days: 7,
+      silent: true,
+      entryPoint: 'test',
+      workflow: 'test',
+    });
+    const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+    expect(db._raws).toContainEqual({ table: 'estimates', sql: REPRICE_PENDING_ABSENT_SQL });
   });
 });
 

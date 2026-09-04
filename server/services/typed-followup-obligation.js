@@ -50,11 +50,13 @@ const logger = require('./logger');
 // never book a date the customer report contradicts.
 const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 };
 
-// Two-treatment package keys (20260712300000 cutover): the ALERT follow-up
-// policy means visit 1 owes an included second visit — and ONLY visit 1;
-// an included follow-up completing must not mint a third (Codex r3 on
-// #3078-era rounds). Trapping programs deliberately chain and are excluded.
-const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment']);
+// Two-treatment package keys (20260712300000 cutover; flea_tick joined via
+// 20260903000060 when the Flea Elimination Package became the only flea
+// offer): the ALERT follow-up policy means visit 1 owes an included second
+// visit — and ONLY visit 1; an included follow-up completing must not mint
+// a third (Codex r3 on #3078-era rounds). Trapping programs deliberately
+// chain and are excluded.
+const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment', 'flea_tick']);
 
 // A linked follow-up child in any of these states does NOT cover the
 // obligation: cancelled/skipped never happened, and a no_show means the

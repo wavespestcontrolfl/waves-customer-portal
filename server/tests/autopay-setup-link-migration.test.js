@@ -83,3 +83,40 @@ describe('autopay setup link migration (standalone mode of appointment_card_requ
     expect(state.raw[state.raw.length - 1]).toBe('ALTER TABLE appointment_card_requests ALTER COLUMN scheduled_service_id SET NOT NULL');
   });
 });
+
+describe('autopay setup link template — lane-neutral reword (20260903000040)', () => {
+  const reword = require('../models/migrations/20260903000040_autopay_setup_link_template_lane_neutral');
+  function updateKnex() {
+    const state = { updates: [] };
+    const knex = jest.fn((table) => {
+      const q = {
+        where: jest.fn((criteria) => { q.__where = criteria; return q; }),
+        update: jest.fn(async (payload) => { state.updates.push({ table, where: q.__where, payload }); return 1; }),
+      };
+      return q;
+    });
+    knex.schema = { hasTable: jest.fn(async () => true) };
+    return { knex, state };
+  }
+
+  test('up rewords ONLY the still-seeded body (an owner edit is never clobbered) and drops the visit-as-unit wording', async () => {
+    const { knex, state } = updateKnex();
+    await reword.up(knex);
+    expect(state.updates).toHaveLength(1);
+    const [u] = state.updates;
+    expect(u.table).toBe('sms_templates');
+    expect(u.where.template_key).toBe('autopay_setup_link');
+    expect(u.where.body).toContain('each visit is paid automatically');
+    expect(u.payload.body).toContain('each completed service is paid automatically');
+    expect(u.payload.body).not.toMatch(/visit/);
+    expect(u.payload.body).toContain('{secure_link}');
+  });
+
+  test('down restores the seeded body only where the neutral one still stands', async () => {
+    const { knex, state } = updateKnex();
+    await reword.down(knex);
+    const [u] = state.updates;
+    expect(u.where.body).toContain('each completed service');
+    expect(u.payload.body).toContain('each visit is paid automatically');
+  });
+});

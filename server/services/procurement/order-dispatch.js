@@ -89,7 +89,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
-const { startOfETMonth } = require('../../utils/datetime-et');
+const { startOfETMonth, addETDays } = require('../../utils/datetime-et');
 const { getVendorLoginCredentials } = require('../vendor-credentials');
 const { auditVendorOrder } = require('../audit-log');
 const { parsePackSize, convertToOz } = require('../product-costing');
@@ -101,7 +101,11 @@ const RESTOCK_TAB = '/admin/inventory?tab=restock';
 const CAPS_LOCK_KEY = 'vendor-order-caps';
 // Ledger outcomes AFTER the vendor call was dispatched: the order may or does
 // exist, so the bell must never say "order manually".
-const POST_SUBMIT_REASONS = new Set(['ambiguous_after_submit', 'persist_after_placement', 'over_cap_after_placement', 'stale_placing']);
+// Every reason a row can park AFTER the vendor call went out: placed_at is
+// stamped, the bell says do-not-reorder, the spend and duplicate-order
+// guards cover it. no_final_total = placed, no positive total anywhere
+// (pre-push P0).
+const POST_SUBMIT_REASONS = new Set(['ambiguous_after_submit', 'persist_after_placement', 'over_cap_after_placement', 'stale_placing', 'no_final_total']);
 
 // vendors.code → adapter (.claude/vendor-codes.md). Name is the fallback for
 // a row that predates the code column.
@@ -153,7 +157,13 @@ async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
   const row = vendor || (vendorId ? await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code', 'active') : null);
   if (!row || row.active === false) return false;
   const key = adapterKeyFor(row);
-  return !!key && !!loadAdapters()[key] && gateEnvValue(VENDOR_GATE[key]);
+  const adapter = key ? loadAdapters()[key] : null;
+  // An adapter without its credential must not own requests: the sweep would
+  // stand down its manual bell and the dispatcher would park every claim as
+  // "no prior order" — a misleading, non-reclaimable needs_review (Codex r20
+  // P2). Unconfigured = not auto-orderable = the sweep bells the office.
+  const configured = !!adapter && (typeof adapter.configured !== 'function' || adapter.configured() === true);
+  return configured && gateEnvValue(VENDOR_GATE[key]);
 }
 
 // Pack-size count for count-based stock: "100", "100 each", "50 ct", "1 pc".
@@ -225,9 +235,12 @@ function vendorOrderQuantity({ adapter, request, pricing }) {
 
 /**
  * Refuse a staff / forecast / Intelligence Bar restock request while an
- * AUTOMATIC order for the product is live: an auto request still open|ordered
- * whose vendor_orders row is 'placing' or was dispatched (placed_at set —
- * placed, and the post-submit parks whose money may have moved). Call under
+ * AUTOMATIC order for the product is live: a vendor_orders row that is
+ * 'placing' or was dispatched (placed_at set — placed, and the post-submit
+ * parks whose money may have moved) and is neither received nor revoked —
+ * whatever the request's status now says: an order that landed after its
+ * request was cancelled is still coming (Codex r22 P1; mirrors
+ * lockedProductGuards). Call under
  * the products_catalog row lock, in the same transaction as the insert. The
  * dispatcher's own lock is released when its claim commits, BEFORE the vendor
  * call, so the claim row — not the lock — is what carries the exclusion
@@ -239,8 +252,9 @@ async function assertNoLiveAutoOrder(trx, productId) {
     .join('vendor_orders as vo', 'vo.restock_request_id', 'prr.id')
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .where('prr.product_id', productId)
-    .whereIn('prr.status', ['open', 'ordered'])
+    .whereNot('prr.status', 'received')
     .whereRaw("(vo.status = 'placing' OR vo.placed_at IS NOT NULL)")
+    .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
     .first('vo.status', 'vo.external_order_number', 'v.name as vendor_name');
   if (!live) return;
   const vendor = live.vendor_name || 'vendor';
@@ -299,14 +313,28 @@ async function orderedQuantityFor(conn, requestId) {
 // and the post-submit needs_review parks). A row parked BEFORE submission
 // (over cap, no binding total, dry run, refusal) keeps its amount for the
 // tab but has no placed_at and must not consume headroom (Codex hook P1).
-// The month is the PURCHASE month: placed_at for a dispatched row, else the
-// row's created_at, which reserveUnderCaps re-stamps at reservation time —
-// a claim raised before an ET month rollover and submitted after it spends
-// the new month's cap, not the old one (pre-push P0).
+// The accounting month is FIXED at reservation: reserveUnderCaps re-stamps
+// the row's created_at when it reserves headroom, and that stamp — never
+// placed_at — is the bucket. A reservation made just before ET midnight
+// stays in the old month even when the vendor call lands after it, so the
+// in-flight amount cannot vacate one month and land in the next on top of
+// headroom another dispatcher reserved there meanwhile (pre-push P0, Codex
+// r14 P1).
+// Spend of ONE ET accounting month: [start of the month `now` is in, start
+// of the next). Bounded above so an anchored re-check of an earlier month
+// (a placement that crossed the boundary) never sums later months' rows
+// (pre-push P1).
 async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = {}) {
+  const monthStart = startOfETMonth(now);
+  const nextMonthStart = startOfETMonth(addETDays(monthStart, 32));
+  // A revoked order (evidence.revokedAt — cancelled with the vendor) no longer
+  // consumes headroom, matching the live-order guards: its replacement must
+  // be able to dispatch (pre-push P1).
   let q = conn('vendor_orders')
     .whereNot('status', 'failed')
-    .whereRaw('COALESCE(placed_at, created_at) >= ?', [startOfETMonth(now)])
+    .whereRaw("NULLIF(evidence->>'revokedAt', '') IS NULL")
+    .where('created_at', '>=', monthStart)
+    .where('created_at', '<', nextMonthStart)
     .where(function dispatched() { this.where('status', 'placing').orWhereNotNull('placed_at'); });
   if (excludeId) q = q.whereNot('id', excludeId);
   const row = await q.sum({ total: 'amount_cents' }).first();
@@ -328,20 +356,31 @@ async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = 
 // `now` is evaluated HERE, per reservation — never a run-start clock passed
 // through: a run that crosses the ET month boundary reserves against the
 // month it is in (pre-push P0). The reservation re-stamps the row's
-// created_at (its cap-accounting month) at the same instant.
-async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env } = {}) {
+// created_at (its cap-accounting month) at the same instant. A post-placement
+// re-check of a higher confirmed total passes `accountingAt` — the month the
+// order was reserved in stays its month (the documented fixed-at-reservation
+// policy): the increase is checked against THAT month's headroom and
+// created_at is left alone (Codex r19 P2).
+async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env, accountingAt = null, postPlacement = false } = {}) {
   const now = new Date();
+  const monthAnchor = accountingAt || now;
   const { perOrder, monthly } = caps(env);
   if (perOrder == null || monthly == null) return { ok: false, reason: 'caps_unconfigured', message: 'AUTO_ORDER_MAX_PER_ORDER_CENTS and AUTO_ORDER_MAX_MONTHLY_CENTS must both be set' };
   if (!Number.isFinite(cents) || cents <= 0) return { ok: false, reason: 'no_binding_total', message: 'no positive vendor total to reserve' };
-  if (cents > perOrder) return { ok: false, reason: 'over_per_order_cap', message: `${dollars(cents)} exceeds the per-order cap ${dollars(perOrder)}` };
+  const overPerOrder = cents > perOrder ? { ok: false, reason: 'over_per_order_cap', message: `${dollars(cents)} exceeds the per-order cap ${dollars(perOrder)}` } : null;
+  // Before the vendor call an over-cap figure is simply refused. After it
+  // (postPlacement) the money has MOVED: the actual charge is written under
+  // the cap lock whatever the verdict, so no concurrent reservation can read
+  // the stale lower amount in the gap before the park (pre-push P0).
+  if (overPerOrder && !postPlacement) return overPerOrder;
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAPS_LOCK_KEY]);
-    const spent = await monthlySpentCents(trx, { now, excludeId: ledgerId });
-    if (spent + cents > monthly) return { ok: false, reason: 'over_monthly_cap', message: `${dollars(cents)} would take this month to ${dollars(spent + cents)}, over the monthly cap ${dollars(monthly)}` };
-    const n = await trx('vendor_orders').where({ id: ledgerId, status: 'placing' }).update({ amount_cents: cents, created_at: now, updated_at: now });
+    const spent = await monthlySpentCents(trx, { now: monthAnchor, excludeId: ledgerId });
+    const overMonthly = spent + cents > monthly ? { ok: false, reason: 'over_monthly_cap', message: `${dollars(cents)} would take this month to ${dollars(spent + cents)}, over the monthly cap ${dollars(monthly)}` } : null;
+    if (overMonthly && !postPlacement) return overMonthly;
+    const n = await trx('vendor_orders').where({ id: ledgerId, status: 'placing' }).update({ amount_cents: cents, ...(accountingAt ? {} : { created_at: now }), updated_at: now });
     if (n !== 1) return { ok: false, reason: 'claim_lost', message: 'this order\'s claim was parked by stale recovery while the vendor call ran — nothing submitted; see the Restock tab' };
-    return { ok: true };
+    return overPerOrder || overMonthly || { ok: true };
   });
 }
 
@@ -389,20 +428,34 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
     logger.warn(`[order-dispatch] bell for ledger ${ledgerId} was not persisted (re-rung next run)`);
     return false;
   }
+  let superseded = false;
   try {
     // Stamp ONLY the bell version that was delivered: if the row's bell was
     // replaced meanwhile, the replacement stays pending for the re-ring.
     const stamp = conn('vendor_orders').where({ id: ledgerId });
     if (v) stamp.whereRaw("evidence->'bell'->>'v' = ?", [v]);
-    await stamp.update({
+    const n = await stamp.update({
       evidence: conn.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ bellAt: new Date().toISOString() })]),
       updated_at: new Date(),
     });
+    // Zero rows = the row's bell was replaced after this one was delivered:
+    // the REPLACEMENT is still pending, so this is not a delivery (hook P1).
+    superseded = n !== 1;
   } catch (err) {
     // The bell landed; the dedupeKey makes the re-ring a refresh, not a double.
     logger.warn(`[order-dispatch] bell stamp failed for ledger ${ledgerId}: ${err.message}`);
   }
-  return true;
+  if (!superseded) return true;
+  // The notification just inserted carries the superseded version's
+  // instructions (a stale reconcile / dry-run text beside the replacement):
+  // retire it now rather than leave it unread (Codex r23 P1).
+  try {
+    await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-order:${ledgerId}:${v}`]).whereNull('read_at').update({ read_at: new Date() });
+  } catch (err) {
+    logger.warn(`[order-dispatch] superseded bell v${v} for ledger ${ledgerId} could not be retired: ${err.message}`);
+  }
+  logger.warn(`[order-dispatch] bell v${v || '?'} for ledger ${ledgerId} was superseded before its stamp — retired; replacement re-rung next run`);
+  return false;
 }
 
 /** Re-ring every terminal ledger row whose persisted bell never landed. */
@@ -478,7 +531,7 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
     if (staleBefore) transition.where('updated_at', '<', staleBefore);
     const n = await transition.update(patch);
     if (!n) return false;
-    if (markRequestOrdered) await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ status: 'ordered', updated_at: new Date() });
+    if (markRequestOrdered) await requestToOrdered(trx, request.id);
     await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: status, amount_cents: amountCents, reason: `${reason}: ${message}`.slice(0, 400), trx });
     return true;
   });
@@ -524,6 +577,11 @@ async function resolveClaimVendor(trx, { request, registry, deadAdapters = null 
   // credential store is down) gets no further claims this run — the request
   // stays open for tomorrow, no ledger row is written (Codex r8 P1).
   if (deadAdapters && deadAdapters.has(adapterKey)) return { skipped: 'adapter_down' };
+  // The same credential check canAutoOrder makes: an adapter without its key
+  // must not claim (and retire the manual bell) only to park every request as
+  // "no prior order" — hand it back instead (Codex r21 P2).
+  const adapter = registry[adapterKey];
+  if (typeof adapter.configured === 'function' && adapter.configured() !== true) return { skipped: 'adapter_unconfigured' };
   return { vendor, adapterKey, m };
 }
 
@@ -580,6 +638,29 @@ async function lockedProductGuards(trx, { request }) {
   return null;
 }
 
+// A re-armed dry-run row still has its "nothing was submitted — turn dry run
+// off to order for real" bell out: retire it in the claim's own transaction,
+// before this claim can submit, or staff act on it beside a real order
+// (pre-push P0). The versioned key is auto-order:<ledger>[:<v>].
+function retireLedgerBells(trx, ledgerId) {
+  return trx('notifications').whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${ledgerId}`, `auto-order:${ledgerId}:%`]).whereNull('read_at').update({ read_at: new Date() });
+}
+
+// The Restock tab renders the request's OWN vendorSku / vendorProductUrl as
+// the order link: when the eligible price row changed between the request
+// and the claim, stamp what the claim actually authorized so the tab (and a
+// pre-submit park's "order by hand" link) shows the SKU being bought
+// (Codex r21 P2). The link is the CURRENT row's — null included: a row with
+// no URL must not keep sending staff to the previous SKU's page (Codex r22
+// P2). Unchanged = no write.
+async function stampAuthorizedSku(trx, { request, pricing }) {
+  if (!pricing?.vendor_sku) return;
+  const m = meta(request.metadata);
+  const learned = { vendorSku: pricing.vendor_sku, vendorProductUrl: pricing.vendor_product_url || null };
+  if (m.vendorSku === learned.vendorSku && (m.vendorProductUrl || null) === learned.vendorProductUrl) return;
+  await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ metadata: JSON.stringify({ ...m, ...learned }), updated_at: new Date() });
+}
+
 // The eligible price row is read under the same lock so the claim's payload
 // records the SKU + vendor quantity the order will carry.
 async function insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity }) {
@@ -598,6 +679,10 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
     .whereRaw(DRY_RUN_RECLAIMABLE_SQL)
     .returning('*');
   const ledger = inserted && inserted[0];
+  if (ledger) {
+    await retireLedgerBells(trx, ledger.id);
+    await stampAuthorizedSku(trx, { request, pricing });
+  }
   return { ledger, pricing, order };
 }
 
@@ -625,6 +710,11 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null }) {
   if (guarded) return guarded;
   const quantity = Number(request.requested_quantity);
   if (!Number.isFinite(quantity) || quantity <= 0) return { skipped: 'no_quantity' };
+  // A manual-order bell an earlier (gated) sweep rang for this request is
+  // retired IN the claim transaction: the claim exists only if the bell is
+  // gone, so staff are never told to buy what the dispatcher is ordering. A
+  // failed retire aborts the claim — nothing is ordered (Codex r20 P1).
+  await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${request.id}`]).whereNull('read_at').update({ read_at: new Date() });
   const { ledger, pricing, order } = await insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity });
   if (!ledger) return { skipped: 'already_claimed' };
   return { request, vendor, adapterKey, product, quantity, ledger, pricing, order };
@@ -657,16 +747,32 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
 
 // What an adapter.place() rejection means. Run-level errors are the caller's
 // (claim released, batch aborts); everything else is this request's park.
-function parkForPlaceError(conn, err, { ctx, vendor, quoteCents }) {
-  // A refusal that names the vendor total it was decided on (a cap
+// A post-submit park with NO positive total anywhere (nothing confirmed, no
+// quote, nothing reserved) is counted at the per-order cap: a placed_at row
+// with a null amount would count as $0 against the monthly cap while the
+// money may have moved (pre-push P0 / P1, Codex r23 P1). Fail closed; the
+// receive or revoke corrects the figure.
+function unconfirmedAmount(env) {
+  const amountCents = caps(env).perOrder ?? null;
+  return { amountCents, counted: amountCents != null ? ` No total was confirmed or reserved, so it is counted against the monthly cap at the per-order cap (${dollars(amountCents)}) until received or revoked.` : '' };
+}
+
+async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
+  // A refusal that names the vendor total it was decided on (SiteOne's cap
   // refusal at the cart or checkout stage) parks with THAT amount — the
-  // ledger must show the binding total, not an earlier quote (Codex r4 P2).
+  // ledger must show the binding total, not an earlier quote (Codex #3853 r4 P2).
   if (err.refuse) return park(conn, { ...ctx, reason: err.refuse, message: err.message, amountCents: err.cents ?? quoteCents, evidence: err.evidence || null });
-  // An ambiguous submit (the click happened) parks with the total the
-  // adapter had in hand at the click — a vendor that quotes at place time
-  // has no earlier quote, and a null amount on a placed_at row would count
-  // as $0 against the monthly cap (pre-push P0).
-  if (err.ambiguous) return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.`, amountCents: err.cents ?? quoteCents, evidence: err.evidence || null });
+  // An ambiguous submit (the click happened) parks with the best figure
+  // known: the total the adapter had at the click, else the binding quote,
+  // else what beforeSubmit reserved on the ledger — else the per-order cap.
+  // The vendor's response body (err.body: Sticker Mule accepted the POST but
+  // returned no recognizable number) is persisted as response_payload — it
+  // is what staff locate the possibly-placed order with (Codex r23 P2).
+  if (err.ambiguous) {
+    const known = positiveCents(err.cents) ?? positiveCents(quoteCents) ?? (await ledgerReservation(conn, ctx.ledger)).cents;
+    const { amountCents, counted } = known == null ? unconfirmedAmount(env) : { amountCents: known, counted: '' };
+    return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.${counted}`, amountCents, evidence: err.evidence || null, placed: err.body ? { response: err.body } : null });
+  }
   return park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
 }
 
@@ -681,6 +787,16 @@ function parkForPlaceError(conn, err, { ctx, vendor, quoteCents }) {
  * and the outcome is audited placed_after_stale_park. Status stays
  * needs_review: a human still has to look.
  */
+// The order exists now: the request goes to 'ordered' from open — and from
+// cancelled, when it was closed while the vendor call was in flight (stock is
+// coming; receive or revoke is the way to close it — a cancelled request with
+// an unreceived, unrevoked ledger row could be reconciled by neither: both
+// receive endpoints and the revoke CLI refuse it while the live-order guard
+// blocks a replacement, Codex r23 P1). Any other status is left alone.
+function requestToOrdered(trx, requestId) {
+  return trx('product_restock_requests').where({ id: requestId }).whereIn('status', ['open', 'cancelled']).update({ status: 'ordered', closed_at: null, updated_at: new Date() });
+}
+
 async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCents, fresh }) {
   const { ledger, request, product, vendor, adapterKey } = ctx;
   const parked = await trx('vendor_orders').where({ id: ledger.id }).first('evidence');
@@ -695,15 +811,16 @@ async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCe
     evidence: conn.raw("(COALESCE(evidence, '{}'::jsonb) - 'revokedAt' - 'bellAt') || ?::jsonb", [JSON.stringify({ bell, latePlacementAt: new Date().toISOString(), latePlacementAfterRevoke: wasRevoked })]),
     error: conn.raw("COALESCE(error, '') || ?", [` | order confirmed placed after stale recovery${wasRevoked ? ' and revoke' : ''}: ${placed.externalOrderNumber || '?'}`]),
   });
-  await trx('product_restock_requests').where({ id: request.id }).whereIn('status', ['open', 'cancelled']).update({ status: 'ordered', closed_at: null, updated_at: new Date() });
+  await requestToOrdered(trx, request.id);
   await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: orderFacts.amount_cents, external_order_number: placed.externalOrderNumber || null, reason: `the row was parked by stale recovery${wasRevoked ? ' and revoked' : ''} while the vendor call ran; the order exists`, trx });
   return { bell, settledElsewhere: true };
 }
 
 /**
  * Green path: ledger placed + request ordered + audit in ONE transaction, no
- * bell — unless the office closed the request mid-flight (one reconcile
- * bell) or stale recovery already parked the row (attachLatePlacement).
+ * bell — unless the office closed the request mid-flight (back to ordered,
+ * one reconcile bell) or stale recovery already parked the row
+ * (attachLatePlacement).
  */
 async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
   const { ledger, request, product, vendor, adapterKey, notify } = ctx;
@@ -715,10 +832,19 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
     updated_at: new Date(),
   };
   // The office closed the request while the vendor call was in flight: an
-  // order exists that the tab no longer expects — say so once.
-  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. Reconcile by hand.` });
+  // order exists that the tab no longer expects — say so once. A cancelled
+  // request is put back to ordered (requestToOrdered).
+  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. ${freshStatus === 'cancelled' ? 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke.' : 'Reconcile by hand.'}` });
   const outcome = await conn.transaction(async (trx) => {
-    // LOCK ORDER: ledger row first, then the request — the same order the
+    // The cap lock FIRST — the reservation's own order (cap lock → ledger
+    // row): the amount this commit records lands while no concurrent
+    // reservation can sum the month against the row's old figure or its
+    // revoked marker. That matters for a late placement whose higher final
+    // total the post-placement re-check could not write (claim_lost: stale
+    // recovery had parked the row) — attachLatePlacement restores it here,
+    // under the same lock (Codex r23 P1).
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAPS_LOCK_KEY]);
+    // LOCK ORDER: ledger row next, then the request — the same order the
     // revoke script and every park use, so a late placement racing an
     // operator revoke waits instead of deadlocking (Codex r3 P1).
     await trx('vendor_orders').where({ id: ledger.id }).forUpdate().first('id');
@@ -733,7 +859,7 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
       error: stillOpen ? null : `request_state_changed: request was ${fresh?.status || 'missing'} when the order landed`,
     });
     if (!n) return attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCents, fresh });
-    if (stillOpen) await trx('product_restock_requests').where({ id: request.id }).update({ status: 'ordered', updated_at: new Date() });
+    await requestToOrdered(trx, request.id);
     await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, trx });
     return { bell };
   });
@@ -764,7 +890,15 @@ async function settleAfterError(conn, err, { ctx, vendor, submitted, placed, quo
   logger.error(`[order-dispatch] ${product.name}: ${err.message}`);
   try {
     if (submitted) {
-      return await park(conn, { ...ctx, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${placed?.amountCents != null ? ` (${dollars(placed.amountCents)})` : ''} was placed but recording it failed: ${err.message}.`, amountCents: placed?.amountCents ?? quoteCents ?? null, evidence: placed?.evidence || null, placed });
+      const parked = await park(conn, { ...ctx, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${placed?.amountCents != null ? ` (${dollars(placed.amountCents)})` : ''} was placed but recording it failed: ${err.message}.`, amountCents: placed?.amountCents ?? quoteCents ?? null, evidence: placed?.evidence || null, placed });
+      // The row had already left 'placing' (stale recovery / revoke while
+      // the vendor call ran) and the late-placement attachment itself
+      // failed: a skipped park would read as harmless while the confirmed
+      // number and amount are unrecorded and a revokedAt marker may still
+      // admit a replacement purchase. That is UNRECORDED — the run goes
+      // red on it (Codex r17 P1).
+      if (parked.skipped === 'already_settled') return { requestId: request.id, ledgerId: ledger.id, status: 'unrecorded', reason: 'persist_after_placement', externalOrderNumber: placed?.externalOrderNumber || null, error: `${err.message}; the row had already left placing and the late placement was not attached` };
+      return parked;
     }
     return await park(conn, { ...ctx, status: 'failed', reason: 'dispatch_error', message: err.message });
   } catch (parkErr) {
@@ -802,11 +936,43 @@ async function withVendorLogin(conn, { placeArgs, vendor, releaseClaim }) {
 // came out higher and breaks a cap, the order exists but parks for the owner
 // (cancel with the vendor / revoke); the request is ordered. Returns the park
 // result, or null when the final total fits.
-async function parkIfOverCapAfterPlacement(conn, { adapter, ctx, vendor, ledger, placed, finalCents, quoteCents, now, env }) {
-  if (adapter.quotesAtPlace || finalCents == null || finalCents <= (quoteCents ?? 0)) return null;
-  const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { env });
+// The baseline is whatever the caps already admitted: the pre-submit binding
+// quote, or — for a quotesAtPlace adapter — the amount beforeSubmit reserved
+// on the ledger row. A checkout-quoting vendor whose confirmation comes back
+// higher than the reserved checkout figure is re-checked exactly like a
+// quoted one (pre-push P0): no adapter kind skips the detector.
+async function parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, finalCents, quoteCents, env }) {
+  if (finalCents == null) return null;
+  const reservation = await ledgerReservation(conn, ledger);
+  const admitted = positiveCents(quoteCents) ?? reservation.cents;
+  if (finalCents <= (admitted ?? 0)) return null;
+  const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { env, accountingAt: reservation.createdAt, postPlacement: true });
   if (finalCap.ok) return null;
-  return park(conn, { ...ctx, markRequestOrdered: true, reason: 'over_cap_after_placement', message: `${vendor.name} charged ${dollars(finalCents)} for order ${placed.externalOrderNumber || '?'}: ${finalCap.message}.`, amountCents: finalCents, evidence: placed.evidence || null, placed });
+  // The row already left 'placing' (stale recovery parked or the operator
+  // revoked it while the vendor call ran): the order still EXISTS at this
+  // higher total, so it must land as a late placement — number, amount,
+  // request back to ordered, revoke marker replaced — exactly as the green
+  // path does, never dropped by a skipped park (pre-push P0).
+  const late = () => recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
+  if (finalCap.reason === 'claim_lost') return late();
+  const parked = await park(conn, { ...ctx, markRequestOrdered: true, reason: 'over_cap_after_placement', message: `${vendor.name} charged ${dollars(finalCents)} for order ${placed.externalOrderNumber || '?'}: ${finalCap.message}.`, amountCents: finalCents, evidence: placed.evidence || null, placed });
+  return parked.skipped === 'already_settled' ? late() : parked;
+}
+
+// The amount a PLACED order is recorded and cap-counted at: the vendor's
+// confirmed total, else the pre-submit quote, else the amount beforeSubmit
+// reserved on the ledger row — never null or non-positive, which would
+// overwrite the reservation and drop the order from the monthly cap
+// (pre-push P0). null = nothing positive anywhere: the caller parks.
+const positiveCents = (v) => (Number.isInteger(v) && v > 0 ? v : null);
+// What the ledger row holds from the reservation: the amount beforeSubmit
+// reserved (null = nothing reserved) and the cap-accounting month stamp.
+async function ledgerReservation(conn, ledger) {
+  const row = await conn('vendor_orders').where({ id: ledger.id }).first('amount_cents', 'created_at');
+  return { cents: positiveCents(row?.amount_cents == null ? null : Number(row.amount_cents)), createdAt: row?.created_at ? new Date(row.created_at) : null };
+}
+async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
+  return positiveCents(placed?.amountCents) ?? positiveCents(quoteCents) ?? (await ledgerReservation(conn, ledger)).cents;
 }
 
 // Stages after a committed claim: price → binding total → vendor call →
@@ -842,12 +1008,16 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     } catch (err) {
       if (err.runLevel) { await releaseClaim(); throw err; }
       if (err.ambiguous) submitted = true;
-      return await parkForPlaceError(conn, err, { ctx, vendor, quoteCents });
+      return await parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env });
     } finally { stopHeartbeat(); }
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
-    const finalCents = placed.amountCents ?? quoteCents ?? null;
-    const overCap = await parkIfOverCapAfterPlacement(conn, { adapter, ctx, vendor, ledger, placed, finalCents, quoteCents, now, env });
+    const finalCents = await settledFinalCents(conn, { ledger, placed, quoteCents });
+    if (finalCents == null) {
+      const { amountCents, counted } = unconfirmedAmount(env);
+      return await park(conn, { ...ctx, markRequestOrdered: true, reason: 'no_final_total', message: `${vendor.name} order ${placed.externalOrderNumber || '?'} was placed but no positive total was confirmed or reserved — verify the charge with the vendor and record it.${counted}`, amountCents, evidence: placed.evidence || null, placed });
+    }
+    const overCap = await parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, finalCents, quoteCents, env });
     if (overCap) return overCap;
     return await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
   } catch (err) {
@@ -863,22 +1033,39 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
 // or its gate flipped in between — would otherwise have neither bell: hand
 // it to the office with the sweep's own request-id-deduped bell (Codex r12
 // P2). Idempotent: a bell the sweep already rang is a no-op.
-const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated']);
+const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated', 'adapter_unconfigured']);
 async function bellUndispatchable(conn, requestId, notify) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first();
   const product = request && await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
   if (!request || !product) return false;
-  await require('./auto-reorder').ringRestockBell({ notify, product, request });
+  // notifyAdmin resolves null when it could not persist the row: a null
+  // hand-off is NOT a delivered bell (Codex r17 P2).
+  const rung = await require('./auto-reorder').ringRestockBell({ notify, product, request });
+  if (!rung) return false;
+  // The request-id dedupe returns the EXISTING row unchanged when the text
+  // is the same — and the dispatcher's claim marked that row read on the
+  // hand-off. A handback must be visible again: reopen it (Codex r20 P2).
+  await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNotNull('read_at').update({ read_at: null, updated_at: new Date() });
   return true;
 }
 
 async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env, deadAdapters = null } = {}) {
-  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated' };
+  // The master gate closing between the 6:10 sweep (which stood down its own
+  // bell because this lane would order) and the dispatch is the same
+  // hand-off as a vendor gate: the request gets the sweep's deduped bell
+  // now, not after another silent day (Codex r18 P2).
+  if (!gateEnvValue(GATE)) {
+    const belled = await bellUndispatchable(conn, requestId, notify);
+    return { requestId, skipped: 'gated', ...(belled ? { belled: true } : { bellLost: true }) };
+  }
   const registry = adapters || loadAdapters();
   const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters }));
   if (claim.skipped) {
     const belled = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : false;
-    return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...(belled ? { belled: true } : {}) };
+    // A lost hand-off bell is reported, not swallowed: the request stays open
+    // and unclaimed, so the next run re-rings it — and this run goes red.
+    const bellState = !HANDOFF_SKIPS.has(claim.skipped) ? {} : belled ? { belled: true } : { bellLost: true };
+    return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...bellState };
   }
   return dispatchClaimed(conn, claim, { registry, notify, now, env });
 }
@@ -933,15 +1120,13 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
   return { recovered, bellPending, unrecovered };
 }
 
-async function runVendorOrderDispatch({ conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
-  // Reconciliation runs BEFORE and REGARDLESS of the gate: a 'placing' claim
-  // the dispatcher died on, or a park whose bell never sent, is an order that
-  // may already exist at the vendor — killing the lane must surface it, not
-  // bury it (pre-push P0). Bells first: the one outcome that must not wait
-  // another day.
-  const bells = await reringPendingBells({ conn, notify });
-  const recovered = await recoverStalePlacing({ conn, notify, now });
-  const gated = !gateEnvValue(GATE);
+// The bounded dispatch passes (Codex r3 P2): a request another replica's
+// sweep raised while a slow vendor order was in flight is picked up now, not
+// tomorrow; a pass that finds nothing new ends. A run-level error (the
+// environment is broken for every remaining request) stops the batch with
+// its claims released — job_health records it, tomorrow retries.
+async function dispatchPasses({ conn, notify, adapters, now, env }) {
+  const seen = new Set();
   const results = [];
   let runLevelError = null;
   // A run-level failure is scoped to the adapter that raised it (err.adapterKey
@@ -953,37 +1138,60 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
   // Rescan before releasing the lease (Codex r3 P2): a request another
   // replica's sweep raised while a slow vendor order was in flight is
   // picked up now, not tomorrow. Bounded; a pass that finds nothing new ends.
-  const seen = new Set();
-  let rows = [];
-  for (let pass = 0; pass < 3 && !(runLevelError && !runLevelError.adapterKey) && !gated; pass += 1) {
-    rows = (await findDispatchable(conn)).filter((r) => !seen.has(r.id));
+  for (let pass = 0; pass < 3 && !(runLevelError && !runLevelError.adapterKey); pass += 1) {
+    const rows = (await findDispatchable(conn)).filter((r) => !seen.has(r.id));
     if (!rows.length) break;
     for (const row of rows) {
       seen.add(row.id);
       try {
         results.push(await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env, deadAdapters }));
       } catch (err) {
+        // An unscoped error (the registry, a transaction) is batch-wide and must
+        // not be masked by an earlier adapter-scoped one still held in
+        // runLevelError — the outer loop would see an adapterKey and keep
+        // dispatching (Codex #3853 r11 P2).
+        if (!err.adapterKey) { runLevelError = err; logger.error(`[order-dispatch] run-level failure, batch aborted: ${err.message}`); break; }
         runLevelError = runLevelError || err;
-        if (!err.adapterKey) { logger.error(`[order-dispatch] run-level failure, batch aborted: ${err.message}`); break; }
         deadAdapters.add(err.adapterKey);
         logger.error(`[order-dispatch] run-level failure for ${err.adapterKey}, its remaining requests wait for the next run: ${err.message}`);
       }
     }
     if (runLevelError && !runLevelError.adapterKey) break;
   }
-  const failed = results.filter((r) => r.status === 'failed');
-  const bellsPending = [...bells.pending, ...recovered.bellPending, ...results.filter((r) => r.bellPending).map((r) => r.ledgerId)];
-  logger.info(`[order-dispatch] ${results.filter((r) => r.status === 'placed').length} placed, ${results.filter((r) => r.status === 'needs_review').length} parked, ${failed.length} failed, ${results.filter((r) => r.skipped).length} skipped of ${seen.size}; ${bells.rung.length} bells re-rung, ${bellsPending.length} pending`);
-  if (runLevelError) throw runLevelError;
+  return { results, seen, runLevelError };
+}
+
+// What turns the run red after every request settled: failures, outcomes a
+// vendor call left unrecorded (Codex r2 P1), stale rows that could not be
+// parked, and bells — a parked order or a hand-off nobody was told about.
+function runProblems({ results, recovered, bellsPending }) {
   const problems = [];
+  const failed = results.filter((r) => r.status === 'failed');
   if (failed.length) problems.push(`${failed.length} order(s) failed (${failed.map((f) => f.reason).join(', ')})`);
-  // A vendor call that ran but whose outcome could not be written — the
-  // order may exist with no ledger state and no bell (Codex r2 P1).
   const unrecorded = results.filter((r) => r.status === 'unrecorded');
   if (unrecorded.length) problems.push(`${unrecorded.length} outcome(s) UNRECORDED — reconcile by hand (ledger ${unrecorded.map((r) => r.ledgerId).join(', ')})`);
   if (recovered.unrecovered.length) problems.push(`${recovered.unrecovered.length} stale placing row(s) could not be parked (ledger ${recovered.unrecovered.join(', ')})`);
-  // An undelivered bell is a parked order nobody knows about: red until it lands.
   if (bellsPending.length) problems.push(`${bellsPending.length} bell(s) not delivered, re-rung next run (ledger ${bellsPending.join(', ')})`);
+  const bellLost = results.filter((r) => r.bellLost);
+  if (bellLost.length) problems.push(`${bellLost.length} hand-off bell(s) not persisted, re-rung next run (request ${bellLost.map((r) => r.requestId).join(', ')})`);
+  return problems;
+}
+
+async function runVendorOrderDispatch({ conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
+  // Reconciliation runs BEFORE and REGARDLESS of the gate: a 'placing' claim
+  // the dispatcher died on, or a park whose bell never sent, is an order that
+  // may already exist at the vendor — killing the lane must surface it, not
+  // bury it (pre-push P0). Bells first: the one outcome that must not wait
+  // another day. A gated run still walks the dispatchable requests: each is
+  // handed off with its bell instead of ordered (Codex r18 P2).
+  const bells = await reringPendingBells({ conn, notify });
+  const recovered = await recoverStalePlacing({ conn, notify, now });
+  const gated = !gateEnvValue(GATE);
+  const { results, seen, runLevelError } = await dispatchPasses({ conn, notify, adapters, now, env });
+  const bellsPending = [...bells.pending, ...recovered.bellPending, ...results.filter((r) => r.bellPending).map((r) => r.ledgerId)];
+  logger.info(`[order-dispatch] ${results.filter((r) => r.status === 'placed').length} placed, ${results.filter((r) => r.status === 'needs_review').length} parked, ${results.filter((r) => r.status === 'failed').length} failed, ${results.filter((r) => r.skipped).length} skipped of ${seen.size}; ${bells.rung.length} bells re-rung, ${bellsPending.length} pending`);
+  if (runLevelError) throw runLevelError;
+  const problems = runProblems({ results, recovered, bellsPending });
   if (problems.length) throw new Error(`vendor order dispatch: ${problems.join('; ')}`);
   return { ...(gated ? { skipped: 'gated' } : {}), results, recovered: recovered.recovered, bells };
 }

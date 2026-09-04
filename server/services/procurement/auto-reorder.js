@@ -216,6 +216,9 @@ async function handleLiveRequest(ctx, p, existing) {
   // establish a vendor id (pinned to a vendor the product has since left)
   // is nobody's — ring so a human works it (Codex r10 P1).
   const { vendorId } = parseMeta(request.metadata);
+  // The dispatcher's CLAIM retires any manual bell an earlier sweep rang, in
+  // the same transaction that creates the claim (Codex r19 P1 / r20 P1) —
+  // the sweep only stands down here.
   if (vendorId && await dispatcherOrders(ctx.conn, vendorId)) return;
   await bellOrWarn(ctx, p, request, 'renotified');
 }

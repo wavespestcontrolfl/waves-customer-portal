@@ -113,7 +113,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const s = src('routes/admin-backlink-agent-v2.js');
     const block = s.slice(s.indexOf("router.patch('/prospects/:id'"), s.indexOf("router.post('/prospects/:id/recheck'"));
     const iTrx = block.indexOf('db.transaction(async (trx)');
-    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key')");
+    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'conversation_closed_at')");
     const iGate = block.indexOf("&& !inOutreach(current.status, current.link_type)");
     // a link_type change out of the signup lane (directory/citation/social → outreach type) is an admission too
     expect(block).toMatch(/const inOutreach = \(status, type\) => ACTIVE_OUTREACH_STATUSES\.includes\(status\) && !SIGNUP_TYPES\.includes\(type \|\| ''\);/);
@@ -130,7 +130,14 @@ describe('every board writer takes the shared lock inside its check+insert trans
     expect(block).not.toMatch(/\bdb\('seo_link_prospects'\)/);
     // a target_page edit is a placement move: domain lock + canonical placement probe (self excluded) → 409, before the update
     const iMove = block.indexOf("'target_page' in patch && patch.target_page !== current.target_page");
-    const iMoveLock = block.indexOf('lockProspectDomain(trx, current.target_domain)');
+    const iMoveLock = block.indexOf('lockProspectDomain(trx, current.target_domain)', iMove); // the move's own re-take, after the check
+    // a conversation-opening edit takes the domain lock BEFORE the inbox lock (the send claim's domain → inbox → row order), so a
+    // page move in the same edit never takes the domain lock after the inbox
+    const iOpenLock = block.indexOf('lockProspectDomain(trx, current.target_domain)');
+    const iInbox = block.indexOf('Outreach.inboxConflict(trx, { recipient, excludeId: current.id })');
+    expect(iOpenLock).toBeGreaterThan(iLock);
+    expect(iInbox).toBeGreaterThan(iOpenLock);
+    expect(iMove).toBeGreaterThan(iInbox);
     const iMoveProbe = block.indexOf('findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key })'); // scoped to the row's own location since step 2
     expect(iMove).toBeGreaterThan(iRead);
     expect(iMoveLock).toBeGreaterThan(iMove);

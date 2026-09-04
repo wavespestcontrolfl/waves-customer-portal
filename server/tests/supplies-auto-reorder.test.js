@@ -17,7 +17,7 @@ const mockState = { candidates: [], existing: null, pricing: null, lockedPricing
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'orWhereExists', 'whereExists', 'from']) q[m] = () => q;
+    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'select', 'orderBy', 'orWhereExists', 'whereExists', 'from']) q[m] = () => q;
     // The product row lock: from here on the pricing row is the LOCKED one
     // (a test sets lockedPricing to simulate a pricing edit that committed
     // between an unlocked read and the lock).
@@ -379,6 +379,8 @@ test('PR 2: when the dispatcher will order from the vendor, the request is raise
   const r2 = await runSuppliesAutoReorderSweep({ notify });
   expect(r2.deduped).toHaveLength(1);
   expect(notify).not.toHaveBeenCalled();
+  // …and the sweep touches no bell on the hand-off — the dispatcher's claim retires it (Codex r20 P1).
+  expect(mockState.updates.filter((u) => u.table === 'notifications')).toHaveLength(0);
   mockState.autoOrder = false;
 });
 

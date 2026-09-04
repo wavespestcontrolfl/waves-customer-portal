@@ -1956,7 +1956,9 @@ describe('rain-out service', () => {
       expect(options.ok).toBe(true);
       // Offers probe the same one-hour block commit() books (codex P2).
       expect(SmartRebooker.findRescheduleOptions).toHaveBeenCalledWith(
-        'svc-1', 'weather_rain', { probeSpanMinutes: 60 },
+        // travelGap: the customer-facing sheet applies GATE_SLOT_TRAVEL_GAP;
+        // admin reschedule-options stay overlap-only (advisory saves).
+        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true },
       );
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });

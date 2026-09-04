@@ -6,6 +6,8 @@ const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./scheduling/occupancy');
+const { resolveStopCoords } = require('./scheduling/travel-gap');
+const { guardedCoordSelects } = require('./scheduling/day-stops');
 const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
@@ -799,7 +801,10 @@ class SmartRebooker {
       .where('scheduled_services.id', serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .select('scheduled_services.*', 'customers.first_name', 'customers.last_name',
-        'customers.city', 'customers.zip', 'customers.waveguard_tier')
+        'customers.city', 'customers.zip', 'customers.waveguard_tier',
+        // Divergence-guarded pin (overrides the raw lat/lng of the `*`) for
+        // the travel-gap probe below.
+        ...guardedCoordSelects(db))
       .first();
 
     if (!service) throw new Error('Service not found');
@@ -901,6 +906,10 @@ class SmartRebooker {
           windowEnd: candidateEnd,
           excludeServiceIds: [String(serviceId)],
           excludeStatuses: ['cancelled', 'completed'],
+          // Travel gap: a CUSTOMER-FACING day option (rain-out sheet) must
+          // survive the commit's own probe. Admin reschedule-options stay
+          // overlap-only — staff saves are advisory (GH codex #3803 r3 P2).
+          ...(opts.travelGap === true ? { travel: { lat: service.lat ?? null, lng: service.lng ?? null } } : {}),
         });
         if (clash.length) continue;
       } catch (err) {
@@ -1092,7 +1101,10 @@ class SmartRebooker {
 
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
-    const windowEnd = win.end || service.window_end;
+    // clearWindowEnd (office Combine compensation, pre-push codex #3843
+    // P1): an open-ended row that was moved onto a materialized end must
+    // be put back open-ended — `end: null` alone keeps the current end.
+    const windowEnd = win.end || (options.clearWindowEnd === true ? null : service.window_end);
 
     // Same-day target whose window already elapsed in ET is just as
     // unreachable as yesterday — a stale morning option accepted in the
@@ -1117,11 +1129,16 @@ class SmartRebooker {
         ? null
         : occupancyProbeEnd(win.start || service.window_start, null, service.estimated_duration_minutes)
     );
+    // keepStatus (office Combine, GH codex #3843 r1 P1): the abut move is
+    // incidental to grouping, so the row keeps its own status — the unit
+    // mover's sibling rule — instead of landing on 'confirmed'; a failed
+    // Combine then has nothing to un-confirm. A live row still rewinds.
+    const landedStatus = options.keepStatus === true && !lifecycleRewound ? service.status : 'confirmed';
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
       window_end: windowEnd,
-      status: 'confirmed',
+      status: landedStatus,
       ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
       // A this-visit-only DATE move of a cadence visit is a deliberate
       // exception to the series — see dateExceptionStamp.
@@ -1354,6 +1371,12 @@ class SmartRebooker {
           windowEnd: occupancyGateEnd,
           excludeServiceIds: [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))],
           excludeStatuses: ['cancelled', 'completed'],
+          // Travel gap (GATE_SLOT_TRAVEL_GAP): the moving row's own pin —
+          // CUSTOMER-FACING movers only (options.travelGap: public reschedule
+          // page, SMS reply). Auto-dispatch generates its candidates under
+          // its own route policy; admin and tech (rain-out) moves are
+          // advisory; all stay overlap-only (GH codex #3803 r4 P1).
+          ...(options.travelGap === true ? { travel: await resolveStopCoords(trx, serviceId) } : {}),
         });
         if (occupancyClash.length) {
           if (!overlapAdvisory) {
@@ -1420,11 +1443,11 @@ class SmartRebooker {
         });
       }
 
-      if (service.status !== 'confirmed') {
+      if (service.status !== landedStatus) {
         await trx('job_status_history').insert({
           job_id: serviceId,
           from_status: service.status,
-          to_status: 'confirmed',
+          to_status: landedStatus,
           transitioned_by: null,
         });
       }
@@ -1873,6 +1896,11 @@ class SmartRebooker {
         .slice(startIdx)
         .filter((s) => RESCHEDULABLE.has(s.status) || (wasLive && String(s.id) === String(serviceId)))
         .map((s) => s.id);
+      // Travel gap (GATE_SLOT_TRAVEL_GAP): one pin for the whole sweep —
+      // siblings of a series share the anchor's property.
+      // Customer-facing series moves only (see reschedule()); undefined →
+      // the legacy overlap probe, no coordinate read.
+      const seriesTravel = options.travelGap === true ? await resolveStopCoords(trx, serviceId) : undefined;
 
       // Same-series same-DATE collisions are hard-blocked regardless of
       // tech/time (auto-dispatch candidate-slots does the same): a plan must
@@ -2317,6 +2345,7 @@ class SmartRebooker {
             windowEnd: anchorOccEnd,
             excludeServiceIds: sweptIds,
             excludeStatuses: TERMINAL,
+            travel: seriesTravel,
           });
           if (anchorOccClash.length) {
             if (!overlapAdvisory) {
@@ -2397,6 +2426,7 @@ class SmartRebooker {
             windowEnd: occEnd,
             excludeServiceIds: sweptIds,
             excludeStatuses: TERMINAL,
+            travel: seriesTravel,
           });
           if (occClash.length) {
             if (overlapAdvisory) {
