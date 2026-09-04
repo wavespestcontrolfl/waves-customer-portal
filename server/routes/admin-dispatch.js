@@ -13606,8 +13606,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Yard-sign kit consumption (sign card + stake + sticker per completed
     // visit). Runs on the resume path too — the partial unique index on
     // product_inventory_movements makes it at-most-once per (product, visit).
-    // Skipped for an incomplete visit and for inspection_only /
-    // customer_declined closeouts (no sign is left). Never throws. Runs
+    // Skipped for an incomplete visit, for inspection_only /
+    // customer_declined closeouts and for an internal-only completion
+    // profile such as a Waves Assessment (no sign is left). Never throws. Runs
     // BEFORE job costing so the initial cost calc sees the kit movements
     // (pre-push codex P1).
     try {
@@ -13619,6 +13620,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         technicianId: svc.technician_id || null,
         isIncompleteVisit,
         visitPerformed,
+        isInternalOnlyCompletion,
         serviceLine: reportServiceLine,
         serviceType: svc.service_type || null,
       });

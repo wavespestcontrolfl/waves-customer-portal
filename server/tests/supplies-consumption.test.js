@@ -114,6 +114,13 @@ test('a service-line scope set between the scan and the lock is honored', async 
   expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'service_line_excluded' }]);
 });
 
+test('an internal-only completion profile (Waves Assessment) consumes nothing even though its name reads as pest (Codex r9 P2)', async () => {
+  const { db, inserts } = fakeDb({ products: [sign] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'Waves Assessment', isInternalOnlyCompletion: true });
+  expect(res.skipped).toEqual([{ reason: 'internal_only_completion' }]);
+  expect(inserts).toHaveLength(0);
+});
+
 test('a treatment service type is not an inspection', async () => {
   const { db, inserts } = fakeDb({ products: [sign] });
   await consumeCompletionSupplies(db, { ...args, serviceType: 'Quarterly Pest Control' });
@@ -142,9 +149,10 @@ test('movement carries unit_cost / cost_used from cost_per_unit in the inventory
   const res = await consumeCompletionSupplies(db, args);
   expect(inserts[0]).toMatchObject({ unit_cost: 0.5356, cost_used: 0.5356 });
   expect(res.consumed[0].costUsed).toBe(0.5356);
-  const { inserts: noCost } = fakeDb({ products: [{ ...sign, cost_per_unit: '12', cost_unit: 'gal' }] });
-  await consumeCompletionSupplies(fakeDb({ products: [{ ...sign, cost_per_unit: '12', cost_unit: 'gal' }] }).db, args);
-  expect(noCost).toHaveLength(0);
+  const mismatch = fakeDb({ products: [{ ...sign, cost_per_unit: '12', cost_unit: 'gal' }] });
+  await consumeCompletionSupplies(mismatch.db, args);
+  expect(mismatch.inserts).toHaveLength(1);
+  expect(mismatch.inserts[0]).toMatchObject({ unit_cost: null, cost_used: null });
 });
 
 test('duplicate (index ignored the insert) → no decrement', async () => {
@@ -168,7 +176,18 @@ describe('service-line scope', () => {
     expect(appliesToLine(JSON.stringify(['pest']), 'pest')).toBe(true);
     expect(appliesToLine(['pest'], 'termite')).toBe(false);
     expect(appliesToLine(['pest'], null)).toBe(false);
-    expect(appliesToLine('not json', 'termite')).toBe(false); // corrupt scope fails closed (PR 2 hook P1)
+    // Malformed scope fails CLOSED (pre-push P1): not "every line".
+    expect(appliesToLine('not json', 'termite')).toBe(false);
+    expect(appliesToLine('not json', 'pest')).toBe(false);
+    expect(appliesToLine({ pest: true }, 'pest')).toBe(false);
+  });
+
+  test('a product whose scope is malformed is skipped with a recorded error, no movement', async () => {
+    const { db, inserts } = fakeDb({ products: [{ ...sign, per_completion_service_lines: 'not json' }] });
+    const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' });
+    expect(res.errors).toEqual([{ productId: 'prod-sign', reason: 'invalid_service_lines' }]);
+    expect(res.consumed).toHaveLength(0);
+    expect(inserts).toHaveLength(0);
   });
 
   test('a pest visit consumes the kit item', async () => {
@@ -214,10 +233,20 @@ test('a thrown error is contained — and rings ONE deduped bell so the miss is 
   expect(opts.dedupeKey).toBe('supplies-consumption-failed:prod-sign:svc-1');
 });
 
-test('a bell failure on top of a deduction failure is still contained', async () => {
+test('a bell failure on top of a deduction failure is still contained — and recorded, not treated as sent', async () => {
   notifyAdmin.mockImplementationOnce(async () => { throw new Error('bell down'); });
   const { db } = fakeDb({ products: [sign], throwOnInsert: true });
-  await expect(consumeCompletionSupplies(db, args)).resolves.toMatchObject({ errors: [{ productId: 'prod-sign' }] });
+  await expect(consumeCompletionSupplies(db, args)).resolves.toMatchObject({
+    errors: [{ productId: 'prod-sign', message: 'insert boom' }, { productId: 'prod-sign', reason: 'failure_bell_not_sent', message: 'bell down' }],
+  });
+});
+
+test('notifyAdmin resolving null (its own persistence failure) counts as a lost bell (Codex r11 P2)', async () => {
+  notifyAdmin.mockImplementationOnce(async () => null);
+  const { db } = fakeDb({ products: [sign], throwOnInsert: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ productId: 'prod-sign', message: 'insert boom' }, { productId: 'prod-sign', reason: 'failure_bell_not_sent', message: 'notification not persisted' }]);
+  expect(require('../services/logger').error).toHaveBeenCalledWith(expect.stringContaining('failure bell NOT sent'));
 });
 
 test('a successful deduction rings no bell', async () => {

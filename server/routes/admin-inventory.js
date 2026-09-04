@@ -3,6 +3,9 @@ const { parse: parseCsvSync } = require('csv-parse/sync');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { eligibleVendorPricing } = require('../services/vendor-pricing-eligibility');
+const { findLiveRestockRequest } = require('../services/procurement/live-restock-request');
+const { AUTO_REORDER_SOURCE } = require('../services/procurement/auto-reorder');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
@@ -3103,17 +3106,19 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
     const body = req.body || {};
     const actor = req.technicianId || req.technician?.id || null;
     const actorName = req.technician?.name || req.technician?.email || null;
-    // One transaction, product row LOCKED before the insert: the auto-order
-    // dispatcher checks for a live sibling request under this same lock
-    // before it claims an order, so a staff request either lands before that
-    // check (the dispatcher stands down) or waits for the claim to commit
-    // (the tab shows the order) — never both orders (pre-push P0).
+    // One transaction, product row LOCKED before the insert, then — under
+    // that lock — the dispatcher's live-order check (409 while an automatic
+    // order is placing/placed: the Restock tab carries the order line,
+    // pre-push P0) and the SHARED any-source live-request check every
+    // restock creator runs (this route, the readiness route, the
+    // Intelligence Bar tool, the auto-reorder sweep), so a writer that
+    // resumes after a concurrent commit hands back the request that already
+    // exists instead of raising its twin (Codex r8 P1, r9 P1).
+    // allowDuplicate lets staff stack a second STAFF request on purpose; it
+    // never stacks one on the sweep's automatic request.
     const outcome = await db.transaction(async (trx) => {
       const product = await trx('products_catalog').where({ id: req.params.productId }).forUpdate().first();
       if (!product) return { status: 404, body: { error: 'Product not found' } };
-      // An automatic order already claimed/placed for this product → 409
-      // (err.statusCode, caught below); the Restock tab carries the order
-      // line (pre-push P0).
       await require('../services/procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id);
       const requestedQuantity = numberOrNull(body.requestedQuantity);
       const unit = String(body.unit || product.inventory_unit || product.rate_unit || '').trim();
@@ -3122,12 +3127,8 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
       }
       assertSupportedInventoryUnit(unit);
 
-      const existing = await trx('product_restock_requests')
-        .where({ product_id: product.id })
-        .whereIn('status', ['open', 'ordered'])
-        .where('source', 'waveguard_inventory_forecast')
-        .first();
-      if (existing && body.allowDuplicate !== true) {
+      const existing = await findLiveRestockRequest(trx, product.id);
+      if (existing && (body.allowDuplicate !== true || existing.source === AUTO_REORDER_SOURCE)) {
         return { status: 200, body: { success: true, existing: true, restockRequest: existing } };
       }
 
@@ -3523,17 +3524,10 @@ async function recalcBestPriceLocked(productId, dbc) {
   // become the catalog best price — a pending or rejected scrape must never
   // feed best_price consumers. The control-layer migration backfilled all
   // legacy rows to approved/is_active=true, so this excludes nothing valid.
-  const rows = await dbc('vendor_pricing')
-    .where({ product_id: productId })
-    // Authoritative-first positivity (r21-push P1): the coalesced value the
-    // scorer actually uses must be positive — a positive legacy price must
-    // not admit a row whose authoritative price_amount is zero/negative.
-    .whereRaw('COALESCE(vendor_pricing.price_amount, vendor_pricing.price) > 0')
-    .where('vendor_pricing.is_active', true)
-    .whereIn('vendor_pricing.approval_status', ['approved', 'auto_approved'])
-    .where(function unexpired() {
-      this.whereNull('vendor_pricing.expires_at').orWhere('vendor_pricing.expires_at', '>', new Date());
-    })
+  // Eligibility (positivity, active, approval, expiry) is the shared
+  // vendor-pricing-eligibility predicate — the auto-reorder sweep applies the
+  // same one, so both read the same set of rows.
+  const rows = await eligibleVendorPricing(dbc('vendor_pricing').where({ product_id: productId }))
     .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
     .select('vendor_pricing.*', 'vendors.name as vendor_name');
   if (!rows || !rows.length) {

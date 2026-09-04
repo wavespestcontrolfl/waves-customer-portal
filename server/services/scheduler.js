@@ -927,7 +927,12 @@ function initScheduledJobs() {
         if (gateEnvValue('GATE_AUTO_REORDER')) {
           logger.info('Running: Supplies auto-reorder sweep');
           try {
-            await require('./procurement/auto-reorder').runSuppliesAutoReorderSweep();
+            const { runSuppliesAutoReorderSweep, sweepFailureError } = require('./procurement/auto-reorder');
+            // A contained per-product failure still fails the RUN (job_health
+            // red) — the sweep returns normally so the other products get
+            // their requests, then the failure is surfaced here (pre-push P1).
+            const failure = sweepFailureError(await runSuppliesAutoReorderSweep());
+            if (failure) throw failure;
           } catch (err) {
             sweepError = err;
             logger.error(`Supplies auto-reorder sweep failed: ${err.message}`);
