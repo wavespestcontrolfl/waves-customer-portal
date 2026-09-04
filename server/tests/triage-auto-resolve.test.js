@@ -742,6 +742,10 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(termiteQuote('inspection_only'), treatmentLine)).toBe(false);
     expect(estimateCoversAsk(termiteQuote('preventative_one_time'), inspectionLine)).toBe(false);
     expect(estimateCoversAsk(termiteQuote('quote_only'), treatmentLine)).toBe(true);
+    // A quote-only ask takes either subtype — the category / specific
+    // service says what was quoted, so a delivered inspection quote closes
+    // the inspection quote promise (codex r28 P2).
+    expect(estimateCoversAsk(termiteQuote('quote_only'), inspectionLine)).toBe(true);
     expect(estimateCoversAsk(termiteQuote('quote_only'), est({ estimate_data: { result: { recurring: { services: [{ name: 'Termite Bond', annual: 300 }] } } } }))).toBe(true);
     expect(estimateCoversAsk(termiteQuote('complaint_or_callback'), treatmentLine)).toBe(false);
     // A call that named a second property is answered only when a delivered
@@ -788,6 +792,13 @@ describe('evidence helpers', () => {
     expect(bookingAtRequestedAddress(card(named), atOnFile, places)).toBe(false);
     expect(bookingAtRequestedAddress(card(named), booking({ service_address_line1: '5 Pine Ave Unit 2', service_address_city: 'Sarasota' }), places)).toBe(false);
     expect(bookingAtRequestedAddress(card(named), booking({ service_address_line1: '5 Pine Ave', service_address_city: 'Venice' }), places)).toBe(false);
+    // A street-only off-file ask (no city, no ZIP in any reading) cannot
+    // prove WHICH street and binds nothing, even against a booking whose
+    // stamp matches the street (codex r28 P1).
+    const streetOnly = { ...none, street_line_1: '5 Pine Ave' };
+    expect(bookingAtRequestedAddress(card(streetOnly), atOther, places)).toBe(false);
+    expect(bookingAtRequestedAddress(card({ ...none, raw_text: '5 Pine Ave' }), atOther, places)).toBe(false);
+    expect(bookingAtRequestedAddress(card({ ...none, raw_text: '5 Pine Ave, Sarasota FL 34236' }), atOther, places)).toBe(true);
     // A second-property ask binds nothing.
     expect(bookingAtRequestedAddress(card({ ...none, additional_properties: 1 }), atOnFile, places)).toBe(false);
     // Through the booking arm: this call's own booking at the wrong address

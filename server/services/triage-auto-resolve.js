@@ -349,10 +349,16 @@ function bookingPlace(visit, places) {
 // readings? None (the ask named no address) or exactly the on-file one →
 // the booking must be positively at the on-file address. Another address →
 // positively at THAT one (every reading keys to it, locality and unit
-// agreeing). A reprocess that moved the extracted property and minted this
+// agreeing), and only when some reading carries a locality of its own: a
+// street-only off-file ask ("5 Pine Ave", no city, no ZIP) cannot prove
+// WHICH 5 Pine Ave, exactly as a street-only visit stamp cannot, so it
+// binds nothing — a multi-property customer's same-named streets or a
+// reprocessed booking in the wrong city would otherwise answer it (codex
+// r28 P1). A reprocess that moved the extracted property and minted this
 // call's own booking elsewhere must not close the original ask.
 function bookingAtReadings(item, visit, places, readings) {
   if (!readings.length || readings.every((r) => readingMatchesOnFile(item, r))) return visitAtOnFileAddress(item, visit, places);
+  if (!readings.some((r) => zip5(r.zip) || cityKey(r.city))) return false;
   const place = bookingPlace(visit, places);
   if (!place || !place.key) return false;
   if (place.customer_id && String(place.customer_id) !== String(item.call_customer_id)) return false;
@@ -492,7 +498,9 @@ function timeOfDayMatches(item, visit) {
 // inspection ask only by an inspection — a termite TREATMENT booking or
 // quote is not the termite inspection the caller asked for, and an
 // inspection answers no treatment ask (codex r24 P1); a quote-only ask by a
-// delivered quote and never by a booking. A complaint, a callback or a
+// delivered quote of either subtype — the category / specific-service
+// tokens say what was quoted, and a WDO-inspection quote must close the
+// WDO quote promise (codex r28 P2) — and never by a booking. A complaint, a callback or a
 // cancellation is not an ask a booking or a quote answers, and a snapshot
 // without an intent binds nothing: both fail closed.
 const INTENT_RULES = {
@@ -501,15 +509,16 @@ const INTENT_RULES = {
   active_infestation_treatment: { recurring: true, oneTime: true, inspection: false, booking: true },
   follow_up_existing_service: { recurring: false, oneTime: true, inspection: false, booking: true },
   inspection_only: { recurring: true, oneTime: true, inspection: true, booking: true },
-  quote_only: { recurring: true, oneTime: true, inspection: false, booking: false },
+  quote_only: { recurring: true, oneTime: true, inspection: null, booking: false },
 };
 const intentRule = (item) => INTENT_RULES[requestAsk(item)?.requested_service_intent] || null;
 const isInspection = (words) => /\binspections?\b/i.test(String(words || ''));
 // A record — a booking's service words and cadence, or an estimate line —
 // answers the intent when it carries a cadence the rule allows and is an
-// inspection exactly when the rule wants one.
+// inspection exactly when the rule wants one (null: either).
 function intentAnswered(rule, { recurring, oneTime, words }) {
-  return Boolean(rule) && ((recurring && rule.recurring) || (oneTime && rule.oneTime)) && isInspection(words) === rule.inspection;
+  return Boolean(rule) && ((recurring && rule.recurring) || (oneTime && rule.oneTime))
+    && (rule.inspection === null || isInspection(words) === rule.inspection);
 }
 function cadenceMatches(item, visit) {
   const rule = intentRule(item);
@@ -777,90 +786,79 @@ function surnameCameFromCall(item) {
   return names.last.includes(onFile);
 }
 
+// A customer whose record is independent evidence for a moot rule: not
+// soft-deleted, in a trusted pipeline stage, and older than the call (a
+// customer created FROM this call cannot moot its own cards).
+function trustedPreexistingCustomer(item) {
+  return !item.customer_deleted_at
+    && TRUSTED_CUSTOMER_STAGES.has(String(item.customer_pipeline_stage || '').trim().toLowerCase())
+    && customerPredatesCall(item);
+}
+const filled = (v) => String(v || '').trim() !== '';
+
+// The rules, in precedence order — ONE table (codex r28 P2). `when` reads
+// the joined card row, its evidence flags (`ev`, null while the evidence
+// gate is off — every evidence rule requires it) and the sweep clock.
+// Order matters: moot-condition resolves outrank the evidence arms, which
+// outrank age-based dismissal, so a card that is BOTH old and moot records
+// the real reason it closed.
+const CLASSIFY_RULES = [
+  // Address cards are moot ONLY for a pre-existing trusted customer with a
+  // full on-file address whose call supplied no address of its own
+  // (payload evidence AND the call's extraction both empty) — the mirror
+  // of the routing guard's on-file-address recovery condition. A call that
+  // DID state an address keeps its card held for validation.
+  { rule: 'address_moot', action: 'resolve',
+    when: (item, ev) => ADDRESS_MOOT_CODES.has(item.reason_code)
+      && trustedPreexistingCustomer(item)
+      && !hasNewAddressEvidence(item.payload)
+      && !callSuppliedAddress(item.call_extraction, item.call_extraction_v1)
+      && !callConfirmedUnbooked(item, ev)
+      && filled(item.customer_address_line1) && filled(item.customer_zip) },
+  // Same provenance guards as addresses: a pre-existing customer whose
+  // surname was BACKFILLED from this call's merged extraction cannot moot
+  // its own identity card. Only a surname that predates the call (record
+  // older than the call AND not matching what the call heard) is
+  // independent evidence.
+  { rule: 'name_moot', action: 'resolve',
+    when: (item) => item.reason_code === 'missing_last_name'
+      && trustedPreexistingCustomer(item)
+      && callerMatchesCustomerFirstName(item)
+      && !surnameCameFromCall(item)
+      && filled(item.customer_last_name) },
+  // Evidence rules: each flag is true only when the proof postdates the
+  // CARD — see loadEvidence for the exact predicates.
+  { rule: 'quote_fulfilled', action: 'resolve', when: (item, ev) => item.reason_code === 'quote_promised' && ev?.estimate_direct === true },
+  { rule: 'email_engaged', action: 'resolve', when: (item, ev) => item.reason_code === 'email_unverified' && ev?.email_engaged === true },
+  // Clearing the authorization question must not make a confirmed-but-
+  // unbooked call (the routing block kept its appointment from being
+  // created, and no not_confirmed sibling exists) read as fully resolved
+  // — the promised appointment is still owed.
+  { rule: 'caller_phone_added', action: 'resolve',
+    when: (item, ev) => item.reason_code === 'caller_not_authorized' && ev?.caller_phone_added === true
+      && callerPhoneOnFile(item) && !cardConfirmedUnbooked(item, ev) },
+  { rule: 'booking_created', action: 'resolve', when: (item, ev) => item.reason_code === 'not_confirmed' && ev?.booking_after_card === true },
+  // A confirmed call held solely on its address card has no not_confirmed
+  // sibling: an unrelated recurring visit completing at the address must
+  // not close the call's only trace while the confirmed appointment was
+  // never created.
+  { rule: 'visit_completed_at_address', action: 'resolve',
+    when: (item, ev) => ADDRESS_MOOT_CODES.has(item.reason_code) && ev?.visit_completed_at_address === true
+      && !item.customer_deleted_at && heardAddressMatchesOnFile(item) && !cardConfirmedUnbooked(item, ev) },
+  { rule: 'spam_aged', action: 'dismiss', when: (item, ev, now) => item.reason_code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS },
+  { rule: 'advisory_aged', action: 'dismiss',
+    when: (item, ev, now) => ADVISORY_AGE_CODES.has(item.reason_code) && item.severity === 'advisory' && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS },
+];
+
 // Pure classifier, exported for tests. `item` is a triage_items row joined
 // with its call's customer fields; `ctx.evidence` is the per-item proof map
 // loadEvidence() built (empty when GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE is
 // off). Returns { action: 'resolve'|'dismiss', rule } or null (untouched).
-// Order matters: moot-condition resolves outrank age-based dismissal so a
-// card that is BOTH old and moot records the real reason it closed.
 function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   if (item.status !== 'open') return null;
-  const code = item.reason_code;
-  // Each evidence flag is true only when the proof postdates the CARD —
-  // see loadEvidence for the exact predicates.
-  const ev = ctx.evidence instanceof Map ? ctx.evidence.get(item.id) : null;
-
-  // Address cards are moot ONLY for a customer who existed before the call,
-  // has a full on-file address, and whose call supplied no address of its
-  // own (payload evidence AND the call's extraction both empty) — the
-  // mirror of the routing guard's on-file-address recovery condition. A
-  // call that DID state an address keeps its card held for validation.
-  if (ADDRESS_MOOT_CODES.has(code)
-      && !item.customer_deleted_at
-      && TRUSTED_CUSTOMER_STAGES.has(String(item.customer_pipeline_stage || '').trim().toLowerCase())
-      && customerPredatesCall(item)
-      && !hasNewAddressEvidence(item.payload)
-      && !callSuppliedAddress(item.call_extraction, item.call_extraction_v1)
-      && !callConfirmedUnbooked(item, ev)
-      && String(item.customer_address_line1 || '').trim() !== ''
-      && String(item.customer_zip || '').trim() !== '') {
-    return { action: 'resolve', rule: 'address_moot' };
-  }
-  // Same provenance guards as addresses: a customer created FROM this call
-  // — or a pre-existing one whose surname was BACKFILLED from this call's
-  // merged extraction — cannot moot its own identity card. Only a surname
-  // that predates the call (record older than the call AND not matching
-  // what the call heard) is independent evidence.
-  if (code === 'missing_last_name'
-      && !item.customer_deleted_at
-      && TRUSTED_CUSTOMER_STAGES.has(String(item.customer_pipeline_stage || '').trim().toLowerCase())
-      && customerPredatesCall(item)
-      && callerMatchesCustomerFirstName(item)
-      && !surnameCameFromCall(item)
-      && String(item.customer_last_name || '').trim() !== '') {
-    return { action: 'resolve', rule: 'name_moot' };
-  }
-  // Evidence rules: none can fire while the evidence gate is off.
-  if (ev) {
-    if (code === 'quote_promised' && ev.estimate_direct) {
-      return { action: 'resolve', rule: 'quote_fulfilled' };
-    }
-    if (code === 'email_unverified' && ev.email_engaged) {
-      return { action: 'resolve', rule: 'email_engaged' };
-    }
-    // Clearing the authorization question must not make a confirmed-but-
-    // unbooked call (the routing block kept its appointment from being
-    // created, and no not_confirmed sibling exists) read as fully resolved
-    // — the promised appointment is still owed.
-    if (code === 'caller_not_authorized' && ev.caller_phone_added && callerPhoneOnFile(item)
-        && !cardConfirmedUnbooked(item, ev)) {
-      return { action: 'resolve', rule: 'caller_phone_added' };
-    }
-    if (code === 'not_confirmed' && ev.booking_after_card) {
-      return { action: 'resolve', rule: 'booking_created' };
-    }
-    // A confirmed call held solely on its address card has no not_confirmed
-    // sibling: an unrelated recurring visit completing at the address must
-    // not close the call's only trace while the confirmed appointment was
-    // never created.
-    if (ADDRESS_MOOT_CODES.has(code)
-        && !item.customer_deleted_at
-        && ev.visit_completed_at_address
-        && heardAddressMatchesOnFile(item)
-        && !cardConfirmedUnbooked(item, ev)) {
-      return { action: 'resolve', rule: 'visit_completed_at_address' };
-    }
-  }
-  if (code === 'spam_or_wrong_number'
-      && ageDays(item.created_at, now) >= SPAM_AGE_DAYS) {
-    return { action: 'dismiss', rule: 'spam_aged' };
-  }
-  if (ADVISORY_AGE_CODES.has(code)
-      && item.severity === 'advisory'
-      && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS) {
-    return { action: 'dismiss', rule: 'advisory_aged' };
-  }
-  return null;
+  const ev = (ctx.evidence instanceof Map && ctx.evidence.get(item.id)) || null;
+  const hit = CLASSIFY_RULES.find(({ when }) => when(item, ev, now));
+  return hit ? { action: hit.action, rule: hit.rule } : null;
 }
 
 async function runTriageAutoResolve({ now = new Date() } = {}) {
