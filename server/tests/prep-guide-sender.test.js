@@ -412,6 +412,14 @@ describe('sendPrepToCustomer', () => {
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' }))
       .toMatchObject({ ok: false, reason: 'prep_link_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+    // Email after a failed mint: goes out with the portal link, but the row
+    // is never stamped as a delivered guide (no token = no page owned).
+    serviceUpdates = [];
+    const emailed = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'email' });
+    expect(emailed).toMatchObject({ ok: true, emailSent: true });
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload.prep_url).toContain('?tab=visits');
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
   });
 
   test('both with one leg down reports a partial send naming the failed channel', async () => {

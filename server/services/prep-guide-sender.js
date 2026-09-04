@@ -200,8 +200,11 @@ async function resolvePrepVisit(customer, config) {
     }
     return { visit, prepUrl: portalUrl(`/prep/${token}`), ownsPage: true, linkReason: null };
   } catch (tokenErr) {
+    // No token or no claim = no page to own: the email still goes out
+    // (portal link, dated by the visit) but never stamps the row as a
+    // delivered guide (pre-push Codex P1 on c3398fd21).
     logger.warn(`[prep-guide-sender] prep token mint failed for service ${visit.id}: ${tokenErr.message}`);
-    return { visit, prepUrl: null, ownsPage: true, linkReason: 'prep_link_failed' };
+    return { visit, prepUrl: null, ownsPage: false, linkReason: 'prep_link_failed' };
   }
 }
 
@@ -270,7 +273,8 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
       workflow: 'manual_prep_send', entity_type: 'customer', entity_id: customer.id,
     });
   } catch (err) {
-    logger.warn(`[prep-guide-sender] ${templateKey} render threw for customer ${customer.id}: ${err.message}`);
+    // Sanitized: renderer/provider errors can echo the phone or the body.
+    logger.warn(`[prep-guide-sender] ${templateKey} render threw for customer ${customer.id} (${err?.name || 'Error'})`);
     return { sent: false };
   }
   if (!body) {
@@ -302,7 +306,7 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
       },
     });
   } catch (err) {
-    logger.warn(`[prep-guide-sender] prep SMS provider call threw for customer ${customer.id}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] prep SMS provider call threw for customer ${customer.id} (${err?.code || err?.name || 'Error'})`);
     return { sent: false, uncertain: true };
   }
   // sent:true with a suppression sentinel (gate off, template disabled, owner
