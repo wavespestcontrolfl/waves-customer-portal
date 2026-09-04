@@ -33,6 +33,7 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
     q.forUpdate = () => q;
     q.first = async () => (table === 'product_inventory_movements' ? (techLogged ? { id: 'mv-tech' } : null) : products[0]);
     q.update = async (row) => { updates.push({ table, row }); return 1; };
+    q.whereNull = () => q;
     q.insert = (row) => ({
       onConflict: () => ({
         ignore: () => ({
@@ -49,8 +50,9 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
   trx.raw = (s) => s;
   const db = (table) => {
     const q = {};
-    for (const m of ['whereNotNull', 'where']) q[m] = () => q;
+    for (const m of ['whereNotNull', 'where', 'whereRaw', 'whereNull']) q[m] = () => q;
     q.select = async () => products;
+    q.update = async (row) => { updates.push({ table, row }); return 1; };
     return q;
   };
   db.transaction = async (fn) => fn(trx);
@@ -133,7 +135,7 @@ test('consumable with a count → one usage movement and a decrement', async () 
   expect(res.consumed).toEqual([{ productId: 'prod-sign', name: 'Sign card', usage: 1, unit: 'each', before: 640, after: 639, costUsed: null }]);
   expect(inserts).toHaveLength(1);
   expect(inserts[0]).toMatchObject({ scheduled_service_id: 'svc-1', movement_type: 'usage', quantity: 1, stock_before: 640, stock_after: 639, metadata: { source: 'completion_consumable' } });
-  expect(updates).toEqual([{ table: 'products_catalog', row: expect.objectContaining({ inventory_on_hand: 639 }) }]);
+  expect(updates.filter((u) => u.table === 'products_catalog')).toEqual([{ table: 'products_catalog', row: expect.objectContaining({ inventory_on_hand: 639 }) }]);
 });
 
 test('a kit item the tech logged in the picker is not consumed again', async () => {
@@ -247,6 +249,24 @@ test('notifyAdmin resolving null (its own persistence failure) counts as a lost 
   const res = await consumeCompletionSupplies(db, args);
   expect(res.errors).toEqual([{ productId: 'prod-sign', message: 'insert boom' }, { productId: 'prod-sign', reason: 'failure_bell_not_sent', message: 'notification not persisted' }]);
   expect(require('../services/logger').error).toHaveBeenCalledWith(expect.stringContaining('failure bell NOT sent'));
+});
+
+test('a failed consumables lookup rings ONE visit-scoped deduped bell (Codex r14 P2)', async () => {
+  notifyAdmin.mockClear();
+  const db = () => { throw new Error('relation lost'); };
+  db.transaction = async () => { throw new Error('unreachable'); };
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('supplies-consumption-failed:lookup:svc-1');
+});
+
+test('a successful deduction retires the failure bells an earlier attempt rang for this product + visit (Codex r15 P2)', async () => {
+  const { db, updates } = fakeDb({ products: [sign] });
+  await consumeCompletionSupplies(db, args);
+  const retired = updates.filter((u) => u.table === 'notifications');
+  expect(retired).toHaveLength(1);
+  expect(retired[0].row.read_at).toBeInstanceOf(Date);
 });
 
 test('a successful deduction rings no bell', async () => {
