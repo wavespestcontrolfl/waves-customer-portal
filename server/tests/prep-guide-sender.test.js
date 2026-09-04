@@ -40,6 +40,7 @@ function scheduledQuery() {
   let listMode = false; // nextUpcomingVisit: .limit(n).select(cols) → rows
   const q = {
     limit: jest.fn(() => { listMode = true; return q; }),
+    offset: jest.fn(() => q),
     select: jest.fn(() => {
       if (listMode) return Promise.resolve(upcomingVisitRow ? [upcomingVisitRow] : []);
       tokenMode = true; return q;
