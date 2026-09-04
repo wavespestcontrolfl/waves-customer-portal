@@ -83,12 +83,17 @@ describe('buildLanes', () => {
   const window = hubRead.resolveWindow('7d', NOW);
   const ledger = {
     current: [
-      { lane_id: 'sms_draft', calls: 6, ok_calls: 4, input_tokens: '600', cached_input_tokens: '0', output_tokens: '120', reasoning_tokens: '0', p50_latency_ms: 700, p95_latency_ms: 9000, last_active_at: '2026-09-04T21:00:00.000Z', recent_calls: 6, recent_errors: 2 },
-      { lane_id: 'report_copy', calls: 1, ok_calls: 1, input_tokens: '10', cached_input_tokens: '0', output_tokens: '5', reasoning_tokens: '0', p50_latency_ms: 300, p95_latency_ms: 300, last_active_at: '2026-09-02T12:00:00.000Z', recent_calls: 0, recent_errors: 0 },
-      // Below the min-calls floor: a 100 % error rate on 3 calls is not attention.
-      { lane_id: 'email_classify', calls: 3, ok_calls: 0, input_tokens: '0', cached_input_tokens: '0', output_tokens: '0', reasoning_tokens: '0', p50_latency_ms: null, p95_latency_ms: null, last_active_at: '2026-09-04T20:00:00.000Z', recent_calls: 3, recent_errors: 3 },
+      { lane_id: 'sms_draft', calls: 6, ok_calls: 4, input_tokens: '600', cached_input_tokens: '0', output_tokens: '120', reasoning_tokens: '0', p50_latency_ms: 700, p95_latency_ms: 9000, last_active_at: '2026-09-04T21:00:00.000Z' },
+      { lane_id: 'report_copy', calls: 1, ok_calls: 1, input_tokens: '10', cached_input_tokens: '0', output_tokens: '5', reasoning_tokens: '0', p50_latency_ms: 300, p95_latency_ms: 300, last_active_at: '2026-09-02T12:00:00.000Z' },
+      { lane_id: 'email_classify', calls: 3, ok_calls: 0, input_tokens: '0', cached_input_tokens: '0', output_tokens: '0', reasoning_tokens: '0', p50_latency_ms: null, p95_latency_ms: null, last_active_at: '2026-09-04T20:00:00.000Z' },
     ],
     prior: [{ lane_id: 'sms_draft', calls: 1, ok_calls: 1 }],
+    // The trailing hour is its own read (not clipped by the window): sms_draft
+    // trips the rule; email_classify is below the min-calls floor.
+    recent: [
+      { lane_id: 'sms_draft', recent_calls: 6, recent_errors: 2 },
+      { lane_id: 'email_classify', recent_calls: 3, recent_errors: 3 },
+    ],
     chains: [{ lane_id: 'sms_draft', chains: 2, fallbacks: 1 }],
     buckets: [
       { lane_id: 'sms_draft', bucket: '2026-09-04', calls: 6, errors: 2 },

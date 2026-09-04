@@ -95,10 +95,9 @@ function ledgerRows(from, to) {
     .andWhere('created_at', '<', to);
 }
 
-// Per-lane aggregates over [from, to). `recentSince` adds the trailing-hour
-// counts the error-rate rule reads.
-function laneAggregates(from, to, recentSince = null) {
-  const q = ledgerRows(from, to).groupBy('lane_id').select(
+// Per-lane aggregates over [from, to).
+function laneAggregates(from, to) {
+  return ledgerRows(from, to).groupBy('lane_id').select(
     'lane_id',
     db.raw('COUNT(*)::int AS calls'),
     db.raw('COUNT(*) FILTER (WHERE ok)::int AS ok_calls'),
@@ -110,13 +109,17 @@ function laneAggregates(from, to, recentSince = null) {
     db.raw('(percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE latency_ms IS NOT NULL))::int AS p95_latency_ms'),
     db.raw('MAX(created_at) AS last_active_at'),
   );
-  if (recentSince) {
-    q.select(
-      db.raw('COUNT(*) FILTER (WHERE created_at >= ?)::int AS recent_calls', [recentSince]),
-      db.raw('COUNT(*) FILTER (WHERE created_at >= ? AND NOT ok)::int AS recent_errors', [recentSince]),
-    );
-  }
-  return q;
+}
+
+// The trailing hour the error-rate rule reads — its own range, NOT a filter
+// inside the display window: right after ET midnight the `today` window
+// starts inside that hour and would clip it (pre-push audit P1).
+function recentAggregates(since, to) {
+  return ledgerRows(since, to).groupBy('lane_id').select(
+    'lane_id',
+    db.raw('COUNT(*)::int AS recent_calls'),
+    db.raw('COUNT(*) FILTER (WHERE NOT ok)::int AS recent_errors'),
+  );
 }
 
 // Fallback rate lives on the chain rows (one per dispatchWithFallback chain,
@@ -156,13 +159,14 @@ function bucketRows(from, to, unit) {
 
 async function loadLedger(window, now) {
   const recentSince = new Date(now.getTime() - 60 * 60 * 1000);
-  const [current, prior, chains, buckets] = await Promise.all([
-    laneAggregates(window.from, window.to, recentSince),
+  const [current, prior, chains, buckets, recent] = await Promise.all([
+    laneAggregates(window.from, window.to),
     laneAggregates(window.prior.from, window.prior.to),
     chainAggregates(window.from, window.to),
     bucketRows(window.from, window.to, window.unit),
+    recentAggregates(recentSince, now),
   ]);
-  return { current, prior, chains, buckets };
+  return { current, prior, chains, buckets, recent };
 }
 
 // ── Other sources (each gated, each isolated) ────────────────────────
@@ -245,10 +249,10 @@ function sumSparks(sparks, window) {
   }));
 }
 
-function laneReasons(row, extra) {
+function laneReasons(recent, extra) {
   const reasons = [...extra];
-  const recentCalls = num(row?.recent_calls);
-  const recentErrors = num(row?.recent_errors);
+  const recentCalls = num(recent?.recent_calls);
+  const recentErrors = num(recent?.recent_errors);
   if (recentCalls >= ERROR_RATE_MIN_CALLS && recentErrors / recentCalls > ERROR_RATE_THRESHOLD) {
     reasons.push({
       priority: 'P1',
@@ -273,6 +277,7 @@ function buildLanes({ lanes, window, ledger, reasons = [] }) {
   const current = new Map(ledger.current.map((r) => [r.lane_id, r]));
   const prior = new Map(ledger.prior.map((r) => [r.lane_id, r]));
   const chains = new Map(ledger.chains.map((r) => [r.lane_id, r]));
+  const recent = new Map((ledger.recent || []).map((r) => [r.lane_id, r]));
   const buckets = new Map();
   for (const r of ledger.buckets) {
     if (!buckets.has(r.lane_id)) buckets.set(r.lane_id, []);
@@ -287,7 +292,7 @@ function buildLanes({ lanes, window, ledger, reasons = [] }) {
   return lanes.map((lane) => {
     const row = current.get(lane.id) || null;
     const metrics = laneMetrics(row, prior.get(lane.id) || null, chains.get(lane.id) || null);
-    const attentionReasons = laneReasons(row, extraByLane.get(lane.id) || []);
+    const attentionReasons = laneReasons(recent.get(lane.id) || null, extraByLane.get(lane.id) || []);
     return {
       ...laneIdentity(lane, policyFor(lane.id)),
       status: attentionReasons.length ? 'attention' : metrics.calls > 0 ? 'active' : 'idle',
@@ -445,6 +450,7 @@ module.exports = {
   buildLanes,
   buildAreas,
   laneAggregates,
+  recentAggregates,
   chainAggregates,
   bucketRows,
   SOURCE_LANE,
