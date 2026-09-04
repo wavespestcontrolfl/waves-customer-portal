@@ -149,6 +149,20 @@ test('a vendor id learned alone (name already on the request, no SKU/URL yet) is
   expect(notify.mock.calls[0][3].metadata.vendorId).toBe('vend-gemplers');
 });
 
+test('a request pinned to another vendor learns nothing from the product\'s new vendor — no mixed SKU/link (Codex r8 P2)', async () => {
+  mockState.candidates = [{ ...lowSign, vendor_name: 'Amazon', auto_reorder_vendor_id: 'vend-amazon' }];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Gemplers', requested_quantity: '650', unit: 'each', metadata: { vendorId: 'vend-gemplers' } };
+  mockState.pricing = { vendor_sku: 'B0AMZ', vendor_product_url: 'https://amazon.com/y' };
+  const notify = jest.fn(async () => ({}));
+  const res = await runSuppliesAutoReorderSweep({ notify });
+  expect(res.refreshed).toEqual([]);
+  expect(mockState.updates).toHaveLength(0);
+  const [, , body, opts] = notify.mock.calls[0];
+  expect(body).toContain('from Gemplers');
+  expect(body).not.toContain('amazon');
+  expect(opts.metadata.vendorSku).toBeNull();
+});
+
 test('an existing ORDERED auto request does not re-ring', async () => {
   mockState.candidates = [lowSign];
   mockState.existing = { id: 'req-auto', status: 'ordered', source: 'auto_reorder' };

@@ -35,6 +35,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
+const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 
 const GATE = 'GATE_AUTO_REORDER';
 const SOURCE = 'auto_reorder';
@@ -68,17 +69,14 @@ async function findLowStockCandidates(conn = db) {
     .orderBy('pc.name');
 }
 
-// Same eligibility as recalcBestPriceLocked (admin-inventory.js): a
-// deactivated, unapproved or expired row must not steer an order (Codex r4
-// P2). Any query failure (older schema) degrades to "no link", never throws.
+// THE eligibility predicate recalcBestPriceLocked uses (shared module):
+// a zero-priced, deactivated, unapproved or expired row must not steer an
+// order (Codex r4 P2, r8 P1). Any query failure (older schema) degrades to
+// "no link", never throws.
 async function vendorPricingFor(conn, productId, vendorId) {
   if (!vendorId) return null;
   try {
-    return await conn('vendor_pricing')
-      .where({ product_id: productId, vendor_id: vendorId })
-      .where('is_active', true)
-      .whereIn('approval_status', ['approved', 'auto_approved'])
-      .where(function unexpired() { this.whereNull('expires_at').orWhere('expires_at', '>', new Date()); })
+    return await eligibleVendorPricing(conn('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }))
       .orderBy('is_best_price', 'desc')
       .first();
   } catch {
@@ -129,6 +127,14 @@ async function bellOrWarn(ctx, product, request, bucket) {
 // Returns the request as the bell must see it.
 async function refreshOpenRequest(ctx, p, existing, pricing) {
   const meta = parseMeta(existing.metadata);
+  // Everything learned comes from ONE vendor — the request's own. A request
+  // already pinned to a vendor (id, or name when it predates ids) learns
+  // nothing from a product that has since moved to another vendor: it keeps
+  // saying "from Gemplers" with no Amazon SKU/link (Codex r8 P2). Only a
+  // request with no vendor identity at all adopts the product's vendor.
+  const scanVendorId = p.auto_reorder_vendor_id || null;
+  const sameVendor = meta.vendorId ? meta.vendorId === scanVendorId : (!existing.vendor || existing.vendor === p.vendor_name);
+  if (!sameVendor) return existing;
   const learned = {
     vendorId: meta.vendorId || p.auto_reorder_vendor_id || null,
     vendorSku: meta.vendorSku || pricing?.vendor_sku || null,
