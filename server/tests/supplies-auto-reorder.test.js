@@ -24,6 +24,7 @@ jest.mock('../models/db', () => {
     q.forUpdate = () => { if (!mockState.raws.some((r) => /pg_advisory_xact_lock/.test(r))) throw new Error('row lock taken before the pricing advisory lock'); mockState.locked = true; return q; };
     q.first = async () => {
       if (table === 'product_restock_requests') return mockState.existing;
+      if (table === 'vendors') return mockState.vendorRow === undefined ? { name: 'Gemplers', active: true } : mockState.vendorRow;
       if (table === 'vendor_pricing') {
         if (mockState.pricingThrows) throw new Error('relation "vendor_pricing" does not exist');
         return mockState.locked && mockState.lockedPricing !== undefined ? mockState.lockedPricing : mockState.pricing;
@@ -62,6 +63,7 @@ const { runSuppliesAutoReorderSweep, sweepFailureError } = require('../services/
 const lowSign = {
   id: 'prod-sign', name: 'Pesticide application sign 4x5', inventory_on_hand: '80', inventory_unit: 'each',
   low_stock_threshold: '100', reorder_quantity: '650', auto_reorder_vendor_id: 'vend-gemplers', vendor_name: 'Gemplers',
+  auto_reorder_enabled: true, active: true,
 };
 
 beforeEach(() => {
@@ -78,6 +80,7 @@ beforeEach(() => {
   mockState.insertConflict = false;
   mockState.raws = [];
   mockState.pricingThrows = false;
+  mockState.vendorRow = undefined;
 });
 afterAll(() => { delete process.env.GATE_AUTO_REORDER; });
 
@@ -101,7 +104,7 @@ test('low product with no open request → one auto_reorder row + one deduped be
   expect(row.source).toBe('auto_reorder');
   expect(row.status).toBe('open');
   expect(row.requested_quantity).toBe(650);
-  expect(row.target_stock).toBe(750);
+  expect(row.target_stock).toBe(730); // on hand 80 + reorder 650: the level receiving it produces (Codex r15 P2)
   expect(row.vendor).toBe('Gemplers');
   expect(row.metadata.vendorSku).toBe('127544');
   expect(notify).toHaveBeenCalledTimes(1);
@@ -225,7 +228,7 @@ test('reorder quantity edited between the scan and the lock → the request and 
   const notify = jest.fn(async () => ({}));
   const res = await runSuppliesAutoReorderSweep({ notify });
   expect(mockState.inserted[0].requested_quantity).toBe(325);
-  expect(mockState.inserted[0].target_stock).toBe(425);
+  expect(mockState.inserted[0].target_stock).toBe(405);
   expect(res.created[0].requestedQuantity).toBe(325);
   expect(notify.mock.calls[0][2]).toContain('Reorder 325 each');
 });
@@ -282,6 +285,35 @@ test('an open auto request still re-rings when the product\'s reorder quantity w
   expect(r.unconfigured).toHaveLength(0);
   expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
   expect(notify).toHaveBeenCalledTimes(1);
+});
+
+test('an open auto request is found and re-belled even after the product\'s low-stock threshold was cleared (Codex r15 P2)', async () => {
+  mockState.candidates = [{ ...lowSign, low_stock_threshold: null }];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Gemplers', metadata: { vendorId: 'vend-gemplers' } };
+  const notify = jest.fn(async () => ({}));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
+  expect(notify).toHaveBeenCalledTimes(1);
+});
+
+test('a product that is not low (or has no threshold) and has no live request is left alone', async () => {
+  mockState.candidates = [{ ...lowSign, inventory_on_hand: '500' }, { ...lowSign, id: 'p2', low_stock_threshold: null }];
+  const r = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+  expect(r.created).toHaveLength(0);
+  expect(r.unconfigured).toHaveLength(0);
+  expect(mockState.inserted).toHaveLength(0);
+});
+
+test('a deactivated vendor steers nothing: no name, SKU or link on the request, bell says order manually (Codex r15 P2)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/x' };
+  mockState.vendorRow = { name: 'Gemplers', active: false };
+  const notify = jest.fn(async () => ({}));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.created).toHaveLength(1);
+  expect(mockState.inserted[0].vendor).toBeNull();
+  expect(mockState.inserted[0].metadata).toMatchObject({ vendorId: null, vendorSku: null, vendorProductUrl: null });
+  expect(notify.mock.calls[0][2]).not.toContain('gemplers.com');
 });
 
 test('no reorder_quantity → unconfigured, no row', async () => {

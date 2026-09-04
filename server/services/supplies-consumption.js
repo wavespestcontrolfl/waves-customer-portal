@@ -86,9 +86,12 @@ function appliesToLine(rawLines, serviceLine) {
 // entry, never a silent success (Codex r11 P2).
 async function ringMissedDeductionBell(result, { scheduledServiceId, product = null, reason }) {
   const title = product ? `Inventory: ${product.name} was not deducted for a completed visit` : 'Inventory: yard-sign supplies were not deducted for a completed visit';
+  // The lookup bell names no product: which kit items this visit should
+  // have consumed is decided only after the lookup (service-line scope), so
+  // it must not prescribe a deduction (Codex r15 P2).
   const body = product
     ? `Adjust the count by ${product.per_completion_usage} ${product.inventory_unit || ''} on the Inventory page. Reason: ${reason}`
-    : `The consumables lookup failed, so nothing was deducted for this visit — adjust the sign card, stake and sticker counts on the Inventory page. Reason: ${reason}`;
+    : `The consumables lookup failed, so nothing was deducted for this visit — check on the Inventory page which per-visit supplies apply to this service line and adjust those counts by hand. Reason: ${reason}`;
   const dedupeKey = product ? `supplies-consumption-failed:${product.id}:${scheduledServiceId}` : `supplies-consumption-failed:lookup:${scheduledServiceId}`;
   try {
     const bell = await require('./notification-service').notifyAdmin('system', title, body, { bell: true, link: '/admin/inventory', dedupeKey, metadata: { productId: product?.id || null, scheduledServiceId } });
@@ -96,6 +99,20 @@ async function ringMissedDeductionBell(result, { scheduledServiceId, product = n
   } catch (bellErr) {
     logger.error(`[supplies-consumption] failure bell NOT sent for ${product ? product.name : 'the visit'} on visit ${scheduledServiceId}: ${bellErr.message}`);
     result.errors.push({ productId: product?.id || null, reason: 'failure_bell_not_sent', message: bellErr.message });
+  }
+}
+
+// A deduction that SUCCEEDS on a retried completion (the resume path runs
+// this hook again) retires the failure bell an earlier attempt rang for
+// the same (product, visit) — and the visit-scoped lookup bell — so staff
+// do not follow a stale "adjust by hand" on top of the real deduction
+// (Codex r15 P2). Best effort, never throws.
+async function clearMissedDeductionBells(db, { scheduledServiceId, productId }) {
+  const keys = [`supplies-consumption-failed:${productId}:${scheduledServiceId}`, `supplies-consumption-failed:lookup:${scheduledServiceId}`];
+  try {
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereNull('read_at').update({ read_at: new Date() });
+  } catch (err) {
+    logger.warn(`[supplies-consumption] could not retire the failure bell for ${productId} on visit ${scheduledServiceId}: ${err.message}`);
   }
 }
 
@@ -190,7 +207,7 @@ async function consumeCompletionSupplies(db, {
         await trx('products_catalog').where({ id: locked.id }).update({ inventory_on_hand: after, updated_at: new Date() });
         return { consumed: { productId: locked.id, name: locked.name, usage, unit, before, after, costUsed } };
       });
-      if (outcome.consumed) result.consumed.push(outcome.consumed);
+      if (outcome.consumed) { result.consumed.push(outcome.consumed); await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id }); }
       else result.skipped.push({ productId: product.id, reason: outcome.skipped });
     } catch (err) {
       logger.warn(`[supplies-consumption] ${product.name} failed for visit ${scheduledServiceId} (non-blocking): ${err.message}`);
