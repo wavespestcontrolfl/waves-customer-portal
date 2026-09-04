@@ -81,6 +81,11 @@ jest.mock('../services/composer-customer-links', () => ({
   buildReferralLink: jest.fn(),
   buildAutopaySetupLink: jest.fn(),
 }));
+jest.mock('../services/prep-guide-sender', () => ({
+  isSupportedPestType: () => true,
+  isSupportedChannel: () => true,
+  sendPrepToCustomer: jest.fn(),
+}));
 jest.mock('../services/review-request', () => ({
   sendGatedAsk: jest.fn(),
   findInlineAwaitingEmail: jest.fn(async () => null),
@@ -385,6 +390,17 @@ describe('POST /admin/communications/customer-link', () => {
         expect(res.status).toBe(409);
         expect((await res.json()).error).toMatch(/could not be read — try again/);
       });
+
+      // An uncertain leg (post-dispatch throw) is never "try again" — the
+      // provider may hold it (GH Codex #3856 r8 P2).
+      wireDb({ customers: soloCustomer() });
+      ReviewService.findInlineAwaitingEmail.mockResolvedValueOnce({ id: 'rr-texted' });
+      ReviewService.sendInlineEmailCopy.mockResolvedValueOnce({ sent: false, reason: 'email_uncertain' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/may or may not have gone out — check the customer's email log/);
+      });
     });
 
     test('email: the toast names the resolved email contact, not the phone owner', async () => {
@@ -448,6 +464,29 @@ describe('POST /admin/communications/customer-link', () => {
       expect((await res.json()).error).toBe('No open balance on this account');
     });
   });
+
+  // POST /send-prep — a zero-confirmed send whose leg the provider MAY have
+  // accepted must not read as "try again" (GH Codex #3856 r8 P2).
+  describe('POST /send-prep', () => {
+    const { sendPrepToCustomer } = require('../services/prep-guide-sender');
+    test('no leg confirmed + an uncertain leg → check the log, not try again', async () => {
+      sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, emailUncertain: true, smsSent: false, smsUncertain: false });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'flea', channel: 'email' });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toBe("The prep email may or may not have gone out — check the customer's email log before sending it again.");
+      });
+      sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, emailUncertain: true, smsSent: false, smsUncertain: true });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'flea', channel: 'both' });
+        expect((await res.json()).error).toMatch(/prep email and text may or may not have gone out — check the customer's email and message log/);
+      });
+      // A definite failure keeps the plain retry copy.
+      sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, smsSent: false });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'flea', channel: 'email' });
+        expect((await res.json()).error).toMatch(/try again/);
+      });
+    });
+  });
 });
-
-

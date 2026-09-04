@@ -1887,11 +1887,16 @@ const ReviewService = {
    * Returns { sent, reason } — never throws.
    */
   /**
-   * The most recent composer-texted inline ask whose email leg never went
-   * (status 'sent', sms_sent_at within the 30-day cooldown, sent_at null).
-   * Quick Links → Email after a Both whose email leg failed lands here:
-   * the cooldown would refuse a fresh ask, so the caller re-attempts the
-   * SAME row's email copy instead — idempotent per row (GH Codex #3856 r7).
+   * The most recent composer-texted BOTH ask whose email leg is still owed
+   * (status 'sent', sms_sent_at within the 30-day cooldown, sent_at null,
+   * email_leg_owed_at set). Quick Links → Email after a Both whose email
+   * leg failed lands here: the cooldown would refuse a fresh ask, so the
+   * caller re-attempts the SAME row's email copy instead — idempotent per
+   * row (GH Codex #3856 r7). email_leg_owed_at is the persisted evidence
+   * the ask requested an email leg — a Text-only composer ask or a
+   * completion-SMS ask never matches — and it is cleared once the email
+   * MAY have reached the provider, so an uncertain leg is never re-sent
+   * blindly (r8 P1/P2).
    */
   async findInlineAwaitingEmail(customerId) {
     if (!customerId) return null;
@@ -1901,6 +1906,7 @@ const ReviewService = {
       .whereNotNull("sms_sent_at")
       .where("sms_sent_at", ">=", since)
       .whereNull("sent_at")
+      .whereNotNull("email_leg_owed_at")
       .orderBy("sms_sent_at", "desc")
       .first("id");
     return row || null;
@@ -1908,11 +1914,19 @@ const ReviewService = {
 
   async sendInlineEmailCopy(requestId) {
     if (!requestId) return { sent: false, reason: "no_request" };
+    // onQueued fires immediately before the provider call: a throw after it
+    // MAY have reached SendGrid (the library's post-dispatch bookkeeping
+    // carries no marker), so it is uncertain — never "try again" (r8 P2).
+    let dispatched = false;
     try {
       const request = await db("review_requests").where({ id: requestId }).first();
       if (!request) return { sent: false, reason: "no_request" };
       const customer = await db("customers").where({ id: request.customer_id }).first();
-      if (!customer) return { sent: false, reason: "no_customer" };
+      // Live customer eligibility, the same terminal guards sendGatedAsk
+      // applies: a Both row can be retried days after its text went, and the
+      // customer may have reviewed (or been removed) since (r8 P2).
+      if (!customer || customer.deleted_at) return { sent: false, reason: "no_customer" };
+      if (customer.has_left_google_review) return { sent: false, reason: "already_reviewed" };
       const { getServiceContact } = require("./customer-contact");
       const contact = getServiceContact(customer);
       if (!contact.email) return { sent: false, reason: "no_email" };
@@ -1948,6 +1962,7 @@ const ReviewService = {
         // SendGrid body out of the transport log (AGENTS.md: no email
         // addresses in logs); the sanitized catch below is the only log.
         suppressProviderErrorLog: true,
+        onQueued: () => { dispatched = true; },
       });
       if (!result?.sent) return { sent: false, reason: result?.reason || "email_blocked" };
       // channel 'both': the row texted AND emailed — the outreach analytics
@@ -1956,12 +1971,20 @@ const ReviewService = {
       await db("review_requests")
         .where({ id: request.id })
         .whereNull("sent_at")
-        .update({ sent_at: new Date(), channel: "both" })
+        .update({ sent_at: new Date(), channel: "both", email_leg_owed_at: null })
         .catch((err) => logger.warn(`[review] inline email sent_at stamp failed (requestId=${request.id}): ${err.message}`));
       return { sent: true };
     } catch (err) {
-      logger.error(`[review] inline email copy failed (requestId=${requestId} errType=${err?.name || "Error"})`);
-      return { sent: false, reason: "email_send_failed" };
+      logger.error(`[review] inline email copy failed (requestId=${requestId} errType=${err?.name || "Error"} dispatched=${dispatched})`);
+      if (!dispatched) return { sent: false, reason: "email_send_failed" };
+      // The provider may hold this email: the leg is no longer owed, so the
+      // Quick Links retry path can never re-send it blindly — the operator
+      // checks the email log instead.
+      await db("review_requests")
+        .where({ id: requestId })
+        .update({ email_leg_owed_at: null })
+        .catch((e) => logger.warn(`[review] inline email owed clear failed (requestId=${requestId}): ${e.message}`));
+      return { sent: false, reason: "email_uncertain" };
     }
   },
 
@@ -2004,7 +2027,11 @@ const ReviewService = {
    * createInline keeps reusing it so no second token mints around the
    * block). Re-texting a solicitation is the one unacceptable outcome.
    */
-  async claimInlineForSend(requestId) {
+  // emailRequested: the composer asked for Both — the email half of THIS
+  // ask is owed (email_leg_owed_at) and Quick Links → Email may re-attempt
+  // it on the same row; every other claim clears the marker so a Text-only
+  // ask on a previously-Both row can never be emailed (GH Codex #3856 r8 P1).
+  async claimInlineForSend(requestId, { emailRequested = false } = {}) {
     if (!requestId) return false;
     // The claim stamp doubles as the FENCE token: mark/release only act
     // while claimed_at still equals the token the caller was handed, so a
@@ -2014,7 +2041,7 @@ const ReviewService = {
     const claimed = await db("review_requests")
       .where({ id: requestId, triggered_by: "auto_inline", status: "pending" })
       .whereNull("sms_sent_at")
-      .update({ status: "sending", claimed_at: token });
+      .update({ status: "sending", claimed_at: token, email_leg_owed_at: emailRequested ? token : null });
     if (claimed > 0) return token;
 
     // Not pending — a stale abandoned claim is the only other claimable
@@ -2083,7 +2110,7 @@ const ReviewService = {
       .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
       .whereNull("sms_sent_at")
       .where("claimed_at", "<", staleBefore)
-      .update({ claimed_at: reclaimToken });
+      .update({ claimed_at: reclaimToken, email_leg_owed_at: emailRequested ? reclaimToken : null });
     return reclaimed > 0 ? reclaimToken : false;
   },
 

@@ -498,7 +498,10 @@ router.post('/sms', async (req, res, next) => {
             if (!consent.allowed) return { consent };
             const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
             if (!gate.allowed) return { gate };
-            return { claimed: await ReviewService.claimInlineForSend(rr.id) };
+            // Both stamps the owed email leg on the claim itself, so the
+            // Quick Links retry path has persisted evidence this ask asked
+            // for an email (GH Codex #3856 r8 P1).
+            return { claimed: await ReviewService.claimInlineForSend(rr.id, { emailRequested: reviewRequestEmail === true }) };
           },
           { recordHealth: false },
         );
@@ -846,6 +849,13 @@ const { isSupportedPestType, isSupportedChannel } = require('../services/prep-gu
 
 function manualPrepMessage(result) {
   if (!result.ok) {
+    // No leg confirmed, but a provider MAY have accepted one: the page claim
+    // is kept and "try again" would double-send the guide (GH Codex #3856 r8 P2).
+    if (result.emailUncertain || result.smsUncertain) {
+      const legs = [result.emailUncertain ? 'email' : null, result.smsUncertain ? 'text' : null].filter(Boolean).join(' and ');
+      const logs = [result.emailUncertain ? 'email' : null, result.smsUncertain ? 'message' : null].filter(Boolean).join(' and ');
+      return `The prep ${legs} may or may not have gone out — check the customer's ${logs} log before sending it again.`;
+    }
     switch (result.reason) {
       case 'customer_not_found': return 'That customer could not be found.';
       case 'no_email': return 'This customer has no email on file — choose Text instead.';
@@ -1795,6 +1805,10 @@ const EMAIL_LEG_REASONS = {
   no_contact: 'No review email for this customer — no email on file',
   no_email: 'No review email for this customer — no email on file',
   email_blocked: 'The review email could not be sent — the address is suppressed',
+  // Post-dispatch throw: the provider MAY hold it — never "try again".
+  email_uncertain: "The review email may or may not have gone out — check the customer's email log before sending it again",
+  already_reviewed: 'This customer is already marked as having left a review',
+  no_customer: 'That customer could not be found',
 };
 
 async function emailReviewAskNow(primaryId) {

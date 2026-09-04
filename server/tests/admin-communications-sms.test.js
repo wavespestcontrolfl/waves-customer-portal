@@ -704,7 +704,7 @@ describe('admin communications SMS route', () => {
       });
 
       expect(res.status).toBe(200);
-      expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1');
+      expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1', { emailRequested: false });
     });
   });
 
@@ -805,7 +805,7 @@ describe('admin communications SMS route', () => {
       });
 
       expect(res.status).toBe(200);
-      expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1');
+      expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1', { emailRequested: false });
       expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
     });
   });
@@ -849,6 +849,9 @@ describe('admin communications SMS route', () => {
         expect(await res.json()).toMatchObject({ reviewEmail: { sent: true } });
         expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
         expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
+        // Both stamps the owed email leg on the claim — the Quick Links
+        // retry path's persisted evidence this ask asked for an email.
+        expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1', { emailRequested: true });
       });
     });
 

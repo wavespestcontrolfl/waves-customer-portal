@@ -584,7 +584,11 @@ describe('review request follow-up flow', () => {
     expect(await ReviewService.claimInlineForSend('rr-inline')).toBeInstanceOf(Date);
     expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline', triggered_by: 'auto_inline', status: 'pending' });
     expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
-    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sending' }));
+    // A Text-only claim clears the owed email leg; a Both claim stamps it
+    // (the Quick Links retry path's evidence the ask asked for an email).
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sending', email_leg_owed_at: null }));
+    expect(await ReviewService.claimInlineForSend('rr-inline', { emailRequested: true })).toBeInstanceOf(Date);
+    expect(updateQuery.update).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'sending', email_leg_owed_at: expect.any(Date) }));
 
     // A colleague's fresh (non-stale) claim already holds the row — the
     // conditional UPDATE matches nothing, the stale lookup finds nothing,
@@ -710,6 +714,9 @@ describe('review request follow-up flow', () => {
       expect(q.whereNotNull).toHaveBeenCalledWith('sms_sent_at');
       expect(q.where).toHaveBeenCalledWith('sms_sent_at', '>=', expect.any(Date));
       expect(q.whereNull).toHaveBeenCalledWith('sent_at');
+      // Only asks that requested an email leg (and still owe it) match —
+      // never a Text-only or completion-SMS ask (GH Codex #3856 r8 P1).
+      expect(q.whereNotNull).toHaveBeenCalledWith('email_leg_owed_at');
       expect(q.orderBy).toHaveBeenCalledWith('sms_sent_at', 'desc');
       expect(await ReviewService.findInlineAwaitingEmail(null)).toBeNull();
     });
@@ -718,7 +725,7 @@ describe('review request follow-up flow', () => {
   describe('sendInlineEmailCopy', () => {
     const EmailLib = require('../services/email-template-library');
     let rrUpdate;
-    const wire = ({ prefs, prefsThrow = false, email = 'megan@example.com' } = {}) => {
+    const wire = ({ prefs, prefsThrow = false, email = 'megan@example.com', customerRow = {} } = {}) => {
       rrUpdate = jest.fn().mockResolvedValue(1);
       getServiceContact.mockReturnValue({ email, name: 'Megan Example' });
       db.mockImplementation((table) => {
@@ -731,7 +738,7 @@ describe('review request follow-up flow', () => {
           return q;
         }
         if (table === 'customers') {
-          return chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Megan', city: 'Bradenton' }) });
+          return chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Megan', city: 'Bradenton', ...customerRow }) });
         }
         if (table === 'notification_prefs') {
           if (prefsThrow) return chain({ first: jest.fn().mockRejectedValue(new Error('db down')) });
@@ -748,7 +755,7 @@ describe('review request follow-up flow', () => {
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
       // The row texted AND emailed — recorded as channel 'both' so the
       // outreach analytics count the email leg.
-      expect(rrUpdate).toHaveBeenCalledWith(expect.objectContaining({ sent_at: expect.any(Date), channel: 'both' }));
+      expect(rrUpdate).toHaveBeenCalledWith(expect.objectContaining({ sent_at: expect.any(Date), channel: 'both', email_leg_owed_at: null }));
       const call = EmailLib.sendTemplate.mock.calls[0][0];
       expect(call).toMatchObject({
         templateKey: 'review_request_email',
@@ -781,8 +788,30 @@ describe('review request follow-up flow', () => {
       wire({ prefs: { review_request: true, email_enabled: true } });
       EmailLib.sendTemplate.mockResolvedValue({ sent: false, reason: 'suppressed' });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'suppressed' });
+      // A throw BEFORE dispatch (onQueued never fired) reached no one: a
+      // plain, retryable failure — the owed leg stays.
       EmailLib.sendTemplate.mockRejectedValue(new Error('boom'));
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
+      expect(rrUpdate).not.toHaveBeenCalled();
+    });
+
+    test('a throw AFTER dispatch is uncertain: the owed leg is cleared so no retry re-sends it (r8 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        await opts.onQueued({ id: 'em-1' });
+        throw new Error('post-dispatch bookkeeping failed');
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_uncertain' });
+      expect(rrUpdate).toHaveBeenCalledWith({ email_leg_owed_at: null });
+      expect(rrUpdate).not.toHaveBeenCalledWith(expect.objectContaining({ sent_at: expect.any(Date) }));
+    });
+
+    test('re-checks the live customer: already reviewed or removed refuses before any send (r8 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true }, customerRow: { has_left_google_review: true } });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'already_reviewed' });
+      wire({ prefs: { review_request: true, email_enabled: true }, customerRow: { deleted_at: new Date() } });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'no_customer' });
+      expect(EmailLib.sendTemplate).not.toHaveBeenCalled();
     });
   });
 
