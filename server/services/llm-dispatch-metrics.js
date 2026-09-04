@@ -535,18 +535,19 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
   try {
     if (!ledgerEnabled() || !sessionId) return null;
     const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
-    let session = null;
+    // Empty when the GET misses: the row still lands, without counts.
+    let session = {};
     try {
       const { anthropicSessionsFetch } = require('./intelligence-bar/managed-agents-ops-tools');
-      session = await anthropicSessionsFetch(`/v1/sessions/${encodeURIComponent(sessionId)}`);
+      session = (await anthropicSessionsFetch(`/v1/sessions/${encodeURIComponent(sessionId)}`)) || {};
     } catch (err) {
       logger.warn(`[llm-dispatch-metrics] session ${sessionId} usage unavailable (${err.message}) — recording the session without token counts`);
     }
-    const tokens = extractUsage('anthropic', { usage: session?.usage });
+    const tokens = extractUsage('anthropic', { usage: session.usage });
     // The runner's own outcome first (session_error_event, max_events, an
     // anthropic_429 — the codes the taxonomy classifies); a terminated
     // session only names the failure when the runner had none (Codex r10).
-    const errorCode = failureCode(failure) || (session?.status === 'terminated' ? 'session_terminated' : null);
+    const errorCode = failureCode(failure) || (session.status === 'terminated' ? 'session_terminated' : null);
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
     logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId}) usage in=${tokens.input_tokens} out=${tokens.output_tokens} ${errorCode || 'ok'}`);
@@ -557,7 +558,7 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
       policyLabel: lane || `anthropic/${model || 'session'}`,
       provider: 'anthropic',
       requestedModel: model,
-      servedModel: session?.model,
+      servedModel: session.model,
       ok: !errorCode,
       errorCode,
       tokens,

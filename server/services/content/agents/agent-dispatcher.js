@@ -299,7 +299,11 @@ class AgentDispatcher {
   /**
    * Internal: stream session events via SSE (same pattern as the
    * legacy content-agent.js), execute custom tool calls, stop when
-   * the agent emits draft / metadata OR the session completes.
+   * the session completes — the draft / metadata sink firing is the
+   * agent's work done, not the session's end (Codex r14 on #3846):
+   * it still processes that tool result and ends its turn, and the
+   * session ledger snapshots usage after this returns, so leaving on
+   * the sink would file every draft session short its final turn.
    *
    * Earlier iteration polled GET /sessions/{id}/events with an
    * `?after=` cursor and read `evt.type === 'tool_use'`. The Managed
@@ -310,76 +314,88 @@ class AgentDispatcher {
    */
   async _streamAndExecute(sessionId, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
-    for await (const { event, data } of streamSessionEvents(sessionId, deadline)) {
-      // Tool use surfaces in three shapes depending on the agent
-      // config: the legacy SDK tools emit `event: tool_use`, custom
-      // `type:'custom'` tools (which is what all three new agents
-      // declare) emit `event: agent.custom_tool_use`, and some
-      // server builds put the discriminator on the data payload
-      // instead of the event name. All three are accepted.
-      const isCustomToolUse =
-        event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
-      const isLegacyToolUse =
-        event === 'tool_use' || data?.type === 'tool_use';
-      if (isCustomToolUse || isLegacyToolUse) {
-        const toolName = data?.name;
-        const toolInput = data?.input || {};
-        const toolUseId = data?.id;
-        const result = await executeBriefTool(toolName, toolInput, { sessionId });
-        // Reply schema differs by tool kind:
-        //   - custom tools → user.custom_tool_result with custom_tool_use_id
-        //   - legacy tools → tool_result with tool_use_id, content blocks
-        // Mirrors managed-agents-2026-04-01 contract used by
-        // server/services/lead-response-agent.js.
-        if (isCustomToolUse) {
-          // Mirrors lead-response-agent.js:331-335 — events wrapped,
-          // content as text blocks, not a bare JSON string.
-          await apiCall('POST', `/sessions/${sessionId}/events`, {
-            events: [{
-              type: 'user.custom_tool_result',
-              custom_tool_use_id: toolUseId,
-              content: [{ type: 'text', text: JSON.stringify(result) }],
-            }],
-          });
-        } else {
-          await apiCall('POST', `/sessions/${sessionId}/events`, {
-            events: [{
-              type: 'tool_result',
-              tool_use_id: toolUseId,
-              content: [{ type: 'text', text: JSON.stringify(result) }],
-            }],
-          });
+    try {
+      for await (const { event, data } of streamSessionEvents(sessionId, deadline)) {
+        // Tool use surfaces in three shapes depending on the agent
+        // config: the legacy SDK tools emit `event: tool_use`, custom
+        // `type:'custom'` tools (which is what all three new agents
+        // declare) emit `event: agent.custom_tool_use`, and some
+        // server builds put the discriminator on the data payload
+        // instead of the event name. All three are accepted.
+        const isCustomToolUse =
+          event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
+        const isLegacyToolUse =
+          event === 'tool_use' || data?.type === 'tool_use';
+        if (isCustomToolUse || isLegacyToolUse) {
+          const toolName = data?.name;
+          const toolInput = data?.input || {};
+          const toolUseId = data?.id;
+          const result = await executeBriefTool(toolName, toolInput, { sessionId });
+          // Reply schema differs by tool kind:
+          //   - custom tools → user.custom_tool_result with custom_tool_use_id
+          //   - legacy tools → tool_result with tool_use_id, content blocks
+          // Mirrors managed-agents-2026-04-01 contract used by
+          // server/services/lead-response-agent.js.
+          if (isCustomToolUse) {
+            // Mirrors lead-response-agent.js:331-335 — events wrapped,
+            // content as text blocks, not a bare JSON string.
+            await apiCall('POST', `/sessions/${sessionId}/events`, {
+              events: [{
+                type: 'user.custom_tool_result',
+                custom_tool_use_id: toolUseId,
+                content: [{ type: 'text', text: JSON.stringify(result) }],
+              }],
+            });
+          } else {
+            await apiCall('POST', `/sessions/${sessionId}/events`, {
+              events: [{
+                type: 'tool_result',
+                tool_use_id: toolUseId,
+                content: [{ type: 'text', text: JSON.stringify(result) }],
+              }],
+            });
+          }
+          continue;
         }
-        if (getDraft(sessionId)) return; // sink fired; agent finished
-        continue;
+        // Terminal session/turn events — always exit the stream. If a
+        // draft was captured runWithBrief returns it; if not it returns
+        // agent_did_not_emit_draft.
+        //
+        // session.status_idle is intentionally NOT terminal on its own:
+        // Managed Agents emit it with stop_reason: requires_action while
+        // the agent waits for the tool_result we just sent. Treating it
+        // as terminal makes multi-tool runs (e.g. get_content_brief then
+        // emit_draft) exit after the first tool and report
+        // agent_did_not_emit_draft even though the agent was about to
+        // continue. Only end_turn (handled below) is the real terminal.
+        if (isSessionTerminal(event, data)) return;
+        if (isSessionError(event)) {
+          // Don't mask infrastructure failures as a content-quality
+          // outcome — throw so runWithBrief surfaces streaming_failed
+          // instead of agent_did_not_emit_draft.
+          const detail = typeof data === 'string' ? data : JSON.stringify(data).slice(0, 200);
+          logger.error(`[agent-dispatcher] session ${sessionId} error: ${detail}`);
+          // `code` is what the session ledger files the exit under (provider).
+          throw Object.assign(new Error(`session_error: ${detail}`), { code: 'session_error_event' });
+        }
       }
-      // Terminal session/turn events — always exit the stream. If a
-      // draft was captured runWithBrief returns it; if not it returns
-      // agent_did_not_emit_draft.
-      //
-      // session.status_idle is intentionally NOT terminal on its own:
-      // Managed Agents emit it with stop_reason: requires_action while
-      // the agent waits for the tool_result we just sent. Treating it
-      // as terminal makes multi-tool runs (e.g. get_content_brief then
-      // emit_draft) exit after the first tool and report
-      // agent_did_not_emit_draft even though the agent was about to
-      // continue. Only end_turn (handled below) is the real terminal.
-      if (isSessionTerminal(event, data)) return;
-      if (isSessionError(event)) {
-        // Don't mask infrastructure failures as a content-quality
-        // outcome — throw so runWithBrief surfaces streaming_failed
-        // instead of agent_did_not_emit_draft.
-        const detail = typeof data === 'string' ? data : JSON.stringify(data).slice(0, 200);
-        logger.error(`[agent-dispatcher] session ${sessionId} error: ${detail}`);
-        // `code` is what the session ledger files the exit under (provider).
-        throw Object.assign(new Error(`session_error: ${detail}`), { code: 'session_error_event' });
+      // The loop ended without a terminal event: the provider closed the
+      // stream early — the same session_stream_eof (→ provider) the other
+      // runners file. Our own deadline never reaches here: the reader throws
+      // session_timeout itself (Codex r11). After a captured draft it is the
+      // wind-down that was cut off, not the work.
+      if (getDraft(sessionId)) {
+        logger.warn(`[agent-dispatcher] session ${sessionId} stream closed after the draft, before its terminal event`);
+        return;
       }
+      throw Object.assign(new Error(`session ${sessionId} stream ended without a terminal event`), { code: 'session_stream_eof' });
+    } catch (err) {
+      // The agent had already delivered; only its wind-down outran the
+      // deadline. The draft ships as the success it was — the ledger row
+      // carries the timing.
+      if (err.code !== 'session_timeout' || !getDraft(sessionId)) throw err;
+      logger.warn(`[agent-dispatcher] session ${sessionId} delivered its draft; the wind-down ran past the deadline`);
     }
-    // The loop ended without a terminal event: the provider closed the
-    // stream early — the same session_stream_eof (→ provider) the other
-    // runners file. Our own deadline never reaches here: the reader throws
-    // session_timeout itself (Codex r11).
-    throw Object.assign(new Error(`session ${sessionId} stream ended without a terminal event`), { code: 'session_stream_eof' });
   }
 }
 
