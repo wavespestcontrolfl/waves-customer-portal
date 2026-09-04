@@ -2216,6 +2216,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // row, on the keeper (codex #3834 r14 P1).
         let keeperId = lead.id;
         let stampedId = null;
+        let stampedStage = 'lead';
         if (duplicateOfLeadId) {
           const root = await followDuplicateLink(db, await db('leads').where({ id: duplicateOfLeadId }).first());
           // The root's row is the ORIGINAL touch rebuilt from what the root
@@ -2223,6 +2224,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // stage the root's current status maps to (r11 P2, r13 P2s, r15
           // P2): stampLeadFunnelRow. A vanished root (dead marker) gets nothing.
           keeperId = root ? root.id : null;
+          stampedStage = root ? LEAD_STATUS_TO_FUNNEL_STAGE[root.status] || 'lead' : 'lead';
           stampedId = root ? await stampLeadFunnelRow(db, root, { customerId, serviceInterest }) : null;
         } else if (touch) {
           const [stamped] = await db('ad_service_attribution').insert({
@@ -2254,9 +2256,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // flight — whose own status bridge found no row to advance yet —
           // has the fresh row brought to that stage, so a won root never
           // sits at 'lead' and a lost one never advances (codex #3834 r17 P1).
+          // The drop is ONE statement conditioned on both facts — the keeper
+          // still 'duplicate' and the row still at the stage the repair
+          // inserted — so a promotion (accept / self-booking) landing between
+          // the read and the delete, which sets the keeper won and advances
+          // this same row to booked, keeps its row: either order leaves the
+          // delete at 0 rows (codex #3834 r19 P1).
           const keeper = await db('leads').where({ id: keeperId }).first('status');
-          if (keeper?.status === 'duplicate') await db('ad_service_attribution').where({ id: stampedId }).del();
-          else if (keeper && LEAD_STATUS_TO_FUNNEL_STAGE[keeper.status]) await bridgeLeadFunnelStage(keeperId, keeper.status, db);
+          if (keeper?.status === 'duplicate') {
+            await db('ad_service_attribution')
+              .where({ id: stampedId, funnel_stage: stampedStage })
+              .whereExists(db('leads').where({ id: keeperId, status: 'duplicate' }))
+              .del();
+          } else if (keeper && LEAD_STATUS_TO_FUNNEL_STAGE[keeper.status]) {
+            await bridgeLeadFunnelStage(keeperId, keeper.status, db);
+          }
         }
       }
     } catch (attrErr) {

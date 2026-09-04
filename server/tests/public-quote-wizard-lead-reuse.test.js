@@ -137,11 +137,16 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // a keeper that filed as a duplicate meanwhile loses the row this request
     // added (codex r14 P1) — on both the current-touch and root-repair paths.
     expect(src).toMatch(/\}\)\.onConflict\('lead_id'\)\.ignore\(\)\.returning\('id'\);\n\s+stampedId = stamped \? stamped\.id : null;/);
-    expect(src).toMatch(/if \(stampedId\) \{[\s\S]*?const keeper = await db\('leads'\)\.where\(\{ id: keeperId \}\)\.first\('status'\);\n\s+if \(keeper\?\.status === 'duplicate'\) await db\('ad_service_attribution'\)\.where\(\{ id: stampedId \}\)\.del\(\);/);
+    // The drop is one statement conditioned on the keeper STILL being
+    // duplicate and the row STILL at its repair stage, so a promotion that
+    // advanced the row between the read and the delete keeps it (codex r19 P1).
+    expect(src).toMatch(/if \(stampedId\) \{[\s\S]*?const keeper = await db\('leads'\)\.where\(\{ id: keeperId \}\)\.first\('status'\);\n\s+if \(keeper\?\.status === 'duplicate'\) \{\n\s+await db\('ad_service_attribution'\)\n\s+\.where\(\{ id: stampedId, funnel_stage: stampedStage \}\)\n\s+\.whereExists\(db\('leads'\)\.where\(\{ id: keeperId, status: 'duplicate' \}\)\)\n\s+\.del\(\);/);
+    expect(src).toMatch(/stampedStage = root \? LEAD_STATUS_TO_FUNNEL_STAGE\[root\.status\] \|\| 'lead' : 'lead';/);
+    expect(src).not.toMatch(/where\(\{ id: stampedId \}\)\.del\(\)/);
     // ...and a keeper staff moved on while the repair was in flight has the
     // fresh row brought to its current stage (won → booked, lost → lost), so
     // the status bridge that found nothing to advance is caught up (codex r17 P1).
-    expect(src).toMatch(/else if \(keeper && LEAD_STATUS_TO_FUNNEL_STAGE\[keeper\.status\]\) await bridgeLeadFunnelStage\(keeperId, keeper\.status, db\);/);
+    expect(src).toMatch(/\} else if \(keeper && LEAD_STATUS_TO_FUNNEL_STAGE\[keeper\.status\]\) \{\n\s+await bridgeLeadFunnelStage\(keeperId, keeper\.status, db\);/);
     // A submission that adds properties is a wider inquiry, never a repeat
     // (codex r10 P1) — on both paths.
     expect(src).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
