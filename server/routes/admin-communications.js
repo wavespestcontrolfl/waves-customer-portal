@@ -855,6 +855,7 @@ function manualPrepMessage(result) {
       // guide, and re-keying it would flip every link already delivered.
       case 'prep_page_taken': return `This guide can only be texted as a link, and the customer's next visit already carries the ${result.takenBy || 'other'} prep page — email this guide instead.`;
       case 'prep_link_failed': return "Couldn't build the guide page link for this visit — try again.";
+      case 'prep_send_busy': return 'Another prep send for this customer is in progress — try again in a moment.';
       case 'unsupported_pest_type': return 'That prep type is not available yet.';
       case 'unsupported_channel': return 'Choose Email, Text, or Both.';
       default: return "Couldn't send the prep — check the customer's contact info and try again.";

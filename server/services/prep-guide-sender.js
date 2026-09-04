@@ -34,6 +34,7 @@ const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const SERVICE_GROUP = 'service_operational';
@@ -418,25 +419,6 @@ async function logPrepInteraction({ customer, config, contacts, result, pestType
   }
 }
 
-// Per-customer serialization of claim → send → release/stamp. Two operators
-// sending this customer's prep within the same seconds is the only way a
-// fresh claim's release can race a sibling's non-fresh reuse of the same
-// key (the sibling's delivered URL would lose its guide); a keyed promise
-// chain makes the second wait for the first. In-process: the portal runs
-// as one Railway replica (pre-push Codex P1 on 8dbc30cc1).
-const customerPrepLocks = new Map();
-async function withCustomerPrepLock(customerId, fn) {
-  const prev = customerPrepLocks.get(customerId) || Promise.resolve();
-  const run = prev.then(fn, fn);
-  const settled = run.then(() => {}, () => {});
-  customerPrepLocks.set(customerId, settled);
-  try {
-    return await run;
-  } finally {
-    if (customerPrepLocks.get(customerId) === settled) customerPrepLocks.delete(customerId);
-  }
-}
-
 // Sends prep to a customer on the operator-chosen channel. Returns a
 // structured result the route turns into an operator-facing message. Never
 // throws — every failure surfaces as { ok: false, reason }.
@@ -461,7 +443,15 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   };
   if (contacts.refusal) return { ...result, reason: contacts.refusal };
 
-  return withCustomerPrepLock(customer.id, async () => {
+  // Per-customer exclusivity of claim → send → release/stamp, across
+  // instances (a deploy overlaps two): two sends for this customer within
+  // the same seconds are the only way a fresh claim's release can race a
+  // sibling's reuse of the same key and un-guide the sibling's delivered
+  // URL. The canonical session advisory lock (cron-lock.runExclusive,
+  // request-scoped: no health row, non-blocking) serializes them; a held
+  // lease is an operator-facing "try again", not a wait (pre-push Codex
+  // P1s on 8dbc30cc1 + 87b4cee92).
+  const outcome = await runExclusive(`prep-send:${customer.id}`, async () => {
     const page = await resolvePrepVisit(customer, config);
     // The stamp target: only a visit whose page this guide owns.
     page.stampVisit = page.ownsPage ? page.visit : null;
@@ -475,7 +465,9 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     await deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result });
     if (result.ok) await logPrepInteraction({ customer, config, contacts, result, pestType, actorId });
     return result;
-  });
+  }, { recordHealth: false, waitForSlot: false });
+  if (wasLockSkipped(outcome)) return { ...result, reason: 'prep_send_busy' };
+  return outcome;
 }
 
 module.exports = {

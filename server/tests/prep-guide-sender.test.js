@@ -4,6 +4,12 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/sms-auto-send', () => ({ isRealProviderSend: jest.requireActual('../services/sms-auto-send').isRealProviderSend }));
+// The per-customer advisory lock: pass-through by default; a test flips it
+// to "lease held elsewhere" (the real lock semantics live in cron-lock's own suite).
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: jest.fn(async (_name, fn) => fn()),
+  wasLockSkipped: jest.requireActual('../utils/cron-lock').wasLockSkipped,
+}));
 jest.mock('../services/project-email', () => ({
   // Mirrors the real resolver: a configured service contact wins the email
   // recipient (address + name); otherwise the primary customer.
@@ -355,24 +361,18 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
   });
 
-  test('prep sends for one customer are serialized — the second waits for the first to settle', async () => {
+  test('claim → send → release runs under the per-customer advisory lock; a held lease is "busy"', async () => {
+    const { runExclusive } = require('../utils/cron-lock');
     upcomingVisitRow = VISIT;
-    let finishFirst;
-    sendCustomerMessage.mockImplementationOnce(() => new Promise((resolve) => {
-      finishFirst = () => resolve({ sent: true, providerMessageId: 'SM1' });
-    }));
 
-    const first = sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
-    const second = sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
-    await new Promise((r) => setTimeout(r, 20));
-    // The second attempt has not reached the provider while the first holds the lock.
+    const sent = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    expect(sent.ok).toBe(true);
+    expect(runExclusive).toHaveBeenCalledWith('prep-send:cust-1', expect.any(Function), { recordHealth: false, waitForSlot: false });
+
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+    const busy = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    expect(busy).toMatchObject({ ok: false, reason: 'prep_send_busy' });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-
-    finishFirst();
-    const [a, b] = await Promise.all([first, second]);
-    expect(a.ok).toBe(true);
-    expect(b.ok).toBe(true);
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
   });
 
   test('a delivered guide keeps its page claim; a partial Both does not release it', async () => {
