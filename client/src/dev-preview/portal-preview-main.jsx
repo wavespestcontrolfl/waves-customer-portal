@@ -213,6 +213,20 @@ const SPARE_CARD = {
   autopayEnabled: false, bankName: null, bankLastFour: null, achStatus: null,
 };
 const REMOVAL_GUARD = new URLSearchParams(window.location.search).get('guard') !== '0';
+// ?hold=1 stamps the spare card with a future secured visit
+// (GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE) so Remove opens the call-us
+// disclaimer; ?hold=1&nolink=1 drops the reschedule link (grouped stop).
+const HOLD_PREVIEW = new URLSearchParams(window.location.search).get('hold') === '1';
+const HOLD_NO_LINK = new URLSearchParams(window.location.search).get('nolink') === '1';
+if (HOLD_PREVIEW) {
+  const start = new Date();
+  start.setDate(start.getDate() + 9);
+  start.setHours(9, 0, 0, 0);
+  SPARE_CARD.holdsAppointment = {
+    serviceId: 'svc-demo-hold', start: start.toISOString(), serviceType: 'Pest Control',
+    feeAmount: 49, rescheduleUrl: HOLD_NO_LINK ? null : '#reschedule-preview',
+  };
+}
 
 const AUTOPAY = {
   state: 'active',

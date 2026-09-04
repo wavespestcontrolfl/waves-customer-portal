@@ -9,6 +9,7 @@ import {
   glassDayLinesFor,
   glassEstimateCopyFor,
   glassOneTimeHeroOverlay,
+  glassPackWithOneTimeHero,
   glassPestInclusions,
   glassRewriteSlotSummary,
   glassRowInclusions,
@@ -146,6 +147,34 @@ describe('glassOneTimeHeroOverlay', () => {
     const wdo = glassEstimateCopyFor('wdo_inspection');
     expect(glassOneTimeHeroOverlay(wdo, { preserveServiceHero: true }).heroH1).toMatch(/WDO inspection/i);
     expect(glassOneTimeHeroOverlay(glassEstimateCopyFor('pest_control')).heroH1).toMatch(/service quote/i);
+  });
+});
+
+describe('glassPackWithOneTimeHero', () => {
+  const hero = { eyebrow: 'Your flea treatment', h1: 'Hello {first}, your flea treatment quote is ready!', sub: 'Interior treatment priced from your home — approve online and pick a day.' };
+  it('overlays the service hero on the glass pack and keeps the pack’s other copy', () => {
+    setGlassDefault(true);
+    const base = glassOneTimeHeroOverlay(glassEstimateCopyFor('pest_control'));
+    const pack = glassPackWithOneTimeHero(base, { hero });
+    expect(pack).toMatchObject({ eyebrow: hero.eyebrow, heroH1: hero.h1, heroSub: hero.sub, aiTitle: base.aiTitle });
+  });
+  it('still applies the service hero when the category glass copy is off (SSR parity)', () => {
+    setGlassDefault(false);
+    expect(glassEstimateCopyFor('pest_control')).toBeNull();
+    const pack = glassPackWithOneTimeHero(null, { hero });
+    expect(pack).toEqual({ eyebrow: hero.eyebrow, heroH1: hero.h1, heroSub: hero.sub });
+    expect(pack.aiTitle).toBeUndefined();
+  });
+  it('a review-gated quote keeps the base confirm-with-you subline, or none without a base pack', () => {
+    setGlassDefault(true);
+    const base = glassOneTimeHeroOverlay(glassEstimateCopyFor('pest_control'), { reviewBeforeBooking: true });
+    expect(glassPackWithOneTimeHero(base, { hero }, { reviewBeforeBooking: true }).heroSub).toBe(base.heroSub);
+    expect(glassPackWithOneTimeHero(null, { hero }, { reviewBeforeBooking: true }).heroSub).toBeNull();
+  });
+  it('no service hero leaves the pack untouched', () => {
+    expect(glassPackWithOneTimeHero(null, null)).toBeNull();
+    const base = { eyebrow: 'x', heroH1: 'y' };
+    expect(glassPackWithOneTimeHero(base, {})).toBe(base);
   });
 });
 

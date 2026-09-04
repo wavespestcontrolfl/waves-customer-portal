@@ -3,8 +3,22 @@ const logger = require('../logger');
 const { CUSTOMER_STAGES } = require('../customer-stages');
 const MODELS = require('../../config/models');
 const { isEnabled } = require('../../config/feature-gates');
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const { dispatchWithFallback } = require('../llm/call');
+
+// Structured-output contract for an owner-approved retention draft
+// (llm/call.js jsonSchema). Nothing here sends — rows park as
+// pending_approval for Adam.
+const OUTREACH_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['outreach_type', 'strategy', 'message', 'urgency'],
+  properties: {
+    outreach_type: { type: 'string', enum: ['sms', 'call'] },
+    strategy: { type: 'string', description: 'strategy_name' },
+    message: { type: 'string', description: 'exact text' },
+    urgency: { type: 'string', enum: ['today', 'this_week'] },
+  },
+};
 
 let TwilioService;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
@@ -61,17 +75,13 @@ class RetentionEngine {
       recentSMS = msgs.map(m => `[${m.direction}] ${(m.message_body || '').substring(0, 150)}`).join('\n');
     } catch { /* */ }
 
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      // The health_* SMS templates were retired 2026-07-06; without the AI
-      // drafter there is no outreach copy to propose, so skip drafting.
-      return null;
-    }
-
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-    const response = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 500,
+    // FLAGSHIP first, Terra on a miss (customerCopy). The health_* SMS
+    // templates were retired 2026-07-06; without a draft there is no outreach
+    // copy to propose, so a two-leg miss skips drafting below.
+    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+      maxTokens: 500,
+      jsonMode: true,
+      jsonSchema: OUTREACH_SCHEMA,
       system: `You generate personalized retention outreach for Waves Pest Control customers showing churn risk. Write as Adam — direct, empathetic, specific. Reference their actual situation. NEVER be generic or corporate.
 
 Strategies:
@@ -84,10 +94,8 @@ Strategies:
 
 For critical: always recommend personal call from Adam.
 
-Return JSON: { "outreach_type": "sms/call", "strategy": "strategy_name", "message": "exact text", "urgency": "today/this_week" }`,
-      messages: [{
-        role: 'user',
-        content: `Generate retention outreach:
+Give the outreach type (sms or call), the strategy name, the exact message text, and the urgency (today or this_week).`,
+      text: `Generate retention outreach:
 
 Customer: ${customer.first_name} ${customer.last_name}
 Tier: ${customer.waveguard_tier} ($${customer.monthly_rate}/mo)
@@ -100,18 +108,15 @@ ${riskFactors.map(f => `- ${f.signal}: ${f.value}`).join('\n')}
 ${lastServiceNote}
 
 Recent SMS:
-${recentSMS || 'None'}`
-      }]
+${recentSMS || 'None'}`,
     });
 
-    let outreach;
-    try {
-      outreach = JSON.parse(response.content[0].text.replace(/```json|```/g, '').trim());
-    } catch {
-      // Unparseable draft — skip rather than fall back to the retired
+    if (!res.ok || !res.json) {
+      // No usable draft — skip rather than fall back to the retired
       // health_* template copy (removed 2026-07-06).
       return null;
     }
+    const outreach = res.json;
 
     const [saved] = await db('retention_outreach').insert({
       customer_id: customerId,

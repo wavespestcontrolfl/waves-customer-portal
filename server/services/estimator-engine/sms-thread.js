@@ -33,6 +33,32 @@ const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { last10 } = require('../external-phone');
 
+
+// Structured-output contracts (llm/call.js jsonSchema): the provider constrains
+// the reply to these shapes. The 0–1 confidence range sits outside the schema
+// subset every provider accepts; the >= 0.6 gates below enforce it.
+const CONFIDENCE = { type: 'number', description: 'Confidence in the decision, from 0 to 1' };
+const BARE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['quote_request', 'confidence'],
+  properties: {
+    quote_request: { type: 'boolean' },
+    confidence: CONFIDENCE,
+  },
+};
+const GROUNDED_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['quote_request', 'service_offered', 'relates_to_existing_job', 'confidence'],
+  properties: {
+    quote_request: { type: 'boolean' },
+    service_offered: { type: 'boolean' },
+    relates_to_existing_job: { type: 'boolean' },
+    confidence: CONFIDENCE,
+  },
+};
+
 function smsThreadDraftsEnabled() {
   const flag = process.env.GATE_ESTIMATOR_SMS_DRAFTS;
   const on = flag === '1' || flag === 'true' || flag === 'on';
@@ -102,19 +128,16 @@ Decide three things about the sender's message:
 
 NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
 
-Message: ${JSON.stringify(text)}
-
-Return ONLY JSON: {"quote_request":true|false,"service_offered":true|false,"relates_to_existing_job":true|false,"confidence":0.0-1.0}`
+Message: ${JSON.stringify(text)}`
       : `An SMS arrived at Waves Pest Control (pest control + lawn care). Decide if the sender is asking for a QUOTE or PRICING for a service (new or additional service, "how much", "can you give me a price", describing a pest/lawn problem they want serviced).
 
 NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
 
-Message: ${JSON.stringify(text)}
-
-Return ONLY JSON: {"quote_request":true|false,"confidence":0.0-1.0}`;
+Message: ${JSON.stringify(text)}`;
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
       text: prompt,
       jsonMode: true,
+      jsonSchema: grounded ? GROUNDED_SCHEMA : BARE_SCHEMA,
       // The grounded response carries three booleans instead of one.
       maxTokens: grounded ? 100 : 60,
       // Webhook-safe ceiling: the Twilio handler AWAITS this classifier

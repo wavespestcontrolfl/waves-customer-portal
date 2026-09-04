@@ -42,6 +42,12 @@ const { hasWrongPremiseFlag } = require('../lookup-confidence');
 // on the customer-facing path, which has no review lane). The snappedRecord
 // check survives an enrichment failure (flags live on the enriched payload,
 // the audit marker on the record itself).
+// The unit-answer fence's QUIET block reasons (clarify write-back): the
+// engine neither bells "an estimate already covers this" nor retries —
+// pending = the reply's own re-run owns the replacement; retracted = the
+// human retired the fence this run had adopted (pre-push codex P1, r8).
+const UNIT_FENCE_QUIET_REASONS = ['unit_answer_pending', 'unit_answer_retracted'];
+
 function parcelSignalsDescribeGatheredAddress({ enriched, propertyRecord }) {
   if (hasWrongPremiseFlag(enriched)) return false;
   if (propertyRecord?._addressAudit?.snappedRecord) return false;
@@ -329,7 +335,99 @@ function draftAmountLabel({ monthly, oneTime }) {
   return 'amount TBD';
 }
 
+// A unit the customer supplied AFTER the call (clarify write-back): the
+// re-run composes the address WITH it, since the original extraction and
+// the lead line may still describe the whole building. A line already
+// carrying the SAME dwelling unit (any spelling, either position — the
+// write-back formats it as its own comma segment, "street, Apt 204,
+// city") is left alone; a DIFFERENT dwelling unit is the stale or
+// misheard one the customer's answer corrects, so it is replaced — never
+// kept beside the answer. A STRUCTURAL component ("Bldg 9", "Floor 2") is
+// a resolved building, not the apartment: it is preserved and the
+// dwelling unit is added beside it (pre-push codex P1 on #3804).
+function withUnitOverride(line, context) {
+  const unit = String(context?.unitLineOverride || '').trim();
+  if (!unit || !line) return line;
+  const {
+    splitStreetLineUnitParts, unitLineValueKey, splitUnitFirstLine, dwellingUnitOnLine, structuralUnitPart,
+  } = require('../../utils/address-normalizer');
+  const rebuiltUnit = (existingUnit) => [structuralUnitPart(existingUnit), unit].filter(Boolean).join(' ');
+  // The supported UNIT-FIRST form ("Apt 204, 123 Main St, …"): the splitter
+  // would read the leading unit as the street and the override would be
+  // doubled in front of it (codex r3 P2 on #3796). Same-unit = untouched;
+  // a different one is replaced in place, the form kept.
+  const unitFirst = splitUnitFirstLine(String(line));
+  if (unitFirst) {
+    const dwelling = dwellingUnitOnLine(String(line));
+    if (dwelling && unitLineValueKey(dwelling) === unitLineValueKey(unit)) return line;
+    return `${rebuiltUnit(unitFirst.unit)}, ${unitFirst.rest}`;
+  }
+  const parsed = splitStreetLineUnitParts(String(line));
+  if (parsed.unit) {
+    const dwelling = dwellingUnitOnLine(String(line));
+    if (dwelling && unitLineValueKey(dwelling) === unitLineValueKey(unit)) return line;
+    return [`${parsed.street} ${rebuiltUnit(parsed.unit)}`, parsed.tail].filter(Boolean).join(', ');
+  }
+  const parts = String(line).split(',');
+  parts[0] = `${parts[0].trim()} ${unit}`;
+  return parts.map((p, i) => (i === 0 ? p : ` ${p.trim()}`)).join(',');
+}
+
 function addressFromContext(context) {
+  return withUnitOverride(addressFromContextBase(context), context);
+}
+
+// The street this run HEARD, for the unit-adoption compare: the extracted
+// street as spoken (before addressFromContextBase's locality borrow — a
+// street-only extraction can be lent an unrelated lead's city/ZIP, which
+// would read as another building and skip the stamped unit; codex r9 P1
+// on #3804), else the composed line, whose lead/customer sources carry
+// their own locality.
+function ownStreetForUnitAdoption(context) {
+  const sa = context?.extraction?.property?.service_address;
+  if (sa?.street_line_1) {
+    // The extraction's OWN city/ZIP ride along (codex r14 P1 on #3804):
+    // sameStreetAddress treats a missing locality as a match, so a bare
+    // street would let a reprocess that heard the same numbered street in
+    // ANOTHER city adopt the old fence and draft the old building. Only
+    // BORROWED locality is excluded; a genuinely street-only extraction
+    // still compares on the street alone.
+    const zip = sa.postal_code ? String(sa.postal_code).trim() : '';
+    return [String(sa.street_line_1).trim(), sa.city ? String(sa.city).trim() : null, zip ? `FL ${zip}` : null]
+      .filter(Boolean).join(', ');
+  }
+  return String(addressFromContextBase(context) || '').trim();
+}
+
+function addressFromContextBase(context) {
+  // The item-bound building of a clarify re-run outranks EVERY other
+  // source — the extraction (a reprocess may name another building) and,
+  // for a fallback context with no extraction at all, the lead/customer
+  // lines (which could describe another property entirely; pre-push codex
+  // P1 on the unit write-back).
+  const ov = context.serviceAddressOverride;
+  if (ov?.street_line_1) {
+    let city = ov.city || null;
+    let zip = ov.postal_code || null;
+    if (!city && !zip) {
+      // A street-only building (unit_ask_building carries what the caller
+      // said) borrows locality ONLY from a record naming the SAME street —
+      // the extraction, this call's lead, the trusted profile — never from
+      // one that may describe another property; with no such record the
+      // street stands alone rather than a "…, FL" that geocodes nowhere
+      // (pre-push codex P1 on #3804, r9).
+      const { splitUnitFirstLine } = require('../../utils/address-normalizer');
+      const sa = context.extraction?.property?.service_address;
+      const trusted = (!context.customerPhoneAmbiguous && context.customer) || null;
+      const same = [
+        sa?.street_line_1 ? { street: sa.street_line_1, city: sa.city, zip: sa.postal_code } : null,
+        context.leadIsForThisCall && context.lead?.address ? { street: context.lead.address, city: context.lead.city, zip: context.lead.zip } : null,
+        trusted?.address_line1 ? { street: trusted.address_line1, city: trusted.city, zip: trusted.zip } : null,
+      ].find((c) => c && (c.city || c.zip) && sameStreetAddress(splitUnitFirstLine(c.street)?.rest || c.street, ov.street_line_1));
+      if (same) { city = same.city || null; zip = same.zip || null; }
+    }
+    return [ov.street_line_1, city, [city || zip ? 'FL' : null, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  }
   const sa = context.extraction?.property?.service_address;
   if (sa?.street_line_1) {
     // Street-only extractions (city/ZIP nullable in the schema) borrow
@@ -1235,6 +1333,18 @@ async function maybeDraftEstimateForCall({
 }) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
+  // Clarify write-back, read from the call row's unit-answer fence below
+  // (never a caller argument — one owned path, so the adoption identity
+  // stamp can never be bypassed; codex r13 P2 on #3804): the apartment/unit
+  // the customer texted after the call ("Apt 204"), composed into the
+  // service address and stamped on the extraction's street_line_2 so the
+  // unit-scope model sees the subpremise…
+  let unitLineOverride = null;
+  // …and the BUILDING the ask was about ({ street_line_1, city,
+  // postal_code }): a reprocessed call's rolling extraction may name a
+  // different building than the surviving card, so the item-bound building
+  // wins over the call row's latest extraction.
+  let serviceAddressOverride = null;
   // This pass's ordering stamp: markers written after it began belong to
   // a newer verdict and are never cleared by it. The wall-clock instant
   // fences generation-less legacy markers; ownerProcGeneration (the claim
@@ -1253,6 +1363,74 @@ async function maybeDraftEstimateForCall({
       context.supersedeAttempt = supersedeAttempt || null;
     }
     if (context && !context.error && bedroomCountOverride != null) context.bedroomCountOverride = bedroomCountOverride;
+    // A unit answer already stamped on the call (the clarify write-back's
+    // fence) is ADOPTED by any later composer that was not handed one — a
+    // force-reprocess weeks after the reply must draft the unit, not the
+    // building, and must not be blocked by the fence it never saw. Only
+    // when this run's own address is the asked building (or it has none):
+    // a reprocess that heard a different property keeps its own address.
+    // Dry runs (estimator-replay) adopt it too — the read has no side
+    // effects, and a replay that priced the whole building while the live
+    // path drafts the apartment would misreport production (codex r2 P2).
+    if (context && !context.error) {
+      try {
+        const { callUnitAnswer } = require('../../utils/estimate-claim-sql');
+        const fence = await callUnitAnswer(db, callLogId);
+        if (fence?.unit) {
+          const own = ownStreetForUnitAdoption(context);
+          const b = fence.building;
+          const buildingLine = b?.street_line_1
+            ? [b.street_line_1, b.city, b.postal_code ? `FL ${b.postal_code}` : null].filter(Boolean).join(', ')
+            : null;
+          const { splitUnitFirstLine } = require('../../utils/address-normalizer');
+          // Compared on the STREET — a structural unit-first line ("Bldg 9,
+          // 123 Main St") is at the building (codex r1 P2 on #3804).
+          if (!own || !buildingLine || sameStreetAddress(splitUnitFirstLine(own)?.rest || own, buildingLine)) {
+            unitLineOverride = fence.unit;
+            if (b?.street_line_1) serviceAddressOverride = b;
+            result.unitAnswerAdopted = true;
+            // The identity the creators' LOCKED fence read must still find
+            // on the call row — a Dismiss/Deny that cleared it (or a newer
+            // reply that replaced it) while this run composed aborts the
+            // insert instead of persisting the rejected unit (pre-push
+            // codex P1 on #3804, r8).
+            context.adoptedUnitAnswer = { unit: String(fence.unit), at: fence.at || null };
+          }
+        }
+      } catch (fenceErr) {
+        // FAIL the run (the outer catch reports it and the pipeline's
+        // retry/reconcile sees a failure) rather than compose without the
+        // unit: the creator's in-lock fence read could then succeed, return
+        // unit_answer_pending, and the pass would exit quietly with no
+        // replacement draft and nobody told (pre-push codex P1 on #3804).
+        fenceErr.message = `unit-answer fence read failed: ${fenceErr.message}`;
+        throw fenceErr;
+      }
+    }
+    if (context && !context.error && (unitLineOverride || serviceAddressOverride?.street_line_1)) {
+      if (unitLineOverride) context.unitLineOverride = String(unitLineOverride);
+      // Honored by addressFromContext directly (extraction or not); ALSO
+      // stamped into the extraction below so the unit-scope model sees the
+      // subpremise on street_line_2.
+      if (serviceAddressOverride?.street_line_1) context.serviceAddressOverride = serviceAddressOverride;
+      if (context.extraction && typeof context.extraction === 'object') {
+        context.extraction.property = context.extraction.property && typeof context.extraction.property === 'object'
+          ? context.extraction.property : {};
+        const prop = context.extraction.property;
+        prop.service_address = prop.service_address && typeof prop.service_address === 'object' ? prop.service_address : {};
+        const sa = prop.service_address;
+        if (serviceAddressOverride?.street_line_1) {
+          sa.street_line_1 = String(serviceAddressOverride.street_line_1);
+          sa.city = serviceAddressOverride.city || null;
+          sa.postal_code = serviceAddressOverride.postal_code || null;
+          sa.state = 'FL';
+        }
+        // The customer's texted unit REPLACES whatever the rolling extraction
+        // holds on line 2 — after a reprocess that may be another property's
+        // unit (codex r3 P1 on #3785).
+        if (unitLineOverride) sa.street_line_2 = String(unitLineOverride);
+      }
+    }
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.
     if (!dryRun && context && !context.error) {
       await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration });
@@ -1327,6 +1505,27 @@ async function maybeDraftEstimateForCall({
 
     if (!dryRun) {
       const existing = await existingDraftForCall(callLogId);
+      // An adopted unit answer whose existing draft is the HELD whole-building
+      // row (the clarify hold: reprice marker + an address the fence
+      // rejects) makes that row this run's supersede target — otherwise a
+      // force-reprocess would return it as `existing` and never compose the
+      // unit (codex r1 P2 on #3804). Same attempt token, so the creator's
+      // lock takes it and archives it after the replacement insert.
+      if (result.unitAnswerAdopted && existing && !supersedeEstimateId) {
+        try {
+          const exData = typeof existing.estimate_data === 'string' ? JSON.parse(existing.estimate_data) : (existing.estimate_data || {});
+          const exEngine = exData?.estimatorEngine || {};
+          const { unitAnswerFenceReason } = require('../../utils/estimate-claim-sql');
+          if (exEngine.reprice_pending_at && unitAnswerFenceReason({ unit: unitLineOverride, building: serviceAddressOverride || null }, { address: existing.address })) {
+            supersedeEstimateId = String(existing.id);
+            context.supersedeEstimateId = supersedeEstimateId;
+            context.supersedeReason = 'unit_answer_adopted';
+            context.supersedeAttempt = exEngine.reprice_attempt || null;
+          }
+        } catch (exErr) {
+          logger.warn(`[estimator-engine] held-draft read failed (composing without a supersede target): ${exErr.message}`);
+        }
+      }
       // The draft a re-run supersedes IS the existing draft for this call —
       // it is replaced inside the dedupe transaction, not returned as-is.
       const supersedesExisting = existing && supersedeEstimateId
@@ -1485,6 +1684,21 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     }
     const { intent, model } = composed;
     result.intent = intent;
+    // Clarify write-back: the customer's texted unit is applied to the
+    // composer's FINAL address deterministically — a model that returns
+    // the whole building, or repeats the call's stale unit, must not
+    // persist that on the draft (codex r1 P1 on #3796). Only at the asked
+    // building; a composer that quoted another property keeps it.
+    if (context.unitLineOverride && intent.address) {
+      const ov = context.serviceAddressOverride;
+      const buildingLine = ov?.street_line_1
+        ? [ov.street_line_1, ov.city, ov.postal_code ? `FL ${ov.postal_code}` : null].filter(Boolean).join(', ')
+        : null;
+      const { splitUnitFirstLine } = require('../../utils/address-normalizer');
+      if (!buildingLine || sameStreetAddress(splitUnitFirstLine(intent.address)?.rest || intent.address, buildingLine)) {
+        intent.address = withUnitOverride(intent.address, context);
+      }
+    }
 
     // The composer establishes the FINAL service address (spelled-out
     // corrections, quote-for-a-different-property, transcript-only addresses
@@ -1990,6 +2204,15 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             return result;
           }
           let commercialOutcome = proposalOutcome;
+          if (commercialOutcome?.blocked && UNIT_FENCE_QUIET_REASONS.includes(commercialOutcome.reason)) {
+            // Same quiet exit as the residential creator: the unit re-run
+            // owns the replacement and its bell (codex r1 P2 on #3796); a
+            // retracted adoption composes again on the next reprocess.
+            result.blocked = true;
+            result.reasons = [commercialOutcome.reason];
+            logger.info('[estimator-engine] commercial scaffold blocked — the caller answered the unit after this run composed; the unit re-draft replaces it', { callLogId: context?.call?.id || null });
+            return result;
+          }
           if (commercialOutcome?.blocked && !dryRun && context?.call?.id) {
             // Same late-race handling as the residential path (codex P1,
             // PR #3304 r10): a stale composer committing after the
@@ -2134,6 +2357,19 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
       membershipSnapshot, priorQualifyingServices, origin,
     });
+
+    if (draft.blocked && UNIT_FENCE_QUIET_REASONS.includes(draft.duplicateBlock?.reason)) {
+      // The caller texted their unit while this whole-building draft was
+      // composing (clarify write-back fence): the unit re-run owns the
+      // replacement and its own bell — no "an estimate already covers this
+      // prospect" bell, no reconcile retry (it would be fenced again). A
+      // RETRACTED adoption (the human retired the fence mid-run) exits the
+      // same way; the next reprocess composes without the unit.
+      result.blocked = true;
+      result.reasons = [draft.duplicateBlock.reason];
+      logger.info('[estimator-engine] draft blocked — the caller answered the unit after this run composed; the unit re-draft replaces it', { callLogId: context?.call?.id || null });
+      return result;
+    }
 
     if (draft.blocked && !dryRun && context?.call?.id) {
       // The corrected retry can LOSE the insert race to a stale detached
@@ -2439,7 +2675,7 @@ module.exports = {
   runDraftPipeline,
   notify,
   _private: {
-    addressFromContext, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
+    addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
     parcelSignalsDescribeGatheredAddress,
   },
 };

@@ -20,6 +20,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
+const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 // Router module doubling as the template helper — same import the
 // estimate-follow-up service uses.
@@ -245,6 +246,12 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     .where({ id: estimate.id, status: estimate.status })
     .whereNull('archived_at')
     .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
+    // Never revive a row under a clarify re-price hold (codex r7 P0 on
+    // #3804): the renderer refuses it, so the extension's SMS would carry
+    // a dead link — and the public auto-grant's eligibility read could
+    // have preceded the hold. Zero rows → the same 409 as any other
+    // concurrent change; the public route releases its burn on it.
+    .whereRaw(REPRICE_PENDING_ABSENT_SQL)
     .update(updates);
   if (!updated) {
     const err = new Error('Estimate changed while extending — retry.');
@@ -280,6 +287,8 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         // cannot render, so a revived status would only mislead the sweep.
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+        // …nor a HELD sibling (clarify re-price): it cannot render either.
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         // Atomic belt to the pre-mutation verdict (uncapped codex P0 r20):
         // while the gate is on a sibling that fails the authority predicate
         // is never revived, whatever raced between the verdict and here.

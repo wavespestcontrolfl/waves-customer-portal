@@ -1858,6 +1858,36 @@ async function getReminderPrefs(customerId) {
 // inline callers keep their exact query sequence. The deferred path passes
 // recheckBeforeSend so a same-second cancel/reschedule landing after the row
 // was first read can still suppress the now-stale send.
+// A HELD call-booking confirmation (quiet hours / grouped move) owes the
+// open-estimate accept line the pipeline would have appended itself: the
+// re-armed row carries confirmation_estimate_id (GH codex #3814 r2 P2).
+// Re-verified at delivery — the pinned estimate must still be the newest
+// open one and the accept must still adopt THIS visit — and appended for
+// the account holder's own number only: a service contact must never
+// receive the bearer link (#3814 r1 P1). Gate reads at call time (live
+// kill). Best-effort: any failure sends the plain confirmation.
+async function appendHeldEstimateAcceptLine(body, { record, contact, customer, scheduledServiceId }) {
+  if (!body || !record?.confirmation_estimate_id || contact?.role !== 'primary') return body;
+  try {
+    const gates = require('../config/feature-gates');
+    if (!gates.gateEnvValue('GATE_CALL_CONFIRMATION_ESTIMATE_LINK') || !gates.isEnabled('estimateExistingApptCustomerWide')) return body;
+    const { samePhone } = require('./customer-contact');
+    if (!customer?.phone || !samePhone(contact.phone, customer.phone)) return body;
+    const { resolveConfirmationEstimate, appendEstimateAcceptLine } = require('./composer-customer-links');
+    const estimate = await resolveConfirmationEstimate({
+      customerId: customer.id, scheduledServiceId, estimateId: record.confirmation_estimate_id,
+    });
+    if (!estimate) {
+      logger.info(`[appt-remind] held estimate accept line withheld for ${scheduledServiceId}: the pinned estimate is no longer open or no longer adopts this visit`);
+      return body;
+    }
+    return appendEstimateAcceptLine(body, estimate, { scheduledServiceId });
+  } catch (err) {
+    logger.warn(`[appt-remind] held estimate accept line skipped for ${scheduledServiceId}: ${err.message}`);
+    return body;
+  }
+}
+
 async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false }) {
   if (apptTime.getTime() <= Date.now()) {
     // Deferred path (codex #3609 r22 P2): the time this sender read can have
@@ -1979,7 +2009,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         smsOutcome,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
-          return renderAppointmentPageTemplate(
+          const rendered = await renderAppointmentPageTemplate(
             'appointment_confirmation',
             async () => {
               // Confirm-first label ONLY when there is something to confirm:
@@ -2003,6 +2033,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
           );
+          return appendHeldEstimateAcceptLine(rendered, { record, contact, customer, scheduledServiceId });
         }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }, { sendOutcome: smsOutcome }),
       });
 
@@ -2024,7 +2055,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // resends with the new time (one extra, correct text beats none).
       const marked = await db('appointment_reminders')
         .where({ id: record.id, appointment_time: apptTime })
-        .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+        .update({ confirmation_sent: true, confirmation_sent_at: new Date(), confirmation_estimate_id: null });
       if (Number(marked) === 0) {
         logger.warn(`[appt-remind] Confirmation for ${scheduledServiceId} went out for a time that changed under the send — row left pending so the sweep resends the new time`);
       }
@@ -5332,6 +5363,7 @@ AppointmentReminders._test = {
   getReminderPrefs,
   liveReminderServiceLabel,
   buildMergedServiceLabel,
+  appendHeldEstimateAcceptLine,
 };
 
 // Exposed for unit tests (e.g. the shared line-type cache consolidation).
@@ -5347,5 +5379,13 @@ AppointmentReminders.confirmationArrivalWindow = confirmationArrivalWindow;
 // Per-row customer-facing label (parent + add-ons) — the grouped appointment
 // page / calendar list members with it (codex #3609 r15/r16).
 AppointmentReminders.buildServiceLabel = buildServiceLabel;
+// The visit's ET start instant, shared with BOTH card-fee rails
+// (estimate-card-holds, appointment-card-request) and the deferred-replay
+// registry. It lived only in _test until 2026-09-03, so every prod
+// destructure got undefined and the cancel previews fell into their
+// fail-closed "fee may apply" branch for every secured visit.
+AppointmentReminders.scheduledServiceApptTime = scheduledServiceApptTime;
+// Same composition for callers that already hold the row (joined reads).
+AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 
 module.exports = AppointmentReminders;

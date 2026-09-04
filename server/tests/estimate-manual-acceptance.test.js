@@ -192,6 +192,24 @@ describe('estimate manual acceptance', () => {
     })).rejects.toMatchObject({ statusCode: 409 });
   });
 
+  test('a verbal yes on a row under a clarify re-price hold is refused on the LOCKED read (codex r11 sweep on #3804)', async () => {
+    const estimate = {
+      id: 'estimate-held',
+      status: 'viewed',
+      customer_id: null,
+      sent_at: '2026-05-10T12:00:00.000Z',
+      monthly_total: '125.00',
+      estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1', reprice_pending_at: '2026-09-03T12:00:00Z', reprice_attempt: 'att-1' } }),
+    };
+    const { database } = makeDb(estimate);
+    await expect(markEstimateManuallyAccepted({
+      estimateId: 'estimate-held',
+      adminUserId: 'admin-1',
+      source: 'verbal_yes',
+      database,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/held for a re-price/) });
+  });
+
   test('one-time-only commercial win stamps the customer commercial without the converter (codex #3594 r3)', async () => {
     // Commercial trenching: the public accept route refuses it, staff marks it
     // won — no monthly total, so the converter (and its stamp) never runs.

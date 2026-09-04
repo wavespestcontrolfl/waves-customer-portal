@@ -150,6 +150,73 @@ describe('Payment Methods row hierarchy', () => {
     await waitFor(() => expect(showCustomerConfirm).toHaveBeenCalledWith(expect.stringMatching(/3 business days/), expect.anything()));
   });
 
+  // GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE: a card carrying holdsAppointment
+  // opens the call-us disclaimer (visit + agreed fee survive removal; call
+  // or reschedule), with Keep card as the default and Remove anyway still
+  // available — removal is never blocked.
+  const holdingCards = () => [cards[0], {
+    ...cards[1],
+    holdsAppointment: { serviceId: 'svc-9', start: '2026-09-12T13:00:00.000Z', serviceType: 'Pest Control', feeAmount: 49, rescheduleUrl: '/reschedule/tok-9' },
+  }];
+
+  it('Remove on a card holding a visit opens the disclaimer with the phone + reschedule links; Keep card removes nothing', async () => {
+    api.getCards.mockResolvedValue({ cards: holdingCards() });
+    api.getAutopay.mockResolvedValue(autopayPayload());
+    showCustomerConfirm.mockResolvedValue(false);
+    render(<BillingTab customer={customer} />);
+    await screen.findByText(/Auto Pay method/);
+    fireEvent.click(within(rowFor('1881')).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(showCustomerConfirm).toHaveBeenCalledTimes(1));
+    const [message, options] = showCustomerConfirm.mock.calls[0];
+    expect(options).toEqual({ title: 'This card holds an appointment', confirmLabel: 'Remove anyway', cancelLabel: 'Keep card', danger: true });
+    const { container } = render(<div data-testid="msg">{message}</div>);
+    const text = container.textContent;
+    expect(text).toMatch(/holding your Pest Control visit on Sat, Sep 12, 9:00 AM/);
+    expect(text).toMatch(/does not cancel the visit or the \$49\.00 late-cancel fee you agreed to/);
+    expect(within(container).getByRole('link', { name: '(941) 297-5749' })).toHaveAttribute('href', 'tel:+19412975749');
+    expect(within(container).getByRole('link', { name: 'reschedule online' })).toHaveAttribute('href', '/reschedule/tok-9');
+    expect(api.removeCard).not.toHaveBeenCalled();
+  });
+
+  it('a fractional agreed fee keeps its cents', async () => {
+    const [live, holding] = holdingCards();
+    api.getCards.mockResolvedValue({ cards: [live, { ...holding, holdsAppointment: { ...holding.holdsAppointment, feeAmount: 49.5 } }] });
+    api.getAutopay.mockResolvedValue(autopayPayload());
+    showCustomerConfirm.mockResolvedValue(false);
+    render(<BillingTab customer={customer} />);
+    await screen.findByText(/Auto Pay method/);
+    fireEvent.click(within(rowFor('1881')).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(showCustomerConfirm).toHaveBeenCalledTimes(1));
+    const { container } = render(<div>{showCustomerConfirm.mock.calls[0][0]}</div>);
+    expect(container.textContent).toMatch(/\$49\.50 late-cancel fee/);
+  });
+
+  it('Remove anyway still removes the holding card', async () => {
+    api.getCards.mockResolvedValue({ cards: holdingCards() });
+    api.getAutopay.mockResolvedValue(autopayPayload());
+    render(<BillingTab customer={customer} />);
+    await screen.findByText(/Auto Pay method/);
+    fireEvent.click(within(rowFor('1881')).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(api.removeCard).toHaveBeenCalledWith('pm-spare'));
+  });
+
+  it('no reschedule link when the server sent none; a card without a hold keeps the plain confirm', async () => {
+    const [live, holding] = holdingCards();
+    api.getCards.mockResolvedValue({ cards: [live, { ...holding, holdsAppointment: { ...holding.holdsAppointment, rescheduleUrl: null } }] });
+    api.getAutopay.mockResolvedValue(autopayPayload({ autopay_selected_method_ids: [] }));
+    showCustomerConfirm.mockResolvedValue(false);
+    render(<BillingTab customer={customer} />);
+    await waitFor(() => expect(within(list()).getAllByRole('button', { name: 'Remove' })).toHaveLength(2));
+    fireEvent.click(within(rowFor('1881')).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(showCustomerConfirm).toHaveBeenCalledTimes(1));
+    const { container } = render(<div>{showCustomerConfirm.mock.calls[0][0]}</div>);
+    expect(within(container).queryByRole('link', { name: 'reschedule online' })).not.toBeInTheDocument();
+    expect(within(container).getByRole('link', { name: '(941) 297-5749' })).toBeInTheDocument();
+    fireEvent.click(within(rowFor('4242')).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(showCustomerConfirm).toHaveBeenCalledTimes(2));
+    expect(showCustomerConfirm.mock.calls[1]).toEqual(['Remove this payment method?', { title: 'Remove payment method?', confirmLabel: 'Remove', danger: true }]);
+  });
+
   it('a 409 autopay_method_in_use on Remove surfaces the server message and refreshes', async () => {
     api.getAutopay.mockResolvedValue(autopayPayload({ autopay_selected_method_ids: [] }));
     const err = new Error('This payment method is currently used for Auto Pay. Add another payment method or turn off Auto Pay before removing it.');

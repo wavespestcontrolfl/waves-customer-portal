@@ -48,10 +48,21 @@ describe('email shouldSkipAutoAction — operational-sender guard', () => {
     expect(shouldSkipAutoAction('spam', 'winner@lottery.example.biz')).toBe(false);
   });
 
-  test('non-destructive categories are never skipped by this guard', () => {
-    expect(shouldSkipAutoAction('lead_inquiry', 'events@wavespestcontrol.com')).toBe(false);
+  test('non-destructive categories still run for operational domains that are not ours', () => {
     expect(shouldSkipAutoAction('vendor_invoice', 'billing@google.com')).toBe(false);
-    expect(shouldSkipAutoAction('customer_request', 'contact@wavespestcontrol.com')).toBe(false);
+    expect(shouldSkipAutoAction('lead_inquiry', 'no-reply@accounts.google.com', GOOG('accounts.google.com'))).toBe(false);
+    expect(shouldSkipAutoAction('customer_request', 'jane@example.com', GOOG('example.com'))).toBe(false);
+  });
+
+  test('our OWN addresses skip every non-destructive handler — a self-addressed alert never matches a customer or drafts a reply', () => {
+    expect(shouldSkipAutoAction('lead_inquiry', 'events@wavespestcontrol.com')).toBe(true);
+    expect(shouldSkipAutoAction('customer_request', 'contact@wavespestcontrol.com', GOOG('wavespestcontrol.com'))).toBe(true);
+    expect(shouldSkipAutoAction('scheduling', 'Contact@WavesPestControl.com', GOOG('wavespestcontrol.com'))).toBe(true);
+    expect(shouldSkipAutoAction('complaint', 'anyone@wavespestcontrol.com', GOOG('wavespestcontrol.com'))).toBe(true);
+    // A spoofed "us" with failed auth is skipped too: these handlers would
+    // match/draft for the spoofer; the spam verdict path is what quarantines.
+    expect(shouldSkipAutoAction('customer_request', 'contact@wavespestcontrol.com', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example')).toBe(true);
+    expect(shouldSkipAutoAction('spam', 'contact@wavespestcontrol.com', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example')).toBe(false);
   });
 });
 

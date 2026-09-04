@@ -13,6 +13,9 @@
 const logger = require('../logger');
 const db = require('../../models/db');
 const { executeBacklinkTool } = require('./backlink-strategy-tools');
+const { BACKLINK_STRATEGY_AGENT_CONFIG } = require('./backlink-strategy-agent-config');
+const { recordSessionUsage } = require('../llm-dispatch-metrics');
+const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BACKLINK_STRATEGY_AGENT_ID = process.env.BACKLINK_STRATEGY_AGENT_ID;
@@ -72,7 +75,7 @@ async function apiCall(method, path, body) {
   });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${err}`);
+    throw Object.assign(new Error(`Anthropic API ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
   return res.json();
 }
@@ -88,7 +91,7 @@ async function* streamSessionEvents(sessionId) {
   });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Stream error ${res.status}: ${err}`);
+    throw Object.assign(new Error(`Stream error ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
 
   const reader = res.body.getReader();
@@ -178,138 +181,166 @@ const BacklinkStrategyAgent = {
 
     const sessionId = session.id;
     logger.info(`[backlink-strategy] Session created: ${sessionId}`);
-
-    await sendSessionEvents(sessionId, [buildUserMessageEvent(prompt)]);
-
     let finalReport = '';
     let toolsExecuted = [];
     let targetsAdded = 0;
     let gapsFound = 0;
-    let maxToolCalls = 60; // strategy agent may need lots of tool calls
-    const pendingCustomToolUses = new Map();
-    const resolvedToolUseIds = new Set();
+    // Call ledger (never throws): one session row with the session's token
+    // usage, written however the session ends from here on — a failed first
+    // event, a stream that throws or times out, all still consumed tokens —
+    // carrying this runner's own outcome. Upserted by session id, so
+    // re-billing is safe.
+    let failure = null;
+    // Set only by a terminal event: any other stream exit is a failure.
+    let sessionEnded = false;
+    // The run's own end — the ledger's usage GET after it is observability
+    // time, not agent time, and stays out of the reported duration.
+    let runEndedAt = null;
+    try {
+      await sendSessionEvents(sessionId, [buildUserMessageEvent(prompt)]);
 
-    notify('auditing', 'Agent is auditing the backlink profile...');
+      let maxToolCalls = 60; // strategy agent may need lots of tool calls
+      const pendingCustomToolUses = new Map();
+      const resolvedToolUseIds = new Set();
 
-    const executeToolUse = async (toolName, toolInput, toolUseId) => {
-      if (!toolUseId || resolvedToolUseIds.has(toolUseId)) return null;
-      if (--maxToolCalls <= 0) {
-        logger.warn(`[backlink-strategy] Hit max tool calls for session ${sessionId}`);
-        return null;
-      }
+      notify('auditing', 'Agent is auditing the backlink profile...');
 
-      const stageMap = {
-        get_backlink_dashboard: 'auditing',
-        scan_backlinks: 'auditing',
-        get_signup_agent_stats: 'auditing',
-        get_citation_dashboard: 'auditing',
-        scan_competitor_gaps: 'analyzing competitors',
-        get_competitor_gap_opportunities: 'analyzing competitors',
-        add_targets_to_queue: 'adding targets',
-        get_queue_status: 'reviewing queue',
-        get_completed_profiles: 'reviewing profiles',
-        list_prospects: 'reviewing prospects',
-        create_link_prospects: 'adding prospects',
-        check_search_volume: 'checking keywords',
-        check_llm_mentions: 'checking LLM visibility',
-        save_strategy_report: 'saving report',
+      const executeToolUse = async (toolName, toolInput, toolUseId) => {
+        if (!toolUseId || resolvedToolUseIds.has(toolUseId)) return null;
+        if (--maxToolCalls <= 0) {
+          logger.warn(`[backlink-strategy] Hit max tool calls for session ${sessionId}`);
+          failure = 'max_tool_calls';
+          return null;
+        }
+
+        const stageMap = {
+          get_backlink_dashboard: 'auditing',
+          scan_backlinks: 'auditing',
+          get_signup_agent_stats: 'auditing',
+          get_citation_dashboard: 'auditing',
+          scan_competitor_gaps: 'analyzing competitors',
+          get_competitor_gap_opportunities: 'analyzing competitors',
+          add_targets_to_queue: 'adding targets',
+          get_queue_status: 'reviewing queue',
+          get_completed_profiles: 'reviewing profiles',
+          list_prospects: 'reviewing prospects',
+          create_link_prospects: 'adding prospects',
+          check_search_volume: 'checking keywords',
+          check_llm_mentions: 'checking LLM visibility',
+          save_strategy_report: 'saving report',
+        };
+        notify(stageMap[toolName] || 'working', `Executing: ${toolName}`);
+
+        logger.info(`[backlink-strategy] Tool: ${toolName}(${JSON.stringify(toolInput).slice(0, 200)})`);
+
+        let toolResult;
+        try {
+          toolResult = await executeBacklinkTool(toolName, toolInput);
+
+          if (toolName === 'add_targets_to_queue' && toolResult.added) {
+            targetsAdded += toolResult.added;
+          }
+          if (toolName === 'create_link_prospects' && toolResult.added) {
+            targetsAdded += toolResult.added;
+          }
+          if (toolName === 'scan_competitor_gaps' && toolResult.gaps) {
+            gapsFound += toolResult.gaps;
+          }
+        } catch (err) {
+          toolResult = { error: `Tool failed: ${err.message}` };
+          logger.error(`[backlink-strategy] Tool ${toolName} error: ${err.message}`);
+        }
+
+        resolvedToolUseIds.add(toolUseId);
+        toolsExecuted.push({ tool: toolName, input: toolInput, result: toolResult });
+        return toolResult;
       };
-      notify(stageMap[toolName] || 'working', `Executing: ${toolName}`);
 
-      logger.info(`[backlink-strategy] Tool: ${toolName}(${JSON.stringify(toolInput).slice(0, 200)})`);
-
-      let toolResult;
-      try {
-        toolResult = await executeBacklinkTool(toolName, toolInput);
-
-        if (toolName === 'add_targets_to_queue' && toolResult.added) {
-          targetsAdded += toolResult.added;
-        }
-        if (toolName === 'create_link_prospects' && toolResult.added) {
-          targetsAdded += toolResult.added;
-        }
-        if (toolName === 'scan_competitor_gaps' && toolResult.gaps) {
-          gapsFound += toolResult.gaps;
-        }
-      } catch (err) {
-        toolResult = { error: `Tool failed: ${err.message}` };
-        logger.error(`[backlink-strategy] Tool ${toolName} error: ${err.message}`);
-      }
-
-      resolvedToolUseIds.add(toolUseId);
-      toolsExecuted.push({ tool: toolName, input: toolInput, result: toolResult });
-      return toolResult;
-    };
-
-    for await (const { event, data } of streamSessionEvents(sessionId)) {
-      if (event === 'assistant' || event === 'text') {
-        if (data.text) finalReport += data.text;
-        if (data.content) {
-          for (const block of data.content) {
-            if (block.type === 'text') finalReport += block.text;
+      for await (const { event, data } of streamSessionEvents(sessionId)) {
+        if (event === 'assistant' || event === 'text') {
+          if (data.text) finalReport += data.text;
+          if (data.content) {
+            for (const block of data.content) {
+              if (block.type === 'text') finalReport += block.text;
+            }
           }
         }
-      }
 
-      const isCustomToolUse = event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
-      const isLegacyToolUse = event === 'tool_use' || data?.type === 'tool_use';
-      if (isCustomToolUse) {
-        const toolName = data.name;
-        const toolInput = data.input || {};
-        const toolUseId = toolUseIdFromEvent(data);
-        if (!toolUseId) {
-          logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
-          continue;
-        }
-        pendingCustomToolUses.set(toolUseId, { toolName, toolInput });
-      } else if (isLegacyToolUse) {
-        const toolName = data.name;
-        const toolInput = data.input || {};
-        const toolUseId = toolUseIdFromEvent(data);
-        if (!toolUseId) {
-          logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
-          continue;
-        }
-
-        const toolResult = await executeToolUse(toolName, toolInput, toolUseId);
-        if (!toolResult) break;
-
-        await sendSessionEvents(sessionId, [
-          buildToolResultEvent(toolUseId, toolResult, { custom: false }),
-        ]);
-      }
-
-      const stopReason = stopReasonFromEvent(data);
-      if (event === 'session.status_idle' && stopReason?.type === 'requires_action') {
-        const toolResultEvents = [];
-        for (const toolUseId of stopReason.event_ids || []) {
-          const pending = pendingCustomToolUses.get(toolUseId);
-          if (!pending) {
-            logger.error(`[backlink-strategy] Missing pending custom tool use for required event ${toolUseId}`);
+        const isCustomToolUse = event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
+        const isLegacyToolUse = event === 'tool_use' || data?.type === 'tool_use';
+        if (isCustomToolUse) {
+          const toolName = data.name;
+          const toolInput = data.input || {};
+          const toolUseId = toolUseIdFromEvent(data);
+          if (!toolUseId) {
+            logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
             continue;
           }
-          const toolResult = await executeToolUse(pending.toolName, pending.toolInput, toolUseId);
+          pendingCustomToolUses.set(toolUseId, { toolName, toolInput });
+        } else if (isLegacyToolUse) {
+          const toolName = data.name;
+          const toolInput = data.input || {};
+          const toolUseId = toolUseIdFromEvent(data);
+          if (!toolUseId) {
+            logger.error(`[backlink-strategy] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
+            continue;
+          }
+
+          const toolResult = await executeToolUse(toolName, toolInput, toolUseId);
           if (!toolResult) break;
-          pendingCustomToolUses.delete(toolUseId);
-          toolResultEvents.push(buildToolResultEvent(toolUseId, toolResult, { custom: true }));
+
+          await sendSessionEvents(sessionId, [
+            buildToolResultEvent(toolUseId, toolResult, { custom: false }),
+          ]);
         }
-        if (toolResultEvents.length) {
-          await sendSessionEvents(sessionId, toolResultEvents);
+
+        const stopReason = stopReasonFromEvent(data);
+        if (event === 'session.status_idle' && stopReason?.type === 'requires_action') {
+          const toolResultEvents = [];
+          for (const toolUseId of stopReason.event_ids || []) {
+            const pending = pendingCustomToolUses.get(toolUseId);
+            if (!pending) {
+              logger.error(`[backlink-strategy] Missing pending custom tool use for required event ${toolUseId}`);
+              continue;
+            }
+            const toolResult = await executeToolUse(pending.toolName, pending.toolInput, toolUseId);
+            if (!toolResult) break;
+            pendingCustomToolUses.delete(toolUseId);
+            toolResultEvents.push(buildToolResultEvent(toolUseId, toolResult, { custom: true }));
+          }
+          if (toolResultEvents.length) {
+            await sendSessionEvents(sessionId, toolResultEvents);
+          }
+          continue;
         }
-        continue;
+
+        if (isSessionTerminal(event, data)) {
+          sessionEnded = true;
+          break;
+        }
+
+        if (isSessionError(event)) {
+          logger.error(`[backlink-strategy] Agent error: ${JSON.stringify(data)}`);
+          failure = 'session_error_event';
+          break;
+        }
+      }
+      // The stream closed (or was left) before the session said it ended:
+      // not a success, whatever the session GET reports later.
+      if (!failure && !sessionEnded) {
+        logger.error(`[backlink-strategy] Stream ended without a terminal event for session ${sessionId}`);
+        failure = 'session_stream_eof';
       }
 
-      if (event === 'done' || event === 'session_complete' || stopReason?.type === 'end_turn') {
-        break;
-      }
-
-      if (event === 'error' || event === 'session.error') {
-        logger.error(`[backlink-strategy] Agent error: ${JSON.stringify(data)}`);
-        break;
-      }
+    } catch (err) {
+      failure = err;
+      throw err;
+    } finally {
+      runEndedAt = Date.now();
+      await recordSessionUsage({ laneId: 'agent_backlink', sessionId, agentId: BACKLINK_STRATEGY_AGENT_ID, model: BACKLINK_STRATEGY_AGENT_CONFIG.model, startedAt: startTime, failure });
     }
 
-    const durationSeconds = Math.round((Date.now() - startTime) / 1000);
+    const durationSeconds = Math.round((runEndedAt - startTime) / 1000);
     notify('complete', `Finished in ${durationSeconds}s`);
 
     const result = {

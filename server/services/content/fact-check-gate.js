@@ -60,9 +60,32 @@ Severity (only for statements that are actually wrong). NOTE: only P0 blocks pub
 - P1: probably wrong, OR a debatable expert judgment. JUDGMENT CALLS ARE ALWAYS P1, NEVER P0 — this includes prevalence / how common a disease is on a given turf type, host-range emphasis, efficacy rankings of labeled products, and best-practice opinions. Even if you strongly disagree with such a claim, it is P1 at most. Surfaced for review but does NOT block.
 - P2: technically imprecise but not actually wrong. Do NOT use for "could add more detail."
 
-Return ONLY JSON, no prose:
-{"findings":[{"severity":"P0|P1|P2","claim":"<exact quoted text from the post>","issue":"<what's wrong and why>","fix":"<the correction>"}]}
-Empty findings array means the content is factually clean.`;
+An empty findings array means the content is factually clean.`;
+
+// Structured-output contract (llm/call.js jsonSchema): the provider constrains
+// the reply to this shape. normalizeFinding below still runs — it caps the
+// strings and stamps the FACTUAL_ERROR code the publish gate keys on.
+const RESPONSE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['findings'],
+  properties: {
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['severity', 'claim', 'issue', 'fix'],
+        properties: {
+          severity: { type: 'string', enum: ['P0', 'P1', 'P2'] },
+          claim: { type: 'string', description: 'Exact quoted text from the post' },
+          issue: { type: 'string', description: "What's wrong and why" },
+          fix: { type: 'string', description: 'The correction' },
+        },
+      },
+    },
+  },
+};
 
 function normalizeFinding(f) {
   // The model's severity is only prompt-constrained, so normalize casing/space
@@ -102,6 +125,7 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
       maxTokens: 6000,
       timeoutMs: FACTCHECK_TIMEOUT_MS,
       jsonMode: true,
+      jsonSchema: RESPONSE_SCHEMA,
       system: SYSTEM_PROMPT,
       text: `City: ${city || '(none)'}\nKeyword: ${keyword || '(none)'}\nTag: ${tag || '(none)'}\nTitle: ${title || '(none)'}\n\n--- POST BODY ---\n${body}`,
     });

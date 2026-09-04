@@ -984,7 +984,7 @@ describe('caller wiring (source)', () => {
   test('SMS-reply effects — the customer confirmation included — run through the durable shared pass; the 15-minute cron reconciles dead passes', () => {
     const sms = read('../services/reschedule-sms.js');
     expect(sms).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
-    expect(sms).toContain("sourceSurface: 'sms_reply',\n            notifyRequested: true,");
+    expect(sms).toMatch(/sourceSurface: 'sms_reply',\n(\s*\/\/[^\n]*\n)*\s*travelGap: true,\n\s*notifyRequested: true,/);
     expect(sms).not.toContain('notify: false');
     const index = read('../index.js');
     expect(index).toContain("runExclusive('series-move-effects-reconcile'");
@@ -1132,7 +1132,7 @@ describe('caller wiring (source)', () => {
     // Quick Move's series behavior is owned by its own gate + effects path:
     // its single call always opts out of the collective choke point.
     expect(read('../services/rain-out.js')).toMatch(/excludeServiceIds: \[job\.id\],[\s\S]{0,900}seriesPolicy: 'single',/);
-    expect(read('../routes/reschedule-public.js')).toContain("{ technicianId: slot.technician_id, seriesPolicy: 'single' }");
+    expect(read('../routes/reschedule-public.js')).toContain("{ technicianId: slot.technician_id, seriesPolicy: 'single', travelGap: true }");
     const sched = read('../routes/admin-schedule.js');
     const handler = sched.indexOf("router.put('/:id/update-details'");
     // Disclosure: without seriesAck the planner refuses up front (nothing saved) with the preview.

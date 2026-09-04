@@ -12,8 +12,8 @@
 // needs_review is reported, not rewritten.
 //
 //   railway run --service Postgres node ops/agents/auto-order-revoke.js --order=<vendor_orders.id>            # dry run
-//   railway run --service Postgres node ops/agents/auto-order-revoke.js --order=<vendor_orders.id> --execute
-//   railway run --service Postgres node ops/agents/auto-order-revoke.js --list                                # dispatched rows this month: placed + post-submit needs_review (placing shown, not revocable)
+//   railway run --service Postgres node ops/agents/auto-order-revoke.js --order=<vendor_orders.id> --cancelled-with-vendor --execute   # after the vendor has cancelled the order
+//   railway run --service Postgres node ops/agents/auto-order-revoke.js --list                                # every unreconciled dispatched row, all months: placed + post-submit needs_review (placing shown, not revocable)
 //
 // Run from the repo root (resolves the server's modules). Output carries ids,
 // vendor names and amounts only.

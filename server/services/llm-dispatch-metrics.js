@@ -29,12 +29,30 @@
  *
  * Dark until GATE_LLM_DISPATCH_METRICS=true. Kill switch: unset — recording
  * and the digest both no-op instantly; existing rows just age out.
+ *
+ * The same table is also the CALL LEDGER (agent-control S2a): behind the
+ * separate GATE_LLM_CALL_LEDGER, every provider call through the llm adapters
+ * writes one row_kind='call' row (tokens, latency, served model, error
+ * class) and every Managed Agents session one row_kind='session' row, each
+ * stamped with the ambient agent-control lane / chain / run / step ids. Chain
+ * rows and heartbeats keep their row_kind so the digest above reads exactly
+ * what it always did. Redacted bodies (GATE_LLM_CALL_TRACES + a lane policy
+ * that opts in) live in llm_call_traces, keyed to the call row and pruned
+ * after TRACE_RETENTION_DAYS. Every recorder here has the same contract as
+ * recordDispatch: never throws, never blocks the call it observes.
  */
 
 const logger = require('./logger');
 
+const { classifyFailure } = require('./agent-control/taxonomy');
+const { policyFor } = require('./agent-control/lane-policies');
+
 const DIGEST_TO = 'contact@wavespestcontrol.com';
 const RETENTION_DAYS = 30;
+// Traces are debugging material, not history: pruned independently of the
+// ledger rows they hang off, gate or no gate.
+const TRACE_RETENTION_DAYS = 7;
+const TRACE_BODY_CAP = 8 * 1024;
 
 // Exception thresholds. Volumes are per ET day per policy.
 const FALLBACK_RATE_THRESHOLD = 0.2; // fallback on >=20% of a policy's calls
@@ -76,25 +94,34 @@ const MIN_DAY_COVERAGE = 20;
 // classification, fact-check), often many layers below where the harness can
 // pass an option — so replay traffic would otherwise be recorded under the
 // live policy label, diluting its fallback/failure rates and keeping a dead
-// live lane looking active. AsyncLocalStorage (not a module flag) so a replay
-// running concurrently with live traffic cannot mislabel the live calls.
-const { AsyncLocalStorage } = require('async_hooks');
-const replayContext = new AsyncLocalStorage();
+// live lane looking active. Carried by the agent-control context's workload
+// scope (AsyncLocalStorage, not a module flag) so a replay running
+// concurrently with live traffic cannot mislabel the live calls.
+const agentContext = require('./agent-control/context');
 
 /**
- * Run `fn` with every LLM dispatch inside it recorded under a replay lane.
- * Harnesses wrap their whole run; nested live-service calls inherit it.
+ * Run `fn` with every LLM dispatch inside it recorded under the replay
+ * workload. Harnesses wrap their whole run; nested live-service calls inherit
+ * it. `lane` names the switchboard lane being replayed when the harness knows
+ * it (none of the in-repo harnesses pass one today).
  */
-function runAsReplay(fn, lane = 'replay') {
-  return replayContext.run(String(lane), fn);
+function runAsReplay(fn, lane = null) {
+  const replay = () => agentContext.withWorkload('replay', fn);
+  return lane ? agentContext.runInLane(lane, replay) : replay();
 }
 
 // Explicit workload names on the policy itself (smsShadow:<p>:sealed) win —
-// they are more specific than the ambient lane.
+// they are more specific than the ambient workload.
 function applyReplayLane(label) {
-  const lane = replayContext.getStore();
-  if (!lane || EPISODIC_LANE_RE.test(label)) return label;
-  return `${label}:${lane}`;
+  if (agentContext.current().workload !== 'replay' || EPISODIC_LANE_RE.test(label)) return label;
+  return `${label}:replay`;
+}
+
+// The `policy` column EVERY row of a chain carries — the chain row and each
+// leg's call row — so aggregation by policy never splits a chain, and replay
+// traffic is never attributed to the live policy (Codex r5 on #3846).
+function recordedPolicyLabel(policy) {
+  return applyReplayLane(policyLabel(policy));
 }
 
 // Named TEXT_POLICIES entries carry their registry key as `name` (set in
@@ -119,17 +146,52 @@ function policyLabel(policy) {
 function isEnabled() {
   return require('../config/feature-gates').isEnabled('llmDispatchMetrics');
 }
+// Both ledger gates are read at CALL time (gateEnvValue) so a flip needs no
+// redeploy and unset = off = kill.
+function ledgerEnabled() {
+  return require('../config/feature-gates').gateEnvValue('GATE_LLM_CALL_LEDGER');
+}
+function tracesEnabled() {
+  return require('../config/feature-gates').gateEnvValue('GATE_LLM_CALL_TRACES');
+}
+
+// The correlation columns every ledger row carries, straight from the
+// agent-control context. All null outside any scope.
+function contextColumns(ctx) {
+  return {
+    chain_id: ctx.chainId || null,
+    lane_id: ctx.laneId || null,
+    workload: ctx.workload || null,
+    run_id: ctx.runId || null,
+    attempt_id: ctx.attemptId || null,
+    step_id: ctx.stepId || null,
+    work_item_id: ctx.workItemId || null,
+    trace_id: ctx.traceId || null,
+    span_id: ctx.spanId || null,
+    parent_span_id: ctx.parentSpanId || null,
+    agent_version_id: ctx.agentVersionId || null,
+    workflow_id: ctx.workflowId || null,
+  };
+}
 
 /**
  * Record one completed dispatch chain. Fire-and-forget from the dispatcher's
  * hot path: never throws, never blocks, logs at debug on insert failure so a
  * DB blip can't cascade into the LLM call it was only supposed to observe.
  */
-function buildRow(policy, result) {
+function buildRow(policy, result, rowKind = 'chain') {
   const failures = Array.isArray(result?.failures) ? result.failures : [];
+  const ctx = agentContext.current();
   return {
-    policy: applyReplayLane(policyLabel(policy)).slice(0, 120),
+    ...contextColumns(ctx),
+    row_kind: rowKind,
+    policy: recordedPolicyLabel(policy).slice(0, 120),
     ok: !!result?.ok,
+    // WHY the chain failed, from the first leg's code — the class the alert
+    // rules and eval selection key on; null on success. A rejection from the
+    // caller's validate hook keeps that provenance (its codes are the
+    // lane's own vocabulary — model-quality, not plumbing).
+    error_class: result?.ok ? null : classifyFailure(failures[0]?.reason || result?.reason || 'error', { validator: failures[0]?.validator === true }),
     provider: result?.ok ? result.provider || null : null,
     model: result?.ok ? result.model || null : null,
     fallback_used: !!result?.fallbackUsed,
@@ -140,6 +202,7 @@ function buildRow(policy, result) {
         // Reasons are short codes or validator messages — cap length so a
         // pathological error string can't bloat the row.
         reason: String(f.reason || '').slice(0, 300),
+        ...(f.validator === true ? { validator: true } : {}),
       })))
       : null,
   };
@@ -186,8 +249,387 @@ function recordDispatch(policy, result) {
  */
 async function recordHeartbeat() {
   if (!isEnabled()) return { skipped: 'gate_off' };
-  await insertRow(buildRow({ name: HEARTBEAT_POLICY }, { ok: true }));
+  await insertRow(buildRow({ name: HEARTBEAT_POLICY }, { ok: true }, 'heartbeat'));
   return { ok: true };
+}
+
+// ── Call ledger ───────────────────────────────────────────────────────────
+
+const toCount = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Math.trunc(Number(v)));
+
+/**
+ * Normalise a provider's usage block into the ledger's five token columns.
+ * Pure; absent fields are null; never throws — an unexpected body shape must
+ * cost the row its token counts, not the call its result.
+ *   anthropic  usage.{input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens}
+ *   openai     usage.{input_tokens, input_tokens_details.cached_tokens, output_tokens, output_tokens_details.reasoning_tokens}
+ *   gemini     usageMetadata.{promptTokenCount, cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount}
+ */
+function extractUsage(provider, data) {
+  const out = { input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null };
+  try {
+    if (provider === 'anthropic') {
+      const u = data?.usage;
+      if (!u || typeof u !== 'object') return out;
+      out.input_tokens = toCount(u.input_tokens);
+      out.cached_input_tokens = toCount(u.cache_read_input_tokens);
+      out.cache_write_tokens = toCount(u.cache_creation_input_tokens);
+      out.output_tokens = toCount(u.output_tokens);
+    } else if (provider === 'openai') {
+      const u = data?.usage;
+      if (!u || typeof u !== 'object') return out;
+      out.input_tokens = toCount(u.input_tokens);
+      out.cached_input_tokens = toCount(u.input_tokens_details?.cached_tokens);
+      out.output_tokens = toCount(u.output_tokens);
+      out.reasoning_tokens = toCount(u.output_tokens_details?.reasoning_tokens);
+    } else if (provider === 'gemini') {
+      const u = data?.usageMetadata;
+      if (!u || typeof u !== 'object') return out;
+      out.input_tokens = toCount(u.promptTokenCount);
+      out.cached_input_tokens = toCount(u.cachedContentTokenCount);
+      out.output_tokens = toCount(u.candidatesTokenCount);
+      out.reasoning_tokens = toCount(u.thoughtsTokenCount);
+    }
+  } catch { /* unexpected shape — counts stay null */ }
+  return out;
+}
+
+// Run a ledger write and resolve the row id it produced (null when the DB
+// says no). Separate from insertRow because the trace writer needs the id
+// back and the heartbeat/chain path must keep its exact mocked shape.
+async function writtenId(query) {
+  const rows = typeof query.returning === 'function' ? await query.returning('id') : await query;
+  const first = Array.isArray(rows) ? rows[0] : rows;
+  const id = first && typeof first === 'object' ? first.id : first;
+  return Number.isFinite(Number(id)) ? Number(id) : null;
+}
+
+// Every column a call or session row normalises: ONE place decides how a
+// value is clipped, counted or classified, so a schema change is audited
+// here and nowhere else. `ok` follows from the error code (a failed row
+// always carries one — `errorCode`, else `error`); `tokens` is an
+// extractUsage shape.
+const clip = (v, n) => (v === null || v === undefined || v === '' ? null : String(v).slice(0, n));
+function ledgerRow({ ctx, rowKind, laneId, policyLabel, provider, requestedModel, servedModel, ok, errorCode, tokens, latencyMs, promptVersion, providerRef }) {
+  const code = ok ? null : (errorCode || 'error');
+  return {
+    ...contextColumns(ctx),
+    lane_id: laneId,
+    row_kind: rowKind,
+    policy: clip(policyLabel, 120),
+    ok: !code,
+    provider: provider || null,
+    requested_model: clip(requestedModel, 120),
+    served_model: clip(servedModel, 120),
+    input_tokens: toCount(tokens.input_tokens),
+    cached_input_tokens: toCount(tokens.cached_input_tokens),
+    cache_write_tokens: toCount(tokens.cache_write_tokens),
+    output_tokens: toCount(tokens.output_tokens),
+    reasoning_tokens: toCount(tokens.reasoning_tokens),
+    latency_ms: toCount(latencyMs),
+    error_code: clip(code, 80),
+    error_class: code && classifyFailure(code),
+    prompt_version: clip(promptVersion, 60),
+    provider_ref: clip(providerRef, 120),
+  };
+}
+
+// The ledger's write path for call rows: one row, resolves the new id.
+async function insertLedgerRow(row) {
+  try {
+    return await writtenId(require('../models/db')('llm_dispatch_log').insert(row));
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] ledger insert failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Record one provider call. Resolves the ledger row id (null when the gate
+ * is off, the insert failed, or the arguments were unusable) and NEVER
+ * rejects — adapters fire-and-forget it on the hot path.
+ *
+ * Explicit `laneId` / `promptVersion` beat the ambient context (that is the
+ * caller's job per agent-control/context.js). `policyLabel` is the chain's
+ * registry name when the call ran inside dispatchWithFallback; otherwise the
+ * row is labelled by lane, then by provider/model, so loadStats (chain rows
+ * only) is untouched either way.
+ */
+async function recordCall({
+  provider, requestedModel, servedModel = null, ok, errorCode = null, usage = null,
+  latencyMs = null, promptVersion = null, providerRef = null, laneId = null, policyLabel: label = null,
+} = {}) {
+  try {
+    if (!ledgerEnabled()) return null;
+    const ctx = agentContext.current();
+    const lane = laneId || ctx.laneId || null;
+    return await insertLedgerRow(ledgerRow({
+      ctx,
+      rowKind: 'call',
+      laneId: lane,
+      policyLabel: label || lane || `${provider}/${requestedModel}`,
+      provider,
+      requestedModel,
+      servedModel,
+      ok,
+      errorCode,
+      tokens: usage || extractUsage(null, null),
+      latencyMs,
+      promptVersion: promptVersion || ctx.promptVersion,
+      providerRef,
+    }));
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] recordCall skipped: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Flip a recorded call row to a failure after the fact: the adapter filed
+ * the answer as ok (it arrived whole), then the chain rejected it — the
+ * validate hook's own code or `empty_text` — so the row carries what the
+ * caller saw, and the success rate / quality-failure selection are not
+ * counting a rejected answer. Same fire-and-forget contract as recordCall:
+ * resolves the id promise the adapter kept, never throws, no-op off-gate.
+ */
+function failCall(callIdPromise, errorCode, { validator = false } = {}) {
+  try {
+    if (!ledgerEnabled()) return;
+    const code = clip(errorCode, 80) || 'error';
+    const errorClass = classifyFailure(code, { validator });
+    void Promise.resolve(callIdPromise).then((callId) => {
+      if (callId === null || callId === undefined) return null;
+      return require('../models/db')('llm_dispatch_log')
+        .where({ id: callId })
+        .update({ ok: false, error_code: code, error_class: errorClass });
+    }).catch((err) => logger.debug(`[llm-dispatch-metrics] failCall skipped: ${err.message}`));
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] failCall skipped: ${err.message}`);
+  }
+}
+
+/**
+ * Run one raw provider call under the ledger. `fn` resolves the provider's
+ * own value — an SDK Message or a parsed JSON body — which is returned
+ * UNCHANGED; a throw is recorded as a failed call and rethrown unchanged, so
+ * every caller's catch / fallback path sees exactly what it saw before.
+ * `trace: { system, prompt }` hands the request bodies to recordTrace (the
+ * response is read from the resolved Message's text blocks), so a direct-SDK
+ * lane traces exactly like an adapter lane once its policy opts in.
+ */
+async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, laneId = null, policyLabel: label = null, trace = null } = {}) {
+  // Monotonic clock: callers' own budget math uses Date.now (and tests pin it).
+  const t0 = performance.now();
+  let value;
+  try {
+    value = await fn();
+  } catch (err) {
+    // The adapters' own reason (`<provider>_<status>`, `<provider>_timeout`);
+    // llm/call.js requires this module, so its require is lazy.
+    let errorCode = 'error';
+    try { errorCode = require('./llm/call').providerErrorReason(provider, err); } catch { /* keep the generic code */ }
+    const failedId = recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: label });
+    // The calls most worth debugging are the ones that failed: an opted-in
+    // lane keeps the request bodies of a rejected call too (no response).
+    if (trace) recordTrace(failedId, { system: trace.system, prompt: trace.prompt, laneId });
+    throw err;
+  }
+  // An Anthropic Message that resolved with stop_reason 'refusal' is a
+  // failed call (the model declined; the DEEP helper falls over to OpenAI),
+  // billed for its tokens like any other answered request. 'max_tokens' is
+  // an incomplete one — the output was cut off (the DEEP helper warns and
+  // hands it back unchanged) — filed the way OpenAI's `incomplete` status
+  // already is, so the ledger's success rate and failure classes do not
+  // depend on which provider truncated (Codex r7 on #3846).
+  const errorCode = provider !== 'anthropic' ? null
+    : value?.stop_reason === 'refusal' ? 'anthropic_refusal'
+    : value?.stop_reason === 'max_tokens' ? 'anthropic_incomplete'
+    : null;
+  const callId = recordCall({
+    provider,
+    requestedModel,
+    servedModel: value?.model || value?.modelVersion,
+    ok: !errorCode,
+    errorCode,
+    usage: extractUsage(provider, value),
+    latencyMs: Math.round(performance.now() - t0),
+    providerRef: value?.id,
+    promptVersion,
+    laneId,
+    policyLabel: label,
+  });
+  if (trace) recordTrace(callId, { system: trace.system, prompt: trace.prompt, response: messageText(value), laneId });
+  return value;
+}
+
+// The text an SDK Message answered with (thinking blocks skipped) — the
+// response body a trace keeps. Null when the value carries no text blocks.
+function messageText(value) {
+  const blocks = Array.isArray(value?.content) ? value.content : [];
+  const text = blocks.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('');
+  return text || null;
+}
+
+// One row per session, keyed by the session id in provider_ref (unique
+// partial index llm_dispatch_log_session_ref_uidx, migration 000010). The
+// customer assistant re-records after EVERY turn of its long-lived session
+// with cumulative usage, and two turns can overlap, so the write is ONE
+// atomic INSERT … ON CONFLICT whose every merged column is MONOTONE — no
+// ordering between writers is assumed: token counters keep the GREATEST
+// snapshot (cumulative counts only grow), latency keeps the longest turn,
+// and a terminal status is sticky (ok can only go false, the first error
+// code / class stays), so a delayed pre-termination snapshot can never
+// resurrect a terminated session. A runner's finally re-bills safely; a sum
+// over session rows never counts a session twice.
+async function upsertSessionRow(row) {
+  try {
+    const db = require('../models/db');
+    const greatest = (col) => db.raw(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
+    const first = (col) => db.raw(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
+    return await writtenId(db('llm_dispatch_log')
+      .insert(row)
+      .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
+      .merge({
+        ok: db.raw('(llm_dispatch_log.ok AND EXCLUDED.ok)'),
+        error_code: first('error_code'),
+        error_class: first('error_class'),
+        latency_ms: greatest('latency_ms'),
+        served_model: first('served_model'),
+        input_tokens: greatest('input_tokens'),
+        cached_input_tokens: greatest('cached_input_tokens'),
+        cache_write_tokens: greatest('cache_write_tokens'),
+        output_tokens: greatest('output_tokens'),
+        reasoning_tokens: greatest('reasoning_tokens'),
+      }));
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] session upsert failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * One row_kind='session' row per Managed Agents session, from the session's
+ * own usage block (GET /v1/sessions/{id}). Called by the six agent runners in
+ * their `finally` once the SSE loop ends (however it ends); never throws into
+ * them. The one-shot runners AWAIT it, so a preview / CLI process that exits
+ * after the run cannot lose the row; the customer assistant fires it without
+ * waiting (a reply must not wait on the usage GET). Re-recording the same session id updates its row (see
+ * upsertSessionRow). `latency_ms` is the wall time since `startedAt`, taken
+ * BEFORE the usage GET so a slow or timed-out fetch is never billed as agent
+ * latency: the run for one-shot runners, the longest turn for the assistant.
+ * `failure` is the runner's OWN outcome — null on success, else the Error it
+ * threw or a short code (`initial_message_failed`, `missing_draft`,
+ * `session_error_event`, `session_timeout` for a runner's own deadline,
+ * `max_events` / `max_tool_calls` when its own cap ended the stream, or a
+ * helper's `anthropic_<status>`) — combined with the remote status: the row is ok
+ * only when the session is not terminated AND the runner succeeded, so an
+ * application-level failure is never hidden behind an idle session. When
+ * the usage GET itself fails (429, network, the 15 s timeout) the session
+ * is still written — from the id the runner already holds, with null token
+ * counts a later re-record fills in (GREATEST treats null as absent) — so a
+ * billed session never vanishes from the ledger during API degradation.
+ * `agentId` is accepted for the runners' convenience but has no column yet —
+ * the session id (provider_ref) resolves it in the Console.
+ */
+async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, failure = null } = {}) {
+  try {
+    if (!ledgerEnabled() || !sessionId) return null;
+    const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
+    // Empty when the GET misses: the row still lands, without counts.
+    let session = {};
+    try {
+      const { anthropicSessionsFetch } = require('./intelligence-bar/managed-agents-ops-tools');
+      session = (await anthropicSessionsFetch(`/v1/sessions/${encodeURIComponent(sessionId)}`)) || {};
+    } catch (err) {
+      logger.warn(`[llm-dispatch-metrics] session ${sessionId} usage unavailable (${err.message}) — recording the session without token counts`);
+    }
+    const tokens = extractUsage('anthropic', { usage: session.usage });
+    // The runner's own outcome first (session_error_event, max_events, an
+    // anthropic_429 — the codes the taxonomy classifies); a terminated
+    // session only names the failure when the runner had none (Codex r10).
+    const errorCode = failureCode(failure) || (session.status === 'terminated' ? 'session_terminated' : null);
+    const ctx = agentContext.current();
+    const lane = laneId || ctx.laneId || null;
+    logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId}) usage in=${tokens.input_tokens} out=${tokens.output_tokens} ${errorCode || 'ok'}`);
+    return await upsertSessionRow(ledgerRow({
+      ctx,
+      rowKind: 'session',
+      laneId: lane,
+      policyLabel: lane || `anthropic/${model || 'session'}`,
+      provider: 'anthropic',
+      requestedModel: model,
+      servedModel: session.model,
+      ok: !errorCode,
+      errorCode,
+      tokens,
+      latencyMs,
+      providerRef: sessionId,
+    }));
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] recordSessionUsage skipped: ${err.message}`);
+    return null;
+  }
+}
+
+// The runner's outcome as a ledger error code: a thrown Error keeps its own
+// `code` when it has one, otherwise `runner_error`; a string is a code.
+function failureCode(failure) {
+  if (!failure) return null;
+  if (failure instanceof Error) return String(failure.code || 'runner_error').slice(0, 80);
+  return String(failure).slice(0, 80);
+}
+
+/**
+ * Keep the redacted bodies of one call, fire-and-forget. Only when
+ * GATE_LLM_CALL_TRACES is on AND the lane's runtime policy opts in
+ * (`trace: true`). A LOW-confidence redaction is never persisted, on any
+ * lane: the redactor reports low exactly when its name / address heuristics
+ * may be blind, and a report or draft lane carries customer names as
+ * readily as an inbound one — "redacted" has to mean it. Bodies are
+ * redacted in full and THEN capped, so a cap can never split a phone number
+ * into an unredacted half. Nothing is written when the call row itself was
+ * not (null id).
+ */
+function recordTrace(callIdPromise, { system = null, prompt = null, response = null, laneId = null } = {}) {
+  try {
+    if (!tracesEnabled()) return;
+    const ctx = agentContext.current();
+    const lane = laneId || ctx.laneId || null;
+    if (!lane || policyFor(lane).trace !== true) return;
+    const runId = ctx.runId || null;
+    void Promise.resolve(callIdPromise).then((callId) => {
+      if (callId === null || callId === undefined) return null;
+      const { redact } = require('./content/pii-redactor');
+      const RANK = { high: 0, medium: 1, low: 2 };
+      let worst = 'high';
+      const clean = (body) => {
+        if (body === null || body === undefined) return null;
+        const r = redact(String(body));
+        if (RANK[r.confidence] > RANK[worst]) worst = r.confidence;
+        return r.text.slice(0, TRACE_BODY_CAP);
+      };
+      const row = {
+        system_redacted: clean(system),
+        prompt_redacted: clean(prompt),
+        response_redacted: clean(response),
+      };
+      if (worst === 'low') {
+        logger.debug(`[llm-dispatch-metrics] trace for call ${callId} (${lane}) skipped: low redaction confidence`);
+        return null;
+      }
+      return require('../models/db')('llm_call_traces').insert({
+        call_id: callId,
+        lane_id: lane,
+        run_id: runId,
+        ...row,
+        redaction_confidence: worst,
+      });
+    }).catch((err) => {
+      logger.debug(`[llm-dispatch-metrics] trace insert failed: ${err.message}`);
+    });
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] trace skipped: ${err.message}`);
+  }
 }
 
 /**
@@ -300,7 +742,7 @@ async function countHeartbeats(db, start, end) {
   const row = await db('llm_dispatch_log')
     .where('created_at', '>=', start)
     .andWhere('created_at', '<', end)
-    .andWhere('policy', HEARTBEAT_POLICY)
+    .andWhere('row_kind', 'heartbeat')
     .count({ n: db.raw("DISTINCT date_trunc('hour', created_at)") })
     .first();
   return Number(row?.n || 0);
@@ -397,6 +839,9 @@ async function loadStats(db, start, end) {
   const rows = await db('llm_dispatch_log')
     .where('created_at', '>=', start)
     .andWhere('created_at', '<', end)
+    // Chain rows only: per-call and per-session ledger rows share the table
+    // but describe legs, not outcomes, and would double-count every chain.
+    .where('row_kind', 'chain')
     .whereNot('policy', HEARTBEAT_POLICY)
     .groupBy('policy')
     .select('policy')
@@ -426,6 +871,20 @@ async function loadStats(db, start, end) {
  * Daily digest tick. Aggregates yesterday's ET day, emails the company inbox
  * ONLY when exceptions exist, then prunes rows past retention.
  */
+// One retention DELETE: the rows older than `days` ET days. Never throws —
+// the digest treats a failed prune as maintenance-only (see the call site).
+async function pruneOlderThan(db, table, days) {
+  try {
+    const pruned = await db(table).where('created_at', '<', etDayWindow(days).start).del();
+    logger.debug(`[llm-dispatch-metrics] pruned ${pruned} ${table} row(s) older than ${days} days`);
+    return { pruned, error: null };
+  } catch (err) {
+    const error = err.message || String(err);
+    logger.error(`[llm-dispatch-metrics] ${table} retention prune failed (maintenance only — digest continues): ${error}`);
+    return { pruned: 0, error };
+  }
+}
+
 async function runLlmDispatchDigest() {
   const db = require('../models/db');
 
@@ -439,8 +898,6 @@ async function runLlmDispatchDigest() {
   // cron-lock job health records the failed run too. Without this, the single
   // worst case (table gone) produced silence — the exact failure this whole
   // lane exists to eliminate.
-  let pruned = 0;
-  let pruneError = null;
   let yesterdayStats;
   let priorWeekStats;
   let recentStats;
@@ -448,18 +905,14 @@ async function runLlmDispatchDigest() {
   let priorHeartbeats = 0;
 
   // Retention pruning runs regardless of the gate (codex r2 P2: a kill-switch
-  // flip must not park rows forever) — and FAILS INDEPENDENTLY (codex r7): a
+  // flip must not park rows forever); traces age out on their own shorter
+  // window for the same reason. Each prune FAILS INDEPENDENTLY (codex r7): a
   // DELETE deadlock or lost DELETE grant says nothing about recorder health,
   // and must not abort the digest or masquerade as an outage while INSERT and
   // SELECT still work. Maintenance failure = log and carry on; a genuinely
   // dead table fails the stats reads below, which DO alert.
-  try {
-    const cutoff = etDayWindow(RETENTION_DAYS).start;
-    pruned = await db('llm_dispatch_log').where('created_at', '<', cutoff).del();
-  } catch (err) {
-    pruneError = err.message || String(err);
-    logger.error(`[llm-dispatch-metrics] retention prune failed (maintenance only — digest continues): ${pruneError}`);
-  }
+  const { pruned, error: pruneError } = await pruneOlderThan(db, 'llm_dispatch_log', RETENTION_DAYS);
+  await pruneOlderThan(db, 'llm_call_traces', TRACE_RETENTION_DAYS);
 
   if (!isEnabled()) return { skipped: 'gate_off', pruned, ...(pruneError ? { pruneError } : {}) };
 
@@ -557,11 +1010,20 @@ async function runLlmDispatchDigest() {
 module.exports = {
   recordDispatch,
   recordHeartbeat,
+  recordCall,
+  failCall,
+  ledgerCall,
+  recordSessionUsage,
+  recordTrace,
+  extractUsage,
+  TRACE_RETENTION_DAYS,
+  TRACE_BODY_CAP,
   runLlmDispatchDigest,
   alertRecorderUnreachable,
   detectExceptions,
   policyLabel,
   runAsReplay,
+  recordedPolicyLabel,
   HEARTBEAT_POLICY,
   FALLBACK_RATE_THRESHOLD,
   FALLBACK_MIN_VOLUME,

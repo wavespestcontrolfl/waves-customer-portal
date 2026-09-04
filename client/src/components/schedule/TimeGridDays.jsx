@@ -209,7 +209,19 @@ function computeLanes(services) {
   return result;
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onTreatmentPlan, onViewCustomer }) {
+// Completed visit whose closeout (invoice / report / completion text) is
+// still owed — the dispatch page's owesCompletion predicate decides. The
+// block / rail item click already routes through the completion-aware
+// onEdit, so the chip is the cue, not the control (Codex #3799 pre-push).
+function CloseoutOwedChip() {
+  return (
+    <span className="inline-flex items-center h-4 px-1 rounded-xs bg-alert-bg text-alert-fg text-10 font-medium uppercase tracking-label whitespace-nowrap">
+      Closeout owed
+    </span>
+  );
+}
+
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onTreatmentPlan, onViewCustomer, owesCompletion }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -267,6 +279,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         >
           {service.customerName || 'Unassigned'}
         </button>
+        {owesCompletion?.(service) && <CloseoutOwedChip />}
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && height >= SLOT_HEIGHT * 2 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
@@ -342,7 +355,7 @@ function SlotDroppable({ date, slotIdx, onCreateStart }) {
   );
 }
 
-function AnytimeStrip({ services, dayLabel, scheduledDate, onEdit, onTreatmentPlan, onViewCustomer }) {
+function AnytimeStrip({ services, dayLabel, scheduledDate, onEdit, onTreatmentPlan, onViewCustomer, owesCompletion }) {
   return (
     <div
       className="px-2 py-1.5 bg-zinc-50 flex flex-col gap-1 overflow-y-auto"
@@ -360,14 +373,14 @@ function AnytimeStrip({ services, dayLabel, scheduledDate, onEdit, onTreatmentPl
           dayLabel={dayLabel}
           onEdit={onEdit}
           onTreatmentPlan={onTreatmentPlan}
-          onViewCustomer={onViewCustomer}
+          onViewCustomer={onViewCustomer} owesCompletion={owesCompletion}
         />
       ))}
     </div>
   );
 }
 
-function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, onCreateSlot }) {
+function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, owesCompletion, onCreateSlot }) {
   // Unassigned services render in the UnassignedRail; assigned flexible
   // services render above the timed grid so they are still visible.
   const assignedServices = (day.services || []).filter((s) => s.technicianId);
@@ -444,7 +457,7 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, onCreateSlot 
         scheduledDate={day.date}
         onEdit={onEdit}
         onTreatmentPlan={onTreatmentPlan}
-        onViewCustomer={onViewCustomer}
+        onViewCustomer={onViewCustomer} owesCompletion={owesCompletion}
       />
       <div ref={gridRef} className="relative" style={{ height: GRID_HEIGHT }}>
         {Array.from({ length: SLOT_COUNT }).map((_, idx) => (
@@ -493,7 +506,7 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, onCreateSlot 
                 laneCount={lane.laneCount}
                 onEdit={onEdit}
                 onTreatmentPlan={onTreatmentPlan}
-                onViewCustomer={onViewCustomer}
+                onViewCustomer={onViewCustomer} owesCompletion={owesCompletion}
               />
             );
           });
@@ -532,7 +545,7 @@ function TimeAxis({ headerHeight }) {
   );
 }
 
-function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer }) {
+function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer, owesCompletion }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -580,6 +593,7 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer }
         >
           {service.customerName || 'Unassigned'}
         </button>
+        {owesCompletion?.(service) && <CloseoutOwedChip />}
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
@@ -609,7 +623,7 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer }
   );
 }
 
-function UnassignedRail({ items, onEdit, onTreatmentPlan, onViewCustomer, collapsed, onToggleCollapsed }) {
+function UnassignedRail({ items, onEdit, onTreatmentPlan, onViewCustomer, owesCompletion, collapsed, onToggleCollapsed }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
     data: { target: 'rail' },
@@ -675,7 +689,7 @@ function UnassignedRail({ items, onEdit, onTreatmentPlan, onViewCustomer, collap
                 dayLabel={dayLabel}
                 onEdit={onEdit}
                 onTreatmentPlan={onTreatmentPlan}
-                onViewCustomer={onViewCustomer}
+                onViewCustomer={onViewCustomer} owesCompletion={owesCompletion}
               />
             ))}
           </div>
@@ -695,6 +709,7 @@ export default function TimeGridDays({
   onEdit,
   onTreatmentPlan,
   onViewCustomer,
+  owesCompletion, // (service) => bool — completed visit still owing its closeout
   onChange,
   onDateClick,
   onCreateSlot,
@@ -1001,7 +1016,7 @@ export default function TimeGridDays({
               items={unassignedList}
               onEdit={onEdit}
               onTreatmentPlan={onTreatmentPlan}
-              onViewCustomer={onViewCustomer}
+              onViewCustomer={onViewCustomer} owesCompletion={owesCompletion}
               collapsed={unassignedCollapsed}
               onToggleCollapsed={() => setUnassignedCollapsed((v) => !v)}
             />
@@ -1020,7 +1035,7 @@ export default function TimeGridDays({
                   day={day}
                   onEdit={onEdit}
                   onTreatmentPlan={onTreatmentPlan}
-                  onViewCustomer={onViewCustomer}
+                  onViewCustomer={onViewCustomer} owesCompletion={owesCompletion}
                   onCreateSlot={onCreateSlot}
                 />
               ))}

@@ -589,6 +589,66 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
   return moved;
 }
 
+// ---------------------------------------------------------------------------
+// Owner registry actions (plan §11 item 2): Watch / Reject / Reopen — the ONE
+// writer for both the Registry table and the Owner-queue cards. Returns the
+// UPDATE count: 0 = the domain is lane-owned (ready_to_acquire / acquiring /
+// acquired — a placement holds stamped authority or is in flight) or gone; a
+// domain-only flip there would contradict the placements behind it, so the
+// guard rides the UPDATE and the caller reports the race as a 409.
+// ---------------------------------------------------------------------------
+const REGISTRY_ACTIONS = Object.freeze({ watch: 'watching', reject: 'rejected', reopen: 'investigating' });
+const LANE_OWNED_STATES = Object.freeze(['ready_to_acquire', 'acquiring', 'acquired']);
+const DEFERRED_TERMINAL_NOTE = /\s*·?\s*downgraded: terminal verdict deferred: unfetched candidate URLs remain/;
+function registryActionPatch(action, domain, now = new Date()) {
+  const nextState = REGISTRY_ACTIONS[action];
+  if (!nextState) return null;
+  const patch = { agent_state: nextState, updated_at: now };
+  // who rejected: the authority bridge lifts only its OWN rejections once the
+  // inputs improve; the owner's stands until Reopen / Watch clears the marker
+  patch.rejected_by = action === 'reject' ? 'owner' : null;
+  patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
+  // A manual Watch starts a LONG-TERM watch generation exactly like the
+  // investigator's own parks: the probe-coverage mask resets, so the
+  // resumed pass a month later re-earns coverage instead of closing on
+  // routes credited before the park.
+  if (action === 'watch') patch.probe_coverage_mask = 0;
+  // An explicit Reopen is a fresh mandate: clear the failure backoff so the
+  // very next sweep picks the domain up instead of honoring a stale defer —
+  // and the probe-tail deferral marker with it, so the reopened
+  // investigation gets its own rotated tail pass before a terminal close.
+  if (action === 'reopen') {
+    patch.investigate_after = null;
+    patch.investigate_failures = 0;
+    patch.probe_coverage_mask = 0; // the reopened investigation re-earns probe coverage
+    // …and a run claimed BEFORE this reopen must not finish on top of it:
+    // its claim token no longer matches, so its write phase aborts stale
+    patch.investigate_claim_token = null;
+    const cleared = String(domain.score_reasons || '').replace(DEFERRED_TERMINAL_NOTE, '').trim();
+    if (cleared !== String(domain.score_reasons || '').trim()) patch.score_reasons = cleared || null;
+  }
+  return patch;
+}
+// A new generation (Watch park, Reopen) is ONE atomic write: the domain
+// state/mask and the provenance-hint coverage — BOTH halves, the stamp
+// (covered_at) and the per-URL accrual (covered_urls), on every touch —
+// reset together, exactly like the investigator's own generation resets.
+// A partially covered touch carries no stamp but does carry covered_urls,
+// and the resumed pass would credit those URLs as observed without
+// re-fetching them; so a failure can never leave a reset mask beside
+// stale hint coverage, and a fresh generation never inherits any.
+async function applyRegistryAction(trx, domain, action, now = new Date()) {
+  const patch = registryActionPatch(action, domain, now);
+  if (!patch) throw new Error(`invalid registry action '${action}'`);
+  const updated = await trx('seo_link_domains')
+    .where({ id: domain.id }).whereNotIn('agent_state', [...LANE_OWNED_STATES])
+    .update(patch);
+  if (updated && patch.probe_coverage_mask === 0) {
+    await trx('seo_link_domain_sources').where({ domain_id: domain.id }).update({ covered_at: null, covered_urls: null });
+  }
+  return { updated, nextState: patch.agent_state, watchRecheckAt: patch.watch_recheck_at };
+}
+
 module.exports = {
   LINK_SOURCES, AGENT_STATES, DISCOVERY_PRIORITIES, ACQUISITION_TYPES, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES,
   EXPECTED_REL, EXPECTED_INDEXABILITY, EXPECTED_PERSISTENCE, RENEWAL_PERIODS, PATH_LINK_TYPES, CURRENCIES, FEE_SCOPES,
@@ -600,4 +660,5 @@ module.exports = {
   mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, isStandingConfidence, normalizeSubmissionUrl, pathKey, movePatch, isOutreachLocked,
   acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,
   settleRetiredPlacements,
+  REGISTRY_ACTIONS, LANE_OWNED_STATES, registryActionPatch, applyRegistryAction,
 };

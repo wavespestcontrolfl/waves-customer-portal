@@ -6,6 +6,7 @@
 
 const {
   buildCurationPrompt,
+  CURATION_SCHEMA,
   parseCurationResponse,
   missingAssessmentFallbacks,
   curationEnabled,
@@ -85,7 +86,9 @@ describe('event-curation buildCurationPrompt', () => {
   test('demands evidence-only scoring and fail-closed uncertainty', () => {
     expect(prompt).toContain('never invent prices');
     expect(prompt).toContain('score it LOW');
-    expect(prompt).toContain('"assessments"');
+    // The output shape is provider-enforced now (jsonSchema), not prose.
+    expect(CURATION_SCHEMA.required).toEqual(['assessments']);
+    expect(CURATION_SCHEMA.properties.assessments.items.required).toEqual(expect.arrayContaining(['id', 'scores', 'rejection_codes', 'evidence']));
   });
 
   test('lists every event with its exact id, price/family signals, and source', () => {
@@ -117,31 +120,31 @@ describe('event-curation buildCurationPrompt', () => {
 
 describe('event-curation parseCurationResponse', () => {
   test('accepts valid assessments keyed by exact id', () => {
-    const assessments = parseCurationResponse(JSON.stringify({
+    const assessments = parseCurationResponse({
       assessments: [VALID_ASSESSMENT(IDS[0]), VALID_ASSESSMENT(IDS[1], { rejection_codes: ['government_civic'] })],
-    }), IDS);
+    }, IDS);
     expect(assessments).toHaveLength(2);
     expect(assessments[0].id).toBe(IDS[0]);
     expect(assessments[1].rejection_codes).toEqual(['government_civic']);
   });
 
   test('drops unknown and duplicate ids (hallucination guard)', () => {
-    const assessments = parseCurationResponse(JSON.stringify({
+    const assessments = parseCurationResponse({
       assessments: [
         VALID_ASSESSMENT('ffffffff-dead-beef-0000-000000000000'),
         VALID_ASSESSMENT(IDS[0]),
         VALID_ASSESSMENT(IDS[0], { editorial_reason: 'duplicate' }),
       ],
-    }), IDS);
+    }, IDS);
     expect(assessments).toHaveLength(1);
     expect(assessments[0].id).toBe(IDS[0]);
     expect(assessments[0].editorial_reason).not.toBe('duplicate');
   });
 
-  test('tolerates prose around the JSON but throws when none is present', () => {
-    const wrapped = `Here you go:\n${JSON.stringify({ assessments: [VALID_ASSESSMENT(IDS[0])] })}`;
-    expect(parseCurationResponse(wrapped, IDS)).toHaveLength(1);
+  test('throws when the dispatcher hands back no JSON object', () => {
+    expect(() => parseCurationResponse(null, IDS)).toThrow(/JSON/);
     expect(() => parseCurationResponse('no json here', IDS)).toThrow(/JSON/);
+    expect(parseCurationResponse({ assessments: 'not-an-array' }, IDS)).toEqual([]);
   });
 });
 

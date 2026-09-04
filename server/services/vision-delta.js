@@ -44,17 +44,25 @@ Rules:
 - Describe only what is visible. NEVER speculate about causes, products, treatments, pests, or diseases.
 - If the photos show different areas, angles, or lighting conditions that prevent a fair comparison, set "comparable" to false.
 - Deltas are AFTER minus BEFORE: positive = visibly better in the AFTER photo, negative = visibly worse. 0 = no visible change.
+- Every change score is -100..100; confidence is 0..1; notes is a short factual description of visible differences only.`;
 
-Return ONLY JSON, no markdown:
-{
-  "overall_change": <-100..100 overall visual change>,
-  "density_change": <-100..100>,
-  "color_change": <-100..100>,
-  "weed_coverage_change": <-100..100 negative = more visible weeds after>,
-  "confidence": <0-1>,
-  "comparable": <true/false>,
-  "notes": "<short factual description of visible differences only>"
-}`;
+// Structured-output contract (llm/call.js jsonSchema). Numeric ranges are
+// outside the provider subset — validateVerdict below still enforces them
+// and still rejects coercible junk before anything is stamped.
+const VERDICT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['overall_change', 'density_change', 'color_change', 'weed_coverage_change', 'confidence', 'comparable', 'notes'],
+  properties: {
+    overall_change: { type: 'number', description: 'Overall visual change, -100..100' },
+    density_change: { type: 'number', description: '-100..100' },
+    color_change: { type: 'number', description: '-100..100' },
+    weed_coverage_change: { type: 'number', description: '-100..100; negative = more visible weeds after' },
+    confidence: { type: 'number', description: '0..1' },
+    comparable: { type: 'boolean' },
+    notes: { type: 'string', description: 'Short factual description of visible differences only' },
+  },
+};
 
 // Clamp a GENUINE number into [-100, 100]. Callers must have validated
 // typeof === 'number' already — this never coerces strings/null/''.
@@ -87,11 +95,6 @@ function validateVerdict(verdict) {
   return verdict;
 }
 
-function parseVerdictText(text) {
-  if (!text || !String(text).trim()) throw new Error('empty vision response');
-  return JSON.parse(String(text).replace(/```json|```/g, '').trim());
-}
-
 // Cross-provider by policy, not a direct Anthropic call: an Anthropic outage
 // must fail over to the OpenAI leg instead of burning all three attempts and
 // terminally abandoning a valid photo pair. TEXT_POLICIES.visionAnalysis is
@@ -110,14 +113,15 @@ async function callVisionModel(prePhoto, postPhoto) {
         { data: prePhoto.data, mimeType: prePhoto.mimeType },
         { data: postPhoto.data, mimeType: postPhoto.mimeType },
       ],
-      jsonMode: false,
+      jsonMode: true,
+      jsonSchema: VERDICT_SCHEMA,
       maxTokens: 600,
       temperature: 0.2, // pin output for repeatable verdicts on the same pair
     },
     {
       validate: (candidate) => {
         try {
-          validateVerdict(parseVerdictText(candidate.text));
+          validateVerdict(candidate.json);
           return null;
         } catch (err) {
           return `invalid_vision_verdict: ${err.message}`;
@@ -129,7 +133,7 @@ async function callVisionModel(prePhoto, postPhoto) {
     const detail = (result?.failures || []).map((f) => `${f.provider}:${f.reason}`).join(', ');
     throw new Error(`vision dispatch failed: ${result?.reason || 'unknown'}${detail ? ` (${detail})` : ''}`);
   }
-  return validateVerdict(parseVerdictText(result.text));
+  return validateVerdict(result.json);
 }
 
 const PHOTO_KEY_COLUMNS = ['pre_best_photo_key', 'post_best_photo_key'];

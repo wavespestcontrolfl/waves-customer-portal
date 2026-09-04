@@ -14,7 +14,13 @@ jest.mock('../services/scheduling/occupancy', () => ({ listOccupiedWindows: jest
 jest.mock('../services/weather-forecast', () => ({
   getDailyRainOutlookBounded: jest.fn(async () => null),
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => false),
+  // The travel-gap rule reads its gate through the registry's parser at call
+  // time (scheduling/travel-gap.js); keep the real helper so the builder runs
+  // exactly as it does in prod with the gate unset.
+  gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
+}));
 
 const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');

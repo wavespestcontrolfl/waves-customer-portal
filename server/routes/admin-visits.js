@@ -8,6 +8,8 @@ const express = require('express');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { gates } = require('../config/feature-gates');
 const VisitGroups = require('../services/visit-groups');
+const { combineRows } = require('../services/visit-combine');
+const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 
 const router = express.Router();
 // Grouping/splitting is an OFFICE action (doc §3: "The office keeps one
@@ -37,11 +39,22 @@ router.post('/group', async (req, res, next) => {
         code: 'visit_group_refused',
       });
     }
-    const visit = await VisitGroups.createOrJoinVisit({
-      rows: serviceIds.map((id) => ({ id })),
+    // Combine moves later rows to abut the earlier ones when the window
+    // rule is the only refusal (owner ruling 2026-09-03) — the response
+    // names every row it moved so the office sees the new stop time.
+    const { visit, moved } = await combineRows({
+      serviceIds,
       createdBy: `admin:${(req.technician && req.technician.id) || 'unknown'}`,
     });
-    return res.json({ visit });
+    // Other dispatch boards patch window_start/window_end from
+    // dispatch:job_update (useDispatchBoard) — the same broadcast the
+    // admin reschedule route sends; without it they keep the old slots
+    // until a full reload (GH codex #3843 r1 P2). Best-effort, after the
+    // grouping succeeded.
+    for (const m of moved) {
+      try { await emitDispatchJobUpdate({ jobId: m.id, actorId: req.technicianId }); } catch {}
+    }
+    return res.json({ visit, moved });
   } catch (err) {
     if (/row not found/.test(String(err.message))) {
       // Stale admin selection (row deleted mid-flight) is a request race,
@@ -50,6 +63,12 @@ router.post('/group', async (req, res, next) => {
     }
     if (/not mutually groupable|membership conflict/.test(String(err.message))) {
       return res.status(409).json({ error: err.message, code: 'visit_group_refused' });
+    }
+    // The abut move's own refusals (window rules, a row no longer
+    // reschedulable, a taken slot) are request outcomes, not server
+    // failures — same shape as the dispatch reschedule route.
+    if (err && (err.statusCode === 409 || err.statusCode === 422)) {
+      return res.status(err.statusCode).json({ error: err.message, code: 'visit_group_refused' });
     }
     return next(err);
   }

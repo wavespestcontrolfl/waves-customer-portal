@@ -4,10 +4,12 @@ const BudgetManager = require('./budget-manager');
 const MODELS = require('../../config/models');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { publicPortalUrl } = require('../../utils/portal-url');
-const { parseLooseJson } = require('../../utils/llm-json');
+const { dispatchWithFallback } = require('../llm/call');
 
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+// The SDK path ran on its 10-minute default request timeout; keep that as the
+// shared two-leg ceiling.
+const ADVISOR_TIMEOUT_MS = 10 * 60 * 1000;
+
 
 let TwilioService;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
@@ -135,19 +137,21 @@ class CampaignAdvisor {
       };
     });
 
-    // If no Anthropic SDK / key, return a data-only summary
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
+    // With no provider key at all, return a data-only summary
+    if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
       const fallback = this.generateFallbackAdvice(campaignSummaries, targets);
       await this.storeReport(fallback);
       return fallback;
     }
 
     try {
-      const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-      const response = await anthropic.messages.create({
-        model: MODELS.FLAGSHIP,
-        max_tokens: 4000,
+      // FLAGSHIP first, Sol on a miss. timeoutMs keeps the SDK's old 10-minute
+      // ceiling as the shared budget across both legs — a verbose day's
+      // report needs more than the dispatcher's 2-minute-per-leg default.
+      const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+        maxTokens: 4000,
+        jsonMode: true,
+        timeoutMs: ADVISOR_TIMEOUT_MS,
         system: `You are a digital marketing performance analyst specializing in pest control and lawn care businesses in Southwest Florida. You review Google Ads, Google Search Console (organic SEO), and Google Business Profile data daily and provide specific, actionable recommendations across BOTH paid and organic channels.
 
 PAID ADS RULES:
@@ -180,9 +184,7 @@ BUSINESS CONTEXT:
 
 Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "EXACT campaign_name for budget/mode actions, else page/query", "campaign_id": "EXACT id from CAMPAIGN PERFORMANCE — REQUIRED for budget/mode actions; omit otherwise", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action", "apply_value": "REQUIRED for increase_budget/decrease_budget (new daily budget in dollars, a number) and change_mode (base|spent|stop); omit otherwise"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`,
 
-        messages: [{
-          role: 'user',
-          content: `Daily ads review for ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}:
+        text: `Daily ads review for ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}:
 
 CAMPAIGN PERFORMANCE:
 ${JSON.stringify(campaignSummaries, null, 2)}
@@ -226,16 +228,19 @@ GOOGLE BUSINESS PROFILE (last 30 days):
 ${JSON.stringify(gbpSummary, null, 2)}
 ` : '(No GBP data available)'}
 
-Analyze BOTH paid ads and organic SEO performance. Provide specific recommendations for each.`
-        }]
+Analyze BOTH paid ads and organic SEO performance. Provide specific recommendations for each.`,
+      }, {
+        // The dispatcher's loose parse accepts any JSON value; the old
+        // utils/llm-json parser accepted only a non-array object. Keep that
+        // contract: a wrongly shaped answer is a rejected leg, not a stored row.
+        validate: (result) => (result.json && typeof result.json === 'object' && !Array.isArray(result.json) ? null : 'not_an_object'),
       });
 
-      const rawText = response.content[0].text;
-      let advice = parseLooseJson(rawText);
-      if (!advice) {
-        logger.warn(`[campaign-advisor] daily advice JSON parse failed (len=${String(rawText).length}); head: ${String(rawText).slice(0, 300)}`);
-        advice = { raw: rawText, parse_error: true, grade: '?', overall_assessment: 'Report generated but could not parse structured output.' };
-      }
+      // An unparseable or wrongly shaped answer is a rejected leg inside the
+      // dispatcher (the next provider gets a turn); a two-leg miss lands in
+      // the catch below and stores the deterministic fallback advice.
+      if (!res.ok) throw new Error(`advice dispatch failed: ${res.reason}`);
+      const advice = res.json;
 
       advice.date = etDateString(now);
       this.normalizeRecommendations(advice, campaigns);

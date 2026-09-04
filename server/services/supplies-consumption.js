@@ -211,8 +211,12 @@ async function consumeCompletionSupplies(db, {
         await trx('products_catalog').where({ id: locked.id }).update({ inventory_on_hand: after, updated_at: new Date() });
         return { consumed: { productId: locked.id, name: locked.name, usage, unit, before, after, costUsed } };
       });
-      if (outcome.consumed) { result.consumed.push(outcome.consumed); await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id }); }
+      if (outcome.consumed) result.consumed.push(outcome.consumed);
       else result.skipped.push({ productId: product.id, reason: outcome.skipped });
+      // The kit IS deducted (now, or by an earlier attempt whose bell clear
+      // failed transiently): retire the stale hand-off bells either way
+      // (Codex r17 P2).
+      if (outcome.consumed || outcome.skipped === 'already_consumed') await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id });
     } catch (err) {
       logger.warn(`[supplies-consumption] ${product.name} failed for visit ${scheduledServiceId} (non-blocking): ${err.message}`);
       result.errors.push({ productId: product.id, message: err.message });
