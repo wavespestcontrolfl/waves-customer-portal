@@ -75,14 +75,31 @@ function draftReview(placement) {
   if (p.outreach_status !== 'drafted') return { clean: false, flags: [], lint: [], reason: 'no draft' };
   return reviewDraft({ to: p.outreach_to_email, subject: p.outreach_subject, body: p.outreach_body });
 }
-/** The same verdict for the FOLLOW-UP draft (§6.4): drafted, addressed to the thread's recipient, lint-clean, no flag. */
+/**
+ * The same verdict for the FOLLOW-UP draft (§6.4): drafted, addressed to the thread's recipient, lint-clean, no flag —
+ * AND the follow-up's own deterministic shape (the prompt asks for it; the drafter accepts any parseable JSON, so the
+ * review is what AUTO_OUTREACH relies on): the subject is exactly `Re: <the pitch's subject>` (it answers the thread —
+ * a new subject reads as a second pitch) and the body is a nudge, not another pitch (FOLLOW_UP_MAX_WORDS).
+ */
+const FOLLOW_UP_MAX_WORDS = 160;
+const followUpShape = (p) => {
+  const flags = [];
+  if (String(p.follow_up_subject || '').trim() !== `Re: ${String(p.outreach_subject || '').trim()}`) flags.push('follow_up_subject');
+  if (String(p.follow_up_body || '').trim().split(/\s+/).length > FOLLOW_UP_MAX_WORDS) flags.push('follow_up_length');
+  return flags;
+};
 function followUpReview(placement) {
   const p = placement || {};
   if (p.follow_up_status !== 'drafted') return { clean: false, flags: [], lint: [], reason: 'no follow-up draft' };
+  const text = reviewDraft({ to: p.outreach_to_email, subject: p.follow_up_subject, body: p.follow_up_body });
+  const shape = followUpShape(p);
+  const flags = [...text.flags, ...shape];
+  const reasons = [text.reason, ...shape].filter(Boolean);
   // a failed reply check on an automatic attempt routes the follow-up to the owner (§6.4: never sent by default) —
   // the text may be clean, the SEND is not automatic
-  if (p.follow_up_skipped_reason === REPLY_CHECK_FAILED) return { ...reviewDraft({ to: p.outreach_to_email, subject: p.follow_up_subject, body: p.follow_up_body }), clean: false, reason: 'reply check failed on the automatic attempt — the owner sends it' };
-  return reviewDraft({ to: p.outreach_to_email, subject: p.follow_up_subject, body: p.follow_up_body });
+  if (p.follow_up_skipped_reason === REPLY_CHECK_FAILED) reasons.push('reply check failed on the automatic attempt — the owner sends it');
+  const clean = text.clean && shape.length === 0 && p.follow_up_skipped_reason !== REPLY_CHECK_FAILED;
+  return { clean, flags, lint: text.lint, reason: clean ? null : reasons.join(', ') };
 }
 // the marker the sender stamps on follow_up_skipped_reason (the draft stays drafted) when an automatic attempt's reply check failed
 const REPLY_CHECK_FAILED = 'reply_check_failed';
@@ -227,4 +244,4 @@ async function reviewByEmail(q, emails) {
 // have delivered the pitch, so the inbox stays held and the authority it was claimed under stays pinned until then
 const AMBIGUOUS_SEND_STATUSES = Object.freeze(['sending', 'send_error']);
 
-module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_MS, FOLLOW_UP_STATUSES, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_MS, FOLLOW_UP_STATUSES, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };

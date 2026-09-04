@@ -188,6 +188,14 @@ describe('the follow-up (§6.4)', () => {
     expect(M.followUpReview({ ...sent, outreach_to_email: 'nope' })).toMatchObject({ clean: false, reason: 'invalid recipient' });
     expect(M.draftReview(sent).clean).toBe(false); // the pitch is sent — not a draft
   });
+  test('the follow-up\'s own shape is deterministic: the subject is exactly "Re: <the pitch\'s subject>", the body is bounded; a failed automatic reply check routes it to the owner', () => {
+    expect(M.followUpReview({ ...sent, follow_up_subject: 'Re: A Resource' })).toMatchObject({ clean: false, flags: ['follow_up_subject'], reason: 'follow_up_subject' });
+    expect(M.followUpReview({ ...sent, follow_up_subject: 'A resource' })).toMatchObject({ clean: false, flags: ['follow_up_subject'] });
+    expect(M.followUpReview({ ...sent, follow_up_subject: '  Re: A resource  ' }).clean).toBe(true);
+    expect(M.followUpReview({ ...sent, follow_up_body: Array(M.FOLLOW_UP_MAX_WORDS + 1).fill('word').join(' ') })).toMatchObject({ clean: false, flags: ['follow_up_length'] });
+    expect(M.followUpReview({ ...sent, follow_up_body: 'We can pay a fee.', follow_up_subject: 'x' })).toMatchObject({ clean: false, flags: ['payment', 'follow_up_subject'], reason: 'payment, follow_up_subject' });
+    expect(M.followUpReview({ ...sent, follow_up_skipped_reason: 'reply_check_failed' })).toMatchObject({ clean: false, flags: [], reason: expect.stringMatching(/owner sends it/) });
+  });
   test('followUpHash binds the recipient, the follow-up subject and body — never the pitch\'s text', () => {
     expect(M.followUpHash(sent)).toBe(M.draftHash({ outreach_to_email: 'editor@example.org', outreach_subject: 'Re: A resource', outreach_body: sent.follow_up_body }));
     expect(M.followUpHash(sent)).not.toBe(M.draftHash(sent));
