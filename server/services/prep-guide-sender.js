@@ -138,18 +138,21 @@ async function nextUpcomingVisit(customerId, config) {
 // send stamps prep_sent_at). A reservation whose lane then skipped, blocked
 // or failed would otherwise refuse every other guide for that visit forever
 // (GH Codex #3856 r11 P2). Abandoned = never delivered AND no lane can still
-// deliver it: no live transactional run for this visit + key, no live
-// sequence enrolment whose first step stamps this key (the runner's
-// PREP_TEMPLATE_BY_SEQUENCE_KEY, mirrored here), AND no trace of a MANUAL
-// delivery of that key: a manual send keeps its key without prep_sent_at
-// when its email threw after dispatch (uncertain) or its delivered stamp
-// was lost — that page may be in the customer's hands (GH Codex #3856 r13
-// P0). Manual evidence = an email_messages row for this customer + key
-// that got past the dispatch boundary (anything but blocked / aborted-
-// before-dispatch — a post-dispatch 'failed' MAY have reached SendGrid),
-// an outbound sms_log row carrying the visit's /prep/:token link, or the
-// interaction marker a confirmed manual text writes. Unknown (a read
-// failed) is NOT abandoned — fail closed on the delivered URL.
+// deliver it AND nothing may already have delivered it. Automated lanes
+// (pre-push Codex P0 on 8a5799a6d): a transactional run for this visit +
+// key that is still runnable / running, or that SENT (prep_sent_at stamp
+// lost), or whose email_messages row (the run's idempotency key) got past
+// the dispatch boundary — anything but blocked / aborted-before-dispatch,
+// a post-dispatch 'failed' MAY have reached SendGrid; a sequence enrolment
+// (the runner's PREP_TEMPLATE_BY_SEQUENCE_KEY, mirrored here) that is
+// live, ever sent a step, or has a step-send row past its blocked gate.
+// Manual lane (GH Codex #3856 r13 P0): a manual send keeps its key without
+// prep_sent_at when its email threw after dispatch (uncertain) or its
+// delivered stamp was lost — an email_messages row for this customer + key
+// past the dispatch boundary, an outbound sms_log row carrying the visit's
+// /prep/:token link, or the interaction marker a confirmed manual text
+// writes. Unknown (a read failed) is NOT abandoned — fail closed on the
+// delivered URL.
 const LIVE_ENROLLMENT_STATUSES = ['queued', 'active'];
 const SEQUENCE_KEY_BY_PREP_TEMPLATE = Object.freeze({ 'prep.bed_bug': 'bed_bug', 'prep.cockroach': 'cockroach', 'prep.flea': 'flea' });
 // Any trace that a MANUAL send of takenKey reached (or may have reached)
@@ -159,7 +162,7 @@ async function manualDeliveryTrace(visit, takenKey, customerId) {
   const email = await db('email_messages')
     .where({ trigger_event_id: `manual_prep:${customerId}:${takenKey}` })
     .whereNot('status', 'blocked')
-    .whereRaw("COALESCE(error_message, '') <> ?", ['aborted_by_caller_before_dispatch'])
+    .whereRaw("COALESCE(error_message, '') <> ?", [ABORTED_BEFORE_DISPATCH])
     .first('id');
   if (email) return true;
   if (visit.prep_token) {
@@ -180,25 +183,53 @@ async function manualDeliveryTrace(visit, takenKey, customerId) {
   return false;
 }
 
+const ABORTED_BEFORE_DISPATCH = 'aborted_by_caller_before_dispatch';
+
+// Any automated lane that can still deliver takenKey on this visit, or may
+// already have — see reservationAbandoned. Throws on a read failure.
+async function automatedDeliveryTrace(visit, takenKey, customerId) {
+  // The executor's own runnable set (queued / scheduled — a future
+  // run_after — / retry_scheduled) plus a run mid-send (GH Codex #3856 r12
+  // P1), plus a run that SENT.
+  const { RUNNABLE_STATUSES } = require('./email-template-automation-executor');
+  const runs = await db('email_template_automation_runs')
+    .where({ entity_type: 'scheduled_service', entity_id: visit.id, template_key: takenKey })
+    .select('status', 'idempotency_key');
+  const liveOrSent = [...RUNNABLE_STATUSES, 'running', 'sent'];
+  if (runs.some((r) => liveOrSent.includes(r.status))) return true;
+  const runKeys = runs.map((r) => r.idempotency_key).filter(Boolean);
+  if (runKeys.length) {
+    const dispatched = await db('email_messages')
+      .whereIn('idempotency_key', runKeys)
+      .whereNot('status', 'blocked')
+      .whereRaw("COALESCE(error_message, '') <> ?", [ABORTED_BEFORE_DISPATCH])
+      .first('id');
+    if (dispatched) return true;
+  }
+  const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[takenKey];
+  if (!sequenceKey) return false;
+  const enrollments = await db('automation_enrollments')
+    .where({ customer_id: customerId, template_key: sequenceKey })
+    .select('id', 'status', 'last_sent_at');
+  if (enrollments.some((e) => LIVE_ENROLLMENT_STATUSES.includes(e.status) || e.last_sent_at)) return true;
+  const enrollmentIds = enrollments.map((e) => e.id);
+  if (enrollmentIds.length) {
+    // The runner marks a step send 'blocked' before the provider and
+    // 'failed' on any throw — before or after dispatch — so only blocked is
+    // proof of no delivery.
+    const stepSend = await db('automation_step_sends')
+      .whereIn('enrollment_id', enrollmentIds)
+      .whereNot('status', 'blocked')
+      .first('id');
+    if (stepSend) return true;
+  }
+  return false;
+}
+
 async function reservationAbandoned(visit, takenKey, customerId) {
   if (visit.prep_sent_at) return false;
   try {
-    // The executor's own runnable set (queued / scheduled — a future
-    // run_after — / retry_scheduled) plus a run mid-send (GH Codex #3856 r12 P1).
-    const { RUNNABLE_STATUSES } = require('./email-template-automation-executor');
-    const run = await db('email_template_automation_runs')
-      .where({ entity_type: 'scheduled_service', entity_id: visit.id, template_key: takenKey })
-      .whereIn('status', [...RUNNABLE_STATUSES, 'running'])
-      .first('id');
-    if (run) return false;
-    const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[takenKey];
-    if (sequenceKey) {
-      const enrollment = await db('automation_enrollments')
-        .where({ customer_id: customerId, template_key: sequenceKey })
-        .whereIn('status', LIVE_ENROLLMENT_STATUSES)
-        .first('id');
-      if (enrollment) return false;
-    }
+    if (await automatedDeliveryTrace(visit, takenKey, customerId)) return false;
     return !(await manualDeliveryTrace(visit, takenKey, customerId));
   } catch (err) {
     logger.warn(`[prep-guide-sender] prep reservation liveness check failed for service ${visit.id}: ${err.message}`);
