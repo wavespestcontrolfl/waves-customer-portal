@@ -148,7 +148,9 @@ async function backfillSms() {
 
 async function backfillVoice() {
   // Live sync never creates a message for a bake-off call; neither does this.
-  const total = await db('call_log').modify((q) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(q)) // bake-off calls are not data.count('* as c').first();
+  const total = await db('call_log')
+    .modify((q) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(q)) // bake-off calls are not data
+    .count('* as c').first();
   const totalCount = parseInt(total.c);
   console.log(`\n[call_log] candidates: ${totalCount}`);
   if (DRY_RUN) { console.log('  (dry-run — no writes)'); return { inserted: 0, skipped: 0, unparseable: 0 }; }
