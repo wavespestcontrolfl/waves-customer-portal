@@ -5,6 +5,7 @@
 // an em dash or curly quote flips the SMS to UCS-2 (70-char segments).
 import { describe, expect, it } from "vitest";
 import {
+  reviewEmailNote,
   appendStaticLinkClause,
   buildCustomerLinkPrefill,
   buildReschedulePrefill,
@@ -180,5 +181,20 @@ describe("CUSTOMER_COMPOSER_LINKS", () => {
     const login = CUSTOMER_COMPOSER_LINKS.find((l) => l.key === "portal_login");
     expect(login.dynamic).toBeUndefined();
     expect(login.url).toBe("portal.wavespestcontrol.com/login");
+  });
+
+  it("only the review request row asks for a channel (Text / Email / Both)", () => {
+    const withChooser = CUSTOMER_COMPOSER_LINKS.filter((l) => l.channels).map((l) => l.key);
+    expect(withChooser).toEqual(["review_request"]);
+  });
+});
+
+describe("reviewEmailNote", () => {
+  it("is silent for a Text-only send and names the outcome of a Both send", () => {
+    expect(reviewEmailNote(undefined)).toBe("");
+    expect(reviewEmailNote({ sent: true })).toBe(" Review request emailed too.");
+    expect(reviewEmailNote({ sent: false, reason: "email_off" })).toMatch(/skipped — review emails are off/);
+    expect(reviewEmailNote({ sent: false, reason: "no_email" })).toMatch(/no email on file/);
+    expect(reviewEmailNote({ sent: false, reason: "something_new" })).toMatch(/could not be sent/);
   });
 });

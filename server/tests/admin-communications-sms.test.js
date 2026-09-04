@@ -69,6 +69,7 @@ jest.mock('../services/review-request', () => ({
   inlineClaimStillHeld: jest.fn(async () => true),
   releaseInlineClaim: jest.fn(async () => {}),
   markInlineDelivered: jest.fn(async () => {}),
+  sendInlineEmailCopy: jest.fn(async () => ({ sent: true })),
   reviewSmsAllowedNow: jest.fn(async () => ({ allowed: true })),
   checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
 }));
@@ -768,6 +769,74 @@ describe('admin communications SMS route', () => {
       expect(res.status).toBe(200);
       expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1');
       expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
+    });
+  });
+
+  // Quick Links "Both" (owner ruling 2026-09-03): the same ask is emailed
+  // only after the text REALLY sent — never on a released claim.
+  describe('reviewRequestEmail (Both channel)', () => {
+    const wireInlineRow = () => {
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'review_requests') {
+          first.mockResolvedValue({
+            id: 'rr-1', customer_id: 'cust-A', status: 'pending',
+            sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123',
+          });
+        } else if (table === 'customers') {
+          first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+        }
+        return { where: jest.fn(function () { return this; }), first };
+      });
+    };
+    const send = (baseUrl, extra) => fetch(`${baseUrl}/admin/communications/sms`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        to: '+15551234567',
+        body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+        messageType: 'manual',
+        reviewRequestId: 'rr-1',
+        ...extra,
+      }),
+    });
+
+    test('emails the same ask after a real send and reports the outcome', async () => {
+      const ReviewService = require('../services/review-request');
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM999' });
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { reviewRequestEmail: true });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ reviewEmail: { sent: true } });
+        expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
+      });
+    });
+
+    test('never emails when the text did not really send (claim released)', async () => {
+      const ReviewService = require('../services/review-request');
+      // sent:true without a providerMessageId = a suppression sentinel, not a real send.
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false });
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { reviewRequestEmail: true });
+        expect(res.status).toBe(200);
+        expect(ReviewService.releaseInlineClaim).toHaveBeenCalledWith('rr-1', expect.any(Date));
+        expect(ReviewService.sendInlineEmailCopy).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a Text-only send never emails', async () => {
+      const ReviewService = require('../services/review-request');
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM999' });
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, {});
+        expect(res.status).toBe(200);
+        expect((await res.json()).reviewEmail).toBeUndefined();
+        expect(ReviewService.sendInlineEmailCopy).not.toHaveBeenCalled();
+      });
     });
   });
 

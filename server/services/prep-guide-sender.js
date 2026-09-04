@@ -7,15 +7,18 @@
  * an automated send already fired. It is the manual escape hatch for the case
  * where the automated prep was skipped (e.g. a phone-only booking).
  *
- * Smart channel (owner directive 2026-07-11):
- *   • customer has an email on file → email the formatted prep guide AND the
- *     companion text (matches the automated first-time experience).
- *   • no email → send the self-contained prep text that carries the steps
- *     inline (auto_*_no_email), so phone-only customers still get prep.
+ * Channel is the operator's choice (owner ruling 2026-09-03: text only,
+ * email only, or both — replaces the 2026-07-11 smart channel):
+ *   • email → the formatted prep guide email (prep.* template).
+ *   • sms   → when a matching upcoming visit exists, a short text carrying
+ *             the tokened /prep/:token guide page (auto_prep_guide_link —
+ *             the same content as the email, with a PDF download);
+ *             otherwise the pest's self-contained inline-steps text
+ *             (auto_*_no_email, three pests) or reason no_upcoming_visit.
+ *   • both  → email + the text above.
  *
- * The Communications route allow-lists every PREP_CONFIG pest (flea, bed
- * bug, cockroach) — see admin-communications.js. Wire a new pest by adding
- * its config here.
+ * The Communications route allow-lists every PREP_CONFIG pest — all nine
+ * prep.* guides. Wire a new pest by adding its config here.
  */
 
 const db = require('../models/db');
@@ -35,39 +38,87 @@ const SERVICE_GROUP = 'service_operational';
 const PREP_CONFIG = Object.freeze({
   flea: {
     label: 'Flea Treatment',
-    serviceKeyword: 'flea',
+    serviceKeywords: ['flea'],
     emailTemplateKey: 'prep.flea',
-    smsCompanionKey: 'auto_flea',
     smsStandaloneKey: 'auto_flea_no_email',
   },
   bed_bug: {
     label: 'Bed Bug Treatment Service',
-    serviceKeyword: 'bed bug',
+    serviceKeywords: ['bed bug'],
     emailTemplateKey: 'prep.bed_bug',
-    smsCompanionKey: 'auto_bed_bug',
     smsStandaloneKey: 'auto_bed_bug_no_email',
   },
   cockroach: {
     label: 'Cockroach Treatment Service',
-    serviceKeyword: 'roach',
+    serviceKeywords: ['roach'],
     emailTemplateKey: 'prep.cockroach',
-    smsCompanionKey: 'auto_cockroach',
     smsStandaloneKey: 'auto_cockroach_no_email',
   },
+  // The six guides below have no inline-steps text: their text channel is
+  // the guide-page link, which needs an upcoming visit to hang the token on.
+  // Service-family keywords mirror VISIT_FAMILY_KEYWORDS in prep-public.js.
+  interior_pest: {
+    label: 'Interior Pest Treatment',
+    serviceKeywords: ['pest'],
+    emailTemplateKey: 'prep.interior_pest',
+    smsStandaloneKey: null,
+  },
+  lawn: {
+    label: 'Lawn Treatment',
+    serviceKeywords: ['lawn'],
+    emailTemplateKey: 'prep.lawn',
+    smsStandaloneKey: null,
+  },
+  mosquito: {
+    label: 'Mosquito Treatment',
+    serviceKeywords: ['mosquito'],
+    emailTemplateKey: 'prep.mosquito',
+    smsStandaloneKey: null,
+  },
+  rodent: {
+    label: 'Rodent Service',
+    serviceKeywords: ['rodent'],
+    emailTemplateKey: 'prep.rodent',
+    smsStandaloneKey: null,
+  },
+  termite: {
+    label: 'Termite Service',
+    serviceKeywords: ['termite'],
+    emailTemplateKey: 'prep.termite',
+    smsStandaloneKey: null,
+  },
+  wildlife: {
+    label: 'Wildlife Trapping',
+    serviceKeywords: ['wildlife', 'trapping'],
+    emailTemplateKey: 'prep.wildlife',
+    smsStandaloneKey: null,
+  },
 });
+
+// The text that carries the tokened guide page — one template for every
+// pest; {prep_label} names the guide, {prep_url} is the /prep/:token link.
+const SMS_GUIDE_LINK_KEY = 'auto_prep_guide_link';
+
+const CHANNELS = Object.freeze(['email', 'sms', 'both']);
 
 function isSupportedPestType(pestType) {
   return Object.prototype.hasOwnProperty.call(PREP_CONFIG, pestType);
 }
 
+function isSupportedChannel(channel) {
+  return CHANNELS.includes(channel);
+}
+
 // Soonest upcoming visit of this pest family, so the emailed guide's "Service
 // date" row references the real appointment and the prep token can hang off
 // the visit row. Null when there is no matching upcoming visit.
-async function nextUpcomingVisit(customerId, serviceKeyword) {
+async function nextUpcomingVisit(customerId, serviceKeywords) {
   try {
     const row = await db('scheduled_services')
       .where({ customer_id: customerId })
-      .whereRaw('LOWER(service_type) LIKE ?', [`%${serviceKeyword}%`])
+      .where(function familyMatch() {
+        for (const kw of serviceKeywords) this.orWhereRaw('LOWER(service_type) LIKE ?', [`%${kw}%`]);
+      })
       .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
       // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
       // midnight ET "today's" visit would fall before the UTC date and the
@@ -82,7 +133,34 @@ async function nextUpcomingVisit(customerId, serviceKeyword) {
   }
 }
 
-async function sendPrepEmail({ customer, recipient, firstName, config }) {
+// The visit the guide hangs on, plus its tokened page URL. prepUrl is null
+// when there is no matching upcoming visit (nothing for the page to
+// describe) or the token mint failed soft — callers pick their fallback.
+async function resolvePrepVisit(customer, config) {
+  const visit = await nextUpcomingVisit(customer.id, config.serviceKeywords);
+  let prepUrl = null;
+  if (visit?.id) {
+    try {
+      prepUrl = portalUrl(`/prep/${await ensureServicePrepToken(visit.id, config.emailTemplateKey)}`);
+    } catch (tokenErr) {
+      logger.warn(`[prep-guide-sender] prep token mint failed for service ${visit.id}: ${tokenErr.message}`);
+    }
+  }
+  return { visit, prepUrl };
+}
+
+// Confirmed delivery of the guide (either channel): stamp the tracker's
+// prep_sent_at proof and align the rendered guide to what was delivered.
+async function stampPrepSent(visit, config) {
+  if (!visit?.id) return;
+  try {
+    await markServicePrepSent(visit.id, config.emailTemplateKey);
+  } catch (stampErr) {
+    logger.warn(`[prep-guide-sender] prep_sent_at stamp failed for service ${visit.id}: ${stampErr.message}`);
+  }
+}
+
+async function sendPrepEmail({ customer, recipient, firstName, config, visit, prepUrl }) {
   try {
     const portalVisitsUrl = portalUrl('/?tab=visits');
     const address = [customer.address_line1, customer.city, customer.state, customer.zip]
@@ -90,20 +168,8 @@ async function sendPrepEmail({ customer, recipient, firstName, config }) {
     // service_date is a REQUIRED prep-template var (PREP_REQUIRED in
     // 20260526000014) — sendTemplate rejects an empty one. Fall back to a
     // non-empty placeholder when the customer has no matching upcoming visit.
-    const visit = await nextUpcomingVisit(customer.id, config.serviceKeyword);
     const serviceDate = (visit?.scheduled_date
       ? formatDisplayDate(visit.scheduled_date, { fallback: '' }) : '') || 'To be confirmed';
-    // Tokened public prep page when a real visit exists to hang it on; a
-    // customer with no matching upcoming visit keeps the portal link (there
-    // is no appointment for the page to describe). Mint fails soft.
-    let prepUrl = portalVisitsUrl;
-    if (visit?.id) {
-      try {
-        prepUrl = portalUrl(`/prep/${await ensureServicePrepToken(visit.id, config.emailTemplateKey)}`);
-      } catch (tokenErr) {
-        logger.warn(`[prep-guide-sender] prep token mint failed for service ${visit.id}: ${tokenErr.message}`);
-      }
-    }
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: config.emailTemplateKey,
       to: recipient.email,
@@ -122,21 +188,13 @@ async function sendPrepEmail({ customer, recipient, firstName, config }) {
         service_date: serviceDate,
         property_address: address,
         customer_portal_url: portalVisitsUrl,
-        prep_url: prepUrl,
+        // No visit to hang the page on → the portal's visits tab.
+        prep_url: prepUrl || portalVisitsUrl,
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: CONTACT_EMAIL,
       },
     });
-    if (result?.sent && visit?.id) {
-      // Confirmed delivery: stamp the tracker's prep_sent_at proof and
-      // align the rendered guide to what THIS email delivered. The token
-      // is minted before the send, so only a confirmed send moves these.
-      try {
-        await markServicePrepSent(visit.id, config.emailTemplateKey);
-      } catch (stampErr) {
-        logger.warn(`[prep-guide-sender] prep_sent_at stamp failed for service ${visit.id}: ${stampErr.message}`);
-      }
-    }
+    if (result?.sent) await stampPrepSent(visit, config);
     return !!result?.sent;
   } catch (err) {
     // Sanitized: never log err.message — provider errors can carry the email.
@@ -145,8 +203,8 @@ async function sendPrepEmail({ customer, recipient, firstName, config }) {
   }
 }
 
-async function sendPrepSms({ customer, firstName, phone, templateKey, pestType, actorId }) {
-  const body = await renderSmsTemplate(templateKey, { first_name: firstName }, {
+async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, pestType, actorId }) {
+  const body = await renderSmsTemplate(templateKey, { first_name: firstName, ...vars }, {
     workflow: 'manual_prep_send', entity_type: 'customer', entity_id: customer.id,
   });
   if (!body) {
@@ -167,7 +225,7 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, pestType, 
     metadata: {
       original_message_type: 'prep_info',
       pest_type: pestType,
-      prep_variant: templateKey.endsWith('_no_email') ? 'standalone' : 'companion',
+      prep_variant: variant,
       manual: true,
       // adminUserId is the key the Twilio send path forwards into
       // sms_log.admin_user_id — keeps the manual send attributed to the
@@ -182,12 +240,13 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, pestType, 
   return true;
 }
 
-// Sends prep to a customer via the smart channel. Returns a structured result
-// the route turns into an operator-facing message. Never throws — every failure
-// surfaces as { ok: false, reason }.
-async function sendPrepToCustomer({ customerId, pestType = 'flea', actorId = null } = {}) {
+// Sends prep to a customer on the operator-chosen channel. Returns a
+// structured result the route turns into an operator-facing message. Never
+// throws — every failure surfaces as { ok: false, reason }.
+async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'both', actorId = null } = {}) {
   const config = PREP_CONFIG[pestType];
   if (!config) return { ok: false, reason: 'unsupported_pest_type', pestType };
+  if (!isSupportedChannel(channel)) return { ok: false, reason: 'unsupported_channel', pestType, channel };
 
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
   if (!customer) return { ok: false, reason: 'customer_not_found', pestType };
@@ -199,10 +258,13 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', actorId = nul
   const emailFirstName = String(recipient.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there';
   const smsFirstName = String(customer.first_name || '').trim().split(/\s+/)[0] || 'there';
   const phone = String(customer.phone || '').trim();
+  const wantEmail = channel !== 'sms';
+  const wantSms = channel !== 'email';
 
   const result = {
     ok: false,
     pestType,
+    channel,
     label: config.label,
     emailSent: false,
     smsSent: false,
@@ -210,20 +272,29 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', actorId = nul
     phone: phone || null,
   };
 
-  if (recipient.email) {
-    result.emailSent = await sendPrepEmail({ customer, recipient, firstName: emailFirstName, config });
-    if (phone) {
-      // The companion text claims "we emailed your guide" — only send it when
-      // the email actually went out. If the email was suppressed or failed,
-      // fall back to the self-contained steps so the customer still gets real
-      // prep instructions instead of a text pointing at a guide that never came.
-      const templateKey = result.emailSent ? config.smsCompanionKey : config.smsStandaloneKey;
-      result.smsSent = await sendPrepSms({ customer, firstName: smsFirstName, phone, templateKey, pestType, actorId });
-    }
-  } else if (phone) {
-    result.smsSent = await sendPrepSms({ customer, firstName: smsFirstName, phone, templateKey: config.smsStandaloneKey, pestType, actorId });
-  } else {
-    return { ...result, reason: 'no_email_or_phone' };
+  // Contact checks first — a chosen channel with nothing on file is an
+  // operator-facing refusal, not a silent skip.
+  if (wantEmail && !recipient.email) return { ...result, reason: 'no_email' };
+  if (wantSms && !phone) return { ...result, reason: 'no_phone' };
+
+  const { visit, prepUrl } = await resolvePrepVisit(customer, config);
+  // Text body: the guide-page link when a visit exists, else the pest's
+  // inline-steps text, else nothing to text.
+  const smsPlan = prepUrl
+    ? { templateKey: SMS_GUIDE_LINK_KEY, vars: { prep_label: config.label, prep_url: prepUrl }, variant: 'guide_link' }
+    : config.smsStandaloneKey
+      ? { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone' }
+      : null;
+  if (wantSms && !smsPlan) return { ...result, reason: 'no_upcoming_visit' };
+
+  if (wantEmail) {
+    result.emailSent = await sendPrepEmail({ customer, recipient, firstName: emailFirstName, config, visit, prepUrl });
+  }
+  if (wantSms) {
+    result.smsSent = await sendPrepSms({
+      customer, firstName: smsFirstName, phone, pestType, actorId, ...smsPlan,
+    });
+    if (result.smsSent && smsPlan.variant === 'guide_link' && !result.emailSent) await stampPrepSent(visit, config);
   }
 
   result.ok = result.emailSent || result.smsSent;
@@ -254,4 +325,6 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', actorId = nul
   return result;
 }
 
-module.exports = { sendPrepToCustomer, isSupportedPestType, PREP_CONFIG };
+module.exports = {
+  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
+};

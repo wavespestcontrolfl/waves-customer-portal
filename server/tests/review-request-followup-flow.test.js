@@ -15,6 +15,9 @@ jest.mock('../services/customer-contact', () => ({
   getServiceContactSmsRecipient: jest.fn(),
   firstNameFrom: jest.requireActual('../services/customer-contact').firstNameFrom,
 }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: jest.fn(),
+}));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn((url) => Promise.resolve(url)),
   existingShortUrlFor: jest.fn().mockResolvedValue(null),
@@ -691,6 +694,71 @@ describe('review request follow-up flow', () => {
 
     prefsQuery.first.mockRejectedValueOnce(new Error('db down'));
     expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'prefs_unavailable' });
+  });
+
+  // Quick Links "Both": the emailed copy of an inline ask (owner ruling 2026-09-03).
+  describe('sendInlineEmailCopy', () => {
+    const EmailLib = require('../services/email-template-library');
+    let rrUpdate;
+    const wire = ({ prefs, prefsThrow = false, email = 'megan@example.com' } = {}) => {
+      rrUpdate = jest.fn().mockResolvedValue(1);
+      getServiceContact.mockReturnValue({ email, name: 'Megan Example' });
+      db.mockImplementation((table) => {
+        if (table === 'review_requests') {
+          const q = chain({
+            first: jest.fn().mockResolvedValue({ id: 'rr-1', customer_id: 'cust-1', token: 'tok-1', status: 'sent' }),
+            update: rrUpdate,
+          });
+          q.update = jest.fn(() => ({ ...q, catch: jest.fn(async () => rrUpdate()) }));
+          return q;
+        }
+        if (table === 'customers') {
+          return chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Megan', city: 'Bradenton' }) });
+        }
+        if (table === 'notification_prefs') {
+          if (prefsThrow) return chain({ first: jest.fn().mockRejectedValue(new Error('db down')) });
+          return chain({ first: jest.fn().mockResolvedValue(prefs) });
+        }
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+    };
+
+    test('emails the SAME ask (same token) and stamps sent_at once — status untouched', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockResolvedValue({ sent: true });
+
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      const call = EmailLib.sendTemplate.mock.calls[0][0];
+      expect(call).toMatchObject({
+        templateKey: 'review_request_email',
+        to: 'megan@example.com',
+        recipientId: 'cust-1',
+        idempotencyKey: 'review_touch:rr-1:email',
+      });
+      expect(call.payload.first_name).toBe('Megan');
+      expect(call.payload.review_url).toContain('tok-1');
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    test('refuses when review or email notifications are off, or prefs cannot be read (fail closed)', async () => {
+      wire({ prefs: { review_request: false, email_enabled: true } });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_off' });
+      wire({ prefs: { review_request: true, email_enabled: false } });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_off' });
+      wire({ prefsThrow: true });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'prefs_unavailable' });
+      wire({ prefs: null, email: '' });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'no_email' });
+      expect(EmailLib.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('a blocked send reports the library reason and never throws', async () => {
+      wire({ prefs: null });
+      EmailLib.sendTemplate.mockResolvedValue({ sent: false, reason: 'suppressed' });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'suppressed' });
+      EmailLib.sendTemplate.mockRejectedValue(new Error('boom'));
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
+    });
   });
 
   test('composer mint refuses an email-only review preference', async () => {

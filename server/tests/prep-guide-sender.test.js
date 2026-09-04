@@ -69,17 +69,17 @@ beforeEach(() => {
   servicePrepRow = { prep_token: null, prep_template_key: null };
   serviceUpdates = [];
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
-  renderSmsTemplate.mockResolvedValue('Flea prep steps...');
+  renderSmsTemplate.mockResolvedValue('Prep text...');
   sendCustomerMessage.mockResolvedValue({ sent: true });
 });
 
 describe('sendPrepToCustomer', () => {
-  test('email on file → emails the prep guide AND the companion text', async () => {
+  const VISIT = { id: 'svc-9', scheduled_date: '2026-08-01' };
+
+  test('default channel (both), no upcoming visit → emails the guide AND texts the inline-steps standalone', async () => {
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
 
-    expect(result.ok).toBe(true);
-    expect(result.emailSent).toBe(true);
-    expect(result.smsSent).toBe(true);
+    expect(result).toMatchObject({ ok: true, channel: 'both', emailSent: true, smsSent: true });
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
     expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0]).toMatchObject({
       templateKey: 'prep.flea',
@@ -92,10 +92,80 @@ describe('sendPrepToCustomer', () => {
     // upcoming visit (falls back to a non-empty placeholder).
     expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload.service_date)
       .toBe('To be confirmed');
-    // Companion SMS (references the emailed guide), not the standalone variant.
+    // No visit → no guide page to link; the inline-steps text goes instead.
     expect(renderSmsTemplate).toHaveBeenCalledWith(
-      'auto_flea', { first_name: 'Megan' }, expect.any(Object),
+      'auto_flea_no_email', { first_name: 'Megan' }, expect.any(Object),
     );
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ prep_variant: 'standalone' });
+  });
+
+  test('both with an upcoming visit → the text carries the tokened guide page link', async () => {
+    upcomingVisitRow = VISIT;
+
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
+
+    expect(result).toMatchObject({ ok: true, emailSent: true, smsSent: true });
+    const [key, vars] = renderSmsTemplate.mock.calls[0];
+    expect(key).toBe('auto_prep_guide_link');
+    expect(vars.first_name).toBe('Megan');
+    expect(vars.prep_label).toBe('Flea Treatment');
+    expect(vars.prep_url).toMatch(/\/prep\/[0-9a-f]{32}$/);
+    // Same token in the email and the text.
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload.prep_url).toBe(vars.prep_url);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ prep_variant: 'guide_link' });
+  });
+
+  test('email only → no text, even with a phone on file', async () => {
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'email' });
+
+    expect(result).toMatchObject({ ok: true, channel: 'email', emailSent: true, smsSent: false });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(interactionsInsert).toHaveBeenCalledWith(
+      expect.objectContaining({ interaction_type: 'email_outbound', subject: 'Flea Treatment prep sent (manual)' }),
+    );
+  });
+
+  test('text only → no email, even with an email on file', async () => {
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'sms' });
+
+    expect(result).toMatchObject({ ok: true, channel: 'sms', emailSent: false, smsSent: true });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'auto_flea_no_email', { first_name: 'Megan' }, expect.any(Object),
+    );
+  });
+
+  test('text only for a guide with no inline-steps text needs an upcoming visit', async () => {
+    const refused = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    expect(refused).toMatchObject({ ok: false, reason: 'no_upcoming_visit' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+    upcomingVisitRow = VISIT;
+    const sent = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    expect(sent).toMatchObject({ ok: true, smsSent: true, emailSent: false });
+    const [key, vars] = renderSmsTemplate.mock.calls[0];
+    expect(key).toBe('auto_prep_guide_link');
+    expect(vars.prep_label).toBe('Termite Service');
+    // The texted link IS the guide delivery: prep_sent_at is stamped for it.
+    expect(serviceUpdates).toContainEqual(expect.objectContaining({
+      prep_sent_at: 'NOW()',
+      prep_template_key: 'prep.termite',
+    }));
+  });
+
+  test('every prep guide is sendable by email', async () => {
+    const { PREP_CONFIG } = require('../services/prep-guide-sender');
+    const keys = Object.keys(PREP_CONFIG);
+    expect(keys.sort()).toEqual([
+      'bed_bug', 'cockroach', 'flea', 'interior_pest', 'lawn', 'mosquito', 'rodent', 'termite', 'wildlife',
+    ]);
+    for (const pestType of keys) {
+      jest.clearAllMocks();
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+      const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType, channel: 'email' });
+      expect(result.ok).toBe(true);
+      expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].templateKey).toBe(PREP_CONFIG[pestType].emailTemplateKey);
+    }
   });
 
   test('service-contact account: email greets the contact, SMS greets the phone owner', async () => {
@@ -106,14 +176,14 @@ describe('sendPrepToCustomer', () => {
       service_contact_email: 'jamie@example.com',
     };
 
-    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
 
     // Email is addressed to the service contact (recipient), by their name.
     expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].to).toBe('jamie@example.com');
     expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload.first_name).toBe('Jamie');
     // The SMS goes to the primary's phone, so it greets the primary — not Jamie.
     expect(renderSmsTemplate).toHaveBeenCalledWith(
-      'auto_flea', { first_name: 'Megan' }, expect.any(Object),
+      'auto_flea_no_email', { first_name: 'Megan' }, expect.any(Object),
     );
   });
 
@@ -144,42 +214,17 @@ describe('sendPrepToCustomer', () => {
     );
   });
 
-  test('an email-only send keeps the descriptive manual subject', async () => {
-    customerRow = { ...customerRow, phone: '' };
-
-    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
-
-    expect(result.emailSent).toBe(true);
-    expect(result.smsSent).toBe(false);
-    expect(interactionsInsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        interaction_type: 'email_outbound',
-        subject: 'Flea Treatment prep sent (manual)',
-      }),
-    );
-  });
-
-  test('no email → sends the self-contained standalone text, no email', async () => {
+  test('a chosen channel with nothing on file is refused, not silently skipped', async () => {
     customerRow = { ...customerRow, email: '' };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'email' }))
+      .toMatchObject({ ok: false, reason: 'no_email' });
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' }))
+      .toMatchObject({ ok: false, reason: 'no_email' });
 
-    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+    customerRow = { ...customerRow, email: 'megan@example.com', phone: '' };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'no_phone' });
 
-    expect(result.ok).toBe(true);
-    expect(result.emailSent).toBe(false);
-    expect(result.smsSent).toBe(true);
-    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
-    expect(renderSmsTemplate).toHaveBeenCalledWith(
-      'auto_flea_no_email', { first_name: 'Megan' }, expect.any(Object),
-    );
-  });
-
-  test('no email and no phone → nothing to send', async () => {
-    customerRow = { ...customerRow, email: '', phone: '' };
-
-    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
-
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe('no_email_or_phone');
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
@@ -192,32 +237,26 @@ describe('sendPrepToCustomer', () => {
     expect(result).toMatchObject({ ok: false, reason: 'customer_not_found' });
   });
 
-  test('unsupported pest type → rejected', async () => {
-    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite' });
-
-    expect(result).toMatchObject({ ok: false, reason: 'unsupported_pest_type' });
+  test('unsupported pest type or channel → rejected', async () => {
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'gator' }))
+      .toMatchObject({ ok: false, reason: 'unsupported_pest_type' });
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'fax' }))
+      .toMatchObject({ ok: false, reason: 'unsupported_channel' });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('email present but send fails → SMS falls back to the standalone text', async () => {
+  test('both: a rejected email still lets the text go out', async () => {
     EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'blocked' });
 
-    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
 
-    expect(result.ok).toBe(true);
-    expect(result.emailSent).toBe(false);
-    expect(result.smsSent).toBe(true);
-    // The companion text claims "we emailed your guide" — since the email did
-    // not send, the self-contained variant goes out instead.
-    expect(renderSmsTemplate).toHaveBeenCalledWith(
-      'auto_flea_no_email', { first_name: 'Megan' }, expect.any(Object),
-    );
+    expect(result).toMatchObject({ ok: true, emailSent: false, smsSent: true });
   });
 
-  test('upcoming visit → prep_url is the tokened public prep page', async () => {
-    upcomingVisitRow = { id: 'svc-9', scheduled_date: '2026-08-01' };
+  test('upcoming visit → prep_url is the tokened public prep page and a sent email stamps prep_sent_at', async () => {
+    upcomingVisitRow = VISIT;
 
-    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'email' });
 
     expect(result.ok).toBe(true);
     const payload = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;
@@ -232,17 +271,19 @@ describe('sendPrepToCustomer', () => {
     }));
   });
 
-  test('a rejected email never stamps prep_sent_at', async () => {
-    upcomingVisitRow = { id: 'svc-9', scheduled_date: '2026-08-01' };
+  test('nothing delivered never stamps prep_sent_at', async () => {
+    upcomingVisitRow = VISIT;
     EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'blocked' });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'suppressed' });
 
-    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
 
+    expect(result).toMatchObject({ ok: false, reason: 'send_failed' });
     expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
   });
 
-  test('no upcoming visit → prep_url stays the portal visits tab', async () => {
-    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+  test('no upcoming visit → the email prep_url stays the portal visits tab', async () => {
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'email' });
 
     expect(result.ok).toBe(true);
     const payload = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;

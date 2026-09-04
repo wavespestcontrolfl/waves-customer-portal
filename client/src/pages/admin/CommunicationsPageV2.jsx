@@ -95,6 +95,7 @@ import {
   Button,
   Card,
   Dialog,
+  Radio,
   DialogHeader,
   DialogTitle,
   DialogBody,
@@ -696,7 +697,20 @@ export function buildReservicePrefill({ firstName, laneLabel, url }) {
   } re-service here: ${url}`;
 }
 
-// The Insert Link sheet's "For this customer" rows. reschedule/reservice
+// Both-channel review ask: the /sms response says whether the email copy went.
+export function reviewEmailNote(outcome) {
+  if (!outcome) return "";
+  if (outcome.sent) return " Review request emailed too.";
+  const why = {
+    no_email: "no email on file",
+    email_off: "review emails are off in their preferences",
+    email_blocked: "the address is suppressed",
+    prefs_unavailable: "preferences could not be read",
+  }[outcome.reason] || "it could not be sent";
+  return ` Review email skipped — ${why}.`;
+}
+
+// The Quick Links sheet's "For this customer" rows. reschedule/reservice
 // keep their dedicated endpoints; the other minted kinds go through
 // POST /admin/communications/customer-link. portal_login is the one static
 // row in the group — same link for everyone, scheme-less per the SMS
@@ -704,7 +718,10 @@ export function buildReservicePrefill({ firstName, laneLabel, url }) {
 export const CUSTOMER_COMPOSER_LINKS = [
   { key: "reschedule", name: "Reschedule link", keywords: "appointment move change visit time", dynamic: true },
   { key: "reservice", name: "Re-service link", keywords: "free callback between visit retreat", dynamic: true },
-  { key: "review_request", name: "Review request link", keywords: "rate rating feedback stars ask google", dynamic: true },
+  // channels: picking the row asks Text / Email / Both (owner ruling
+  // 2026-09-03) — Text inserts the link, Email sends the review email now,
+  // Both inserts the link and emails when the text is sent.
+  { key: "review_request", name: "Review request", keywords: "rate rating feedback stars ask google email", dynamic: true, channels: true },
   { key: "pay_balance", name: "Pay balance link", keywords: "pay payment invoice bill billing owe money", dynamic: true },
   { key: "estimate", name: "Latest estimate link", keywords: "estimate proposal open pending price quote", dynamic: true },
   { key: "referral", name: "Referral link", keywords: "refer friend neighbor share reward", dynamic: true },
@@ -1259,7 +1276,7 @@ function SmsTab() {
           text: `Scheduled for ${formatScheduledForToast(scheduledFor)}.`,
         });
       } else {
-        await adminFetch("/admin/communications/sms", {
+        const sent = await adminFetch("/admin/communications/sms", {
           method: "POST",
           body: JSON.stringify({
             to: toNumber.trim(),
@@ -1280,9 +1297,11 @@ function SmsTab() {
             // The send that just left IS the review ask — the server marks
             // the inline review_requests row delivered (see /sms route).
             reviewRequestId: insertedCustomerLinks.review_request?.requestId || undefined,
+            // Both: email the same ask once the text has really sent.
+            reviewRequestEmail: insertedCustomerLinks.review_request?.emailToo ? true : undefined,
           }),
         });
-        setSendResult({ ok: true, text: "Message sent." });
+        setSendResult({ ok: true, text: `Message sent.${reviewEmailNote(sent?.reviewEmail)}` });
       }
       setToNumber("");
       setToSearch("");
@@ -1712,7 +1731,7 @@ function SmsTab() {
   // response guard, replace-don't-stack per kind, and the strip-on-
   // recipient-change effect below.
   const CUSTOMER_LINK_NOTES = {
-    review_request: (d) => `Review request added — personal link${d.firstName ? ` for ${d.firstName}` : ""}.`,
+    review_request: (d) => `Review request added — personal link${d.firstName ? ` for ${d.firstName}` : ""}${d.channel === "both" ? "; the email goes out when you send" : ""}.`,
     pay_balance: (d) =>
       d.balance
         ? `Pay link added — $${Number(d.balance.total).toFixed(2)} open across ${d.balance.count === 1 ? "1 invoice" : `${d.balance.count} invoices`}.`
@@ -1729,7 +1748,7 @@ function SmsTab() {
   // auto-sends), the customer's next insert reuses it, and only a claimed
   // /sms send delivers it.
 
-  const handleInsertCustomerLink = async (kind) => {
+  const handleInsertCustomerLink = async (kind, channel = null) => {
     const requestRecipient = toNumber.trim();
     if (!requestRecipient || insertingCustomerLink) return;
     const requestRecipientKey = smsThreadKey(requestRecipient);
@@ -1758,11 +1777,19 @@ function SmsTab() {
           phone: requestRecipient,
           customerId: requestCustomerId || undefined,
           kind,
+          channel: channel || undefined,
         }),
       });
       if (contextChanged()) {
         // The mint landed after the operator moved on — just drop it. The
         // shared pending row stays reusable (see the withdrawal note above).
+        // (An Email-channel review ask has already been sent by the server;
+        // the toast is the only thing dropped.)
+        return;
+      }
+      if (d.sent && channel === "email") {
+        // Email channel: the server sent the review email — nothing to insert.
+        setSendResult({ ok: true, text: `Review request emailed${d.firstName ? ` to ${d.firstName}` : ""}.` });
         return;
       }
       if (d.autoSecured) {
@@ -1811,9 +1838,12 @@ function SmsTab() {
           recipientKey: requestRecipientKey,
           customerId: linkCustomerId,
           requestId: d.requestId || null,
+          // Both: the send posts reviewRequestEmail so the same ask is
+          // emailed once the text has really gone out.
+          emailToo: channel === "both",
         },
       }));
-      setSendResult({ ok: true, text: (CUSTOMER_LINK_NOTES[kind] || (() => "Link added."))(d) });
+      setSendResult({ ok: true, text: (CUSTOMER_LINK_NOTES[kind] || (() => "Link added."))({ ...d, channel }) });
     } catch (e) {
       if (!contextChanged()) {
         setSendResult({ ok: false, text: e.message });
@@ -1875,11 +1905,11 @@ function SmsTab() {
     [libraryLinks, smsIsAdminRole],
   );
 
-  const handleInsertSheetPick = (link) => {
+  const handleInsertSheetPick = (link, channel = null) => {
     setShowLinkSheet(false);
     if (link.key === "reschedule") return handleInsertRescheduleLink();
     if (link.key === "reservice") return handleInsertReserviceLink();
-    if (link.dynamic) return handleInsertCustomerLink(link.key);
+    if (link.dynamic) return handleInsertCustomerLink(link.key, channel);
     return handleInsertLibraryLink(link);
   };
 
@@ -2720,13 +2750,13 @@ function SmsTab() {
               !!insertingCustomerLink ||
               !toNumber.trim()
             }
-            title="Insert a customer, review, website, or app link into the message"
+            title="Quick Links — insert a customer, review, website, or app link into the message"
             aria-haspopup="dialog"
             aria-expanded={showLinkSheet}
           >
             {insertingResched || insertingReservice || insertingCustomerLink
               ? "Adding…"
-              : "Insert Link"}
+              : "Quick Links"}
           </Button>{" "}
           <Button
             variant="secondary"
@@ -3075,10 +3105,25 @@ const PREP_TYPES = [
   { value: "flea", label: "Flea treatment" },
   { value: "bed_bug", label: "Bed bug treatment" },
   { value: "cockroach", label: "Cockroach treatment" },
+  { value: "interior_pest", label: "Interior pest treatment" },
+  { value: "rodent", label: "Rodent service" },
+  { value: "termite", label: "Termite service" },
+  { value: "mosquito", label: "Mosquito treatment" },
+  { value: "lawn", label: "Lawn treatment" },
+  { value: "wildlife", label: "Wildlife trapping" },
+];
+
+// Operator-chosen channel (owner ruling 2026-09-03). Text carries the
+// guide page link, which needs an upcoming visit of that type.
+const PREP_CHANNELS = [
+  { value: "both", label: "Email and text" },
+  { value: "email", label: "Email only" },
+  { value: "sms", label: "Text only" },
 ];
 
 function PrepSendDialog({ open, onClose }) {
   const [pestType, setPestType] = useState("flea");
+  const [channel, setChannel] = useState("both");
   const [search, setSearch] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -3089,6 +3134,7 @@ function PrepSendDialog({ open, onClose }) {
   useEffect(() => {
     if (!open) {
       setPestType("flea");
+      setChannel("both");
       setSearch("");
       setResults([]);
       setSelected(null);
@@ -3137,7 +3183,7 @@ function PrepSendDialog({ open, onClose }) {
     try {
       const data = await adminFetch("/admin/communications/send-prep", {
         method: "POST",
-        body: JSON.stringify({ customerId: selected.id, pestType }),
+        body: JSON.stringify({ customerId: selected.id, pestType, channel }),
       });
       setResult({ ok: true, text: data?.message || "Prep sent." });
     } catch (e) {
@@ -3154,8 +3200,9 @@ function PrepSendDialog({ open, onClose }) {
       </DialogHeader>
       <DialogBody>
         <p className="text-13 text-zinc-600 mb-3">
-          Search a customer by name. We'll email the prep guide if they have an
-          email on file, otherwise we'll text it.
+          Search a customer by name, pick the guide, and choose how it goes
+          out. A text carries the guide page link, so it needs an upcoming
+          visit of that type on the calendar.
         </p>
         <label className="block text-11 uppercase tracking-label text-zinc-500 mb-1">
           Treatment
@@ -3174,6 +3221,23 @@ function PrepSendDialog({ open, onClose }) {
             </option>
           ))}
         </select>
+        <fieldset className="flex flex-col gap-2 border-0 p-0 m-0 mb-3 min-w-0">
+          <legend className="text-11 uppercase tracking-label text-zinc-500 mb-1 p-0">Send by</legend>
+          {PREP_CHANNELS.map((c) => (
+            <Radio
+              key={c.value}
+              id={`prep-channel-${c.value}`}
+              name="prep-channel"
+              label={c.label}
+              checked={channel === c.value}
+              onChange={() => {
+                setChannel(c.value);
+                setResult(null);
+              }}
+              disabled={sending}
+            />
+          ))}
+        </fieldset>
         {selected ? (
           <div className="flex items-center justify-between border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
             <div className="min-w-0">

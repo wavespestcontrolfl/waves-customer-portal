@@ -205,6 +205,7 @@ router.post('/sms', async (req, res, next) => {
   let parkedThreadIds = [];
   let claimedReviewRequestId = null;
   let claimedReviewClaimToken = null;
+  let reviewEmailOutcome = null;
   const clearManualReservation = async () => {
     if (!manualReservationId) return;
     const id = manualReservationId;
@@ -226,9 +227,12 @@ router.post('/sms', async (req, res, next) => {
       mediaAttachments,
       agentDecisionId,
       agentDraft,
-      // Composer Insert Link: a pending inline review_requests row whose link
+      // Composer Quick Links: a pending inline review_requests row whose link
       // rides in this body — marked delivered after a real send (below).
       reviewRequestId,
+      // Quick Links "Both": once the text has really sent, the same ask goes
+      // out by email too (ReviewService.sendInlineEmailCopy).
+      reviewRequestEmail,
     } = req.body;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
@@ -642,6 +646,11 @@ router.post('/sms', async (req, res, next) => {
             logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${claimedReviewRequestId}): ${firstErr.message}`);
             await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
           }
+          // "Both": the email copy rides on the SAME row — only after the
+          // text really went (a released claim must never email).
+          if (reviewRequestEmail === true) {
+            reviewEmailOutcome = await ReviewService.sendInlineEmailCopy(claimedReviewRequestId);
+          }
         } else {
           await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
         }
@@ -760,7 +769,7 @@ router.post('/sms', async (req, res, next) => {
       }
     }
 
-    res.json(result);
+    res.json(reviewEmailOutcome ? { ...result, reviewEmail: reviewEmailOutcome } : result);
   } catch (err) {
     // Release the in-flight reservation so a throw mid-send can't strand a
     // 'sending' row that blocks auto-sends to the thread.
@@ -807,17 +816,19 @@ router.post('/sms', async (req, res, next) => {
 
 // POST /api/admin/communications/send-prep — manual prep-guide send for a
 // customer picked by name ("Send prep guide" button). Smart channel: emails
-// the formatted prep guide (plus the companion text) when the customer has an
-// email on file, otherwise sends the self-contained prep text. All PREP_CONFIG
-// pests are allowed — flea, bed bug, and cockroach templates all exist.
-const { isSupportedPestType } = require('../services/prep-guide-sender');
+// the prep guide on the operator-chosen channel (email / sms / both — owner
+// ruling 2026-09-03). All PREP_CONFIG pests are allowed — every prep.* guide.
+const { isSupportedPestType, isSupportedChannel } = require('../services/prep-guide-sender');
 
 function manualPrepMessage(result) {
   if (!result.ok) {
     switch (result.reason) {
       case 'customer_not_found': return 'That customer could not be found.';
-      case 'no_email_or_phone': return 'This customer has no email or phone number on file, so there was nothing to send.';
+      case 'no_email': return 'This customer has no email on file — choose Text instead.';
+      case 'no_phone': return 'This customer has no phone number on file — choose Email instead.';
+      case 'no_upcoming_visit': return 'This guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to — email it, or book the visit first.';
       case 'unsupported_pest_type': return 'That prep type is not available yet.';
+      case 'unsupported_channel': return 'Choose Email, Text, or Both.';
       default: return "Couldn't send the prep — check the customer's contact info and try again.";
     }
   }
@@ -829,13 +840,16 @@ function manualPrepMessage(result) {
 
 router.post('/send-prep', async (req, res, next) => {
   try {
-    const { customerId, pestType = 'flea' } = req.body || {};
+    const { customerId, pestType = 'flea', channel = 'both' } = req.body || {};
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!isSupportedPestType(pestType)) {
       return res.status(400).json({ error: `Unsupported prep type: ${pestType}` });
     }
+    if (!isSupportedChannel(channel)) {
+      return res.status(400).json({ error: 'channel must be one of email, sms, both' });
+    }
     const { sendPrepToCustomer } = require('../services/prep-guide-sender');
-    const result = await sendPrepToCustomer({ customerId, pestType, actorId: req.technicianId || null });
+    const result = await sendPrepToCustomer({ customerId, pestType, channel, actorId: req.technicianId || null });
     const message = manualPrepMessage(result);
     if (!result.ok) {
       const status = result.reason === 'customer_not_found' ? 404 : 400;
@@ -1752,6 +1766,33 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       if (!primaryId) primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
     }
 
+    // Quick Links review channel (owner ruling 2026-09-03): 'email' is a
+    // SEND, not a link build — the gate-wrapped engine path (sendGatedAsk)
+    // emails the ask now and nothing is inserted into the text. 'sms' and
+    // 'both' mint the inline row as before; for 'both' the composer's send
+    // carries reviewRequestEmail so the email goes out with the text.
+    const channel = kind === 'review_request' ? String(req.body?.channel || 'sms') : null;
+    if (channel && !['sms', 'email', 'both'].includes(channel)) {
+      return res.status(400).json({ error: 'channel must be one of sms, email, both' });
+    }
+    if (channel === 'email') {
+      const ReviewService = require('../services/review-request');
+      const ask = await ReviewService.sendGatedAsk({ customerId: primaryId, channel: 'email', triggeredBy: 'admin' });
+      if (ask.outcome === 'sent') {
+        return res.json({ kind, channel, sent: true, requestId: ask.requestId, firstName: recipientFirstName });
+      }
+      const emailReasons = {
+        already_reviewed: 'This customer is already marked as having left a review',
+        no_customer: 'That customer could not be found',
+        archived: 'That customer is archived',
+        concurrent: 'A review request to this customer is already being sent — try again in a moment',
+        blocked: 'No review email for this customer — no email on file, or review emails are turned off in their notification preferences',
+        deferred: 'A review request to this customer is already queued and will send automatically.',
+      };
+      const error = builders.REVIEW_GATE_REASONS[ask.outcome] || emailReasons[ask.outcome] || 'Review request email could not be sent';
+      return res.status(ask.outcome === 'no_customer' ? 404 : 409).json({ error, outcome: ask.outcome });
+    }
+
     const result = await builderByKind[kind](customerIds, primaryId);
     // Auto Pay auto-secure: a consented saved card was enrolled instead of a
     // link being minted — a successful outcome with nothing to insert.
@@ -1763,6 +1804,7 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     }
     res.json({
       kind,
+      channel: channel || undefined,
       url: stripSmsLinkScheme(result.url),
       line: stripSmsLinkScheme(result.line),
       firstName: recipientFirstName,

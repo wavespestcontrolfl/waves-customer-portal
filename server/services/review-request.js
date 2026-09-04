@@ -1870,6 +1870,67 @@ const ReviewService = {
     return { url, requestId: request.id, token: request.token };
   },
 
+  /**
+   * Composer "Both" channel (owner ruling 2026-09-03): after the operator's
+   * text carrying an inline ask has REALLY sent, email the same ask — same
+   * row, same token, same link — so the customer gets it on both channels
+   * and the cap/cooldown count ONE ask (getDeliveredAskStats counts rows,
+   * not channels). Never mints a row and never touches `status` (the SMS
+   * leg owns it); on a real send it stamps `sent_at` once. Consent is the
+   * email half of sendOutreachTouch's rules: review_request off or
+   * email_enabled off refuses, a prefs read failure fails CLOSED.
+   * Returns { sent, reason } — never throws.
+   */
+  async sendInlineEmailCopy(requestId) {
+    if (!requestId) return { sent: false, reason: "no_request" };
+    try {
+      const request = await db("review_requests").where({ id: requestId }).first();
+      if (!request) return { sent: false, reason: "no_request" };
+      const customer = await db("customers").where({ id: request.customer_id }).first();
+      if (!customer) return { sent: false, reason: "no_customer" };
+      const { getServiceContact } = require("./customer-contact");
+      const contact = getServiceContact(customer);
+      if (!contact.email) return { sent: false, reason: "no_email" };
+      let prefs = null;
+      try {
+        prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
+      } catch {
+        return { sent: false, reason: "prefs_unavailable" };
+      }
+      if (prefs && (prefs.review_request === false || prefs.email_enabled === false)) {
+        return { sent: false, reason: "email_off" };
+      }
+      const reviewUrl = await buildReviewUrl(request, customer.id);
+      const EmailLib = require("./email-template-library");
+      const result = await EmailLib.sendTemplate({
+        templateKey: "review_request_email",
+        to: contact.email,
+        payload: {
+          first_name: firstNameFrom(contact.name) || customer.first_name || "",
+          review_url: reviewUrl,
+          tech_name: "Adam",
+          intro_paragraph: GENERIC_EMAIL_INTRO,
+        },
+        recipientType: "customer",
+        recipientId: customer.id,
+        // Distinct from the SMS leg's bookkeeping: one email per inline row.
+        idempotencyKey: `review_touch:${request.id}:email`,
+        suppressionGroupKey: "service_operational",
+        categories: ["review_request"],
+      });
+      if (!result?.sent) return { sent: false, reason: result?.reason || "email_blocked" };
+      await db("review_requests")
+        .where({ id: request.id })
+        .whereNull("sent_at")
+        .update({ sent_at: new Date() })
+        .catch((err) => logger.warn(`[review] inline email sent_at stamp failed (requestId=${request.id}): ${err.message}`));
+      return { sent: true };
+    } catch (err) {
+      logger.error(`[review] inline email copy failed (requestId=${requestId} errType=${err?.name || "Error"})`);
+      return { sent: false, reason: "email_send_failed" };
+    }
+  },
+
   async markInlineDelivered(requestId, claimToken = null) {
     if (!requestId) return;
     let q = db("review_requests")

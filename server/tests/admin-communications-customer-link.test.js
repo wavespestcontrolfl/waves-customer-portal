@@ -74,6 +74,7 @@ jest.mock('@anthropic-ai/sdk', () => (
   }))
 ));
 jest.mock('../services/composer-customer-links', () => ({
+  REVIEW_GATE_REASONS: jest.requireActual('../services/composer-customer-links').REVIEW_GATE_REASONS,
   buildReviewRequestLink: jest.fn(),
   buildPayBalanceLink: jest.fn(),
   buildLatestEstimateLink: jest.fn(),
@@ -81,6 +82,7 @@ jest.mock('../services/composer-customer-links', () => ({
   buildAutopaySetupLink: jest.fn(),
 }));
 jest.mock('../services/review-request', () => ({
+  sendGatedAsk: jest.fn(),
 }));
 
 const express = require('express');
@@ -326,6 +328,58 @@ describe('POST /admin/communications/customer-link', () => {
       const body = await res.json();
       expect(builders.buildReviewRequestLink).toHaveBeenCalledWith(CUSTOMER_UUID);
       expect(body.requestId).toBe('rr-1');
+    });
+  });
+
+  // Quick Links review channel (owner ruling 2026-09-03).
+  describe('review_request channel', () => {
+    test('sms (default) and both mint the inline link; both echoes its channel', async () => {
+      wireDb({ customers: soloCustomer() });
+      builders.buildReviewRequestLink.mockResolvedValue({
+        url: 'https://portal.wavespestcontrol.com/l/rv333', line: 'x', requestId: 'rr-1',
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'both' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ channel: 'both', requestId: 'rr-1' });
+        expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
+      });
+    });
+
+    test('email sends the review email now through the gated engine path — nothing to insert', async () => {
+      wireDb({ customers: soloCustomer() });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'sent', requestId: 'rr-9' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body).toMatchObject({ kind: 'review_request', channel: 'email', sent: true, requestId: 'rr-9' });
+        expect(body.url).toBeUndefined();
+        expect(ReviewService.sendGatedAsk).toHaveBeenCalledWith(
+          expect.objectContaining({ customerId: CUSTOMER_UUID, channel: 'email', triggeredBy: 'admin' }),
+        );
+        expect(builders.buildReviewRequestLink).not.toHaveBeenCalled();
+      });
+    });
+
+    test('email: a gate refusal is a 409 with the shared gate copy', async () => {
+      wireDb({ customers: soloCustomer() });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'cooldown' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ outcome: 'cooldown', error: expect.stringMatching(/last 30 days/) });
+      });
+    });
+
+    test('an unknown channel is a 400', async () => {
+      wireDb({ customers: soloCustomer() });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'fax' });
+        expect(res.status).toBe(400);
+        expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
+        expect(builders.buildReviewRequestLink).not.toHaveBeenCalled();
+      });
     });
   });
 
