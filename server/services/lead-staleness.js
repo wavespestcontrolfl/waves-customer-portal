@@ -70,14 +70,18 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
     // just the row it names (pre-push P1 on r12); a removed repeat or hop
     // says nothing about re-engagement (codex r11 P2). A repeat is recent by
     // its LAST wizard submission, not its filing: a rerun on the repeat's
-    // own token re-types the row in place (updated_at, marker kept), and
-    // that re-engagement must exempt the original too (codex r23 P1).
+    // own token re-types the row in place (marker kept), and that
+    // re-engagement must exempt the original too (codex r23 P1). The
+    // submission is the wizard's own extracted_data.wizard_submitted_at
+    // stamp, not updated_at — an admin edit or assignment bumps updated_at
+    // without the customer re-engaging (codex #3861 r1 P2); a row filed
+    // before the stamp existed falls back to its filing.
     .whereRaw(
       `leads.id::text NOT IN (
         WITH RECURSIVE chain AS (
           SELECT r.extracted_data->>'duplicate_of_lead_id' AS parent_id, 1 AS depth
           FROM leads r
-          WHERE r.lead_type = 'quote_wizard' AND r.status = 'duplicate' AND COALESCE(r.updated_at, r.created_at) >= ?${excludeSoftDeleted ? ' AND r.deleted_at IS NULL' : ''}
+          WHERE r.lead_type = 'quote_wizard' AND r.status = 'duplicate' AND COALESCE((r.extracted_data->>'wizard_submitted_at')::timestamptz, r.created_at) >= ?${excludeSoftDeleted ? ' AND r.deleted_at IS NULL' : ''}
           UNION ALL
           SELECT p.extracted_data->>'duplicate_of_lead_id', chain.depth + 1
           FROM chain JOIN leads p ON p.id::text = chain.parent_id

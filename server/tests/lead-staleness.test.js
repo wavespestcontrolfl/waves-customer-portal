@@ -138,9 +138,10 @@ describe('lead staleness sweep', () => {
         // re-engaging (codex #3834 r10 P1, chain-aware per pre-push r12).
         + 'and leads.id::text NOT IN ( WITH RECURSIVE chain AS ( '
         + "SELECT r.extracted_data->>'duplicate_of_lead_id' AS parent_id, 1 AS depth FROM leads r "
-        // ...recent by its LAST wizard submission — a rerun on the repeat's
-        // own token re-types the row in place (codex r23 P1).
-        + "WHERE r.lead_type = 'quote_wizard' AND r.status = 'duplicate' AND COALESCE(r.updated_at, r.created_at) >= ? "
+        // ...recent by its LAST wizard submission (the wizard's own
+        // extracted_data.wizard_submitted_at stamp, never updated_at — an
+        // admin edit is not the customer re-engaging; codex r23 P1, #3861 r1 P2).
+        + "WHERE r.lead_type = 'quote_wizard' AND r.status = 'duplicate' AND COALESCE((r.extracted_data->>'wizard_submitted_at')::timestamptz, r.created_at) >= ? "
         + "UNION ALL SELECT p.extracted_data->>'duplicate_of_lead_id', chain.depth + 1 "
         + 'FROM chain JOIN leads p ON p.id::text = chain.parent_id '
         + "WHERE p.lead_type = 'quote_wizard' AND p.status = 'duplicate' AND chain.depth < 8 ) "

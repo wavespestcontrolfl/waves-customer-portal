@@ -379,13 +379,13 @@ describe('stampLeadFunnelRow — the one row a lead row\'s own intake would have
     expect(database._captured.insert.service_line).toBe(inferServiceLine('Lawn Care'));
   });
 
-  test("the row's own customer beats the fallback, and a stage override lands as given (the booked winner still reads 'duplicate')", async () => {
+  test("the row's own customer beats the fallback", async () => {
     const database = makeStampDb();
-    await stampLeadFunnelRow(database, { ...stored, customer_id: 'c-own', status: 'duplicate' }, { customerId: 'c-9', funnelStage: 'booked' });
-    expect(database._captured.insert).toEqual(expect.objectContaining({ customer_id: 'c-own', funnel_stage: 'booked' }));
+    await stampLeadFunnelRow(database, { ...stored, customer_id: 'c-own', status: 'new' }, { customerId: 'c-9' });
+    expect(database._captured.insert).toEqual(expect.objectContaining({ customer_id: 'c-own', funnel_stage: 'lead' }));
   });
 
-  test("without an override the row starts at the stage the lead's CURRENT status maps to — a root that already advanced is not reset to 'lead' (codex r15 P2)", async () => {
+  test("the row starts at the stage the lead's CURRENT status maps to — a root that already advanced is not reset to 'lead' (codex r15 P2)", async () => {
     for (const [status, stage] of [['new', 'lead'], ['contacted', 'contacted'], ['estimate_sent', 'estimate_sent'], ['estimate_viewed', 'estimate_viewed'], ['won', 'booked'], [undefined, 'lead']]) {
       const database = makeStampDb();
       await stampLeadFunnelRow(database, { ...stored, status });

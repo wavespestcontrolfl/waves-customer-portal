@@ -1817,6 +1817,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     const extractedData = JSON.stringify({
       stage: 'quote_calculated',
+      // When the visitor last submitted THIS stage — the token path re-types
+      // a lookup-minted row in place, so created_at is the mint, not the
+      // submission. The staleness sweep judges a repeat recent by this stamp
+      // (an admin edit bumps updated_at without the customer re-engaging —
+      // codex #3861 r1 P2).
+      wizard_submitted_at: new Date().toISOString(),
       entry_channel: entryChannel,
       homeSqFt: sqft,
       lotSqFt: lot,
