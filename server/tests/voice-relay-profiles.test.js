@@ -175,3 +175,12 @@ describe('parseTtsVoice — the ElevenLabs voice attribute format', () => {
     expect(parseTtsVoice('')).toEqual({ voiceId: null, ttsModel: null, ttsSettings: null });
   });
 });
+
+describe('shipped profiles name their provider (codex r5 P1)', () => {
+  test('every Nova / Flux profile sets transcriptionProvider=Deepgram — the relay default is Google', () => {
+    for (const [id, profile] of Object.entries(RELAY_PROFILES)) {
+      expect({ id, provider: profile.attrs.transcriptionProvider }).toEqual({ id, provider: 'Deepgram' });
+      expect(resolveRelayProfile(id).attrs.transcriptionProvider).toBe('Deepgram');
+    }
+  });
+});

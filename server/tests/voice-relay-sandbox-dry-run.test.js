@@ -92,7 +92,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
   const fs = require('fs');
   const path = require('path');
   const ROOT = path.join(__dirname, '..');
-  const QUERY_RE = /(db|trx|knex|dbc|conn)\('call_log( as [a-z]+)?'\)|from\('call_log'\)|\.table\('call_log'\)|\bFROM call_log\b|\bJOIN call_log\b/i;
+  const QUERY_RE = /(db|trx|knex|dbc|conn)\(['"]call_log( as [a-z]+)?['"]\)|from\(['"]call_log['"]\)|\.table\(['"]call_log['"]\)|\bFROM call_log\b|\bJOIN call_log\b/gi;
   const SAFE = {
     // Writers and per-row processors keyed by id / CallSid / a marker only
     // the recording processor stamps — none of them lists inbound calls.
@@ -149,6 +149,24 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/promised-estimate-watcher.js': 'requires an enriched quote_promised extraction',
     'services/unworked-comms-watcher.js': 'requires disposition = callback_task_created, which only extraction sets',
   };
+  // A query keyed by a row id, CallSid, call_log_id, customer_id (a sandbox
+  // row never gains one) or the processor's token: knex form or raw SQL.
+  const KEYED_RE = /(where|whereIn|andWhere|whereNotNull|first)\(\s*(\{\s*)?['"]?(call_log\.|cl\.|c\.)?(id|twilio_call_sid|call_log_id|customer_id|processing_token)['"]?\s*[:,)]|\b(call_log\.|cl\.)?(id|twilio_call_sid|call_log_id)\s*(=|IN)\s*(\?|\$\d|\(|ANY)/;
+  // The statement holding a query: from the start of its line to the ';'
+  // that closes it at paren/brace depth zero (callbacks carry their own ';';
+  // line comments are skipped).
+  const statementAt = (src, at) => {
+    const start = src.lastIndexOf('\n', at) + 1;
+    let depth = 0;
+    for (let i = at; i < src.length; i += 1) {
+      const ch = src[i];
+      if (ch === '/' && src[i + 1] === '/') { i = src.indexOf('\n', i); if (i < 0) break; continue; }
+      if (ch === '(' || ch === '{' || ch === '[') depth += 1;
+      else if (ch === ')' || ch === '}' || ch === ']') depth -= 1;
+      else if (ch === ';' && depth <= 0) return src.slice(start, i);
+    }
+    return src.slice(start);
+  };
   const seen = new Set();
   const offenders = [];
   const walk = (dir) => {
@@ -157,11 +175,19 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
       if (entry.isDirectory()) { if (entry.name !== 'node_modules') walk(full); continue; }
       if (!entry.name.endsWith('.js')) continue;
       const src = fs.readFileSync(full, 'utf8');
-      if (!QUERY_RE.test(src)) continue;
+      const matches = [...src.matchAll(QUERY_RE)];
+      if (!matches.length) continue;
       const rel = path.relative(ROOT, full).split(path.sep).join('/');
       seen.add(rel);
-      const excludes = /whereNotSandboxCall\(/.test(src) || /VOICE_RELAY_SANDBOX_SOURCE/.test(src);
-      if (!excludes && !SAFE[rel]) offenders.push(rel);
+      if (SAFE[rel]) continue;
+      // EACH query must exclude, not the file as a whole: the exclusion has
+      // to ride the statement that contains the query, or the statement is
+      // keyed by an id / CallSid / customer_id (never a sandbox row's).
+      for (const m of matches) {
+        const statement = statementAt(src, m.index);
+        const excludes = /whereNotSandboxCall\(/.test(statement) || /VOICE_RELAY_SANDBOX_SOURCE/.test(statement);
+        if (!excludes && !KEYED_RE.test(statement)) offenders.push(`${rel}:${src.slice(0, m.index).split('\n').length}`);
+      }
     }
   };
   walk(path.join(ROOT, 'services'));

@@ -64,46 +64,49 @@ const HINTS_DEFAULT = 'default';
 // application-side estimate only.
 const EVENTS_ALL = 'speaker-events tokens-played';
 
+// Every shipped profile names a Deepgram model (Nova / Flux), so every one
+// sets the provider — ConversationRelay's default is Google, and a Deepgram
+// speechModel on the Google provider cannot deliver the advertised recognizer.
 const RELAY_PROFILES = Object.freeze({
   nova_baseline_v1: {
-    attrs: { speechModel: 'nova-3-general', events: EVENTS_ALL },
+    attrs: { transcriptionProvider: 'Deepgram', speechModel: 'nova-3-general', events: EVENTS_ALL },
   },
   nova_hints_v1: {
-    attrs: { speechModel: 'nova-3-general', hints: HINTS_DEFAULT, events: EVENTS_ALL },
+    attrs: { transcriptionProvider: 'Deepgram', speechModel: 'nova-3-general', hints: HINTS_DEFAULT, events: EVENTS_ALL },
   },
   flux_balanced_v1: {
-    attrs: { speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL },
+    attrs: { transcriptionProvider: 'Deepgram', speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL },
   },
   flux_fast_v1: {
-    attrs: { speechModel: 'flux', eotThreshold: '0.6', hints: HINTS_DEFAULT, events: EVENTS_ALL },
+    attrs: { transcriptionProvider: 'Deepgram', speechModel: 'flux', eotThreshold: '0.6', hints: HINTS_DEFAULT, events: EVENTS_ALL },
   },
   flux_noise_resistant_v1: {
     attrs: {
-      speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
+      transcriptionProvider: 'Deepgram', speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
       ignoreBackchannel: 'true', interruptSensitivity: 'medium',
     },
   },
   flux_reporting_v1: {
     attrs: {
-      speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
+      transcriptionProvider: 'Deepgram', speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
       reportInputDuringAgentSpeech: 'speech',
     },
   },
   flux_smartformat_off_v1: {
     attrs: {
-      speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
+      transcriptionProvider: 'Deepgram', speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
       deepgramSmartFormat: 'false',
     },
   },
   flux_tts_normalization_v1: {
     attrs: {
-      speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
+      transcriptionProvider: 'Deepgram', speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL,
       elevenlabsTextNormalization: 'on',
     },
   },
   // Sandbox only: counts Flux partial prompts (the loop still drops them).
   flux_partials_probe_v1: {
-    attrs: { speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL, partialPrompts: 'true' },
+    attrs: { transcriptionProvider: 'Deepgram', speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL, partialPrompts: 'true' },
     sandboxOnly: true,
   },
 });

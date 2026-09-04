@@ -908,6 +908,7 @@ async function resolveFulfillment(conn, commitment, call) {
       if (!phone) return null;
       const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
       const outbound = await conn("call_log")
+        .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
         .where("direction", "outbound")
         .where("created_at", ">", after)
         .whereRaw("COALESCE(duration_seconds, 0) >= 60")
@@ -946,6 +947,8 @@ async function resolveFulfillment(conn, commitment, call) {
         .where("created_at", "<=", until)
         .where("status", "completed")
         .where("duration_seconds", ">=", 20)
+        // A bake-off call from a customer's phone is not the customer calling back.
+        .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
         .modify((b) => phoneWhere(b, "from_phone", phone))
         .orderBy("created_at", "asc")
         .first("id", "created_at");
