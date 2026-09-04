@@ -199,6 +199,8 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
     const unmapped = await db('call_log as c')
       .leftJoin('lead_sources as s', 'c.to_phone', 's.twilio_phone_number')
       .where('c.direction', 'inbound')
+      // The voice-agent sandbox number is deliberately uncatalogued.
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb, 'c.source'))
       .whereRaw("c.created_at >= ((NOW() AT TIME ZONE 'America/New_York')::date)")
       .whereNull('s.id')
       .countDistinct('c.to_phone as count').first();

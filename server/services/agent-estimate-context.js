@@ -169,6 +169,7 @@ async function loadCalls(lead, phoneKey) {
         // PR #3304 r3): a stamped call that also matches by phone would
         // otherwise re-consume limit slots before the id-dedup, shrinking
         // the pack below three even when more history exists.
+        .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q)) // a bake-off call is not phone history
         .modify((q) => {
           if (lead.twilio_call_sid && rows.length) {
             q.where(function notAnchor() {

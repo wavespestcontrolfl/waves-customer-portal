@@ -531,6 +531,7 @@ async function getCallLog(input) {
 
   let query = db('call_log')
     .where('call_log.created_at', '>=', since)
+    .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb, 'call_log.source')) // bake-off calls are not customer calls
     .leftJoin('customers', 'call_log.customer_id', 'customers.id')
     .select(
       'call_log.*',
@@ -982,6 +983,7 @@ async function listCallPartners(input = {}) {
     const q = db('call_log')
       .whereRaw("created_at >= now() - (?::int * interval '1 day')", [daysBack])
       .where('direction', 'inbound')
+      .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb))
       .whereRaw(`${phoneKeyExpr('from_phone')} <> ''`)
       // Legacy rows (pre-V2, or a failed V2 run) have NO enriched payload but
       // a usable summary — they must reach the ARRANGER_PHRASE_RE fallback.
@@ -1094,6 +1096,7 @@ async function getPartnerCallHistory(input = {}) {
   // malformed rows would throw the whole tool) — JSON parses per-row in JS.
   const rows = await db('call_log')
     .whereRaw(`(${phoneKeyExpr('from_phone')} = ? OR ${phoneKeyExpr('to_phone')} = ?)`, [digits, digits])
+    .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb))
     .select('id', 'created_at', 'direction', 'duration_seconds', 'call_summary', 'disposition', 'ai_extraction', 'ai_extraction_enriched')
     .orderBy('created_at', 'desc')
     .limit(limit);

@@ -466,6 +466,9 @@ async function fetchCrmCalls(days = 30) {
   const newestCallIds = db('call_log')
     .select('id')
     .where('direction', 'inbound')
+    // The voice-agent sandbox number IS a tracking number: its test calls
+    // must never bridge as ad conversions.
+    .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb))
     .whereIn('to_phone', phoneVariants(target.number))
     .where('created_at', '>=', since)
     .orderBy('created_at', 'desc')

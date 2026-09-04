@@ -329,6 +329,7 @@ async function callSightings(phone) {
   if (!phone) return { sightings: [], calls: [] };
   const calls = await db('call_log')
     .where((q) => q.where('from_phone', phone).orWhere('to_phone', phone))
+    .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a test call's spoken email is not evidence
     .whereNotNull('transcription')
     .orderBy('created_at')
     .select('id', 'created_at', 'transcription', 'ai_extraction')
