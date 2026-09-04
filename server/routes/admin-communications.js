@@ -2257,7 +2257,10 @@ const REVIEW_LINK_RE = /\/(?:api\/)?rate\/[A-Za-z0-9_-]{6,}/i;
 // Branded /l/:code short links — what buildReviewUrl normally hands out
 // (shortenOrPassthrough); resolved through short_codes.kind below.
 // {5,}: legacy five-character codes still resolve (short-url.js).
-const SHORT_LINK_RE = /\/l\/([A-Za-z0-9_-]{5,})/g;
+// Case-insensitive like REVIEW_LINK_RE: Express routing is case-insensitive
+// and the public resolver lowercases the code, so /L/AbCdE resolves too
+// (GH Codex #3856 r15 P1).
+const SHORT_LINK_RE = /\/l\/([A-Za-z0-9_-]{5,})/gi;
 const REVIEW_LINK_SCHEDULE_ERROR = 'Review request links can only go on an immediate send — send now, or remove the review link before scheduling';
 
 router.post('/schedule-sms', async (req, res, next) => {

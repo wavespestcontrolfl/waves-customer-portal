@@ -475,7 +475,7 @@ describe('admin communications SMS route', () => {
           // A legacy five-character code and a current ten-character one.
           // A legacy five-character code (pasted with capitals — the public
           // resolver lowercases, so must the fence) and a current ten-character one.
-          body: JSON.stringify({ to: '+15551234567', body: 'Review us: wavespestcontrol.com/l/AbCdE or wavespestcontrol.com/l/abc123xyz9', messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+          body: JSON.stringify({ to: '+15551234567', body: 'Review us: wavespestcontrol.com/L/AbCdE or wavespestcontrol.com/l/abc123xyz9', messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
         });
         expect(res.status).toBe(400);
         expect((await res.json()).error).toMatch(/immediate send/);
