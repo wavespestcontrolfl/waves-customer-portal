@@ -545,11 +545,13 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
 
 const followUpLease = (p) => p.follow_up_status === 'due' && p.outreach_status === 'sent';
 // the path the follow-up was leased on is no longer the row's path at that revision (superseded, or revised in place)
-async function followUpPathMoved(prospect) {
-  if (!prospect.path_id) return true;
-  const path = await db('seo_link_acquisition_paths').where({ id: prospect.path_id }).first('id', 'revision', 'superseded_by');
+// — read FOR UPDATE in the report's transaction: the investigator's revise / supersede takes the same path lock, so
+// its write orders before or after the report, never between the revision check and the acceptance
+async function followUpPathMoved(trx, row) {
+  if (!row.path_id) return true;
+  const path = await trx('seo_link_acquisition_paths').where({ id: row.path_id }).forUpdate().first('id', 'revision', 'superseded_by');
   if (!path || path.superseded_by) return true;
-  return prospect.leased_path_revision != null && path.revision != null && Number(path.revision) !== Number(prospect.leased_path_revision);
+  return row.leased_path_revision != null && path.revision != null && Number(path.revision) !== Number(row.leased_path_revision);
 }
 // the follow-up lane's report: drafted → the follow-up parked for the bridge's decision; failed → due again (the next
 // sweep re-leases it); skipped → skipped for good, with the worker's reason. Any other outcome is not this lane's.
@@ -560,25 +562,35 @@ async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
   const now = new Date();
   const release = { claimed_at: null, claimed_by: null, updated_at: now };
   const note = body.notes || null;
-  // the draft is bound to the path revision the lease stamped (the sender's boundToRevision refuses a stale one): a
-  // path revised or superseded while the drafter held the lease makes the copy obsolete — the follow-up returns to
-  // `due` (re-leased, re-drafted against the current route) rather than parking a draft nothing can send
-  if (outcome === 'drafted' && await followUpPathMoved(prospect)) {
-    const n = await db('seo_link_prospects').where({ id: prospect.id, follow_up_status: 'due', outreach_status: 'sent' }).where('claimed_at', leaseDate).update({ ...release, follow_up_status: 'due' });
-    if (!n) return { ok: false, code: 'stale_lease', error: 'lease expired or reclaimed; re-claim before reporting' };
+  const { lockProspectDomain } = require('./prospect-domain-lock');
+  // ONE transaction under the locks the lease was taken under (the per-domain advisory lock, the row FOR UPDATE,
+  // the path FOR UPDATE — claimFollowUps' order). The draft is bound to the path revision the lease stamped (the
+  // sender's boundToRevision refuses a stale one), so the revision is read and the draft accepted under the same
+  // path lock: a revise / supersede committing between the check and the acceptance cannot slip a stale draft in as
+  // `drafted` — a state nothing could send and the drafter could not reclaim. A path revised or superseded while the
+  // drafter held the lease makes the copy obsolete — the follow-up returns to `due` (re-leased, re-drafted against
+  // the current route) rather than parking a draft nothing can send.
+  const r = await db.transaction(async (trx) => {
+    await lockProspectDomain(trx, prospect.target_domain);
+    const row = await trx('seo_link_prospects').where({ id: prospect.id }).forUpdate().first();
+    if (!row) return { n: 0 };
+    const moved = outcome === 'drafted' && await followUpPathMoved(trx, row);
+    const patch = moved || outcome === 'failed'
+      ? { ...release, follow_up_status: 'due' }
+      : outcome === 'drafted'
+        ? { ...release, follow_up_subject: body.outreach_subject, follow_up_body: body.outreach_body, follow_up_status: 'drafted', ...(note ? { notes: row.notes ? `${row.notes}\n${note}` : note } : {}) }
+        : { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: note || 'worker skipped' };
+    // the same optimistic concurrency as the initial lane: only THIS lease writes, on the follow-up state it was taken in
+    const n = await trx('seo_link_prospects').where({ id: prospect.id, follow_up_status: 'due', outreach_status: 'sent' }).where('claimed_at', leaseDate).update(patch);
+    return { n, moved, patch };
+  });
+  if (!r.n) return { ok: false, code: 'stale_lease', error: 'lease expired or reclaimed; re-claim before reporting' };
+  if (r.moved) {
     logger.info(`[link-worker] follow-up report ${prospect.id} outcome=drafted discarded — its acquisition path moved while drafting`);
     return { ok: false, code: 'path_moved', error: 'the placement\'s acquisition path changed while drafting; the follow-up was discarded — it is re-leased against the current path' };
   }
-  const patch = outcome === 'drafted'
-    ? { ...release, follow_up_subject: body.outreach_subject, follow_up_body: body.outreach_body, follow_up_status: 'drafted', ...(note ? { notes: prospect.notes ? `${prospect.notes}\n${note}` : note } : {}) }
-    : outcome === 'skipped'
-      ? { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: note || 'worker skipped' }
-      : { ...release, follow_up_status: 'due' };
-  // the same optimistic concurrency as the initial lane: only THIS lease writes, on the follow-up state it was taken in
-  const n = await db('seo_link_prospects').where({ id: prospect.id, follow_up_status: 'due', outreach_status: 'sent' }).where('claimed_at', leaseDate).update(patch);
-  if (!n) return { ok: false, code: 'stale_lease', error: 'lease expired or reclaimed; re-claim before reporting' };
   logger.info(`[link-worker] follow-up report ${prospect.id} outcome=${outcome}`);
-  return { ok: true, status: prospect.status, follow_up_status: patch.follow_up_status };
+  return { ok: true, status: prospect.status, follow_up_status: r.patch.follow_up_status };
 }
 
 /**

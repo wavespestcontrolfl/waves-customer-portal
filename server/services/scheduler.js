@@ -1665,6 +1665,19 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Link authority bridge failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:50AM — Silent-conversation closure (plan §13 / §3.3): a contacted
+  // send-first placement whose pitch + follow-up are terminal and whose Gmail
+  // thread has stayed silent 45 ET days past the last send is stamped
+  // conversation_closed_at, releasing its inbox for a later placement. Reads
+  // the thread first — a reply keeps the conversation open (the owner's).
+  // Under the outreach gate: only the outreach lane needs the inbox back.
+  cron.schedule('50 3 * * *', async () => {
+    if (!isEnabled('linkProspectOutreach')) return;
+    try {
+      await require('./seo/link-prospect-outreach').closeSilentConversations();
+    } catch (err) { logger.error(`Link conversation closure failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY SUNDAY 4:10AM — Registry feeders, after the 3:30 backlink scan (§4):
   // existing-profile baseline (idempotent) → competitor-gap ingestion → enrich
   // (DataForSEO, gated by GATE_SEO_INTELLIGENCE inside the service). Services

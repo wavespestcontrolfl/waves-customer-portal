@@ -590,7 +590,10 @@ describe('lost-link recovery', () => {
     makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', follow_up_status: 'send_error' }; if (op === 'update') { updates.push(st.payload); return 1; } } });
     const scorer = { scoreCandidates: jest.fn() };
     const r = await recovery.queueLostDomains([loss], { scorer });
-    expect(r).toEqual(expect.objectContaining({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: expect.stringMatching(/follow-up is send_error — reconcile/) }] }));
+    expect(r).toEqual(expect.objectContaining({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: expect.stringMatching(/follow-up is send_error — deferred until it is reconciled/) }] }));
+    // NOT terminal (Codex r3 P1): the monitor stamps recovery_queued_at on every outcome but error / deferred — a
+    // 'skipped' here would drop the loss for good once the operator reconciles the follow-up
+    expect(r.results).toEqual([expect.objectContaining({ domain: 'blog.example', outcome: 'deferred' })]);
     expect(updates).toHaveLength(0);
     expect(scorer.scoreCandidates).not.toHaveBeenCalled();
   });

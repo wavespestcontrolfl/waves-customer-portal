@@ -1096,3 +1096,76 @@ describe('Codex r2 on #3854', () => {
     expect(placement(t.db).follow_up_due_at).toBeTruthy();
   });
 });
+
+describe('Codex r3 on #3854', () => {
+  test('P2: the follow-up report reads the path revision and accepts the draft in ONE transaction, under the domain lock and the row + path FOR UPDATE (the lease\'s own locks)', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY), follow_up_subject: null, follow_up_body: null });
+    const [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
+    s.db._raws.length = 0;
+    const tx = jest.spyOn(s.db, 'transaction');
+    expect(await worker.report({ prospect_id: s.row.id, outcome: 'drafted', lease_token: l.lease_token, outreach_subject: 'Re: A resource for your readers', outreach_body: FOLLOW_UP_BODY })).toMatchObject({ ok: true, follow_up_status: 'drafted' });
+    expect(tx).toHaveBeenCalledTimes(1); // the revision check and the lease-conditional acceptance are not separate autocommit statements
+    const raws = s.db._raws.map(String);
+    expect(raws.some((r) => /link_prospect_domain|advisory/i.test(r))).toBe(true);
+    expect(raws).toContain('FOR UPDATE seo_link_prospects');
+    expect(raws).toContain('FOR UPDATE seo_link_acquisition_paths'); // the investigator's revise / supersede waits on this lock
+    tx.mockRestore();
+    // the locked row decides, not the caller's read: a revision that landed under the lock discards the draft in the same transaction
+    const [l2] = (Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_subject: null, follow_up_body: null, claimed_at: null }), await worker.claim({ n: 10, type: 'outreach', followUp: true }));
+    s.db._beforeResolve = (table, db) => { if (table === 'seo_link_acquisition_paths') db._tables.seo_link_acquisition_paths[0].revision = 2; };
+    expect(await worker.report({ prospect_id: s.row.id, outcome: 'drafted', lease_token: l2.lease_token, outreach_subject: 'Re: A resource for your readers', outreach_body: FOLLOW_UP_BODY })).toMatchObject({ ok: false, code: 'path_moved' });
+    s.db._beforeResolve = null;
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'due', follow_up_subject: null, claimed_at: null });
+  });
+  test('P2: a silent conversation closes 45 ET days after its last send and releases the inbox; a reply keeps it open; a failed thread read waits; a closed one is not re-read', async () => {
+    const s = await conversation();
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).ok).toBe(true);
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'sent' });
+    expect(placement(s.db).conversation_closed_at).toBeFalsy();
+    const sentAt = new Date(placement(s.db).follow_up_sent_at); // the finalize stamps the wall clock
+    const day = (n) => new Date(sentAt.getTime() + n * DAY);
+    // a second placement addressed to the same editor: the inbox guard holds while the conversation is open
+    const other = draftedRow(s.d, s.p, { target_page: '/mosquito/', outreach_to_email: 'Editor@Example.org' });
+    s.db._tables.seo_link_prospects.push(other);
+    const conflict = () => s.db.transaction((trx) => Outreach.inboxConflict(trx, { recipient: other.outreach_to_email, excludeId: other.id }));
+    expect((await conflict()).id).toBe(s.row.id);
+    gmail.getThread.mockClear(); // the follow-up send's reply check is not the sweep's read
+    // not yet: the window is 45 ET days from the LAST send (the follow-up's)
+    expect(await Outreach.closeSilentConversations({ now: day(43) })).toEqual({ scanned: 0, closed: 0, open: 0, failed: 0 });
+    expect(gmail.getThread).not.toHaveBeenCalled();
+    // an inbound message = the owner's conversation: read, left open, nothing written
+    gmail.getThread.mockResolvedValueOnce({ id: 'thr1', messages: [ours('msg1'), ours('msg2'), theirs('Dana <dana@example.org>')] });
+    expect(await Outreach.closeSilentConversations({ now: day(47) })).toEqual({ scanned: 1, closed: 0, open: 1, failed: 0 });
+    expect(placement(s.db).conversation_closed_at).toBeFalsy();
+    // a thread read that fails proves nothing: retried next sweep
+    gmail.getThread.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    expect(await Outreach.closeSilentConversations({ now: day(47) })).toEqual({ scanned: 1, closed: 0, open: 0, failed: 1 });
+    expect(placement(s.db).conversation_closed_at).toBeFalsy();
+    // silence (our two messages only) ⇒ closed: the stamp, the note, and the inbox released
+    const at = day(47);
+    expect(await Outreach.closeSilentConversations({ now: at })).toEqual({ scanned: 1, closed: 1, open: 0, failed: 0 });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'sent', conversation_closed_at: at });
+    expect(placement(s.db).notes).toMatch(/Conversation closed .* silent 45 ET days/);
+    expect(Outreach.conversationOpen(placement(s.db))).toBe(false);
+    expect(await conflict()).toBeNull();
+    expect(s.db._raws.some((r) => /link_prospect_domain|advisory/i.test(String(r)))).toBe(true); // stamped under the per-domain lock
+    // closed rows leave the candidate set — no second thread read
+    gmail.getThread.mockClear();
+    expect(await Outreach.closeSilentConversations({ now: day(60) })).toEqual({ scanned: 0, closed: 0, open: 0, failed: 0 });
+    expect(gmail.getThread).not.toHaveBeenCalled();
+  });
+  test('P2: a bounced pitch (mailer-daemon only) is no inbound match — the conversation closes; a pitch without a thread reference never closes here', async () => {
+    const s = await conversation();
+    gmail.getThread.mockResolvedValue({ id: 'thr1', messages: [ours('msg1'), theirs('Mail Delivery Subsystem <mailer-daemon@googlemail.com>')] });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'bounced' });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'skipped', follow_up_skipped_reason: 'bounce' });
+    const sentAt = new Date(placement(s.db).outreach_sent_at); // no follow-up send: the window runs from the pitch
+    expect(await Outreach.closeSilentConversations({ now: new Date(sentAt.getTime() + 47 * DAY) })).toEqual({ scanned: 1, closed: 1, open: 0, failed: 0 });
+    expect(placement(s.db).conversation_closed_at).toBeTruthy();
+    const t = await conversation();
+    Object.assign(placement(t.db), { follow_up_status: 'skipped', follow_up_skipped_reason: 'reply', outreach_thread_ref: null });
+    expect(await Outreach.closeSilentConversations({ now: new Date(Date.now() + 60 * DAY) })).toEqual({ scanned: 0, closed: 0, open: 0, failed: 0 });
+    expect(placement(t.db).conversation_closed_at).toBeFalsy();
+  });
+});

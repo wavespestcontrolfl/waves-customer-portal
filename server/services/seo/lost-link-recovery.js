@@ -161,11 +161,13 @@ async function queueOne(loss, out, scoreMod) {
     // Rows rejected by the owner are left alone.
     const exists = await byDomain(db('seo_link_prospects'), domain).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type', 'domain_id', 'path_id', 'target_url', 'follow_up_status');
     // a follow-up whose send is still ambiguous (claimed `sending`, or errored before the Sent-folder reconcile) may
-    // have reached the inbox: the conversation is not over, and a re-pitch cannot open beside it — reconcile first
+    // have reached the inbox: the conversation is not over, and a re-pitch cannot open beside it — reconcile first.
+    // Not a terminal verdict: the monitor stamps recovery_queued_at on every outcome but 'error' / 'deferred', so a
+    // bare skip here would drop the loss for good once the operator reconciles — deferred, it is swept again next scan
     if (exists && exists.status === 'lost' && ['sending', 'send_error'].includes(exists.follow_up_status)) {
       out.skipped++;
-      out.reasons.push({ domain, reason: `lost placement's follow-up is ${exists.follow_up_status} — reconcile it before re-pitching` });
-      return;
+      out.reasons.push({ domain, reason: `lost placement's follow-up is ${exists.follow_up_status} — deferred until it is reconciled` });
+      return 'deferred';
     }
     if (exists && exists.status === 'lost' && NON_OUTREACH_TYPES.has(exists.link_type)) {
       // A lost signup-lane placement (citation/directory/social) is not an
