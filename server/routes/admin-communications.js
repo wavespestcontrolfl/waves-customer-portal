@@ -878,7 +878,13 @@ function manualPrepMessage(result) {
   // Both with one leg down: name the leg that did not go out. An email
   // SendGrid MAY have accepted (uncertain) must not be re-sent blindly.
   if (result.failedChannel === 'sms') {
-    return `${sent} The text did not go out — send it again as Text once the number is confirmed.`;
+    // An unplanned text (Both with no link to text) names the link's reason.
+    switch (result.smsLinkReason) {
+      case 'no_upcoming_visit': return `${sent} The text was not sent — this guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to.`;
+      case 'prep_page_taken': return `${sent} The text was not sent — the customer's next visit already carries the ${result.takenBy || 'other'} prep page.`;
+      case 'prep_link_failed': return `${sent} The text was not sent — the guide page link could not be built; try Text again later.`;
+      default: return `${sent} The text did not go out — send it again as Text once the number is confirmed.`;
+    }
   }
   return result.emailUncertain
     ? `${sent} The email may or may not have gone out — check the customer's email log before sending it again.`

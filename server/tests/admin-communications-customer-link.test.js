@@ -476,6 +476,13 @@ describe('POST /admin/communications/customer-link', () => {
         expect(res.status).toBe(400);
         expect((await res.json()).error).toBe("The prep email may or may not have gone out — check the customer's email log before sending it again.");
       });
+      // Both whose text could not be planned: the email went, the copy names the link reason.
+      sendPrepToCustomer.mockResolvedValueOnce({ ok: true, reason: 'partial', failedChannel: 'sms', smsLinkReason: 'prep_page_taken', takenBy: 'Interior Pest Treatment', label: 'Lawn', emailSent: true, emailAddress: 'a@example.com', smsSent: false });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'lawn', channel: 'both' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ partial: true, message: "Lawn prep emailed to a@example.com. The text was not sent — the customer's next visit already carries the Interior Pest Treatment prep page." });
+      });
       // A definite failure keeps the plain retry copy.
       sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, smsSent: false });
       await withServer(async (baseUrl) => {

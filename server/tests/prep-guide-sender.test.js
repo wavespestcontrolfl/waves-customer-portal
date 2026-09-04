@@ -158,6 +158,13 @@ describe('sendPrepToCustomer', () => {
     );
   });
 
+  test('Both with no link to text still emails — partial, the text named as the failed leg with the link reason', async () => {
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'both' });
+    expect(result).toMatchObject({ ok: true, reason: 'partial', failedChannel: 'sms', emailSent: true, smsSent: false, smsLinkReason: 'no_upcoming_visit' });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('text only for a guide with no inline-steps text needs an upcoming visit', async () => {
     const refused = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
     expect(refused).toMatchObject({ ok: false, reason: 'no_upcoming_visit' });

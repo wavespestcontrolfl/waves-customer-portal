@@ -388,7 +388,7 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
     result.emailUncertain = !!email.uncertain;
     uncertain = result.emailUncertain;
   }
-  if (contacts.wantSms) {
+  if (contacts.wantSms && smsPlan) {
     const sms = await sendPrepSms({
       customer, firstName: contacts.smsFirstName, phone: contacts.phone, pestType, actorId, ...smsPlan,
     });
@@ -466,10 +466,16 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     // The stamp target: only a visit whose page this guide owns.
     page.stampVisit = page.ownsPage ? page.visit : null;
     const smsPlan = planPrepSms(config, page.prepUrl);
-    // Refused with the link's own reason (no visit / page taken / link
-    // failed), never a blanket "no visit".
+    // Text-only: refused with the link's own reason (no visit / page taken /
+    // link failed), never a blanket "no visit". Both: the email leg is
+    // valid, so it goes out and the text is reported as the failed leg
+    // carrying that reason (pre-push Codex P1 on 7271142f8) — deliverPrep
+    // skips an unplanned text.
     if (contacts.wantSms && !smsPlan) {
-      return { ...result, reason: page.linkReason, ...(page.takenBy ? { takenBy: page.takenBy } : {}) };
+      const linkRefusal = { reason: page.linkReason, ...(page.takenBy ? { takenBy: page.takenBy } : {}) };
+      if (!contacts.wantEmail) return { ...result, ...linkRefusal };
+      result.smsLinkReason = linkRefusal.reason;
+      if (linkRefusal.takenBy) result.takenBy = linkRefusal.takenBy;
     }
 
     await deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result });
