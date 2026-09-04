@@ -379,10 +379,8 @@ test('PR 2: when the dispatcher will order from the vendor, the request is raise
   const r2 = await runSuppliesAutoReorderSweep({ notify });
   expect(r2.deduped).toHaveLength(1);
   expect(notify).not.toHaveBeenCalled();
-  // …and a manual bell an earlier (gated) sweep rang is retired on the hand-off (Codex r19 P1).
-  const retired = mockState.updates.filter((u) => u.table === 'notifications');
-  expect(retired).toHaveLength(1);
-  expect(retired[0].row.read_at).toBeInstanceOf(Date);
+  // …and the sweep touches no bell on the hand-off — the dispatcher's claim retires it (Codex r20 P1).
+  expect(mockState.updates.filter((u) => u.table === 'notifications')).toHaveLength(0);
   mockState.autoOrder = false;
 });
 

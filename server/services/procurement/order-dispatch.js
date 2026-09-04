@@ -159,7 +159,13 @@ async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
   const row = vendor || (vendorId ? await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code', 'active') : null);
   if (!row || row.active === false) return false;
   const key = adapterKeyFor(row);
-  return !!key && !!loadAdapters()[key] && gateEnvValue(VENDOR_GATE[key]);
+  const adapter = key ? loadAdapters()[key] : null;
+  // An adapter without its credential must not own requests: the sweep would
+  // stand down its manual bell and the dispatcher would park every claim as
+  // "no prior order" — a misleading, non-reclaimable needs_review (Codex r20
+  // P2). Unconfigured = not auto-orderable = the sweep bells the office.
+  const configured = !!adapter && (typeof adapter.configured !== 'function' || adapter.configured() === true);
+  return configured && gateEnvValue(VENDOR_GATE[key]);
 }
 
 // Pack-size count for count-based stock: "100", "100 each", "50 ct", "1 pc".
@@ -645,6 +651,11 @@ async function claimRequest(trx, { requestId, registry }) {
   if (guarded) return guarded;
   const quantity = Number(request.requested_quantity);
   if (!Number.isFinite(quantity) || quantity <= 0) return { skipped: 'no_quantity' };
+  // A manual-order bell an earlier (gated) sweep rang for this request is
+  // retired IN the claim transaction: the claim exists only if the bell is
+  // gone, so staff are never told to buy what the dispatcher is ordering. A
+  // failed retire aborts the claim — nothing is ordered (Codex r20 P1).
+  await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${request.id}`]).whereNull('read_at').update({ read_at: new Date() });
   const { ledger, pricing, order } = await insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity });
   if (!ledger) return { skipped: 'already_claimed' };
   return { request, vendor, adapterKey, product, quantity, ledger, pricing, order };
@@ -915,7 +926,13 @@ async function bellUndispatchable(conn, requestId, notify) {
   if (!request || !product) return false;
   // notifyAdmin resolves null when it could not persist the row: a null
   // hand-off is NOT a delivered bell (Codex r17 P2).
-  return !!(await require('./auto-reorder').ringRestockBell({ notify, product, request }));
+  const rung = await require('./auto-reorder').ringRestockBell({ notify, product, request });
+  if (!rung) return false;
+  // The request-id dedupe returns the EXISTING row unchanged when the text
+  // is the same — and the dispatcher's claim marked that row read on the
+  // hand-off. A handback must be visible again: reopen it (Codex r20 P2).
+  await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNotNull('read_at').update({ read_at: null, updated_at: new Date() });
+  return true;
 }
 
 async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {

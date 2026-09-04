@@ -216,20 +216,11 @@ async function handleLiveRequest(ctx, p, existing) {
   // establish a vendor id (pinned to a vendor the product has since left)
   // is nobody's — ring so a human works it (Codex r10 P1).
   const { vendorId } = parseMeta(request.metadata);
-  if (vendorId && await dispatcherOrders(ctx.conn, vendorId)) { await retireManualBell(ctx.conn, request.id); return; }
+  // The dispatcher's CLAIM retires any manual bell an earlier sweep rang, in
+  // the same transaction that creates the claim (Codex r19 P1 / r20 P1) —
+  // the sweep only stands down here.
+  if (vendorId && await dispatcherOrders(ctx.conn, vendorId)) return;
   await bellOrWarn(ctx, p, request, 'renotified');
-}
-
-// The request now belongs to the dispatcher: a manual-order bell an earlier
-// sweep rang (a gate was off then) would send staff to buy what the
-// dispatcher is about to order — retire it as part of the hand-off
-// (Codex r19 P1). Best effort: a failed retire is logged, the sweep goes on.
-async function retireManualBell(conn, requestId) {
-  try {
-    await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNull('read_at').update({ read_at: new Date() });
-  } catch (err) {
-    logger.warn(`[auto-reorder] could not retire the manual bell for request ${requestId}: ${err.message}`);
-  }
 }
 
 function stillLow(fresh) {

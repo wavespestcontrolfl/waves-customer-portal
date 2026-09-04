@@ -62,7 +62,7 @@ jest.mock('../models/db', () => {
     q.sum = () => q;
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
     // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
-    q.update = async (row) => { mockState.updates.push({ table, row }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
+    q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); mockState.updates.push({ table, row }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
     q.delete = async () => { mockState.deletes.push(table); return 1; };
     let row;
     const returning = async () => {
@@ -84,7 +84,7 @@ jest.mock('../models/db', () => {
 const { auditVendorOrder } = require('../services/audit-log');
 const dispatch = require('../services/procurement/order-dispatch');
 
-const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', GATE_AUTO_ORDER_SITEONE: 'true', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
+const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', GATE_AUTO_ORDER_SITEONE: 'true', STICKERMULE_API_KEY: 'test-key', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
 const baseRequest = () => ({ id: 'req-1', product_id: 'prod-sticker', status: 'open', source: 'auto_reorder', requested_quantity: '500', unit: 'each', metadata: { vendorId: 'vend-sm', vendorSku: '4242' } });
 const stickerMule = { id: 'vend-sm', name: 'Sticker Mule', code: 25, active: true };
 const sticker = { id: 'prod-sticker', name: 'Yard sign sticker', active: true, auto_reorder_enabled: true, inventory_on_hand: '40', low_stock_threshold: '100', auto_reorder_vendor_id: 'vend-sm', reorder_quantity: '500', inventory_unit: 'each' };
@@ -200,6 +200,39 @@ test('the monthly cap buckets by the RESERVATION-stamped created_at (fixed accou
   const reservation = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.amount_cents === 31400 && u.row.created_at);
   expect(reservation).toBeTruthy();
   expect(reservation.row.created_at.getTime()).toBeGreaterThanOrEqual(before);
+});
+
+test('the claim retires the request\'s manual bell in its own transaction; a failed retire aborts the claim — nothing ordered (Codex r20 P1)', async () => {
+  const a = mockAdapter();
+  expect(await run(a)).toMatchObject({ status: 'placed' });
+  const retired = mockState.updates.filter((u) => u.table === 'notifications');
+  expect(retired).toHaveLength(1);
+  expect(retired[0].row.read_at).toBeInstanceOf(Date);
+  mockState.updates = []; mockState.ledgerRows = [];
+  mockState.bellRetireThrows = true;
+  const b = mockAdapter();
+  try {
+    await expect(run(b)).rejects.toThrow('bell retire lost connection');
+    expect(b.place).not.toHaveBeenCalled();
+    expect(mockState.ledgerRows).toHaveLength(0);
+  } finally { mockState.bellRetireThrows = false; }
+});
+
+test('a handback (gate off after the claim marked the bell read) reopens the deduped bell (Codex r20 P2)', async () => {
+  mockState.vendor = { ...mockState.vendor, active: false };
+  const r = await run(mockAdapter());
+  expect(r).toMatchObject({ skipped: 'no_adapter', belled: true });
+  const reopened = mockState.updates.find((u) => u.table === 'notifications' && u.row.read_at === null);
+  expect(reopened).toBeTruthy();
+});
+
+test('an adapter without its credential does not own requests: canAutoOrder is false until STICKERMULE_API_KEY is set (Codex r20 P2)', async () => {
+  const key = process.env.STICKERMULE_API_KEY;
+  delete process.env.STICKERMULE_API_KEY;
+  try {
+    expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(false);
+  } finally { process.env.STICKERMULE_API_KEY = key; }
+  expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(true);
 });
 
 test('a request the claim finds undispatchable (vendor deactivated / gated after the sweep stood down) is handed off with the sweep\'s deduped bell (Codex r12 P2)', async () => {

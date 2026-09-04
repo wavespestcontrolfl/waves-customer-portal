@@ -14091,8 +14091,13 @@ async function recapSuppliesOwed(result) {
     const flags = typeof rec?.field_flags === 'string' ? JSON.parse(rec.field_flags) : (rec?.field_flags || {});
     return flags.completion_supplies_owed === true;
   } catch (err) {
-    logger.warn(`[dispatch] recap supplies-owed read failed: ${err.message}`);
-    return false;
+    // This is the marker's only production reader and the client gets a 200
+    // either way, so "not owed" on a failed read would strand the kit for
+    // good. Fail TOWARD consuming: the at-most-once movement index makes a
+    // double deduction impossible and a handed-off product is skipped by
+    // settlement (Codex r20 P2).
+    logger.warn(`[dispatch] recap supplies-owed read failed — consuming anyway: ${err.message}`);
+    return true;
   }
 }
 
