@@ -1898,6 +1898,12 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(await markCardRequestSends({ stamp, cards })).toBe(false);
       expect(markCardLinkSendOutcome).toHaveBeenCalledTimes(2); // never short-circuits — every claimed visit is finalized
       expect(startInvitationEmailLeg).toHaveBeenCalledTimes(2); // the text went out either way — so does its twin
+      // The AMBIGUOUS provider outcome: marker lands, no twin (GH Codex #3851 r4 P1).
+      markCardLinkSendOutcome.mockReset().mockResolvedValue(true);
+      startInvitationEmailLeg.mockReset();
+      expect(await markCardRequestSends({ stamp, cards }, { emailTwin: false })).toBe(true);
+      expect(markCardLinkSendOutcome).toHaveBeenCalledTimes(2);
+      expect(startInvitationEmailLeg).not.toHaveBeenCalled();
     });
 
     test('mark: a marker that throws, or a visit read that fails for one email twin, never leaves a later claim unfinalized (GH Codex #3851 r1 P1)', async () => {

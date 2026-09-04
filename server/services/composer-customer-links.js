@@ -1237,7 +1237,9 @@ async function markStatementsSent(statementIds) {
  *     service does after its own text (owner delivery rule: both
  *     channels; GH Codex #3844 r5 P1) — the composer inserts the base
  *     template copy, so the email follows the base variant. Returns
- *     false when any marker did not land.
+ *     false when any marker did not land. { emailTwin: false } = the
+ *     AMBIGUOUS provider outcome: the marker lands (the claim stays
+ *     consumed), no twin — nothing is known to have left.
  */
 async function claimCardRequestSends(cards) {
   const { claimCardLinkSend } = require('./appointment-card-request');
@@ -1283,7 +1285,7 @@ async function releaseCardRequestSends(claim) {
   }
 }
 
-async function markCardRequestSends(claim) {
+async function markCardRequestSends(claim, { emailTwin = true } = {}) {
   const card = require('./appointment-card-request');
   let allMarked = true;
   // Every claimed visit finalizes on its own (GH Codex #3851 r1 P1): the
@@ -1299,6 +1301,7 @@ async function markCardRequestSends(claim) {
       logger.warn(`[composer-links] card request sent marker threw for visit ${scheduledServiceId}: ${err.message}`);
     }
   }
+  if (!emailTwin) return allMarked;
   for (const { scheduledServiceId, token, planChoice } of claim.cards) {
     try {
       const visit = await db('scheduled_services')

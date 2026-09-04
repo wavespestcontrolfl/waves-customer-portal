@@ -574,6 +574,22 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('a RETRYABLE provider outcome (timeout / 5xx / 429 — the provider may hold the text) keeps the claim: the maybe-sent marker lands, no release, no email twin (GH Codex #3851 r4 P1)', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, code: 'PROVIDER_FAILURE', retryable: true, deferred: true });
+      const { startInvitationEmailLeg, markCardLinkSendOutcome } = require('../services/appointment-card-request');
+      startInvitationEmailLeg.mockClear();
+      markCardLinkSendOutcome.mockClear();
+      wireCardDb();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(422);
+        const visitWrites = stamps.filter((s) => s.table === 'scheduled_services');
+        expect(visitWrites).toHaveLength(1); // the claim — never released
+        expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v-77', visitWrites[0].payload.card_link_sent_at);
+        expect(startInvitationEmailLeg).not.toHaveBeenCalled();
+      });
+    });
+
     test('a blocked send releases the claim', async () => {
       sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, reason: 'quiet hours' });
       wireCardDb();
@@ -709,6 +725,17 @@ describe('admin communications SMS route', () => {
           const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
           expect(res.status).toBe(status);
           expect(contracts().restorePreparedShareLinks).toHaveBeenCalledWith([expect.objectContaining({ id: 'k1' })], expect.anything(), expect.objectContaining({ reason: expect.any(String) }));
+          expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a RETRYABLE provider outcome keeps the prepared link activated — never restored, nothing recorded (GH Codex #3851 r4 P1)', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, code: 'PROVIDER_FAILURE', retryable: true, deferred: true });
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(422);
+          expect(contracts().restorePreparedShareLinks).not.toHaveBeenCalled();
           expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
         });
       });

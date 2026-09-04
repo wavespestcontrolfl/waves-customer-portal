@@ -237,6 +237,33 @@ router.post('/sms', async (req, res, next) => {
       logger.warn(`[communications] card request claim release failed (the service's stale-claim lease recovers it): ${releaseErr.message}`);
     }
   };
+  // AMBIGUOUS provider outcome (GH Codex #3851 r4 P1 — the card funnel's own
+  // rule): a provider-phase retryable/deferred result (Twilio timeout, 5xx,
+  // 429) is NOT a definitive no-send — the provider may already hold the
+  // message. blocked:true is a validator stop and stays definitive. Bearer
+  // state is kept consumed: the card claim finalizes through the service's
+  // maybe-sent marker (no email twin — nothing is known to have left, and
+  // the marker is what the stale lease reads), and an activated contract
+  // link stays live for the customer who may hold it. A definitively-lost
+  // send surfaces through the office lanes, never as a second bearer link.
+  const holdBearerStateAmbiguous = async (result) => {
+    const code = result?.code || 'no_code';
+    if (contractActivations) {
+      const ids = contractActivations.map((a) => a.id).join(', ');
+      contractActivations = null;
+      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — prepared contract links stay activated (${ids})`);
+    }
+    if (cardClaim) {
+      const claim = cardClaim;
+      cardClaim = null;
+      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — keeping the card request claim for visits ${claim.cards.map((c) => c.scheduledServiceId).join(', ')}`);
+      try {
+        await require('../services/composer-customer-links').markCardRequestSends(claim, { emailTwin: false });
+      } catch (markErr) {
+        logger.warn(`[communications] card request maybe-sent marker failed (the service's lease + park recover it): ${markErr.message}`);
+      }
+    }
+  };
   const clearManualReservation = async () => {
     if (!manualReservationId) return;
     const id = manualReservationId;
@@ -677,9 +704,13 @@ router.post('/sms', async (req, res, next) => {
     // a stuck 'sending' row blocking auto-sends to the thread.
     await clearManualReservation();
     if (result.blocked || result.sent === false) {
-      // The reply never left — release the claims and the parked cards.
-      await releaseCardClaim();
-      await restoreContractLinks();
+      if (!result.blocked && (result.retryable || result.deferred)) {
+        await holdBearerStateAmbiguous(result);
+      } else {
+        // The reply never left — release the claims and the parked cards.
+        await releaseCardClaim();
+        await restoreContractLinks();
+      }
       if (claimedReviewRequestId) {
         await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
