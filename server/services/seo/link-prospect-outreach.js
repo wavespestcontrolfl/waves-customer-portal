@@ -97,7 +97,7 @@ class Rollback extends Error { constructor(result) { super(result.code); this.re
 // automatic send acts on `prospect` rows only (a parked row is the owner's).
 const SENDABLE_STATUSES = Object.freeze(['prospect', 'awaiting_owner']);
 
-const { etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
+const { etDateString, parseETDateTime, addETDaysAtWallClock } = require('../../utils/datetime-et');
 const OUTREACH_TYPE_SET = new Set(OUTREACH_TYPES);
 // Postgres advisory-lock namespace serializing the cap-check + claim so concurrent
 // approvals can't both pass the cap or both flip drafted→sending.
@@ -908,7 +908,10 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
  * match — the recipient never received the pitch). A thread with an inbound message is the owner's conversation and
  * stays open (a reply reopens nothing and closes nothing; the owner settles it by hand). A thread read that fails is
  * retried on the next sweep. A pitch reconciled as sent WITHOUT a thread reference is never closed here: its silence
- * cannot be read (the owner's). The thread is read UNDER the locks the stamp is written under — the per-domain lock
+ * cannot be read (the owner's). `limit` bounds the thread reads a run makes; a conversation the sweep leaves open (a
+ * reply, a failed read) is stamped quality_signals.closure_checked_at and goes to the back of the line — never-checked
+ * first, then least-recently checked — so replied conversations (the owner's, open until settled by hand) never
+ * starve a newer silent one. The thread is read UNDER the locks the stamp is written under — the per-domain lock
  * every domain writer takes, then the row FOR UPDATE, as the send's reply check reads it inside the locked claim —
  * and the stamp is conditional on the state the candidate was read in, so a recovery cycle reopening the row (which
  * clears the stamp in its own transaction) or a hand-moved lifecycle is the later decision and wins. No lock reaches
@@ -917,20 +920,24 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
  */
 const CONVERSATION_SILENT_ET_DAYS = 45;
 const lastSendOf = (r) => r.follow_up_sent_at || r.outreach_sent_at;
+const signalsOf = (r) => (r.quality_signals && typeof r.quality_signals === 'object' ? r.quality_signals : {});
+const checkedAt = (r) => (signalsOf(r).closure_checked_at ? new Date(signalsOf(r).closure_checked_at).getTime() : 0);
 async function closeSilentConversations({ now = new Date(), limit = 50 } = {}) {
   const out = { scanned: 0, closed: 0, open: 0, failed: 0 };
-  // the last ET calendar day a send may fall on and still count as CONVERSATION_SILENT_ET_DAYS days silent
-  const lastDay = etDateString(addETDays(now, -CONVERSATION_SILENT_ET_DAYS));
-  // the completed-lane set is small (one row per conversation) — read whole, the ET-day window applied in JS
+  // silent = CONVERSATION_SILENT_ET_DAYS ET calendar days after the last send AT ITS ET WALL-CLOCK TIME (as the
+  // follow-up's due date is computed) — never a bare calendar-day compare, which would release an evening send at
+  // the 03:50 sweep of the 45th day, half a day early
+  const silent = (r) => addETDaysAtWallClock(new Date(lastSendOf(r)), CONVERSATION_SILENT_ET_DAYS).getTime() <= now.getTime();
+  // the completed-lane set is small (one row per conversation) — read whole, the window and the rotation applied in JS
   const candidates = (await db('seo_link_prospects')
     .where({ status: 'contacted', outreach_status: 'sent' })
     .whereIn('follow_up_status', ['sent', 'skipped'])
     .whereNull('conversation_closed_at')
     .whereNotNull('outreach_thread_ref')
     .whereNotNull('outreach_sent_at')
-    .orderBy('outreach_sent_at', 'asc')
-    .select('id', 'target_domain', 'follow_up_status', 'outreach_sent_at', 'follow_up_sent_at', 'outreach_thread_ref'))
-    .filter((r) => etDateString(new Date(lastSendOf(r))) <= lastDay)
+    .select('id', 'target_domain', 'follow_up_status', 'outreach_sent_at', 'follow_up_sent_at', 'outreach_thread_ref', 'quality_signals'))
+    .filter(silent)
+    .sort((a, b) => (checkedAt(a) - checkedAt(b)) || (new Date(lastSendOf(a)).getTime() - new Date(lastSendOf(b)).getTime()))
     .slice(0, limit);
   const own = M.normalizeEmail(gmailClient.ownAddress());
   const isInbound = (m) => { const a = addressOf(headerOf(m, 'From')); return Boolean(a) && a !== own && !/^(mailer-daemon|postmaster)@/.test(a); };
@@ -938,7 +945,9 @@ async function closeSilentConversations({ now = new Date(), limit = 50 } = {}) {
     out.scanned++;
     const verdict = await db.transaction(async (trx) => {
       await lockProspectDomain(trx, c.target_domain);
-      const row = await trx('seo_link_prospects').where({ id: c.id }).forUpdate().first('id', 'notes', 'status', 'outreach_status', 'follow_up_status', 'conversation_closed_at', 'outreach_thread_ref');
+      const row = await trx('seo_link_prospects').where({ id: c.id }).forUpdate().first('id', 'notes', 'status', 'outreach_status', 'follow_up_status', 'conversation_closed_at', 'outreach_thread_ref', 'quality_signals');
+      // left open this run (a reply, a failed read): to the back of the rotation — a sweep bookkeeping stamp, not a row edit (updated_at untouched)
+      const checked = () => trx('seo_link_prospects').where({ id: c.id }).update({ quality_signals: { ...signalsOf(row), closure_checked_at: now.toISOString() } });
       // the state the candidate was read in, re-asserted under the locks: a row moved on meanwhile is not this sweep's;
       // the thread read follows, so the row cannot move between the read and the stamp
       if (!row || row.status !== 'contacted' || row.outreach_status !== 'sent' || row.follow_up_status !== c.follow_up_status || row.conversation_closed_at || !row.outreach_thread_ref) return 'moved';
@@ -949,9 +958,10 @@ async function closeSilentConversations({ now = new Date(), limit = 50 } = {}) {
         if (!messages.length) throw new Error('empty thread');
       } catch (err) {
         logger.warn(`[link-outreach] closure: thread read failed for ${c.id} (code=${(err && (err.code || err.name)) || 'unknown'}) — retried next sweep`);
+        await checked();
         return 'failed';
       }
-      if (messages.some(isInbound)) return 'open';
+      if (messages.some(isInbound)) { await checked(); return 'open'; }
       const note = `Conversation closed ${now.toISOString()}: silent ${CONVERSATION_SILENT_ET_DAYS} ET days after the last send`;
       const n = await trx('seo_link_prospects')
         .where({ id: c.id, status: 'contacted', outreach_status: 'sent', follow_up_status: c.follow_up_status })

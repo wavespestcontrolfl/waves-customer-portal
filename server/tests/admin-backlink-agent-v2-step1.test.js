@@ -40,7 +40,7 @@ describe('status contract (plan §3.3)', () => {
     expect(IN_FLIGHT_STATUSES).toContain('watching');
     // claim() leases only status='prospect' — pinned in source so a widened claim predicate is a deliberate change
     const worker = fs.readFileSync(path.join(__dirname, '..', 'services/seo/link-prospect-worker.js'), 'utf8');
-    const claimBlock = worker.slice(worker.indexOf('async function claim('), worker.indexOf('async function claim(') + 1200);
+    const claimBlock = worker.slice(worker.indexOf('async function claim('), worker.indexOf('async function claim(') + 2000); // the §6.4 follow-up branch precedes the candidate query
     expect(claimBlock).toMatch(/\.where\(\{ status: 'prospect' \}\)/);
     expect(claimBlock).not.toMatch(/awaiting_owner|watching/);
   });

@@ -427,7 +427,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   // once the pitch went out and its ONE follow-up is drafted (§6.4, followUpPending), the communication/followup
   // instance is required and decided by the same rule on the FOLLOW-UP's text (the satisfied initial is never re-decided)
   const decisionFor = (placement) => {
-    const followUp = lane.outreach && M.followUpPending(placement);
+    const followUp = lane.outreach && M.followUpPending(placement, ctx.path);
     const draftClean = !lane.outreach ? false : followUp ? M.followUpReview(placement).clean : M.draftReview(placement).clean;
     const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean, followUp, waiver });
     return regroupHeld

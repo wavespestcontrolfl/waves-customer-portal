@@ -182,11 +182,14 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
   // (repoints, draft clears, unclassify) before leasing, and none of that may
   // happen on a preview — nothing is leased, so nothing is released either.
   const profile = worker.businessProfile();
-  // the follow-up pass first: due follow-ups are few and dated; a pitch batch never starves them
+  // the follow-up pass first: due follow-ups are few and dated; a pitch batch never starves them. ONE budget for
+  // both lanes — batchSize (the nightly's, the CLI's --limit) bounds the run's leases and model calls: pitches get
+  // what the follow-ups left
   const followUps = await draftFollowUps({ batchSize, dryRun, client, profile });
-  const claimed = await worker.claim({ n: batchSize, type: 'outreach', requireContactEmail: true, ...(dryRun ? { preview: true } : {}) });
+  const remaining = Math.max(0, batchSize - followUps.claimed);
+  const claimed = remaining ? await worker.claim({ n: remaining, type: 'outreach', requireContactEmail: true, ...(dryRun ? { preview: true } : {}) }) : [];
   if (!claimed.length) {
-    logger.info('[outreach-drafter] no claimable outreach prospects with a contact email');
+    logger.info(remaining ? '[outreach-drafter] no claimable outreach prospects with a contact email' : `[outreach-drafter] the batch of ${batchSize} went to follow-ups — no pitch claimed`);
     return { claimed: 0, drafted: 0, skipped: 0, failed: 0, followUps: { claimed: followUps.claimed, drafted: followUps.drafted, failed: followUps.failed }, ...(dryRun ? { samples: followUps.samples } : {}) };
   }
   let drafted = 0, skipped = 0, failed = 0;

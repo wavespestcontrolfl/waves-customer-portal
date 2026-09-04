@@ -34,7 +34,7 @@ const { lintComms } = require('../comms-lint');
 const { canonicalEmail } = require('../ads/ad-audience-consent');
 const { SERVICE_CONTACT_SLOTS } = require('../customer-contact');
 const { isValidEmail } = require('./link-prospect-worker');
-const { etParts, etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { addETDaysAtWallClock } = require('../../utils/datetime-et');
 
 // The commitments §6.4 keeps out of an automatic send. Conservative by design:
 // a false positive costs one owner click; a false negative sends a promise.
@@ -149,22 +149,20 @@ const draftOf = (placement, followUp = false) => (followUp
 // time — never raw elapsed milliseconds, which land an hour early or late across a DST seam (the America/New_York
 // discipline: every day-offset goes through datetime-et)
 const FOLLOW_UP_DELAY_DAYS = 10;
-const followUpDueAt = (sentAt) => {
-  const at = new Date(sentAt);
-  const t = etParts(at);
-  const pad = (n) => String(n).padStart(2, '0');
-  const due = parseETDateTime(`${etDateString(addETDays(at, FOLLOW_UP_DELAY_DAYS))}T${pad(t.hour)}:${pad(t.minute)}:${pad(t.second || 0)}`);
-  return new Date(due.getTime() + at.getUTCMilliseconds());
-};
+const followUpDueAt = (sentAt) => addETDaysAtWallClock(sentAt, FOLLOW_UP_DELAY_DAYS);
 // the lifecycle statuses a follow-up may act on: `contacted` (the initial send left the row there), plus the
 // Judge-owned statuses on a SUBMIT-FIRST path (execution_after_send=false), where the acquisition moved the row on
 // before the pitch — a follow-up there is claimable and never demotes the row (the follow-up writes its own columns)
 const FOLLOW_UP_JUDGE_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
 const FOLLOW_UP_STATUSES = (path) => Object.freeze(['contacted', ...(path && path.execution_after_send === false ? FOLLOW_UP_JUDGE_STATUSES : [])]);
-// a follow-up the bridge must DECIDE (the communication/followup instance exists for it): drafted, or in flight /
-// ambiguous after the claim (the instance stays pinned until the reconcile settles it)
-const followUpPending = (placement) => Boolean(placement) && placement.outreach_status === 'sent'
-  && ['drafted', 'sending', 'send_error'].includes(placement.follow_up_status);
+// a follow-up the bridge must DECIDE (the communication/followup instance exists for it): drafted — while the
+// placement is still in the lifecycle a follow-up may act on for ITS path (FOLLOW_UP_STATUSES: a send-first row the
+// verifier promoted to live has left it; the sender refuses the draft by the same rule, so the instance is no longer
+// required and the bridge ends it) — or in flight / ambiguous after the claim, whatever the lifecycle (the instance
+// stays pinned until the reconcile settles it)
+const followUpPending = (placement, path) => Boolean(placement) && placement.outreach_status === 'sent'
+  && (['sending', 'send_error'].includes(placement.follow_up_status)
+    || (placement.follow_up_status === 'drafted' && FOLLOW_UP_STATUSES(path).includes(placement.status)));
 
 // Consumer mail providers: a shared domain there says nothing about identity, so
 // only an EXACT address match can be a customer at these hosts.

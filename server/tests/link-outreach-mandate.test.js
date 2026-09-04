@@ -215,11 +215,21 @@ describe('the follow-up (§6.4)', () => {
     // ten ET CALENDAR days at the pitch's ET wall-clock time, across the DST seam (2026-11-01): 08:00 EDT → 08:00 EST, not 240 elapsed hours (07:00 EST)
     expect(M.followUpDueAt('2026-10-28T12:00:00Z').toISOString()).toBe('2026-11-07T13:00:00.000Z');
     expect(M.followUpDueAt(new Date('2026-03-05T13:30:00Z')).toISOString()).toBe('2026-03-15T12:30:00.000Z'); // 08:30 EST → 08:30 EDT
-    expect(M.followUpPending(sent)).toBe(true);
-    expect(M.followUpPending({ ...sent, follow_up_status: 'sending' })).toBe(true);
-    expect(M.followUpPending({ ...sent, follow_up_status: 'send_error' })).toBe(true);
-    for (const st of ['none', 'due', 'sent', 'skipped']) expect(M.followUpPending({ ...sent, follow_up_status: st })).toBe(false);
-    expect(M.followUpPending({ ...sent, outreach_status: 'drafted' })).toBe(false);
-    expect(M.followUpPending(null)).toBe(false);
+    expect(M.followUpDueAt('2026-09-03T00:00:00.250Z').getMilliseconds()).toBe(250);
+    // pending is PATH-aware for a drafted follow-up (Codex r4): the placement must still be in FOLLOW_UP_STATUSES(path)
+    const sendFirst = { execution_after_send: true }, submitFirst = { execution_after_send: false };
+    const contacted = { ...sent, status: 'contacted' };
+    expect(M.followUpPending(contacted, sendFirst)).toBe(true);
+    expect(M.followUpPending({ ...contacted, follow_up_status: 'sending' }, sendFirst)).toBe(true);
+    expect(M.followUpPending({ ...contacted, follow_up_status: 'send_error' }, sendFirst)).toBe(true);
+    for (const st of ['none', 'due', 'sent', 'skipped']) expect(M.followUpPending({ ...contacted, follow_up_status: st }, sendFirst)).toBe(false);
+    expect(M.followUpPending({ ...contacted, outreach_status: 'drafted' }, sendFirst)).toBe(false);
+    expect(M.followUpPending(null, sendFirst)).toBe(false);
+    // a send-first row promoted to live has left the follow-up lifecycle: the draft is no longer pending (the sender refuses it by the same rule) — an ambiguous send stays pinned
+    expect(M.followUpPending({ ...contacted, status: 'live' }, sendFirst)).toBe(false);
+    expect(M.followUpPending({ ...contacted, status: 'live', follow_up_status: 'sending' }, sendFirst)).toBe(true);
+    // the Judge-owned statuses follow up on a submit-first path
+    for (const st of ['placed', 'live', 'indexed']) expect(M.followUpPending({ ...contacted, status: st }, submitFirst)).toBe(true);
+    expect(M.followUpPending({ ...contacted, status: 'placed' }, sendFirst)).toBe(false);
   });
 });

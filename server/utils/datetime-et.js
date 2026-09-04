@@ -73,6 +73,18 @@ function addETDays(date, days) {
   return new Date(Date.UTC(et.year, et.month - 1, et.day + days, 12, 0, 0));
 }
 
+// Returns the instant N ET-calendar-days away from `date` at the SAME ET wall-clock
+// time (hour:minute:second.ms) — across a DST seam the elapsed time is 23 or 25 hours,
+// never a fixed 24×N. Use for "N days after this event" deadlines; addETDays anchors
+// at noon for calendar-day arithmetic.
+function addETDaysAtWallClock(date, days) {
+  const at = date instanceof Date ? date : new Date(date);
+  const t = etParts(at);
+  const pad = (n) => String(n).padStart(2, '0');
+  const then = parseETDateTime(`${etDateString(addETDays(at, days))}T${pad(t.hour)}:${pad(t.minute)}:${pad(t.second || 0)}`);
+  return new Date(then.getTime() + at.getUTCMilliseconds());
+}
+
 // Returns a Date N ET-calendar-months away from `date`, preserving the
 // same ordinal weekday by default. Example: first Monday + 3 months lands
 // on the first Monday of the target month. If the target month does not
@@ -280,7 +292,7 @@ function lastCompletedWeekEndingET(now = new Date()) {
 module.exports = {
   lastCompletedWeekEndingET,
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
-  etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
+  etParts, etDateString, addETDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,
 };

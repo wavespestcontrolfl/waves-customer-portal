@@ -26,6 +26,7 @@ const bridge = require('../services/seo/link-authority-bridge');
 const Outreach = require('../services/seo/link-prospect-outreach');
 const Q = require('../services/seo/link-owner-queue');
 const { makeDb, uid } = require('./helpers/link-authority-store');
+const { addETDaysAtWallClock } = require('../utils/datetime-et');
 
 const NOW = new Date('2026-09-03T07:35:00Z');
 const EARLIER = new Date('2026-09-01T00:00:00Z');
@@ -1132,9 +1133,14 @@ describe('Codex r3 on #3854', () => {
     const conflict = () => s.db.transaction((trx) => Outreach.inboxConflict(trx, { recipient: other.outreach_to_email, excludeId: other.id }));
     expect((await conflict()).id).toBe(s.row.id);
     gmail.getThread.mockClear(); // the follow-up send's reply check is not the sweep's read
-    // not yet: the window is 45 ET days from the LAST send (the follow-up's)
+    // not yet: the window is 45 ET calendar days from the LAST send (the follow-up's) at its ET wall-clock time — a minute short is not silent
+    const until = addETDaysAtWallClock(sentAt, 45);
     expect(await Outreach.closeSilentConversations({ now: day(43) })).toEqual({ scanned: 0, closed: 0, open: 0, failed: 0 });
+    expect(await Outreach.closeSilentConversations({ now: new Date(until.getTime() - 60000) })).toEqual({ scanned: 0, closed: 0, open: 0, failed: 0 });
     expect(gmail.getThread).not.toHaveBeenCalled();
+    expect(await Outreach.closeSilentConversations({ now: until })).toEqual({ scanned: 1, closed: 1, open: 0, failed: 0 }); // the whole window elapsed at the send's wall-clock time: read, silent, closed
+    expect(placement(s.db).conversation_closed_at).toEqual(until);
+    Object.assign(placement(s.db), { conversation_closed_at: null, quality_signals: null }); // rewind the stamp for the reply / failure cases below
     // an inbound message = the owner's conversation: read, left open, nothing written
     gmail.getThread.mockResolvedValueOnce({ id: 'thr1', messages: [ours('msg1'), ours('msg2'), theirs('Dana <dana@example.org>')] });
     expect(await Outreach.closeSilentConversations({ now: day(47) })).toEqual({ scanned: 1, closed: 0, open: 1, failed: 0 });
@@ -1159,6 +1165,43 @@ describe('Codex r3 on #3854', () => {
     gmail.getThread.mockClear();
     expect(await Outreach.closeSilentConversations({ now: day(60) })).toEqual({ scanned: 0, closed: 0, open: 0, failed: 0 });
     expect(gmail.getThread).not.toHaveBeenCalled();
+  });
+  test('r4 P1: the sweep rotates — a conversation left open (a reply, a failed read) goes to the back of the line, so `limit` never starves a newer silent one', async () => {
+    const s = await conversation();
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).ok).toBe(true);
+    const a = placement(s.db);
+    const b = { ...a, id: uid(), target_domain: 'other.example', target_page: '/', outreach_to_email: 'editor@other.example', outreach_thread_ref: 'thr-b', outreach_sent_at: new Date(new Date(a.outreach_sent_at).getTime() + 60000), follow_up_sent_at: new Date(new Date(a.follow_up_sent_at).getTime() + 60000), quality_signals: null, conversation_closed_at: null, notes: null };
+    s.db._tables.seo_link_prospects.push(b);
+    const at = new Date(addETDaysAtWallClock(new Date(b.follow_up_sent_at), 45).getTime() + DAY);
+    gmail.getThread.mockReset();
+    gmail.getThread.mockImplementation(async (ref) => (ref === 'thr1' ? { id: 'thr1', messages: [ours('m1'), theirs('Dana <dana@example.org>')] } : { id: ref, messages: [ours('m1')] }));
+    // day 1, one read: A (the older send) — a reply, left open, stamped checked
+    expect(await Outreach.closeSilentConversations({ now: at, limit: 1 })).toEqual({ scanned: 1, closed: 0, open: 1, failed: 0 });
+    expect(gmail.getThread).toHaveBeenLastCalledWith('thr1');
+    expect(a.quality_signals).toEqual({ closure_checked_at: at.toISOString() });
+    expect(a.conversation_closed_at).toBeFalsy();
+    // day 2, one read: B (never checked) goes first — silent, closed
+    const at2 = new Date(at.getTime() + DAY);
+    expect(await Outreach.closeSilentConversations({ now: at2, limit: 1 })).toEqual({ scanned: 1, closed: 1, open: 0, failed: 0 });
+    expect(gmail.getThread).toHaveBeenLastCalledWith('thr-b');
+    expect(s.db._tables.seo_link_prospects[1].conversation_closed_at).toEqual(at2);
+    // day 3: A comes around again (still the owner's) — and a failed read rotates the same way
+    gmail.getThread.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    const at3 = new Date(at2.getTime() + DAY);
+    expect(await Outreach.closeSilentConversations({ now: at3, limit: 1 })).toEqual({ scanned: 1, closed: 0, open: 0, failed: 1 });
+    expect(a.quality_signals).toEqual({ closure_checked_at: at3.toISOString() });
+  });
+  test('r4 P2: a drafted follow-up on a send-first row the verifier promoted to live is no longer pending — the bridge ends its instance; a submit-first row keeps it; an ambiguous send stays pinned', async () => {
+    const s = await conversation(); // the follow-up drafted and decided: an open communication/followup instance
+    const fuRow = () => s.db._tables.seo_link_placement_authorities.find((r) => r.instance_kind === 'followup' && !r.ended_at);
+    expect(fuRow()).toBeTruthy();
+    expect(M.followUpPending(placement(s.db), storedPath(s.db))).toBe(true);
+    Object.assign(placement(s.db), { status: 'live', live_url: 'https://example.org/resources/', updated_at: new Date(LATER.getTime() + 1000) }); // the verifier found the link
+    expect(M.followUpPending(placement(s.db), storedPath(s.db))).toBe(false); // the sender refuses it by the same rule (FOLLOW_UP_STATUSES on a send-first path = contacted)
+    expect(M.followUpPending(placement(s.db), { ...storedPath(s.db), execution_after_send: false })).toBe(true); // Judge-owned statuses follow up on a submit-first path
+    expect(M.followUpPending({ ...placement(s.db), follow_up_status: 'sending' }, storedPath(s.db))).toBe(true); // pinned until the reconcile, whatever the lifecycle
+    await nightly(s.db, { now: new Date(LATER.getTime() + 60000) });
+    expect(fuRow()).toBeUndefined(); // ended: no longer required — no card on the live row, nothing stranded
   });
   test('P2: a bounced pitch (mailer-daemon only) is no inbound match — the conversation closes; a pitch without a thread reference never closes here', async () => {
     const s = await conversation();

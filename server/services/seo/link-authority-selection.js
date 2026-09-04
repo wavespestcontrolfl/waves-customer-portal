@@ -118,7 +118,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   // no best_path_id filter: a domain whose route the investigator disproved (best_path_id cleared) still owns
   // open rows — it is selected once so the bridge retires them (see below), then drops out of the candidates
   const domains = await db('seo_link_domains').whereIn('id', candidateIds).select('id', 'domain', 'agent_state', 'best_path_id', 'updated_at');
-  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id).filter(Boolean))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'fee_scope', 'revision_payment', 'revision', 'baseline');
+  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id).filter(Boolean))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'fee_scope', 'revision_payment', 'revision', 'baseline', 'execution_after_send'); // execution_after_send: the follow-up's lifecycle set is path-dependent (followUpPending)
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
   const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'payment_group_id', 'updated_at', 'outreach_status', 'outreach_sent_at', 'follow_up_status');
@@ -169,7 +169,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     // an UNSATISFIED instance the path no longer requires must be ended (the bridge keeps a satisfied surplus row —
     // it is history — so it is never a reason to re-select)
     // (the communication/followup instance is required per PLACEMENT — while its follow-up is drafted / in flight, §6.4)
-    const requiredFor = (p) => new Set(requiredInstances(best, { followUp: followUpPending(p) }).map((i) => `${i.dimension}|${i.instance_kind}`));
+    const requiredFor = (p) => new Set(requiredInstances(best, { followUp: followUpPending(p, best) }).map((i) => `${i.dimension}|${i.instance_kind}`));
     const instanceSetMoved = (p) => {
       if (!best) return false;
       const required = requiredFor(p);
