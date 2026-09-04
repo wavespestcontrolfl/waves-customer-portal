@@ -866,9 +866,15 @@ function manualPrepMessage(result) {
   if (result.smsSent) parts.push(`texted to ${result.phone}`);
   const sent = `${result.label} prep ${parts.join(' and ')}.`;
   if (result.reason !== 'partial') return sent;
-  // Both with one leg down: name the leg that did not go out.
-  return result.failedChannel === 'sms'
-    ? `${sent} The text did not go out — send it again as Text once the number is confirmed.`
+  // Both with one leg down: name the leg that did not go out. A leg the
+  // provider MAY have accepted (uncertain) must not be re-sent blindly.
+  if (result.failedChannel === 'sms') {
+    return result.smsUncertain
+      ? `${sent} The text may or may not have gone out — check the customer's message log before sending it again.`
+      : `${sent} The text did not go out — send it again as Text once the number is confirmed.`;
+  }
+  return result.emailUncertain
+    ? `${sent} The email may or may not have gone out — check the customer's email log before sending it again.`
     : `${sent} The email did not go out — send it again as Email once the address is confirmed.`;
 }
 

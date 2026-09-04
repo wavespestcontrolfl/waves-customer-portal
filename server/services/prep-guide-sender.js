@@ -230,11 +230,15 @@ async function stampPrepSent(visit, config) {
 }
 
 // The email leg. Outcome { sent, uncertain }: the template library can throw
-// AFTER SendGrid accepted (its post-dispatch bookkeeping) and carries no
-// marker for it, so every throw past the payload build is uncertain — a
-// kept claim costs an operator "email it instead"; a released page 404s a
-// URL the customer may already hold (GH Codex #3856 r5 P1).
+// AFTER SendGrid accepted (its post-dispatch bookkeeping) with no marker on
+// the error, so a throw once dispatch was reached is uncertain — a kept
+// claim costs an operator "email it instead"; a released page 404s a URL
+// the customer may already hold (GH Codex #3856 r5 P1). onQueued fires
+// immediately before the provider call: a throw BEFORE it (template
+// missing/disabled, no active version) reached no one and is a plain
+// failure (GH Codex #3856 r6 P2).
 async function sendPrepEmail({ customer, recipient, firstName, config, visit, prepUrl, stampVisit }) {
+  let dispatched = false;
   try {
     const portalVisitsUrl = portalUrl('/?tab=visits');
     const address = [customer.address_line1, customer.city, customer.state, customer.zip]
@@ -255,6 +259,7 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
       // Provider rejections can echo the recipient address; keep the raw
       // SendGrid body out of the logs (email addresses in logs are a P1).
       suppressProviderErrorLog: true,
+      onQueued: () => { dispatched = true; },
       payload: {
         first_name: firstName,
         customer_name: [customer.first_name, customer.last_name].map((v) => String(v || '').trim()).filter(Boolean).join(' '),
@@ -272,8 +277,8 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
     return { sent: !!result?.sent };
   } catch (err) {
     // Sanitized: never log err.message — provider errors can carry the email.
-    logger.error(`[prep-guide-sender] email send failed for customer ${customer.id} (${err?.name || 'Error'})`);
-    return { sent: false, uncertain: true };
+    logger.error(`[prep-guide-sender] email send failed for customer ${customer.id} (${err?.name || 'Error'}, dispatched=${dispatched})`);
+    return { sent: false, uncertain: dispatched };
   }
 }
 
@@ -375,14 +380,16 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
       customer, recipient: contacts.recipient, firstName: contacts.emailFirstName, config, visit, prepUrl, stampVisit,
     });
     result.emailSent = email.sent;
-    uncertain = !!email.uncertain;
+    result.emailUncertain = !!email.uncertain;
+    uncertain = result.emailUncertain;
   }
   if (contacts.wantSms) {
     const sms = await sendPrepSms({
       customer, firstName: contacts.smsFirstName, phone: contacts.phone, pestType, actorId, ...smsPlan,
     });
     result.smsSent = sms.sent;
-    uncertain = uncertain || !!sms.uncertain;
+    result.smsUncertain = !!sms.uncertain;
+    uncertain = uncertain || result.smsUncertain;
     if (sms.sent && smsPlan.variant === 'guide_link' && !result.emailSent) await stampPrepSent(stampVisit, config);
   }
   result.ok = result.emailSent || result.smsSent;

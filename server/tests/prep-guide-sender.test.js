@@ -336,16 +336,33 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
   });
 
-  test('an email-library throw is uncertain — the page claim is kept', async () => {
+  test('an email-library throw after dispatch is uncertain (claim kept); before dispatch it is not (claim released)', async () => {
     upcomingVisitRow = VISIT;
-    EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(new Error('post-dispatch bookkeeping failed'));
-
-    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'email' });
-
-    expect(result).toMatchObject({ ok: false, reason: 'send_failed', emailSent: false });
+    // Post-dispatch: the library ran onQueued (about to call SendGrid) and then threw.
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async (opts) => {
+      await opts.onQueued({ id: 'em-1' });
+      throw new Error('post-dispatch bookkeeping failed');
+    });
+    const afterDispatch = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'email' });
+    expect(afterDispatch).toMatchObject({ ok: false, reason: 'send_failed', emailSent: false, emailUncertain: true });
     // SendGrid may have accepted it — the delivered URL must keep rendering.
     expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
     expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
+
+    // Pre-dispatch: no onQueued — nobody could have received the URL.
+    serviceUpdates = [];
+    EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(new Error('template not found'));
+    const beforeDispatch = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'email' });
+    expect(beforeDispatch).toMatchObject({ ok: false, reason: 'send_failed', emailUncertain: false });
+    expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
+  });
+
+  test('a partial Both carries the failed leg uncertainty', async () => {
+    sendCustomerMessage.mockRejectedValueOnce(new Error('socket hang up'));
+
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
+
+    expect(result).toMatchObject({ ok: true, reason: 'partial', failedChannel: 'sms', smsUncertain: true, emailUncertain: false });
   });
 
   test('a claim that already matched (another same-guide attempt made it) is never released', async () => {
