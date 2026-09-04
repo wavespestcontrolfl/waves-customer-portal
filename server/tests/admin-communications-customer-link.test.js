@@ -413,19 +413,21 @@ describe('POST /admin/communications/customer-link', () => {
   });
 
   test('appointment: the route picks the soonest live visit and hands the row to the builder', async () => {
-    const visit = { id: 'v1', customer_id: CUSTOMER_UUID, scheduled_date: '2026-09-08', window_start: '09:00', window_end: '11:00', service_type: 'Flea Treatment', status: 'confirmed' };
+    // A week out in ET — a fixed near-today date rots into pageState 'past' (pre-push Codex P1).
+    const NEXT_WEEK = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86_400_000));
+    const visit = { id: 'v1', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '09:00', window_end: '11:00', service_type: 'Flea Treatment', status: 'confirmed' };
     wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([visit]) });
     builders.buildAppointmentPageLink.mockResolvedValue({
       url: 'https://wavespest.co/a/abc',
       line: 'Everything about your visit: https://wavespest.co/a/abc\n\n',
-      appointment: { id: 'v1', scheduledDate: '2026-09-08', serviceType: 'Flea Treatment' },
+      appointment: { id: 'v1', scheduledDate: NEXT_WEEK, serviceType: 'Flea Treatment' },
     });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'appointment' });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(visit);
-      expect(body.appointment).toEqual({ id: 'v1', scheduledDate: '2026-09-08', serviceType: 'Flea Treatment' });
+      expect(body.appointment).toEqual({ id: 'v1', scheduledDate: NEXT_WEEK, serviceType: 'Flea Treatment' });
       // Account-scoped pick, but the text is a customer-specific bearer: the
       // phone owner rides back so the /sms send carries customerId and the
       // recipient's own consent policy applies (GH Codex #3844 r4 P1).
