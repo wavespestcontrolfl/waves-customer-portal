@@ -923,6 +923,7 @@ function ElectronicAuthorizationContractV2({
   const requestAutopaySetupLink = async (delivery) => {
     if (setupLinkBusy) return;
     if (delivery === "sms" && !window.confirm("Text this customer an Auto Pay setup link now?")) return;
+    if (delivery === "email" && !window.confirm("Email this customer an Auto Pay setup link now?")) return;
     setSetupLinkBusy(true);
     setSetupLinkResult(null);
     try {
@@ -1197,6 +1198,15 @@ function ElectronicAuthorizationContractV2({
               title="Text this customer an Auto Pay setup link"
             >
               Text Auto Pay link
+            </Button>{" "}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => requestAutopaySetupLink("email")}
+              disabled={setupLinkBusy}
+              title="Email this customer an Auto Pay setup link"
+            >
+              Email Auto Pay link
             </Button>{" "}
             <Button
               size="sm"
