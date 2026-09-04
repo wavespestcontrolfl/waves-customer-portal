@@ -418,6 +418,25 @@ describe('lead-estimate link service', () => {
     expect(database._updates[0].patch.updated_at).toBeInstanceOf(Date);
   });
 
+  test('a lost stamp whose winner is THIS estimate on a RE-IDENTIFIED row (one admin write re-assigned and linked it) does not convert the original — the repeat takes the win (codex r25 P1)', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2r', estimate_data: { lead_id: 'lead-dupR2' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-dupR2': { id: 'lead-dupR2', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-origR2' } },
+        'lead-origR2': { id: 'lead-origR2', status: 'new', customer_id: null, phone: '9415550142', email: 'a@example.com' },
+      },
+      // Between the read and the stamp an admin edit handed the original to
+      // another customer AND linked it to this same estimate: the identity
+      // claim on the stamp loses, and the re-read matches on estimate + open
+      // status only.
+      raceRows: { 'lead-origR2': { id: 'lead-origR2', status: 'new', customer_id: 'customer-OTHER', phone: '9415550199', email: 'other@example.com', estimate_id: 'estimate-2r' } },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2r', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-origR2', expect.anything());
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dupR2', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
+  });
+
   test('an original relabelled a duplicate IN FLIGHT (a concurrent /calculate pointed it at an older root) is followed: the root converts, the repeat is not promoted (codex r21 P1)', async () => {
     const database = makeAcceptDb({
       linked: [],

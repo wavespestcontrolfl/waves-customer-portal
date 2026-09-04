@@ -388,10 +388,15 @@ router.get('/analytics/funnel', async (req, res, next) => {
     const start = start_date ? new Date(start_date) : startOfETMonth();
     const end = end_date ? new Date(end_date) : new Date();
 
+    // The same prospect population as the overview KPIs and the source
+    // analytics (scopeToProspects): a suppressed rerun or a second win must
+    // not make the Pipeline funnel's Won total exceed its KPI (codex #3834
+    // r25 P2).
     const stages = await db('leads')
       .select('status')
       .count('* as count')
       .whereNull('deleted_at')
+      .modify(scopeToProspects)
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)
       .groupBy('status');

@@ -667,8 +667,15 @@ async function markLinkedLeadEstimateAccepted({
         // r8) and its identity (an original staff re-assigned or re-contacted
         // in the same window is no longer this opportunity — codex r16 P1).
         // A vanished row leaves the read as it was: unlinked, so it loses.
+        // The link that won must be THIS estimate's on the identity the row
+        // was read with: an admin edit that re-identified the row AND linked
+        // it to this estimate in one write is another opportunity, and the
+        // claim below would otherwise be built from that new identity and
+        // hand the row to this customer (codex #3834 r25 P1).
+        const read = identityOf(lead);
         Object.assign(lead, await database('leads').where({ id: lead.id }).first());
-        if (String(lead.estimate_id) !== String(estimateId) || CLOSED_LEAD_STATUSES.has(lead.status)) return false;
+        const sameIdentity = ['customer_id', 'phone', 'email'].every((key) => (lead[key] ?? null) === read[key]);
+        if (!sameIdentity || String(lead.estimate_id) !== String(estimateId) || CLOSED_LEAD_STATUSES.has(lead.status)) return false;
       }
     }
     const converted = await leadAttributionService.markConverted(lead.id, {
