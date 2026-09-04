@@ -73,7 +73,10 @@ const SELECTORS = Object.freeze({
   productSku: '[data-product-code], .product-code, .sku, [itemprop="sku"]',
   qtyInput: 'input[name="qty"], input.qty, input[name="quantity"], input[type="number"]',
   addToCart: 'button.add-to-cart, button#addToCartButton, button[data-action="add-to-cart"], button:has-text("Add to Cart")',
-  unavailable: '.out-of-stock, .unavailable, :has-text("Out of Stock"), :has-text("Not available")',
+  // Scoped to the product's own availability / stock element — a bare
+  // :has-text() would match an ancestor (the body) via any footer or
+  // recommendation panel and park a valid order (Codex PR3 r1 P2).
+  unavailable: '.out-of-stock, .unavailable, [class*="availab" i]:has-text("Out of Stock"), [class*="availab" i]:has-text("Not available"), [class*="stock" i]:has-text("Out of Stock"), [class*="stock" i]:has-text("Not available")',
   cartUrl: 'https://www.siteone.com/en/cart',
   cartLine: '.cart-item, .entry-item, .cart-entry, [data-test="cart-line"], tr.item',
   cartLineSku: '[data-product-code], .product-code, .sku, .item-code, [itemprop="sku"]',
@@ -239,14 +242,19 @@ async function login(page, creds) {
     if (i) await page.waitForTimeout(3000);
     // A transient navigation / wait failure is one failed attempt of three;
     // an off-host redirect or missing fields is run-level at once (Codex r4
-    // P2). Exhaustion is run-level too: nothing was submitted, retry tomorrow.
+    // P2).
     try { ok = await attempt(); }
     catch (e) { if (e.runLevel) throw e; lastError = e; logger.warn(`[siteone-bot] login attempt ${i + 1} failed: ${String(e.message).slice(0, 120)}`); }
   }
-  if (!ok) {
-    const err = (await page.locator(SELECTORS.loginError).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-    throw runLevel(`siteone login failed${err ? `: ${err}` : lastError ? `: ${String(lastError.message).slice(0, 120)}` : ''}`);
-  }
+  if (ok) return;
+  // Exhaustion: three NETWORK failures are the environment's problem —
+  // run-level, retry tomorrow. SiteOne answering and keeping us on the login
+  // page (wrong password, locked account) is THIS vendor's configuration —
+  // it parks with a bell so the rest of the batch (other vendors) still runs
+  // and the same request cannot abort every daily run (Codex PR3 r1 P1).
+  const err = (await page.locator(SELECTORS.loginError).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (lastError && !err) throw runLevel(`siteone login failed: ${String(lastError.message).slice(0, 120)}`);
+  throw new RefusedError('login_rejected', `SiteOne rejected the stored login${err ? `: ${err}` : ''} — check the vendor row's credentials`);
 }
 
 // ---- place() stages ---------------------------------------------------------
@@ -294,6 +302,13 @@ async function openLockedBrowser({ launchBrowser, resolveHostIps, evidence }) {
   }
 }
 
+// https on a pinned host, nothing else: a form post or redirect to
+// http://www.siteone.com would carry the credentials in the clear before the
+// page-URL check could notice (Codex PR3 r1 P1). Any evaluation error = deny.
+function requestPermitted(url, pinned) {
+  try { return /^https:\/\//i.test(String(url)) && filler.requestAllowed({ url, allowedHosts: pinned }) === true; } catch { return false; }
+}
+
 async function lockContext(browser, evidence, pinned) {
   const context = await browser.newContext({ serviceWorkers: 'block' });
   // Fail CLOSED (Codex r7 P1): a context that cannot intercept HTTP or
@@ -305,9 +320,7 @@ async function lockContext(browser, evidence, pinned) {
   }
   await context.route('**/*', (route) => {
     const url = route.request().url();
-    let ok = false;
-    try { ok = filler.requestAllowed({ url, allowedHosts: pinned }); } catch { ok = false; }
-    if (ok) return route.continue();
+    if (requestPermitted(url, pinned)) return route.continue();
     const host = filler.hostOf(url) || 'unknown';
     evidence.blockedHosts[host] = (evidence.blockedHosts[host] || 0) + 1;
     return route.abort();
@@ -392,13 +405,16 @@ async function verifyBillToAccount(page, { evidence, upload }) {
   try { await bill.click({ timeout: 5000 }); }
   catch (e) { await refuse('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`); }
   await page.waitForTimeout(1500);
-  // Proof is the CLICKED option's own state — a checked account radio
-  // elsewhere on the page (a hidden responsive duplicate, a stale node) is
-  // not it — and it must be the ONLY checked account tender (Codex r7 P1).
-  const checked = await bill.isChecked().catch(() => null);
-  const checkedCount = await page.locator(SELECTORS.billToAccountSelected).count().catch(() => null);
-  if (checked !== true) await refuse('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender');
+  // Proof is on the account RADIO itself (the click target may be its label,
+  // which has no checked state — Codex PR3 r1 P1): exactly ONE checked
+  // account radio on the page, and that one visible — a hidden responsive
+  // duplicate or a stale checked node is not the tender the checkout shows,
+  // and two checked cannot tell which the order bills (Codex r7 P1).
+  const checkedRadios = page.locator(SELECTORS.billToAccountSelected);
+  const checkedCount = await checkedRadios.count().catch(() => null);
+  if (checkedCount === 0) await refuse('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender');
   if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount ?? 'an unreadable number of'} account tenders read as selected at checkout — cannot tell which the order bills`);
+  if (!(await checkedRadios.first().isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the selected bill-to-account radio is not visible — not the tender the checkout shows');
   evidence.billToAccountVerified = true;
 }
 
@@ -460,15 +476,24 @@ async function submitAndReadOrderNumber(page, { evidence, upload }) {
   }
   await shot(page, 'confirmation', evidence, upload);
   const numText = (await page.locator(SELECTORS.orderNumber).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ');
-  // The number ADJACENT to the label wins; the trailing token is only the
-  // fallback for a bare-number element.
-  const m = numText.match(/order\s*(?:#|number|no\.?)?\s*:?\s*([A-Z0-9-]{5,})/i) || numText.match(/([A-Z0-9-]{5,})\s*$/i);
-  if (!m) {
+  const number = orderNumberIn(numText);
+  if (!number) {
     const err = new Error('siteone: order submitted but no confirmation number was found');
     err.ambiguous = true; err.evidence = evidence;
     throw err;
   }
-  return m[1];
+  return number;
+}
+
+// The confirmation number: the token adjacent to the "Order #/number" label
+// when it is an identifier, else the first identifier-shaped token. An
+// identifier carries at least one DIGIT — a label word ("Confirmation",
+// "order") never becomes the recorded order number (Codex PR3 r1 P2).
+function orderNumberIn(text) {
+  const isId = (t) => !!t && /\d/.test(t);
+  const adjacent = String(text).match(/order\s*(?:#|number|no\.?)?\s*:?\s*([A-Z0-9-]{5,})/i);
+  if (adjacent && isId(adjacent[1])) return adjacent[1];
+  return (String(text).match(/[A-Z0-9-]{5,}/gi) || []).find(isId) || null;
 }
 
 async function place(
@@ -529,5 +554,5 @@ module.exports = {
   quote: () => null,
   place,
   RefusedError,
-  _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, EVIDENCE_PREFIX },
+  _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, requestPermitted, orderNumberIn, EVIDENCE_PREFIX },
 };

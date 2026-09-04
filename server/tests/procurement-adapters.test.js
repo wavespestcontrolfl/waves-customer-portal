@@ -169,6 +169,14 @@ describe('siteone internals', () => {
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
+  test('egress permits https on a pinned host only — http to the pinned host is denied before credentials could travel (PR3 r1 P1)', () => {
+    const pinned = new Set(['www.siteone.com', 'siteone.com']);
+    expect(s1._internals.requestPermitted('https://www.siteone.com/en/login', pinned)).toBe(true);
+    expect(s1._internals.requestPermitted('http://www.siteone.com/en/login', pinned)).toBe(false);
+    expect(s1._internals.requestPermitted('https://evil.example.com/x', pinned)).toBe(false);
+    expect(s1._internals.requestPermitted(undefined, pinned)).toBe(false);
+  });
+
   test('every selector lives in the frozen SELECTORS map', () => {
     expect(Object.isFrozen(SELECTORS)).toBe(true);
     for (const k of ['loginUser', 'loginPass', 'searchInput', 'qtyInput', 'addToCart', 'cartTotal', 'cardField', 'mfaField', 'billToAccount', 'placeOrder', 'orderNumber']) expect(typeof SELECTORS[k]).toBe('string');
@@ -200,7 +208,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const line = (l) => el({ count: 1, sub: (sub) => sub === S.cartLineSku ? el({ count: 1, text: l.sku }) : sub === S.cartLineQty ? el({ count: 1, value: l.qty }) : el() });
     const resolve = (sel) => {
       if (sel.startsWith(S.loginPass)) return el({ count: st.loggedIn ? 0 : 1 });
-      if (sel === S.loginSubmit) return el({ count: 1, onClick: () => { st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
+      if (sel === S.loginSubmit) return el({ count: 1, onClick: () => { if (st.loginRejects) return; st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
       if (sel === S.loginError) return el();
       if (sel === S.searchInput) return el({ count: 1 });
       if (sel === S.productLink) return el({ count: 1 });
@@ -217,12 +225,13 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // `checked` is a live getter: a real locator re-resolves, so the option clicked a moment ago reads its CURRENT state
       if (sel === S.billToAccount) return el({ count: 1, visible: true, get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } });
       // extraCheckedAccounts = checked account radios ELSEWHERE on the page (hidden responsive duplicates, stale nodes)
-      if (sel === S.billToAccountSelected) return el({ count: (st.accountChecked ? 1 : 0) + (st.extraCheckedAccounts || 0) });
+      // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
+      if (sel === S.billToAccountSelected) return el({ count: (st.accountChecked ? 1 : 0) + (st.extraCheckedAccounts || 0), visible: st.accountChecked === true });
       if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountText === undefined ? 'Account # 12345' : st.accountText });
       if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, visible: st.shipToVisible ?? true, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
       if (sel === S.checkoutTotal) return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: 'Order total $105.93' });
       if (sel === S.placeOrder) return el({ count: 1, onClick: () => { st.placeClicked += 1; } });
-      if (sel === S.orderNumber) return el({ count: 1, text: 'Order # SO-778899' });
+      if (sel === S.orderNumber) return el({ count: 1, text: st.orderNumberText || 'Order # SO-778899' });
       return el();
     };
     const page = {
@@ -311,14 +320,30 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   });
 
   test('bill-to proof is the CLICKED option: a checked account radio elsewhere does not count, and two checked refuse (r7 P1)', async () => {
-    // The click did not take, but a hidden duplicate account radio is checked → still unverified.
+    // The click did not take, but a hidden duplicate account radio is checked → the one checked radio is not visible → refuse.
     const masked = fakeSiteOne({ accountSelectable: false, extraCheckedAccounts: 1 });
-    await expect(s1.place(args(), masked.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
+    await expect(s1.place(args(), masked.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_hidden' });
     expect(masked.st.placeClicked).toBe(0);
     // The click took, but a second account radio is also checked → ambiguous, never submit.
     const doubled = fakeSiteOne({ extraCheckedAccounts: 1 });
     await expect(s1.place(args(), doubled.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_ambiguous' });
     expect(doubled.st.placeClicked).toBe(0);
+  });
+
+  test('SiteOne rejecting the stored login parks (refusal, no submit) instead of aborting the batch; network failures stay run-level (PR3 r1 P1)', async () => {
+    const rejected = fakeSiteOne({ loginRejects: true });
+    await expect(s1.place(args(), rejected.deps)).rejects.toMatchObject({ refuse: 'login_rejected' });
+    expect(rejected.st.placeClicked).toBe(0);
+    expect(rejected.browser.close).toHaveBeenCalled();
+  });
+
+  test('the order number must be an identifier: a label word next to "Order" never becomes the recorded number (PR3 r1 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberText: 'Order Confirmation Number: SO-778899' });
+    const r = await s1.place(args(), deps);
+    expect(r.externalOrderNumber).toBe('SO-778899');
+    expect(st.placeClicked).toBe(1);
+    expect(s1._internals.orderNumberIn('Thank you for your order')).toBeNull();
+    expect(s1._internals.orderNumberIn('Order # 12345678')).toBe('12345678');
   });
 
   test('bill-to-account must be CONFIRMED selected before the place-order click (r1 P1)', async () => {
