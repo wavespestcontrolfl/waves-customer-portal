@@ -19,6 +19,7 @@ const db = require('../../models/db');
 const { executeContentTool } = require('./content-agent-tools');
 const { CONTENT_AGENT_CONFIG } = require('./content-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
+const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CONTENT_AGENT_ID = process.env.CONTENT_AGENT_ID;
@@ -218,15 +219,13 @@ const ContentAgent = {
         }
 
         // ── Session complete ──
-        // stop_reason arrives as a string or as { type } — read both (Codex r9).
-        const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
-        if (event === 'done' || event === 'session_complete' || stopReason === 'end_turn') {
+        if (isSessionTerminal(event, data)) {
           sessionEnded = true;
           break;
         }
 
         // ── Error ──
-        if (event === 'error' || event === 'session.error') {
+        if (isSessionError(event)) {
           logger.error(`[content-agent] Agent error: ${JSON.stringify(data)}`);
           failure = 'session_error_event';
           break;

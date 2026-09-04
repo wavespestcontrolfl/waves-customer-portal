@@ -11,6 +11,7 @@ const db = require('../models/db');
 const { executeBITool } = require('./bi-agent-tools');
 const { BI_AGENT_CONFIG } = require('./bi-agent-config');
 const { recordSessionUsage } = require('./llm-dispatch-metrics');
+const { isSessionTerminal, isSessionError } = require('./agent-control/session-events');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BI_AGENT_ID = process.env.BI_AGENT_ID;
@@ -131,10 +132,8 @@ const BIAgent = {
           });
         }
 
-        // stop_reason arrives as a string or as { type } — read both (Codex r9).
-        const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
-        if (event === 'done' || event === 'session_complete' || stopReason === 'end_turn') { sessionEnded = true; break; }
-        if (event === 'error' || event === 'session.error') { logger.error(`[bi-agent] Error: ${JSON.stringify(data)}`); failure = 'session_error_event'; break; }
+        if (isSessionTerminal(event, data)) { sessionEnded = true; break; }
+        if (isSessionError(event)) { logger.error(`[bi-agent] Error: ${JSON.stringify(data)}`); failure = 'session_error_event'; break; }
       }
       // The stream closed (or was left) before the session said it ended:
       // not a success, whatever the session GET reports later.

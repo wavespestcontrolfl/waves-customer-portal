@@ -519,7 +519,10 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
       logger.warn(`[llm-dispatch-metrics] session ${sessionId} usage unavailable (${err.message}) — recording the session without token counts`);
     }
     const tokens = extractUsage('anthropic', { usage: session?.usage });
-    const errorCode = session?.status === 'terminated' ? 'session_terminated' : failureCode(failure);
+    // The runner's own outcome first (session_error_event, max_events, an
+    // anthropic_429 — the codes the taxonomy classifies); a terminated
+    // session only names the failure when the runner had none (Codex r10).
+    const errorCode = failureCode(failure) || (session?.status === 'terminated' ? 'session_terminated' : null);
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
     logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId}) usage in=${tokens.input_tokens} out=${tokens.output_tokens} ${errorCode || 'ok'}`);

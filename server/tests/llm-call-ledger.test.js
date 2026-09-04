@@ -487,6 +487,13 @@ describe('llm call ledger', () => {
       expect(ledgerRows()[0]).toMatchObject({ ok: false, error_code: 'session_terminated', error_class: 'infrastructure' });
     });
 
+    it("a terminated session behind a runner failure keeps the runner's own code (its class), not session_terminated", async () => {
+      global.fetch = fetchJson({ id: 's', status: 'terminated', usage: { input_tokens: 1, output_tokens: 1 } });
+      const { metrics } = load();
+      await metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's', failure: 'session_error_event' });
+      expect(ledgerRows()[0]).toMatchObject({ ok: false, error_code: 'session_error_event', error_class: 'provider' });
+    });
+
     it("combines the runner's own outcome with the remote status — an idle session behind a failed run is a failed row", async () => {
       global.fetch = fetchJson({ id: 's', status: 'idle', usage: { input_tokens: 10, output_tokens: 2 } });
       const { metrics } = load();

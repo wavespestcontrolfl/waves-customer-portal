@@ -25,6 +25,7 @@ const { getBreaker } = require('./intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('./intelligence-bar/tool-events');
 const { LEAD_RESPONSE_AGENT_CONFIG } = require('./lead-response-agent-config');
 const { recordSessionUsage } = require('./llm-dispatch-metrics');
+const { isSessionTerminal, isSessionError } = require('./agent-control/session-events');
 
 const leadToolBreaker = getBreaker('lead-response-agent');
 
@@ -296,13 +297,11 @@ const LeadResponseAgent = {
           }]);
         }
 
-        // session.status_idle is NOT terminal on its own: it arrives with
-        // stop_reason requires_action while the agent waits for the tool
-        // result sent above, and the run continues. Only its end_turn is
-        // (the rule agent-dispatcher.js documents) — Codex r8 on #3846.
-        const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
-        if (event === 'done' || event === 'session_complete' || stopReason === 'end_turn') { sessionEnded = true; break; }
-        if (event === 'error' || event === 'session.error') {
+        // session.status_idle is NOT terminal on its own (it arrives with
+        // requires_action while the agent waits for the tool result sent
+        // above) — the shared predicate reads only real terminals.
+        if (isSessionTerminal(event, data)) { sessionEnded = true; break; }
+        if (isSessionError(event)) {
           logger.error(`[lead-agent] Agent error: ${JSON.stringify(data)}`);
           failure = 'session_error_event';
           break;

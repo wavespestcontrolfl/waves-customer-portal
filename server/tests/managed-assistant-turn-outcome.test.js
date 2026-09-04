@@ -84,6 +84,12 @@ describe('managed assistant — the turn recorder sees how the stream ended', ()
     expect(recorded()).toMatchObject({ failure: 'session_error_event' });
   });
 
+  it('a turn_end event ends the turn ok, like done (Codex r10)', async () => {
+    global.fetch = fetchFor([text('Thursday at 9am.'), { event: 'turn_end', data: {} }, text('never read')]);
+    await expect(turn()).resolves.toMatchObject({ reply: 'Thursday at 9am.' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
   it('an idle carrying an object-valued end_turn stop reason ends the turn ok (Codex r9)', async () => {
     global.fetch = fetchFor([text('Thursday at 9am.'), { event: 'session.status_idle', data: { stop_reason: { type: 'end_turn' } } }, text('never read')]);
     await expect(turn()).resolves.toMatchObject({ reply: 'Thursday at 9am.' });

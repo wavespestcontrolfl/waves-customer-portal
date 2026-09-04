@@ -32,6 +32,7 @@ const ContextAggregator = require('../context-aggregator');
 const { executeToolCall } = require('./tools-expanded');
 const { AGENT_CONFIG } = require('./managed-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
+const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
 
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MANAGED_AGENT_ID = process.env.MANAGED_AGENT_ID;
@@ -323,15 +324,13 @@ class ManagedAssistant {
       }
 
       // ── Session complete ──
-      // stop_reason arrives as a string or as { type } — read both (Codex r9).
-      const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
-      if (event === 'done' || event === 'session_complete' || stopReason === 'end_turn') {
+      if (isSessionTerminal(event, data)) {
         sessionEnded = true;
         break;
       }
 
       // ── Error from agent ──
-      if (event === 'error' || event === 'session.error') {
+      if (isSessionError(event)) {
         logger.error(`[managed-assistant] Agent error: ${JSON.stringify(data)}`);
         failure = 'session_error_event';
         if (!finalReply) {

@@ -20,6 +20,7 @@
  */
 
 const logger = require('../../logger');
+const { isSessionTerminal, isSessionError } = require('../../agent-control/session-events');
 const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint } = require('./brief-driven-tools');
 const { recordSessionUsage } = require('../../llm-dispatch-metrics');
 
@@ -355,10 +356,8 @@ class AgentDispatcher {
       // emit_draft) exit after the first tool and report
       // agent_did_not_emit_draft even though the agent was about to
       // continue. Only end_turn (handled below) is the real terminal.
-      const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
-      if (event === 'done' || event === 'session_complete' || event === 'turn_end' || event === 'session_end') return;
-      if (stopReason === 'end_turn') return;
-      if (event === 'error' || event === 'session.error') {
+      if (isSessionTerminal(event, data)) return;
+      if (isSessionError(event)) {
         // Don't mask infrastructure failures as a content-quality
         // outcome — throw so runWithBrief surfaces streaming_failed
         // instead of agent_did_not_emit_draft.

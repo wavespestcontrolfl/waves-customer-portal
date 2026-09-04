@@ -15,6 +15,7 @@ const db = require('../../models/db');
 const { executeBacklinkTool } = require('./backlink-strategy-tools');
 const { BACKLINK_STRATEGY_AGENT_CONFIG } = require('./backlink-strategy-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
+const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BACKLINK_STRATEGY_AGENT_ID = process.env.BACKLINK_STRATEGY_AGENT_ID;
@@ -313,12 +314,12 @@ const BacklinkStrategyAgent = {
           continue;
         }
 
-        if (event === 'done' || event === 'session_complete' || stopReason?.type === 'end_turn') {
+        if (isSessionTerminal(event, data)) {
           sessionEnded = true;
           break;
         }
 
-        if (event === 'error' || event === 'session.error') {
+        if (isSessionError(event)) {
           logger.error(`[backlink-strategy] Agent error: ${JSON.stringify(data)}`);
           failure = 'session_error_event';
           break;
