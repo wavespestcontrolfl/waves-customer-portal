@@ -468,6 +468,16 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
+  test('appointment: the visit pick excludes rescheduled placeholders — the page renders them as pending_rebook (pre-push Codex P1); the reschedule link keeps them', async () => {
+    const visits = makeVisitsBuilder([]);
+    wireDb({ customers: makeCustomersBuilder({ firstRow: { id: CUSTOMER_UUID, phone: '+15551234567', account_id: CUSTOMER_UUID }, selectResults: [[{ id: CUSTOMER_UUID }], [{ first_name: 'Ann' }], [{ id: CUSTOMER_UUID }]] }), visits });
+    builders.buildAppointmentPageLink.mockResolvedValue({ url: null, line: '', reason: 'No upcoming appointment' });
+    await withServer(async (baseUrl) => {
+      await post(baseUrl, 'customer-link', { phone: '+15551234567', customerId: CUSTOMER_UUID, kind: 'appointment' });
+      expect(visits.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed']);
+    });
+  });
+
   test.each(['appointment', 'service_report'])('%s: 409 when two live siblings on the account share the phone and no customer was picked — the owner that rides back is never an arbitrary row (GH Codex #3844 r9 P1)', async (kind) => {
     wireDb({ customers: makeCustomersBuilder({
       selectResults: [

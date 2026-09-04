@@ -1437,13 +1437,18 @@ function isElapsedSameDayReschedulePlaceholder(svc, now = new Date()) {
 // upcoming appointment" when a later visit exists. Ordering is fully
 // deterministic (id tie-breaker), so offset pages can't skip or repeat
 // rows within a request.
-async function soonestUpcomingVisit(customerIds) {
+// `statuses`: the reschedule link rebooks a 'rescheduled' placeholder, so
+// it is upcoming there; the appointment PAGE renders that status as
+// pending_rebook (its retained date/window is stale — appointment-public),
+// so the appointment link passes the statuses the page treats as upcoming
+// (pre-push Codex P1).
+async function soonestUpcomingVisit(customerIds, { statuses = ['pending', 'confirmed', 'rescheduled'] } = {}) {
   const PAGE = 25;
   let svc = null;
   for (let offset = 0; ; offset += PAGE) {
     const candidates = await db('scheduled_services')
       .whereIn('customer_id', customerIds)
-      .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+      .whereIn('status', statuses)
       .where('scheduled_date', '>=', etDateString())
       .where((qb) => qb
         .whereNull('source_action')
@@ -1825,7 +1830,7 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // Visit-anchored kinds share the reschedule-link pick (one set of
       // exclusions — dispatch-owned pendings, elapsed placeholders); the
       // builder takes the picked row so the pick stays route-owned.
-      appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids)),
+      appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids, { statuses: ['pending', 'confirmed'] })),
       // The prep page shows its customer's name and address and the /sms
       // send requires the recipient to own it (GH Codex #3844 r3 P2), so
       // the visit pick is the phone owner's row — never an account sibling's
