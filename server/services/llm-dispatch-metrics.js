@@ -496,9 +496,11 @@ function messageText(value) {
 // re-record that carries nothing new — a runner's finally re-billing the
 // same snapshot, a retried terminal write, a delayed lower snapshot — writes
 // NO turn row (pre-push audit P1 on #3869): a turn row means the counters
-// advanced, or this is the session's first record, or a failure the session
-// row did not already carry. A turn whose usage GET failed and whose outcome
-// the session row already has is folded into the next snapshot.
+// advanced, or a failure the session row did not already carry on KNOWN
+// counters. Never a placeholder: a record whose usage GET failed writes no
+// turn row (its outcome is on the session row) and is folded into the next
+// snapshot — otherwise that snapshot's re-record of the same turn would be
+// a second row (pre-push audit P1 on #3869, again).
 const SESSION_COUNTERS = ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens'];
 function sessionTurnRow(row, prev) {
   const turn = { ...row, row_kind: 'session_turn' };
@@ -508,8 +510,9 @@ function sessionTurnRow(row, prev) {
     turn[col] = row[col] == null ? null : Math.max(row[col] - Number(prev?.[col] || 0), 0);
     if (turn[col] > 0) advanced = true;
   }
-  const newFailure = !row.ok && (prev?.ok !== false || prev.error_code !== row.error_code);
-  return !prev || advanced || newFailure ? turn : null;
+  const known = row.input_tokens != null;
+  const newFailure = known && !row.ok && (prev?.ok !== false || prev.error_code !== row.error_code);
+  return advanced || newFailure ? turn : null;
 }
 async function upsertSessionRow(row) {
   try {

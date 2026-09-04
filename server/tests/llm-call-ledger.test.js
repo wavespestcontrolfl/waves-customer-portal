@@ -644,7 +644,7 @@ describe('llm call ledger', () => {
       expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
     });
 
-    it('writes one session_turn row per turn that carries something new — its delta of the counters, a first record, or a new failure — and none for a re-recorded snapshot', async () => {
+    it('writes one session_turn row per turn that carries something new — its delta of the counters, or a new failure on known counters — never a placeholder, none for a re-recorded snapshot', async () => {
       const { metrics } = load();
       // first turn: no session row yet → the delta is the whole snapshot
       sessionPrev = null;
@@ -659,20 +659,32 @@ describe('llm call ledger', () => {
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'streaming_failed' });
       expect(turnRows()[1]).toMatchObject({ input_tokens: 100, output_tokens: 5, ok: false, error_code: 'streaming_failed' });
       // nothing new → no turn row: a delayed lower snapshot, the same failure re-billed from a
-      // runner's finally, a failed usage GET whose outcome the session row already carries
+      // runner's finally, and ANY record whose usage GET failed (no placeholder — its outcome is
+      // on the session row; the recovered snapshot of that turn is the one row)
       sessionPrev = { input_tokens: 400, cached_input_tokens: null, cache_write_tokens: null, output_tokens: 50, reasoning_tokens: null, ok: false, error_code: 'streaming_failed' };
       global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 350, output_tokens: 45 } });
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9' });
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'streaming_failed' });
       global.fetch = jest.fn(() => Promise.reject(new Error('network')));
-      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'streaming_failed' });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'session_timeout' });
       expect(turnRows()).toHaveLength(2);
-      // a NEW failure on unchanged counters is a turn (its tokens null: the GET failed)
+      // a NEW failure on known, unchanged counters is a turn
+      global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 400, output_tokens: 50 } });
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'session_timeout' });
       expect(turnRows()).toHaveLength(3);
-      expect(turnRows()[2]).toMatchObject({ ok: false, error_code: 'session_timeout', input_tokens: null });
+      expect(turnRows()[2]).toMatchObject({ ok: false, error_code: 'session_timeout', input_tokens: 0, output_tokens: 0 });
+      // first record of a session with a failed GET: no placeholder; the recovered re-record is the one row
+      sessionPrev = null;
+      global.fetch = jest.fn(() => Promise.reject(new Error('network')));
+      await metrics.recordSessionUsage({ laneId: 'agent_bi', sessionId: 'sess_10' });
+      expect(turnRows()).toHaveLength(3);
+      sessionPrev = { input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null, ok: true, error_code: null };
+      global.fetch = fetchJson({ id: 'sess_10', status: 'idle', usage: { input_tokens: 90, output_tokens: 9 } });
+      await metrics.recordSessionUsage({ laneId: 'agent_bi', sessionId: 'sess_10' });
+      expect(turnRows()).toHaveLength(4);
+      expect(turnRows()[3]).toMatchObject({ provider_ref: 'sess_10', input_tokens: 90, output_tokens: 9 });
       // the session row itself is still the ONE cumulative upsert per record
-      expect(mockMerge).toHaveBeenCalledTimes(6);
+      expect(mockMerge).toHaveBeenCalledTimes(8);
       sessionPrev = null;
     });
 
