@@ -153,11 +153,12 @@ describe('sendPrepToCustomer', () => {
     }));
   });
 
-  test('every prep guide is sendable by email', async () => {
+  test('every live prep guide is sendable by email', async () => {
     const { PREP_CONFIG } = require('../services/prep-guide-sender');
     const keys = Object.keys(PREP_CONFIG);
+    // prep.wildlife stays archived — wildlife is a prohibited Waves service.
     expect(keys.sort()).toEqual([
-      'bed_bug', 'cockroach', 'flea', 'interior_pest', 'lawn', 'mosquito', 'rodent', 'termite', 'wildlife',
+      'bed_bug', 'cockroach', 'flea', 'interior_pest', 'lawn', 'mosquito', 'rodent', 'termite',
     ]);
     for (const pestType of keys) {
       jest.clearAllMocks();

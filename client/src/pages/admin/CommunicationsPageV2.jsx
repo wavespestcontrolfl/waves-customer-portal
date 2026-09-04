@@ -3110,7 +3110,6 @@ const PREP_TYPES = [
   { value: "termite", label: "Termite service" },
   { value: "mosquito", label: "Mosquito treatment" },
   { value: "lawn", label: "Lawn treatment" },
-  { value: "wildlife", label: "Wildlife trapping" },
 ];
 
 // Operator-chosen channel (owner ruling 2026-09-03). Text carries the

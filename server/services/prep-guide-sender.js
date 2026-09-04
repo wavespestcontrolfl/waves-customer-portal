@@ -17,8 +17,10 @@
  *             (auto_*_no_email, three pests) or reason no_upcoming_visit.
  *   • both  → email + the text above.
  *
- * The Communications route allow-lists every PREP_CONFIG pest — all nine
- * prep.* guides. Wire a new pest by adding its config here.
+ * The Communications route allow-lists every PREP_CONFIG pest — the eight
+ * live prep.* guides (prep.wildlife stays archived: wildlife is a prohibited
+ * Waves service, migration 20260707000002). Wire a new pest by adding its
+ * config here.
  */
 
 const db = require('../models/db');
@@ -85,12 +87,6 @@ const PREP_CONFIG = Object.freeze({
     label: 'Termite Service',
     serviceKeywords: ['termite'],
     emailTemplateKey: 'prep.termite',
-    smsStandaloneKey: null,
-  },
-  wildlife: {
-    label: 'Wildlife Trapping',
-    serviceKeywords: ['wildlife', 'trapping'],
-    emailTemplateKey: 'prep.wildlife',
     smsStandaloneKey: null,
   },
 });
