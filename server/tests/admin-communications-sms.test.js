@@ -444,6 +444,20 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('schedule-sms refuses a body carrying a review link — the ask rides the immediate send only', async () => {
+      await withServer(async (baseUrl) => {
+        for (const body of ['Review us: portal.wavespestcontrol.com/rate/tok-abc123', 'https://portal.wavespestcontrol.com/api/rate/tok-abc123/go']) {
+          const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+            method: 'POST',
+            headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ to: '+15551234567', body, messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+          });
+          expect(res.status).toBe(400);
+          expect((await res.json()).error).toMatch(/immediate send/);
+        }
+      });
+    });
+
     test('a send without the resolved owner as customerId is refused — the link must ride the owner policy', async () => {
       wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'cust-A' } });
       await withServer(async (baseUrl) => {

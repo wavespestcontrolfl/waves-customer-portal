@@ -1688,11 +1688,115 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/admin/communications/customer-link  { phone, customerId?, kind }
-// The Insert Link sheet's other per-customer links — kind ∈ review_request |
-// pay_balance | estimate | referral | autopay_setup. Same fail-closed recipient contract as
-// /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
-// cross-checked then expanded to the account, cross-account 409). Builders
+// Resolves the composer's recipient into the account's customer ids, the
+// single-customer target, and the greeting name. Answers { status, error }
+// on a refusal. The single-customer kinds (review ask, referral) target the
+// phone's owner: the operator-selected row first, else the account row
+// whose phone matches the number, else the first sibling (sorted — the
+// account expansion has no ORDER BY of its own). Auto Pay is money-
+// affecting and per row (a consented saved card can enroll on the spot) —
+// never guess the row: the body's customerId is NOT proof of an operator
+// pick (opening a thread auto-fills whichever sibling the latest message
+// carried — see firstNameForPhone), so the phone must belong to exactly
+// ONE row on the account, else 409 to the customer's own profile card
+// (GH Codex #3812 r1 P1 + pre-push P0).
+async function resolveLinkTarget({ kind, customerId, last10 }) {
+  let customerIds = [];
+  if (customerId && UUID_RE.test(String(customerId))) {
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first('id', 'phone', 'account_id');
+    if (!customer) return { status: 404, error: 'Customer not found' };
+    if (fullPhoneLast10(customer.phone) !== last10) {
+      return { status: 400, error: 'phone must match the selected customer' };
+    }
+    customerIds = await customerIdsForAccount(customer.account_id || customer.id);
+  } else {
+    const matches = await db('customers')
+      .whereNull('deleted_at')
+      .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+      .select('id', 'account_id');
+    if (!matches.length) return { status: 404, error: 'No customer found for that number' };
+    const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
+    if (accountKeys.length > 1) {
+      return {
+        status: 409,
+        error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
+      };
+    }
+    customerIds = await customerIdsForAccount(accountKeys[0]);
+  }
+  if (!customerIds.length) return { status: 404, error: 'No customer found for that number' };
+
+  const recipientFirstName = await firstNameForPhone(last10, customerIds);
+  const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
+  let primaryId = selectedId;
+  if (!primaryId || kind === 'autopay_setup') {
+    const phoneRows = await db('customers')
+      .whereNull('deleted_at')
+      .whereIn('id', customerIds)
+      .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+      .select('id');
+    if (kind === 'autopay_setup' && phoneRows.length !== 1) {
+      return {
+        status: 409,
+        error: 'That number is on file for more than one customer on this account — send the Auto Pay setup link from that customer\'s profile instead',
+      };
+    }
+    if (!primaryId) primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
+  }
+  return { customerIds, primaryId, recipientFirstName };
+}
+
+// Quick Links review channel 'email' (owner ruling 2026-09-03): a SEND, not
+// a link build — the gate-wrapped engine path emails the ask now and nothing
+// is inserted into the text. strictChannel: the operator chose Email — never
+// fall back to a text. Answers { status, body } for the route to send.
+async function emailReviewAskNow(primaryId) {
+  const ReviewService = require('../services/review-request');
+  const ask = await ReviewService.sendGatedAsk({ customerId: primaryId, channel: 'email', triggeredBy: 'admin', strictChannel: true });
+  if (ask.outcome === 'sent') {
+    // The email went to the resolved email contact (a service contact when
+    // one is on file) — name THAT person, not the phone's owner.
+    let firstName;
+    try {
+      const { getServiceContact, firstNameFrom, SERVICE_CONTACT_COLUMNS } = require('../services/customer-contact');
+      const row = await db('customers').where({ id: primaryId }).first('first_name', 'last_name', 'email', 'phone', ...SERVICE_CONTACT_COLUMNS);
+      firstName = row ? (firstNameFrom(getServiceContact(row).name) || undefined) : undefined;
+    } catch { /* the name is a nicety; the email already went */ }
+    return { status: 200, body: { kind: 'review_request', channel: 'email', sent: true, requestId: ask.requestId, firstName } };
+  }
+  // A 'blocked' outcome carries the touch's own reason — transient ones
+  // (prefs read, provider throw) are retryable and must not read as a
+  // missing address or an opt-out.
+  const blockedReasons = {
+    prefs_unavailable: 'Notification preferences could not be read — try again',
+    email_send_failed: 'The review email could not be sent — try again',
+    opted_out: 'Review emails are turned off in this customer\'s notification preferences',
+    no_contact: 'No review email for this customer — no email on file',
+  };
+  const outcomeReasons = {
+    already_reviewed: 'This customer is already marked as having left a review',
+    no_customer: 'That customer could not be found',
+    archived: 'That customer is archived',
+    concurrent: 'A review request to this customer is already being sent — try again in a moment',
+    blocked: 'No review email for this customer — no email on file, or review emails are turned off in their notification preferences',
+    deferred: 'A review request to this customer is already queued and will send automatically.',
+  };
+  const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
+  const error = REVIEW_GATE_REASONS[ask.outcome]
+    || (ask.outcome === 'blocked' && blockedReasons[ask.reason])
+    || outcomeReasons[ask.outcome]
+    || 'Review request email could not be sent';
+  return { status: ask.outcome === 'no_customer' ? 404 : 409, body: { error, outcome: ask.outcome } };
+}
+
+const CUSTOMER_LINK_KINDS = ['review_request', 'pay_balance', 'estimate', 'referral', 'autopay_setup'];
+const REVIEW_LINK_CHANNELS = ['sms', 'email', 'both'];
+
+// POST /api/admin/communications/customer-link  { phone, customerId?, kind, channel? }
+// Composer helper: mint one of the "for this customer" links. The builders
 // live in services/composer-customer-links.js; a kind with nothing to insert
 // answers 404 with the builder's plain reason.
 // review_request mints a real review_requests row via createInline with
@@ -1701,148 +1805,55 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
 // deliver it; an abandoned draft never auto-texts, and a withdrawn draft
 // just forgets the row client-side (the pending row is SHARED across
 // composers via createInline reuse, so canceling it would break a sibling
-// operator's valid send — the next insert reuses it instead).
+// operator's valid send — the next insert reuses it instead). channel
+// 'email' sends the ask now instead (emailReviewAskNow); 'sms' and 'both'
+// mint the inline row as before — for 'both' the composer's send carries
+// reviewRequestEmail so the email goes out with the text.
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
-    const kind = String(req.body?.kind || '');
+    const body = req.body || {};
+    const kind = String(body.kind || '');
+    if (!CUSTOMER_LINK_KINDS.includes(kind)) {
+      return res.status(400).json({ error: `kind must be one of ${CUSTOMER_LINK_KINDS.join(', ')}` });
+    }
+    const last10 = fullPhoneLast10(body.phone);
+    if (!last10) {
+      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
+    }
+    const channel = kind === 'review_request' ? String(body.channel || 'sms') : null;
+    if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) {
+      return res.status(400).json({ error: 'channel must be one of sms, email, both' });
+    }
+
+    const target = await resolveLinkTarget({ kind, customerId: body.customerId, last10 });
+    if (target.error) return res.status(target.status).json({ error: target.error });
+    const { customerIds, primaryId, recipientFirstName } = target;
+
+    if (channel === 'email') {
+      const answer = await emailReviewAskNow(primaryId);
+      return res.status(answer.status).json(answer.body);
+    }
+
     const builders = require('../services/composer-customer-links');
     const builderByKind = {
-      review_request: (ids, primaryId) => builders.buildReviewRequestLink(primaryId),
-      pay_balance: (ids) => builders.buildPayBalanceLink(ids),
-      estimate: (ids) => builders.buildLatestEstimateLink(ids),
-      referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
+      review_request: () => builders.buildReviewRequestLink(primaryId),
+      pay_balance: () => builders.buildPayBalanceLink(customerIds),
+      estimate: () => builders.buildLatestEstimateLink(customerIds),
+      referral: () => builders.buildReferralLink(primaryId),
       // Auto Pay is per customer row (the phone's owner), same as referral.
       // The builder delegates to autopay-setup-link's single entry point —
       // gate, payer exemption, dedup and the saved-card auto-secure all
       // live there; a link_created outcome is the ONLY thing inserted.
-      autopay_setup: (ids, primaryId) => builders.buildAutopaySetupLink(primaryId),
+      autopay_setup: () => builders.buildAutopaySetupLink(primaryId),
     };
-    if (!builderByKind[kind]) {
-      return res.status(400).json({ error: 'kind must be one of review_request, pay_balance, estimate, referral, autopay_setup' });
-    }
-
-    const last10 = fullPhoneLast10(req.body?.phone);
-    if (!last10) {
-      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
-    }
-
-    const customerId = req.body?.customerId;
-    let customerIds = [];
-    if (customerId && UUID_RE.test(String(customerId))) {
-      const customer = await db('customers')
-        .where({ id: customerId })
-        .whereNull('deleted_at')
-        .first('id', 'phone', 'account_id');
-      if (!customer) return res.status(404).json({ error: 'Customer not found' });
-      if (fullPhoneLast10(customer.phone) !== last10) {
-        return res.status(400).json({ error: 'phone must match the selected customer' });
-      }
-      customerIds = await customerIdsForAccount(customer.account_id || customer.id);
-    } else {
-      const matches = await db('customers')
-        .whereNull('deleted_at')
-        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-        .select('id', 'account_id');
-      if (!matches.length) {
-        return res.status(404).json({ error: 'No customer found for that number' });
-      }
-      const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
-      if (accountKeys.length > 1) {
-        return res.status(409).json({
-          error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
-        });
-      }
-      customerIds = await customerIdsForAccount(accountKeys[0]);
-    }
-    if (!customerIds.length) {
-      return res.status(404).json({ error: 'No customer found for that number' });
-    }
-
-    const recipientFirstName = await firstNameForPhone(last10, customerIds);
-
-    // The single-customer kinds (review ask, referral) target the phone's
-    // owner: the operator-selected row first, else the account row whose
-    // phone matches the number, else the first sibling (sorted — the account
-    // expansion has no ORDER BY of its own).
-    const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
-    let primaryId = selectedId;
-    // Auto Pay is money-affecting and per row (a consented saved card can
-    // enroll on the spot) — never guess the row. The body's customerId is
-    // NOT proof of an operator pick (opening a thread auto-fills whichever
-    // sibling the latest message carried — see firstNameForPhone), so the
-    // check runs whether or not one was supplied: the phone must belong to
-    // exactly ONE row on the account, else 409 to the customer's own
-    // profile card (GH Codex #3812 r1 P1 + pre-push P0).
-    if (!primaryId || kind === 'autopay_setup') {
-      const phoneRows = await db('customers')
-        .whereNull('deleted_at')
-        .whereIn('id', customerIds)
-        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-        .select('id');
-      if (kind === 'autopay_setup' && phoneRows.length !== 1) {
-        return res.status(409).json({
-          error: 'That number is on file for more than one customer on this account — send the Auto Pay setup link from that customer\'s profile instead',
-        });
-      }
-      if (!primaryId) primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
-    }
-
-    // Quick Links review channel (owner ruling 2026-09-03): 'email' is a
-    // SEND, not a link build — the gate-wrapped engine path (sendGatedAsk)
-    // emails the ask now and nothing is inserted into the text. 'sms' and
-    // 'both' mint the inline row as before; for 'both' the composer's send
-    // carries reviewRequestEmail so the email goes out with the text.
-    const channel = kind === 'review_request' ? String(req.body?.channel || 'sms') : null;
-    if (channel && !['sms', 'email', 'both'].includes(channel)) {
-      return res.status(400).json({ error: 'channel must be one of sms, email, both' });
-    }
-    if (channel === 'email') {
-      const ReviewService = require('../services/review-request');
-      // strictChannel: the operator chose Email — never fall back to a text.
-      const ask = await ReviewService.sendGatedAsk({ customerId: primaryId, channel: 'email', triggeredBy: 'admin', strictChannel: true });
-      if (ask.outcome === 'sent') {
-        // The email went to the resolved email contact (a service contact
-        // when one is on file) — name THAT person, not the phone's owner.
-        let emailFirstName;
-        try {
-          const { getServiceContact, firstNameFrom, SERVICE_CONTACT_COLUMNS } = require('../services/customer-contact');
-          const row = await db('customers').where({ id: primaryId }).first('first_name', 'last_name', 'email', 'phone', ...SERVICE_CONTACT_COLUMNS);
-          emailFirstName = row ? (firstNameFrom(getServiceContact(row).name) || undefined) : undefined;
-        } catch { /* the name is a nicety; the email already went */ }
-        return res.json({ kind, channel, sent: true, requestId: ask.requestId, firstName: emailFirstName });
-      }
-      // A 'blocked' outcome carries the touch's own reason — transient ones
-      // (prefs read, provider throw) are retryable and must not read as a
-      // missing address or an opt-out.
-      const blockedReasons = {
-        prefs_unavailable: 'Notification preferences could not be read — try again',
-        email_send_failed: 'The review email could not be sent — try again',
-        opted_out: 'Review emails are turned off in this customer\'s notification preferences',
-        no_contact: 'No review email for this customer — no email on file',
-      };
-      const emailReasons = {
-        already_reviewed: 'This customer is already marked as having left a review',
-        no_customer: 'That customer could not be found',
-        archived: 'That customer is archived',
-        concurrent: 'A review request to this customer is already being sent — try again in a moment',
-        blocked: 'No review email for this customer — no email on file, or review emails are turned off in their notification preferences',
-        deferred: 'A review request to this customer is already queued and will send automatically.',
-      };
-      const error = builders.REVIEW_GATE_REASONS[ask.outcome]
-        || (ask.outcome === 'blocked' && blockedReasons[ask.reason])
-        || emailReasons[ask.outcome]
-        || 'Review request email could not be sent';
-      return res.status(ask.outcome === 'no_customer' ? 404 : 409).json({ error, outcome: ask.outcome });
-    }
-
-    const result = await builderByKind[kind](customerIds, primaryId);
+    const result = (await builderByKind[kind]()) || {};
     // Auto Pay auto-secure: a consented saved card was enrolled instead of a
     // link being minted — a successful outcome with nothing to insert.
-    if (result?.autoSecured) {
+    if (result.autoSecured) {
       return res.json({ kind, url: null, line: '', autoSecured: true, firstName: recipientFirstName });
     }
-    if (!result?.url) {
-      return res.status(404).json({ error: result?.reason || 'Nothing to link for this customer' });
+    if (!result.url) {
+      return res.status(404).json({ error: result.reason || 'Nothing to link for this customer' });
     }
     res.json({
       kind,
@@ -2154,6 +2165,10 @@ router.post('/rewrite-sms', async (req, res) => {
 // The /5min scheduled-sms cron in server/services/scheduler.js picks up rows
 // where status='scheduled' AND scheduled_for <= now() and dispatches them
 // through sendCustomerMessage (same path as the immediate /sms route).
+// A tokenized review page link (/rate/:token or its /api/rate/:token/go
+// short form), scheme-less or not — what buildReviewRequestLink inserts.
+const REVIEW_LINK_RE = /\/(?:api\/)?rate\/[A-Za-z0-9_-]{6,}/i;
+
 router.post('/schedule-sms', async (req, res, next) => {
   try {
     const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft } = req.body || {};
@@ -2173,6 +2188,14 @@ router.post('/schedule-sms', async (req, res, next) => {
       if (autopayCheck.present) {
         return res.status(400).json({ error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' });
       }
+    }
+    // A review ask rides the immediate /sms send only — that path claims and
+    // marks the inline row and emails the Both copy; a scheduled row would
+    // deliver it untracked (invisible to the cap and cooldown) and never
+    // email. The composer refuses client-side; this is the authoritative
+    // fence (GH Codex #3856 r4 P1).
+    if (REVIEW_LINK_RE.test(cleanBody)) {
+      return res.status(400).json({ error: 'Review request links can only go on an immediate send — send now, or remove the review link before scheduling' });
     }
 
     // ET wall-clock parse — datetime-local strings without offset are

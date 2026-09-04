@@ -260,43 +260,143 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
   }
 }
 
+// The SMS leg. Outcome { sent, uncertain }: uncertain means the provider call
+// threw after it may have accepted the message, so the caller must not hand
+// the prep page back on the strength of "nothing delivered".
 async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, pestType, actorId }) {
-  const body = await renderSmsTemplate(templateKey, { first_name: firstName, ...vars }, {
-    workflow: 'manual_prep_send', entity_type: 'customer', entity_id: customer.id,
-  });
+  let body;
+  try {
+    body = await renderSmsTemplate(templateKey, { first_name: firstName, ...vars }, {
+      workflow: 'manual_prep_send', entity_type: 'customer', entity_id: customer.id,
+    });
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] ${templateKey} render threw for customer ${customer.id}: ${err.message}`);
+    return { sent: false };
+  }
   if (!body) {
     logger.warn(`[prep-guide-sender] ${templateKey} template missing/disabled; SMS skipped for customer ${customer.id}`);
-    return false;
+    return { sent: false };
   }
-  const res = await sendCustomerMessage({
-    to: phone,
-    body,
-    channel: 'sms',
-    audience: 'customer',
-    purpose: 'appointment',
-    customerId: customer.id,
-    identityTrustLevel: 'phone_matches_customer',
-    // Sole caller is the admin send-prep route — an operator-clicked send,
-    // exempt from the send window (allowlisted entry point).
-    entryPoint: 'admin_prep_guide_send',
-    metadata: {
-      original_message_type: 'prep_info',
-      pest_type: pestType,
-      prep_variant: variant,
-      manual: true,
-      // adminUserId is the key the Twilio send path forwards into
-      // sms_log.admin_user_id — keeps the manual send attributed to the
-      // operator instead of reading as system-authored.
-      adminUserId: actorId || undefined,
-    },
-  });
+  let res;
+  try {
+    res = await sendCustomerMessage({
+      to: phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'appointment',
+      customerId: customer.id,
+      identityTrustLevel: 'phone_matches_customer',
+      // Sole caller is the admin send-prep route — an operator-clicked send,
+      // exempt from the send window (allowlisted entry point).
+      entryPoint: 'admin_prep_guide_send',
+      metadata: {
+        original_message_type: 'prep_info',
+        pest_type: pestType,
+        prep_variant: variant,
+        manual: true,
+        // adminUserId is the key the Twilio send path forwards into
+        // sms_log.admin_user_id — keeps the manual send attributed to the
+        // operator instead of reading as system-authored.
+        adminUserId: actorId || undefined,
+      },
+    });
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] prep SMS provider call threw for customer ${customer.id}: ${err.message}`);
+    return { sent: false, uncertain: true };
+  }
   // sent:true with a suppression sentinel (gate off, template disabled, owner
   // SMS kill) means nothing left — never record that as a delivery.
   if (!isRealProviderSend(res)) {
     logger.warn(`[prep-guide-sender] prep SMS not sent for customer ${customer.id}: ${res.code || res.reason || res.providerMessageId || 'unknown'}`);
-    return false;
+    return { sent: false };
   }
-  return true;
+  return { sent: true };
+}
+
+// Who each channel greets: the email goes to the resolved recipient (which
+// may be a service contact); the text goes to customer.phone — the primary's
+// line — so it greets the customer's own first name, never the contact's.
+// A chosen channel with nothing on file is an operator-facing refusal.
+function resolvePrepContacts(customer, channel) {
+  const recipient = resolveProjectEmailRecipient(customer);
+  const firstWord = (v) => String(v || '').trim().split(/\s+/)[0] || 'there';
+  const contacts = {
+    recipient,
+    emailFirstName: firstWord(recipient.name || customer.first_name),
+    smsFirstName: firstWord(customer.first_name),
+    phone: String(customer.phone || '').trim(),
+    wantEmail: channel !== 'sms',
+    wantSms: channel !== 'email',
+    refusal: null,
+  };
+  if (contacts.wantEmail && !recipient.email) contacts.refusal = 'no_email';
+  else if (contacts.wantSms && !contacts.phone) contacts.refusal = 'no_phone';
+  return contacts;
+}
+
+// Text body: the guide-page link when the visit's page is ours, else the
+// pest's inline-steps text, else nothing to text.
+function planPrepSms(config, prepUrl) {
+  if (prepUrl) {
+    return { templateKey: SMS_GUIDE_LINK_KEY, vars: { prep_label: config.label, prep_url: prepUrl }, variant: 'guide_link' };
+  }
+  if (config.smsStandaloneKey) return { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone' };
+  return null;
+}
+
+// Runs the requested legs and settles the outcome on `result`: ok when either
+// delivered; 'partial' (+ failedChannel) when Both delivered one; 'send_failed'
+// when neither did — then the provisional page claim is handed back, unless
+// the provider left the text uncertain (GH Codex #3856 r4 P2).
+async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result }) {
+  const { visit, prepUrl, stampVisit } = page;
+  let smsUncertain = false;
+  if (contacts.wantEmail) {
+    result.emailSent = await sendPrepEmail({
+      customer, recipient: contacts.recipient, firstName: contacts.emailFirstName, config, visit, prepUrl, stampVisit,
+    });
+  }
+  if (contacts.wantSms) {
+    const sms = await sendPrepSms({
+      customer, firstName: contacts.smsFirstName, phone: contacts.phone, pestType, actorId, ...smsPlan,
+    });
+    result.smsSent = sms.sent;
+    smsUncertain = !!sms.uncertain;
+    if (sms.sent && smsPlan.variant === 'guide_link' && !result.emailSent) await stampPrepSent(stampVisit, config);
+  }
+  result.ok = result.emailSent || result.smsSent;
+  if (!result.ok) {
+    result.reason = 'send_failed';
+    if (stampVisit && !smsUncertain) await releasePrepPage(stampVisit.id, config.emailTemplateKey);
+  } else if (contacts.wantEmail && contacts.wantSms && result.emailSent !== result.smsSent) {
+    // Both: one leg delivered, the other did not — say which, or the
+    // operator reads a half-delivered ask as fully sent (GH Codex #3856 r2 P2).
+    result.reason = 'partial';
+    result.failedChannel = result.emailSent ? 'sms' : 'email';
+  }
+}
+
+// When the SMS went out, write the SAME marker the appointment tagger's
+// replay guard (hasSentPrepSms) looks for — sms_outbound + "<pestType> prep
+// info sent" — so a later replay of onServiceScheduled (e.g. regenerate-
+// brief) doesn't re-text prep this manual click already delivered.
+// Email-only sends keep the descriptive manual subject.
+async function logPrepInteraction({ customer, config, contacts, result, pestType, actorId }) {
+  try {
+    await db('customer_interactions').insert({
+      customer_id: customer.id,
+      interaction_type: result.smsSent ? 'sms_outbound' : 'email_outbound',
+      admin_user_id: actorId || null,
+      subject: result.smsSent ? `${pestType} prep info sent` : `${config.label} prep sent (manual)`,
+      body: `Prep sent manually via Communications — ${[
+        result.emailSent ? `email to ${contacts.recipient.email}` : null,
+        result.smsSent ? `text to ${contacts.phone}` : null,
+      ].filter(Boolean).join(' + ')}.`,
+    });
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] interaction log failed for customer ${customer.id}: ${err.message}`);
+  }
 }
 
 // Sends prep to a customer on the operator-chosen channel. Returns a
@@ -310,16 +410,7 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
   if (!customer) return { ok: false, reason: 'customer_not_found', pestType };
 
-  const recipient = resolveProjectEmailRecipient(customer);
-  // The email greets the resolved recipient (which may be a service contact);
-  // the SMS greets the phone owner — customer.phone is the primary's line — so
-  // it must use the customer's own first name, not the service contact's.
-  const emailFirstName = String(recipient.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there';
-  const smsFirstName = String(customer.first_name || '').trim().split(/\s+/)[0] || 'there';
-  const phone = String(customer.phone || '').trim();
-  const wantEmail = channel !== 'sms';
-  const wantSms = channel !== 'email';
-
+  const contacts = resolvePrepContacts(customer, channel);
   const result = {
     ok: false,
     pestType,
@@ -327,73 +418,23 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     label: config.label,
     emailSent: false,
     smsSent: false,
-    emailAddress: recipient.email || null,
-    phone: phone || null,
+    emailAddress: contacts.recipient.email || null,
+    phone: contacts.phone || null,
   };
+  if (contacts.refusal) return { ...result, reason: contacts.refusal };
 
-  // Contact checks first — a chosen channel with nothing on file is an
-  // operator-facing refusal, not a silent skip.
-  if (wantEmail && !recipient.email) return { ...result, reason: 'no_email' };
-  if (wantSms && !phone) return { ...result, reason: 'no_phone' };
-
-  const { visit, prepUrl, ownsPage, linkReason, takenBy } = await resolvePrepVisit(customer, config);
+  const page = await resolvePrepVisit(customer, config);
   // The stamp target: only a visit whose page this guide owns.
-  const stampVisit = ownsPage ? visit : null;
-  // Text body: the guide-page link when a visit exists, else the pest's
-  // inline-steps text, else nothing to text — refused with the link's own
-  // reason (no visit / page taken / link failed), never a blanket "no visit".
-  const smsPlan = prepUrl
-    ? { templateKey: SMS_GUIDE_LINK_KEY, vars: { prep_label: config.label, prep_url: prepUrl }, variant: 'guide_link' }
-    : config.smsStandaloneKey
-      ? { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone' }
-      : null;
-  if (wantSms && !smsPlan) return { ...result, reason: linkReason, ...(takenBy ? { takenBy } : {}) };
-
-  if (wantEmail) {
-    result.emailSent = await sendPrepEmail({
-      customer, recipient, firstName: emailFirstName, config, visit, prepUrl, stampVisit,
-    });
-  }
-  if (wantSms) {
-    result.smsSent = await sendPrepSms({
-      customer, firstName: smsFirstName, phone, pestType, actorId, ...smsPlan,
-    });
-    if (result.smsSent && smsPlan.variant === 'guide_link' && !result.emailSent) await stampPrepSent(stampVisit, config);
+  page.stampVisit = page.ownsPage ? page.visit : null;
+  const smsPlan = planPrepSms(config, page.prepUrl);
+  // Refused with the link's own reason (no visit / page taken / link
+  // failed), never a blanket "no visit".
+  if (contacts.wantSms && !smsPlan) {
+    return { ...result, reason: page.linkReason, ...(page.takenBy ? { takenBy: page.takenBy } : {}) };
   }
 
-  result.ok = result.emailSent || result.smsSent;
-  if (!result.ok) {
-    result.reason = 'send_failed';
-    if (stampVisit) await releasePrepPage(stampVisit.id, config.emailTemplateKey);
-  } else if (wantEmail && wantSms && result.emailSent !== result.smsSent) {
-    // Both: one leg delivered, the other did not — say which, or the
-    // operator reads a half-delivered ask as fully sent (GH Codex #3856 r2 P2).
-    result.reason = 'partial';
-    result.failedChannel = result.emailSent ? 'sms' : 'email';
-  }
-
-  if (result.ok) {
-    try {
-      // When the SMS went out, write the SAME marker the appointment tagger's
-      // replay guard (hasSentPrepSms) looks for — sms_outbound +
-      // "<pestType> prep info sent" — so a later replay of onServiceScheduled
-      // (e.g. regenerate-brief) doesn't re-text prep this manual click already
-      // delivered. Email-only sends keep the descriptive manual subject.
-      await db('customer_interactions').insert({
-        customer_id: customer.id,
-        interaction_type: result.smsSent ? 'sms_outbound' : 'email_outbound',
-        admin_user_id: actorId || null,
-        subject: result.smsSent ? `${pestType} prep info sent` : `${config.label} prep sent (manual)`,
-        body: `Prep sent manually via Communications — ${[
-          result.emailSent ? `email to ${recipient.email}` : null,
-          result.smsSent ? `text to ${phone}` : null,
-        ].filter(Boolean).join(' + ')}.`,
-      });
-    } catch (err) {
-      logger.warn(`[prep-guide-sender] interaction log failed for customer ${customer.id}: ${err.message}`);
-    }
-  }
-
+  await deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result });
+  if (result.ok) await logPrepInteraction({ customer, config, contacts, result, pestType, actorId });
   return result;
 }
 

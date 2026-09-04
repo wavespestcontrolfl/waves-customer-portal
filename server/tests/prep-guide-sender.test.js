@@ -314,6 +314,22 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
   });
 
+  test('a text that fails before the provider releases the claim; a provider throw keeps it', async () => {
+    upcomingVisitRow = VISIT;
+    renderSmsTemplate.mockRejectedValueOnce(new Error('renderer down'));
+    const preProvider = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    expect(preProvider).toMatchObject({ ok: false, reason: 'send_failed' });
+    expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
+
+    serviceUpdates = [];
+    renderSmsTemplate.mockResolvedValue('Prep text...');
+    sendCustomerMessage.mockRejectedValueOnce(new Error('socket hang up'));
+    const uncertain = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    expect(uncertain).toMatchObject({ ok: false, reason: 'send_failed' });
+    // The provider may have accepted it — the page is NOT handed back.
+    expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
+  });
+
   test('a delivered guide keeps its page claim; a partial Both does not release it', async () => {
     upcomingVisitRow = VISIT;
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'suppressed' });
