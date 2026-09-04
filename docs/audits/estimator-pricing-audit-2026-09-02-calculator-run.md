@@ -1,7 +1,7 @@
 # Independent estimator pricing audit — run output
 
-Generated 2026-09-03T23:54:51.312Z. Constants source: **constants.js (in-code defaults)**.
-Scenarios: 1782 · independent-vs-engine matches: 1730 · mismatches: 2 · expected a price but the engine returned none: 0 · engine-only observations: 50 (1730 + 2 + 0 + 50 = 1782) · commercial engine errors: 0 · P0/P1 findings without a row: 0
+Generated 2026-09-04T00:14:53.051Z. Constants source: **constants.js (in-code defaults)**.
+Scenarios: 1801 · independent-vs-engine matches: 1744 · mismatches: 2 · expected a price but the engine returned none: 0 · engine-only observations: 55 (1744 + 2 + 0 + 55 = 1801) · commercial engine errors: 0 · P0/P1 findings without a row: 0
 
 ## Findings raised by this run
 
@@ -108,6 +108,11 @@ Recorded span = check-in → check-out, which often includes driving to the next
 - [specialty] palm {"treatmentType":"treeAge","palmCount":1,"dbhInches":12,"product":"Tree-Age R10"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"licensedApplicator is required for restricted-use Tree-Age product pricing","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"treeAge","palmCount":2,"dbhInches":18,"restrictedUseProduct":true}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"licensedApplicator is required for restricted-use Tree-Age product pricing","palmSizeUsed":null}
 - [specialty] palm {"treatmentType":"treeAge","palmCount":2,"dbhInches":18,"restrictedUseProduct":true,"licensedApplicator":"yes"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"licensedApplicator is required for restricted-use Tree-Age product pricing","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"nutrition","palmCount":3,"appsPerYear":0}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"appsPerYear must be a positive number","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"nutrition","palmCount":3,"appsPerYear":-1}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"appsPerYear must be a positive number","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"nutrition","palmCount":3,"appsPerYear":"2"}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"appsPerYear must be a positive number","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"nutrition","palmCount":3,"appsPerYear":3}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"appsPerYear for nutrition must be one of: 1, 2","palmSizeUsed":null}
+- [specialty] palm {"treatmentType":"nutrition","palmCount":3,"appsPerYear":1.5}: {"perVisitExpected":null,"perVisitActual":null,"minimumApplied":null,"engineError":"appsPerYear for nutrition must be one of: 1, 2","palmSizeUsed":null}
 - [commercial] commercial pest office 5,000 sf: {"engineError":null,"expectedLine":{"service":"commercial_pest","manual":false},"tier":"bronze","autoPricedLines":1,"manualQuoteLines":0,"lines":[{"service":"commercial_pest","annual":715.83,"price":null,"perApp":178.96,"visits":4,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}
 - [commercial] commercial lawn 60,000 sf turf: {"engineError":null,"expectedLine":{"service":"commercial_lawn","manual":false},"tier":"bronze","autoPricedLines":1,"manualQuoteLines":0,"lines":[{"service":"commercial_lawn","annual":6231.52,"price":null,"perApp":778.94,"visits":8,"manualQuote":false,"taxable":false,"taxCategory":"lawn_spraying_or_treatment","margin":0.45,"review":false}]}
 - [commercial] commercial mosquito 40,000 sf lot: {"engineError":null,"expectedLine":{"service":"commercial_mosquito","manual":false},"tier":"bronze","autoPricedLines":1,"manualQuoteLines":0,"lines":[{"service":"commercial_mosquito","annual":1321.09,"price":null,"perApp":146.79,"visits":9,"manualQuote":false,"taxable":true,"taxCategory":"nonresidential_pest_control","margin":0.45,"review":false}]}

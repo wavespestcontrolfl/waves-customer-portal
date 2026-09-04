@@ -388,7 +388,9 @@ function expectMosquito({ homeSqFt, stories = 1, lotSqFt, propertyType = 'single
   const WATER_MULT = { ADJACENT: 1.35, CLOSE: 1.2, NEAR: 1.1, MODERATE: 1.05, DISTANT: 1.02, NONE: 1 };
   const waterLevel = features.nearWater === true ? 'CLOSE' : String(features.nearWater || 'NONE').toUpperCase();
   const waterMult = WATER_MULT[waterLevel] ?? (features.nearWater ? 1.2 : 1);
-  if (features.nearWater && waterMult <= 1) pressure += f.nearWater;
+  // An explicit 'NONE' level is no water at all — neither the multiplier nor
+  // the additive factor applies (property-calculator.js:678 defaults to it).
+  if (features.nearWater && waterLevel !== 'NONE' && waterMult <= 1) pressure += f.nearWater;
   if (features.irrigation) pressure += f.irrigation;
   // Ramp boundaries come from the (possibly DB-overlaid) lot categories exactly as
   // service-pricing.js mosquitoLotSizePressure derives them: each band starts one
@@ -578,7 +580,17 @@ function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, apps
   if (!t) return null;
   const quote = (floor) => (customPricePerPalm == null ? floor : Math.max(Number(customPricePerPalm), floor));
   let perPalm; let apps;
-  if (t.pricingType === 'fixed') { perPalm = t.pricePerPalm; apps = appsPerYear || t.defaultAppsPerYear; }
+  if (t.pricingType === 'fixed') {
+    perPalm = t.pricePerPalm;
+    // Mirror of pricePalmInjection's cadence validation (service-pricing.js:4159-4168):
+    // an omitted cadence takes the default; a supplied one must be a finite
+    // positive number AND one of the configured allowedAppsPerYear values,
+    // otherwise the engine throws — so the expectation is NO price (codex r25 P2).
+    if (appsPerYear === null || appsPerYear === undefined || appsPerYear === '') apps = t.defaultAppsPerYear;
+    else if (typeof appsPerYear !== 'number' || !Number.isFinite(appsPerYear) || appsPerYear <= 0) return null;
+    else if (!Array.isArray(t.allowedAppsPerYear) || !t.allowedAppsPerYear.includes(appsPerYear)) return null;
+    else apps = appsPerYear;
+  }
   else if (t.pricingType === 'tiered') {
     // The engine fails closed on a tiered treatment without a palm size
     // (getTierByPalmSize) — expect NO price, never a defaulted medium tier.
@@ -966,6 +978,19 @@ function runMosquitoMatrix() {
     const li = line(r.result, 'mosquito');
     record(section, `features ${JSON.stringify(features)}`, features, exp.perVisit, li ? li.perVisit : null, { extra: { pressureExpected: exp.pressure, pressureActual: li ? li.pressureMultiplier ?? li.pressure : null } });
   }
+  // Property-level water proximity (codex r25 P2): modifiers.js derives a
+  // distinct multiplier per level (ADJACENT 1.35 / CLOSE 1.20 / NEAR 1.10 /
+  // MODERATE 1.05 / DISTANT 1.02 / NONE 1); the level string travels on the
+  // INPUT (`nearWater`, property-calculator.js:678), not in `features`. Both
+  // the multiplier and the price are compared for every level.
+  for (const level of ['ADJACENT', 'CLOSE', 'NEAR', 'MODERATE', 'DISTANT', 'NONE']) {
+    const exp = expectMosquito({ homeSqFt: 2000, lotSqFt: 8000, features: { nearWater: level }, program: 'seasonal9' });
+    const r = runEngine({ ...BASE, lawnSqFt: undefined, nearWater: level, services: { mosquito: { tier: 'seasonal9' } } });
+    const li = line(r.result, 'mosquito');
+    const pressureActual = li ? (li.pressureMultiplier ?? li.pressure ?? null) : null;
+    record(section, `water proximity ${level} perVisit`, { nearWater: level }, exp.perVisit, li ? li.perVisit : null, { extra: { pressureExpected: exp.pressure, pressureActual, engineError: r.ok ? null : r.error } });
+    record(section, `water proximity ${level} pressure multiplier`, { nearWater: level }, exp.pressure, pressureActual === null ? null : round2(pressureActual), { tolerance: 0.005 });
+  }
   // Every hardscape curve and pool addition (codex r21 P2): the residential
   // curves price through expectMosquito against the engine's perVisit; a
   // commercial property routes to the commercial mosquito pricer (its own
@@ -1263,6 +1288,16 @@ function runSpecialtyMatrix() {
     { treatmentType: 'treeAge', palmCount: 2, dbhInches: 18, restrictedUseProduct: true, licensedApplicator: 'yes', _refusal: /licensedApplicator/ },
     { treatmentType: 'treeAge', palmCount: 1, dbhInches: 25, product: 'Tree-Age R10', licensedApplicator: true, customPricePerPalm: 200 },
     { treatmentType: 'treeAge', palmCount: 1, dbhInches: 12, product: 'Tree-Age G4' },
+    // Fixed-treatment cadence (codex r25 P2): nutrition accepts only its
+    // allowedAppsPerYear (1, 2); zero / negative / non-numeric fail the
+    // positive-number assertion, an unsupported cadence names the allowed list.
+    { treatmentType: 'nutrition', palmCount: 3, appsPerYear: 1 },
+    { treatmentType: 'nutrition', palmCount: 3, appsPerYear: 2 },
+    { treatmentType: 'nutrition', palmCount: 3, appsPerYear: 0, _refusal: /positive number/ },
+    { treatmentType: 'nutrition', palmCount: 3, appsPerYear: -1, _refusal: /positive number/ },
+    { treatmentType: 'nutrition', palmCount: 3, appsPerYear: '2', _refusal: /positive number/ },
+    { treatmentType: 'nutrition', palmCount: 3, appsPerYear: 3, _refusal: /must be one of/ },
+    { treatmentType: 'nutrition', palmCount: 3, appsPerYear: 1.5, _refusal: /must be one of/ },
   ];
   for (const { _refusal, ...c } of palmCases) {
     const exp = c.palmCount > 0 && Number.isInteger(c.palmCount) ? expectPalm(c) : null;
@@ -1531,7 +1566,11 @@ function runPrepayAndCadence() {
     { services: { foamRecurring: { points: 5, cadence: 'monthly' } }, key: 'foam_recurring', visits: 12 },
   ];
   for (const c of cases) {
-    const li = line(runEngine({ ...BASE, bedArea: 2000, services: c.services }).result, c.key);
+    const r = runEngine({ ...BASE, bedArea: 2000, services: c.services });
+    const li = line(r.result, c.key);
+    // A throwing engine or a missing line is a COUNTED discrepancy, not a crash
+    // before the artifacts are written (codex r25 P2).
+    if (!r.ok || !li) { record(section, `${c.key} ${JSON.stringify(c.services)} line present`, c.services, c.visits, null, { extra: { engineError: r.ok ? null : r.error } }); continue; }
     const visits = li.visitsPerYear ?? li.visits ?? li.frequency;
     const perApp = li.perApp ?? li.perVisit;
     scenarios.push({ section, name: `${c.key} ${JSON.stringify(c.services)} visits`, expected: c.visits, actual: visits, status: visits === c.visits ? 'match' : 'MISMATCH' });
