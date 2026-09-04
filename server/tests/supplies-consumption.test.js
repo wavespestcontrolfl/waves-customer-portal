@@ -162,7 +162,7 @@ test('duplicate (index ignored the insert) → no decrement', async () => {
   const res = await consumeCompletionSupplies(db, args);
   expect(res.consumed).toHaveLength(0);
   expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'already_consumed' }]);
-  expect(updates).toHaveLength(0);
+  expect(updates.filter((u) => u.table === 'products_catalog')).toHaveLength(0);
 });
 
 describe('service-line scope', () => {
@@ -263,6 +263,13 @@ test('a successful deduction retires the failure bells an earlier attempt rang f
   const retired = updates.filter((u) => u.table === 'notifications');
   expect(retired).toHaveLength(1);
   expect(retired[0].row.read_at).toBeInstanceOf(Date);
+});
+
+test('an already_consumed retry (the movement exists) still retires the stale failure bells (Codex r17 P2)', async () => {
+  const { db, updates } = fakeDb({ products: [sign], duplicate: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'already_consumed' }]);
+  expect(updates.filter((u) => u.table === 'notifications')).toHaveLength(1);
 });
 
 test('a successful deduction rings no bell', async () => {
