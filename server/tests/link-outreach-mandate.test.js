@@ -206,9 +206,15 @@ describe('the follow-up (§6.4)', () => {
     expect(M.draftOf(sent)).toEqual({ outreach_to_email: 'Editor@Example.org', outreach_subject: 'A resource', outreach_body: 'Hi' });
   });
   test('FOLLOW_UP_STATUSES: contacted, plus the Judge-owned statuses on a submit-first path only', () => {
-    expect([...M.FOLLOW_UP_STATUSES({ execution_after_send: true })]).toEqual(['contacted']);
+    expect([...M.FOLLOW_UP_STATUSES({ acquisition_type: 'resource_outreach', account_required: true, execution_after_send: true })]).toEqual(['contacted']);
     expect([...M.FOLLOW_UP_STATUSES(null)]).toEqual(['contacted']);
-    expect([...M.FOLLOW_UP_STATUSES({ execution_after_send: false })]).toEqual(['contacted', 'placed', 'live', 'indexed']);
+    // submit-first = the policy's submitFirst: an outreach path whose acquire step EXISTS (account / content submission) and precedes the pitch
+    expect([...M.FOLLOW_UP_STATUSES({ acquisition_type: 'resource_outreach', account_required: true, execution_after_send: false })]).toEqual(['contacted', 'placed', 'live', 'indexed']);
+    expect([...M.FOLLOW_UP_STATUSES({ acquisition_type: 'content_submission', execution_after_send: false })]).toEqual(['contacted', 'placed', 'live', 'indexed']);
+    // the flag alone on a send-first path (no acquire step) means nothing (Codex r15): its placed / live row has no follow-up left
+    expect([...M.FOLLOW_UP_STATUSES({ acquisition_type: 'resource_outreach', execution_after_send: false })]).toEqual(['contacted']);
+    expect([...M.FOLLOW_UP_STATUSES({ acquisition_type: 'directory', execution_after_send: false })]).toEqual(['contacted']);
+    expect([...M.FOLLOW_UP_STATUSES_ANY]).toEqual(['contacted', 'placed', 'live', 'indexed']);
   });
   test('followUpDueAt is ten days after the send; followUpPending = sent pitch with a drafted / in-flight / errored follow-up', () => {
     expect(M.followUpDueAt('2026-09-03T00:00:00Z').toISOString()).toBe('2026-09-13T00:00:00.000Z');
@@ -217,7 +223,7 @@ describe('the follow-up (§6.4)', () => {
     expect(M.followUpDueAt(new Date('2026-03-05T13:30:00Z')).toISOString()).toBe('2026-03-15T12:30:00.000Z'); // 08:30 EST → 08:30 EDT
     expect(M.followUpDueAt('2026-09-03T00:00:00.250Z').getMilliseconds()).toBe(250);
     // pending is PATH-aware for a drafted follow-up (Codex r4): the placement must still be in FOLLOW_UP_STATUSES(path)
-    const sendFirst = { execution_after_send: true }, submitFirst = { execution_after_send: false };
+    const sendFirst = { acquisition_type: 'resource_outreach', execution_after_send: true }, submitFirst = { acquisition_type: 'resource_outreach', account_required: true, execution_after_send: false }; // submit-first = the acquire step exists AND precedes the pitch
     const contacted = { ...sent, status: 'contacted' };
     expect(M.followUpPending(contacted, sendFirst)).toBe(true);
     expect(M.followUpPending({ ...contacted, follow_up_status: 'sending' }, sendFirst)).toBe(true);

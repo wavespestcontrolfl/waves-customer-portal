@@ -1200,6 +1200,42 @@ describe('Codex r2 on #3854', () => {
     expect(await Outreach.sendOutreach({ prospectId: t.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'path_moved' });
     expect(placement(t.db).follow_up_status).toBe('drafted');
   });
+  test('P2: a requeue of an ambiguous follow-up whose path was SUPERSEDED or whose domain RE-RANKED meanwhile retires it (Codex r15) — never "Returned to drafts" on a frozen path', async () => {
+    const s = await conversation();
+    Object.assign(placement(s.db), { follow_up_status: 'send_error', follow_up_send_token: null });
+    storedPath(s.db).superseded_by = uid();
+    expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'requeue', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true, retired: true });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/superseded/) });
+    const t = await conversation();
+    Object.assign(placement(t.db), { follow_up_status: 'send_error', follow_up_send_token: null });
+    const other = outreachPath(t.d); t.db._tables.seo_link_acquisition_paths.push(other); t.db._tables.seo_link_domains[0].best_path_id = other.id;
+    expect(await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'requeue', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true, retired: true });
+    expect(placement(t.db)).toMatchObject({ follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/re-ranked/) });
+    // 'sent' still settles as sent whatever the route did
+    const u = await conversation();
+    Object.assign(placement(u.db), { follow_up_status: 'send_error', follow_up_send_token: null });
+    storedPath(u.db).superseded_by = uid();
+    expect(await Outreach.reconcileSendError({ prospectId: u.row.id, outcome: 'sent', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true });
+    expect(placement(u.db).follow_up_status).toBe('sent');
+  });
+  test('P2: a CLOSED conversation does not shadow the next prospect (Codex r15): a row admitted for the released publisher is selected unbridged and decided; alone, the closed row still covers the slot', async () => {
+    const s = await conversation();
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).ok).toBe(true);
+    const until = addETDaysAtWallClock(new Date(placement(s.db).follow_up_sent_at), 45);
+    expect(await Outreach.closeSilentConversations({ now: until })).toMatchObject({ closed: 1 });
+    expect(placement(s.db).conversation_closed_at).toBeTruthy();
+    // alone: the closed row's satisfied rows are the slot's history — nothing to bridge, no nightly slot spent
+    expect(await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).toEqual([]);
+    // a fresh prospect for the released publisher, linked to the same best path (the registry catch-up): selected, decided
+    const fresh = draftedRow(s.d, s.p, { id: uid(), target_page: '/mosquito/', outreach_status: 'none', outreach_subject: null, outreach_body: null, updated_at: until });
+    s.db._tables.seo_link_prospects.push(fresh);
+    expect(await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).toEqual([{ id: s.d.id, domain: 'example.org', why: 'unbridged' }]);
+    const r = await nightly(s.db, { now: new Date(until.getTime() + DAY) });
+    expect(r.selected).toBe(1);
+    expect(s.db._tables.seo_link_placement_authorities.some((x) => x.prospect_id === fresh.id && x.dimension === 'communication' && !x.ended_at)).toBe(true);
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'sent' }); // the closed row untouched
+    expect(await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).toEqual([]); // converged
+  });
   test('P2: the domain RE-RANKED to another standing path retires the follow-up — at the lease (due) and at the send (drafted): the pinned conversation is frozen off the best path', async () => {
     const s = await conversation({ decide: false });
     Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY), follow_up_subject: null, follow_up_body: null });
@@ -1349,7 +1385,7 @@ describe('Codex r3 on #3854', () => {
     expect(M.followUpPending(placement(s.db), storedPath(s.db))).toBe(true);
     Object.assign(placement(s.db), { status: 'live', live_url: 'https://example.org/resources/', updated_at: new Date(LATER.getTime() + 1000) }); // the verifier found the link
     expect(M.followUpPending(placement(s.db), storedPath(s.db))).toBe(false); // the sender refuses it by the same rule (FOLLOW_UP_STATUSES on a send-first path = contacted)
-    expect(M.followUpPending(placement(s.db), { ...storedPath(s.db), execution_after_send: false })).toBe(true); // Judge-owned statuses follow up on a submit-first path
+    expect(M.followUpPending(placement(s.db), { ...storedPath(s.db), execution_after_send: false, account_required: true })).toBe(true); // Judge-owned statuses follow up on a submit-first path (the acquire step exists AND precedes the pitch)
     expect(M.followUpPending({ ...placement(s.db), follow_up_status: 'sending' }, storedPath(s.db))).toBe(true); // pinned until the reconcile, whatever the lifecycle
     await nightly(s.db, { now: new Date(LATER.getTime() + 60000) });
     expect(fuRow()).toBeUndefined(); // ended: no longer required — no card on the live row, nothing stranded

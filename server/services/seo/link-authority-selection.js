@@ -121,7 +121,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id).filter(Boolean))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'fee_scope', 'revision_payment', 'revision', 'baseline', 'execution_after_send'); // execution_after_send: the follow-up's lifecycle set is path-dependent (followUpPending)
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
-  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'payment_group_id', 'updated_at', 'outreach_status', 'outreach_sent_at', 'follow_up_status', 'follow_up_skipped_reason');
+  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'payment_group_id', 'updated_at', 'outreach_status', 'outreach_sent_at', 'follow_up_status', 'follow_up_skipped_reason', 'conversation_closed_at');
   const paid = await paidPlacementIds(db, placements.map((p) => p.id));
   const byDomain = new Map();
   for (const p of placements) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
@@ -161,6 +161,16 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     const pinned = (p) => isOutreachLocked(p);
     const frozen = (p) => pinned(p) && p.path_id !== d.best_path_id;
     const onBest = mine.filter((p) => p.path_id === d.best_path_id || pinned(p));
+    // a location is bridged when a LIVE placement there carries rows. A CLOSED conversation (§13: conversation_closed_at
+    // — silent, its inbox and domain released) keeps its satisfied rows as history and still counts as the slot's
+    // placement ONLY while no live row waits there unbridged: a prospect admitted for the released publisher must be
+    // selected and bridged, not shadowed by the closed row's coverage; with nothing else at the location the closed
+    // row covers it as before (nothing to bridge, no nightly slot spent)
+    const covered = (l) => {
+      const at = onBest.filter((p) => p.location_key === l);
+      const live = at.filter((p) => !p.conversation_closed_at);
+      return live.some((p) => rowsByProspect.has(p.id)) || (at.some((p) => rowsByProspect.has(p.id)) && !live.length);
+    };
     const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
     // an AUTOMATIC follow-up the sender refused for a reason only the owner resolves carries a marker on
     // follow_up_skipped_reason (reply check failed, recipient review required — the draft still drafted): its authority
@@ -191,7 +201,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     let why = null;
     if (forced.has(d.id)) why = 'forced';
     else if (!d.best_path_id) why = all.some((p) => (rowsByProspect.get(p.id) || []).some((r) => !r.satisfied_at)) ? 'stale' : null; // route gone: open unsatisfied rows to retire
-    else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';
+    else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !covered(l))) why = 'unbridged';
     else if (contradicted || offShapeOpen || groupMismatch(best, mine) || withRows.some((p) => p.path_id !== d.best_path_id || instanceSetMoved(p) || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
     else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !withRows.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
     if (why) picked.push({ id: d.id, domain: d.domain, why, at: ts(d.updated_at) });

@@ -644,7 +644,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // recipient: the same recipient-level lock + predicate the send claim takes, so no two writers open the same inbox
       const Outreach = require('../services/seo/link-prospect-outreach');
       // the predicate is path-aware (a submit-first row's follow-up is owed past its outcome): the row's path rides along
-      const currentPath = current.path_id ? await trx('seo_link_acquisition_paths').where({ id: current.path_id }).first('id', 'execution_after_send') : null;
+      const currentPath = current.path_id ? await trx('seo_link_acquisition_paths').where({ id: current.path_id }).first('id', 'execution_after_send', 'acquisition_type', 'account_required') : null;
       const opensConversation = Outreach.conversationOpen({ ...current, ...patch }, currentPath) && !Outreach.conversationOpen(current, currentPath);
       if (opensConversation) {
         // the same lock ORDER as the send claim (domain → inbox advisory lock → row lock) for EVERY conversation-opening

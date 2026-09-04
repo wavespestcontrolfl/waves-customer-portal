@@ -324,7 +324,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
 async function claimFollowUps(trx, { limit, preview }) {
   const M = require('./link-outreach-mandate');
   const now = new Date();
-  const widest = M.FOLLOW_UP_STATUSES({ execution_after_send: false });
+  const widest = M.FOLLOW_UP_STATUSES_ANY;
   // the due set is small (one follow-up per conversation, ten days out) — read whole, narrowed below in order
   const due = await trx('seo_link_prospects')
     .whereIn('link_type', OUTREACH_TYPES)
@@ -346,7 +346,7 @@ async function claimFollowUps(trx, { limit, preview }) {
   // a standing path, and the lifecycle set is PATH-dependent: placed / live / indexed follow up only on a submit-first path
   const eligible = (r, p) => Boolean(p) && !p.superseded_by && isStandingConfidence(p.confidence) && p.agent_completable !== false && M.FOLLOW_UP_STATUSES(p).includes(r.status);
   if (preview) {
-    const paths = await trx('seo_link_acquisition_paths').whereIn('id', [...new Set(candidates.map((r) => r.path_id))]).select('id', 'superseded_by', 'confidence', 'agent_completable', 'execution_after_send');
+    const paths = await trx('seo_link_acquisition_paths').whereIn('id', [...new Set(candidates.map((r) => r.path_id))]).select('id', 'superseded_by', 'confidence', 'agent_completable', 'execution_after_send', 'acquisition_type', 'account_required');
     const pathById = new Map(paths.map((p) => [p.id, p]));
     return candidates.filter((r) => eligible(r, pathById.get(r.path_id))).slice(0, limit).map((r) => ({ ...r }));
   }
@@ -363,7 +363,7 @@ async function claimFollowUps(trx, { limit, preview }) {
     if (!r || r.claimed_at || r.outreach_status !== 'sent' || !['none', 'due'].includes(r.follow_up_status) || !OUTREACH_TYPES.includes(r.link_type)) continue;
     const dom = r.domain_id ? await trx('seo_link_domains').where({ id: r.domain_id }).first('id', 'agent_state', 'best_path_id') : null;
     if (dom && nonClaimableDomainStates().includes(dom.agent_state)) continue;
-    const p = r.path_id ? await trx('seo_link_acquisition_paths').where({ id: r.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'revision', 'agent_completable', 'execution_after_send') : null;
+    const p = r.path_id ? await trx('seo_link_acquisition_paths').where({ id: r.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'revision', 'agent_completable', 'execution_after_send', 'acquisition_type', 'account_required') : null;
     // the domain was RE-RANKED to another (standing) path during the wait: a sent conversation is pinned to its path and
     // the selection freezes it off the best path — no authority instance is ever decided for its follow-up and the
     // sender's domainRefusal refuses the old path, so a draft could only ever hang. It RETIRES here (skipped), as a
@@ -594,7 +594,7 @@ async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
     await lockProspectDomain(trx, prospect.target_domain);
     const row = await trx('seo_link_prospects').where({ id: prospect.id }).forUpdate().first();
     if (!row) return { n: 0 };
-    const path = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).forUpdate().first('id', 'revision', 'superseded_by', 'execution_after_send') : null;
+    const path = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).forUpdate().first('id', 'revision', 'superseded_by', 'execution_after_send', 'acquisition_type', 'account_required') : null;
     // EVERY lease condition re-asserted under the locks before a draft is accepted (as the lease asserted them): the
     // path at its revision; the lifecycle still in the path-specific follow-up set — a send-first row the verifier
     // promoted to live while the drafter worked has no follow-up left (followUpPending excludes it, the sender refuses

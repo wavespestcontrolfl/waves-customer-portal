@@ -89,7 +89,7 @@ async function inboxConflict(trx, { recipient, excludeId = null }) {
   if (excludeId) q = q.where('id', '<>', excludeId);
   const others = (await q.select('id', 'status', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'outreach_to_email', 'path_id')).filter((o) => M.normalizeEmail(o.outreach_to_email) === inbox);
   const pathIds = [...new Set(others.map((o) => o.path_id).filter(Boolean))];
-  const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'execution_after_send') : [];
+  const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'execution_after_send', 'acquisition_type', 'account_required') : [];
   const pathById = new Map(paths.map((p) => [p.id, p]));
   return others.find((o) => CONVERSATION_OPEN(o, pathById.get(o.path_id) || null)) || null;
 }
@@ -173,7 +173,7 @@ function checkSendPreconditions({ prospect, gateOn, dailyCount, cap, followUp = 
 function checkFollowUpPreconditions({ prospect, dailyCount, cap }) {
   if (prospect.outreach_status !== 'sent') return { ok: false, code: 'no_initial_send' };
   if (prospect.follow_up_sent_at || prospect.follow_up_status === 'sent') return { ok: false, code: 'already_sent' };
-  if (!M.FOLLOW_UP_STATUSES({ execution_after_send: false }).includes(prospect.status)) return { ok: false, code: 'not_actionable' };
+  if (!M.FOLLOW_UP_STATUSES_ANY.includes(prospect.status)) return { ok: false, code: 'not_actionable' };
   if (prospect.follow_up_status !== 'drafted') return { ok: false, code: 'no_draft' };
   if (!isValidEmail(prospect.outreach_to_email)) return { ok: false, code: 'invalid_recipient' };
   if (!prospect.follow_up_subject || !prospect.follow_up_body) return { ok: false, code: 'incomplete_draft' };
@@ -962,20 +962,27 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
   // RETIRES (`skipped`) instead of parking a draft nowhere lists
   let retired = false;
   const rows = await db.transaction(async (trx) => {
-    const row = await trx('seo_link_prospects').where({ id: prospect.id }).forUpdate().first('id', 'status', 'path_id', 'notes', 'follow_up_sent_at');
+    const row = await trx('seo_link_prospects').where({ id: prospect.id }).forUpdate().first('id', 'status', 'path_id', 'domain_id', 'notes', 'follow_up_sent_at');
     if (!row) return [];
-    const path = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first('id', 'execution_after_send') : null;
-    retired = outcome !== 'sent' && !M.FOLLOW_UP_STATUSES(path).includes(row.status);
+    const path = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first('id', 'execution_after_send', 'acquisition_type', 'account_required', 'superseded_by') : null;
+    const dom = row.domain_id ? await trx('seo_link_domains').where({ id: row.domain_id }).first('best_path_id') : null;
+    // …and a requeue cannot yield a sendable draft either when the ROUTE moved on under the pinned conversation — the
+    // path superseded, or the domain re-ranked to another path — exactly the states the lease and the send retire
+    const gone = outcome === 'sent' ? null
+      : path && path.superseded_by ? 'acquisition path superseded before the follow-up'
+        : dom && dom.best_path_id && row.path_id && dom.best_path_id !== row.path_id ? 'domain re-ranked to another path before the follow-up'
+          : !M.FOLLOW_UP_STATUSES(path).includes(row.status) ? `placement left the follow-up lifecycle (${row.status})` : null;
+    retired = Boolean(gone);
     const note = outcome === 'sent'
       ? `Follow-up reconciled as SENT ${now.toISOString()} by ${approvedBy}`
       : retired
-        ? `Follow-up reconciled as NOT sent ${now.toISOString()} by ${approvedBy} — the placement moved on (${row.status}); follow-up retired`
+        ? `Follow-up reconciled as NOT sent ${now.toISOString()} by ${approvedBy} — ${gone}; follow-up retired`
         : `Follow-up reconciled as NOT sent (re-queued) ${now.toISOString()} by ${approvedBy}`;
     const notes = row.notes ? `${row.notes}\n${note}` : note;
     const patch = outcome === 'sent'
       ? { follow_up_status: 'sent', follow_up_sent_at: row.follow_up_sent_at || now, follow_up_send_token: null, notes, updated_at: now }
       : retired
-        ? { follow_up_status: 'skipped', follow_up_skipped_reason: `placement left the follow-up lifecycle (${row.status})`, follow_up_send_token: null, follow_up_attempted_at: null, notes, updated_at: now }
+        ? { follow_up_status: 'skipped', follow_up_skipped_reason: gone, follow_up_send_token: null, follow_up_attempted_at: null, notes, updated_at: now }
         : { follow_up_status: 'drafted', follow_up_send_token: null, follow_up_attempted_at: null, follow_up_skipped_reason: null, notes, updated_at: now };
     // the CAS the lane has always had (state + token), plus the lifecycle the decision was taken on
     let q = trx('seo_link_prospects').where({ id: prospect.id, follow_up_status: st, status: row.status, path_id: row.path_id });

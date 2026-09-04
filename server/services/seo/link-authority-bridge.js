@@ -178,7 +178,7 @@ async function dispatchBatch(db, out, { send, now, followUp, limit }) {
   if (!decidedPath.size) return false;
   const statusCol = followUp ? 'follow_up_status' : 'outreach_status';
   let q = db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...eligible]).where({ [statusCol]: 'drafted' }).whereNull('claimed_at');
-  q = followUp ? q.where({ outreach_status: 'sent' }).whereIn('status', [...M.FOLLOW_UP_STATUSES({ execution_after_send: false })]) : q.where({ status: PARKABLE }).whereNull('outreach_sent_at');
+  q = followUp ? q.where({ outreach_status: 'sent' }).whereIn('status', [...M.FOLLOW_UP_STATUSES_ANY]) : q.where({ status: PARKABLE }).whereNull('outreach_sent_at');
   const batch = await q.orderBy('updated_at', 'asc').limit(limit).select('id', 'path_id', 'updated_at');
   for (const p of batch) {
     if (decidedPath.get(p.id) !== p.path_id) continue; // the row left the path its instance was decided on — the bridge rotates it
@@ -286,11 +286,16 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       const bound = await trx('seo_link_prospects').where({ domain_id: domain.id, path_id: path.id, location_key: '-' }).select('*');
       if (bound.length) {
         const withOpen = new Set((await trx(AUTH).whereIn('prospect_id', bound.map((p) => p.id)).whereNull('ended_at').select('prospect_id')).map((r) => r.prospect_id));
-        row = bound.find((p) => withOpen.has(p.id)) || null;
+        // a CLOSED conversation (§13 stamp — silent, its inbox and domain released) is history, not the lane's
+        // conversation: it never shadows a live row, so a prospect admitted for the released publisher is bridged
+        row = bound.find((p) => withOpen.has(p.id) && !p.conversation_closed_at) || null;
         conversation = Boolean(row);
       }
     }
     if (!row) row = await findPlacementRow(trx, domain.domain, HOMEPAGE, { location, columns: ['*'] });
+    // the exact homepage row is a closed conversation and another row is in flight for the domain: the in-flight row
+    // IS the placement (adopted below); the closed row stays as it is (its history, no re-pitch)
+    if (row && row.conversation_closed_at && inFlight && inFlight.id !== row.id) row = null;
     // one conversation per inbox: an active outreach row on ANOTHER page beside an UNBRIDGED homepage row means the
     // homepage row is not this domain's conversation. Pinned (sent / locked) or leased, the homepage row is a
     // conversation of its own — two for one inbox is a conflict nothing here may resolve. Dormant, the in-flight row

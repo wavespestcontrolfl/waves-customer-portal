@@ -161,10 +161,14 @@ const draftOf = (placement, followUp = false) => (followUp
 const FOLLOW_UP_DELAY_DAYS = 10;
 const followUpDueAt = (sentAt) => addETDaysAtWallClock(sentAt, FOLLOW_UP_DELAY_DAYS);
 // the lifecycle statuses a follow-up may act on: `contacted` (the initial send left the row there), plus the
-// Judge-owned statuses on a SUBMIT-FIRST path (execution_after_send=false), where the acquisition moved the row on
-// before the pitch — a follow-up there is claimable and never demotes the row (the follow-up writes its own columns)
+// Judge-owned statuses on a SUBMIT-FIRST path (the policy's submitFirst: an outreach path whose acquire step exists AND
+// precedes the pitch — `execution_after_send` alone is persisted on every path and means nothing without the step), where
+// the acquisition moved the row on before the pitch — a follow-up there is claimable and never demotes the row (the
+// follow-up writes its own columns). The path needs acquisition_type, account_required and execution_after_send.
+// FOLLOW_UP_STATUSES_ANY is the widest set, for a query that narrows per path afterwards.
 const FOLLOW_UP_JUDGE_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
-const FOLLOW_UP_STATUSES = (path) => Object.freeze(['contacted', ...(path && path.execution_after_send === false ? FOLLOW_UP_JUDGE_STATUSES : [])]);
+const FOLLOW_UP_STATUSES_ANY = Object.freeze(['contacted', ...FOLLOW_UP_JUDGE_STATUSES]);
+const FOLLOW_UP_STATUSES = (path) => Object.freeze(['contacted', ...(path && require('./link-authority-policy').submitFirst(path) ? FOLLOW_UP_JUDGE_STATUSES : [])]);
 // a follow-up the bridge must DECIDE (the communication/followup instance exists for it): drafted — while the
 // placement is still in the lifecycle a follow-up may act on for ITS path (FOLLOW_UP_STATUSES: a send-first row the
 // verifier promoted to live has left it; the sender refuses the draft by the same rule, so the instance is no longer
@@ -261,4 +265,4 @@ async function reviewByEmail(q, emails) {
 // have delivered the pitch, so the inbox stays held and the authority it was claimed under stays pinned until then
 const AMBIGUOUS_SEND_STATUSES = Object.freeze(['sending', 'send_error']);
 
-module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, RECIPIENT_REVIEW_REQUIRED, OWNER_MARKERS, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, RECIPIENT_REVIEW_REQUIRED, OWNER_MARKERS, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_STATUSES_ANY, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
