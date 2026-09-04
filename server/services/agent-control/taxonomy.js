@@ -139,7 +139,9 @@ function classifyFailure(errorCode, ctx = {}) {
   // `session_stream_eof`: the stream closed before any terminal event — the
   // session never said it ended, so the runner does not get to call it a
   // success (Codex r7 on #3846).
-  if (code === 'no_key' || code === 'all_providers_failed' || code === 'session_error_event' || code === 'session_stream_eof' || /_(5\d\d|429|529|503|401|403|404)$/.test(code)) return 'provider';
+  // `openai_failed` / `openai_cancelled`: a Responses body that ended in a
+  // provider-side terminal state (not the model's output cut off).
+  if (code === 'no_key' || code === 'all_providers_failed' || code === 'session_error_event' || code === 'session_stream_eof' || /^openai_(failed|cancelled)$/.test(code) || /_(5\d\d|429|529|503|401|403|404)$/.test(code)) return 'provider';
   // status-qualified 408s (Codex r13) and the adapters' own deadlines —
   // `<provider>_timeout` from llm/call.js providerErrorReason (Codex on #3793).
   if (code === 'timeout_budget_exhausted' || code === 'timeout' || /_(408|timeout)$/.test(code)) return 'timeout';

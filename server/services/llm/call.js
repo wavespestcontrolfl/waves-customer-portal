@@ -277,16 +277,23 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
     // max_output_tokens cut-off is exactly what its trace needs to show.
     const out = extractOpenAIText(data);
     if (data?.status && data.status !== 'completed') {
-      logger.warn(`[llm] OpenAI response ${data.status}${data.incomplete_details?.reason ? ` (${data.incomplete_details.reason})` : ''}`);
-      recordLedgerCall(base, { ...served, ok: false, errorCode: 'openai_incomplete', response: out });
-      return { ok: false, reason: 'openai_incomplete' };
+      // 'incomplete' is the model's output cut off (max_output_tokens); any
+      // other terminal state (failed, cancelled …) is the provider's failure
+      // — its own code, filed as provider, never as incomplete output.
+      const code = data.status === 'incomplete' ? 'openai_incomplete' : `openai_${String(data.status).toLowerCase().replace(/[^a-z_]/g, '_')}`;
+      const detail = data.incomplete_details?.reason || data.error?.code || data.error?.message;
+      logger.warn(`[llm] OpenAI response ${data.status}${detail ? ` (${detail})` : ''}`);
+      recordLedgerCall(base, { ...served, ok: false, errorCode: code, response: out });
+      return { ok: false, reason: code };
     }
     // A refusal block is a failed leg in BOTH modes, as an Anthropic
     // stop_reason 'refusal' is: recorded (billed) AND returned as such, so
     // the call row and the caller agree and the cross-provider fallback runs.
     const refusal = extractOpenAIRefusal(data);
     if (refusal !== null && !out) {
-      logger.warn(`[llm] OpenAI refusal: ${refusal.slice(0, 120)}`);
+      // The refusal body can echo customer detail from the prompt — never
+      // logged; the (redacted) trace keeps it for lanes that opt in.
+      logger.warn(`[llm] OpenAI refusal (${data?.id || 'no id'})`);
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'openai_refusal', response: refusal });
       return { ok: false, reason: 'openai_refusal' };
     }
@@ -311,6 +318,8 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
  * Gemini generateContent. jsonMode sets response_mime_type and joins ALL text
  * parts (a thinking model can emit a thought part before the answer part).
  */
+const GEMINI_BLOCK_FINISHES = new Set(['SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII']);
+
 async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, timeoutMs, laneId, promptVersion, policyLabel } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
@@ -340,10 +349,23 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
     // status and Anthropic's 'max_tokens' stop are: the output was cut off,
     // so the call row and the caller agree it failed and the caller's
     // fallback runs instead of a truncated answer shipping.
-    if (data?.candidates?.[0]?.finishReason === 'MAX_TOKENS') {
+    const finish = data?.candidates?.[0]?.finishReason;
+    if (finish === 'MAX_TOKENS') {
       logger.warn(`[llm] Gemini response finished at MAX_TOKENS (${maxTokens})`);
       recordLedgerCall(base, { ...served, ok: false, errorCode: 'gemini_incomplete', response: out });
       return { ok: false, reason: 'gemini_incomplete' };
+    }
+    // A safety-blocked answer — a blocked candidate, or a prompt-level block
+    // with no candidate at all — is the model declining: `gemini_refusal`,
+    // the class the other providers' refusals take. Any other non-STOP
+    // finish is its own outcome. Both before the success branch, so a
+    // text-mode call never returns ok with nothing in it.
+    const blocked = GEMINI_BLOCK_FINISHES.has(finish) || (!data?.candidates?.length && data?.promptFeedback?.blockReason);
+    if (blocked || (finish && finish !== 'STOP')) {
+      const code = blocked ? 'gemini_refusal' : `gemini_finish_${String(finish).toLowerCase().replace(/[^a-z_]/g, '_')}`;
+      logger.warn(`[llm] Gemini ${code} (${finish || data?.promptFeedback?.blockReason})`);
+      recordLedgerCall(base, { ...served, ok: false, errorCode: code, response: out });
+      return { ok: false, reason: code };
     }
     const json = jsonMode ? parseLooseJson(out) : null;
     if (jsonMode && !json) {

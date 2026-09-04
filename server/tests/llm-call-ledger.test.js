@@ -22,7 +22,8 @@ jest.mock('../models/db', () => {
   db.raw = (sql) => sql;
   return db;
 });
-jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// warn lines are captured globally: each isolateModules load gets its own mock instance.
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn((...a) => { (global.__llmWarns = global.__llmWarns || []).push(a.join(' ')); }), error: jest.fn(), debug: jest.fn() }));
 const mockAnthropicCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockAnthropicCreate(...args) },
@@ -143,6 +144,26 @@ describe('llm call ledger', () => {
       expect(row).toMatchObject({ ok: false, error_code: 'openai_incomplete', error_class: 'incomplete', input_tokens: 120, output_tokens: 30 });
     });
 
+    it('a failed / cancelled Responses body is the provider\'s failure (openai_<status> → provider), never openai_incomplete', async () => {
+      const { call } = load();
+      global.fetch = fetchJson({ ...OPENAI_BODY, status: 'failed', error: { code: 'server_error', message: 'boom' } });
+      expect(await call.callOpenAI({ model: 'm', text: 't' })).toEqual({ ok: false, reason: 'openai_failed' });
+      global.fetch = fetchJson({ ...OPENAI_BODY, status: 'cancelled' });
+      expect(await call.callOpenAI({ model: 'm', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'openai_cancelled' });
+      await flush();
+      expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'openai_failed', 'provider', 120], [false, 'openai_cancelled', 'provider', 120]]);
+    });
+
+    it('the refusal warning never carries the refusal body (it can echo customer detail)', async () => {
+      const { call } = load();
+      global.__llmWarns = [];
+      global.fetch = fetchJson({ ...OPENAI_BODY, output_text: undefined, output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'I cannot discuss Jane Doe at 12 Palm St.' }] }] });
+      await call.callOpenAI({ model: 'o', text: 't', jsonMode: false });
+      const logged = global.__llmWarns.join('\n');
+      expect(logged).toMatch(/OpenAI refusal \(resp_1\)/);
+      expect(logged).not.toMatch(/Jane Doe|Palm St/);
+    });
+
     it('a completed refusal block is a FAILED leg in both modes — openai_refusal recorded (with usage) AND returned, like anthropic_refusal', async () => {
       const { call } = load();
       const refused = { ...OPENAI_BODY, output_text: undefined, output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'I cannot help with that.' }] }] };
@@ -211,6 +232,20 @@ describe('llm call ledger', () => {
       expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'gemini_incomplete' });
       await flush();
       expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'gemini_incomplete', 'incomplete', 50], [false, 'gemini_incomplete', 'incomplete', 50]]);
+    });
+  });
+
+  describe('callGemini — blocked answers', () => {
+    it('a SAFETY finish and a prompt-level block are gemini_refusal (→ instruction) in both modes; another non-STOP finish is its own code', async () => {
+      const { call } = load();
+      global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ finishReason: 'SAFETY', content: { parts: [] } }] });
+      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'gemini_refusal' });
+      global.fetch = fetchJson({ modelVersion: 'gemini-served', candidates: [], promptFeedback: { blockReason: 'PROHIBITED_CONTENT' }, usageMetadata: GEMINI_BODY.usageMetadata });
+      expect(await call.callGemini({ model: 'g', text: 't' })).toEqual({ ok: false, reason: 'gemini_refusal' });
+      global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ finishReason: 'OTHER', content: { parts: [{ text: 'x' }] } }] });
+      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'gemini_finish_other' });
+      await flush();
+      expect(callRows().map((r) => [r.ok, r.error_code, r.error_class])).toEqual([[false, 'gemini_refusal', 'instruction'], [false, 'gemini_refusal', 'instruction'], [false, 'gemini_finish_other', 'infrastructure']]);
     });
   });
 

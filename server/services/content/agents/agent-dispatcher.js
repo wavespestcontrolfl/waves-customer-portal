@@ -243,9 +243,14 @@ class AgentDispatcher {
     }
 
     // Stream events; execute tool calls; capture emit_draft / emit_metadata_only.
+    // The agent's own end — the recorder's usage GET after it (up to its
+    // 15 s timeout) is observability time, not agent time (Codex r12).
+    let agentEndedAt;
     try {
       await this._streamAndExecute(sessionId, sessionTimeoutMs);
+      agentEndedAt = Date.now();
     } catch (err) {
+      agentEndedAt = Date.now();
       await recordSession(err.code || 'streaming_failed');
       const partial = getDraft(sessionId);
       clearDraft(sessionId);
@@ -255,7 +260,7 @@ class AgentDispatcher {
         session_id: sessionId,
         agent_id: route.agent_id,
         partial_draft: partial || null,
-        duration_ms: Date.now() - t0,
+        duration_ms: agentEndedAt - t0,
       };
     }
 
@@ -273,7 +278,7 @@ class AgentDispatcher {
         reason: 'agent_did_not_emit_draft',
         session_id: sessionId,
         agent_id: route.agent_id,
-        duration_ms: Date.now() - t0,
+        duration_ms: agentEndedAt - t0,
       };
     }
 
@@ -284,7 +289,7 @@ class AgentDispatcher {
       role: route.role,
       agent_id: route.agent_id,
       session_id: sessionId,
-      duration_ms: Date.now() - t0,
+      duration_ms: agentEndedAt - t0,
     };
   }
 
