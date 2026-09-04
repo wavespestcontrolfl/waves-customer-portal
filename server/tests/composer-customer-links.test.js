@@ -1189,11 +1189,12 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
   });
 
   test('an appointment page link refuses at the send once GATE_APPOINTMENT_PAGE is off', async () => {
+    const TOMORROW = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
     const prev = process.env.GATE_APPOINTMENT_PAGE;
     try {
       wire();
       mockBuilders.short_codes = chainBuilder({ firstRow: { code: 'ab12cd', kind: 'appointment', target_url: 'https://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY' } });
-      mockBuilders.scheduled_services = chainBuilder({ firstRow: { id: 'v1', customer_id: 'c1' } });
+      mockBuilders.scheduled_services = chainBuilder({ firstRow: { id: 'v1', customer_id: 'c1', status: 'confirmed', scheduled_date: TOMORROW } });
       mockBuilders.customers = chainBuilder({ firstRow: { id: 'c1', account_id: 'acct' }, rows: [{ id: 'c1', account_id: 'acct' }] });
       process.env.GATE_APPOINTMENT_PAGE = 'true';
       expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
@@ -1208,11 +1209,13 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
     const gate = process.env.GATE_APPOINTMENT_PAGE;
     const RESCHEDULE = 'e'.repeat(64);
     const REPORT = 'b'.repeat(32);
+    const TOMORROW = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
     const acct = (id, account_id = 'acct') => ({ id, account_id });
     function wireAccount({ recipientRows = [acct('c1')], linkCustomer = acct('c1'), visit = { id: 'v1', customer_id: 'c1' }, report = { id: 'r1', customer_id: 'c1', structured_notes: null }, shortRow = null } = {}) {
       wire();
       mockBuilders.customers = chainBuilder({ firstRow: linkCustomer, rows: recipientRows });
-      mockBuilders.scheduled_services = chainBuilder({ firstRow: visit });
+      // A live upcoming visit unless the case says otherwise.
+      mockBuilders.scheduled_services = chainBuilder({ firstRow: visit && { status: 'confirmed', scheduled_date: TOMORROW, ...visit } });
       mockBuilders.service_records = chainBuilder({ firstRow: report });
       mockBuilders.short_codes = chainBuilder({ firstRow: shortRow });
     }
@@ -1261,6 +1264,22 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       // Still live (future expiry, or none) passes as before.
       wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', target_url: `https://portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, expires_at: new Date(Date.now() + 60_000).toISOString() } });
       expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    });
+
+    test('the appointment seam re-runs the page\'s state NOW — cancelled, completed, pending rebook, elapsed, or dispatch-owned unreviewed refuses (pre-push Codex P1)', async () => {
+      const link = `portal.wavespestcontrol.com/appointment/${RESCHEDULE}`;
+      for (const visit of [
+        { id: 'v1', customer_id: 'c1', status: 'cancelled' },
+        { id: 'v1', customer_id: 'c1', status: 'completed' },
+        { id: 'v1', customer_id: 'c1', status: 'rescheduled' },
+        { id: 'v1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2020-01-01', window_start: '09:00' },
+        { id: 'v1', customer_id: 'c1', status: 'pending', source_action: require('../services/call-booking-source-actions').DISPATCH_OWNED_PENDING_SOURCE_ACTIONS[0], customer_confirmed: false },
+      ]) {
+        wireAccount({ visit });
+        expect((await bearerLinkSendCheck(link, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
+      }
+      wireAccount({ visit: { id: 'v1', customer_id: 'c1', status: 'pending', source_action: require('../services/call-booking-source-actions').DISPATCH_OWNED_PENDING_SOURCE_ACTIONS[0], customer_confirmed: true } });
+      expect(await bearerLinkSendCheck(link, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
     });
 
     test('a visit whose owning customer was deleted refuses — the public route 404s it, and a live sibling on the account must not be texted a dead link (pre-push Codex P1)', async () => {

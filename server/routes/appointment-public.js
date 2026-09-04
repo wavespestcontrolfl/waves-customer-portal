@@ -1150,3 +1150,6 @@ module.exports = router;
 // The page's own state predicate — the composer's visit picks skip what it
 // renders as 'past' (GH Codex #3844 r10).
 module.exports.pageState = pageState;
+// …and the send seam refuses what the page would not render as upcoming,
+// including the dispatch-owned unreviewed booking the builder never picks.
+module.exports.dispatchOwnedUnreviewed = dispatchOwnedUnreviewed;
