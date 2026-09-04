@@ -682,10 +682,27 @@ async function shortCodeRows(runs, scheme = {}) {
   for (const run of shortRuns) {
     const code = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, scheme);
     if (!code) continue;
-    const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'entity_type', 'entity_id', 'expires_at');
-    if (row) rows.push(row);
+    const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'target_url', 'expires_at');
+    const dest = row && shortRowDestination(row, hosts);
+    if (dest) rows.push({ code: row.code, expires_at: row.expires_at, ...dest });
   }
   return rows;
+}
+// What /l/:code actually opens is its target_url (public-shortlinks 302s
+// there); `kind` is an analytics classifier, so a legacy or misclassified
+// code whose target is a protected page is judged by the target — the same
+// token path as the long form (pre-push Codex P0). Metadata that claims a
+// protected kind the target does not confirm fails closed: present to the
+// fence, unverifiable (refused) at the send. The stored target is our own
+// redirect, judged under ANY_SCHEME like the fence.
+function shortRowDestination(row, hosts) {
+  const target = String(row.target_url || '');
+  const appointment = canonicalPortalToken(target, hosts, APPOINTMENT_TOKEN_RE, ANY_SCHEME);
+  if (appointment) return { kind: 'appointment', token: appointment };
+  const report = canonicalPortalToken(target, hosts, REPORT_TOKEN_RE, ANY_SCHEME);
+  if (report) return { kind: 'service_report', token: report };
+  if (row.kind === 'appointment' || row.kind === 'service_report') return { kind: row.kind, token: null };
+  return null;
 }
 // /l/:code answers 410 past expires_at (public-shortlinks) — the same
 // predicate, so an expired short bearer never rides an immediate send on
@@ -906,7 +923,8 @@ async function checkAppointmentLinks(ctx, shortRows, onRecipientAccount) {
   }
   for (const row of shortRows.filter((r) => r.kind === 'appointment')) {
     if (expiredShortRow(row)) return refuseSend('This appointment link has expired — remove it and insert a fresh one.');
-    const bad = await bind(row.entity_type === 'scheduled_services' && row.entity_id ? await visitById({ id: row.entity_id }) : null);
+    if (!row.token) return refuseSend('This appointment short link does not open an appointment page — remove it and insert a fresh one.');
+    const bad = await bind(await visitById({ reschedule_token: row.token }));
     if (bad) return bad;
   }
   return null;
@@ -938,7 +956,8 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
   }
   for (const row of shortRows.filter((r) => r.kind === 'service_report')) {
     if (expiredShortRow(row)) return refuseSend('This service report link has expired — remove it and insert a fresh one.');
-    const bad = await bind(row.entity_type === 'service_records' && row.entity_id ? await publicReport({ id: row.entity_id }) : null);
+    if (!row.token) return refuseSend('This service report short link does not open a report — remove it and insert a fresh one.');
+    const bad = await bind(await publicReport({ report_view_token: row.token }));
     if (bad) return bad;
   }
   return null;

@@ -949,12 +949,12 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
   test('a service report link (long /report form, or the branded short form of kind service_report) is immediate-only', async () => {
     mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
     expect(await immediateOnlyLinkSendCheck(`Here is your latest service report: portal.wavespestcontrol.com/report/${'b'.repeat(32)}`)).toEqual({ present: true, label: 'Service report' });
-    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rep1', kind: 'service_report' } }) };
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rep1', kind: 'service_report', target_url: 'https://portal.wavespestcontrol.com/report/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } }) };
     expect(await immediateOnlyLinkSendCheck('Here is your latest service report: wavespest.co/l/rep1')).toEqual({ present: true, label: 'Service report' });
   });
 
   test('an appointment page link (branded short form of kind appointment, or the long /appointment form) is immediate-only', async () => {
-    mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'appointment' } }) };
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'ab12cd', kind: 'appointment', target_url: 'https://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY' } }) };
     expect(await immediateOnlyLinkSendCheck('Everything about your visit: wavespest.co/l/Ab12cD')).toEqual({ present: true, label: 'Appointment page' });
     // Codes are stored lower-case and the public resolver lowercases before
     // its lookup — a pasted mixed-case code is the same working link and must
@@ -987,7 +987,7 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
   });
 
   test('a trailing slash is the same working page — every fenced kind is still judged (GH Codex #3844 r7 P1)', async () => {
-    mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'appointment' } }) };
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'ab12cd', kind: 'appointment', target_url: 'https://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY' } }) };
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/prep/${PREP}/`)).toEqual({ present: true, label: 'Prep guide' });
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}/`)).toEqual({ present: true, label: 'Statement pay' });
     expect(await immediateOnlyLinkSendCheck('portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY/')).toEqual({ present: true, label: 'Appointment page' });
@@ -998,7 +998,7 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
   });
 
   test('an explicit http:// owned bearer is a protected link the fence parks — the public mounts are protocol-agnostic (GH Codex #3844 r11 P1)', async () => {
-    mockBuilders = { short_codes: chainBuilder({ firstRow: { kind: 'appointment' } }) };
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'ab12cd', kind: 'appointment', target_url: 'https://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY' } }) };
     expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: true, label: 'Prep guide' });
     expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`)).toEqual({ present: true, label: 'Statement pay' });
     expect(await immediateOnlyLinkSendCheck('http://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Appointment page' });
@@ -1008,6 +1008,15 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     // Only http(s) is a served page; another host under http is still not ours.
     expect(await immediateOnlyLinkSendCheck(`ftp://portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: false });
     expect(await immediateOnlyLinkSendCheck(`http://evil.example/prep/${PREP}`)).toEqual({ present: false });
+  });
+
+  test('the fence judges a short code by its target, and parks a protected kind claim the target does not confirm (pre-push Codex P0)', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'ab12cd', kind: 'other', target_url: 'https://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY' } }) };
+    expect(await immediateOnlyLinkSendCheck('See it: wavespest.co/l/Ab12cD')).toEqual({ present: true, label: 'Appointment page' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'ab12cd', kind: 'service_report', target_url: 'https://portal.wavespestcontrol.com/estimate/xyz' } }) };
+    expect(await immediateOnlyLinkSendCheck('See it: wavespest.co/l/Ab12cD')).toEqual({ present: true, label: 'Service report' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'ab12cd', kind: 'other', target_url: 'https://evil.example/appointment/abcDEF123_-xyz789QWERTY' } }) };
+    expect(await immediateOnlyLinkSendCheck('See it: wavespest.co/l/Ab12cD')).toEqual({ present: false });
   });
 
   test('long-form bearers on the branded short host are the same served pages — fenced like the portal origin (GH Codex #3844 r8 P1)', async () => {
@@ -1183,7 +1192,7 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
     const prev = process.env.GATE_APPOINTMENT_PAGE;
     try {
       wire();
-      mockBuilders.short_codes = chainBuilder({ firstRow: { code: 'Ab12cD', kind: 'appointment', entity_type: 'scheduled_services', entity_id: 'v1' } });
+      mockBuilders.short_codes = chainBuilder({ firstRow: { code: 'ab12cd', kind: 'appointment', target_url: 'https://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY' } });
       mockBuilders.scheduled_services = chainBuilder({ firstRow: { id: 'v1', customer_id: 'c1' } });
       mockBuilders.customers = chainBuilder({ firstRow: { id: 'c1', account_id: 'acct' }, rows: [{ id: 'c1', account_id: 'acct' }] });
       process.env.GATE_APPOINTMENT_PAGE = 'true';
@@ -1218,22 +1227,39 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
     });
 
-    test('the branded short form resolves through short_codes → scheduled_services, the code lower-cased as the public resolver does (GH Codex #3844 r5 P1)', async () => {
-      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', entity_type: 'scheduled_services', entity_id: 'v1' } });
+    test('the branded short form resolves through short_codes.target_url → reschedule_token, the code lower-cased as the public resolver does (GH Codex #3844 r5 P1)', async () => {
+      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', target_url: `https://portal.wavespestcontrol.com/appointment/${RESCHEDULE}` } });
       expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
       expect(mockBuilders.short_codes.where).toHaveBeenCalledWith({ code: 'ab12cd' });
-      expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ id: 'v1' });
+      expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ reschedule_token: RESCHEDULE });
+    });
+
+    test('a short code is judged by the page it opens, not its kind column (pre-push Codex P0)', async () => {
+      // kind says nothing protected, target is an appointment page → bound like the long form.
+      wireAccount({ recipientRows: [acct('c1')], linkCustomer: acct('c9', 'other-acct'), visit: { id: 'v1', customer_id: 'c9' },
+        shortRow: { code: 'ab12cd', kind: 'other', target_url: `https://portal.wavespestcontrol.com/appointment/${RESCHEDULE}` } });
+      expect((await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/appointment link/);
+      expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ reschedule_token: RESCHEDULE });
+      // kind claims appointment, target is not one → unverifiable, refused.
+      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', target_url: 'https://portal.wavespestcontrol.com/estimate/xyz' } });
+      expect((await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/does not open an appointment page/);
+      expect(mockBuilders.scheduled_services.where).not.toHaveBeenCalled();
+      wireAccount({ shortRow: { code: 'rep1', kind: 'service_report', target_url: 'https://evil.example/report/' + REPORT } });
+      expect((await bearerLinkSendCheck('Report: wavespest.co/l/rep1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/does not open a report/);
+      // Neither kind nor target protected → not this seam's business.
+      wireAccount({ shortRow: { code: 'est1', kind: 'estimate', target_url: 'https://portal.wavespestcontrol.com/estimate/xyz' } });
+      expect(await bearerLinkSendCheck('See it: wavespest.co/l/est1', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
     });
 
     test('an expired short link refuses — /l/:code answers 410 past expires_at even while the visit or report still exists (pre-push Codex P1)', async () => {
       const gone = new Date(Date.now() - 60_000).toISOString();
-      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', entity_type: 'scheduled_services', entity_id: 'v1', expires_at: gone } });
+      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', target_url: `https://portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, expires_at: gone } });
       expect((await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/appointment link has expired/);
       expect(mockBuilders.scheduled_services.where).not.toHaveBeenCalled();
-      wireAccount({ shortRow: { code: 'rep1', kind: 'service_report', entity_type: 'service_records', entity_id: 'r1', expires_at: gone } });
+      wireAccount({ shortRow: { code: 'rep1', kind: 'service_report', target_url: `https://portal.wavespestcontrol.com/report/${REPORT}`, expires_at: gone } });
       expect((await bearerLinkSendCheck('Report: wavespest.co/l/rep1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/service report link has expired/);
       // Still live (future expiry, or none) passes as before.
-      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', entity_type: 'scheduled_services', entity_id: 'v1', expires_at: new Date(Date.now() + 60_000).toISOString() } });
+      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', target_url: `https://portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, expires_at: new Date(Date.now() + 60_000).toISOString() } });
       expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
     });
 
@@ -1278,9 +1304,9 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       expect(mockBuilders.service_records.where).toHaveBeenCalledWith({ report_view_token: REPORT });
       expect(mockBuilders.service_records.where).toHaveBeenCalledWith({ status: 'completed', report_template_version: 'service_report_v1' });
       expect(mockBuilders.service_records.whereNotNull).toHaveBeenCalledWith('report_view_token');
-      wireAccount({ shortRow: { code: 'rep1', kind: 'service_report', entity_type: 'service_records', entity_id: 'r1' } });
+      wireAccount({ shortRow: { code: 'rep1', kind: 'service_report', target_url: `https://portal.wavespestcontrol.com/report/${REPORT}` } });
       expect(await bearerLinkSendCheck('Report: wavespest.co/l/rep1', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
-      expect(mockBuilders.service_records.where).toHaveBeenCalledWith({ id: 'r1' });
+      expect(mockBuilders.service_records.where).toHaveBeenCalledWith({ report_view_token: REPORT });
     });
 
     test('a suppressed typed report, a vanished record, or another account\'s report refuses', async () => {
