@@ -360,11 +360,11 @@ async function claimFollowUps(trx, { limit, preview }) {
     if (out.length >= limit) break;
     await lockProspectDomain(trx, c.target_domain);
     const r = await trx('seo_link_prospects').where({ id: c.id }).forUpdate().first();
-    if (!r || r.claimed_at || r.outreach_status !== 'sent' || !['none', 'due'].includes(r.follow_up_status)) continue;
+    if (!r || r.claimed_at || r.outreach_status !== 'sent' || !['none', 'due'].includes(r.follow_up_status) || !OUTREACH_TYPES.includes(r.link_type)) continue;
     if (r.domain_id && await trx('seo_link_domains').where({ id: r.domain_id }).whereIn('agent_state', nonClaimableDomainStates()).first('id')) continue;
     const p = r.path_id ? await trx('seo_link_acquisition_paths').where({ id: r.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'revision', 'agent_completable', 'execution_after_send') : null;
     if (!eligible(r, p)) continue;
-    const n = await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent', status: r.status, path_id: r.path_id }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
+    const n = await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent', status: r.status, path_id: r.path_id, link_type: r.link_type }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
       .update({ claimed_at: now, claimed_by: WORKER, follow_up_status: 'due', leased_path_revision: p.revision == null ? null : Number(p.revision), updated_at: now });
     if (n) out.push({ ...r, follow_up_status: 'due', claimed_at: now, claimed_by: WORKER, lease_token: now.toISOString() });
   }
@@ -544,6 +544,13 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
 }
 
 const followUpLease = (p) => p.follow_up_status === 'due' && p.outreach_status === 'sent';
+// the path the follow-up was leased on is no longer the row's path at that revision (superseded, or revised in place)
+async function followUpPathMoved(prospect) {
+  if (!prospect.path_id) return true;
+  const path = await db('seo_link_acquisition_paths').where({ id: prospect.path_id }).first('id', 'revision', 'superseded_by');
+  if (!path || path.superseded_by) return true;
+  return prospect.leased_path_revision != null && path.revision != null && Number(path.revision) !== Number(prospect.leased_path_revision);
+}
 // the follow-up lane's report: drafted → the follow-up parked for the bridge's decision; failed → due again (the next
 // sweep re-leases it); skipped → skipped for good, with the worker's reason. Any other outcome is not this lane's.
 const FOLLOW_UP_OUTCOMES = ['drafted', 'failed', 'skipped'];
@@ -553,6 +560,15 @@ async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
   const now = new Date();
   const release = { claimed_at: null, claimed_by: null, updated_at: now };
   const note = body.notes || null;
+  // the draft is bound to the path revision the lease stamped (the sender's boundToRevision refuses a stale one): a
+  // path revised or superseded while the drafter held the lease makes the copy obsolete — the follow-up returns to
+  // `due` (re-leased, re-drafted against the current route) rather than parking a draft nothing can send
+  if (outcome === 'drafted' && await followUpPathMoved(prospect)) {
+    const n = await db('seo_link_prospects').where({ id: prospect.id, follow_up_status: 'due', outreach_status: 'sent' }).where('claimed_at', leaseDate).update({ ...release, follow_up_status: 'due' });
+    if (!n) return { ok: false, code: 'stale_lease', error: 'lease expired or reclaimed; re-claim before reporting' };
+    logger.info(`[link-worker] follow-up report ${prospect.id} outcome=drafted discarded — its acquisition path moved while drafting`);
+    return { ok: false, code: 'path_moved', error: 'the placement\'s acquisition path changed while drafting; the follow-up was discarded — it is re-leased against the current path' };
+  }
   const patch = outcome === 'drafted'
     ? { ...release, follow_up_subject: body.outreach_subject, follow_up_body: body.outreach_body, follow_up_status: 'drafted', ...(note ? { notes: prospect.notes ? `${prospect.notes}\n${note}` : note } : {}) }
     : outcome === 'skipped'

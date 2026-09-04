@@ -1043,3 +1043,56 @@ describe('Codex r1 on #3854', () => {
     expect(await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'sent', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: false, code: 'send_in_flight' });
   });
 });
+
+describe('Codex r2 on #3854', () => {
+  test('P1: a recovered row whose previous follow-up is still ambiguous takes no new pitch until it is reconciled', async () => {
+    const s = await conversation();
+    gmail.sendMessage.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'send_failed' });
+    // the verifier lost the link and recovery reopened the row (the pitch's state reset; the follow-up's is not the recovery's to clear — it refuses on an ambiguous one, emulated here as if it had not)
+    Object.assign(placement(s.db), { status: 'prospect', outreach_status: 'drafted', outreach_sent_at: null, outreach_attempted_at: null, outreach_thread_ref: null });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', draftHash: M.draftHash(placement(s.db)), now: LATER })).toMatchObject({ ok: false, code: 'needs_reconcile' });
+    expect(Outreach.checkSendPreconditions({ prospect: { ...placement(s.db) }, gateOn: true, dailyCount: 0, cap: 12 })).toMatchObject({ ok: false, code: 'needs_reconcile' });
+    expect(gmail.sendMessage).toHaveBeenCalledTimes(1); // the failed follow-up only
+    // settled ⇒ the pitch may go again
+    expect((await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'sent', approvedBy: 'Adam', followUp: true })).ok).toBe(true);
+    expect(Outreach.checkSendPreconditions({ prospect: { ...placement(s.db) }, gateOn: true, dailyCount: 0, cap: 12 }).code).not.toBe('needs_reconcile');
+  });
+  test('P1: a follow-up drafted against a path revised or superseded during the lease is discarded and returned to due (never a draft nothing can send)', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY), follow_up_subject: null, follow_up_body: null });
+    let [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
+    expect(placement(s.db).leased_path_revision).toBe(1);
+    storedPath(s.db).revision = 2; // the investigator revised the path in place while the drafter held the lease
+    expect(await worker.report({ prospect_id: s.row.id, outcome: 'drafted', lease_token: l.lease_token, outreach_subject: 'Re: A resource for your readers', outreach_body: FOLLOW_UP_BODY })).toMatchObject({ ok: false, code: 'path_moved' });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'due', follow_up_subject: null, claimed_at: null });
+    [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true }); // re-leased at the current revision
+    expect(placement(s.db).leased_path_revision).toBe(2);
+    storedPath(s.db).superseded_by = uid();
+    expect(await worker.report({ prospect_id: s.row.id, outcome: 'drafted', lease_token: l.lease_token, outreach_subject: 'Re: A resource for your readers', outreach_body: FOLLOW_UP_BODY })).toMatchObject({ ok: false, code: 'path_moved' });
+    storedPath(s.db).superseded_by = null;
+    [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
+    expect(await worker.report({ prospect_id: s.row.id, outcome: 'drafted', lease_token: l.lease_token, outreach_subject: 'Re: A resource for your readers', outreach_body: FOLLOW_UP_BODY })).toMatchObject({ ok: true, follow_up_status: 'drafted' });
+  });
+  test('P2: a lane edit out of outreach committed under the lock leases nothing', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY) });
+    s.db._beforeResolve = (table, db) => { if (table === 'seo_link_prospects') db._tables.seo_link_prospects[0].link_type = 'directory'; };
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toEqual([]);
+    s.db._beforeResolve = null;
+    expect(placement(s.db).claimed_at).toBeFalsy();
+  });
+  test('P2: a pitch reconciled as sent WITHOUT a Gmail thread reference schedules no follow-up (the reply check could never prove silence); with one, it does', async () => {
+    const s = scenario({ policy: AUTO_POLICY });
+    await nightly(s.db);
+    Object.assign(placement(s.db), { outreach_status: 'send_error', outreach_send_token: null, outreach_thread_ref: null });
+    expect((await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'sent', approvedBy: 'Adam' })).ok).toBe(true);
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', outreach_status: 'sent' });
+    expect(placement(s.db).follow_up_due_at).toBeFalsy(); // (the store seeds no follow_up_status key; the DB default is 'none')
+    const t = scenario({ policy: AUTO_POLICY });
+    await nightly(t.db);
+    Object.assign(placement(t.db), { outreach_status: 'send_error', outreach_send_token: null, outreach_thread_ref: 'thr9' });
+    expect((await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'sent', approvedBy: 'Adam' })).ok).toBe(true);
+    expect(placement(t.db).follow_up_due_at).toBeTruthy();
+  });
+});

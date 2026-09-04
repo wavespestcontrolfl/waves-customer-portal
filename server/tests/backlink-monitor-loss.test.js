@@ -579,6 +579,20 @@ describe('lost-link recovery', () => {
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_attempts/); // retry budget restarts, history kept
     expect(updates[0].patch.notes).toMatch(/^placed via signup\nLost-link recovery/);
     expect(scorer.scoreCandidates).not.toHaveBeenCalled();
+    // the re-pitch is a NEW outreach cycle (§6.4): the previous cycle's follow-up state and the stale Gmail thread go
+    // with the pitch's, and the follow-up's attempt joins the same append-only ledger the cap counts
+    expect(updates[0].patch).toEqual(expect.objectContaining({ outreach_thread_ref: null, follow_up_status: 'none', follow_up_due_at: null, follow_up_subject: null, follow_up_body: null, follow_up_send_token: null, follow_up_attempted_at: null, follow_up_sent_at: null, follow_up_skipped_reason: null }));
+    expect(updates[0].patch.quality_signals.__raw).toMatch(/\|\| COALESCE\(to_jsonb\(follow_up_attempted_at\), '\[\]'::jsonb\)/);
+  });
+
+  test('a lost row whose follow-up send is still ambiguous (sending / send_error) is NOT reopened — the Sent folder settles it first', async () => {
+    const updates = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', follow_up_status: 'send_error' }; if (op === 'update') { updates.push(st.payload); return 1; } } });
+    const scorer = { scoreCandidates: jest.fn() };
+    const r = await recovery.queueLostDomains([loss], { scorer });
+    expect(r).toEqual(expect.objectContaining({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: expect.stringMatching(/follow-up is send_error — reconcile/) }] }));
+    expect(updates).toHaveLength(0);
+    expect(scorer.scoreCandidates).not.toHaveBeenCalled();
   });
 
   test('a concurrent insert of the same (domain, page) is ignored, counted as a skip, and does not abort the batch', async () => {

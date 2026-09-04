@@ -159,7 +159,14 @@ async function queueOne(loss, out, scoreMod) {
     // it to 'lost' when the inbound link disappears — that EXACT-page row is
     // REOPENED as a fresh prospect (the worker only claims status='prospect').
     // Rows rejected by the owner are left alone.
-    const exists = await byDomain(db('seo_link_prospects'), domain).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type', 'domain_id', 'path_id', 'target_url');
+    const exists = await byDomain(db('seo_link_prospects'), domain).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type', 'domain_id', 'path_id', 'target_url', 'follow_up_status');
+    // a follow-up whose send is still ambiguous (claimed `sending`, or errored before the Sent-folder reconcile) may
+    // have reached the inbox: the conversation is not over, and a re-pitch cannot open beside it — reconcile first
+    if (exists && exists.status === 'lost' && ['sending', 'send_error'].includes(exists.follow_up_status)) {
+      out.skipped++;
+      out.reasons.push({ domain, reason: `lost placement's follow-up is ${exists.follow_up_status} — reconcile it before re-pitching` });
+      return;
+    }
     if (exists && exists.status === 'lost' && NON_OUTREACH_TYPES.has(exists.link_type)) {
       // A lost signup-lane placement (citation/directory/social) is not an
       // outreach target; reopening it would hand it to the citation runner.
@@ -211,10 +218,17 @@ async function queueOne(loss, out, scoreMod) {
           // inside one ET calendar day counts against the cap — however many
           // times the row is recovered, lost and reopened.
           outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null, outreach_attempted_at: null,
+          // …and the thread with them: the re-pitch opens a NEW Gmail thread, so a stale reference could only attach
+          // the next follow-up's reply check to the old conversation
+          outreach_thread_ref: null,
+          // the follow-up is per OUTREACH CYCLE (§6.4: one per pitch): the re-pitch schedules its own once it sends,
+          // so the previous cycle's follow-up state goes with the pitch's — its attempt joins the same ledger below
+          follow_up_status: 'none', follow_up_due_at: null, follow_up_subject: null, follow_up_body: null,
+          follow_up_send_token: null, follow_up_attempted_at: null, follow_up_sent_at: null, follow_up_skipped_reason: null,
           // the reopened conversation re-enters the one-conversation-per-inbox guard (plan §13): its closure stamp goes
           conversation_closed_at: null,
           quality_signals: trx.raw(
-            "jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{lost_recovery}', 'true'::jsonb, true), '{lost_reason}', to_jsonb(?::text), true), '{prior_outreach_sent_at}', COALESCE(to_jsonb(outreach_sent_at), COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_sent_at', 'null'::jsonb), true), '{prior_outreach_attempts}', CASE WHEN jsonb_typeof(COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_attempts') = 'array' THEN quality_signals -> 'prior_outreach_attempts' ELSE '[]'::jsonb END || COALESCE(to_jsonb(outreach_attempted_at), '[]'::jsonb), true), '{prior_attempts}', to_jsonb(COALESCE(attempts, 0)), true)",
+            "jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{lost_recovery}', 'true'::jsonb, true), '{lost_reason}', to_jsonb(?::text), true), '{prior_outreach_sent_at}', COALESCE(to_jsonb(outreach_sent_at), COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_sent_at', 'null'::jsonb), true), '{prior_outreach_attempts}', CASE WHEN jsonb_typeof(COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_attempts') = 'array' THEN quality_signals -> 'prior_outreach_attempts' ELSE '[]'::jsonb END || COALESCE(to_jsonb(outreach_attempted_at), '[]'::jsonb) || COALESCE(to_jsonb(follow_up_attempted_at), '[]'::jsonb), true), '{prior_attempts}', to_jsonb(COALESCE(attempts, 0)), true)",
             [loss.lost_reason || 'unknown'],
           ),
           notes: exists.notes ? `${exists.notes}\n${note}` : note,

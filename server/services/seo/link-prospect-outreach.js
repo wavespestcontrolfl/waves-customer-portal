@@ -139,6 +139,9 @@ function checkSendPreconditions({ prospect, gateOn, dailyCount, cap, followUp = 
   if (!prospect) return { ok: false, code: 'not_found' };
   if (!OUTREACH_TYPE_SET.has(prospect.link_type)) return { ok: false, code: 'not_outreach' };
   if (followUp) return checkFollowUpPreconditions({ prospect, dailyCount, cap });
+  // a follow-up still ambiguous from an earlier cycle (a recovered row reopened before its reconcile) may have reached
+  // the inbox: no new pitch until the Sent folder settles it (the same rule the initial lane applies to its own states)
+  if (M.AMBIGUOUS_SEND_STATUSES.includes(prospect.follow_up_status)) return { ok: false, code: 'needs_reconcile' };
   if (prospect.outreach_sent_at || prospect.outreach_status === 'sent') {
     return { ok: false, code: 'already_sent' };
   }
@@ -542,7 +545,7 @@ async function lockedSendRow(trx, { prospectId, prospect, mode, inbox, followUp 
   const current = await trx('seo_link_prospects').where({ id: prospectId }).first();
   const sendable = followUp
     ? current && current.outreach_status === 'sent' && current.follow_up_status === 'drafted'
-    : current && SENDABLE_STATUSES.includes(current.status) && (mode !== 'auto' || current.status === 'prospect');
+    : current && SENDABLE_STATUSES.includes(current.status) && (mode !== 'auto' || current.status === 'prospect') && !M.AMBIGUOUS_SEND_STATUSES.includes(current.follow_up_status);
   if (!sendable) return { ok: false, code: 'not_actionable' };
   if (followUp && mode === 'auto' && current.follow_up_skipped_reason === M.REPLY_CHECK_FAILED) return { ok: false, code: 'not_authorized', error: 'the reply check failed on an earlier automatic attempt — the follow-up is the owner\'s' };
   if (current.target_domain !== prospect.target_domain) return { ok: false, code: 'not_actionable', error: 'the placement moved to another domain while you looked at it — reload and send again' };
@@ -822,15 +825,17 @@ async function reconcileInitial({ prospect, outcome, approvedBy }) {
   // a confirmed send opens the conversation (→ contacted) on a row still awaiting one; a row whose lifecycle the
   // admin already advanced by hand (watching / lost / placed …) keeps that lifecycle — only the send stamp settles
   const sentAt = prospect.outreach_sent_at || now;
+  // the confirmed pitch schedules its follow-up like a clean send does (§6.4) — ONLY when the send left a Gmail thread
+  // reference for the reply check to read (an errored send captured none, and the reconcile cannot supply one): a
+  // pitch confirmed from the Sent folder without a thread grows no follow-up; its silence is the owner's read
+  const schedule = prospect.outreach_thread_ref ? { follow_up_status: 'none', follow_up_due_at: M.followUpDueAt(sentAt) } : {};
   const patch = outcome === 'sent'
     ? {
         ...(SENDABLE_STATUSES.includes(prospect.status) ? { status: 'contacted', parked_from_status: null } : {}),
         outreach_status: 'sent',
         outreach_sent_at: sentAt,
         outreach_send_token: null,
-        // the confirmed pitch schedules its follow-up like a clean send does (§6.4)
-        follow_up_status: 'none',
-        follow_up_due_at: M.followUpDueAt(sentAt),
+        ...schedule,
         notes: prospect.notes ? `${prospect.notes}\n${note}` : note,
         updated_at: now,
       }
