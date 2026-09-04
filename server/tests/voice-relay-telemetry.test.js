@@ -151,6 +151,23 @@ describe('per-turn stats', () => {
     expect(entry.done).toBe(true);
   });
 
+  test('an EQUAL repeated chunk at the start of an utterance is not mistaken for a cumulative snapshot (codex r11 P2)', () => {
+    const { convo } = convoWithSpokenTurn();
+    convo.say('very very effective');
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'very' });
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'very' });
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'effective' });
+    const entry = agentEntries(convo)[0];
+    expect(entry.played).toBe('very very effective');
+    expect(entry.done).toBe(true);
+    // …while a redelivered identical whole chunk still dedupes.
+    const again = convoWithSpokenTurn({ callSid: 'CA-tel-dup' });
+    again.convo.say('Hello there, this is Sandy.');
+    again.convo.handleRelayEvent({ type: 'tokens-played', tokens: 'Hello there,' });
+    again.convo.handleRelayEvent({ type: 'tokens-played', tokens: 'Hello there,' });
+    expect(agentEntries(again.convo)[0].played).toBe('Hello there,');
+  });
+
   // ⭐ ONE CALLER TURN, TWO UTTERANCES. A read-tool round speaks its filler,
   // the tool runs, then the answer is spoken. Tokens belong to the utterance
   // they fit, never to "the latest one".

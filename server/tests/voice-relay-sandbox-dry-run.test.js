@@ -145,7 +145,7 @@ describe('RelayConversation.sandbox', () => {
 
 describe('every call_log query site is either sandbox-excluding or audited as safe', () => {
   // A source scanner, not a hand-picked list: every file under server/services,
-  // server/routes and server/scripts that queries call_log must either apply
+  // server/routes, server/scripts and the repo-root scripts/ that queries call_log must either apply
   // whereNotSandboxCall / read VOICE_RELAY_SANDBOX_SOURCE row-level, or be
   // listed here with the reason a sandbox row (inbound, no recording, no
   // extraction, no customer_id, no disposition; relay-written transcript)
@@ -258,6 +258,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
   walk(path.join(ROOT, 'services'));
   walk(path.join(ROOT, 'routes'));
   walk(path.join(ROOT, 'scripts'));
+  walk(path.join(ROOT, '..', 'scripts')); // repo-root operator scripts (codex r11 P2: the inbound routing audit)
 
   test('no call_log reader is unclassified', () => {
     expect(offenders).toEqual([]);
@@ -276,6 +277,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/intelligence-bar/comms-tools.js', 'services/dashboard-alerts.js',
     'services/ads/google-call-bridge.js', 'services/email-bounce-rescue.js',
     'services/agent-estimate-context.js', 'services/estimator-engine/context-builder.js',
+    '../scripts/twilio/audit-inbound-routing.js',
   ])('%s applies whereNotSandboxCall', (rel) => {
     expect(fs.readFileSync(path.join(ROOT, rel), 'utf8')).toMatch(/whereNotSandboxCall\(/);
   });

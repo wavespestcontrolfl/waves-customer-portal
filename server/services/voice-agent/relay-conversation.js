@@ -704,7 +704,9 @@ class RelayConversation {
     const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
     const extend = (entry) => {
       const prev = entry.played || '';
-      if (!prev || text.startsWith(prev)) return text;
+      // Only a STRICTLY longer prefix is a cumulative snapshot; an equal chunk
+      // goes through the planned-continuation check below (codex r11 P2).
+      if (!prev || (text.length > prev.length && text.startsWith(prev))) return text;
       const appended = `${prev}${/^[,.;:!?]/.test(text) ? '' : ' '}${text}`;
       // A chunk that repeats the tail is a duplicate notification ONLY when
       // the planned text does not continue with it — "very very effective"
