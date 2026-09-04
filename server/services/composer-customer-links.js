@@ -517,8 +517,9 @@ function canonicalPortalToken(run, hosts, pathRe, { anyScheme = false } = {}) {
   const m = pathRe.exec(url.pathname.replace(/\/+$/, ''));
   return m ? m[1] : null;
 }
-function canonicalSecureToken(run, hosts) {
-  return canonicalPortalToken(run, hosts, /^\/secure\/([A-Za-z0-9_-]{16,})$/i);
+const SECURE_PATH_RE = /^\/secure\/([A-Za-z0-9_-]{16,})$/i;
+function canonicalSecureToken(run, hosts, opts) {
+  return canonicalPortalToken(run, hosts, SECURE_PATH_RE, opts);
 }
 
 /**
@@ -650,7 +651,7 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
   {
     label: 'Card request',
     fragment: /\/secure\//i,
-    token: canonicalSecureToken,
+    token: (run, host) => canonicalSecureToken(run, host, ANY_SCHEME),
     applies: async (token) => {
       const row = await db('appointment_card_requests').where({ token }).first('kind');
       return row?.kind === 'visit';
@@ -1053,13 +1054,13 @@ async function checkContractLinks(ctx, contracts) {
     const tokenHash = require('./contracts').hashContractToken(token);
     const row = await db('customer_contracts')
       .where({ share_token_hash: tokenHash })
-      .first('id', 'customer_id', 'status', 'share_token_expires_at', ...CONTRACT_GUIDE_COLUMNS);
+      .first('id', 'customer_id', 'status', 'share_token_expires_at', ...CONTRACT_GUIDE_COLUMNS, ...CONTRACT_SIGN_COLUMNS);
     if (row) {
       const dead = terminal(row.status)
         || (row.share_token_expires_at && new Date(row.share_token_expires_at).getTime() <= Date.now());
       if (dead) return refuseSend(NOT_LIVE);
       if (await isMarketingGuideContract(row)) return refuseSend(MARKETING_GUIDE_REFUSAL);
-      const bad = await ownedByRecipient(ctx, row.customer_id, 'contract signing link');
+      const bad = (await ownedByRecipient(ctx, row.customer_id, 'contract signing link')) || (await unsignableContractRefusal(row));
       if (bad) return bad;
       ctx.bearers += 1;
       if (!contracts.some((c) => c.tokenHash === tokenHash)) contracts.push({ id: row.id, tokenHash, delivered: true });
@@ -1068,13 +1069,13 @@ async function checkContractLinks(ctx, contracts) {
     if (!ctx.contractId || !require('../utils/composer-contract-token').verifyComposerContractToken(ctx.contractId, token)) {
       return refuseSend(NOT_LIVE);
     }
-    const contract = await db('customer_contracts').where({ id: ctx.contractId }).first('id', 'customer_id', 'status', ...CONTRACT_GUIDE_COLUMNS);
+    const contract = await db('customer_contracts').where({ id: ctx.contractId }).first('id', 'customer_id', 'status', ...CONTRACT_GUIDE_COLUMNS, ...CONTRACT_SIGN_COLUMNS);
     const { shareLinkWritableStatuses } = require('../routes/admin-contracts');
     if (!contract || !shareLinkWritableStatuses(contract).includes(String(contract.status || '').toLowerCase())) {
       return refuseSend(NOT_LIVE);
     }
     if (await isMarketingGuideContract(contract)) return refuseSend(MARKETING_GUIDE_REFUSAL);
-    const bad = await ownedByRecipient(ctx, contract.customer_id, 'contract signing link');
+    const bad = (await ownedByRecipient(ctx, contract.customer_id, 'contract signing link')) || (await unsignableContractRefusal(contract));
     if (bad) return bad;
     ctx.bearers += 1;
     if (!contracts.some((c) => c.tokenHash === tokenHash)) contracts.push({ id: contract.id, tokenHash, delivered: false });
@@ -1091,8 +1092,12 @@ async function checkContractLinks(ctx, contracts) {
 async function checkCardLinks(ctx, cards) {
   for (const run of secureLinkRuns(ctx.runs)) {
     const token = canonicalSecureToken(run, ctx.hosts);
-    if (!token) continue; // the Auto Pay seam already refused a non-canonical /secure run
-    const row = await db('appointment_card_requests').where({ token }).first('id', 'kind', 'status', 'customer_id', 'scheduled_service_id', 'sent_at');
+    // Refused HERE too (GH Codex #3851 r2 P1): the Auto Pay seam refuses a
+    // non-canonical /secure run at every caller, but this seam never leans
+    // on that order — an http:// or look-alike card link is not a bearer
+    // this send may carry.
+    if (!token) return refuseSend('A /secure link in this message is not on the Waves portal — remove it before sending.');
+    const row = await db('appointment_card_requests').where({ token }).first('id', 'kind', 'status', 'customer_id', 'scheduled_service_id', 'sent_at', 'selected_plan', 'annual_prepay_term_id');
     if (!row || row.kind !== 'visit') continue; // unknown → the Auto Pay seam's verdict; customer-kind → its own
     if (row.status !== 'pending') return refuseSend('This card request link is no longer live — remove it and insert a fresh one.');
     if (row.sent_at) return refuseSend('This card request was already texted — the customer gets one card request per appointment. Remove the link before sending.');
@@ -1110,7 +1115,13 @@ async function checkCardLinks(ctx, cards) {
     if (funnel?.action !== 'link_created' || !String(funnel.secureUrl || '').endsWith(`/secure/${token}`)) {
       return refuseSend(`${cardRequestSkipReason(funnel?.reason)} — remove the card request link before sending.`);
     }
-    if (!cards.some((c) => c.token === token)) cards.push({ token, scheduledServiceId: row.scheduled_service_id });
+    if (!cards.some((c) => c.token === token)) {
+      // The email twin follows the copy variant the funnel would send for
+      // THIS request (GH Codex #3851 r2 P1) — the same rule that picked the
+      // inserted text, re-read at the send.
+      const planChoice = !!(await cardRequestPlanVariant(row.scheduled_service_id, row, { secure_link: funnel.secureUrl }));
+      cards.push({ token, scheduledServiceId: row.scheduled_service_id, planChoice });
+    }
   }
   return null;
 }
@@ -1264,17 +1275,28 @@ async function markCardRequestSends(claim) {
       logger.warn(`[composer-links] card request sent marker threw for visit ${scheduledServiceId}: ${err.message}`);
     }
   }
-  for (const { scheduledServiceId, token } of claim.cards) {
+  for (const { scheduledServiceId, token, planChoice } of claim.cards) {
     try {
       const visit = await db('scheduled_services')
         .where({ id: scheduledServiceId })
         .first('id', 'customer_id', 'service_type', 'scheduled_date');
-      if (visit) card.startInvitationEmailLeg({ visit, secureUrl: `${publicPortalUrl()}/secure/${token}`, planChoice: false });
+      if (visit) card.startInvitationEmailLeg({ visit, secureUrl: `${publicPortalUrl()}/secure/${token}`, planChoice: !!planChoice });
     } catch (err) {
       logger.warn(`[composer-links] card request email twin did not start for visit ${scheduledServiceId}: ${err.message}`);
     }
   }
   return allMarked;
+}
+
+// The funnel's own copy-variant rule (requestCardForAppointment's SMS path:
+// usedTemplateKey === PLAN_TEMPLATE_KEY): the plan-choice copy only when the
+// link will open the plan picker for THIS request AND the variant template
+// is active — else null, and the base copy stands. One rule for the inserted
+// text and for the email twin's variant at the send (GH Codex #3851 r2 P1).
+async function cardRequestPlanVariant(visitId, request, vars) {
+  const card = require('./appointment-card-request');
+  if (!await card.planInviteApplies(visitId, request || null)) return null;
+  return card.renderTemplate({ first_name: 'there', service_type: 'service', date_line: '', cancel_fee_line: '', ...vars }, card.PLAN_TEMPLATE_KEY);
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,14 +1386,24 @@ async function buildCardRequestLink(visit) {
     return { url: null, line: '', reason: cardRequestSkipReason(result?.reason) };
   }
   const profile = await db('customers').where({ id: visit.customer_id }).first('first_name');
-  const body = await card.renderTemplate({
+  const templateVars = {
     first_name: profile?.first_name || 'there',
     service_type: visit.service_type || 'service',
     date_line: card.dateLineFor(visit.scheduled_date),
     secure_link: result.secureUrl,
     cancel_fee_line: card.cancelFeeLine(),
-  });
-  if (!body) return { url: null, line: '', reason: CARD_REQUEST_SKIP_REASONS.template_inactive };
+  };
+  // The base render is the live kill-switch check, exactly as in the
+  // funnel; only then the plan-choice overlay, honoring the EXISTING
+  // request's own selection (a reused /book link that already picked
+  // prepay opens the prepay_selected page — the base "only charged after
+  // service" copy is false there; GH Codex #3851 r2 P1).
+  const base = await card.renderTemplate(templateVars);
+  if (!base) return { url: null, line: '', reason: CARD_REQUEST_SKIP_REASONS.template_inactive };
+  const request = await db('appointment_card_requests')
+    .where({ token: result.secureUrl.slice(result.secureUrl.lastIndexOf('/') + 1) })
+    .first('id', 'status', 'token', 'selected_plan', 'annual_prepay_term_id');
+  const body = (await cardRequestPlanVariant(visit.id, request, templateVars)) || base;
   const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
   if (!String(body).includes(stripPortalUrlScheme(result.secureUrl))) {
     return { url: null, line: '', reason: 'The card request text in Templates has no {secure_link} placeholder — add it before texting a card link' };
@@ -1511,6 +1543,27 @@ const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
 // The customer_contracts columns the marketing-guide predicate reads (plus
 // the template id its joined columns come from).
 const CONTRACT_GUIDE_COLUMNS = ['contract_type', 'document_template_id', 'document_render_summary', 'requires_signature_snapshot'];
+const CONTRACT_SIGN_COLUMNS = ['payment_method_id'];
+
+// The public /:token/sign handler's own eligibility, re-read at the send
+// (GH Codex #3851 r2 P2): an Auto Pay authorization whose payment method is
+// gone answers 409 there, a contract on an inactive customer 410 — the
+// composer never texts a signing link the page cannot complete. (A deleted
+// customer already fails ownedByRecipient.)
+async function unsignableContractRefusal(contract) {
+  if (contract.contract_type === 'autopay_authorization') {
+    const method = contract.payment_method_id
+      ? await db('payment_methods')
+        .where({ id: contract.payment_method_id, customer_id: contract.customer_id })
+        .whereNotNull('stripe_payment_method_id')
+        .first('id')
+      : null;
+    if (!method) return refuseSend('The payment method on this Auto Pay authorization is no longer available — remove the signing link and pick a method on the Contracts page first.');
+  }
+  const customer = await db('customers').where({ id: contract.customer_id }).first('id', 'active');
+  if (!customer || customer.active === false) return refuseSend('This contract belongs to an inactive customer — remove the signing link before sending.');
+  return null;
+}
 const MARKETING_GUIDE_REFUSAL = 'This is a customer guide — it goes out from Document Templates (marketing opt-in and opt-out footer), never the composer. Remove the link before sending.';
 
 /**

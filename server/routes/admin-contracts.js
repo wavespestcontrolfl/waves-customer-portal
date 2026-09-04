@@ -424,8 +424,20 @@ async function activateEachPreparedShareLink(links, req, activations) {
   for (const link of links) {
     let refusal = null;
     await db.transaction(async (trx) => {
+      // Lock order (GH Codex #3851 r2 P2): unlocked peek → CUSTOMER row FOR
+      // UPDATE → contract, the order /:id/cancel and /:token/sign hold — the
+      // event insert below takes a key lock on customers, so contract-first
+      // cycled with a cancellation waiting on this contract.
+      const peek = await trx('customer_contracts').where({ id: link.id }).first('id', 'customer_id');
+      if (!peek) { refusal = NOT_LIVE; return; }
+      if (peek.customer_id) await trx('customers').where({ id: peek.customer_id }).forUpdate().first('id');
       const locked = await trx('customer_contracts').where({ id: link.id }).forUpdate().first();
       if (!locked) { refusal = NOT_LIVE; return; }
+      if (String(locked.customer_id || '') !== String(peek.customer_id || '')) {
+        // Repointed while we waited (a merge-undo) — retry under the right lock.
+        refusal = 'Contract status changed. Refresh and try again.';
+        return;
+      }
       if (SHARE_LINK_TERMINAL_STATUSES.includes(locked.status)) {
         refusal = 'This contract is no longer awaiting a signature — remove the signing link before sending.';
         return;

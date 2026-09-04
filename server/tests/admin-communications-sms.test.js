@@ -36,6 +36,9 @@ jest.mock('../services/autopay-setup-link', () => ({ KIND: 'customer', setupLink
 jest.mock('../services/appointment-card-request', () => ({
   LIVE_VISIT_STATUSES: ['pending', 'confirmed'],
   TEMPLATE_KEY: 'secure_appointment_card',
+  PLAN_TEMPLATE_KEY: 'secure_appointment_card_plans',
+  planInviteApplies: jest.fn(async () => false),
+  renderTemplate: jest.fn(async () => null),
   startInvitationEmailLeg: jest.fn(),
   requestCardForAppointment: jest.fn(async () => ({ requested: false, action: 'link_created', reason: 'request_exists', secureUrl: 'https://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY' })),
   markCardLinkSendOutcome: jest.fn(async () => true),

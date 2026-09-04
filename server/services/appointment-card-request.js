@@ -3505,6 +3505,8 @@ module.exports = {
   cancelFeeLine,
   LIVE_VISIT_STATUSES,
   TEMPLATE_KEY,
+  PLAN_TEMPLATE_KEY,
+  planInviteApplies,
   claimCardLinkSend,
   markCardLinkSendOutcome,
   startInvitationEmailLeg,

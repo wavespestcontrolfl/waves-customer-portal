@@ -95,6 +95,25 @@ describe('activatePreparedShareLinks (the /sms send, before the provider call)',
     expect(events()).toEqual([{ type: 'share_link_created', meta: { expiresAt: w.payload.share_token_expires_at.toISOString(), source: 'composer' } }]);
   });
 
+  test('locks the CUSTOMER row before the contract (unlocked peek → customer FOR UPDATE → contract), the order cancel and public signing hold; a contract repointed meanwhile refuses (GH Codex #3851 r2 P2)', async () => {
+    mockRows = { customer_contracts: base, customers: { id: 'c1' } };
+    require('../models/db').mockClear();
+    expect((await activatePreparedShareLinks([{ id: 'k1', tokenHash: HASH, delivered: false }], req)).ok).toBe(true);
+    const db = require('../models/db');
+    const order = db.mock.calls.map(([t]) => t).slice(0, 3);
+    expect(order).toEqual(['customer_contracts', 'customers', 'customer_contracts']);
+    const [peek, customer, lock] = db.mock.results.map((x) => x.value);
+    expect(peek.forUpdate).not.toHaveBeenCalled();
+    expect(customer.forUpdate).toHaveBeenCalled();
+    expect(customer.filters).toContainEqual({ id: 'c1' });
+    expect(lock.forUpdate).toHaveBeenCalled();
+    mockWrites.length = 0;
+    let n = 0;
+    mockRows = { customer_contracts: () => (n++ === 0 ? base : { ...base, customer_id: 'c2' }) };
+    expect(await activatePreparedShareLinks([{ id: 'k1', tokenHash: HASH, delivered: false }], req)).toEqual({ ok: false, error: expect.stringMatching(/status changed/) });
+    expect(updates('customer_contracts')).toHaveLength(0);
+  });
+
   test('an expired earlier link is replaced — the prior hash/window/shared_at ride back for the restore', async () => {
     const old = { status: 'viewed', share_token_hash: 'x'.repeat(64), share_token_expires_at: new Date(Date.now() - DAY), shared_at: new Date(Date.now() - 20 * DAY) };
     mockRows = { customer_contracts: { ...base, ...old } };
