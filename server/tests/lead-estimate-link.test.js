@@ -763,7 +763,8 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
           // the tier-2 duplicate-repeat lookup: .where({ customer_id, lead_type, status: 'duplicate' })
           // .whereNull('deleted_at').orderBy(...).first()
           if (table === 'leads' && clause && 'lead_type' in clause) {
-            const rep = { whereNull: () => rep, orderBy: () => Promise.resolve(opts.customerDuplicateLeads || (opts.customerDuplicateLead ? [opts.customerDuplicateLead] : [])) };
+            const repeatRows = () => Promise.resolve(opts.customerDuplicateLeads || (opts.customerDuplicateLead ? [opts.customerDuplicateLead] : []));
+            const rep = { whereNull: () => rep, orderBy: repeatRows, orderByRaw: (sql) => { calls.orderByRaw = sql; return repeatRows(); } };
             return rep;
           }
           // customerHasWonLead: .where({ customer_id, status: 'won' })
@@ -1221,6 +1222,21 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     // The sibling's date decided origination only; the funnel row the win
     // lands on is markConverted's to settle from the row itself (r21 P2, r27).
     expect(markConverted).toHaveBeenCalledWith('R-new', expect.objectContaining({ onlyIfStatusIn: ['duplicate'] }));
+  });
+
+  test('self-booking: repeat siblings rank by their LATEST wizard submission (a rerun on an older token bumps updated_at), not by insertion (codex r31 P2)', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLead: { id: 'R-rerun', status: 'duplicate', customer_id: 'c1', extracted_data: { duplicate_of_lead_id: 'L-gone' }, first_contact_at: '2026-09-01T12:00:00Z' },
+      leadsById: {},
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(database._calls.orderByRaw).toMatch(/COALESCE\(updated_at, created_at\) DESC/);
+    expect(markConverted).toHaveBeenCalledWith('R-rerun', expect.anything());
   });
 
   test('self-booking: two repeats of a shared parent staff closed as duplicate BY HAND (no marker) are ONE ancestry keyed on that parent — the newest stands in, nothing is ambiguous (codex r28 P1)', async () => {
@@ -2419,12 +2435,12 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
           return {
             first: async () => leadsById[clause.id] || null,
             whereNull: (col) => ({
-              // linkRescuedLead: .whereNull('estimate_id').whereNotIn('status', CLOSED)
-              // .where(identity as read).update(...) (codex r27 P1)
-              whereNotIn: (statusCol, vals) => ({
+              // linkRescuedLead: .whereNull('estimate_id').whereIn('status', OPEN)
+              // .where(identity as read).update(...) (codex r27 P1, r31 P1)
+              whereIn: (statusCol, vals) => ({
                 where: (identity) => ({
                   update: async (patch) => {
-                    updates.push({ id: clause.id, whereNull: col, whereNotIn: vals, identity, patch });
+                    updates.push({ id: clause.id, whereNull: col, whereIn: vals, identity, patch });
                     return opts.linkRows == null ? 1 : opts.linkRows;
                   },
                 }),
@@ -2503,7 +2519,6 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
   const types = (db) => db._activities.map((a) => a.row.activity_type);
   // The open-status guard the rescue stamp applies (CLOSED_LEAD_STATUSES order).
-  const CLOSED = ['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'];
 
   // The bridge call log must not leak across tests (the replay cases assert
   // not.toHaveBeenCalled).
@@ -2626,7 +2641,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateSent({ estimateId: 'e-3', sendMethod: 'both', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-unlinked', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-3' }) },
+      { id: 'L-unlinked', whereNull: 'estimate_id', whereIn: OPEN_LEAD_STATUSES, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-3' }) },
       { id: 'L-unlinked', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-unlinked'),
     ]);
@@ -2672,7 +2687,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateSent({ estimateId: 'e-6', sendMethod: 'email', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-qw', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-6' }) },
+      { id: 'L-qw', whereNull: 'estimate_id', whereIn: OPEN_LEAD_STATUSES, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-6' }) },
       { id: 'L-qw', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-qw'),
     ]);
@@ -2691,7 +2706,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateViewed({ estimateId: 'e-7', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-view', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-7' }) },
+      { id: 'L-view', whereNull: 'estimate_id', whereIn: OPEN_LEAD_STATUSES, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-7' }) },
       { id: 'L-view', whereIn: ['new', 'contacted', 'estimate_sent'], patch: expect.objectContaining({ status: 'estimate_viewed' }) },
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_viewed']);
@@ -2711,7 +2726,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
     // Only the (lost) stamp attempt ran — no status flip, no estimate_created, no estimate_sent.
     expect(database._updates).toEqual([
-      { id: 'L-race', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-9' }) },
+      { id: 'L-race', whereNull: 'estimate_id', whereIn: OPEN_LEAD_STATUSES, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-9' }) },
     ]);
     expect(database._activities).toEqual([]);
   });
@@ -2730,7 +2745,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     // Link already won by the concurrent event (no estimate_created re-log), but
     // this send's status flip + estimate_sent activity must NOT be dropped.
     expect(database._updates).toEqual([
-      { id: 'L-same', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-10' }) },
+      { id: 'L-same', whereNull: 'estimate_id', whereIn: OPEN_LEAD_STATUSES, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-10' }) },
       { id: 'L-same', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-same'),
     ]);
@@ -2751,7 +2766,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateSent({ estimateId: 'e-27', sendMethod: 'sms', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-root27', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: { customer_id: null, phone: '9415550142', email: 'a@example.com', estimate_id: null }, patch: expect.objectContaining({ estimate_id: 'e-27' }) },
+      { id: 'L-root27', whereNull: 'estimate_id', whereIn: OPEN_LEAD_STATUSES, identity: { customer_id: null, phone: '9415550142', email: 'a@example.com', estimate_id: null }, patch: expect.objectContaining({ estimate_id: 'e-27' }) },
     ]);
     expect(database._activities).toEqual([]);
   });
@@ -2785,7 +2800,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
     // Only the guarded (no-op) stamp attempt ran — no link, no status flip, no activity.
     expect(database._updates).toEqual([
-      { id: 'L-conv', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-11' }) },
+      { id: 'L-conv', whereNull: 'estimate_id', whereIn: OPEN_LEAD_STATUSES, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-11' }) },
     ]);
     expect(database._activities).toEqual([]);
   });
@@ -2834,7 +2849,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     });
 
     expect(database._updates).toEqual([
-      { id: 'L-older', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-13' }) },
+      { id: 'L-older', whereNull: 'estimate_id', whereIn: OPEN_LEAD_STATUSES, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-13' }) },
       { id: 'L-older', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-older'),
     ]);
@@ -2854,7 +2869,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     });
 
     expect(database._updates).toEqual([
-      { id: 'L-mirror', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-14' }) },
+      { id: 'L-mirror', whereNull: 'estimate_id', whereIn: OPEN_LEAD_STATUSES, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-14' }) },
       { id: 'L-mirror', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-mirror'),
     ]);
@@ -2898,7 +2913,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateSent({ estimateId: 'e-16', sendMethod: 'sms', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-cust', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-16' }) },
+      { id: 'L-cust', whereNull: 'estimate_id', whereIn: OPEN_LEAD_STATUSES, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-16' }) },
       { id: 'L-cust', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-cust'),
     ]);
