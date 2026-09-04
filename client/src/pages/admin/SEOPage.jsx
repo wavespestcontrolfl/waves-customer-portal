@@ -3585,7 +3585,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     const body = { draft_hash: row.draft?.hash || "", ...(acks[ackKey] && lookupHash ? { reviewed_lookup_hash: lookupHash } : {}) };
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/send`, { method: "POST", body });
-      setResult({ tone: D.green, text: `Sent the pitch to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}` });
+      setResult({ tone: D.green, text: `Sent the ${row.action === "outreach_followup" ? "follow-up" : "pitch"} to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}` });
       await refresh();
     } catch (e) {
       setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
