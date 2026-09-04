@@ -133,12 +133,43 @@ function spokenCallerName(customer) {
 // by name; everyone else is announced as an unknown number (the digits
 // themselves are intentionally not read aloud).
 function connectingAnnouncement(row) {
-  const name = String(parseJsonObject(row?.metadata).screen_caller_name || '')
+  const meta = parseJsonObject(row?.metadata);
+  const name = String(meta.screen_caller_name || '')
     .replace(/[^\p{L}\p{N}\s.'’-]/gu, '')
     .trim()
     .slice(0, 60);
+  // Sandy PR 2A: a transferred call carries its ≤20-word whisper — read from
+  // the persisted packet only, spoken only here (after press-1; the screen
+  // leg stays generic). No packet ⇒ today's line.
+  if (meta.relay_handoff && typeof meta.relay_handoff === 'object') {
+    const { transferWhisper } = require('../services/voice-agent/relay-transfer');
+    return transferWhisper(meta.relay_handoff, name);
+  }
   if (name) return `Connecting your call from ${name}.`;
   return 'Connecting your call from an unknown number.';
+}
+
+/**
+ * The staff simul-ring: <Dial record> with the press-1 screen on every leg
+ * and /call-complete as the action. Shared by /voice and the PR 2A transfer
+ * in /relay-complete — one shape, so the screen URLs never diverge.
+ */
+function appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec) {
+  const dial = twiml.dial({
+    record: 'record-from-answer-dual',
+    recordingStatusCallback: '/api/webhooks/twilio/recording-status',
+    recordingStatusCallbackEvent: 'completed',
+    timeout: ringTimeoutSec,
+    action: '/api/webhooks/twilio/call-complete',
+    answerOnBridge: true,
+  });
+  for (const number of forwardNumbers) {
+    dial.number({
+      url: '/api/webhooks/twilio/inbound-forward-screen',
+      method: 'POST',
+    }, number);
+  }
+  return dial;
 }
 
 async function fetchTwilioCall(callSid) {
@@ -722,6 +753,48 @@ function queueVoiceMessageSync(callSid) {
 
 const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
 const RELAY_COMPLETE_ACTION = '/api/webhooks/twilio/relay-complete';
+/**
+ * Sandy PR 2A: the relay ended with reason 'transfer' — hand the caller to
+ * the staff simul-ring. The outcome stamp is idempotent (the tool already
+ * wrote ai_transferred with the packet; this covers a packet write that
+ * never landed — still terminal for the socket's reconcile). No summary and
+ * no id ride the URL; the whisper is read from the row after press-1. A
+ * sandbox call (?sandbox=1) never rings staff: the transfer is on its own
+ * row already, the leg simply ends. No staff numbers ⇒ voicemail, never a
+ * stranded caller.
+ */
+async function appendRelayTransfer(req, twiml, callSid) {
+  if ((req.query || {}).sandbox === '1') {
+    logger.info(`[relay-complete] sandbox transfer for ${maskSid(callSid)} — hanging up (no staff ring on the sandbox)`);
+    twiml.hangup();
+    return;
+  }
+  if (callSid) {
+    const { RELAY_TERMINAL_OUTCOMES } = require('../services/voice-agent/relay-protocol');
+    await db('call_log').where('twilio_call_sid', callSid)
+      .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', RELAY_TERMINAL_OUTCOMES))
+      .update({ call_outcome: 'ai_transferred', updated_at: new Date() })
+      .catch((err) => logger.warn(`[relay-complete] ai_transferred stamp failed for ${maskSid(callSid)}: ${err.message}`));
+  }
+  const forwardNumbers = getFallbackForwardNumbers();
+  if (forwardNumbers.length === 0) {
+    logger.error(`[relay-complete] transfer for ${maskSid(callSid)} but no staff forward numbers configured — voicemail`);
+    appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
+    return;
+  }
+  appendStaffRingDial(twiml, forwardNumbers, 30);
+}
+
+/** The relay end frame's HandoffData: a JSON object string, or nothing. Never throws. */
+function parseHandoffData(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
 // The production relay profile (STT / turn-taking tuning attributes + the
 // telemetry <Parameter>s). relay-profiles is the only chooser; every relay
 // leg spreads this in. Unset ⇒ {} ⇒ byte-identical TwiML.
@@ -1304,21 +1377,7 @@ router.post('/voice', async (req, res) => {
       return res.type('text/xml').send(twiml.toString());
     }
 
-    const dial = twiml.dial({
-      record: 'record-from-answer-dual',
-      recordingStatusCallback: '/api/webhooks/twilio/recording-status',
-      recordingStatusCallbackEvent: 'completed',
-      timeout: ringTimeoutSec,
-      action: '/api/webhooks/twilio/call-complete',
-      answerOnBridge: true,
-    });
-
-    for (const number of forwardNumbers) {
-      dial.number({
-        url: '/api/webhooks/twilio/inbound-forward-screen',
-        method: 'POST',
-      }, number);
-    }
+    appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec);
 
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
@@ -1492,6 +1551,13 @@ router.post('/relay-complete', async (req, res) => {
   const failed = !!errorCode || ['failed', 'error', 'disconnected'].includes(sessionStatus);
   const failure = errorCode || sessionStatus || 'unknown';
   const twiml = new VoiceResponse();
+  // The relay's own end frame (`HandoffData`, a JSON string Twilio passes
+  // through verbatim; absent on a caller hang-up or a failure). Tolerated,
+  // never trusted beyond `reason`.
+  if (!failed && parseHandoffData(body.HandoffData).reason === 'transfer') {
+    await appendRelayTransfer(req, twiml, callSid);
+    return res.type('text/xml').send(twiml.toString());
+  }
   // A sandbox call (the signed ?sandbox=1 the sandbox route itself rendered)
   // never falls to voicemail: a recording on a test call would enter the
   // voicemail pipeline as a customer message. It ends with the failure
@@ -2839,6 +2905,8 @@ router._test = {
   knownCallerPhoneExists,
   preconnectScreenDecision,
   connectingAnnouncement,
+  appendStaffRingDial,
+  parseHandoffData,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
   foldVoiceMetadata,

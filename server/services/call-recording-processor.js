@@ -28,6 +28,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { resolveLocation } = require('../config/locations');
+const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
@@ -6773,6 +6774,16 @@ const CallRecordingProcessor = {
             recording_url_present: !!call.recording_url,
           },
         };
+        // Sandy PR 2A: a transferred call's recording is the STAFF leg only
+        // (the <Dial> records from answer). The relay's own played-text
+        // transcript already sits on the row — keep it ahead of the human
+        // segment and its provenance under transcription_metadata.relay,
+        // instead of letting the staff-leg transcript replace it.
+        const relaySegment = composeRelaySegment(call);
+        if (relaySegment) {
+          transcription = `${relaySegment.text}\n\n[Staff segment]\n${transcription}`;
+          transcriptionProvenance.metadata.relay = relaySegment.metadata;
+        }
         const transcriptUpdate = {
           transcription,
           transcription_status: 'completed',

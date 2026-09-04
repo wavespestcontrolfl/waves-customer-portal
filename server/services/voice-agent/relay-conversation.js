@@ -85,7 +85,7 @@ const OFFICE_HOURS_TIMEOUT_MS = 2000;
 // the outcome is unknown and NOT to retry.
 const TOOL_TIMEOUT_MS = 3000;
 const WRITE_TOOL_TIMEOUT_MS = 8000;
-const WRITE_TOOLS = new Set(['capture_lead', 'request_booking', 'request_reservice']);
+const WRITE_TOOLS = new Set(['capture_lead', 'request_booking', 'request_reservice', 'transfer_to_office']);
 const TOOL_TIMEOUT_TEXT =
   'Could not look that up right now. Do not guess — tell the caller a Waves team member will follow up with the details.';
 const WRITE_TOOL_TIMEOUT_TEXT =
@@ -330,16 +330,43 @@ function bookingPromptAddendum() {
  * Phase-1 SYSTEM_PROMPT byte-for-byte (gate off ⇒ no behavior change).
  * The booking addendum appears only while GATE_VOICE_AI_BOOKING is ALSO on.
  */
-function buildBasePrompt(contextEnabled, language = null) {
+// PR 2A (GATE_VOICE_RELAY_TRANSFER). Office open ⇒ the transfer rules;
+// closed/unknown ⇒ the callback rules. Gate off ⇒ neither (byte-identical).
+function transferPromptAddendum(officeOpen) {
+  if (officeOpen === true) {
+    return [
+      '',
+      'TRANSFER TO A PERSON (transfer_to_office):',
+      '- The office is open right now. Transfer when the caller asks for a person, after two',
+      '  misunderstandings, for refund, cancellation, medical-exposure, legal, or property-damage',
+      '  topics, or when a tool has failed twice.',
+      '- Say ONE short line first ("Let me get someone for you"), then call transfer_to_office',
+      '  with a summary of at most twenty words. Once it returns, your part of the call is over:',
+      '  say nothing further and call no more tools.',
+    ].join('\n');
+  }
+  return [
+    '',
+    'WHEN THEY ASK FOR A PERSON (office closed):',
+    '- The office is closed right now, so you cannot transfer the call. Say so plainly, state',
+    '  when the office reopens ONLY from the latest CLOCK DATA (never guess), and offer a',
+    '  callback: take their details with capture_lead and say a Waves team member will call',
+    '  them back. Use lead_quality "hot" if it is a genuine emergency.',
+  ].join('\n');
+}
+
+function buildBasePrompt(contextEnabled, language = null, { officeOpen = null } = {}) {
   // Spanish session (GATE_VOICE_SPANISH_MENU — the caller pressed 2): the
   // language addendum is appended LAST so it governs everything above it.
   // No/English language ⇒ byte-identical to before.
   const { isSpanish, LANGUAGE_ADDENDUM_ES } = require('./relay-language');
+  const { isTransferGateOn } = require('./relay-transfer');
+  const transferSuffix = isTransferGateOn() ? '\n' + transferPromptAddendum(officeOpen) : '';
   const langSuffix = isSpanish(language) ? '\n' + LANGUAGE_ADDENDUM_ES : '';
-  if (!contextEnabled) return SYSTEM_PROMPT + langSuffix;
+  if (!contextEnabled) return SYSTEM_PROMPT + transferSuffix + langSuffix;
   const base = SYSTEM_PROMPT.replace(PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT) + '\n' + contextPromptAddendum();
   const { isBookingEnabled } = require('./relay-booking');
-  return (isBookingEnabled() ? base + '\n' + bookingPromptAddendum() : base) + langSuffix;
+  return (isBookingEnabled() ? base + '\n' + bookingPromptAddendum() : base) + transferSuffix + langSuffix;
 }
 
 // ── Voice profile (brand-voice Loop 2) ─────────────────────────────────────
@@ -486,6 +513,10 @@ class RelayConversation {
     this._interruptFollowupTimer = null;
     // PR 1B: the barge-in the NEXT caller message is annotated with (gate on).
     this._pendingInterruptNote = null;
+    // PR 2A: every tool call's outcome (name + ok) for the handoff packet;
+    // the one-per-call transfer latch.
+    this._toolOutcomes = [];
+    this._transferRequested = false;
     this._eventShapesSeen = new Set();
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
     // active relay profile and the voice it rendered) — stamped into the
@@ -1391,7 +1422,46 @@ class RelayConversation {
       // estimate). Recorded as owed commitments at close.
       notePromise: (kind, verdict = true, extra = {}) => { this._promises.set(String(kind || ''), { verdict: verdict === true, expectation: extra?.expectation || null, at: new Date() }); },
       markReserviceFiled: () => { this._reserviceFiled = true; },
+      // ── PR 2A transfer ─────────────────────────────────────────────────
+      transferRequested: () => this._transferRequested,
+      markTransferRequested: () => { this._transferRequested = true; },
+      say: (text) => { this.say(text); },
+      // The relay leg ends with reason 'transfer'; /relay-complete rings the office.
+      endForTransfer: () => {
+        if (this._ending) return;
+        this._ending = true;
+        try { if (this._endSession) this._endSession({ reason: 'transfer', captured: this.leadCaptured }); } catch (e) {
+          logger.error(`[voice-relay] endSession (transfer) failed callSid=${this.callSid}: ${e.message}`);
+        }
+      },
+      // SERVER state for the handoff packet — never the model's claims.
+      handoffFacts: () => ({
+        verificationTier: convo._callerVerified === true
+          ? ((convo._callerContext && convo._callerContext.tier === 'full') ? 'full' : 'redacted')
+          : 'unverified',
+        from: this.from || null,
+        language: this.language || null,
+        factsCollected: { ...(convo._estimateFields || {}) },
+        tools: this._toolOutcomes.slice(),
+        commitments: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict === true, expectation: v.expectation || null })),
+        turnCount: this._userTurns.length,
+      }),
+      // The owner-fenced packet write (same fence as end()'s reconcile).
+      writeHandoff: (packet) => {
+        const { writeHandoffPacket } = require('./relay-transfer');
+        return writeHandoffPacket(db, { callSid: this.callSid, packet, fence: (q) => this._fenceOwner(q), terminal: RELAY_TERMINAL_OUTCOMES });
+      },
     };
+  }
+
+  /** The claim-owner fence every close-time write rides (PR 2A: shared with the handoff packet). */
+  _fenceOwner(q) {
+    return this.sessionKey
+      ? q.whereRaw(
+        "((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)",
+        [this.sessionKey],
+      )
+      : q;
   }
 
   /**
@@ -1479,7 +1549,11 @@ class RelayConversation {
     //      cache on every single turn — it now rides the user turn below.
     if (!this._systemBlocks) {
       const callerBlock = (contextEnabled && this._callerContext?.block) || '';
-      const bareBase = buildBasePrompt(contextEnabled, this.language);
+      // PR 2A: the office state at freeze time decides the transfer tool and
+      // its prompt rules for the whole call (the prompt and tool list are
+      // frozen per session — cache-prefix stability).
+      const officeOpen = toolCtx.officeOpenNow();
+      const bareBase = buildBasePrompt(contextEnabled, this.language, { officeOpen });
       const basePrompt = bareBase + (callerBlock ? `\n\n${callerBlock}` : '');
       const profileText = getVoiceProfileTextNonBlocking();
       this._systemBlocks = [{
@@ -1489,7 +1563,7 @@ class RelayConversation {
       }];
       // Frozen with the system prompt: tools render BEFORE system, so a tool
       // list that changed mid-call (a gate flipped) would invalidate everything.
-      this._tools = activeTools();
+      this._tools = activeTools({ officeOpen });
       // Version stamps: the prompt WITHOUT the per-caller block (so two calls
       // on the same prompt hash alike), the caller block on its own, and the
       // tool schemas the model saw. Hashes only — nothing is stored twice.
@@ -1651,6 +1725,8 @@ class RelayConversation {
           const out = await this._executeToolBounded(block.name, block.input, toolCtx);
           stat.toolMs += now() - toolStartAt;
           stat.toolCount += 1;
+          // ok = the tool answered (a timeout / in-flight refusal is not an answer).
+          this._toolOutcomes.push({ name: block.name, ok: ![TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out) });
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
         }
         this.messages.push({ role: 'user', content: results });
@@ -1797,12 +1873,7 @@ class RelayConversation {
         // NULL owner allowed: an unverified session (claim never won — the
         // row is unclaimed) still owns its own honest reconcile; only a
         // FOREIGN owner means the record belongs to a replacement.
-        const fenceOwner = (q) => (this.sessionKey
-          ? q.whereRaw(
-            "((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)",
-            [this.sessionKey],
-          )
-          : q);
+        const fenceOwner = (q) => this._fenceOwner(q);
         fenceOwner(reconcileQuery);
         const updated = await reconcileQuery
           .update({
@@ -1826,7 +1897,9 @@ class RelayConversation {
         // the recording processor.
         let salvaged = 0;
         if (transcriptUpdate && !updated) {
-          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).where('call_outcome', 'relay_failed'))
+          // ai_transferred (PR 2A) likewise: the outcome is the transfer's,
+          // the AI segment's transcript is still this session's to write.
+          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).whereIn('call_outcome', ['relay_failed', 'ai_transferred']))
             .update({ ...transcriptUpdate, updated_at: new Date() });
           if (salvaged) logger.info(`[voice-relay] transcript kept on a relay_failed row callSid=${maskSid(this.callSid)} turns=${this._transcript.length}`);
         }

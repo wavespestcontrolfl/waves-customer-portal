@@ -2021,3 +2021,10 @@ Everything else from the day's hardening stands: image-first visuals, pair-verif
 **Decisions.** (1) A card on the Invoices page (Tier 2 inline `D` palette, matching the file), not a new route: the operator resolves a parked notice in the same place they record any other manual payment. Hidden when nothing is parked, so an ordinary day is byte-identical. (2) One row per notice — payer · amount · memo · park reason — with the server's candidate list as a dropdown ordered exact-amount + name match → exact amount → near-amount leads; the server re-validates the pick live, so the dropdown is only a convenience. (3) Amber border and amber reason badges; red only for `apply_failed` and `sender_unverified` (a failed settlement or a spoof are genuine alerts — every other reason is ordinary review work). (4) Apply confirms in a native dialog naming invoice, amount, payer and that the receipt goes out email + SMS (owner ruling 2026-09-02); the toast distinguishes receipt sent / not delivered / unknown (settled but a later step threw). (5) A 404 from the list route keeps the card hidden quietly (routes not yet deployed); other errors render inline in the card.
 
 **Verification.** vitest: candidate ordering + label (`AdminInvoicesPage.test.jsx`); ui-verify desktop 1440 + mobile 390 screenshots on the PR.
+
+## 2026-09-04 — Sandy transfer card on the Calls tab (PR 2A)
+
+**Surface:** `/admin/communications#tab=calls` (CallLogTabV2, Tier 1 V2).
+**What:** when a call row carries `metadata.relay_handoff` (a Sandy → office transfer), a compact read-only "Sandy transfer" block renders in the expanded row above the Call intelligence panel: intent, summary, unresolved question, facts collected, tools (ok/failed), commitments, verification tier badge, turn count; a "context unavailable" state when the packet write failed. Data already flows through the list's `metadata` — no new endpoint.
+**Style:** `components/ui` Badge + zinc ramp + `border-hairline`, the same `bg-zinc-50 ml-8` block shape as the Recording / Transcription blocks; `text-14 md:text-12` body. `alert-fg` only on a failed tool (a genuine failure signal). Verified at 1440 and 390.
+
