@@ -168,6 +168,19 @@ const followUpDueAt = (sentAt) => addETDaysAtWallClock(sentAt, FOLLOW_UP_DELAY_D
 // FOLLOW_UP_STATUSES_ANY is the widest set, for a query that narrows per path afterwards.
 const FOLLOW_UP_JUDGE_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
 const FOLLOW_UP_STATUSES_ANY = Object.freeze(['contacted', ...FOLLOW_UP_JUDGE_STATUSES]);
+// §6.4 — why a pending follow-up can never be composed, authorized or sent on its pinned route, or null: the route GONE
+// (the path deleted — FK SET NULL — or superseded: a sent conversation is pinned to its path, the mover never re-paths
+// it), the domain RE-RANKED to another path (the conversation frozen off the best path: no authority is ever decided for
+// it, domainRefusal refuses the old path), or the placement OUT of the path's follow-up lifecycle (a send-first row the
+// verifier promoted to live). ONE reader for the lease, the drafter's report, the send and the reconcile — the places
+// that retire it (`skipped`, the reason stamped) so the conversation completes and the closure sweep releases the inbox.
+function followUpRetirement({ row, path, domain = null }) {
+  if (!path) return 'acquisition path deleted before the follow-up';
+  if (path.superseded_by) return 'acquisition path superseded before the follow-up';
+  if (domain && domain.best_path_id && row.path_id && domain.best_path_id !== row.path_id) return 'domain re-ranked to another path before the follow-up';
+  if (!FOLLOW_UP_STATUSES(path).includes(row.status)) return `placement left the follow-up lifecycle (${row.status})`;
+  return null;
+}
 const FOLLOW_UP_STATUSES = (path) => Object.freeze(['contacted', ...(path && require('./link-authority-policy').submitFirst(path) ? FOLLOW_UP_JUDGE_STATUSES : [])]);
 // a follow-up the bridge must DECIDE (the communication/followup instance exists for it): drafted — while the
 // placement is still in the lifecycle a follow-up may act on for ITS path (FOLLOW_UP_STATUSES: a send-first row the
@@ -265,4 +278,4 @@ async function reviewByEmail(q, emails) {
 // have delivered the pitch, so the inbox stays held and the authority it was claimed under stays pinned until then
 const AMBIGUOUS_SEND_STATUSES = Object.freeze(['sending', 'send_error']);
 
-module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, RECIPIENT_REVIEW_REQUIRED, OWNER_MARKERS, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_STATUSES_ANY, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, RECIPIENT_REVIEW_REQUIRED, OWNER_MARKERS, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_STATUSES_ANY, FOLLOW_UP_JUDGE_STATUSES, followUpRetirement, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };

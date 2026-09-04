@@ -160,13 +160,15 @@ function checkSendPreconditions({ prospect, gateOn, dailyCount, cap, followUp = 
   // lifecycle status (lost/rejected/placed/contacted) must not be sent even if a stale draft lingers.
   if (!SENDABLE_STATUSES.includes(prospect.status)) return { ok: false, code: 'not_actionable' };
   if (prospect.outreach_status !== 'drafted') return { ok: false, code: 'no_draft' };
-  if (!isValidEmail(prospect.outreach_to_email)) return { ok: false, code: 'invalid_recipient' };
-  if (!prospect.outreach_subject || !prospect.outreach_body) {
-    return { ok: false, code: 'incomplete_draft' };
-  }
+  const bad = draftRefusal(M.draftOf(prospect, false));
+  if (bad) return bad;
   if (dailyCount >= cap) return { ok: false, code: 'rate_limited' };
   return { ok: true };
 }
+// what a send needs of its draft, the pitch's or the follow-up's (M.draftOf): a valid recipient, a subject, a body —
+// the one reader for the preconditions and the locked claim
+const draftRefusal = (draft) => (!isValidEmail(draft.outreach_to_email) ? { ok: false, code: 'invalid_recipient' }
+  : !draft.outreach_subject || !draft.outreach_body ? { ok: false, code: 'incomplete_draft' } : null);
 // the follow-up's shape (§6.4): the initial pitch went out, ONE follow-up ever, drafted, to the thread's recipient. The
 // lifecycle status is narrowed against the PATH under the lock (FOLLOW_UP_STATUSES: the Judge-owned statuses count
 // only on a submit-first path); here the widest set the lane ever accepts.
@@ -175,8 +177,8 @@ function checkFollowUpPreconditions({ prospect, dailyCount, cap }) {
   if (prospect.follow_up_sent_at || prospect.follow_up_status === 'sent') return { ok: false, code: 'already_sent' };
   if (!M.FOLLOW_UP_STATUSES_ANY.includes(prospect.status)) return { ok: false, code: 'not_actionable' };
   if (prospect.follow_up_status !== 'drafted') return { ok: false, code: 'no_draft' };
-  if (!isValidEmail(prospect.outreach_to_email)) return { ok: false, code: 'invalid_recipient' };
-  if (!prospect.follow_up_subject || !prospect.follow_up_body) return { ok: false, code: 'incomplete_draft' };
+  const bad = draftRefusal(M.draftOf(prospect, true));
+  if (bad) return bad;
   if (dailyCount >= cap) return { ok: false, code: 'rate_limited' };
   return { ok: true };
 }
@@ -477,32 +479,15 @@ async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLo
   if (draftHash != null && M.draftHash(draft) !== draftHash) return { ok: false, code: 'draft_changed', error: 'the draft changed while you looked at it — reload and read the current text before sending' };
   const attemptAt = now || new Date();
   const reviewed = await reviewRecipient(trx, { prospectId, recipient: draft.outreach_to_email, mode, reviewedLookupHash });
-  if (!reviewed.ok) {
-    // §13 on a follow-up — the recipient is the THREAD's and cannot be replaced (the pitch's counterpart is re-addressed
-    // on the board): an identified customer / lead contact is a hard block for everyone, so the follow-up ENDS
-    // (skipped, the conversation completes and the closure sweep releases the inbox) rather than staying a drafted row
-    // the nightly retries and the card can never send
-    if (followUp && reviewed.code === 'customer_recipient') {
-      await closeCustomerRecipientFollowUp(trx, prospectId, attemptAt);
-      return { ...reviewed, error: `${reviewed.error} — the follow-up is closed (the thread's recipient cannot change)` };
-    }
-    // …a shared business domain is a STABLE refusal of an AUTOMATIC attempt (only the owner's click acknowledges the
-    // match) — marked on the row so the nightly re-decides the follow-up OWNER_OUTREACH and the card offers it,
-    // rather than retrying an invisible AUTO row every night
-    if (followUp && mode === 'auto' && reviewed.code === 'recipient_review_required') {
-      await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_skipped_reason: M.RECIPIENT_REVIEW_REQUIRED, updated_at: attemptAt });
-      return { ...reviewed, error: `${reviewed.error} — routed to the owner` };
-    }
-    return reviewed;
-  }
+  if (!reviewed.ok) return followUp ? settleRecipientRefusal(trx, { prospectId, reviewed, mode, now: attemptAt }) : reviewed;
   // checked BEFORE the authority step so a capped click never records an approval for a send that did not happen
   const capped = await capRefusal(trx, { mode, policy, cap, now: attemptAt });
   if (capped) return capped;
   // §6.4 — the reply check, BEFORE any authority is granted: a follow-up is never sent without a successful
   // lookup proving silence; a reply or a bounce settles the follow-up as skipped (committed — no approval exists
-  // yet), a lookup failure refuses it and leaves the draft for a later attempt
-  const thread = followUp ? await replyCheck(trx, { prospectId, current, mode, now: attemptAt }) : null;
-  if (thread && !thread.ok) return thread;
+  // yet), a lookup failure refuses it and leaves the draft for a later attempt (a pitch has no thread to read)
+  const thread = await replyCheck(trx, { prospectId, current, mode, now: attemptAt, followUp });
+  if (!thread.ok) return thread;
   // §7 — the authority contract, re-validated under the same lock as the claim.
   // From here on the owner's approval may have been written: a refusal below
   // ROLLS the transaction BACK (thrown, caught by the caller) rather than
@@ -524,6 +509,25 @@ async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLo
   return { ok: true, row: claimedRows[0], authority, draft, thread };
 }
 
+// §13 on a FOLLOW-UP whose recipient the claim refused — the recipient is the THREAD's and cannot be replaced (the
+// pitch's counterpart is re-addressed on the board): an identified customer / lead contact is a hard block for
+// everyone, so the follow-up ENDS (skipped; the conversation completes and the closure sweep releases the inbox)
+// rather than staying a drafted row the nightly retries and the card can never send; a shared business domain is a
+// STABLE refusal of an AUTOMATIC attempt (only the owner's click acknowledges the match) — marked on the row so the
+// nightly re-decides the follow-up OWNER_OUTREACH and the card offers it, rather than retrying an invisible AUTO row
+// every night. Any other refusal stands as the review returned it.
+async function settleRecipientRefusal(trx, { prospectId, reviewed, mode, now }) {
+  if (reviewed.code === 'customer_recipient') {
+    await closeCustomerRecipientFollowUp(trx, prospectId, now);
+    return { ...reviewed, error: `${reviewed.error} — the follow-up is closed (the thread's recipient cannot change)` };
+  }
+  if (mode === 'auto' && reviewed.code === 'recipient_review_required') {
+    await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_skipped_reason: M.RECIPIENT_REVIEW_REQUIRED, updated_at: now });
+    return { ...reviewed, error: `${reviewed.error} — routed to the owner` };
+  }
+  return reviewed;
+}
+
 // a header value from a Gmail metadata-format message
 const headerOf = (msg, name) => { const h = ((msg && msg.payload && msg.payload.headers) || []).find((x) => String(x.name || '').toLowerCase() === name.toLowerCase()); return h ? String(h.value || '') : ''; };
 const addressOf = (from) => { const m = /<([^>]+)>/.exec(from || ''); return M.normalizeEmail(m ? m[1] : from); };
@@ -538,9 +542,10 @@ const withTimeout = (p, ms) => Promise.race([p, new Promise((_, reject) => setTi
  * reads the follow-up as the owner's, the nightly re-selects the domain ON THE MARKER (the failure is stamped with the
  * run's own clock, equal to decided_at — no timestamp would), re-decides it OWNER_OUTREACH and the auto dispatch leaves it; the
  * owner's click re-runs the check, fail-closed the same way. Silence returns the pitch's Message-ID so the follow-up
- * answers it.
+ * answers it. A pitch has no thread to read: ok, nothing to answer.
  */
-async function replyCheck(trx, { prospectId, current, mode, now }) {
+async function replyCheck(trx, { prospectId, current, mode, now, followUp }) {
+  if (!followUp) return { ok: true, inReplyTo: null };
   const failed = async (why) => {
     if (mode === 'auto') await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_skipped_reason: M.REPLY_CHECK_FAILED, updated_at: now });
     return { ok: false, code: 'reply_check_failed', error: `${why}; the follow-up is not sent without proof of silence${mode === 'auto' ? ' — routed to the owner' : ' — retry later'}` };
@@ -594,55 +599,58 @@ async function lockedSendRow(trx, { prospectId, prospect, mode, inbox, followUp 
     ? current && current.outreach_status === 'sent' && current.follow_up_status === 'drafted'
     : current && SENDABLE_STATUSES.includes(current.status) && (mode !== 'auto' || current.status === 'prospect') && !M.AMBIGUOUS_SEND_STATUSES.includes(current.follow_up_status);
   if (!sendable) return { ok: false, code: 'not_actionable' };
-  if (followUp && mode === 'auto' && M.OWNER_MARKERS.includes(current.follow_up_skipped_reason)) return { ok: false, code: 'not_authorized', error: `an earlier automatic attempt was refused (${current.follow_up_skipped_reason}) — the follow-up is the owner's` };
   if (current.target_domain !== prospect.target_domain) return { ok: false, code: 'not_actionable', error: 'the placement moved to another domain while you looked at it — reload and send again' };
   if (!current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
   const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first();
-  if (!pathStanding(onPath)) {
-    // a drafted FOLLOW-UP on a path the investigator SUPERSEDED after the draft was accepted: a sent conversation is
-    // pinned to its path (the mover never re-paths it) and the drafter reclaims none / due only, so the draft could
-    // only ever refuse here — it RETIRES (skipped, as claimFollowUps retires a due one), the conversation completes
-    // and the closure sweep releases the inbox. A path not standing for another reason (a disproof, a human-step
-    // ruling) may recover: the plain refusal stands and the draft waits
-    if (followUp && onPath && onPath.superseded_by) {
-      await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted', path_id: current.path_id })
-        .update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'acquisition path superseded before the follow-up', updated_at: new Date() });
-      logger.info(`[link-outreach] follow-up for ${prospectId} retired — its acquisition path was superseded after the draft`);
-      return { ok: false, code: 'path_moved', error: 'the acquisition path was superseded after the follow-up was drafted; the follow-up is retired' };
-    }
-    return { ok: false, code: 'path_moved' };
-  }
-  if (!boundToRevision(current, onPath)) {
-    // a drafted FOLLOW-UP bound to an earlier revision of a path that is still standing: the route changed in place
-    // (terms, lane, URL) after the draft was accepted. The mover never touches a sent conversation and the drafter
-    // re-leases only none / due — so the stale draft is settled HERE, the one place that reads the binding: the
-    // follow-up returns to due (the draft cleared) and is re-drafted against the current route by the next sweep
-    if (followUp) {
-      await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted', path_id: current.path_id })
-        .update({ follow_up_status: 'due', follow_up_subject: null, follow_up_body: null, follow_up_skipped_reason: null, updated_at: new Date() });
-      logger.info(`[link-outreach] follow-up for ${prospectId} drafted on path revision ${current.leased_path_revision}, path now ${onPath.revision} — back to due for a re-draft`);
-      return { ok: false, code: 'path_moved', error: 'the acquisition path changed after the follow-up was drafted; the draft was discarded — it is re-drafted against the current route' };
-    }
-    return { ok: false, code: 'path_moved' };
-  }
-  // the follow-up's lifecycle set depends on the PATH (§6.4): contacted, plus the Judge-owned statuses on a submit-first path only
-  if (followUp && !M.FOLLOW_UP_STATUSES(onPath).includes(current.status)) return { ok: false, code: 'not_actionable', error: `the placement is ${current.status} — no follow-up on this path from there` };
-  // a drafted follow-up whose DOMAIN re-ranked to another path after the draft: the pinned conversation is frozen off
-  // the best path (no authority is decided for it; domainRefusal would refuse every attempt) — it RETIRES, as
-  // claimFollowUps retires a due one, so the conversation completes and the closure sweep releases the inbox
-  if (followUp && current.domain_id) {
-    const dom = await trx('seo_link_domains').where({ id: current.domain_id }).first('best_path_id');
-    if (dom && dom.best_path_id && dom.best_path_id !== current.path_id) {
-      await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted', path_id: current.path_id })
-        .update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'domain re-ranked to another path before the follow-up', updated_at: new Date() });
-      logger.info(`[link-outreach] follow-up for ${prospectId} retired — its domain re-ranked to another path after the draft`);
-      return { ok: false, code: 'not_authorized', error: 'the domain re-ranked to another path after the follow-up was drafted; the follow-up is retired' };
-    }
-  }
+  // the pitch sends on a standing path at the revision the draft was bound to; the drafted follow-up's route is
+  // SETTLED here (retired, re-drafted or refused — settleDraftedFollowUp), the one place that reads its binding
+  const settled = followUp
+    ? await settleDraftedFollowUp(trx, { prospectId, current, onPath, mode })
+    : (pathStanding(onPath) && boundToRevision(current, onPath) ? null : { ok: false, code: 'path_moved' });
+  if (settled) return settled;
   const draft = M.draftOf(current, followUp);
-  if (!isValidEmail(draft.outreach_to_email) || !draft.outreach_subject || !draft.outreach_body) return { ok: false, code: 'incomplete_draft' };
+  const bad = draftRefusal(draft);
+  if (bad) return bad;
   if (M.normalizeEmail(draft.outreach_to_email) !== inbox) return { ok: false, code: 'recipient_changed', error: 'the draft was re-addressed while you looked at it — reload and send again' };
   return { ok: true, current, onPath, draft };
+}
+
+/**
+ * The drafted FOLLOW-UP's route settlement at the send (§6.4), under the row and path locks of the claim. A sent
+ * conversation is pinned to its path (the mover never re-paths it) and the drafter re-leases none / due only, so a
+ * draft whose route moved could only ever refuse here — it is settled instead, the way the lease and the drafter's
+ * report settle a due one (followUpRetirement): the path SUPERSEDED after the draft → the follow-up RETIRES (skipped;
+ * the conversation completes and the closure sweep releases the inbox); a path not standing for another reason (a
+ * disproof, a human-step ruling) may recover → the plain refusal, the draft waits; bound to an EARLIER REVISION of a
+ * standing path (terms, lane, URL changed in place) → back to due, the draft cleared, re-drafted against the current
+ * route by the next sweep; the placement OUT of the path's follow-up lifecycle → refused; the DOMAIN RE-RANKED to
+ * another path → the pinned conversation is frozen off the best path (no authority is ever decided for it) → RETIRES.
+ * First of all: an AUTOMATIC attempt after an earlier one was refused on an owner marker (reply check failed, recipient
+ * review required) is not the queue's to make — the follow-up is the owner's (followUpReview reads the marker).
+ * Returns the refusal, or null when the draft may send.
+ */
+async function settleDraftedFollowUp(trx, { prospectId, current, onPath, mode }) {
+  if (mode === 'auto' && M.OWNER_MARKERS.includes(current.follow_up_skipped_reason)) return { ok: false, code: 'not_authorized', error: `an earlier automatic attempt was refused (${current.follow_up_skipped_reason}) — the follow-up is the owner's` };
+  const drafted = () => trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted', path_id: current.path_id });
+  if (onPath && onPath.superseded_by) {
+    await drafted().update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'acquisition path superseded before the follow-up', updated_at: new Date() });
+    logger.info(`[link-outreach] follow-up for ${prospectId} retired — its acquisition path was superseded after the draft`);
+    return { ok: false, code: 'path_moved', error: 'the acquisition path was superseded after the follow-up was drafted; the follow-up is retired' };
+  }
+  if (!pathStanding(onPath)) return { ok: false, code: 'path_moved' };
+  if (!boundToRevision(current, onPath)) {
+    await drafted().update({ follow_up_status: 'due', follow_up_subject: null, follow_up_body: null, follow_up_skipped_reason: null, updated_at: new Date() });
+    logger.info(`[link-outreach] follow-up for ${prospectId} drafted on path revision ${current.leased_path_revision}, path now ${onPath.revision} — back to due for a re-draft`);
+    return { ok: false, code: 'path_moved', error: 'the acquisition path changed after the follow-up was drafted; the draft was discarded — it is re-drafted against the current route' };
+  }
+  if (!M.FOLLOW_UP_STATUSES(onPath).includes(current.status)) return { ok: false, code: 'not_actionable', error: `the placement is ${current.status} — no follow-up on this path from there` };
+  const dom = current.domain_id ? await trx('seo_link_domains').where({ id: current.domain_id }).first('best_path_id') : null;
+  if (dom && dom.best_path_id && dom.best_path_id !== current.path_id) {
+    await drafted().update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'domain re-ranked to another path before the follow-up', updated_at: new Date() });
+    logger.info(`[link-outreach] follow-up for ${prospectId} retired — its domain re-ranked to another path after the draft`);
+    return { ok: false, code: 'not_authorized', error: 'the domain re-ranked to another path after the follow-up was drafted; the follow-up is retired' };
+  }
+  return null;
 }
 
 /**
@@ -957,6 +965,23 @@ async function reconcileInitial({ prospect, outcome, approvedBy }) {
   return { ok: true, prospect: rows[0] };
 }
 
+// the reconcile's write (pure): 'sent' settles the follow-up sent; a retirement (`gone` — the owner's skip, or a route
+// the requeue could not re-draft on) settles it skipped with the reason; a plain requeue returns it to drafted. The
+// attempt stamp is cleared ONLY on a confirmed-not-sent requeue: a SKIP of an ambiguous attempt keeps it — Gmail may
+// have delivered the message, and dailySendCount counts every attempt of the ET day against the cap (a sent
+// reconcile keeps it for the same reason)
+function followUpReconcilePatch({ outcome, gone, row, now, approvedBy }) {
+  const at = now.toISOString();
+  const note = outcome === 'sent' ? `Follow-up reconciled as SENT ${at} by ${approvedBy}`
+    : outcome === 'skip' ? `Follow-up skipped ${at} by ${approvedBy} after review — ${gone}`
+      : gone ? `Follow-up reconciled as NOT sent ${at} by ${approvedBy} — ${gone}; follow-up retired`
+        : `Follow-up reconciled as NOT sent (re-queued) ${at} by ${approvedBy}`;
+  const base = { follow_up_send_token: null, notes: row.notes ? `${row.notes}\n${note}` : note, updated_at: now };
+  if (outcome === 'sent') return { ...base, follow_up_status: 'sent', follow_up_sent_at: row.follow_up_sent_at || now };
+  if (gone) return { ...base, follow_up_status: 'skipped', follow_up_skipped_reason: gone, ...(outcome === 'skip' ? {} : { follow_up_attempted_at: null }) };
+  return { ...base, follow_up_status: 'drafted', follow_up_attempted_at: null, follow_up_skipped_reason: null };
+}
+
 // the follow-up's reconcile (§6.4): the same Sent-folder decision over ITS columns — 'sent' settles it (the follow-up
 // instance satisfied, the lifecycle untouched), 'requeue' returns it to drafted with the attempt cleared. Atomic on
 // the follow-up state and token the read observed.
@@ -993,23 +1018,9 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
     // path superseded, or the domain re-ranked to another path — exactly the states the lease and the send retire
     const gone = outcome === 'sent' ? null
       : outcome === 'skip' ? `skipped by ${approvedBy} after review${prospect.follow_up_skipped_reason ? ` (${prospect.follow_up_skipped_reason})` : ''}`
-      : path && path.superseded_by ? 'acquisition path superseded before the follow-up'
-        : dom && dom.best_path_id && row.path_id && dom.best_path_id !== row.path_id ? 'domain re-ranked to another path before the follow-up'
-          : !M.FOLLOW_UP_STATUSES(path).includes(row.status) ? `placement left the follow-up lifecycle (${row.status})` : null;
+        : M.followUpRetirement({ row, path, domain: dom });
     retired = Boolean(gone);
-    const note = outcome === 'sent'
-      ? `Follow-up reconciled as SENT ${now.toISOString()} by ${approvedBy}`
-      : outcome === 'skip'
-        ? `Follow-up skipped ${now.toISOString()} by ${approvedBy} after review — ${gone}`
-        : retired
-          ? `Follow-up reconciled as NOT sent ${now.toISOString()} by ${approvedBy} — ${gone}; follow-up retired`
-        : `Follow-up reconciled as NOT sent (re-queued) ${now.toISOString()} by ${approvedBy}`;
-    const notes = row.notes ? `${row.notes}\n${note}` : note;
-    const patch = outcome === 'sent'
-      ? { follow_up_status: 'sent', follow_up_sent_at: row.follow_up_sent_at || now, follow_up_send_token: null, notes, updated_at: now }
-      : retired
-        ? { follow_up_status: 'skipped', follow_up_skipped_reason: gone, follow_up_send_token: null, follow_up_attempted_at: null, notes, updated_at: now }
-        : { follow_up_status: 'drafted', follow_up_send_token: null, follow_up_attempted_at: null, follow_up_skipped_reason: null, notes, updated_at: now };
+    const patch = followUpReconcilePatch({ outcome, gone, row, now, approvedBy });
     // the CAS the lane has always had (state + token), plus the lifecycle the decision was taken on
     let q = trx('seo_link_prospects').where({ id: prospect.id, follow_up_status: st, status: row.status, path_id: row.path_id });
     q = prospect.follow_up_send_token ? q.where({ follow_up_send_token: prospect.follow_up_send_token }) : q.whereNull('follow_up_send_token');

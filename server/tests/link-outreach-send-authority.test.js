@@ -1277,6 +1277,19 @@ describe('Codex r2 on #3854', () => {
     Object.assign(placement(t.db), { follow_up_status: 'sent' });
     expect(await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: false, code: 'not_reconcilable' });
   });
+  test('P2 (Codex r19): a SKIP of an ambiguous follow-up keeps the attempt stamp (Gmail may have delivered it — the ET-day cap counts every attempt); only a confirmed-not-sent requeue clears it', async () => {
+    const s = await conversation();
+    expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: NOW })).ok).toBe(true);
+    Object.assign(placement(s.db), { follow_up_status: 'send_error', follow_up_send_token: null, follow_up_sent_at: null }); // the ambiguous outcome, the attempt stamped NOW
+    expect(placement(s.db).follow_up_attempted_at).toEqual(NOW);
+    expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true, retired: true });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'skipped', follow_up_attempted_at: NOW });
+    const t = await conversation();
+    expect((await Outreach.sendOutreach({ prospectId: t.row.id, mode: 'auto', followUp: true, now: NOW })).ok).toBe(true);
+    Object.assign(placement(t.db), { follow_up_status: 'send_error', follow_up_send_token: null, follow_up_sent_at: null });
+    expect(await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'requeue', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true });
+    expect(placement(t.db)).toMatchObject({ follow_up_status: 'drafted', follow_up_attempted_at: null });
+  });
   test('P2 (Codex r18): the owner SKIPS a follow-up the POLICY routed to them (OWNER_OUTREACH, no marker) — the Owner queue card\'s terminal action; the conversation then closes on silence', async () => {
     const s = await conversation();
     followUpRow(s.db).level = 'OWNER_OUTREACH'; // unclean copy / a score outside the automatic threshold: the owner's to send
