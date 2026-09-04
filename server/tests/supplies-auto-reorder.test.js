@@ -17,7 +17,7 @@ const mockState = { candidates: [], existing: null, pricing: null, lockedPricing
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy']) q[m] = () => q;
+    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'orWhereExists', 'whereExists', 'from']) q[m] = () => q;
     // The product row lock: from here on the pricing row is the LOCKED one
     // (a test sets lockedPricing to simulate a pricing edit that committed
     // between an unlocked read and the lock).
@@ -314,6 +314,19 @@ test('a deactivated vendor steers nothing: no name, SKU or link on the request, 
   expect(mockState.inserted[0].vendor).toBeNull();
   expect(mockState.inserted[0].metadata).toMatchObject({ vendorId: null, vendorSku: null, vendorProductUrl: null });
   expect(notify.mock.calls[0][2]).not.toContain('gemplers.com');
+});
+
+test('an open auto request is still re-belled after "reorder when low" was turned off; nothing new is raised for that product (Codex r16 P2)', async () => {
+  mockState.candidates = [{ ...lowSign, auto_reorder_enabled: false }];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Gemplers', metadata: { vendorId: 'vend-gemplers' } };
+  const notify = jest.fn(async () => ({}));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
+  expect(notify).toHaveBeenCalledTimes(1);
+  mockState.existing = null; mockState.inserted = [];
+  const none = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+  expect(none.created).toHaveLength(0);
+  expect(mockState.inserted).toHaveLength(0);
 });
 
 test('no reorder_quantity → unconfigured, no row', async () => {
