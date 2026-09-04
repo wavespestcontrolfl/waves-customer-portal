@@ -682,10 +682,16 @@ async function shortCodeRows(runs, scheme = {}) {
   for (const run of shortRuns) {
     const code = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, scheme);
     if (!code) continue;
-    const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'entity_type', 'entity_id');
+    const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'entity_type', 'entity_id', 'expires_at');
     if (row) rows.push(row);
   }
   return rows;
+}
+// /l/:code answers 410 past expires_at (public-shortlinks) — the same
+// predicate, so an expired short bearer never rides an immediate send on
+// the strength of an entity that still exists (pre-push Codex P1).
+function expiredShortRow(row) {
+  return Boolean(row.expires_at) && new Date(row.expires_at).getTime() < Date.now();
 }
 
 const APPOINTMENT_TOKEN_RE = /^\/appointment\/([A-Za-z0-9_-]{16,})$/i;
@@ -899,6 +905,7 @@ async function checkAppointmentLinks(ctx, shortRows, onRecipientAccount) {
     if (bad) return bad;
   }
   for (const row of shortRows.filter((r) => r.kind === 'appointment')) {
+    if (expiredShortRow(row)) return refuseSend('This appointment link has expired — remove it and insert a fresh one.');
     const bad = await bind(row.entity_type === 'scheduled_services' && row.entity_id ? await visitById({ id: row.entity_id }) : null);
     if (bad) return bad;
   }
@@ -930,6 +937,7 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
     if (bad) return bad;
   }
   for (const row of shortRows.filter((r) => r.kind === 'service_report')) {
+    if (expiredShortRow(row)) return refuseSend('This service report link has expired — remove it and insert a fresh one.');
     const bad = await bind(row.entity_type === 'service_records' && row.entity_id ? await publicReport({ id: row.entity_id }) : null);
     if (bad) return bad;
   }

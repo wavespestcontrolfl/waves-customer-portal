@@ -1225,6 +1225,18 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ id: 'v1' });
     });
 
+    test('an expired short link refuses — /l/:code answers 410 past expires_at even while the visit or report still exists (pre-push Codex P1)', async () => {
+      const gone = new Date(Date.now() - 60_000).toISOString();
+      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', entity_type: 'scheduled_services', entity_id: 'v1', expires_at: gone } });
+      expect((await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/appointment link has expired/);
+      expect(mockBuilders.scheduled_services.where).not.toHaveBeenCalled();
+      wireAccount({ shortRow: { code: 'rep1', kind: 'service_report', entity_type: 'service_records', entity_id: 'r1', expires_at: gone } });
+      expect((await bearerLinkSendCheck('Report: wavespest.co/l/rep1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/service report link has expired/);
+      // Still live (future expiry, or none) passes as before.
+      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', entity_type: 'scheduled_services', entity_id: 'v1', expires_at: new Date(Date.now() + 60_000).toISOString() } });
+      expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    });
+
     test('a visit whose owning customer was deleted refuses — the public route 404s it, and a live sibling on the account must not be texted a dead link (pre-push Codex P1)', async () => {
       wireAccount({ linkCustomer: null, visit: { id: 'v1', customer_id: 'c-gone' } });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/${RESCHEDULE}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer resolves/);
