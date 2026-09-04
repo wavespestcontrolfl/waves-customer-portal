@@ -971,6 +971,15 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
       }
     }
+    // A throw carrying an AMBIGUOUS provider outcome (retryable/deferred,
+    // not accepted, not a validator block — the audit write failed after a
+    // Twilio timeout/5xx/429) holds the bearer state exactly as the
+    // resolved-result branch does (GH Codex #3851 r5 P1): the provider may
+    // hold the text, so the claim and the activated link stay consumed.
+    if (err?.providerOutcome && err.providerOutcome.sent !== true && !err.providerOutcome.blocked
+      && (err.providerOutcome.retryable || err.providerOutcome.deferred)) {
+      await holdBearerStateAmbiguous({ code: err.providerOutcome.providerErrorCode || 'PROVIDER_FAILURE' });
+    }
     // Same convention for the card request claim: accepted → mark, else release.
     if (cardClaim) {
       if (err?.providerOutcome?.sent === true) {
@@ -1569,7 +1578,14 @@ function scheduledDateStr(value) {
 // elapsed stay pickable on purpose: those are MISSED visits and the public
 // page offers the "we missed each other" rebook for them.
 function isElapsedSameDayReschedulePlaceholder(svc, now = new Date()) {
-  if (String(svc.status || '').toLowerCase() !== 'rescheduled') return false;
+  return String(svc.status || '').toLowerCase() === 'rescheduled' && isElapsedSameDayVisit(svc, now);
+}
+// The window math alone, status-agnostic: a same-day row whose quoted
+// arrival window has elapsed. The card request pick skips these whatever
+// their status (GH Codex #3851 r5 P2): the funnel rejects a date before
+// today but not an elapsed time today, so a missed visit this morning
+// would be minted for while a later eligible appointment exists.
+function isElapsedSameDayVisit(svc, now = new Date()) {
   if (scheduledDateStr(svc.scheduled_date) !== etDateString(now)) return false;
   const toMin = (t) => {
     const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
@@ -2034,8 +2050,10 @@ function composerLinkBuilders() {
     // The card funnel only accepts its own live statuses — a soonest
     // 'rescheduled' placeholder would be picked here and then rejected
     // there, hiding a later eligible visit (GH Codex #3844 r1 P1).
+    // A same-day row whose window elapsed is skipped whatever its status
+    // (GH Codex #3851 r5 P2) — the funnel would mint for the missed visit.
     card_request: async (ids, primaryId) => builders.buildCardRequestLink(
-      await soonestUpcomingVisit([primaryId], { statuses: require('../services/appointment-card-request').LIVE_VISIT_STATUSES }),
+      await soonestUpcomingVisit([primaryId], { statuses: require('../services/appointment-card-request').LIVE_VISIT_STATUSES, skip: isElapsedSameDayVisit }),
     ),
     contract: (ids, primaryId) => builders.buildContractSigningLink([primaryId]),
     // Handled by statementLinkInsert before any customer resolution (the
@@ -3145,6 +3163,7 @@ router._internals = {
   csvEscape,
   fullPhoneLast10,
   isElapsedSameDayReschedulePlaceholder,
+  isElapsedSameDayVisit,
   normalizeRewriteRecentMessages,
   rowsToCsv,
 };

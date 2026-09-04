@@ -590,6 +590,24 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('a THROW carrying a retryable provider outcome (audit write failed after a Twilio timeout) holds the claim the same way — marker stamped, never released (GH Codex #3851 r5 P1)', async () => {
+      const ambiguous = new Error('audit row failed');
+      ambiguous.providerOutcome = { sent: false, retryable: true, providerErrorCode: 'ETIMEDOUT' };
+      sendCustomerMessage.mockRejectedValueOnce(ambiguous);
+      const { startInvitationEmailLeg, markCardLinkSendOutcome } = require('../services/appointment-card-request');
+      startInvitationEmailLeg.mockClear();
+      markCardLinkSendOutcome.mockClear();
+      wireCardDb();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl);
+        expect(res.status).toBe(500);
+        const visitWrites = stamps.filter((s) => s.table === 'scheduled_services');
+        expect(visitWrites).toHaveLength(1);
+        expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v-77', visitWrites[0].payload.card_link_sent_at);
+        expect(startInvitationEmailLeg).not.toHaveBeenCalled();
+      });
+    });
+
     test('a blocked send releases the claim', async () => {
       sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, reason: 'quiet hours' });
       wireCardDb();
@@ -735,6 +753,19 @@ describe('admin communications SMS route', () => {
         await withServer(async (baseUrl) => {
           const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
           expect(res.status).toBe(422);
+          expect(contracts().restorePreparedShareLinks).not.toHaveBeenCalled();
+          expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a THROW carrying a retryable provider outcome keeps the prepared link activated too (GH Codex #3851 r5 P1)', async () => {
+        const ambiguous = new Error('audit row failed');
+        ambiguous.providerOutcome = { sent: false, retryable: true };
+        sendCustomerMessage.mockRejectedValueOnce(ambiguous);
+        wireContractDb();
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: CONTRACT_BODY });
+          expect(res.status).toBe(500);
           expect(contracts().restorePreparedShareLinks).not.toHaveBeenCalled();
           expect(contracts().recordPreparedShareLinkSends).not.toHaveBeenCalled();
         });

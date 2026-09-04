@@ -567,6 +567,21 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
+  test('card_request: a same-day live visit whose arrival window has elapsed is skipped for the next eligible one — the funnel would mint for the missed visit (GH Codex #3851 r5 P2)', async () => {
+    const { etDateString } = require('../utils/datetime-et');
+    const TODAY = etDateString();
+    const NEXT_WEEK = etDateString(new Date(Date.now() + 7 * 86_400_000));
+    const elapsed = { id: 'v-missed', customer_id: CUSTOMER_UUID, scheduled_date: TODAY, window_start: null, window_end: '00:00', service_type: 'Flea Treatment', status: 'confirmed' };
+    const later = { id: 'v-next', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '09:00', window_end: '11:00', service_type: 'Flea Treatment', status: 'confirmed' };
+    wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([elapsed, later]) });
+    builders.buildCardRequestLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/secure/tok22', line: 'Secure: portal.wavespestcontrol.com/secure/tok22\n\n', standalone: true, immediateOnly: true });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'card_request' });
+      expect(res.status).toBe(200);
+      expect(builders.buildCardRequestLink).toHaveBeenCalledWith(later);
+    });
+  });
+
   test.each(['contract', 'card_request', 'prep_guide'])('%s: 409 when the phone belongs to more than one sibling — same rule as Auto Pay', async (kind) => {
     const other = 'bbbb2222-0000-4000-8000-000000000002';
     wireDb({
