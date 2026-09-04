@@ -140,7 +140,8 @@ describe('sendOutreach under the contract', () => {
     const one = scenario({ policy: { auto_outreach_min_score: 60, auto_outreach_daily_cap: 1 } });
     await nightly(one.db);
     one.db._tables.seo_link_prospects.push(draftedRow(one.d, one.p, { id: uid(), location_key: 'x', outreach_to_email: 'other@elsewhere.org', outreach_status: 'sent', outreach_attempted_at: new Date(NOW.getTime() - 3600 * 1000) }));
-    expect(await Outreach.sendOutreach({ prospectId: one.row.id, mode: 'auto' })).toMatchObject({ ok: false, code: 'rate_limited' });
+    // The cap counts TODAY's attempts in ET: the send runs on the fixture clock, not the wall clock (the assertion drifted off the fixture day on 2026-09-04).
+    expect(await Outreach.sendOutreach({ prospectId: one.row.id, mode: 'auto', now: NOW })).toMatchObject({ ok: false, code: 'rate_limited' });
     expect(gmail.sendMessage).not.toHaveBeenCalled();
     // the owner's click: the policy cap (1, reached) does not apply; the hard cap (12) is not reached
     commRow(one.db).level = 'OWNER_OUTREACH';
@@ -173,7 +174,7 @@ describe('sendOutreach under the contract', () => {
     const s = scenario();
     await nightly(s.db);
     s.db._tables.seo_link_prospects.push(draftedRow(s.d, s.p, { id: uid(), location_key: 'x', outreach_to_email: 'other@elsewhere.org', outreach_status: 'sent', outreach_attempted_at: new Date(NOW.getTime() - 3600 * 1000) }));
-    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'rate_limited' });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', now: NOW })).toMatchObject({ ok: false, code: 'rate_limited' });
     expect(approvals(s.db)).toHaveLength(0);
     delete process.env.LINK_OUTREACH_DAILY_CAP;
     // the CAS misses (the row's outreach_status moved under the lock): the approval written by the click is rolled back
