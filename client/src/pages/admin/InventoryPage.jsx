@@ -2777,6 +2777,17 @@ function RestockRequestsTab({ showToast, onUpdate }) {
   const [loading, setLoading] = useState(true);
   const [receivingId, setReceivingId] = useState("");
   const [receiveDrafts, setReceiveDrafts] = useState({});
+  // requestId → [{ label, url }] once fetched (presigned, 1 h)
+  const [evidence, setEvidence] = useState({});
+  const loadEvidence = async (requestId) => {
+    try {
+      const data = await adminFetch(`/admin/inventory/restock-requests/${requestId}/order-evidence`);
+      setEvidence((e) => ({ ...e, [requestId]: data.screenshots || [] }));
+      if (!(data.screenshots || []).length) showToast?.("No screenshots were captured for this order");
+    } catch (e) {
+      showToast?.(`Failed: ${e.message}`);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -2922,6 +2933,19 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                           {request.order.status !== "placed" && request.order.error && (
                             <div style={{ color: D.muted, marginTop: 2, maxWidth: 260 }}>{request.order.error}</div>
                           )}
+                          <div style={{ marginTop: 4, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                            {evidence[request.id] ? (
+                              evidence[request.id].map((s) => (
+                                <a key={s.label} href={s.url} target="_blank" rel="noopener noreferrer" style={{ color: D.text, textDecoration: "underline" }}>
+                                  {s.label} ↗
+                                </a>
+                              ))
+                            ) : (
+                              <button type="button" onClick={() => loadEvidence(request.id)} style={{ ...sBtn("transparent", D.muted), padding: "2px 6px", fontSize: 12 }}>
+                                Screenshots
+                              </button>
+                            )}
+                          </div>
                         </div>
                       )}
                       {request.status === "open" && request.order?.status !== "placing" && (

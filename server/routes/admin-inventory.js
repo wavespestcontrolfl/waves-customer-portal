@@ -3225,6 +3225,26 @@ function restockMeta(raw) {
 }
 
 // GET /restock-requests — product restock request queue.
+// GET /restock-requests/:id/order-evidence — presigned URLs for the
+// screenshots an order adapter uploaded (dry run, refusal, confirmation), so
+// the owner can validate a dry run and staff can diagnose a parked request
+// without S3 access (Codex #3853 r3 P2). Read-only; keys never leave the row.
+router.get('/restock-requests/:id/order-evidence', async (req, res, next) => {
+  try {
+    if (!(await db.schema.hasTable('vendor_orders'))) return res.json({ screenshots: [] });
+    const order = await db('vendor_orders').where({ restock_request_id: req.params.id }).orderBy('created_at', 'desc').first('id', 'status', 'evidence');
+    const shots = restockMeta(order?.evidence).screenshots || {};
+    const { getEvidenceUrl } = require('../services/seo/signup-evidence');
+    const screenshots = [];
+    for (const [label, key] of Object.entries(shots)) {
+      if (!key) continue;
+      const url = await getEvidenceUrl(key, { expiresIn: 3600 }).catch(() => null);
+      if (url) screenshots.push({ label, url });
+    }
+    res.json({ orderId: order?.id || null, orderStatus: order?.status || null, screenshots });
+  } catch (err) { next(err); }
+});
+
 router.get('/restock-requests', async (req, res, next) => {
   try {
     if (!(await db.schema.hasTable('product_restock_requests'))) {

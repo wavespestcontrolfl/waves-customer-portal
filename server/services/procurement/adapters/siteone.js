@@ -385,6 +385,18 @@ async function readExactlyOne(page, selector) {
   return { count, text: String(text || ''), visible: isVisible };
 }
 
+// The radio input a bill-to option resolves to: the element itself when it
+// is an input; for a label, its `for` target or the radio it wraps. Null
+// when no radio is associated (never fall back to a document-wide search).
+async function associatedRadio(page, option) {
+  const tag = await option.evaluate((el) => el.tagName.toLowerCase()).catch(() => null);
+  if (tag === 'input') return option;
+  if (tag !== 'label') return null;
+  const target = await option.getAttribute('for').catch(() => null);
+  const radio = target ? page.locator(`#${target.replace(/[^\w-]/g, '')}`).first() : option.locator('input[type="radio"]').first();
+  return (await radio.count().catch(() => 0)) ? radio : null;
+}
+
 // Checkout tender: no card / MFA / terms prompt (the bot never answers them),
 // bill-to-account offered AND confirmed CHECKED — the click is not proof; a
 // checkout defaulting to a saved card shows no card field (Codex r1 P1).
@@ -405,16 +417,19 @@ async function verifyBillToAccount(page, { evidence, upload }) {
   try { await bill.click({ timeout: 5000 }); }
   catch (e) { await refuse('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`); }
   await page.waitForTimeout(1500);
-  // Proof is on the account RADIO itself (the click target may be its label,
-  // which has no checked state — Codex PR3 r1 P1): exactly ONE checked
-  // account radio on the page, and that one visible — a hidden responsive
-  // duplicate or a stale checked node is not the tender the checkout shows,
-  // and two checked cannot tell which the order bills (Codex r7 P1).
-  const checkedRadios = page.locator(SELECTORS.billToAccountSelected);
-  const checkedCount = await checkedRadios.count().catch(() => null);
-  if (checkedCount === 0) await refuse('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender');
+  // Proof is on the radio ASSOCIATED with the option just clicked (the
+  // click target may be its label — Codex PR3 r1 + r3 P1): that radio's own
+  // checked state, read directly, must be true and it must be visible; and
+  // it must be the ONLY checked account radio on the page — a checked
+  // duplicate elsewhere cannot tell which tender the order bills (Codex r7 P1).
+  const radio = await associatedRadio(page, bill);
+  if (!radio) await refuse('bill_to_account_unverified', 'no radio input is associated with the bill-to-account option — the bot never submits on another tender');
+  let checked = null;
+  try { checked = await radio.isChecked(); } catch { checked = null; }
+  if (checked !== true) await refuse('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender');
+  if (!(await radio.isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the selected bill-to-account radio is not visible — not the tender the checkout shows');
+  const checkedCount = await page.locator(SELECTORS.billToAccountSelected).count().catch(() => null);
   if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount ?? 'an unreadable number of'} account tenders read as selected at checkout — cannot tell which the order bills`);
-  if (!(await checkedRadios.first().isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the selected bill-to-account radio is not visible — not the tender the checkout shows');
   evidence.billToAccountVerified = true;
 }
 
@@ -503,8 +518,15 @@ async function place(
   if (!launchBrowser) throw runLevel('siteone bot: playwright unavailable');
   const { qty, shipToTokens } = validatePlaceArgs({ vendorSku, quantity, credentials, approvedShipTo });
   const evidence = { blockedHosts: {}, dryRun };
+  // A cap verdict of { ok: false } is an ordinary refusal (parks). The cap
+  // check THROWING (the reservation transaction hit a transient DB error) is
+  // the environment's problem, not this request's: run-level, so the claim
+  // is released and retried, never parked failed / "order manually" for a
+  // click that never happened (Codex PR3 r3 P2).
   const gate = async (cents, what) => {
-    const verdict = await beforeSubmit(cents);
+    let verdict;
+    try { verdict = await beforeSubmit(cents); }
+    catch (e) { throw runLevel(`siteone bot: cap check failed before the ${what}: ${String(e.message).slice(0, 120)}`); }
     if (!verdict || verdict.ok !== true) throw new RefusedError(verdict?.reason || 'over_cap', verdict?.message || `cap check refused the ${what}`, evidence);
   };
   let browser = null;

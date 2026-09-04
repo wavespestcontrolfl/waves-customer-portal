@@ -193,6 +193,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const st = { cart: [], removable: true, accountSelectable: true, url: 'https://www.siteone.com/en/login', loggedIn: false, placeClicked: 0, addClicked: 0, qty: null, ...opts };
     const el = (spec = {}) => ({
       count: async () => spec.count ?? 0,
+      evaluate: async () => spec.tag || 'input',
+      getAttribute: async (n) => (spec.attrs ? spec.attrs[n] ?? null : null),
       first() { return this; },
       nth: (i) => spec.nth ? spec.nth(i) : el(spec),
       textContent: async () => spec.text ?? null,
@@ -223,10 +225,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.mfaField || sel === S.cardField) return el();
       if (sel === S.termsCheckbox) return el(st.termsUnreadable ? { count: 1 } : {}); // count 1 with no `checked` → isChecked throws
       // `checked` is a live getter: a real locator re-resolves, so the option clicked a moment ago reads its CURRENT state
-      if (sel === S.billToAccount) return el({ count: 1, visible: true, get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } });
+      // The option: a radio input, or (billIsLabel) a wrapping label whose radio is the sub-locator
+      const radio = () => el({ count: 1, visible: st.radioVisible ?? true, get checked() { return st.accountChecked === true; } });
+      if (sel === S.billToAccount) return el({ count: 1, visible: true, tag: st.billIsLabel ? 'label' : 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; }, sub: (sub) => (sub === 'input[type="radio"]' ? radio() : el()) });
       // extraCheckedAccounts = checked account radios ELSEWHERE on the page (hidden responsive duplicates, stale nodes)
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
-      if (sel === S.billToAccountSelected) return el({ count: (st.accountChecked ? 1 : 0) + (st.extraCheckedAccounts || 0), visible: st.accountChecked === true });
+      if (sel === S.billToAccountSelected) return el({ count: (st.accountChecked ? 1 : 0) + (st.extraCheckedAccounts || 0) });
       if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountText === undefined ? 'Account # 12345' : st.accountText });
       if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, visible: st.shipToVisible ?? true, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
       if (sel === S.checkoutTotal) return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: 'Order total $105.93' });
@@ -320,14 +324,30 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   });
 
   test('bill-to proof is the CLICKED option: a checked account radio elsewhere does not count, and two checked refuse (r7 P1)', async () => {
-    // The click did not take, but a hidden duplicate account radio is checked → the one checked radio is not visible → refuse.
+    // The click did not take, but a checked account radio exists elsewhere → the CLICKED option's radio is not checked → unverified.
     const masked = fakeSiteOne({ accountSelectable: false, extraCheckedAccounts: 1 });
-    await expect(s1.place(args(), masked.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_hidden' });
+    await expect(s1.place(args(), masked.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
     expect(masked.st.placeClicked).toBe(0);
     // The click took, but a second account radio is also checked → ambiguous, never submit.
     const doubled = fakeSiteOne({ extraCheckedAccounts: 1 });
     await expect(s1.place(args(), doubled.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_ambiguous' });
     expect(doubled.st.placeClicked).toBe(0);
+  });
+
+  test('the option may be a wrapping label: the proof is its radio (PR3 r3 P1); a hidden associated radio refuses', async () => {
+    const labelled = fakeSiteOne({ billIsLabel: true });
+    const r = await s1.place(args(), labelled.deps);
+    expect(r.externalOrderNumber).toBe('SO-778899');
+    const hidden = fakeSiteOne({ billIsLabel: true, radioVisible: false });
+    await expect(s1.place(args(), hidden.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_hidden' });
+    expect(hidden.st.placeClicked).toBe(0);
+  });
+
+  test('a cap check that THROWS (reservation transaction error) is run-level — claim released, never parked failed (PR3 r3 P2)', async () => {
+    const { st, deps } = fakeSiteOne();
+    await expect(s1.place(args({ beforeSubmit: async () => { throw new Error('connection reset'); } }), deps)).rejects.toMatchObject({ runLevel: true });
+    expect(st.placeClicked).toBe(0);
+    expect(st.cart).toEqual([]); // cleaned before leaving
   });
 
   test('SiteOne rejecting the stored login parks (refusal, no submit) instead of aborting the batch; network failures stay run-level (PR3 r1 P1)', async () => {
