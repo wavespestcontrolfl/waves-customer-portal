@@ -702,23 +702,52 @@ describe('review request follow-up flow', () => {
 
   // Quick Links "Both": the emailed copy of an inline ask (owner ruling 2026-09-03).
   describe('findInlineAwaitingEmail', () => {
-    test('finds the latest texted inline row whose email leg never went, inside the cooldown window', async () => {
-      const q = chain({ first: jest.fn().mockResolvedValue({ id: 'rr-texted' }) });
+    test('finds the latest texted Both row whose email leg is still owed, inside the cooldown window', async () => {
+      const q = chain({ first: jest.fn().mockResolvedValue({ id: 'rr-texted', status: 'sent', sms_sent_at: new Date() }) });
       db.mockImplementation((table) => {
         if (table === 'review_requests') return q;
         throw new Error(`Unexpected table query: ${table}`);
       });
 
       expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toEqual({ id: 'rr-texted' });
-      expect(q.where).toHaveBeenCalledWith({ customer_id: 'cust-1', triggered_by: 'auto_inline', status: 'sent' });
-      expect(q.whereNotNull).toHaveBeenCalledWith('sms_sent_at');
-      expect(q.where).toHaveBeenCalledWith('sms_sent_at', '>=', expect.any(Date));
+      expect(q.where).toHaveBeenCalledWith({ customer_id: 'cust-1', triggered_by: 'auto_inline' });
+      expect(q.whereIn).toHaveBeenCalledWith('status', ['sent', 'sending']);
       expect(q.whereNull).toHaveBeenCalledWith('sent_at');
       // Only asks that requested an email leg (and still owe it) match —
       // never a Text-only or completion-SMS ask (GH Codex #3856 r8 P1).
       expect(q.whereNotNull).toHaveBeenCalledWith('email_leg_owed_at');
-      expect(q.orderBy).toHaveBeenCalledWith('sms_sent_at', 'desc');
+      expect(q.where).toHaveBeenCalledWith('email_leg_owed_at', '>=', expect.any(Date));
+      expect(q.orderBy).toHaveBeenCalledWith('email_leg_owed_at', 'desc');
+      expect(q.update).not.toHaveBeenCalled();
       expect(await ReviewService.findInlineAwaitingEmail(null)).toBeNull();
+    });
+
+    test('a stranded claim (text left, delivered stamp lost) is repaired from evidence and offered; no evidence = not this row (r10 P2)', async () => {
+      const stranded = { id: 'rr-stranded', status: 'sending', token: 'tok-64chars', customer_id: 'cust-1', claimed_at: new Date(), sms_sent_at: null };
+      const rrQuery = chain({ first: jest.fn().mockResolvedValue(stranded) });
+      const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }) });
+      smsLogQuery.first.mockResolvedValueOnce({ id: 'sms-1' }); // the ask already left
+      db.mockImplementation((table) => {
+        if (table === 'review_requests') return rrQuery;
+        if (table === 'sms_log') return smsLogQuery;
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+      expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toEqual({ id: 'rr-stranded' });
+      expect(rrQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', sms_sent_at: expect.any(Date) }));
+
+      // No local row and the provider positively has nothing → not this row.
+      rrQuery.update.mockClear();
+      smsLogQuery.first.mockResolvedValue(undefined);
+      const customersQuery = chain({ first: jest.fn().mockResolvedValue({ phone: '+19415550123' }) });
+      db.mockImplementation((table) => {
+        if (table === 'review_requests') return rrQuery;
+        if (table === 'sms_log') return smsLogQuery;
+        if (table === 'customers') return customersQuery;
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+      require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ found: false });
+      expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toBeNull();
+      expect(rrQuery.update).not.toHaveBeenCalled();
     });
   });
 
@@ -768,7 +797,8 @@ describe('review request follow-up flow', () => {
         templateKey: 'review_request_email',
         to: 'megan@example.com',
         recipientId: 'cust-1',
-        idempotencyKey: 'review_touch:rr-1:email',
+        // Per attempt (r10 P2): a blocked attempt must not dedupe a corrected address.
+        idempotencyKey: expect.stringMatching(/^review_touch:rr-1:email:[0-9a-z]+$/),
         suppressProviderErrorLog: true,
       });
       expect(call.payload.first_name).toBe('Megan');
@@ -786,6 +816,22 @@ describe('review request follow-up flow', () => {
       });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
       expect(rrUpdate).toHaveBeenCalledTimes(1);
+
+      // A sibling attempt already cleared the owed leg (conditional update hit
+      // no row): this attempt aborts before the provider — never two emails.
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      rrUpdate.mockResolvedValueOnce(0);
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    test('the Both analytics stamp is retried once after a real send (r10 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      rrUpdate.mockResolvedValueOnce(1).mockRejectedValueOnce(new Error('db blip'));
+      EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); return { sent: true }; });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      expect(rrUpdate).toHaveBeenCalledTimes(3);
+      expect(rrUpdate).toHaveBeenNthCalledWith(3, expect.objectContaining({ sent_at: expect.any(Date), channel: 'both' }));
     });
 
     test('refuses when review or email notifications are off, or prefs cannot be read (fail closed)', async () => {

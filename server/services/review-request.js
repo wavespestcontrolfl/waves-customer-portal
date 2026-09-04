@@ -1901,15 +1901,27 @@ const ReviewService = {
   async findInlineAwaitingEmail(customerId) {
     if (!customerId) return null;
     const since = new Date(Date.now() - INLINE_EMAIL_RETRY_WINDOW_MS);
+    // Anchored on the claim stamp (email_leg_owed_at = claimed_at of the
+    // Both claim): present on every candidate, set seconds before the text.
     const row = await db("review_requests")
-      .where({ customer_id: customerId, triggered_by: "auto_inline", status: "sent" })
-      .whereNotNull("sms_sent_at")
-      .where("sms_sent_at", ">=", since)
+      .where({ customer_id: customerId, triggered_by: "auto_inline" })
+      .whereIn("status", ["sent", "sending"])
       .whereNull("sent_at")
       .whereNotNull("email_leg_owed_at")
-      .orderBy("sms_sent_at", "desc")
-      .first("id");
-    return row || null;
+      .where("email_leg_owed_at", ">=", since)
+      .orderBy("email_leg_owed_at", "desc")
+      .first("id", "status", "token", "customer_id", "claimed_at", "sms_sent_at");
+    if (!row) return null;
+    if (row.status === "sent" && row.sms_sent_at) return { id: row.id };
+    // A stranded claim: the text left but both delivered-stamp attempts
+    // failed, and the composer sent the operator here to email it. Only
+    // PROOF the text reached the customer lets the email ride on this row
+    // (repairing the stamp, as claimInlineForSend does); no proof = not this
+    // row, and the caller's gated ask decides (GH Codex #3856 r10 P2).
+    const evidence = await this._inlineSendEvidence(row);
+    if (!evidence.found) return null;
+    await this.markInlineDelivered(row.id);
+    return { id: row.id };
   },
 
   async sendInlineEmailCopy(requestId) {
@@ -1958,8 +1970,13 @@ const ReviewService = {
         },
         recipientType: "customer",
         recipientId: customer.id,
-        // Distinct from the SMS leg's bookkeeping: one email per inline row.
-        idempotencyKey: `review_touch:${request.id}:email`,
+        // Per ATTEMPT, not per row: the durable once-only guard is the owed
+        // marker (cleared conditionally in onQueued below — a sibling attempt
+        // that lost that race aborts before the provider), so a row-stable key
+        // is not needed for dedupe, and it would let one blocked attempt (a
+        // suppressed or stale address) dedupe every later retry as terminal
+        // after staff correct the contact (GH Codex #3856 r10 P2).
+        idempotencyKey: `review_touch:${request.id}:email:${Date.now().toString(36)}`,
         suppressionGroupKey: "service_operational",
         categories: ["review_request"],
         // Provider rejections can echo the recipient address — keep the raw
@@ -1967,10 +1984,19 @@ const ReviewService = {
         // addresses in logs); the sanitized catch below is the only log.
         suppressProviderErrorLog: true,
         onQueued: async () => {
+          let cleared;
           try {
-            await db("review_requests").where({ id: request.id }).update({ email_leg_owed_at: null });
+            cleared = await db("review_requests")
+              .where({ id: request.id })
+              .whereNotNull("email_leg_owed_at")
+              .update({ email_leg_owed_at: null });
           } catch (e) {
             logger.warn(`[review] inline email owed clear failed pre-dispatch (requestId=${request.id}): ${e.message}`);
+            return false;
+          }
+          if (!cleared) {
+            // A sibling attempt already owns this email — never dispatch twice.
+            logger.warn(`[review] inline email leg no longer owed at dispatch (requestId=${request.id})`);
             return false;
           }
           dispatched = true;
@@ -1984,11 +2010,19 @@ const ReviewService = {
       // channel 'both': the row texted AND emailed — the outreach analytics
       // count it as an email touch (channel IN ('email','both')), so the
       // Both path no longer reads as SMS-only.
-      await db("review_requests")
+      const stamp = () => db("review_requests")
         .where({ id: request.id })
         .whereNull("sent_at")
-        .update({ sent_at: new Date(), channel: "both" })
-        .catch((err) => logger.warn(`[review] inline email sent_at stamp failed (requestId=${request.id}): ${err.message}`));
+        .update({ sent_at: new Date(), channel: "both" });
+      try {
+        await stamp();
+      } catch (firstErr) {
+        // Retried once: the owed leg is already cleared, so nothing ever
+        // revisits this row — a lost stamp would under-count Both email
+        // delivery in the outreach analytics for good (GH Codex #3856 r10 P2).
+        logger.warn(`[review] inline email sent_at stamp failed, retrying once (requestId=${request.id}): ${firstErr.message}`);
+        await stamp().catch((err) => logger.error(`[review] inline email sent_at stamp LOST after retry (requestId=${request.id}): ${err.message}`));
+      }
       return { sent: true };
     } catch (err) {
       logger.error(`[review] inline email copy failed (requestId=${requestId} errType=${err?.name || "Error"} dispatched=${dispatched})`);
@@ -2043,6 +2077,61 @@ const ReviewService = {
   // ask is owed (email_leg_owed_at) and Quick Links → Email may re-attempt
   // it on the same row; every other claim clears the marker so a Text-only
   // ask on a previously-Both row can never be emailed (GH Codex #3856 r8 P1).
+  /**
+   * Did a claimed inline ask REALLY reach the customer? Shared by the stale-
+   * claim reconcile (claimInlineForSend) and the Quick Links email retry on a
+   * stranded claim (findInlineAwaitingEmail). Returns { found } — proof the
+   * text left (local log or provider) — or { unavailable: true } when the
+   * provider cannot answer (unknown is not "not sent").
+   */
+  async _inlineSendEvidence(row) {
+    // Any outbound sms_log row carrying this ask's link (long token or its
+    // short URL) is proof the ask reached the provider — excluding
+    // in-flight/reservation ('sending') and failure rows, which are not
+    // evidence of delivery.
+    let frags = [row.token];
+    try {
+      const short = await existingShortUrlFor({
+        kind: "review",
+        entityType: "review_requests",
+        entityId: row.id,
+      });
+      if (short) frags.push(short);
+    } catch {
+      /* no short URL — the token fragment still reconciles */
+    }
+    frags = frags.filter(Boolean).map((f) => String(f).replace(/^https?:\/\//, ""));
+    for (const frag of frags) {
+      const evidence = await db("sms_log")
+        .where("direction", "outbound")
+        .whereNotIn("status", ["sending", "failed", "undelivered", "blocked", "canceled"])
+        .where("message_body", "like", `%${frag}%`)
+        .first("id");
+      if (evidence) return { found: true };
+    }
+
+    // No local evidence is NOT proof of no send (twilio.js swallows a
+    // post-accept sms_log insert failure). Ask the PROVIDER: a message to
+    // the customer carrying this link after the claim means it went out —
+    // repair the stamp; the provider positively confirming none = a
+    // pre-provider crash, and the claim is safely handed back so the
+    // customer's review sends aren't blocked forever. Provider unreachable
+    // = unknown → stay blocked (fail closed).
+    const owner = await db("customers").where({ id: row.customer_id }).first("phone");
+    const to = owner?.phone ? toE164(owner.phone) || owner.phone : null;
+    const TwilioService = require("./twilio");
+    for (const frag of frags) {
+      const provider = await TwilioService.findOutboundMessageSince({
+        to,
+        sentAfter: row.claimed_at,
+        bodyFragment: frag,
+      });
+      if (provider.unavailable) return { unavailable: true };
+      if (provider.found) return { found: true };
+    }
+    return { found: false };
+  },
+
   async claimInlineForSend(requestId, { emailRequested = false } = {}) {
     if (!requestId) return false;
     // The claim stamp doubles as the FENCE token: mark/release only act
@@ -2066,57 +2155,13 @@ const ReviewService = {
       .first("id", "token", "customer_id", "claimed_at");
     if (!row) return false;
 
-    // Any outbound sms_log row carrying this ask's link (long token or its
-    // short URL) is proof the ask reached the provider — excluding
-    // in-flight/reservation ('sending') and failure rows, which are not
-    // evidence of delivery.
-    let frags = [row.token];
-    try {
-      const short = await existingShortUrlFor({
-        kind: "review",
-        entityType: "review_requests",
-        entityId: row.id,
-      });
-      if (short) frags.push(short);
-    } catch {
-      /* no short URL — the token fragment still reconciles */
+    const evidence = await this._inlineSendEvidence(row);
+    if (evidence.found) {
+      // The ask went out — repair the missing stamp.
+      await this.markInlineDelivered(requestId);
+      return false;
     }
-    frags = frags.filter(Boolean).map((f) => String(f).replace(/^https?:\/\//, ""));
-    for (const frag of frags) {
-      const evidence = await db("sms_log")
-        .where("direction", "outbound")
-        .whereNotIn("status", ["sending", "failed", "undelivered", "blocked", "canceled"])
-        .where("message_body", "like", `%${frag}%`)
-        .first("id");
-      if (evidence) {
-        // The ask went out — repair the missing stamp.
-        await this.markInlineDelivered(requestId);
-        return false;
-      }
-    }
-
-    // No local evidence is NOT proof of no send (twilio.js swallows a
-    // post-accept sms_log insert failure). Ask the PROVIDER: a message to
-    // the customer carrying this link after the claim means it went out —
-    // repair the stamp; the provider positively confirming none = a
-    // pre-provider crash, and the claim is safely handed back so the
-    // customer's review sends aren't blocked forever. Provider unreachable
-    // = unknown → stay blocked (fail closed).
-    const owner = await db("customers").where({ id: row.customer_id }).first("phone");
-    const to = owner?.phone ? toE164(owner.phone) || owner.phone : null;
-    const TwilioService = require("./twilio");
-    for (const frag of frags) {
-      const provider = await TwilioService.findOutboundMessageSince({
-        to,
-        sentAfter: row.claimed_at,
-        bodyFragment: frag,
-      });
-      if (provider.unavailable) return false;
-      if (provider.found) {
-        await this.markInlineDelivered(requestId);
-        return false;
-      }
-    }
+    if (evidence.unavailable) return false;
     const reclaimToken = new Date();
     const reclaimed = await db("review_requests")
       .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
