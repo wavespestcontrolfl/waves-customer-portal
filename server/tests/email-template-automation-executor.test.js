@@ -929,10 +929,12 @@ describe('email template automation executor', () => {
         chain({ returning: [{ id: 'e2' }] }),
         chain({ returning: [{ id: 'e3' }] }),
       ],
-      // 1st: live-payload refresh of the visit row; 2nd: the
+      // 1st: live-payload refresh of the visit row; 2nd: the pre-dispatch
+      // page claim (unkeyed or same key → this guide); 3rd: the
       // markServicePrepSent confirmed-delivery stamp.
       scheduled_services: [
         chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [{ id: 'svc-1' }] }),
         stampQuery,
       ],
     });
@@ -1006,10 +1008,12 @@ describe('email template automation executor', () => {
         chain({ returning: [{ id: 'e2' }] }),
         chain({ returning: [{ id: 'e3' }] }),
       ],
-      // Only the live-payload read — NO stamp query is queued; a stamp
-      // attempt would throw "Unexpected db table" and fail this test.
+      // The live-payload read and the pre-dispatch page claim — NO stamp
+      // query is queued; a stamp attempt would throw "Unexpected db table"
+      // and fail this test.
       scheduled_services: [
         chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [{ id: 'svc-1' }] }),
       ],
     });
     EmailTemplates.sendTemplate.mockResolvedValue({ blocked: true, reason: 'suppressed' });
@@ -1059,7 +1063,7 @@ describe('email template automation executor', () => {
         service_date_ymd: '2199-01-01',
       }),
     });
-    const skippedRun = { ...queuedRun, status: 'skipped', exit_reason: 'prep page owned by prep.lawn' };
+    const skippedRun = { ...queuedRun, status: 'skipped', exit_reason: 'prep page owned by another guide' };
 
     setDbQueues({
       'email_template_automations as a': [chain({ result: [prepAutomation] })],
@@ -1074,9 +1078,11 @@ describe('email template automation executor', () => {
         chain({ returning: [{ id: 'e2' }] }),
         chain({ returning: [{ id: 'e3' }] }),
       ],
-      // Only the live-payload read — the page is a manual lawn guide's.
+      // The live-payload read, then the atomic page claim matches nothing —
+      // the page is a manual lawn guide's (keyed between read and send).
       scheduled_services: [
-        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null, prep_template_key: 'prep.lawn' } }),
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [] }),
       ],
     });
 
