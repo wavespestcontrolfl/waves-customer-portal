@@ -391,6 +391,16 @@ describe('POST /admin/communications/customer-link', () => {
         expect((await res.json()).error).toMatch(/could not be read — try again/);
       });
 
+      // The owed-leg lookup fails CLOSED: never fall through to a fresh ask (r11 P2).
+      wireDb({ customers: soloCustomer() });
+      ReviewService.findInlineAwaitingEmail.mockRejectedValueOnce(new Error('db down'));
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ reason: 'owed_lookup_failed' });
+        expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
+      });
+
       // An uncertain leg (post-dispatch throw) is never "try again" — the
       // provider may hold it (GH Codex #3856 r8 P2).
       wireDb({ customers: soloCustomer() });

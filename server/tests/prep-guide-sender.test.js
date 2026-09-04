@@ -43,6 +43,14 @@ let upcomingVisitRow = null;
 let visitLookupError = null;
 let servicePrepRow = null;
 let serviceUpdates = [];
+let scheduledQueries = [];
+// Automated-lane liveness for the abandoned-reservation check: null = no live row.
+let liveRunRow = null;
+let liveEnrollmentRow = null;
+function livenessQuery(row) {
+  const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), first: jest.fn(async () => row) };
+  return q;
+}
 // Rows affected by an awaited .update() (the prep-page claim); 1 = claimed.
 let serviceUpdateCount = 1;
 function scheduledQuery() {
@@ -81,11 +89,16 @@ beforeEach(() => {
   };
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery();
-    if (table === 'scheduled_services') return scheduledQuery();
+    if (table === 'scheduled_services') { const q = scheduledQuery(); scheduledQueries.push(q); return q; }
     if (table === 'customer_interactions') return { insert: interactionsInsert };
+    if (table === 'email_template_automation_runs') return livenessQuery(liveRunRow);
+    if (table === 'automation_enrollments') return livenessQuery(liveEnrollmentRow);
     return customersQuery();
   });
   db.fn = { now: jest.fn(() => 'NOW()') };
+  liveRunRow = null;
+  liveEnrollmentRow = null;
+  scheduledQueries = [];
   upcomingVisitRow = null;
   visitLookupError = null;
   serviceUpdateCount = 1;
@@ -424,7 +437,7 @@ describe('sendPrepToCustomer', () => {
 
   test('a visit whose prep page already carries another guide is never re-keyed or linked', async () => {
     // A combined "Pest + Lawn" row whose page went out as interior pest.
-    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.interior_pest' };
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.interior_pest', prep_sent_at: new Date('2026-06-01T12:00:00Z') };
     servicePrepRow = { prep_token: 'a'.repeat(32), prep_template_key: 'prep.interior_pest' };
 
     // Text: refused with its own reason (not "no visit"), naming the guide
@@ -442,6 +455,42 @@ describe('sendPrepToCustomer', () => {
     expect(payload.prep_url).toContain('?tab=visits');
     expect(payload.service_date).not.toBe('To be confirmed');
     expect(serviceUpdates).toEqual([]);
+  });
+
+  test('an abandoned automated reservation (undelivered, no live run or enrolment) is re-keyed to the requested guide; a live lane or a delivered page keeps it', async () => {
+    // The tagger reserved prep.flea before its lane delivered; the lane died.
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea', prep_sent_at: null };
+    servicePrepRow = { prep_token: 'e'.repeat(32), prep_template_key: 'prep.lawn' };
+    const rekeyed = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' });
+    expect(rekeyed).toMatchObject({ ok: true, smsSent: true });
+    expect(serviceUpdates[0]).toEqual({ prep_template_key: 'prep.lawn' });
+
+    // A live sequence enrolment (its first step would stamp prep.flea) owns the page.
+    serviceUpdates = [];
+    liveEnrollmentRow = { id: 'enr-1' };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'prep_page_taken', takenBy: 'Flea Treatment' });
+    expect(serviceUpdates).toEqual([]);
+
+    // A live transactional run for this visit + key owns the page.
+    liveEnrollmentRow = null;
+    liveRunRow = { id: 'run-1' };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'prep_page_taken' });
+
+    // Delivered (prep_sent_at) is never re-keyed — no liveness read at all.
+    liveRunRow = null;
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea', prep_sent_at: new Date() };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'prep_page_taken' });
+    expect(serviceUpdates).toEqual([]);
+  });
+
+  test('the interior-pest visit match excludes "Lawn Pest Control" (a lawn-line visit)', async () => {
+    upcomingVisitRow = VISIT;
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'interior_pest', channel: 'email' });
+    const excluded = scheduledQueries.some((q) => q.whereRaw.mock.calls.some(([sql, args]) => sql === 'LOWER(service_type) NOT LIKE ?' && args[0] === '%lawn pest%'));
+    expect(excluded).toBe(true);
   });
 
   test('losing the prep-page claim (another guide keyed the row after the read) refuses the text', async () => {

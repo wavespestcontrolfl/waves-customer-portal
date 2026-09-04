@@ -887,6 +887,13 @@ describe('review request follow-up flow', () => {
       expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, terminal: true, channel: 'email', requestId: 'rr-7', reason: 'email_uncertain' });
       expect(rrUpdateOneOff).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', sent_at: expect.any(Date) }));
 
+      // The cooldown stamp is the duplicate guard: retried once (r11 P2).
+      rrUpdateOneOff.mockClear();
+      rrUpdateOneOff.mockRejectedValueOnce(new Error('db blip'));
+      EmailLib.sendTemplate.mockImplementationOnce(async (opts) => { await opts.onQueued({ id: 'em-9' }); throw new Error('post-dispatch'); });
+      expect(await ReviewService._sendOutreachEmail(args)).toMatchObject({ reason: 'email_uncertain' });
+      expect(rrUpdateOneOff).toHaveBeenCalledTimes(2);
+
       // Pre-dispatch (no onQueued): nothing reached SendGrid — the plain failure.
       rrUpdateOneOff.mockClear();
       EmailLib.sendTemplate.mockRejectedValueOnce(new Error('template missing'));

@@ -3366,7 +3366,16 @@ const ReviewService = {
         // Count it as the ask (sent_at starts the cooldown) and tell the
         // operator to check the email log. Sequence steps keep their
         // step-stable key and the cron's own retry.
-        await db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() }).catch(() => {});
+        // The stamp IS the duplicate-send guard (an unscheduled pending row
+        // is invisible to checkUnscheduledAskGates), so it is retried once
+        // and a second failure is an error, not a shrug (r11 P2).
+        const stamp = () => db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() });
+        try {
+          await stamp();
+        } catch (firstErr) {
+          logger.warn(`[review] uncertain outreach email stamp failed, retrying once (requestId=${request.id}): ${firstErr.message}`);
+          await stamp().catch((e) => logger.error(`[review] uncertain outreach email stamp LOST after retry (requestId=${request.id}) — cooldown guard not established: ${e.message}`));
+        }
         return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_uncertain" };
       }
       // There is NO standalone email retry driver — processScheduled only

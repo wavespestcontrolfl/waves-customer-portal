@@ -1819,7 +1819,16 @@ async function emailReviewAskNow(primaryId) {
   // A Both ask whose text went out but whose email leg failed: the text
   // already started the cooldown, so a fresh ask would be refused — re-send
   // the SAME row's email copy instead (idempotent per row; GH Codex #3856 r7 P2).
-  const awaiting = await ReviewService.findInlineAwaitingEmail(primaryId).catch(() => null);
+  // Fail CLOSED on a lookup error: an unreadable owed-leg state is not
+  // "absent" — falling through would refuse a plain Both row on cooldown or
+  // mint a second ask beside a stranded one (GH Codex #3856 r11 P2).
+  let awaiting;
+  try {
+    awaiting = await ReviewService.findInlineAwaitingEmail(primaryId);
+  } catch (err) {
+    logger.warn(`[communications] owed review-email lookup failed (customerId=${primaryId}): ${err.message}`);
+    return { status: 409, body: { error: "Could not check this customer's pending review email — try again", outcome: 'error', reason: 'owed_lookup_failed' } };
+  }
   if (awaiting?.id) {
     const copy = await ReviewService.sendInlineEmailCopy(awaiting.id);
     if (copy?.sent) {
