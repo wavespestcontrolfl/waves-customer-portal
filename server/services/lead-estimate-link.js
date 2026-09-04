@@ -66,13 +66,37 @@ async function followDuplicateLink(database, lead) {
   return current;
 }
 
-// The lead row when it is a wizard repeat — a quote_wizard row carrying the
-// duplicate marker — else null. The one kind of lead whose missing funnel
-// row is a gap to repair rather than a slot left empty on purpose
-// (markConverted; codex #3834 r22 P2, r24 P1).
-async function findWizardRepeatRow(database, leadId) {
-  const row = await database('leads').where('id', leadId).first();
-  return duplicateMarkerOf(row) && row.lead_type === 'quote_wizard' ? row : null;
+// The identity a claimed write pins — customer link, phone, email, AND the
+// estimate link — exactly as the row was read (codex #3834 r17 P1, r18 P1):
+// a row staff linked to a different estimate after the read is that deal's
+// lead, and this event's value hints must not land on it (codex r22 P1).
+const identityOf = (row) => ({ customer_id: row.customer_id ?? null, phone: row.phone ?? null, email: row.email ?? null, estimate_id: row.estimate_id ?? null });
+// Whether a re-read row still carries the contact identity it was read
+// with (the estimate link is judged separately by every caller).
+const sameContactIdentity = (read, current) => ['customer_id', 'phone', 'email'].every((key) => (current[key] ?? null) === (read[key] ?? null));
+
+// Where a converted wizard repeat's win lands in the funnel when the bridge
+// found no row on the repeat itself (/calculate dropped it when the row was
+// filed as a repeat): its ROOT's row, advanced to booked, when the root — read
+// NOW, after the conversion write, never from a check made before it (codex
+// #3834 r27 P1) — is still this customer's open opportunity by the accept
+// path's rule (positive open membership, same customer link or contact, not
+// linked to a different estimate than the repeat); else the repeat's own row,
+// rebuilt from its stored touch. One decision for every conversion path
+// (accept fallback, self-booking stand-in, admin convert of a repeat whose
+// root is still open — codex r27 P2), so a deal never books two rows.
+// Returns the row to rebuild, or null (the root took the win, or the lead is
+// not a wizard repeat — every other lead with no row has none on purpose,
+// codex r22 P2 / r24 P1).
+async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {}) {
+  const repeat = await database('leads').where('id', leadId).first();
+  if (!duplicateMarkerOf(repeat) || repeat.lead_type !== 'quote_wizard') return null;
+  const { root } = await resolveAncestry(database, repeat);
+  const rootOurs = !!root && !root.deleted_at && OPEN_LEAD_STATUSES.includes(root.status)
+    && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
+    && !(root.estimate_id && repeat.estimate_id && String(root.estimate_id) !== String(repeat.estimate_id));
+  if (rootOurs && (await bridgeLeadFunnelStage(root.id, 'won', database)).updated) return null;
+  return repeat;
 }
 
 // The ancestry a repeat belongs to, for grouping repeats of one inquiry: the
@@ -83,12 +107,6 @@ async function findWizardRepeatRow(database, leadId) {
 // back to its own immediate marker and reading as two opportunities (codex
 // #3834 r17 P1). The same bounded, cycle-safe walk through live duplicate
 // hops as followDuplicateLink.
-// The identity a claimed write pins — customer link, phone, email, AND the
-// estimate link — exactly as the row was read (codex #3834 r17 P1, r18 P1):
-// a row staff linked to a different estimate after the read is that deal's
-// lead, and this event's value hints must not land on it (codex r22 P1).
-const identityOf = (row) => ({ customer_id: row.customer_id ?? null, phone: row.phone ?? null, email: row.email ?? null, estimate_id: row.estimate_id ?? null });
-
 async function resolveAncestry(database, repeat) {
   const seen = new Set([repeat.id]);
   let marker = duplicateMarkerOf(repeat);
@@ -351,7 +369,11 @@ async function resolveEstimateEventLeads(database, estimateId, { originatingNotA
 
 // Stamp `leads.estimate_id` onto a lead rescued by contact/mirror match and log
 // the link. Scoped to `estimate_id IS NULL` so a concurrent linker can't be
-// clobbered. Returns one of:
+// clobbered, and to the identity the lead was read with — customer link,
+// phone, email — so a root the resolver validated as this estimate's contact
+// and staff then re-assigned or re-contacted loses the stamp instead of
+// carrying another opportunity's estimate into acceptance, which treats the
+// FK as authoritative (codex #3834 r27 P1). Returns one of:
 //   'won'           — this call stamped the link (and logged the estimate_created
 //                     activity); proceed.
 //   'already_ours'  — the stamp touched 0 rows because a concurrent event (e.g.
@@ -372,6 +394,7 @@ async function linkRescuedLead(database, lead, estimate, performedBy) {
     .where({ id: lead.id })
     .whereNull('estimate_id')
     .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
+    .where(identityOf(lead))
     .update({ estimate_id: estimate.id, updated_at: new Date() });
   if (linked) {
     await database('lead_activities').insert({
@@ -385,8 +408,11 @@ async function linkRescuedLead(database, lead, estimate, performedBy) {
   }
   // 0 rows — a concurrent stamp won the race. Re-read to see whether it landed on
   // THIS estimate (still ours → proceed) or a different one (not ours → skip).
-  const current = await database('leads').where({ id: lead.id }).first('estimate_id');
-  return current && String(current.estimate_id) === String(estimate.id) ? 'already_ours' : 'conflict';
+  // The same-estimate winner must still carry the identity the lead was read
+  // with: a write that re-identified the row AND linked it to this estimate
+  // is another opportunity (codex r25 P1, r27 P1).
+  const current = await database('leads').where({ id: lead.id }).first();
+  return current && String(current.estimate_id) === String(estimate.id) && sameContactIdentity(lead, current) ? 'already_ours' : 'conflict';
 }
 
 // SLA truth, decoupled from attribution. An estimate or human reply delivered
@@ -645,7 +671,7 @@ async function markLinkedLeadEstimateAccepted({
   // onlyIfStatusIn), so a staff closure landing between the stamp and the
   // conversion is never overwritten (codex #3834 r11 P1). The direct path
   // keeps its unconditional stamp and conversion as before.
-  const convert = async (lead, claim, funnelRow) => {
+  const convert = async (lead, claim) => {
     let stamped = 0;
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
@@ -674,8 +700,7 @@ async function markLinkedLeadEstimateAccepted({
         // hand the row to this customer (codex #3834 r25 P1).
         const read = identityOf(lead);
         Object.assign(lead, await database('leads').where({ id: lead.id }).first());
-        const sameIdentity = ['customer_id', 'phone', 'email'].every((key) => (lead[key] ?? null) === read[key]);
-        if (!sameIdentity || String(lead.estimate_id) !== String(estimateId) || CLOSED_LEAD_STATUSES.has(lead.status)) return false;
+        if (!sameContactIdentity(read, lead) || String(lead.estimate_id) !== String(estimateId) || CLOSED_LEAD_STATUSES.has(lead.status)) return false;
       }
     }
     const converted = await leadAttributionService.markConverted(lead.id, {
@@ -687,7 +712,6 @@ async function markLinkedLeadEstimateAccepted({
       // nothing between the stamp and the conversion can hand the row to a
       // different customer (codex #3834 r11 P1, r18 P1).
       ...(claim ? { onlyIfStatusIn: claim, onlyIfIdentity: identityOf(lead) } : {}),
-      ...(funnelRow ? { funnelRowFor: lead } : {}),
     });
     if (claim && !converted) {
       // The stamp landed but the status claim lost (a closure in between):
@@ -811,27 +835,16 @@ async function markLinkedLeadEstimateAccepted({
     // via a DIFFERENT estimate since the read is a different deal. When the
     // hop did not resolve, `lead` IS the named duplicate row, never won here.
     const creditedOnOriginal = lead.status === 'won' && sameOpportunity();
-    if (named.status === 'duplicate' && !named.deleted_at && !creditedOnOriginal) {
-      // The duplicate row never got an ad_service_attribution row (/calculate
-      // skips it for repeats), so markConverted's funnel bridge on the named
-      // id touches nothing. When the original was validated as the SAME
-      // opportunity, the one surviving attribution is the original's:
-      // advance THAT funnel row to booked (monotonic, funnel table only — the
-      // original's lead row stays untouched, codex #3834 r8 P1). An original
-      // that failed the contact/customer/estimate checks is someone else's
-      // inquiry and its funnel is not ours to book (pre-push P1 on #3834 r8);
-      // `lead` was refreshed by the lost claim, so judge the ORIGINAL AS IT
-      // IS NOW: closed since the read, or linked to another estimate, means
-      // it is no longer this opportunity (pre-push P1 on r12). The win then
-      // reaches no funnel row at all, so the named row gets the one its own
-      // run would have stamped, straight at the booked stage (codex #3834
-      // r14 P2).
-      // ...i.e. a resolved original that would still qualify for the hop.
-      const stillOurs = indirect() && eligible();
-      if (await convert(named, DUPLICATE_LEAD_CLAIM, !stillOurs) && stillOurs) {
-        await bridgeLeadFunnelStage(lead.id, 'won', database);
-      }
-    }
+    // The duplicate row never got an ad_service_attribution row (/calculate
+    // skips it for repeats), so the win's funnel row is markConverted's to
+    // settle AFTER the conversion write (settleRepeatFunnelRow): the
+    // original's row advances to booked only when the original, read at
+    // that moment, is still this opportunity (funnel table only — its lead
+    // row stays untouched, codex #3834 r8 P1; judged as it IS NOW, not at a
+    // check made before the awaited conversion, r12 / r27 P1); otherwise
+    // the named row gets the row its own run would have stamped, at booked
+    // (r14 P2). One row either way.
+    if (named.status === 'duplicate' && !named.deleted_at && !creditedOnOriginal) await convert(named, DUPLICATE_LEAD_CLAIM);
     return;
   }
 
@@ -1133,8 +1146,15 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
     }
     const began = await ancestryFirstContactAt(database, repeat, ownedByUs);
     const keeper = keepers.get(ancestryKey);
-    if (keeper) keeper.inquiryBeganAt = earlierOf(keeper.inquiryBeganAt, began);
-    else keepers.set(ancestryKey, { ...repeat, inquiryBeganAt: began });
+    // The newest repeat stands in — unless it is tied to a different estimate
+    // than this event's while an older sibling is not: the out-of-scope
+    // sibling belongs to that deal, and keeping it as the keeper would leave
+    // the ancestry with no candidate once the scope filter runs, so the
+    // accepted estimate records no won lead (codex #3834 r27 P1). The folded
+    // inquiry date carries over either way.
+    if (!keeper) keepers.set(ancestryKey, { ...repeat, inquiryBeganAt: began });
+    else if (!inScope(keeper) && inScope(repeat)) keepers.set(ancestryKey, { ...repeat, inquiryBeganAt: earlierOf(keeper.inquiryBeganAt, began) });
+    else keeper.inquiryBeganAt = earlierOf(keeper.inquiryBeganAt, began);
   }
   linked.push(...keepers.values());
   const scoped = linked.filter(inScope);
@@ -1287,15 +1307,15 @@ async function convertLeadFromEvent({
       // ...and on the identity it was read with — customer link, phone,
       // email — so a row staff re-assigned or re-contacted in between is
       // never handed to this customer (codex #3834 r18 P1). A repeat taking
-      // the win has no funnel row of its own (its root carried the prospect,
-      // and that root is not ours to book), so the conversion stamps the row
-      // the repeat's own run would have, at booked (r14 P2) — inside
-      // markConverted, so the backfill's dry-run stub covers it (r18 P1).
+      // the win has no funnel row of its own (its root carried the prospect);
+      // markConverted settles where the win lands after the write — the
+      // root's row when it is still ours, else the repeat's own at booked
+      // (r14 P2, r27 P1) — inside the conversion, so the backfill's dry-run
+      // stub covers it (r18 P1).
       const claim = resolution !== 'customer_link' ? null : (lead.status === 'duplicate' ? DUPLICATE_LEAD_CLAIM : OPEN_LEAD_CLAIM);
       if (claim) {
         conversion.onlyIfStatusIn = claim;
         conversion.onlyIfIdentity = identityOf(lead);
-        if (claim === DUPLICATE_LEAD_CLAIM) conversion.funnelRowFor = lead;
       }
       const converted = await leadAttributionService.markConverted(lead.id, conversion);
       if (claim && !converted) return { converted: false, reason: 'customer_link_claim_lost' };
@@ -1727,7 +1747,7 @@ module.exports = {
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
   followDuplicateLink,
-  findWizardRepeatRow,
+  settleRepeatFunnelRow,
   stampFirstResponseByContact,
   resolveEstimateEventLeads,
   convertLeadFromEvent,

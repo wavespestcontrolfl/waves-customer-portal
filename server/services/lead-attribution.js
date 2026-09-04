@@ -176,14 +176,8 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // re-assigned or re-contacted since is no longer that opportunity, and the
 // write must lose rather than overwrite its customer, codex #3834 r18 P1):
 // 0 rows ⇒ a concurrent transition wins and nothing below runs.
-// `funnelRowFor` (the lead row, for a repeat taking the win): a repeat has no
-// funnel row of its own (/calculate skipped it — its root carried the
-// prospect), so the bridge below advances nothing and the booked deal would
-// vanish from the Ads funnel; the conversion stamps the row the repeat's own
-// run would have, straight at booked (codex #3834 r14 P2). It is part of the
-// conversion write so a preview stub swaps it out with the rest (r18 P1).
 // Returns whether the lead converted.
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, funnelRowFor } = {}) {
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -213,17 +207,21 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // (won → 'booked'; 'completed' stays the revenue sync's to write). Monotonic
   // in SQL and best-effort — never blocks the conversion.
   // A wizard repeat's win the bridge could not land on any row — /calculate
-  // dropped the row's lead-stage funnel row when it was filed as a repeat,
-  // and staff converted that repeat by hand (admin convert, referral) — is
-  // rebuilt here from the row's own stored touch, at booked (codex #3834
-  // r22 P2). ONLY a repeat (quote_wizard row carrying the marker): every
-  // other lead with no row has none on purpose — an inbound call on the Ads
-  // bridge number leaves its slot empty for the delayed bridge to claim as
-  // paid, and a generic rebuild would stamp it organic first (codex r24 P1).
+  // dropped the row's lead-stage funnel row when it was filed as a repeat —
+  // is settled by settleRepeatFunnelRow: its root's row advances to booked
+  // when the root is still this customer's open opportunity, else the
+  // repeat's own row is rebuilt here from its stored touch, at booked (codex
+  // #3834 r14 P2, r22 P2, r27 P1/P2). ONLY a repeat (quote_wizard row
+  // carrying the marker): every other lead with no row has none on purpose —
+  // an inbound call on the Ads bridge number leaves its slot empty for the
+  // delayed bridge to claim as paid, and a generic rebuild would stamp it
+  // organic first (codex r24 P1). Inside the conversion write, so a preview
+  // stub swaps it out with the rest (r18 P1). Lazy require: the
+  // lead-estimate-link ⇄ lead-attribution cycle.
   const bridged = await bridgeLeadFunnelStage(leadId, 'won');
-  if (!funnelRowFor && !bridged.updated) funnelRowFor = await require('./lead-estimate-link').findWizardRepeatRow(db, leadId);
   const linkedCustomer = customerId || null;
-  if (funnelRowFor) await stampLeadFunnelRow(db, funnelRowFor, { customerId: linkedCustomer, funnelStage: 'booked' });
+  const rebuild = bridged.updated ? null : await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId: linkedCustomer });
+  if (rebuild) await stampLeadFunnelRow(db, rebuild, { customerId: linkedCustomer, funnelStage: 'booked' });
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now

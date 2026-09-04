@@ -32,7 +32,7 @@ const {
   markLinkedLeadEstimateAccepted,
   markLinkedLeadEstimateSent,
   resolveEstimateEventLeads,
-  findWizardRepeatRow,
+  settleRepeatFunnelRow,
   markLinkedLeadEstimateViewed,
   convertLeadFromEvent,
   linkLeadEstimatesToCustomer,
@@ -509,7 +509,7 @@ describe('lead-estimate link service', () => {
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
     // ...so the named row's win gets the funnel row its own run would have
     // stamped, straight at booked (codex r14 P2).
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup6', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], funnelRowFor: expect.objectContaining({ id: 'lead-dup6' }) }));
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup6', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
   });
 
   test('an original closed as won between the read and the atomic stamp records no second win on the duplicate row', async () => {
@@ -591,7 +591,7 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-dup5', patch: expect.objectContaining({ estimate_id: 'estimate-2f' }), conditional: true }]);
     // The other offer's funnel is not ours to book; the named row gets its own (codex r14 P2).
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], funnelRowFor: expect.objectContaining({ id: 'lead-dup5' }) }));
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
   });
 
   test('an indirectly resolved original that is ALREADY won records no second win on the duplicate row', async () => {
@@ -624,7 +624,7 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-dup9', patch: expect.objectContaining({ estimate_id: 'estimate-2k' }), conditional: true }]);
     // The other customer's won funnel is not ours to book (codex r14 P1 + P2).
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup9', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], funnelRowFor: expect.objectContaining({ id: 'lead-dup9' }) }));
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup9', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
   });
 
   test('an indirectly resolved root that is SPAM (not answerable, not in CLOSED_LEAD_STATUSES) is never claimed and never has its funnel booked — the named repeat takes the win with its own funnel row (codex r26 P1)', async () => {
@@ -638,7 +638,7 @@ describe('lead-estimate link service', () => {
     });
     await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2s', customerId: 'customer-1', database });
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-origS', expect.anything());
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dupS', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], funnelRowFor: expect.objectContaining({ id: 'lead-dupS' }) }));
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dupS', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
     expect(database._updates).toEqual([{ id: 'lead-dupS', patch: expect.objectContaining({ estimate_id: 'estimate-2s' }), conditional: true }]);
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
@@ -659,7 +659,7 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-origR', expect.anything());
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dupR', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dupR', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], funnelRowFor: expect.objectContaining({ id: 'lead-dupR' }) }));
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dupR', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
   });
 
   test('the indirect claim pins the identity the original was read with — customer link, phone, email — so a re-assignment after the check loses the stamp (codex r17 P1)', async () => {
@@ -690,7 +690,7 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-dup2', patch: expect.objectContaining({ estimate_id: 'estimate-2c' }), conditional: true }]);
     // No original ⇒ no surviving attribution row to advance.
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup2', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], funnelRowFor: expect.objectContaining({ id: 'lead-dup2' }) }));
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup2', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
   });
 
   test('standalone estimate: rescues a single unlinked lead by contact and stamps the link', async () => {
@@ -1203,9 +1203,9 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
     expect(result).toEqual({ converted: true, count: 1, leadIds: ['R-new'] });
     expect(markConverted).toHaveBeenCalledTimes(1);
-    // The sibling's date decided origination only: the funnel row the win
-    // stamps dates from the keeper's REAL first contact (codex r21 P2).
-    expect(markConverted).toHaveBeenCalledWith('R-new', expect.objectContaining({ funnelRowFor: expect.objectContaining({ id: 'R-new', first_contact_at: '2026-09-03T12:00:00Z' }) }));
+    // The sibling's date decided origination only; the funnel row the win
+    // lands on is markConverted's to settle from the row itself (r21 P2, r27).
+    expect(markConverted).toHaveBeenCalledWith('R-new', expect.objectContaining({ onlyIfStatusIn: ['duplicate'] }));
   });
 
   test('self-booking: a chain B → A → O whose terminal root O vanished is ONE ancestry — the newest repeat stands in, nothing is ambiguous (codex r17 P1)', async () => {
@@ -1262,7 +1262,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     expect(markConverted).not.toHaveBeenCalledWith('L-other', expect.anything());
     // The foreign root's funnel is not ours to book and the booking recorder
     // skips a converted lead: the repeat gets its own row at booked (codex r14 P2).
-    expect(markConverted).toHaveBeenCalledWith('L-rep2', expect.objectContaining({ customerId: 'c2', onlyIfStatusIn: ['duplicate'], onlyIfIdentity: { customer_id: 'c2', phone: null, email: null, estimate_id: null }, funnelRowFor: expect.objectContaining({ id: 'L-rep2' }) }));
+    expect(markConverted).toHaveBeenCalledWith('L-rep2', expect.objectContaining({ customerId: 'c2', onlyIfStatusIn: ['duplicate'], onlyIfIdentity: { customer_id: 'c2', phone: null, email: null, estimate_id: null } }));
   });
 
   test('self-booking: a repeat whose root is SPAM (not answerable, not in CLOSED_LEAD_STATUSES) stands in for it — the root is never claimed on the open statuses (codex r23 P1)', async () => {
@@ -1280,17 +1280,61 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     expect(markConverted).not.toHaveBeenCalledWith('L-root-spam', expect.anything());
   });
 
-  test('findWizardRepeatRow: only a quote_wizard row carrying the duplicate marker is a repeat — a call lead is never one (codex r24 P1)', async () => {
-    const rows = {
-      rep: { id: 'rep', lead_type: 'quote_wizard', extracted_data: { duplicate_of_lead_id: 'root' } },
-      call: { id: 'call', lead_type: 'inbound_call', extracted_data: null },
-      wiz: { id: 'wiz', lead_type: 'quote_wizard', extracted_data: {} },
-    };
-    const database = () => ({ where: (col, id) => ({ first: async () => rows[id] || null }) });
-    await expect(findWizardRepeatRow(database, 'rep')).resolves.toBe(rows.rep);
-    await expect(findWizardRepeatRow(database, 'call')).resolves.toBeNull();
-    await expect(findWizardRepeatRow(database, 'wiz')).resolves.toBeNull();
-    await expect(findWizardRepeatRow(database, 'missing')).resolves.toBeNull();
+  describe('settleRepeatFunnelRow — where a converted repeat\'s win lands when the bridge found no row (codex r22 P2, r24 P1, r27 P1/P2)', () => {
+    const repeat = (id, extra = {}) => ({ id, lead_type: 'quote_wizard', status: 'won', customer_id: 'c1', phone: '9415550142', email: 'a@example.com', estimate_id: null, extracted_data: { duplicate_of_lead_id: 'root' }, ...extra });
+    const dbOf = (rows) => () => ({ where: (a, b) => ({ first: async () => rows[typeof a === 'string' ? b : a.id] || null }) });
+    beforeEach(() => { bridgeLeadFunnelStage.mockClear(); });
+
+    test('only a quote_wizard row carrying the duplicate marker is a repeat — a call lead or a plain wizard row is never rebuilt', async () => {
+      const database = dbOf({
+        call: { id: 'call', lead_type: 'inbound_call', extracted_data: null },
+        wiz: { id: 'wiz', lead_type: 'quote_wizard', extracted_data: {} },
+      });
+      await expect(settleRepeatFunnelRow(database, 'call', { customerId: 'c1' })).resolves.toBeNull();
+      await expect(settleRepeatFunnelRow(database, 'wiz', { customerId: 'c1' })).resolves.toBeNull();
+      await expect(settleRepeatFunnelRow(database, 'missing', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    });
+
+    test('an open root that is still this customer\'s opportunity, read AFTER the conversion write, has ITS row advanced to booked — no second row for the deal', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows);
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database);
+    });
+
+    test('an unlinked open root whose CURRENT contact matches the repeat is ours (the accept path\'s rule); a root with no funnel row to advance falls back to the repeat\'s own row', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'new', customer_id: null, phone: '(941) 555-0142', estimate_id: null } };
+      bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 0 });
+      await expect(settleRepeatFunnelRow(dbOf(rows), 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', expect.any(Function));
+    });
+
+    test.each([
+      ['re-assigned to another customer', { status: 'new', customer_id: 'c-OTHER', phone: '9415550142' }],
+      ['re-contacted (unlinked, contact no longer matches)', { status: 'new', customer_id: null, phone: '9415550199', email: 'other@example.com' }],
+      ['closed by staff', { status: 'lost', customer_id: 'c1', phone: '9415550142' }],
+      ['spam (not answerable — positive open membership)', { status: 'spam', customer_id: 'c1', phone: '9415550142' }],
+      ['linked to a DIFFERENT estimate than the repeat', { status: 'estimate_sent', customer_id: 'c1', phone: '9415550142', estimate_id: 'e-other' }],
+      ['soft-deleted', { status: 'new', customer_id: 'c1', phone: '9415550142', deleted_at: '2026-09-04T00:00:00Z' }],
+    ])('a root %s is not ours to book: the repeat\'s own row is rebuilt and the root\'s funnel is untouched', async (_label, root) => {
+      const rows = { rep: repeat('rep', { estimate_id: 'e-accepted' }), root: { id: 'root', ...root } };
+      await expect(settleRepeatFunnelRow(dbOf(rows), 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    });
+
+    test('a root linked to the SAME estimate as the repeat is the same deal', async () => {
+      const rows = { rep: repeat('rep', { estimate_id: 'e-1' }), root: { id: 'root', status: 'estimate_viewed', customer_id: 'c1', estimate_id: 'e-1' } };
+      const database = dbOf(rows);
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database);
+    });
+
+    test('a vanished root (dead marker) leaves the repeat to carry its own row', async () => {
+      const rows = { rep: repeat('rep') };
+      await expect(settleRepeatFunnelRow(dbOf(rows), 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    });
   });
 
   test('self-booking: a SPAM root already among the customer\'s linked rows never reaches the candidate set (positive open filter) — its repeat stands in (codex r24 P1)', async () => {
@@ -1358,10 +1402,31 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     const result = await convertLeadFromEvent({ source: 'deposit_paid', estimateId: 'e2', customerId: 'c1', database, leadAttributionService: { markConverted } });
     expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep-e2'] });
     expect(markConverted).not.toHaveBeenCalledWith('L-root-e1', expect.anything());
-    expect(markConverted).toHaveBeenCalledWith('L-rep-e2', expect.objectContaining({ onlyIfStatusIn: ['duplicate'], funnelRowFor: expect.objectContaining({ id: 'L-rep-e2' }) }));
+    expect(markConverted).toHaveBeenCalledWith('L-rep-e2', expect.objectContaining({ onlyIfStatusIn: ['duplicate'] }));
     // The stamp is markConverted's (so the backfill preview stub covers it) —
     // never a direct write from the resolver (codex r18 P1).
     expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+  });
+
+  test('deposit_paid: when the NEWEST repeat of an ancestry is tied to a different estimate, its older unlinked sibling is the keeper — an out-of-scope sibling never silences the in-scope one (codex r27 P1)', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      estimate: { id: 'e2', status: 'accepted', customer_id: 'c1', monthly_total: 80 },
+      leadsByEstimate: [],
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLeads: [
+        { id: 'R-e1', status: 'duplicate', customer_id: 'c1', estimate_id: 'e1', extracted_data: { duplicate_of_lead_id: 'L-gone' }, first_contact_at: '2026-09-03T12:00:00Z' },
+        { id: 'R-free', status: 'duplicate', customer_id: 'c1', estimate_id: null, extracted_data: { duplicate_of_lead_id: 'L-gone' }, first_contact_at: '2026-08-30T12:00:00Z' },
+      ],
+      leadsById: {},
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'deposit_paid', estimateId: 'e2', customerId: 'c1', database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['R-free'] });
+    expect(markConverted).toHaveBeenCalledTimes(1);
+    expect(markConverted).toHaveBeenCalledWith('R-free', expect.objectContaining({ onlyIfStatusIn: ['duplicate'], onlyIfIdentity: expect.objectContaining({ estimate_id: null }) }));
   });
 
   test('self-booking: a repeat row whose label was changed by staff before the claim converts nothing', async () => {
@@ -2258,11 +2323,15 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
           return {
             first: async () => leadsById[clause.id] || null,
             whereNull: (col) => ({
+              // linkRescuedLead: .whereNull('estimate_id').whereNotIn('status', CLOSED)
+              // .where(identity as read).update(...) (codex r27 P1)
               whereNotIn: (statusCol, vals) => ({
-                update: async (patch) => {
-                  updates.push({ id: clause.id, whereNull: col, whereNotIn: vals, patch });
-                  return opts.linkRows == null ? 1 : opts.linkRows;
-                },
+                where: (identity) => ({
+                  update: async (patch) => {
+                    updates.push({ id: clause.id, whereNull: col, whereNotIn: vals, identity, patch });
+                    return opts.linkRows == null ? 1 : opts.linkRows;
+                  },
+                }),
               }),
               // recordFirstResponseIfNeeded's atomic claim:
               // .where({id}).whereNull('response_time_minutes').update(patch)
@@ -2461,7 +2530,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateSent({ estimateId: 'e-3', sendMethod: 'both', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-unlinked', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-3' }) },
+      { id: 'L-unlinked', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-3' }) },
       { id: 'L-unlinked', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-unlinked'),
     ]);
@@ -2507,7 +2576,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateSent({ estimateId: 'e-6', sendMethod: 'email', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-qw', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-6' }) },
+      { id: 'L-qw', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-6' }) },
       { id: 'L-qw', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-qw'),
     ]);
@@ -2526,7 +2595,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateViewed({ estimateId: 'e-7', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-view', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-7' }) },
+      { id: 'L-view', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-7' }) },
       { id: 'L-view', whereIn: ['new', 'contacted', 'estimate_sent'], patch: expect.objectContaining({ status: 'estimate_viewed' }) },
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_viewed']);
@@ -2546,7 +2615,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
     // Only the (lost) stamp attempt ran — no status flip, no estimate_created, no estimate_sent.
     expect(database._updates).toEqual([
-      { id: 'L-race', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-9' }) },
+      { id: 'L-race', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-9' }) },
     ]);
     expect(database._activities).toEqual([]);
   });
@@ -2565,11 +2634,46 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     // Link already won by the concurrent event (no estimate_created re-log), but
     // this send's status flip + estimate_sent activity must NOT be dropped.
     expect(database._updates).toEqual([
-      { id: 'L-same', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-10' }) },
+      { id: 'L-same', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-10' }) },
       { id: 'L-same', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-same'),
     ]);
     expect(types(database)).toEqual(['estimate_sent']);
+  });
+
+  test('the rescue stamp pins the identity the followed root was read with — a root re-assigned or re-contacted between the read and the stamp loses it, and nothing advances (codex r27 P1)', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-27', estimate_data: { lead_id: 'L-rep27' }, customer_phone: '+19415550142' },
+      leadsById: {
+        'L-rep27': { id: 'L-rep27', status: 'duplicate', extracted_data: { duplicate_of_lead_id: 'L-root27' } },
+        'L-root27': { id: 'L-root27', status: 'new', customer_id: null, phone: '9415550142', email: 'a@example.com', estimate_id: null },
+      },
+      linkRows: 0, // the identity-scoped stamp hit 0 rows: an admin edit re-identified the root in between
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-27', sendMethod: 'sms', database });
+
+    expect(database._updates).toEqual([
+      { id: 'L-root27', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: { customer_id: null, phone: '9415550142', email: 'a@example.com', estimate_id: null }, patch: expect.objectContaining({ estimate_id: 'e-27' }) },
+    ]);
+    expect(database._activities).toEqual([]);
+  });
+
+  test('a same-estimate link that won the race counts as ours only on the identity the lead was read with (codex r27 P1)', async () => {
+    const database = makeEventDb({
+      linked: [],
+      estimate: { id: 'e-28', estimate_data: null, customer_phone: '+19415550142' },
+      contactLeads: [{ id: 'L-swap', status: 'new', customer_id: null, phone: '9415550142' }],
+      linkRows: 0,
+      // re-read: linked to THIS estimate, but by a write that also re-contacted the row
+      leadsById: { 'L-swap': { id: 'L-swap', status: 'new', customer_id: null, phone: '9415550199', estimate_id: 'e-28' } },
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-28', sendMethod: 'sms', database });
+
+    expect(database._updates).toHaveLength(1); // the lost stamp only — no status flip
+    expect(database._activities).toEqual([]);
   });
 
   test('contact-matched lead CONVERTED between read and stamp (now closed) → does not link or advance', async () => {
@@ -2585,7 +2689,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
     // Only the guarded (no-op) stamp attempt ran — no link, no status flip, no activity.
     expect(database._updates).toEqual([
-      { id: 'L-conv', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-11' }) },
+      { id: 'L-conv', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-11' }) },
     ]);
     expect(database._activities).toEqual([]);
   });
@@ -2634,7 +2738,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     });
 
     expect(database._updates).toEqual([
-      { id: 'L-older', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-13' }) },
+      { id: 'L-older', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-13' }) },
       { id: 'L-older', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-older'),
     ]);
@@ -2654,7 +2758,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     });
 
     expect(database._updates).toEqual([
-      { id: 'L-mirror', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-14' }) },
+      { id: 'L-mirror', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-14' }) },
       { id: 'L-mirror', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-mirror'),
     ]);
@@ -2698,7 +2802,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     await markLinkedLeadEstimateSent({ estimateId: 'e-16', sendMethod: 'sms', database });
 
     expect(database._updates).toEqual([
-      { id: 'L-cust', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-16' }) },
+      { id: 'L-cust', whereNull: 'estimate_id', whereNotIn: CLOSED, identity: expect.any(Object), patch: expect.objectContaining({ estimate_id: 'e-16' }) },
       { id: 'L-cust', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
       QUALIFY_ATTEMPT('L-cust'),
     ]);
