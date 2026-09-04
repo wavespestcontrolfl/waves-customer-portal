@@ -68,7 +68,13 @@ const PREP_CONFIG = Object.freeze({
     // "Lawn Pest Control" is the one-time turf-pest knockdown — a lawn-line
     // visit the broad %pest% match would otherwise claim for indoor prep
     // (service-line-infer.js special-cases the same name; GH Codex #3856 r11 P2).
-    excludeKeywords: ['lawn pest'],
+    // A rodent-LED name ("Rodent Pest Control", rodent_general_one_time's
+    // canonical label) is a rodent service row the broad %pest% match would
+    // otherwise claim for indoor prep; only a "pest ... rodent" combined
+    // plan ("Pest & Rodent Control") is pest-primary — the same split
+    // waveguard-existing-services.js isRodentLedText draws (GH Codex #3856
+    // r20 P2).
+    excludeKeywords: ['lawn pest', { keyword: 'rodent', unless: 'pest%rodent' }],
     emailTemplateKey: 'prep.interior_pest',
     smsStandaloneKey: null,
   },
@@ -93,6 +99,12 @@ const PREP_CONFIG = Object.freeze({
   termite: {
     label: 'Termite Service',
     serviceKeywords: ['termite'],
+    // prep.termite describes trenching, drilling and bait stations — a
+    // termite/WDO INSPECTION or monitoring visit must not receive treatment
+    // prep. Mirrors appointment-tagger classifyAppointmentType: wdo /
+    // wood destroying / inspection outrank the termite-treatment tag
+    // (GH Codex #3856 r20 P1).
+    excludeKeywords: ['inspect', 'monitor', 'wdo', 'wood destroying'],
     emailTemplateKey: 'prep.termite',
     smsStandaloneKey: null,
   },
@@ -138,7 +150,12 @@ async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywo
     const q = db('scheduled_services')
       .whereIn('customer_id', ids)
       .whereRaw(`(${serviceKeywords.map(() => 'LOWER(service_type) LIKE ?').join(' OR ')})`, serviceKeywords.map((kw) => `%${kw}%`));
-    for (const kw of excludeKeywords) q.whereRaw('LOWER(service_type) NOT LIKE ?', [`%${kw}%`]);
+    // An exclusion is a keyword, or { keyword, unless } when a wider LIKE
+    // pattern keeps the row anyway (a pest-primary "pest ... rodent" name).
+    for (const ex of excludeKeywords) {
+      if (typeof ex === 'string') q.whereRaw('LOWER(service_type) NOT LIKE ?', [`%${ex}%`]);
+      else q.whereRaw('(LOWER(service_type) NOT LIKE ? OR LOWER(service_type) LIKE ?)', [`%${ex.keyword}%`, `%${ex.unless}%`]);
+    }
     const rows = await q
       .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
       // The same null-safe dispatch-owned predicate /api/schedule uses.

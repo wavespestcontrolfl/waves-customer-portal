@@ -676,6 +676,24 @@ describe('sendPrepToCustomer', () => {
     expect(excluded).toBe(true);
   });
 
+  test('the interior-pest visit match excludes a rodent-led name unless it is a pest-primary "pest ... rodent" plan', async () => {
+    upcomingVisitRow = VISIT;
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'interior_pest', channel: 'email' });
+    const excluded = scheduledQueries.some((q) => q.whereRaw.mock.calls.some(([sql, args]) => (
+      sql === '(LOWER(service_type) NOT LIKE ? OR LOWER(service_type) LIKE ?)' && args[0] === '%rodent%' && args[1] === '%pest%rodent%'
+    )));
+    expect(excluded).toBe(true);
+  });
+
+  test('the termite visit match excludes inspection, monitoring and WDO visits (treatment prep only)', async () => {
+    upcomingVisitRow = VISIT;
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'email' });
+    const excludedArgs = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls
+      .filter(([sql]) => sql === 'LOWER(service_type) NOT LIKE ?')
+      .map(([, args]) => args[0]));
+    expect(excludedArgs).toEqual(expect.arrayContaining(['%inspect%', '%monitor%', '%wdo%', '%wood destroying%']));
+  });
+
   test('losing the prep-page claim (another guide keyed the row after the read) refuses the text', async () => {
     // The read sees an unkeyed row; the conditional claim then affects 0
     // rows because a concurrent send keyed it to interior pest.
