@@ -163,7 +163,13 @@ async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
   // "no prior order" — a misleading, non-reclaimable needs_review (Codex r20
   // P2). Unconfigured = not auto-orderable = the sweep bells the office.
   const configured = !!adapter && (typeof adapter.configured !== 'function' || adapter.configured() === true);
-  return configured && gateEnvValue(VENDOR_GATE[key]);
+  if (!configured || !gateEnvValue(VENDOR_GATE[key])) return false;
+  if (!adapter.loginRequired || typeof adapter.loginConfigured !== 'function') return true;
+  // Configured by the vendor row (the SiteOne login + account number): a row
+  // without it, or a lookup that fails, is not auto-orderable — the sweep
+  // bells the office rather than standing down (Codex #3853 r12 P2).
+  try { return adapter.loginConfigured(await getVendorLoginCredentials(conn, row.id)) === true; }
+  catch (e) { logger.warn(`[order-dispatch] canAutoOrder: credential lookup for ${row.name || row.id} failed (${e.message}) — treated as unconfigured`); return false; }
 }
 
 // Pack-size count for count-based stock: "100", "100 each", "50 ct", "1 pc".
@@ -582,7 +588,20 @@ async function resolveClaimVendor(trx, { request, registry, deadAdapters = null 
   // "no prior order" — hand it back instead (Codex r21 P2).
   const adapter = registry[adapterKey];
   if (typeof adapter.configured === 'function' && adapter.configured() !== true) return { skipped: 'adapter_unconfigured' };
-  return { vendor, adapterKey, m };
+  // A login-driven adapter (the SiteOne bot) is configured by the vendor row,
+  // not env: its stored login is read HERE, before the one-shot ledger claim,
+  // so a missing login hands the request back (retryable once the owner
+  // stores it) instead of parking a claim as no_credentials (Codex #3853 r12
+  // P2). A lookup that THROWS is run-level for this adapter: nothing written.
+  if (!adapter.loginRequired) return { vendor, adapterKey, m };
+  const credentials = await lookupVendorLogin(trx, vendor, adapterKey);
+  if (typeof adapter.loginConfigured === 'function' && adapter.loginConfigured(credentials) !== true) return { skipped: 'adapter_unconfigured' };
+  return { vendor, adapterKey, m, credentials };
+}
+
+async function lookupVendorLogin(conn, vendor, adapterKey) {
+  try { return await getVendorLoginCredentials(conn, vendor.id); }
+  catch (e) { const err = new Error(`vendor credential lookup failed: ${e.message}`); err.runLevel = true; err.adapterKey = adapterKey; throw err; }
 }
 
 // Withdraw a request the catalog no longer authorizes — the owner's own
@@ -701,7 +720,7 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null }) {
   if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
   const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters });
   if (resolved.skipped) return resolved;
-  const { vendor, adapterKey, m } = resolved;
+  const { vendor, adapterKey, m, credentials = null } = resolved;
   const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit');
   if (!product) return { skipped: 'no_product' };
   const ineligible = claimIneligibility({ product, request, vendor });
@@ -717,7 +736,7 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null }) {
   await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${request.id}`]).whereNull('read_at').update({ read_at: new Date() });
   const { ledger, pricing, order } = await insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity });
   if (!ledger) return { skipped: 'already_claimed' };
-  return { request, vendor, adapterKey, product, quantity, ledger, pricing, order };
+  return { request, vendor, adapterKey, product, quantity, ledger, pricing, order, credentials };
 }
 
 /**
@@ -922,16 +941,6 @@ function parkIfUnpriced(conn, { ctx, pricing, order, vendor, product }) {
   return null;
 }
 
-// A login-driven adapter (the SiteOne browser bot) places with the vendor
-// row's stored credentials. A lookup that THROWS (DB hiccup) is run-level:
-// nothing was sent, so the claim is released for tomorrow's tick instead of
-// burning the request's one-shot claim as 'failed' (pre-push P1). A lookup
-// that RETURNS null/incomplete is configuration and parks inside place().
-async function withVendorLogin(conn, { placeArgs, vendor, releaseClaim }) {
-  try { return { ...placeArgs, credentials: await getVendorLoginCredentials(conn, vendor.id) }; }
-  catch (e) { await releaseClaim(); const err = new Error(`vendor credential lookup failed: ${e.message}`); err.runLevel = true; throw err; }
-}
-
 // Detector: the vendor's read-back total should equal the reserved one. If it
 // came out higher and breaks a cap, the order exists but parks for the owner
 // (cancel with the vendor / revoke); the request is ordered. Returns the park
@@ -979,7 +988,7 @@ async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
 // post-submit detector → record. Every exit is a park, a record, or a
 // run-level throw after releasing the claim.
 async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
-  const { request, vendor, adapterKey, product, ledger, pricing, order } = claim;
+  const { request, vendor, adapterKey, product, ledger, pricing, order, credentials } = claim;
   const adapter = registry[adapterKey];
   const ctx = { ledger, request, product, vendor, adapterKey, notify };
   const releaseClaim = () => conn('vendor_orders').where({ id: ledger.id, status: 'placing' }).delete();
@@ -1001,7 +1010,8 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     // sale and runs the cap reservation through beforeSubmit right before it
     // submits (the binding total is the vendor's, never a local estimate).
     const quoted = adapter.quotesAtPlace ? { ...base, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { env }) } : base;
-    const placeArgs = adapter.loginRequired ? await withVendorLogin(conn, { placeArgs: quoted, vendor, releaseClaim }) : quoted;
+    // A login-driven adapter places with the login the claim already looked up.
+    const placeArgs = adapter.loginRequired ? { ...quoted, credentials } : quoted;
     const stopHeartbeat = startClaimHeartbeat(conn, ledger.id);
     try {
       placed = await adapter.place(placeArgs);

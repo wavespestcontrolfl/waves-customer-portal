@@ -816,7 +816,25 @@ test('a loginRequired adapter places with the vendor row\'s stored login on top 
   expect(place).toHaveBeenCalledTimes(1);
 });
 
-test('a credential lookup that THROWS is run-level: claim released, nothing parked failed, batch aborts (pre-push P1)', async () => {
+test('a login-required vendor without its stored login is handed back before any claim — no ledger row, the sweep bell rings, retryable once configured (Codex #3853 r12 P2)', async () => {
+  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
+  getVendorLoginCredentials.mockResolvedValueOnce(null);
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  const place = jest.fn();
+  const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: (c) => !!(c && c.password && c.accountNumber), place });
+  expect(r).toMatchObject({ skipped: 'adapter_unconfigured', belled: true });
+  expect(place).not.toHaveBeenCalled();
+  expect(mockState.ledgerRows).toHaveLength(0);
+  // canAutoOrder makes the same call, so the sweep never stands down its bell for that vendor
+  getVendorLoginCredentials.mockResolvedValueOnce(null);
+  expect(await dispatch.canAutoOrder({ vendor: mockState.vendor })).toBe(false);
+  expect(await dispatch.canAutoOrder({ vendor: mockState.vendor })).toBe(true); // the default mock login is complete
+});
+
+test('a credential lookup that THROWS is run-level: nothing claimed, nothing parked failed, the adapter is dead for the run (pre-push P1)', async () => {
   const { getVendorLoginCredentials } = require('../services/vendor-credentials');
   getVendorLoginCredentials.mockRejectedValueOnce(new Error('connection reset'));
   mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
@@ -824,9 +842,9 @@ test('a credential lookup that THROWS is run-level: claim released, nothing park
   mockState.product = talstar;
   mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
   const place = jest.fn();
-  await expect(run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, place })).rejects.toMatchObject({ runLevel: true, message: expect.stringMatching(/credential lookup failed/) });
+  await expect(run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, place })).rejects.toMatchObject({ runLevel: true, adapterKey: 'siteone', message: expect.stringMatching(/credential lookup failed/) });
   expect(place).not.toHaveBeenCalled();
-  expect(mockState.deletes).toContain('vendor_orders'); // claim released
+  expect(mockState.ledgerRows).toHaveLength(0); // the lookup precedes the claim: nothing to release
   expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status)).toHaveLength(0); // never parked
   expect(notify).not.toHaveBeenCalled();
 });

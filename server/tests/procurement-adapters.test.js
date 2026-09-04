@@ -220,17 +220,28 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.addToCart) return el({ count: 1, onClick: () => { st.addClicked += 1; st.cart.push({ sku: 'S1-77', qty: st.qty }); if (st.addExtra) st.cart.push(st.addExtra); } });
       if (sel === S.cartLine) return el({ count: st.cart.length, nth: (i) => line(st.cart[i]) });
       if (sel === S.cartRemove) return el({ count: st.cart.length && st.removable ? 1 : 0, onClick: () => { st.cart.shift(); } });
-      if (sel === S.cartTotal) return el({ count: 1, text: '$99.00' });
+      // cartTotalHiddenFirst: a hidden responsive copy carrying a stale figure precedes the visible total
+      if (sel === S.cartTotal) return st.cartTotalHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: '$999.00' }) : el({ count: 1, visible: true, text: '$99.00' })) }) : el({ count: 1, visible: true, text: '$99.00' });
       if (sel === S.checkoutButton) return el({ count: 1 });
       // mfaHiddenFirst: a responsive duplicate — the first matching node is hidden, the second is the visible prompt
       if (sel === S.mfaField) return st.mfaHiddenFirst ? el({ count: 2, nth: (i) => el({ count: 1, visible: i === 1 }) }) : el();
       // cardUntilBillTo: the checkout defaults to card entry and hides the field once bill-to-account is selected
       if (sel === S.cardField) return st.cardUntilBillTo ? el({ count: 1, visible: !st.accountChecked }) : el();
-      if (sel === S.termsCheckbox) return el(st.termsUnreadable ? { count: 1 } : {}); // count 1 with no `checked` → isChecked throws
+      if (sel === S.termsCheckbox) {
+        // termsHiddenCheckedFirst: a hidden CHECKED copy precedes the visible UNCHECKED checkbox the checkout shows
+        if (st.termsHiddenCheckedFirst) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, checked: true }) : el({ count: 1, visible: true, checked: false })) });
+        return el(st.termsUnreadable ? { count: 1 } : {}); // count 1 with no `checked` → isChecked throws
+      }
       // `checked` is a live getter: a real locator re-resolves, so the option clicked a moment ago reads its CURRENT state
       // The option: a radio input, or (billIsLabel) a wrapping label whose radio is the sub-locator
       const radio = () => el({ count: 1, visible: st.radioVisible ?? true, get checked() { return st.accountChecked === true; } });
-      if (sel === S.billToAccount) return el({ count: 1, visible: true, tag: st.billIsLabel ? 'label' : 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; }, sub: (sub) => (sub === 'input[type="radio"]' ? radio() : el()) });
+      const billOption = () => el({ count: 1, visible: true, tag: st.billIsLabel ? 'label' : 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; }, sub: (sub) => (sub === 'input[type="radio"]' ? radio() : el()) });
+      // billHiddenFirst: a hidden responsive copy of the option precedes the usable visible one; billVisibleCopies: N visible copies
+      if (sel === S.billToAccount) {
+        if (st.billHiddenFirst) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, tag: 'input', checked: false }) : billOption()) });
+        if (st.billVisibleCopies) return el({ count: st.billVisibleCopies, nth: () => billOption() });
+        return billOption();
+      }
       // extraCheckedAccounts = checked account radios ELSEWHERE on the page (hidden responsive duplicates, stale nodes)
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
       if (sel === S.billToAccountSelected) return el({ count: (st.accountChecked ? 1 : 0) + (st.extraCheckedAccounts || 0) });
@@ -396,6 +407,33 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ orderNumberText: 'Thank you for your order' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.placeClicked).toBe(1);
+  });
+
+  test('a hidden CHECKED terms copy ahead of the visible unchecked checkbox is not acceptance — every shown checkbox is judged (r12 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ termsHiddenCheckedFirst: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'terms_required' });
+    expect(st.placeClicked).toBe(0);
+  });
+
+  test('the bill-to option is the ONE visible copy: a hidden copy ahead of it is skipped, two visible copies refuse (r12 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ billHiddenFirst: true });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.placeClicked).toBe(1);
+    const dup = fakeSiteOne({ billVisibleCopies: 2 });
+    await expect(s1.place(args(), dup.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_ambiguous' });
+    expect(dup.st.placeClicked).toBe(0);
+  });
+
+  test('the cart total is the ONE visible total — a hidden stale copy ahead of it is never the dry-run or cap figure (r12 P2)', async () => {
+    const { deps } = fakeSiteOne({ cartTotalHiddenFirst: true });
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+  });
+
+  test('loginConfigured mirrors validatePlaceArgs: login + account number (r12 P2)', () => {
+    expect(s1.loginConfigured(creds)).toBe(true);
+    expect(s1.loginConfigured(null)).toBe(false);
+    expect(s1.loginConfigured({ ...creds, password: null })).toBe(false);
+    expect(s1.loginConfigured({ ...creds, accountNumber: '' })).toBe(false);
   });
 
   test('a visible MFA prompt behind a hidden duplicate node still refuses — every match is checked, not the first (r11 P1)', async () => {

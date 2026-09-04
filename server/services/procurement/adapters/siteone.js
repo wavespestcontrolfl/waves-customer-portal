@@ -164,16 +164,26 @@ async function shot(page, label, evidence, upload) {
   } catch (e) { logger.warn(`[siteone-bot] screenshot ${label} failed: ${e.message}`); }
 }
 
-// Any VISIBLE match, not the first: SiteOne renders responsive duplicates,
-// and a hidden node ahead of the visible one must not read as "no blocker"
-// (the MFA / card / unavailable checks fail closed — Codex #3853 r11 P1).
+// SiteOne renders responsive duplicates (a hidden desktop/mobile copy ahead of
+// the visible node), so no check may judge `.first()`: every match is
+// resolved, and the VISIBLE ones are what the checkout shows (Codex #3853 r11
+// P1, r12 P1 + P2s). Returns { all, shown } as locators.
+async function matches(page, selector) {
+  const els = page.locator(selector);
+  const n = await els.count();
+  const all = [];
+  const shown = [];
+  for (let i = 0; i < n; i += 1) {
+    const el = els.nth(i);
+    all.push(el);
+    if (await el.isVisible({ timeout: 1500 }).catch(() => false)) shown.push(el);
+  }
+  return { all, shown };
+}
+
+// Any visible match (the MFA / card / unavailable blockers fail closed).
 async function visible(page, selector) {
-  try {
-    const els = page.locator(selector);
-    const n = await els.count();
-    for (let i = 0; i < n; i += 1) if (await els.nth(i).isVisible({ timeout: 1500 })) return true;
-    return false;
-  } catch { return false; }
+  try { return (await matches(page, selector)).shown.length > 0; } catch { return false; }
 }
 
 // Case- and whitespace-insensitive comparison text for checkout labels.
@@ -288,9 +298,17 @@ async function login(page, creds) {
 // only sequences them. Refusals (RefusedError) park; run-level errors abort
 // the batch; anything thrown after the click is `ambiguous`.
 
+// What "configured" means for a login-driven vendor: a stored login AND the
+// bill-to account number. The dispatcher checks this BEFORE claiming (and
+// canAutoOrder before the sweep stands down its bell), so an unconfigured
+// SiteOne row hands the request to the office instead of burning its one-shot
+// claim as a non-reclaimable park (Codex #3853 r12 P2).
+const hasLogin = (c) => !!(c && c.password && (c.email || c.username));
+function loginConfigured(credentials) { return hasLogin(credentials) && !!credentials.accountNumber; }
+
 // Arguments the bot can act on at all — all refusals, before any browser work.
 function validatePlaceArgs({ vendorSku, quantity, credentials, approvedShipTo }) {
-  if (!credentials || !credentials.password || !(credentials.email || credentials.username)) throw new RefusedError('no_credentials', 'SiteOne login is not stored on the vendor row');
+  if (!hasLogin(credentials)) throw new RefusedError('no_credentials', 'SiteOne login is not stored on the vendor row');
   if (!credentials.accountNumber) throw new RefusedError('no_account_number', 'SiteOne account number is not on the vendor row (bill-to-account only)');
   const qty = Math.round(Number(quantity));
   if (!Number.isFinite(qty) || qty <= 0) throw new RefusedError('bad_quantity', `quantity ${quantity} is not a positive count`);
@@ -390,9 +408,13 @@ async function verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload }
     evidence.cartLines = lines.map((l) => ({ sku: l.sku.slice(0, 60), qty: Number.isFinite(l.qty) ? l.qty : null }));
     throw new RefusedError('cart_mismatch', `SiteOne cart is not exactly ${vendorSku} × ${qty}: ${lines.length ? lines.map((l) => `${l.sku || '?'} × ${Number.isFinite(l.qty) ? l.qty : '?'}`).join(', ') : 'empty'}`, evidence);
   }
-  const totalText = await page.locator(SELECTORS.cartTotal).first().textContent().catch(() => '');
+  // The ONE visible total (a hidden responsive copy can carry a stale figure
+  // that would park a valid order at the cap gate or misreport a dry run — r12 P2).
+  const totals = (await matches(page, SELECTORS.cartTotal)).shown;
+  const totalText = totals.length === 1 ? await totals[0].textContent().catch(() => '') : '';
   const amountCents = parseMoney(totalText);
   await shot(page, 'cart', evidence, upload);
+  if (totals.length !== 1) throw new RefusedError('no_cart_total', `${totals.length} visible cart totals — expected exactly one (SELECTORS.cartTotal)`, evidence);
   if (!amountCents) throw new RefusedError('no_cart_total', `could not read the cart total ("${String(totalText || '').trim().slice(0, 40)}")`, evidence);
   evidence.cartTotalCents = amountCents;
   return amountCents;
@@ -432,16 +454,23 @@ async function associatedRadio(page, option) {
 async function verifyBillToAccount(page, { evidence, upload }) {
   const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
   if (await visible(page, SELECTORS.mfaField)) await refuse('mfa_required', 'SiteOne checkout asks for a verification code — bot never supplies it');
-  const terms = page.locator(SELECTORS.termsCheckbox).first();
-  if (await terms.count()) {
-    // Fail CLOSED on an unreadable state (Codex r4 P2): unknown ≠ accepted.
+  // Every terms checkbox the checkout SHOWS must be accepted; a hidden checked
+  // copy ahead of a visible unchecked one is not acceptance (r12 P1). With no
+  // visible copy at all, the hidden ones are judged (never skipped). Fail
+  // CLOSED on an unreadable state (Codex r4 P2): unknown ≠ accepted.
+  const terms = await matches(page, SELECTORS.termsCheckbox);
+  for (const box of terms.shown.length ? terms.shown : terms.all) {
     let accepted = null;
-    try { accepted = await terms.isChecked(); } catch { await refuse('terms_unreadable', 'SiteOne checkout shows a terms checkbox whose state could not be read — owner action'); }
-    if (!accepted) await refuse('terms_required', 'SiteOne checkout requires accepting terms — owner action');
+    try { accepted = await box.isChecked(); } catch { await refuse('terms_unreadable', 'SiteOne checkout shows a terms checkbox whose state could not be read — owner action'); }
+    if (accepted !== true) await refuse('terms_required', 'SiteOne checkout requires accepting terms — owner action');
   }
-  const bill = page.locator(SELECTORS.billToAccount).first();
-  if (!(await bill.count())) await refuse('no_bill_to_account', 'bill-to-account option not offered at checkout');
-  if (!(await bill.isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the bill-to-account option at checkout is not visible — not the tender the checkout shows');
+  // The tender is the ONE visible bill-to option; a hidden responsive copy
+  // ahead of it is neither refused on nor clicked (r12 P2).
+  const billOptions = await matches(page, SELECTORS.billToAccount);
+  if (!billOptions.all.length) await refuse('no_bill_to_account', 'bill-to-account option not offered at checkout');
+  if (!billOptions.shown.length) await refuse('bill_to_account_hidden', 'the bill-to-account option at checkout is not visible — not the tender the checkout shows');
+  if (billOptions.shown.length > 1) await refuse('bill_to_account_ambiguous', `${billOptions.shown.length} visible bill-to-account options at checkout — cannot tell which the order bills`);
+  const bill = billOptions.shown[0];
   try { await bill.click({ timeout: 5000 }); }
   catch (e) { await refuse('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`); }
   await page.waitForTimeout(1500);
@@ -606,7 +635,8 @@ async function place(
 
 module.exports = {
   key: 'siteone',
-  loginRequired: true, // place() needs the vendor row's stored login (order-dispatch withVendorLogin)
+  loginRequired: true, // place() needs the vendor row's stored login (the dispatcher's claim looks it up and passes `credentials`)
+  loginConfigured,
   quotesAtPlace: true,
   packagedQuantity: true, // cart quantity = packages (pack size from the price row)
   preSubmitTotal: 'vendor', // the checkout total is read live, immediately before the click
