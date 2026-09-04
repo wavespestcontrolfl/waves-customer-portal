@@ -1919,6 +1919,10 @@ const ReviewService = {
         idempotencyKey: `review_touch:${request.id}:email`,
         suppressionGroupKey: "service_operational",
         categories: ["review_request"],
+        // Provider rejections can echo the recipient address — keep the raw
+        // SendGrid body out of the transport log (AGENTS.md: no email
+        // addresses in logs); the sanitized catch below is the only log.
+        suppressProviderErrorLog: true,
       });
       if (!result?.sent) return { sent: false, reason: result?.reason || "email_blocked" };
       // channel 'both': the row texted AND emailed — the outreach analytics

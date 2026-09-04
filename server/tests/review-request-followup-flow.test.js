@@ -737,6 +737,7 @@ describe('review request follow-up flow', () => {
         to: 'megan@example.com',
         recipientId: 'cust-1',
         idempotencyKey: 'review_touch:rr-1:email',
+        suppressProviderErrorLog: true,
       });
       expect(call.payload.first_name).toBe('Megan');
       expect(call.payload.review_url).toContain('tok-1');

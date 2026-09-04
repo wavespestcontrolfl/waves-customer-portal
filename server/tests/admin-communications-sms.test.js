@@ -458,6 +458,29 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('schedule-sms resolves a branded /l/:code short link through short_codes.kind', async () => {
+      const shortCodes = {
+        whereIn: jest.fn(function () { return this; }),
+        where: jest.fn(function () { return this; }),
+        select: jest.fn(async () => [{ code: 'abc123xyz9' }]),
+      };
+      db.mockImplementation((table) => {
+        if (table === 'short_codes') return shortCodes;
+        throw new Error(`unexpected table ${table}`);
+      });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Review us: wavespestcontrol.com/l/abc123xyz9', messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/immediate send/);
+        expect(shortCodes.whereIn).toHaveBeenCalledWith('code', ['abc123xyz9']);
+        expect(shortCodes.where).toHaveBeenCalledWith({ kind: 'review' });
+      });
+    });
+
     test('a send without the resolved owner as customerId is refused — the link must ride the owner policy', async () => {
       wireAutopayDb({ row: { id: 'r1', kind: 'customer', status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'cust-A' } });
       await withServer(async (baseUrl) => {
@@ -825,6 +848,25 @@ describe('admin communications SMS route', () => {
         expect(await res.json()).toMatchObject({ reviewEmail: { sent: true } });
         expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
         expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
+      });
+    });
+
+    test('a throw after provider acceptance still emails the Both copy and says so', async () => {
+      const ReviewService = require('../services/review-request');
+      const accepted = new Error('audit write failed');
+      accepted.providerOutcome = { sent: true };
+      sendCustomerMessage.mockRejectedValue(accepted);
+      // The error path fires the async Twilio failure alert (a promise).
+      require('../services/twilio-failure-alerts').alertTwilioFailure.mockResolvedValue(undefined);
+      ReviewService.sendInlineEmailCopy.mockResolvedValue({ sent: true });
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { reviewRequestEmail: true });
+        expect(res.status).toBe(500);
+        expect((await res.json()).error).toMatch(/text was accepted; the review email was sent too/);
+        expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
+        expect(ReviewService.releaseInlineClaim).not.toHaveBeenCalled();
       });
     });
 

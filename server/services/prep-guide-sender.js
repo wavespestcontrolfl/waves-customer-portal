@@ -220,6 +220,11 @@ async function stampPrepSent(visit, config) {
   }
 }
 
+// The email leg. Outcome { sent, uncertain }: the template library can throw
+// AFTER SendGrid accepted (its post-dispatch bookkeeping) and carries no
+// marker for it, so every throw past the payload build is uncertain — a
+// kept claim costs an operator "email it instead"; a released page 404s a
+// URL the customer may already hold (GH Codex #3856 r5 P1).
 async function sendPrepEmail({ customer, recipient, firstName, config, visit, prepUrl, stampVisit }) {
   try {
     const portalVisitsUrl = portalUrl('/?tab=visits');
@@ -255,11 +260,11 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
       },
     });
     if (result?.sent) await stampPrepSent(stampVisit, config);
-    return !!result?.sent;
+    return { sent: !!result?.sent };
   } catch (err) {
     // Sanitized: never log err.message — provider errors can carry the email.
     logger.error(`[prep-guide-sender] email send failed for customer ${customer.id} (${err?.name || 'Error'})`);
-    return false;
+    return { sent: false, uncertain: true };
   }
 }
 
@@ -352,27 +357,29 @@ function planPrepSms(config, prepUrl) {
 // Runs the requested legs and settles the outcome on `result`: ok when either
 // delivered; 'partial' (+ failedChannel) when Both delivered one; 'send_failed'
 // when neither did — then the provisional page claim is handed back, unless
-// the provider left the text uncertain (GH Codex #3856 r4 P2).
+// a provider left either leg uncertain (GH Codex #3856 r4 P2 / r5 P1).
 async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result }) {
   const { visit, prepUrl, stampVisit } = page;
-  let smsUncertain = false;
+  let uncertain = false;
   if (contacts.wantEmail) {
-    result.emailSent = await sendPrepEmail({
+    const email = await sendPrepEmail({
       customer, recipient: contacts.recipient, firstName: contacts.emailFirstName, config, visit, prepUrl, stampVisit,
     });
+    result.emailSent = email.sent;
+    uncertain = !!email.uncertain;
   }
   if (contacts.wantSms) {
     const sms = await sendPrepSms({
       customer, firstName: contacts.smsFirstName, phone: contacts.phone, pestType, actorId, ...smsPlan,
     });
     result.smsSent = sms.sent;
-    smsUncertain = !!sms.uncertain;
+    uncertain = uncertain || !!sms.uncertain;
     if (sms.sent && smsPlan.variant === 'guide_link' && !result.emailSent) await stampPrepSent(stampVisit, config);
   }
   result.ok = result.emailSent || result.smsSent;
   if (!result.ok) {
     result.reason = 'send_failed';
-    if (stampVisit && !smsUncertain) await releasePrepPage(stampVisit.id, config.emailTemplateKey);
+    if (stampVisit && !uncertain) await releasePrepPage(stampVisit.id, config.emailTemplateKey);
   } else if (contacts.wantEmail && contacts.wantSms && result.emailSent !== result.smsSent) {
     // Both: one leg delivered, the other did not — say which, or the
     // operator reads a half-delivered ask as fully sent (GH Codex #3856 r2 P2).

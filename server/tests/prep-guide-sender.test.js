@@ -330,6 +330,18 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
   });
 
+  test('an email-library throw is uncertain — the page claim is kept', async () => {
+    upcomingVisitRow = VISIT;
+    EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(new Error('post-dispatch bookkeeping failed'));
+
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'email' });
+
+    expect(result).toMatchObject({ ok: false, reason: 'send_failed', emailSent: false });
+    // SendGrid may have accepted it — the delivered URL must keep rendering.
+    expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
+  });
+
   test('a delivered guide keeps its page claim; a partial Both does not release it', async () => {
     upcomingVisitRow = VISIT;
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'suppressed' });

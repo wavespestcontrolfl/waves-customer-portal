@@ -206,6 +206,10 @@ router.post('/sms', async (req, res, next) => {
   let claimedReviewRequestId = null;
   let claimedReviewClaimToken = null;
   let reviewEmailOutcome = null;
+  // Quick Links "Both": once the text has really sent, the same ask goes out
+  // by email too (ReviewService.sendInlineEmailCopy). Hoisted: the catch
+  // below emails after an accepted-but-thrown send.
+  let reviewRequestEmail = false;
   const clearManualReservation = async () => {
     if (!manualReservationId) return;
     const id = manualReservationId;
@@ -230,10 +234,8 @@ router.post('/sms', async (req, res, next) => {
       // Composer Quick Links: a pending inline review_requests row whose link
       // rides in this body — marked delivered after a real send (below).
       reviewRequestId,
-      // Quick Links "Both": once the text has really sent, the same ask goes
-      // out by email too (ReviewService.sendInlineEmailCopy).
-      reviewRequestEmail,
     } = req.body;
+    reviewRequestEmail = req.body.reviewRequestEmail === true;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
     const media = mediaFromOutboundAttachments(mediaAttachments, cleanMediaUrls);
@@ -797,6 +799,16 @@ router.post('/sms', async (req, res, next) => {
         const ReviewService = require('../services/review-request');
         if (err?.providerOutcome?.sent === true) {
           await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
+          // Both: the text DID leave — email the same ask now, as the
+          // happy path would have; the row is delivered, so no retry can
+          // reclaim it (GH Codex #3856 r5 P2). The outcome rides the error
+          // message the composer shows.
+          if (reviewRequestEmail === true) {
+            const emailOutcome = await ReviewService.sendInlineEmailCopy(claimedReviewRequestId);
+            err.message = `${err.message} The text was accepted; ${emailOutcome?.sent
+              ? 'the review email was sent too.'
+              : `the review email was not sent (${emailOutcome?.reason || 'unknown'}).`}`;
+          }
         } else {
           await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
         }
@@ -2168,6 +2180,10 @@ router.post('/rewrite-sms', async (req, res) => {
 // A tokenized review page link (/rate/:token or its /api/rate/:token/go
 // short form), scheme-less or not — what buildReviewRequestLink inserts.
 const REVIEW_LINK_RE = /\/(?:api\/)?rate\/[A-Za-z0-9_-]{6,}/i;
+// Branded /l/:code short links — what buildReviewUrl normally hands out
+// (shortenOrPassthrough); resolved through short_codes.kind below.
+const SHORT_LINK_RE = /\/l\/([A-Za-z0-9_-]{6,})/g;
+const REVIEW_LINK_SCHEDULE_ERROR = 'Review request links can only go on an immediate send — send now, or remove the review link before scheduling';
 
 router.post('/schedule-sms', async (req, res, next) => {
   try {
@@ -2195,7 +2211,20 @@ router.post('/schedule-sms', async (req, res, next) => {
     // email. The composer refuses client-side; this is the authoritative
     // fence (GH Codex #3856 r4 P1).
     if (REVIEW_LINK_RE.test(cleanBody)) {
-      return res.status(400).json({ error: 'Review request links can only go on an immediate send — send now, or remove the review link before scheduling' });
+      return res.status(400).json({ error: REVIEW_LINK_SCHEDULE_ERROR });
+    }
+    // A pasted branded short link hides the /rate/ path — ask short_codes
+    // what it points at (GH Codex #3856 r5 P1). Fail closed on a lookup miss.
+    const shortCodes = [...cleanBody.matchAll(SHORT_LINK_RE)].map((m) => m[1]);
+    if (shortCodes.length) {
+      let reviewCodes;
+      try {
+        reviewCodes = await db('short_codes').whereIn('code', shortCodes).where({ kind: 'review' }).select('code');
+      } catch (lookupErr) {
+        logger.warn(`[communications] short-link kind lookup failed — refusing to schedule: ${lookupErr.message}`);
+        return res.status(503).json({ error: 'Could not verify the links in this message — try again in a moment.' });
+      }
+      if (reviewCodes.length) return res.status(400).json({ error: REVIEW_LINK_SCHEDULE_ERROR });
     }
 
     // ET wall-clock parse — datetime-local strings without offset are
