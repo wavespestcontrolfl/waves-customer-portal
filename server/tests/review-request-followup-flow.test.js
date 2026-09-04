@@ -45,8 +45,11 @@ function chain(overrides = {}) {
   return {
     where: jest.fn(function () { return this; }),
     whereIn: jest.fn(function () { return this; }),
+    whereNotIn: jest.fn(function () { return this; }),
     whereNull: jest.fn(function () { return this; }),
     whereNotNull: jest.fn(function () { return this; }),
+    whereRaw: jest.fn(function () { return this; }),
+    orderByRaw: jest.fn(function () { return this; }),
     whereNotExists: jest.fn(function () { return this; }),
     whereExists: jest.fn(function () { return this; }),
     leftJoin: jest.fn(function () { return this; }),
@@ -714,7 +717,11 @@ describe('review request follow-up flow', () => {
       // Texted rows in ANY later lifecycle status (opened / rated …) plus
       // stranded 'sending' claims (r16 P2) — no status list.
       expect(q.where).toHaveBeenCalledWith(expect.any(Function));
-      expect(q.whereIn).not.toHaveBeenCalled();
+      // …but never a row the customer already answered / that was stopped (r17 P2).
+      expect(q.whereNotIn).toHaveBeenCalledWith('status', ['completed', 'stopped', 'suppressed', 'failed', 'rated']);
+      expect(q.whereNull).toHaveBeenCalledWith('submitted_at');
+      expect(q.whereNull).toHaveBeenCalledWith('rated_at');
+      expect(q.whereNull).toHaveBeenCalledWith('redirected_at');
       expect(q.whereNull).toHaveBeenCalledWith('sent_at');
       // Only asks that requested an email leg (and still owe it) match —
       // never a Text-only or completion-SMS ask (GH Codex #3856 r8 P1).
@@ -962,6 +969,10 @@ describe('review request follow-up flow', () => {
       // Cleared pre-dispatch, restored on the definite rejection.
       expect(rrUpdate).toHaveBeenNthCalledWith(1, { email_leg_owed_at: null });
       expect(rrUpdate).toHaveBeenNthCalledWith(2, { email_leg_owed_at: expect.any(Date) });
+      // Restore lost twice → this row cannot be retried from here (r17 P2).
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      rrUpdate.mockResolvedValueOnce(1).mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down'));
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_retry_lost' });
       // A 5xx stays uncertain.
       wire({ prefs: { review_request: true, email_enabled: true } });
       EmailLib.sendTemplate.mockImplementation(async (opts) => {

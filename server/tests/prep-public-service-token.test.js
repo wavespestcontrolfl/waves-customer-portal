@@ -22,12 +22,21 @@ function projectsQuery(row) {
   return q;
 }
 
+// The service read is the view-stamping UPDATE … RETURNING: unknown,
+// expired or keyless tokens match nothing.
 function servicesQuery(row) {
+  const usable = row && row.prep_template_key && !(row.prep_expires_at && new Date(row.prep_expires_at) < new Date());
   const q = {
-    leftJoin: jest.fn(() => q),
     where: jest.fn(() => q),
-    first: jest.fn(async () => row),
+    whereNotNull: jest.fn(() => q),
+    update: jest.fn(() => q),
+    returning: jest.fn(async () => (usable ? [row] : [])),
   };
+  return q;
+}
+
+function techniciansQuery(row) {
+  const q = { where: jest.fn(() => q), first: jest.fn(async () => (row?.tech_name ? { name: row.tech_name } : null)) };
   return q;
 }
 
@@ -42,9 +51,11 @@ const CUSTOMER = {
 };
 
 function installDb({ project = null, service = null, customer = CUSTOMER } = {}) {
+  mockDb.raw = jest.fn((sql) => sql);
   mockDb.mockImplementation((table) => {
     if (table === 'projects') return projectsQuery(project);
-    if (table === 'scheduled_services as s') return servicesQuery(service);
+    if (table === 'scheduled_services') return servicesQuery(service);
+    if (table === 'technicians') return techniciansQuery(service);
     if (table === 'customers') return customersQuery(customer);
     return customersQuery(null);
   });
@@ -58,6 +69,7 @@ function serviceRow(overrides = {}) {
     scheduled_date: '2026-08-01',
     prep_template_key: 'prep.flea',
     prep_expires_at: null,
+    technician_id: 'tech-1',
     service_address_line1: null,
     service_address_city: null,
     service_address_state: null,

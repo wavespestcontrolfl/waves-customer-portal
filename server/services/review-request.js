@@ -269,13 +269,15 @@ const INLINE_EMAIL_RETRY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 // delivery record: a lost stamp leaves a delivered ask invisible to the
 // gates or the analytics for good. Returns whether a write landed; the
 // second failure is an error, never a shrug.
-// SendGrid exposes the HTTP status on its throw (sendgrid-mail.js): a 4xx is
-// a DEFINITE rejection — not accepted, safe to retry after a fix — where a
-// 5xx / network failure MAY have been accepted (r16 P2).
-function isDefiniteProviderRejection(err) {
-  const status = Number(err?.status);
-  return status >= 400 && status < 500;
-}
+// A 4xx from SendGrid is a DEFINITE rejection — not accepted, safe to retry
+// after a fix — where a 5xx / network failure MAY have been accepted (r16 P2).
+// The semantics live with the transport (sendgrid-mail.js).
+const isDefiniteProviderRejection = (err) => require("./sendgrid-mail").isDefiniteRejection(err);
+
+// Inline rows past the point where another solicitation would be a second
+// ask: the customer already answered (or the row was stopped). `opened`
+// stays eligible for the owed email leg (r16 P2); these do not (r17 P2).
+const INLINE_RETRY_TERMINAL_STATUSES = ["completed", "stopped", "suppressed", "failed", "rated"];
 
 async function stampWithRetry(makeQuery, label) {
   try {
@@ -1937,6 +1939,10 @@ const ReviewService = {
     const row = await db("review_requests")
       .where({ customer_id: customerId, triggered_by: "auto_inline" })
       .where((q) => q.whereNotNull("sms_sent_at").orWhere({ status: "sending" }))
+      .whereNotIn("status", INLINE_RETRY_TERMINAL_STATUSES)
+      .whereNull("submitted_at")
+      .whereNull("rated_at")
+      .whereNull("redirected_at")
       .whereNull("sent_at")
       .whereNotNull("email_leg_owed_at")
       .where("email_leg_owed_at", ">=", since)
@@ -2080,12 +2086,14 @@ const ReviewService = {
         // Definitely NOT accepted: hand the owed leg back (its original
         // stamp keeps the retry window) so a corrected address can retry
         // on the same row — the text's cooldown would refuse a fresh ask.
-        await db("review_requests")
-          .where({ id: requestId })
-          .whereNull("email_leg_owed_at")
-          .update({ email_leg_owed_at: request?.email_leg_owed_at || new Date() })
-          .catch((e) => logger.error(`[review] inline email owed restore failed after a provider rejection (requestId=${requestId}): ${e.message}`));
-        return { sent: false, reason: "email_send_failed" };
+        const restored = await stampWithRetry(
+          () => db("review_requests").where({ id: requestId }).whereNull("email_leg_owed_at").update({ email_leg_owed_at: request?.email_leg_owed_at || new Date() }),
+          `inline email owed restore after a provider rejection (requestId=${requestId})`,
+        );
+        // Restore lost = this row can no longer be retried from Quick Links
+        // and the text's cooldown refuses a fresh ask: say so instead of
+        // "try again" (r17 P2).
+        return { sent: false, reason: restored ? "email_send_failed" : "email_retry_lost" };
       }
       // The provider may hold this email. The owed leg was already cleared
       // before dispatch, so the Quick Links retry path cannot re-send it —
@@ -2610,7 +2618,11 @@ const ReviewService = {
     // would get a stale follow-up.
     const followupsClosed = await db("review_requests")
       .whereIn("status", ["sent", "opened"])
-      .where("sms_sent_at", "<", cutoff)
+      // A texted ask only (email-only asks never get the text follow-up),
+      // aged from the LATER channel: a Both email retried after the text
+      // must not leave the row instantly follow-up eligible (r17 P2).
+      .whereNotNull("sms_sent_at")
+      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [cutoff])
       .where({ followup_sent: false })
       .whereExists(function () {
         this.select(1)
@@ -2625,7 +2637,11 @@ const ReviewService = {
 
     const nonPromoterDrafts = await db("review_requests")
       .whereIn("status", ["sent", "opened"])
-      .where("sms_sent_at", "<", cutoff)
+      // A texted ask only (email-only asks never get the text follow-up),
+      // aged from the LATER channel: a Both email retried after the text
+      // must not leave the row instantly follow-up eligible (r17 P2).
+      .whereNotNull("sms_sent_at")
+      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [cutoff])
       .where({ followup_sent: false })
       .whereNull("rated_at")
       .where("score", "<", 8)
@@ -2635,7 +2651,7 @@ const ReviewService = {
           .whereRaw("customers.id = review_requests.customer_id")
           .whereNotNull("customers.deleted_at");
       })
-      .orderBy("sms_sent_at", "asc")
+      .orderByRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) ASC")
       .limit(20);
 
     let internalFollowups = 0;
@@ -2691,7 +2707,11 @@ const ReviewService = {
 
     const eligible = await db("review_requests")
       .whereIn("status", ["sent", "opened"])
-      .where("sms_sent_at", "<", cutoff)
+      // A texted ask only (email-only asks never get the text follow-up),
+      // aged from the LATER channel: a Both email retried after the text
+      // must not leave the row instantly follow-up eligible (r17 P2).
+      .whereNotNull("sms_sent_at")
+      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [cutoff])
       .where({ followup_sent: false })
       .whereNull("rated_at")
       // Draft score taps are durable but not final. Do not send the
@@ -2704,7 +2724,7 @@ const ReviewService = {
           .whereRaw("customers.id = review_requests.customer_id")
           .whereNotNull("customers.deleted_at");
       })
-      .orderBy("sms_sent_at", "asc")
+      .orderByRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) ASC")
       .limit(20);
 
     let sent = 0;

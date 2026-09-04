@@ -412,6 +412,19 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
     expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
 
+    // A DEFINITE SendGrid 4xx after dispatch is not uncertain: the fresh
+    // claim is released (r17 P2).
+    serviceUpdates = [];
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async (opts) => {
+      await opts.onQueued({ id: 'em-2' });
+      const err = new Error('SendGrid 400: bad address');
+      err.status = 400;
+      throw err;
+    });
+    const rejected = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'email' });
+    expect(rejected).toMatchObject({ ok: false, reason: 'send_failed', emailUncertain: false });
+    expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
+
     // Pre-dispatch: no onQueued — nobody could have received the URL.
     serviceUpdates = [];
     EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(new Error('template not found'));
@@ -495,6 +508,10 @@ describe('sendPrepToCustomer', () => {
     const rekeyed = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' });
     expect(rekeyed).toMatchObject({ ok: true, smsSent: true });
     expect(serviceUpdates[0]).toEqual({ prep_template_key: 'prep.lawn' });
+    // The re-key is fenced on the view columns (atomic against a concurrent
+    // public page load, which stamps the view in its read; r17 P0).
+    expect(scheduledQueries.some((q) => q.whereNull.mock.calls.some(([c]) => c === 'prep_first_viewed_at')
+      && q.whereRaw.mock.calls.some(([sql]) => sql === 'COALESCE(prep_view_count, 0) = 0'))).toBe(true);
     expect(lastRunsQuery.where).toHaveBeenCalledWith({ entity_type: 'scheduled_service', entity_id: VISIT.id, template_key: 'prep.flea' });
 
     // A skipped run with no email past dispatch is abandoned too.

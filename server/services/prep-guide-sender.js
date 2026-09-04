@@ -318,13 +318,20 @@ async function releasePrepPage(serviceId, templateKey) {
 //   prep_page_taken   — the row's page belongs to another guide (takenBy)
 //   prep_link_failed  — visit lookup or token mint threw (retryable)
 // An abandoned reservation moves onto this guide atomically (only while
-// still that key and still undelivered) — a FRESH claim like any other,
-// handed back if nothing delivers. 0 = someone else moved first.
+// still that key, still undelivered AND still unviewed) — a FRESH claim like
+// any other, handed back if nothing delivers. 0 = someone else moved first.
+// The view columns in the WHERE are the fence against a concurrent public
+// page load: /prep/:token stamps the view in the SAME statement that reads
+// the key (prep-public.js), so the row lock orders the two — either the view
+// lands first and this update matches nothing, or this update lands first
+// and the customer's load renders the new guide (GH Codex #3856 r17 P0).
 async function rekeyAbandonedPage(visit, templateKey) {
   try {
     return Number(await db('scheduled_services')
       .where({ id: visit.id, prep_template_key: visit.prep_template_key })
       .whereNull('prep_sent_at')
+      .whereNull('prep_first_viewed_at')
+      .whereRaw('COALESCE(prep_view_count, 0) = 0')
       .update({ prep_template_key: templateKey }));
   } catch (err) {
     logger.warn(`[prep-guide-sender] prep page re-key failed for service ${visit.id}: ${err.message}`);
@@ -446,8 +453,12 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
     return { sent: !!result?.sent };
   } catch (err) {
     // Sanitized: never log err.message — provider errors can carry the email.
-    logger.error(`[prep-guide-sender] email send failed for customer ${customer.id} (${err?.name || 'Error'}, dispatched=${dispatched})`);
-    return { sent: false, uncertain: dispatched };
+    // A SendGrid 4xx after dispatch is a DEFINITE rejection (sendgrid-mail.js),
+    // not uncertain: the fresh claim can be released (GH Codex #3856 r17 P2).
+    const { isDefiniteRejection } = require('./sendgrid-mail');
+    const uncertain = dispatched && !isDefiniteRejection(err);
+    logger.error(`[prep-guide-sender] email send failed for customer ${customer.id} (${err?.name || 'Error'}, dispatched=${dispatched}, uncertain=${uncertain})`);
+    return { sent: false, uncertain };
   }
 }
 

@@ -638,33 +638,9 @@ router.post('/sms', async (req, res, next) => {
     }
     if (claimedReviewRequestId) {
       try {
-        const { isRealProviderSend } = require('../services/sms-auto-send');
-        const ReviewService = require('../services/review-request');
-        if (isRealProviderSend(result)) {
-          // Retried once: a lost stamp after a REAL send is the one state
-          // that can double-text the ask, so it gets a second attempt here
-          // and, failing that, the stale-claim reconcile in
-          // claimInlineForSend repairs it from the outbound log.
-          try {
-            await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
-          } catch (firstErr) {
-            logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${claimedReviewRequestId}): ${firstErr.message}`);
-            await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
-          }
-          // "Both": the email copy rides on the SAME row — only after the
-          // text really went (a released claim must never email).
-          if (reviewRequestEmail === true) {
-            reviewEmailOutcome = await ReviewService.sendInlineEmailCopy(claimedReviewRequestId);
-          }
-        } else {
-          await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
-          // A suppressed text (sentinel send) withheld the email leg too —
-          // say so, or the composer reports "Message sent." for a Both ask
-          // that delivered nothing (GH Codex #3856 r1 P1).
-          if (reviewRequestEmail === true) {
-            reviewEmailOutcome = { sent: false, reason: 'text_not_sent' };
-          }
-        }
+        reviewEmailOutcome = await settleInlineReviewAfterSend({
+          result, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
+        });
       } catch (markErr) {
         logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
         // Both: the text left but its delivery stamp (or the email copy)
@@ -799,22 +775,9 @@ router.post('/sms', async (req, res, next) => {
     // it can never go out twice.
     if (claimedReviewRequestId) {
       try {
-        const ReviewService = require('../services/review-request');
-        if (err?.providerOutcome?.sent === true) {
-          await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
-          // Both: the text DID leave — email the same ask now, as the
-          // happy path would have; the row is delivered, so no retry can
-          // reclaim it (GH Codex #3856 r5 P2). The outcome rides the error
-          // message the composer shows.
-          if (reviewRequestEmail === true) {
-            const emailOutcome = await ReviewService.sendInlineEmailCopy(claimedReviewRequestId);
-            err.message = `${err.message} The text was accepted; ${emailOutcome?.sent
-              ? 'the review email was sent too.'
-              : `the review email was not sent (${emailOutcome?.reason || 'unknown'}).`}`;
-          }
-        } else {
-          await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
-        }
+        await settleInlineReviewAfterThrow({
+          err, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
+        });
       } catch (claimErr) {
         logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
       }
@@ -1818,7 +1781,58 @@ const EMAIL_LEG_REASONS = {
   // invisible to the cooldown, so the operator must not click again.
   email_sent_unrecorded: 'The review email was sent, but it could not be recorded — do not send it again',
   email_uncertain_unrecorded: "The review email may or may not have gone out and could not be recorded — do not send it again; check the customer's email log",
+  // The address was rejected AND the retry marker could not be restored:
+  // this ask cannot be retried from here, and the text's cooldown refuses a
+  // fresh one — never "try again".
+  email_retry_lost: 'The review email was not accepted, and this ask can no longer be retried from here — send a fresh review request after the cooldown',
 };
+
+// The inline review ask once the composer's send has RETURNED: a real send
+// stamps the row delivered (retried once — a lost stamp after a real send is
+// the one state that can double-text the ask; failing that, the stale-claim
+// reconcile in claimInlineForSend repairs it from the outbound log) and, for
+// Both, emails the SAME row — only after the text really went. A suppressed
+// (sentinel) send releases the claim and withholds the email leg, or the
+// composer would report "Message sent." for a Both ask that delivered
+// nothing (GH Codex #3856 r1 P1). Returns the Both email outcome, null when
+// no email was requested.
+async function settleInlineReviewAfterSend({ result, requestId, claimToken, emailRequested }) {
+  const { isRealProviderSend } = require('../services/sms-auto-send');
+  const ReviewService = require('../services/review-request');
+  if (!isRealProviderSend(result)) {
+    await ReviewService.releaseInlineClaim(requestId, claimToken);
+    return emailRequested ? { sent: false, reason: 'text_not_sent' } : null;
+  }
+  try {
+    await ReviewService.markInlineDelivered(requestId, claimToken);
+  } catch (firstErr) {
+    logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${requestId}): ${firstErr.message}`);
+    await ReviewService.markInlineDelivered(requestId, claimToken);
+  }
+  return emailRequested ? ReviewService.sendInlineEmailCopy(requestId) : null;
+}
+
+// The inline review ask once the composer's send has THROWN: a throw after
+// provider acceptance (err.providerOutcome.sent === true, the scheduler's
+// convention) means the ask DID text — stamp it delivered so it can never
+// go out twice and, for Both, email the same row now as the happy path
+// would have (the row is delivered, so no retry can reclaim it; GH Codex
+// #3856 r5 P2), the outcome riding the error message the composer shows.
+// Anything else releases the claim so an immediate retry isn't blocked for
+// the 10-minute stale window.
+async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailRequested }) {
+  const ReviewService = require('../services/review-request');
+  if (err?.providerOutcome?.sent !== true) {
+    await ReviewService.releaseInlineClaim(requestId, claimToken);
+    return;
+  }
+  await ReviewService.markInlineDelivered(requestId, claimToken);
+  if (!emailRequested) return;
+  const emailOutcome = await ReviewService.sendInlineEmailCopy(requestId);
+  err.message = `${err.message} The text was accepted; ${emailOutcome?.sent
+    ? 'the review email was sent too.'
+    : `the review email was not sent (${emailOutcome?.reason || 'unknown'}).`}`;
+}
 
 async function emailReviewAskNow(primaryId) {
   const ReviewService = require('../services/review-request');

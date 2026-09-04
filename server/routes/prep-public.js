@@ -205,18 +205,28 @@ async function resolvePrepSource(token) {
     };
   }
 
-  const service = await db('scheduled_services as s')
-    .leftJoin('technicians as t', 's.technician_id', 't.id')
-    .where('s.prep_token', token)
-    .first(
-      's.id', 's.customer_id', 's.service_type', 's.scheduled_date',
-      's.prep_template_key', 's.prep_expires_at',
-      's.service_address_line1', 's.service_address_city', 's.service_address_state', 's.service_address_zip',
-      't.name as tech_name',
-    );
+  // The view stamp and the key read are ONE statement: the manual prep
+  // sender may move an abandoned reservation onto another guide, fenced on
+  // these very columns (prep-guide-sender.js rekeyAbandonedPage), and the
+  // row lock orders the two — a page the customer has opened can never
+  // change guides behind them (GH Codex #3856 r17 P0). A token that is
+  // unknown, expired or keyless matches nothing (404, no view counted).
+  const [service] = await db('scheduled_services')
+    .where({ prep_token: token })
+    .whereNotNull('prep_template_key')
+    .where((q) => q.whereNull('prep_expires_at').orWhere('prep_expires_at', '>=', now))
+    .update({
+      prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
+      prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
+    })
+    .returning([
+      'id', 'customer_id', 'service_type', 'scheduled_date', 'prep_template_key', 'technician_id',
+      'service_address_line1', 'service_address_city', 'service_address_state', 'service_address_zip',
+    ]);
   if (!service) return null;
-  if (service.prep_expires_at && new Date(service.prep_expires_at) < now) return null;
-  if (!service.prep_template_key) return null;
+  const tech = service.technician_id
+    ? await db('technicians').where({ id: service.technician_id }).first('name')
+    : null;
   const customer = service.customer_id
     ? await db('customers').where({ id: service.customer_id }).first()
     : null;
@@ -234,13 +244,11 @@ async function resolvePrepSource(token) {
     familyType: VISIT_FAMILY_TYPE_BY_TEMPLATE_KEY[service.prep_template_key] || null,
     typeLabel: String(service.service_type || '').trim() || 'Waves service',
     serviceDate: formatDisplayDate(service.scheduled_date, { fallback: '' }),
-    techName: String(service.tech_name || '').trim() || 'your Waves technician',
+    techName: String(tech?.name || '').trim() || 'your Waves technician',
     serviceAddress,
     viewRow: { scheduled_service_id: service.id },
-    countView: () => db('scheduled_services').where({ id: service.id }).update({
-      prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
-      prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
-    }),
+    // Already counted by the read above.
+    countView: () => Promise.resolve(),
   };
 }
 

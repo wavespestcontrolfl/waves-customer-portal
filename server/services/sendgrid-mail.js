@@ -352,8 +352,17 @@ async function sendBroadcast(args) {
   });
 }
 
+// A throw from sendOne carries the HTTP status: 4xx = DEFINITE rejection
+// (not accepted, safe to retry after a fix); 5xx / network = ambiguous (may
+// have been accepted). Callers that hold send-once claims key off this.
+function isDefiniteRejection(err) {
+  const status = Number(err?.status);
+  return status >= 400 && status < 500;
+}
+
 module.exports = {
   isConfigured,
+  isDefiniteRejection,
   sendOne,
   clearBlockedAddress,
   sendBatch,
