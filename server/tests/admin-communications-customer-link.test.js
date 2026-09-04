@@ -510,6 +510,13 @@ describe('POST /admin/communications/customer-link', () => {
         expect(res.status).toBe(200);
         expect(await res.json()).toMatchObject({ partial: true, message: "Lawn prep emailed to a@example.com. The text was not sent — the customer's next visit already carries the Interior Pest Treatment prep page." });
       });
+      // An automation already sending this guide: nothing to do by hand.
+      sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'prep_send_pending', label: 'Flea Treatment' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'flea', channel: 'both' });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/already queued to send automatically/);
+      });
       // A definite failure keeps the plain retry copy.
       sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, smsSent: false });
       await withServer(async (baseUrl) => {

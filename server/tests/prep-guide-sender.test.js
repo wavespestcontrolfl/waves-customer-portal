@@ -65,8 +65,16 @@ function traceQuery(row) {
   const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNot: jest.fn(() => q), whereNotIn: jest.fn(() => q), whereRaw: jest.fn(() => q), first: jest.fn(async () => row) };
   return q;
 }
+// Honours a whereIn('status', …) filter so the live-lane read (first) and
+// the full trace read (select) see the same rows.
 function livenessQuery(rows) {
-  const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), select: jest.fn(async () => rows) };
+  let statuses = null;
+  const q = {
+    where: jest.fn(() => q),
+    whereIn: jest.fn((col, vals) => { if (col === 'status') statuses = vals; return q; }),
+    select: jest.fn(async () => rows),
+    first: jest.fn(async () => rows.find((r) => !statuses || statuses.includes(r.status)) || undefined),
+  };
   return q;
 }
 jest.mock('../services/email-template-automation-executor', () => ({ RUNNABLE_STATUSES: ['queued', 'scheduled', 'retry_scheduled'] }));
@@ -609,6 +617,18 @@ describe('sendPrepToCustomer', () => {
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' }))
       .toMatchObject({ ok: false, reason: 'prep_page_taken' });
     expect(serviceUpdates).toEqual([]);
+  });
+
+  test('a same-guide page still owned by a queued / running automation refuses the manual send (it would send the prep twice); a finished lane lets it through', async () => {
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea' };
+    servicePrepRow = { prep_token: 'h'.repeat(32), prep_template_key: 'prep.flea' };
+    runRows = [{ status: 'scheduled', idempotency_key: 'run-k2' }];
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: false, reason: 'prep_send_pending' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+    runRows = [{ status: 'sent', idempotency_key: 'run-k2' }];
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: true });
   });
 
   test('a later visit with a free page hosts the link when the soonest one is legitimately owned by another guide (r16 P2)', async () => {

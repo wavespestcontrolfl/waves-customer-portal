@@ -264,16 +264,36 @@ const ABORTED_BEFORE_DISPATCH = 'aborted_by_caller_before_dispatch';
 
 // Any automated lane that can still deliver takenKey on this visit, or may
 // already have — see reservationAbandoned. Throws on a read failure.
-async function automatedDeliveryTrace(visit, takenKey, customerId) {
-  // The executor's own runnable set (queued / scheduled — a future
-  // run_after — / retry_scheduled) plus a run mid-send (GH Codex #3856 r12
-  // P1), plus a run that SENT.
+// Is an automated lane still ABOUT to deliver takenKey on this visit — a
+// transactional run that is runnable / running (the executor's own set,
+// GH Codex #3856 r12 P1) or a live sequence enrolment whose first step
+// stamps that key? Used both to keep a reservation (automatedDeliveryTrace)
+// and to refuse a manual send of the SAME guide that would duplicate it
+// (pre-push Codex P1 on 52bbb43b1). Throws on a read failure.
+async function automationLaneLive(visit, key, customerId) {
   const { RUNNABLE_STATUSES } = require('./email-template-automation-executor');
+  const live = [...RUNNABLE_STATUSES, 'running'];
+  const run = await db('email_template_automation_runs')
+    .where({ entity_type: 'scheduled_service', entity_id: visit.id, template_key: key })
+    .whereIn('status', live)
+    .first('id');
+  if (run) return true;
+  const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[key];
+  if (!sequenceKey) return false;
+  const enrollment = await db('automation_enrollments')
+    .where({ customer_id: customerId, template_key: sequenceKey })
+    .whereIn('status', LIVE_ENROLLMENT_STATUSES)
+    .first('id');
+  return !!enrollment;
+}
+
+async function automatedDeliveryTrace(visit, takenKey, customerId) {
+  if (await automationLaneLive(visit, takenKey, customerId)) return true;
+  // A run that SENT (prep_sent_at stamp lost) …
   const runs = await db('email_template_automation_runs')
     .where({ entity_type: 'scheduled_service', entity_id: visit.id, template_key: takenKey })
     .select('status', 'idempotency_key');
-  const liveOrSent = [...RUNNABLE_STATUSES, 'running', 'sent'];
-  if (runs.some((r) => liveOrSent.includes(r.status))) return true;
+  if (runs.some((r) => r.status === 'sent')) return true;
   const runKeys = runs.map((r) => r.idempotency_key).filter(Boolean);
   if (runKeys.length) {
     const dispatched = await db('email_messages')
@@ -288,7 +308,7 @@ async function automatedDeliveryTrace(visit, takenKey, customerId) {
   const enrollments = await db('automation_enrollments')
     .where({ customer_id: customerId, template_key: sequenceKey })
     .select('id', 'status', 'last_sent_at');
-  if (enrollments.some((e) => LIVE_ENROLLMENT_STATUSES.includes(e.status) || e.last_sent_at)) return true;
+  if (enrollments.some((e) => e.last_sent_at)) return true;
   const enrollmentIds = enrollments.map((e) => e.id);
   if (enrollmentIds.length) {
     // The runner marks a step send 'blocked' before the provider and
@@ -414,7 +434,22 @@ async function resolvePrepVisit(customer, config) {
   let claim = null;
   let taken = null;
   for (const candidate of visits) {
-    if (!candidate.prep_template_key || candidate.prep_template_key === config.emailTemplateKey) {
+    if (!candidate.prep_template_key) {
+      visit = candidate;
+      break;
+    }
+    if (candidate.prep_template_key === config.emailTemplateKey) {
+      // Our guide's page — but an automation for this same guide that is
+      // still queued / running will deliver it itself (the executor claims
+      // the key before dispatch): a manual send now would send the prep
+      // twice (pre-push Codex P1 on 52bbb43b1). Unknown = in flight.
+      let inFlight = true;
+      try {
+        inFlight = await automationLaneLive(candidate, config.emailTemplateKey, customer.id);
+      } catch (err) {
+        logger.warn(`[prep-guide-sender] automation liveness check failed for service ${candidate.id}: ${err.message}`);
+      }
+      if (inFlight) return { visit: candidate, prepUrl: null, ownsPage: false, linkReason: 'prep_send_pending' };
       visit = candidate;
       break;
     }
@@ -734,6 +769,9 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   // P1s on 8dbc30cc1 + 87b4cee92).
   const outcome = await runExclusive(`prep-send:${customer.id}`, async () => {
     const page = await resolvePrepVisit(customer, config);
+    // An automation is already sending this very guide for the visit —
+    // every channel would duplicate it.
+    if (page.linkReason === 'prep_send_pending') return { ...result, reason: 'prep_send_pending' };
     // The stamp target: only a visit whose page this guide owns.
     page.stampVisit = page.ownsPage ? page.visit : null;
     const smsPlan = planPrepSms(config, page.prepUrl);

@@ -886,6 +886,7 @@ const PREP_REFUSAL_COPY = {
   // and re-keying it would flip every link already delivered.
   prep_page_taken: (r) => `This guide can only be texted as a link, and the customer's next visit already carries the ${r.takenBy || 'other'} prep page — email this guide instead.`,
   prep_link_failed: () => "Couldn't build the guide page link for this visit — try again.",
+  prep_send_pending: (r) => `The ${r.label || 'prep'} guide for this visit is already queued to send automatically — it will go out on its own.`,
   prep_send_busy: () => 'Another prep send for this customer is in progress — try again in a moment.',
   unsupported_pest_type: () => 'That prep type is not available yet.',
   unsupported_channel: () => 'Choose Email, Text, or Both.',
