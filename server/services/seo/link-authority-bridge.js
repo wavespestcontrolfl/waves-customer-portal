@@ -157,12 +157,14 @@ async function autoSendDecided(db, { send, now }) {
   const out = { attempted: 0, sent: 0, skipped: [] };
   // the due follow-ups FIRST (§6.4: few and dated — a sustained pitch backlog that fills the cap every night must
   // never starve them), then the initial pitches — one cap decision under the sender's lock ends both
-  const capped = await dispatchBatch(db, out, { send, now, followUp: true });
-  if (!capped) await dispatchBatch(db, out, { send, now, followUp: false });
+  // — and ONE attempt budget (AUTO_SEND_BATCH) across both: the pitches get what the follow-ups left
+  const capped = await dispatchBatch(db, out, { send, now, followUp: true, limit: AUTO_SEND_BATCH });
+  const remaining = AUTO_SEND_BATCH - out.attempted;
+  if (!capped && remaining > 0) await dispatchBatch(db, out, { send, now, followUp: false, limit: remaining });
   return out;
 }
-// one lane's batch: the AUTO_OUTREACH rows of its instance kind on drafted, unleased rows. Returns true when the cap ended it.
-async function dispatchBatch(db, out, { send, now, followUp }) {
+// one lane's batch: the AUTO_OUTREACH rows of its instance kind on drafted, unleased rows, at most `limit` attempts. Returns true when the cap ended it.
+async function dispatchBatch(db, out, { send, now, followUp, limit }) {
   const kind = followUp ? 'followup' : '-';
   const rows = await db(AUTH).where({ dimension: 'communication', instance_kind: kind, level: P.LEVELS.AUTO_OUTREACH }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'path_id');
   if (!rows.length) return false;
@@ -177,7 +179,7 @@ async function dispatchBatch(db, out, { send, now, followUp }) {
   const statusCol = followUp ? 'follow_up_status' : 'outreach_status';
   let q = db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...eligible]).where({ [statusCol]: 'drafted' }).whereNull('claimed_at');
   q = followUp ? q.where({ outreach_status: 'sent' }).whereIn('status', [...M.FOLLOW_UP_STATUSES({ execution_after_send: false })]) : q.where({ status: PARKABLE }).whereNull('outreach_sent_at');
-  const batch = await q.orderBy('updated_at', 'asc').limit(AUTO_SEND_BATCH).select('id', 'path_id', 'updated_at');
+  const batch = await q.orderBy('updated_at', 'asc').limit(limit).select('id', 'path_id', 'updated_at');
   for (const p of batch) {
     if (decidedPath.get(p.id) !== p.path_id) continue; // the row left the path its instance was decided on — the bridge rotates it
     out.attempted += 1;

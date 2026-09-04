@@ -117,6 +117,12 @@ async function findPlacementRow(q, domain, targetPage, { excludeId = null, locat
   return (await qb.first(...columns)) || null;
 }
 
+// A conversation (contacted / negotiating) carrying the durable closure stamp (§13 / §3.3: proven silent, its inbox
+// released) is OVER — it holds the domain no more than the inbox. Only those statuses: a reopened row (prospect /
+// awaiting_owner) may still carry the stamp until the send claim drops it, and it IS the domain's next conversation.
+const CONVERSATION_STATUSES = Object.freeze(['contacted', 'negotiating']);
+const notClosedConversation = (qb) => qb.whereRaw(`(conversation_closed_at IS NULL OR status NOT IN (${CONVERSATION_STATUSES.map(() => '?').join(', ')}))`, [...CONVERSATION_STATUSES]);
+
 async function lockProspectDomain(trx, domain) {
   const key = canonicalProspectDomain(domain);
   if (!key) return null;
@@ -137,9 +143,10 @@ async function claimProspectDomain(trx, domain, { statuses = ACTIVE_OUTREACH_STA
   const set = new Set(statuses);
   let qb = byDomain(trx('seo_link_prospects'), key).whereIn('status', [...set]);
   if (lanes === 'outreach') qb = qb.whereRaw(`COALESCE(link_type, '') NOT IN (${SIGNUP_TYPES.map(() => '?').join(', ')})`, [...SIGNUP_TYPES]);
+  qb = notClosedConversation(qb);
   const row = await qb.first('id', 'status', 'target_page');
   // Belt and braces for test doubles / stale readers: only a row in the set counts.
   return { domain: key, inFlight: row && set.has(row.status) ? row : null };
 }
 
-module.exports = { lockProspectDomain, claimProspectDomain, findPlacementRow, canonicalProspectDomain, locationKeyOf, byDomain, TARGET_DOMAIN_CANONICAL_SQL, targetPathOf, targetPageOf, targetPageVariants, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, LOCK_PREFIX };
+module.exports = { lockProspectDomain, claimProspectDomain, notClosedConversation, findPlacementRow, canonicalProspectDomain, locationKeyOf, byDomain, TARGET_DOMAIN_CANONICAL_SQL, targetPathOf, targetPageOf, targetPageVariants, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, LOCK_PREFIX };

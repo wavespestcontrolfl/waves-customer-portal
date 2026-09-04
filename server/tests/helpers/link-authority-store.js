@@ -64,6 +64,8 @@ function makeDb(seed = {}) {
           st.preds.push((r) => st.count(r) > 0);
         }
         else if (/COALESCE\(link_type, ''\) NOT IN/.test(sql)) st.preds.push((r) => !bindings.includes(r.link_type || ''));
+        // the domain admission guard (prospect-domain-lock notClosedConversation): a closure-stamped conversation is not in flight
+        else if (/^\(conversation_closed_at IS NULL OR status NOT IN/.test(sql)) st.preds.push((r) => r.conversation_closed_at == null || !bindings.includes(r.status));
         else throw new Error(`unsupported whereRaw: ${sql}`);
         return q;
       },

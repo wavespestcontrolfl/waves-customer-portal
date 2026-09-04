@@ -2846,7 +2846,7 @@ function OutreachApprovals({ canRun, onChange }) {
     const id = p.id;
     setBusyId(id); setMsg(null);
     const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/reconcile`, { outcome, ...(p.follow_up ? { follow_up: true } : {}) });
-    setMsg({ ok, text: ok ? (outcome === "sent" ? "Marked as sent." : "Returned to drafts.") : (OUTREACH_CODE_MSG[r.code] || r.error || "Reconcile failed.") });
+    setMsg({ ok, text: ok ? (outcome === "sent" ? "Marked as sent." : r.retired ? "Not sent — the placement moved on; the follow-up is retired." : "Returned to drafts.") : (OUTREACH_CODE_MSG[r.code] || r.error || "Reconcile failed.") });
     setBusyId(null); refresh();
   };
 

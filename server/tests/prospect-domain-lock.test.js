@@ -35,6 +35,8 @@ describe('prospect-domain-lock helper', () => {
     const r = await claimProspectDomain(trx, 'https://WWW.Blog.Example/');
     expect(order[0]).toBe('lock');
     expect(r).toEqual({ domain: 'blog.example', inFlight: { id: 'p1', status: 'contacted', target_page: '/x' } });
+    // a closed CONVERSATION (contacted / negotiating with the §13 stamp) holds the domain no more than the inbox; a reopened prospect / awaiting_owner row carrying a stale stamp is still the domain's next conversation
+    expect(raws[2]).toEqual(['(conversation_closed_at IS NULL OR status NOT IN (?, ?))', ['contacted', 'negotiating']]);
     expect(raws[0]).toEqual([`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, ['blog.example']]);
     expect(ins).toEqual(['status', [...ACTIVE_OUTREACH_STATUSES]]);
     // signup-lane rows (directory/citation/social — claimed by the signup runner, per-location) are not an outreach conversation

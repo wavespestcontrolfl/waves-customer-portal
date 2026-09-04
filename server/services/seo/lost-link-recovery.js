@@ -136,8 +136,8 @@ async function queueOne(loss, out, scoreMod) {
     // domain scope when any link returns): if the domain already has a row in
     // flight for ANY Waves page, a second claimable prospect would start parallel
     // outreach to the same inbox. Suppress; the existing row is the conversation.
-    const inFlight = await byDomain(db('seo_link_prospects'), domain)
-      .whereIn('status', [...IN_FLIGHT_STATUSES]).first('id', 'status', 'target_page');
+    const inFlight = await lockMod.notClosedConversation(byDomain(db('seo_link_prospects'), domain) // a closed conversation (§13) is not in flight
+      .whereIn('status', [...IN_FLIGHT_STATUSES])).first('id', 'status', 'target_page');
     if (inFlight && IN_FLIGHT_STATUSES.has(inFlight.status)) {
       const where = inFlight.target_page ? ` for ${targetPathOf(inFlight.target_page)}` : '';
       if (STALE_WHEN_DOMAIN_DARK.has(inFlight.status)) {

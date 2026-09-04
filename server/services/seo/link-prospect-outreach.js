@@ -890,13 +890,22 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
   if (st === 'sending' && !staleSending) return { ok: false, code: 'send_in_flight' };
   if (st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable' };
   const now = new Date();
+  // a requeue on a row that has LEFT the path-specific follow-up lifecycle (a send-first row promoted to live while
+  // the send was in flight) cannot yield a sendable draft — the sender refuses it, followUpPending excludes it, the
+  // bridge ends its instance — so the follow-up RETIRES (`skipped`) instead of parking a draft nowhere lists
+  const path = prospect.path_id ? await db('seo_link_acquisition_paths').where({ id: prospect.path_id }).first('id', 'execution_after_send') : null;
+  const retired = outcome !== 'sent' && !M.FOLLOW_UP_STATUSES(path).includes(prospect.status);
   const note = outcome === 'sent'
     ? `Follow-up reconciled as SENT ${now.toISOString()} by ${approvedBy}`
-    : `Follow-up reconciled as NOT sent (re-queued) ${now.toISOString()} by ${approvedBy}`;
+    : retired
+      ? `Follow-up reconciled as NOT sent ${now.toISOString()} by ${approvedBy} — the placement moved on (${prospect.status}); follow-up retired`
+      : `Follow-up reconciled as NOT sent (re-queued) ${now.toISOString()} by ${approvedBy}`;
   const notes = prospect.notes ? `${prospect.notes}\n${note}` : note;
   const patch = outcome === 'sent'
     ? { follow_up_status: 'sent', follow_up_sent_at: prospect.follow_up_sent_at || now, follow_up_send_token: null, notes, updated_at: now }
-    : { follow_up_status: 'drafted', follow_up_send_token: null, follow_up_attempted_at: null, follow_up_skipped_reason: null, notes, updated_at: now };
+    : retired
+      ? { follow_up_status: 'skipped', follow_up_skipped_reason: `placement left the follow-up lifecycle (${prospect.status})`, follow_up_send_token: null, follow_up_attempted_at: null, notes, updated_at: now }
+      : { follow_up_status: 'drafted', follow_up_send_token: null, follow_up_attempted_at: null, follow_up_skipped_reason: null, notes, updated_at: now };
   const rows = await db.transaction(async (trx) => {
     let q = trx('seo_link_prospects').where({ id: prospect.id, follow_up_status: st });
     q = prospect.follow_up_send_token ? q.where({ follow_up_send_token: prospect.follow_up_send_token }) : q.whereNull('follow_up_send_token');
@@ -905,8 +914,8 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
     return r;
   });
   if (!rows || rows.length === 0) return { ok: false, code: 'not_reconcilable' };
-  logger.info(`[link-outreach] reconciled follow-up ${prospect.id} (${st}) as ${outcome} by ${approvedBy}`);
-  return { ok: true, prospect: rows[0] };
+  logger.info(`[link-outreach] reconciled follow-up ${prospect.id} (${st}) as ${outcome}${retired ? ' (retired)' : ''} by ${approvedBy}`);
+  return { ok: true, prospect: rows[0], ...(retired ? { retired: true } : {}) };
 }
 
 /**
