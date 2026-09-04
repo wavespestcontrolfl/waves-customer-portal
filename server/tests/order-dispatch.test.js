@@ -61,7 +61,7 @@ jest.mock('../models/db', () => {
     q.sum = () => q;
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
     // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
-    q.update = async (row) => { mockState.updates.push({ table, row }); return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
+    q.update = async (row) => { mockState.updates.push({ table, row }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
     q.delete = async () => { mockState.deletes.push(table); return 1; };
     let row;
     const returning = async () => {
@@ -185,7 +185,7 @@ test('monthly cap counts non-failed rows already in the ledger', async () => {
   expect(a.place).not.toHaveBeenCalled();
 });
 
-test('the monthly cap buckets by PURCHASE month (placed_at, else the reservation-stamped created_at) and the reservation re-stamps created_at (pre-push P0)', async () => {
+test('the monthly cap buckets by the RESERVATION-stamped created_at (fixed accounting month) and the reservation re-stamps created_at (pre-push P0, Codex r14 P1)', async () => {
   const dbFn = require('../models/db');
   const orig = dbFn.getMockImplementation();
   const raws = [];
@@ -193,7 +193,7 @@ test('the monthly cap buckets by PURCHASE month (placed_at, else the reservation
   const before = Date.now();
   expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
   dbFn.mockImplementation(orig);
-  expect(raws.some((a) => /COALESCE\(placed_at, created_at\) >= \?/.test(String(a[0])))).toBe(true);
+  expect(raws.some((a) => /COALESCE\(placed_at, created_at\)/.test(String(a[0])))).toBe(false); // the bucket is the reservation stamp, never placed_at (Codex r14 P1)
   const reservation = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.amount_cents === 31400 && u.row.created_at);
   expect(reservation).toBeTruthy();
   expect(reservation.row.created_at.getTime()).toBeGreaterThanOrEqual(before);
@@ -563,6 +563,14 @@ test('a bell that fails to send is persisted with the park, reported, and re-run
   expect(run2.bells).toEqual({ rung: ['ledger-1'], pending: [] });
   expect(notify).toHaveBeenLastCalledWith('system', evidence.bell.title, evidence.bell.body, expect.objectContaining({ dedupeKey: `auto-order:ledger-1:${evidence.bell.v}` }));
   expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.evidence)).toBe(true);
+});
+
+test('a delivered bell whose version stamp hits zero rows (the bell was replaced meanwhile) is NOT a delivery — the replacement stays pending, run red (hook P1)', async () => {
+  mockState.bellStampMiss = true;
+  mockState.pendingBells = [{ id: 'ledger-9', evidence: { bell: { title: 'Auto-order needs review: x', body: 'y', v: 'v1' } }, request_id: 'req-9', product_name: 'x', vendor_name: 'v' }];
+  mockState.request = { ...baseRequest(), status: 'ordered' };
+  await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
+  mockState.bellStampMiss = false;
 });
 
 test('the run goes red while a bell is undelivered', async () => {

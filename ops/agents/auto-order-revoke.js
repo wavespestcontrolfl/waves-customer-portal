@@ -31,6 +31,10 @@ function arg(name) {
   return hit ? hit.slice(name.length + 3) : null;
 }
 const EXECUTE = process.argv.includes('--execute');
+// The revoke marker re-enables request cancel + replacement ordering, so it
+// must only ever be written AFTER the vendor order is cancelled with the
+// vendor — the operator confirms that explicitly (Codex r14 P1).
+const CANCELLED_WITH_VENDOR = process.argv.includes('--cancelled-with-vendor');
 const LIST = process.argv.includes('--list');
 const orderId = arg('order');
 const dollars = (c) => `$${(Number(c || 0) / 100).toFixed(2)}`;
@@ -130,9 +134,11 @@ async function revoke(row) {
     if (blocker) { console.log(blocker); process.exit(0); }
 
     console.log(`Would set ledger → needs_review${row.request_status === 'ordered' ? ', request → open' : ''}, stamp evidence.revokedAt, write audit row procurement.vendor_order.revoked.`);
-    if (!EXECUTE) { console.log('Dry run. Re-run with --execute to apply.'); process.exit(0); }
+    console.log(`FIRST cancel order #${row.external_order_number || '?'} with ${row.vendor || 'the vendor'} by hand. Recording the revoke re-opens the request for a replacement order, so it must follow the vendor cancellation, never precede it.`);
+    if (!EXECUTE) { console.log('Dry run. Once the vendor has cancelled it, re-run with --execute --cancelled-with-vendor to apply.'); process.exit(0); }
+    if (!CANCELLED_WITH_VENDOR) { console.error('Refusing: --execute needs --cancelled-with-vendor, your confirmation that the vendor order is already cancelled.'); process.exit(2); }
     await revoke(row);
-    console.log('Revoked. Cancel with the vendor by hand if the order shipped.');
+    console.log('Revoked: ledger needs_review, request re-opened for a replacement.');
     process.exit(0);
   } catch (err) {
     console.error(err.message);

@@ -301,14 +301,17 @@ async function orderedQuantityFor(conn, requestId) {
 // and the post-submit needs_review parks). A row parked BEFORE submission
 // (over cap, no binding total, dry run, refusal) keeps its amount for the
 // tab but has no placed_at and must not consume headroom (Codex hook P1).
-// The month is the PURCHASE month: placed_at for a dispatched row, else the
-// row's created_at, which reserveUnderCaps re-stamps at reservation time —
-// a claim raised before an ET month rollover and submitted after it spends
-// the new month's cap, not the old one (pre-push P0).
+// The accounting month is FIXED at reservation: reserveUnderCaps re-stamps
+// the row's created_at when it reserves headroom, and that stamp — never
+// placed_at — is the bucket. A reservation made just before ET midnight
+// stays in the old month even when the vendor call lands after it, so the
+// in-flight amount cannot vacate one month and land in the next on top of
+// headroom another dispatcher reserved there meanwhile (pre-push P0, Codex
+// r14 P1).
 async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = {}) {
   let q = conn('vendor_orders')
     .whereNot('status', 'failed')
-    .whereRaw('COALESCE(placed_at, created_at) >= ?', [startOfETMonth(now)])
+    .where('created_at', '>=', startOfETMonth(now))
     .where(function dispatched() { this.where('status', 'placing').orWhereNotNull('placed_at'); });
   if (excludeId) q = q.whereNot('id', excludeId);
   const row = await q.sum({ total: 'amount_cents' }).first();
@@ -396,10 +399,13 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
     // replaced meanwhile, the replacement stays pending for the re-ring.
     const stamp = conn('vendor_orders').where({ id: ledgerId });
     if (v) stamp.whereRaw("evidence->'bell'->>'v' = ?", [v]);
-    await stamp.update({
+    const n = await stamp.update({
       evidence: conn.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ bellAt: new Date().toISOString() })]),
       updated_at: new Date(),
     });
+    // Zero rows = the row's bell was replaced after this one was delivered:
+    // the REPLACEMENT is still pending, so this is not a delivery (hook P1).
+    if (n !== 1) { logger.warn(`[order-dispatch] bell v${v || '?'} for ledger ${ledgerId} was superseded before its stamp — replacement re-rung next run`); return false; }
   } catch (err) {
     // The bell landed; the dedupeKey makes the re-ring a refresh, not a double.
     logger.warn(`[order-dispatch] bell stamp failed for ledger ${ledgerId}: ${err.message}`);
