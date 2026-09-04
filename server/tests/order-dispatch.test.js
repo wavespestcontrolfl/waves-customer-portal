@@ -235,6 +235,28 @@ test('an adapter without its credential does not own requests: canAutoOrder is f
   expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(true);
 });
 
+test('an adapter without its credential does not CLAIM either: handed back with the bell, no ledger row, manual bell untouched (Codex r21 P2)', async () => {
+  const a = { ...mockAdapter(), configured: () => false };
+  const r = await dispatch.dispatchRestockOrder('req-1', { notify, adapters: { stickermule: a, siteone: a } });
+  expect(r).toMatchObject({ skipped: 'adapter_unconfigured', belled: true });
+  expect(mockState.ledgerRows).toHaveLength(0);
+  expect(a.place).not.toHaveBeenCalled();
+  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at instanceof Date)).toHaveLength(0);
+});
+
+test('the claim stamps the SKU + link it actually authorized onto the request when the eligible price row changed since the sweep (Codex r21 P2)', async () => {
+  mockState.request = { ...baseRequest(), metadata: { vendorId: 'vend-sm', vendorSku: 'OLD-1', vendorProductUrl: 'https://old.example/1' } };
+  mockState.pricing = { vendor_sku: '4242', price: '314.00', quantity: '500', vendor_product_url: 'https://stickermule.com/4242' };
+  expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
+  const stamped = mockState.updates.find((u) => u.table === 'product_restock_requests' && u.row.metadata);
+  expect(JSON.parse(stamped.row.metadata)).toMatchObject({ vendorId: 'vend-sm', vendorSku: '4242', vendorProductUrl: 'https://stickermule.com/4242' });
+  // …and an unchanged row writes nothing
+  mockState.updates = []; mockState.ledgerRows = [];
+  mockState.request = { ...baseRequest(), metadata: { vendorId: 'vend-sm', vendorSku: '4242', vendorProductUrl: 'https://stickermule.com/4242' } };
+  expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
+  expect(mockState.updates.find((u) => u.table === 'product_restock_requests' && u.row.metadata)).toBeUndefined();
+});
+
 test('a request the claim finds undispatchable (vendor deactivated / gated after the sweep stood down) is handed off with the sweep\'s deduped bell (Codex r12 P2)', async () => {
   mockState.vendor = { ...mockState.vendor, active: false };
   const r = await run(mockAdapter());

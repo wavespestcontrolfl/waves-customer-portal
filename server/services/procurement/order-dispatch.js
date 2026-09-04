@@ -550,6 +550,11 @@ async function resolveClaimVendor(trx, { request, registry }) {
   const adapterKey = adapterKeyFor(vendor);
   if (!vendor || vendor.active === false || !adapterKey || !registry[adapterKey]) return { skipped: 'no_adapter' };
   if (!gateEnvValue(VENDOR_GATE[adapterKey])) return { skipped: 'vendor_gated' };
+  // The same credential check canAutoOrder makes: an adapter without its key
+  // must not claim (and retire the manual bell) only to park every request as
+  // "no prior order" — hand it back instead (Codex r21 P2).
+  const adapter = registry[adapterKey];
+  if (typeof adapter.configured === 'function' && adapter.configured() !== true) return { skipped: 'adapter_unconfigured' };
   return { vendor, adapterKey, m };
 }
 
@@ -624,6 +629,18 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
     .whereRaw(DRY_RUN_RECLAIMABLE_SQL)
     .returning('*');
   const ledger = inserted && inserted[0];
+  // The Restock tab renders the request's OWN vendorSku / vendorProductUrl as
+  // the order link: when the eligible price row changed between the request
+  // and the claim, stamp what the claim actually authorized so the tab (and a
+  // pre-submit park's "order by hand" link) shows the SKU being bought
+  // (Codex r21 P2).
+  if (ledger && pricing?.vendor_sku) {
+    const m = meta(request.metadata);
+    const learned = { vendorSku: pricing.vendor_sku, vendorProductUrl: pricing.vendor_product_url || m.vendorProductUrl || null };
+    if (m.vendorSku !== learned.vendorSku || (m.vendorProductUrl || null) !== learned.vendorProductUrl) {
+      await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ metadata: JSON.stringify({ ...m, ...learned }), updated_at: new Date() });
+    }
+  }
   return { ledger, pricing, order };
 }
 
@@ -919,7 +936,7 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
 // or its gate flipped in between — would otherwise have neither bell: hand
 // it to the office with the sweep's own request-id-deduped bell (Codex r12
 // P2). Idempotent: a bell the sweep already rang is a no-op.
-const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated']);
+const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated', 'adapter_unconfigured']);
 async function bellUndispatchable(conn, requestId, notify) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first();
   const product = request && await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
