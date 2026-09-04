@@ -319,6 +319,13 @@ describe('setup frame — bound to the authenticated CallSid', () => {
     setup({ callSid: 'CA-authed', from: '+19415550142' });
     expect(RelayConversation).toHaveBeenCalledTimes(1);
     expect(RelayConversation.mock.calls[0][0].callSid).toBe('CA-authed');
+    expect(RelayConversation.mock.calls[0][0].sandbox).toBe(false);
+  });
+
+  test('the upgrade-time sandbox proof reaches the session — the frame cannot set it', () => {
+    const { setup } = connect('CA-authed', { authenticatedSandboxCall: true });
+    setup({ callSid: 'CA-authed', from: '+19415550142', sandbox: false });
+    expect(RelayConversation.mock.calls[0][0].sandbox).toBe(true);
   });
 
   test('a frame naming ANOTHER call is refused — session terminated, none started', () => {
@@ -443,6 +450,16 @@ describe('ws upgrade — collections-source resolution', () => {
     const token = mintCallToken(CALL_SID, { secret: SECRET });
     await upgrade(httpServer, `/ws/voice-agent?callSid=${CALL_SID}&t=${token}`);
     expect(handleUpgrade.mock.calls[0][0].authenticatedCollectionsCall).toBe(false);
+    expect(handleUpgrade.mock.calls[0][0].authenticatedSandboxCall).toBe(false);
+  });
+
+  test('a sandbox-source row stamps authenticatedSandboxCall — the session runs its write tools dry (codex r1 P1)', async () => {
+    mockCallLogRow = { source: 'voice_relay_sandbox' };
+    const token = mintCallToken(CALL_SID, { secret: SECRET });
+    await upgrade(httpServer, `/ws/voice-agent?callSid=${CALL_SID}&t=${token}`);
+    const [req] = handleUpgrade.mock.calls[0];
+    expect(req.authenticatedSandboxCall).toBe(true);
+    expect(req.authenticatedCollectionsCall).toBe(false);
   });
 
   test('an unreadable source REJECTS the upgrade (fail closed, same envelope as the burn)', async () => {

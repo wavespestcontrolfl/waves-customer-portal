@@ -273,6 +273,9 @@ async function syncVoiceMessageForCall(callSid, extraPatch = {}) {
   try {
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) return null;
+    // A voice-agent sandbox call (the dead GA# test number) is a test, not a
+    // customer contact: it gets no unified message and no inbox thread.
+    if (call.source === require('./voice-agent/relay-protocol').VOICE_RELAY_SANDBOX_SOURCE) return null;
 
     const media = voiceMediaForCall(call);
     const duration = call.duration_seconds || call.recording_duration_seconds || null;

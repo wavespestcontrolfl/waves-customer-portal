@@ -950,7 +950,9 @@ router.get('/:id', async (req, res, next) => {
             // exact failure this dissent guard exists to prevent.
             .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
         };
-        const rows = await db('call_log')
+        // The phone arms below would match a sandbox bake-off from a lead's
+        // number and surface its transcript as lead history (codex r15 P2).
+        const rows = await require('../services/voice-agent/relay-protocol').whereNotSandboxCall(db('call_log'))
           .where(function () {
             if (lead.twilio_call_sid) {
               this.orWhere(function sidArm() {

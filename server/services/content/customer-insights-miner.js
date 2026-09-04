@@ -35,6 +35,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const { redact } = require('./pii-redactor');
 const { CITIES, THRESHOLDS } = require('./scoring-config');
 
@@ -218,6 +219,7 @@ class CustomerInsightsMiner {
     try {
       const calls = await db('call_log')
         .where('direction', 'inbound')
+        .modify((qb) => whereNotSandboxCall(qb)) // voice-agent bake-off calls never reach a corpus
         .where('created_at', '>=', since)
         .modify((qb) => {
           // Pluck whichever text columns exist; both are nullable so a

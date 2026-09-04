@@ -895,6 +895,21 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(trxBuilders.scheduled_services.insert).toHaveBeenCalledTimes(1);
   });
 
+  // The sandbox dry run stops at the write boundary but keeps the in-memory
+  // latch (codex r9 P2 on #3852): a bake-off must see the retry refused
+  // exactly as production refuses it, or a duplicate-booking habit hides.
+  test('a sandbox dry-run booking latches the one-per-call guard, so the retry is refused with zero writes', async () => {
+    const ctx = slotCtx({ sandbox: true });
+    const first = await executeTool('request_booking', { slot_ref: 'S1' }, ctx);
+    expect(first).toMatch(/Sandbox test call: request_booking was NOT run/);
+    expect(ctx.bookingRequested()).toBe(true);
+    const out = await executeTool('request_booking', { slot_ref: 'S2' }, ctx);
+    expect(out).toMatch(/already been placed on this call/i);
+    expect(out).not.toMatch(/Sandbox test call/);
+    expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+    expect(trxBuilders.triage_items.insert).not.toHaveBeenCalled();
+  });
+
   // outbound-review-confirm.js falls back to "the customer's SINGLE active
   // lead" when payload.lead_id is null — which can convert an unrelated open
   // quote to WON on confirm.

@@ -13,6 +13,9 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.e
 
 const twilio = require('twilio');
 const TWILIO_NUMBERS = require('../../server/config/twilio-numbers');
+// The sandbox number is deliberately absent from TWILIO_NUMBERS, so its rows
+// must be absent from the portal side too or the two counts drift apart.
+const { whereNotSandboxCall } = require('../../server/services/voice-agent/relay-protocol');
 
 const FLOW_SID = process.env.TWILIO_INBOUND_FLOW_SID || 'FW5fdc2e44700c6e786ed27de94e0cbace';
 const APP_VOICE_URL =
@@ -170,7 +173,7 @@ async function auditDb() {
   const db = require('../../server/models/db');
   try {
     const sinceSql = db.raw(`now() - interval '${DAYS} days'`);
-    const totals = await db('call_log')
+    const totals = await whereNotSandboxCall(db('call_log'))
       .where('created_at', '>', sinceSql)
       .where('direction', 'inbound')
       .select(
@@ -183,7 +186,7 @@ async function auditDb() {
       )
       .first();
 
-    const byNumberRows = await db('call_log')
+    const byNumberRows = await whereNotSandboxCall(db('call_log'))
       .where('created_at', '>', sinceSql)
       .where('direction', 'inbound')
       .select('to_phone')

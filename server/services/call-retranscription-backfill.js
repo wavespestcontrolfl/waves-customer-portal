@@ -45,7 +45,9 @@ const MAX_ATTEMPTS = 3;
 const UNDIARIZED_SQL = "(transcription IS NULL OR transcription NOT ILIKE '%agent:%' OR transcription NOT ILIKE '%caller:%')";
 
 function candidateQuery(dbi, { limit = BATCH_LIMIT } = {}) {
-  return dbi('call_log')
+  // A sandbox bake-off row is inbound with no recording; excluded explicitly
+  // rather than by that accident (codex r12 P2 on #3852).
+  return require('./voice-agent/relay-protocol').whereNotSandboxCall(dbi('call_log'))
     .where('direction', 'inbound')
     .where('call_recording_consent_disclaimer_played', true)
     .whereNotNull('recording_url')

@@ -1015,6 +1015,37 @@ service-contact slot — are gated separately again by
 booking and no re-service ticket).
 Any change to this endpoint, its auth, or its frame handling is
 security-critical).
+`/api/webhooks/twilio/relay-sandbox` + `/api/webhooks/twilio/relay-sandbox/cell`
+(POST; machine-to-machine TwiML webhooks — the voice URL and the in-call
+`<Gather>` action of the dead GA# SANDBOX number, the only test path for the
+AI receptionist. Twilio-signature validated at the `/api/webhooks/twilio`
+mount like every Twilio inbound route, and additionally fail-closed to a 403
+`<Hangup/>` unless the posted `To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`
+(unset ⇒ every request refused) and a `CallSid` is present; relay not
+attached ⇒ a spoken notice and hangup. The first hit inserts a `call_log`
+row for the CallSid (`direction` inbound, `source` 'voice_relay_sandbox')
+under the same per-CallSid advisory lock `/voice` and `/call-status` take;
+a generic `/call-status` fallback row that won the race (`source` NULL) is
+adopted — sandbox source, customer link cleared — and any row with a foreign
+non-null source is refused (403 hangup). `/call-status` itself writes the
+sandbox-sourced row, with no customer link or touchpoint, when it sees the
+sandbox number first. The handler then renders a 3-second two-digit DTMF
+`<Gather>` (a relay-profile cell code, `relay-profiles.SANDBOX_CELLS`;
+'99' = the raw env attributes; no digits ⇒ the production profile) followed
+by the same `<Connect><ConversationRelay>` + per-call minted token that
+`/voice` renders — the WS secret never leaves the server. Payload: standard
+Twilio voice-webhook form fields (`CallSid`, `From`, `To`, `CallStatus`,
+`Digits` on the cell action). The session that answers is a DRY RUN: the ws
+upgrade proves the sandbox source from the call_log row and the relay answers
+`capture_lead` / `request_reservice` / `request_booking` without running them,
+its hangup capture floor stays down, and every call reader (Calls tab,
+unified inbox, dashboard KPIs, corpus/research/insights miners, self-audit,
+the relay's own call history) drops the source through
+`relay-protocol.whereNotSandboxCall` — so a test call, or a stranger dialling
+the test number, can neither create dispatch work nor move a metric. The
+transcript, latency summary and version stamps land on the sandbox row
+exactly as in production; that record is the bake-off. Any change to the
+number gate or the dry-run invariant is security-critical).
 `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
 appointment-card-request funnel — ALSO serves the standalone "set up

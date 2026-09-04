@@ -27,6 +27,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { redactText } = require('./agent-decision-training');
 const { redact: redactPii } = require('./content/pii-redactor');
 const { dispatchWithFallback } = require('./llm/call');
@@ -204,6 +205,7 @@ function mapSegmentRefs(quote, transcriptStructured) {
 function eligibleCallsQuery({ onlyUnmined = true } = {}) {
   let q = db('call_log')
     .where('direction', 'inbound')
+    .modify((qb) => whereNotSandboxCall(qb)) // voice-agent bake-off calls never reach a corpus
     .whereNotNull('transcription')
     .where('call_recording_consent_disclaimer_played', true)
     .where(function () {

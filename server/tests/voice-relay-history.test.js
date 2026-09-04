@@ -69,6 +69,7 @@ function makeBuilder(rows) {
   const chain = ['whereNull', 'whereIn', 'whereNotIn', 'whereNotNull', 'orderBy', 'select', 'limit',
     'whereRaw', 'orWhereRaw', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'whereNot', 'join', 'leftJoin'];
   for (const m of chain) b[m] = jest.fn(() => b);
+  b.modify = jest.fn((fn) => { fn(b); return b; });
   b.where = jest.fn(function whereImpl(arg) { if (typeof arg === 'function') arg.call(b, b); return b; });
   b.first = jest.fn(() => Promise.resolve(rows[0] || null));
   b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
