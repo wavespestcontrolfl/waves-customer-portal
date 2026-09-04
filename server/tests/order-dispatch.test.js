@@ -183,6 +183,20 @@ test('monthly cap counts non-failed rows already in the ledger', async () => {
   expect(a.place).not.toHaveBeenCalled();
 });
 
+test('the monthly cap buckets by PURCHASE month (placed_at, else the reservation-stamped created_at) and the reservation re-stamps created_at (pre-push P0)', async () => {
+  const dbFn = require('../models/db');
+  const orig = dbFn.getMockImplementation();
+  const raws = [];
+  dbFn.mockImplementation((table) => { const q = orig(table); if (table === 'vendor_orders') { const w = q.whereRaw; q.whereRaw = (...a) => { raws.push(a); return w ? w.apply(q, a) : q; }; } return q; });
+  const before = Date.now();
+  expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
+  dbFn.mockImplementation(orig);
+  expect(raws.some((a) => /COALESCE\(placed_at, created_at\) >= \?/.test(String(a[0])))).toBe(true);
+  const reservation = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.amount_cents === 31400 && u.row.created_at);
+  expect(reservation).toBeTruthy();
+  expect(reservation.row.created_at.getTime()).toBeGreaterThanOrEqual(before);
+});
+
 test('adapter refusal → needs_review with the refuse code', async () => {
   const err = new Error('exactly one address required'); err.refuse = 'multiple_addresses';
   const r = await run(mockAdapter({ place: jest.fn(async () => { throw err; }) }));

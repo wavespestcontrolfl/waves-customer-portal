@@ -301,10 +301,14 @@ async function orderedQuantityFor(conn, requestId) {
 // and the post-submit needs_review parks). A row parked BEFORE submission
 // (over cap, no binding total, dry run, refusal) keeps its amount for the
 // tab but has no placed_at and must not consume headroom (Codex hook P1).
+// The month is the PURCHASE month: placed_at for a dispatched row, else the
+// row's created_at, which reserveUnderCaps re-stamps at reservation time —
+// a claim raised before an ET month rollover and submitted after it spends
+// the new month's cap, not the old one (pre-push P0).
 async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = {}) {
   let q = conn('vendor_orders')
     .whereNot('status', 'failed')
-    .where('created_at', '>=', startOfETMonth(now))
+    .whereRaw('COALESCE(placed_at, created_at) >= ?', [startOfETMonth(now)])
     .where(function dispatched() { this.where('status', 'placing').orWhereNotNull('placed_at'); });
   if (excludeId) q = q.whereNot('id', excludeId);
   const row = await q.sum({ total: 'amount_cents' }).first();
@@ -323,7 +327,12 @@ async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = 
  * ownership is gone (pre-push P0). Returns { ok } | { ok:false, reason,
  * message }.
  */
-async function reserveUnderCaps(conn, ledgerId, cents, { now = new Date(), env = process.env } = {}) {
+// `now` is evaluated HERE, per reservation — never a run-start clock passed
+// through: a run that crosses the ET month boundary reserves against the
+// month it is in (pre-push P0). The reservation re-stamps the row's
+// created_at (its cap-accounting month) at the same instant.
+async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env } = {}) {
+  const now = new Date();
   const { perOrder, monthly } = caps(env);
   if (perOrder == null || monthly == null) return { ok: false, reason: 'caps_unconfigured', message: 'AUTO_ORDER_MAX_PER_ORDER_CENTS and AUTO_ORDER_MAX_MONTHLY_CENTS must both be set' };
   if (!Number.isFinite(cents) || cents <= 0) return { ok: false, reason: 'no_binding_total', message: 'no positive vendor total to reserve' };
@@ -332,7 +341,7 @@ async function reserveUnderCaps(conn, ledgerId, cents, { now = new Date(), env =
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAPS_LOCK_KEY]);
     const spent = await monthlySpentCents(trx, { now, excludeId: ledgerId });
     if (spent + cents > monthly) return { ok: false, reason: 'over_monthly_cap', message: `${dollars(cents)} would take this month to ${dollars(spent + cents)}, over the monthly cap ${dollars(monthly)}` };
-    const n = await trx('vendor_orders').where({ id: ledgerId, status: 'placing' }).update({ amount_cents: cents, updated_at: new Date() });
+    const n = await trx('vendor_orders').where({ id: ledgerId, status: 'placing' }).update({ amount_cents: cents, created_at: now, updated_at: now });
     if (n !== 1) return { ok: false, reason: 'claim_lost', message: 'this order\'s claim was parked by stale recovery while the vendor call ran — nothing submitted; see the Restock tab' };
     return { ok: true };
   });
@@ -631,7 +640,7 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
   catch (err) { return { parked: await park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: `binding total lookup failed: ${err.message}` }) }; }
   if (!bq || !Number.isFinite(bq.cents) || bq.cents <= 0) return { parked: await park(conn, { ...ctx, reason: 'no_binding_total', message: `${vendor.name} has no prior order of item ${vendorSku} at ${quantity} on the account, so there is no binding total to cap; place one identical order by hand first.` }) };
   const quoteCents = bq.cents;
-  const cap = await reserveUnderCaps(conn, ctx.ledger.id, quoteCents, { now, env });
+  const cap = await reserveUnderCaps(conn, ctx.ledger.id, quoteCents, { env });
   if (!cap.ok) return { parked: await park(conn, { ...ctx, reason: cap.reason, message: `${cap.message} (${vendor.name} total for the last identical order${bq.source ? `, ${bq.source}` : ''})`, amountCents: quoteCents }) };
   if (adapter.preSubmitTotal !== 'vendor') {
     // A historical charge is not a vendor-confirmed current total: price,
@@ -780,7 +789,7 @@ function parkIfUnpriced(conn, { ctx, pricing, order, vendor, product }) {
 // result, or null when the final total fits.
 async function parkIfOverCapAfterPlacement(conn, { adapter, ctx, vendor, ledger, placed, finalCents, quoteCents, now, env }) {
   if (adapter.quotesAtPlace || finalCents == null || finalCents <= (quoteCents ?? 0)) return null;
-  const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { now, env });
+  const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { env });
   if (finalCap.ok) return null;
   return park(conn, { ...ctx, markRequestOrdered: true, reason: 'over_cap_after_placement', message: `${vendor.name} charged ${dollars(finalCents)} for order ${placed.externalOrderNumber || '?'}: ${finalCap.message}.`, amountCents: finalCents, evidence: placed.evidence || null, placed });
 }
@@ -810,7 +819,7 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     // An adapter with no static quote reads the vendor's total at the point of
     // sale and runs the cap reservation through beforeSubmit right before it
     // submits (the binding total is the vendor's, never a local estimate).
-    const placeArgs = adapter.quotesAtPlace ? { ...base, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { now, env }) } : base;
+    const placeArgs = adapter.quotesAtPlace ? { ...base, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { env }) } : base;
     const stopHeartbeat = startClaimHeartbeat(conn, ledger.id);
     try {
       placed = await adapter.place(placeArgs);
