@@ -722,6 +722,12 @@ describe('review request follow-up flow', () => {
       expect(q.whereNull).toHaveBeenCalledWith('submitted_at');
       expect(q.whereNull).toHaveBeenCalledWith('rated_at');
       expect(q.whereNull).toHaveBeenCalledWith('redirected_at');
+      // …nor a non-promoter draft score (score set, category not promoter) — r19 P2.
+      const draftPredicate = q.where.mock.calls.map(([a]) => a).filter((a) => typeof a === 'function').pop();
+      const qb = { whereNull: jest.fn(() => qb), orWhere: jest.fn(() => qb), whereNotNull: jest.fn(() => qb) };
+      draftPredicate(qb);
+      expect(qb.whereNull).toHaveBeenCalledWith('score');
+      expect(qb.orWhere).toHaveBeenCalledWith({ category: 'promoter' });
       expect(q.whereNull).toHaveBeenCalledWith('sent_at');
       // Only asks that requested an email leg (and still owe it) match —
       // never a Text-only or completion-SMS ask (GH Codex #3856 r8 P1).
@@ -812,6 +818,12 @@ describe('review request follow-up flow', () => {
       expect(rrQ.whereNotIn).toHaveBeenCalledWith('status', ['completed', 'stopped', 'suppressed', 'failed', 'rated']);
       expect(rrQ.whereNull).toHaveBeenCalledWith('submitted_at');
       expect(rrQ.whereExists).toHaveBeenCalledWith(expect.any(Function));
+      // The dispatch claim excludes a non-promoter draft score too (r19 P2).
+      const claimDraft = rrQ.where.mock.calls.map(([a]) => a).filter((a) => typeof a === 'function').pop();
+      const qb2 = { whereNull: jest.fn(() => qb2), orWhere: jest.fn(() => qb2) };
+      claimDraft(qb2);
+      expect(qb2.whereNull).toHaveBeenCalledWith('score');
+      expect(qb2.orWhere).toHaveBeenCalledWith({ category: 'promoter' });
       const call = EmailLib.sendTemplate.mock.calls[0][0];
       expect(call).toMatchObject({
         templateKey: 'review_request_email',

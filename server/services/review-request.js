@@ -278,6 +278,13 @@ const isDefiniteProviderRejection = (err) => require("./sendgrid-mail").isDefini
 // ask: the customer already answered (or the row was stopped). `opened`
 // stays eligible for the owed email leg (r16 P2); these do not (r17 P2).
 const INLINE_RETRY_TERMINAL_STATUSES = ["completed", "stopped", "suppressed", "failed", "rated"];
+// A NON-PROMOTER draft score (/rate/:token/score stores score + category with
+// no submitted_at) is a response too — the cadence stops on it
+// (_runSequenceStep "responded"), so the owed email leg must not follow
+// it either (GH Codex #3856 r19 P2).
+function notNonPromoterDraft(q) {
+  return q.whereNull("score").orWhere({ category: "promoter" });
+}
 
 async function stampWithRetry(makeQuery, label) {
   try {
@@ -1943,6 +1950,7 @@ const ReviewService = {
       .whereNull("submitted_at")
       .whereNull("rated_at")
       .whereNull("redirected_at")
+      .where(notNonPromoterDraft)
       .whereNull("sent_at")
       .whereNotNull("email_leg_owed_at")
       .where("email_leg_owed_at", ">=", since)
@@ -2011,6 +2019,7 @@ const ReviewService = {
         .whereNull("submitted_at")
         .whereNull("rated_at")
         .whereNull("redirected_at")
+        .where(notNonPromoterDraft)
         .whereExists(function eligibleCustomer() {
           this.select(db.raw("1")).from("customers")
             .whereRaw("customers.id = review_requests.customer_id")
