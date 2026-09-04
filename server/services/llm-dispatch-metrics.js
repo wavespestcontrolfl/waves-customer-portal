@@ -500,6 +500,8 @@ async function upsertSessionRow(row) {
         cache_write_tokens: greatest('cache_write_tokens'),
         output_tokens: greatest('output_tokens'),
         reasoning_tokens: greatest('reasoning_tokens'),
+        // when the session last moved (S2d hub read windows sessions on it)
+        last_activity_at: greatest('last_activity_at'),
       }));
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] session upsert failed: ${err.message}`);
@@ -551,7 +553,7 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
     logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId}) usage in=${tokens.input_tokens} out=${tokens.output_tokens} ${errorCode || 'ok'}`);
-    return await upsertSessionRow(ledgerRow({
+    return await upsertSessionRow({ ...ledgerRow({
       ctx,
       rowKind: 'session',
       laneId: lane,
@@ -564,7 +566,7 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
       tokens,
       latencyMs,
       providerRef: sessionId,
-    }));
+    }), last_activity_at: new Date() });
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] recordSessionUsage skipped: ${err.message}`);
     return null;

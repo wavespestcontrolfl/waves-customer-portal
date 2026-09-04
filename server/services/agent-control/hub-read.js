@@ -95,24 +95,24 @@ const LIVE_WORKLOAD = "(workload IS NULL OR workload = 'live')";
 
 // When a row happened. A call row happens at created_at. A session row is
 // ONE row per Managed Agents session, re-recorded after every turn with
-// cumulative usage and latency_ms = GREATEST(now - startedAt) — the session
-// duration — while created_at stays the first write; its activity is the
-// end of that span, so a session that crosses ET midnight lands in the
-// window it last moved in, not the one it started in (Codex r1 P2).
-const ACTIVITY_AT = "(CASE WHEN row_kind = 'session' THEN created_at + COALESCE(latency_ms, 0) * interval '1 millisecond' ELSE created_at END)";
-// Index-friendly pre-filter for the activity window: a session lives at most
-// its hard_timeout (1 h, lane-policies AGENT_SESSION), so created_at can be
-// at most that far before its activity — 2 h keeps a margin.
-const SESSION_LOOKBACK_MS = 2 * 60 * 60 * 1000;
+// cumulative usage while created_at stays the first write, so it is
+// windowed on last_activity_at (written by every session upsert; rows from
+// before migration 000030 were backfilled to created_at) — a session that
+// crosses ET midnight lands in the window it last moved in (Codex r1 P2).
+const ACTIVITY_AT = "(CASE WHEN row_kind = 'session' THEN COALESCE(last_activity_at, created_at) ELSE created_at END)";
 
 function ledgerRows(from, to) {
   return db(TABLE)
-    .whereIn('row_kind', ['call', 'session'])
-    .whereNotNull('lane_id')
+    // qualified: areaLatency joins a VALUES list that also has a lane_id
+    .whereNotNull(`${TABLE}.lane_id`)
     .whereRaw(LIVE_WORKLOAD)
-    .where('created_at', '>=', new Date(from.getTime() - SESSION_LOOKBACK_MS))
-    .andWhere('created_at', '<', to)
-    .whereRaw(`${ACTIVITY_AT} >= ? AND ${ACTIVITY_AT} < ?`, [from, to]);
+    // Two index-backed ranges rather than one CASE: created_at for calls
+    // (llm_dispatch_log_lane_created_idx), last_activity_at for sessions
+    // (llm_dispatch_log_session_activity_idx).
+    .whereRaw(
+      "((row_kind = 'call' AND created_at >= ? AND created_at < ?) OR (row_kind = 'session' AND COALESCE(last_activity_at, created_at) >= ? AND COALESCE(last_activity_at, created_at) < ?))",
+      [from, to, from, to],
+    );
 }
 
 // Per-lane aggregates over [from, to).
@@ -184,14 +184,9 @@ function bucketRows(from, to, unit) {
 function areaLatency(from, to, laneArea) {
   if (!laneArea.length) return Promise.resolve([]);
   const values = laneArea.map(() => '(?, ?)').join(', ');
-  return db(TABLE)
+  return ledgerRows(from, to)
     .joinRaw(`JOIN (VALUES ${values}) AS m(lane_id, area) ON m.lane_id = ${TABLE}.lane_id`, laneArea.flat())
-    .whereIn('row_kind', ['call', 'session'])
     .whereNotNull('latency_ms')
-    .whereRaw(LIVE_WORKLOAD)
-    .where('created_at', '>=', new Date(from.getTime() - SESSION_LOOKBACK_MS))
-    .andWhere('created_at', '<', to)
-    .whereRaw(`${ACTIVITY_AT} >= ? AND ${ACTIVITY_AT} < ?`, [from, to])
     .groupBy('m.area')
     .select(
       'm.area',
@@ -446,8 +441,8 @@ function basisFor(window) {
     rowKinds: ['call', 'session'],
     workloads: ['live'],
     // A session row is attributed to the window of its last activity; its
-    // latency_ms is the session duration, so a session lane's p50 / p95 read
-    // as session durations.
+    // latency_ms is its longest turn, so a session lane's p50 / p95 read as
+    // turn durations.
     sessionAttribution: 'last_activity',
     // Off = no new rows are being written; what is shown is history.
     ledgerRecording: gateEnvValue('GATE_LLM_CALL_LEDGER'),

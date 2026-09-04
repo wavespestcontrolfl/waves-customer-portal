@@ -614,7 +614,7 @@ describe('llm call ledger', () => {
       global.fetch = jest.fn(() => Promise.reject(new Error('network')));
       const { metrics } = load();
       await expect(metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's2', model: 'req-m', startedAt: Date.now() - 10 })).resolves.toEqual(expect.any(Number));
-      expect(ledgerRows()[0]).toMatchObject({ row_kind: 'session', provider_ref: 's2', ok: true, error_code: null, input_tokens: null, output_tokens: null, requested_model: 'req-m', served_model: null });
+      expect(ledgerRows()[0]).toMatchObject({ row_kind: 'session', provider_ref: 's2', ok: true, error_code: null, input_tokens: null, output_tokens: null, requested_model: 'req-m', served_model: null, last_activity_at: expect.any(Date) });
       global.fetch = jest.fn(() => Promise.reject(new Error('network')));
       await metrics.recordSessionUsage({ laneId: 'agent_lead', sessionId: 's3', failure: 'streaming_failed' });
       expect(ledgerRows()[1]).toMatchObject({ provider_ref: 's3', ok: false, error_code: 'streaming_failed', input_tokens: null });
@@ -629,14 +629,14 @@ describe('llm call ledger', () => {
       expect(table).toBe('llm_dispatch_log');
       expect(String(target)).toBe("(provider_ref) WHERE row_kind = 'session'");
       // counters and latency only grow
-      for (const col of ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens', 'latency_ms']) {
+      for (const col of ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens', 'latency_ms', 'last_activity_at']) {
         expect(String(updates[col])).toBe(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
       }
       // a terminal status is sticky: ok only ever goes false, the first error and served model stay
       expect(String(updates.ok)).toBe('(llm_dispatch_log.ok AND EXCLUDED.ok)');
       for (const col of ['error_code', 'error_class', 'served_model']) expect(String(updates[col])).toBe(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
       // the first write's identity and context stay: nothing else is merged
-      expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
+      expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'last_activity_at', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
     });
 
     it('is a no-op while the gate is off', async () => {
