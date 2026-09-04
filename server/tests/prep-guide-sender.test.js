@@ -40,6 +40,8 @@ function customersQuery() {
 // upcomingVisitRow, the same table also serves ensureServicePrepToken's
 // chains (.select()…first() token read + .update().returning() mint).
 let upcomingVisitRow = null;
+let upcomingVisitRows = null; // several candidates (soonest first); null = [upcomingVisitRow]
+let viewRow = null; // prep_guide_views
 let visitLookupError = null;
 let servicePrepRow = null;
 let serviceUpdates = [];
@@ -71,7 +73,12 @@ function scheduledQuery() {
   const q = {
     select: jest.fn(() => { tokenMode = true; return q; }),
     where: jest.fn(() => q), whereRaw: jest.fn(() => q), whereNotIn: jest.fn(() => q),
-    whereNull: jest.fn(() => q),
+    whereNull: jest.fn(() => q), limit: jest.fn(() => q),
+    // nextUpcomingVisits awaits the chain itself (…limit().select(cols)).
+    then: (resolve, reject) => {
+      if (visitLookupError) return reject(visitLookupError);
+      return resolve(upcomingVisitRows || (upcomingVisitRow ? [upcomingVisitRow] : []));
+    },
     update: jest.fn((patch) => {
       serviceUpdates.push(patch);
       // Thenable so `await …update()` yields the row count, while
@@ -84,7 +91,6 @@ function scheduledQuery() {
     first: jest.fn(async (...cols) => {
       // The post-claim key re-read asks for the key column alone.
       if (cols.length === 1 && cols[0] === 'prep_template_key') return servicePrepRow;
-      if (!tokenMode && visitLookupError) throw visitLookupError;
       return tokenMode ? servicePrepRow : upcomingVisitRow;
     }),
   };
@@ -109,6 +115,7 @@ beforeEach(() => {
     if (table === 'email_template_automation_runs') { lastRunsQuery = livenessQuery(runRows); return lastRunsQuery; }
     if (table === 'automation_enrollments') return livenessQuery(enrollmentRows);
     if (table === 'automation_step_sends') return traceQuery(stepSendRow);
+    if (table === 'prep_guide_views') return traceQuery(viewRow);
     return customersQuery();
   });
   db.fn = { now: jest.fn(() => 'NOW()') };
@@ -122,6 +129,8 @@ beforeEach(() => {
   interactionMarkerRow = null;
   scheduledQueries = [];
   upcomingVisitRow = null;
+  upcomingVisitRows = null;
+  viewRow = null;
   visitLookupError = null;
   serviceUpdateCount = 1;
   servicePrepRow = { prep_token: null, prep_template_key: null };
@@ -550,10 +559,46 @@ describe('sendPrepToCustomer', () => {
     interactionMarkerRow = null;
     expect(serviceUpdates).toEqual([]);
 
+    // An OPENED page (prep_first_viewed_at / prep_view_count / a
+    // prep_guide_views row) is never re-keyed, traces or not (r16 P0).
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea', prep_sent_at: null, prep_first_viewed_at: new Date() };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' })).toMatchObject({ ok: false, reason: 'prep_page_taken' });
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea', prep_sent_at: null, prep_view_count: 2 };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' })).toMatchObject({ ok: false, reason: 'prep_page_taken' });
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea', prep_sent_at: null };
+    viewRow = { id: 'v-1' };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' })).toMatchObject({ ok: false, reason: 'prep_page_taken' });
+    viewRow = null;
+    expect(serviceUpdates).toEqual([]);
+
     // Delivered (prep_sent_at) is never re-keyed — no liveness read at all.
     upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea', prep_sent_at: new Date() };
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' }))
       .toMatchObject({ ok: false, reason: 'prep_page_taken' });
+    expect(serviceUpdates).toEqual([]);
+  });
+
+  test('a later visit with a free page hosts the link when the soonest one is legitimately owned by another guide (r16 P2)', async () => {
+    upcomingVisitRows = [
+      { ...VISIT, id: 'svc-soon', prep_template_key: 'prep.interior_pest', prep_sent_at: new Date() },
+      { ...VISIT, id: 'svc-later', prep_template_key: null },
+    ];
+    servicePrepRow = { prep_token: 'g'.repeat(32), prep_template_key: 'prep.lawn' };
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' });
+    expect(result).toMatchObject({ ok: true, smsSent: true });
+    // The fresh claim went to the later visit, not the owned one.
+    expect(serviceUpdates[0]).toEqual({ prep_template_key: 'prep.lawn' });
+    expect(scheduledQueries.some((q) => q.where.mock.calls.some(([arg]) => arg && arg.id === 'svc-later'))).toBe(true);
+    expect(scheduledQueries.some((q) => q.where.mock.calls.some(([arg]) => arg && arg.id === 'svc-soon' && arg.prep_template_key))).toBe(false);
+
+    // Every candidate owned → the soonest visit's refusal.
+    serviceUpdates = [];
+    upcomingVisitRows = [
+      { ...VISIT, id: 'svc-soon', prep_template_key: 'prep.interior_pest', prep_sent_at: new Date() },
+      { ...VISIT, id: 'svc-later', prep_template_key: 'prep.flea', prep_sent_at: new Date() },
+    ];
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'prep_page_taken', takenBy: 'Interior Pest Treatment' });
     expect(serviceUpdates).toEqual([]);
   });
 

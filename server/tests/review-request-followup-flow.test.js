@@ -711,7 +711,10 @@ describe('review request follow-up flow', () => {
 
       expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toEqual({ id: 'rr-texted' });
       expect(q.where).toHaveBeenCalledWith({ customer_id: 'cust-1', triggered_by: 'auto_inline' });
-      expect(q.whereIn).toHaveBeenCalledWith('status', ['sent', 'sending']);
+      // Texted rows in ANY later lifecycle status (opened / rated …) plus
+      // stranded 'sending' claims (r16 P2) — no status list.
+      expect(q.where).toHaveBeenCalledWith(expect.any(Function));
+      expect(q.whereIn).not.toHaveBeenCalled();
       expect(q.whereNull).toHaveBeenCalledWith('sent_at');
       // Only asks that requested an email leg (and still owe it) match —
       // never a Text-only or completion-SMS ask (GH Codex #3856 r8 P1).
@@ -921,6 +924,18 @@ describe('review request follow-up flow', () => {
       expect(await ReviewService._sendOutreachEmail(args)).toMatchObject({ reason: 'email_uncertain' });
       expect(rrUpdateOneOff).toHaveBeenCalledTimes(2);
 
+      // A definite 4xx after dispatch: failed, no cooldown stamp (r16 P2).
+      rrUpdateOneOff.mockClear();
+      EmailLib.sendTemplate.mockImplementationOnce(async (opts) => {
+        await opts.onQueued({ id: 'em-7b' });
+        const err = new Error('SendGrid 400');
+        err.status = 400;
+        throw err;
+      });
+      expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, terminal: true, channel: 'email', requestId: 'rr-7', reason: 'email_send_failed' });
+      expect(rrUpdateOneOff).toHaveBeenCalledWith({ status: 'failed' });
+      expect(rrUpdateOneOff).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
+
       // Pre-dispatch (no onQueued): nothing reached SendGrid — the plain failure.
       rrUpdateOneOff.mockClear();
       EmailLib.sendTemplate.mockRejectedValueOnce(new Error('template missing'));
@@ -933,6 +948,30 @@ describe('review request follow-up flow', () => {
         throw new Error('post-dispatch bookkeeping failed');
       });
       expect(await ReviewService._sendOutreachEmail({ ...args, manageRetryVia: 'sequence' })).toEqual({ ok: false, retryable: true, channel: 'email', requestId: 'rr-7' });
+    });
+
+    test('a definite SendGrid 4xx after dispatch is a plain failure: the owed leg is handed back (r16 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        await opts.onQueued({ id: 'em-1' });
+        const err = new Error('SendGrid 400: bad address');
+        err.status = 400;
+        throw err;
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
+      // Cleared pre-dispatch, restored on the definite rejection.
+      expect(rrUpdate).toHaveBeenNthCalledWith(1, { email_leg_owed_at: null });
+      expect(rrUpdate).toHaveBeenNthCalledWith(2, { email_leg_owed_at: expect.any(Date) });
+      // A 5xx stays uncertain.
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        await opts.onQueued({ id: 'em-1' });
+        const err = new Error('SendGrid 503');
+        err.status = 503;
+        throw err;
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_uncertain' });
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
     });
 
     test('re-checks the live customer: already reviewed or removed refuses before any send (r8 P2)', async () => {

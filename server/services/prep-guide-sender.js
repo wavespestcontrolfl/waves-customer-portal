@@ -111,26 +111,30 @@ function isSupportedChannel(channel) {
   return CHANNELS.includes(channel);
 }
 
-// Soonest upcoming visit of this pest family, so the emailed guide's "Service
-// date" row references the real appointment and the prep token can hang off
-// the visit row. Null when there is no matching upcoming visit; throws on a
-// lookup error (the caller reports it apart from "no visit").
-async function nextUpcomingVisit(customerId, config) {
+// Upcoming visits of this pest family, soonest first, so the emailed guide's
+// "Service date" row references the real appointment and the prep token can
+// hang off a visit row. A few candidates, not one: the soonest visit's page
+// may legitimately belong to another guide while a later visit's is free
+// (GH Codex #3856 r16 P2). Empty when nothing matches; throws on a lookup
+// error (the caller reports it apart from "no visit").
+const VISIT_CANDIDATES = 5;
+async function nextUpcomingVisits(customerId, config) {
   const q = db('scheduled_services')
     .where({ customer_id: customerId })
     .where(function familyMatch() {
       for (const kw of config.serviceKeywords) this.orWhereRaw('LOWER(service_type) LIKE ?', [`%${kw}%`]);
     });
   for (const kw of config.excludeKeywords || []) q.whereRaw('LOWER(service_type) NOT LIKE ?', [`%${kw}%`]);
-  const row = await q
+  const rows = await q
     .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
     // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
     // midnight ET "today's" visit would fall before the UTC date and the
     // email would say "To be confirmed" despite a real upcoming appointment.
     .where('scheduled_date', '>=', etDateString())
     .orderBy('scheduled_date', 'asc')
-    .first('id', 'scheduled_date', 'prep_template_key', 'prep_sent_at', 'prep_token', 'created_at');
-  return row || null;
+    .limit(VISIT_CANDIDATES)
+    .select('id', 'scheduled_date', 'prep_template_key', 'prep_sent_at', 'prep_token', 'created_at', 'prep_first_viewed_at', 'prep_view_count');
+  return rows || [];
 }
 
 // The automated lanes reserve a visit's prep key BEFORE anything delivers
@@ -247,8 +251,13 @@ async function automatedDeliveryTrace(visit, takenKey, customerId) {
 }
 
 async function reservationAbandoned(visit, takenKey, customerId) {
-  if (visit.prep_sent_at) return false;
+  // Delivered, or OPENED: a page the customer has already viewed (the
+  // public route stamps prep_first_viewed_at / prep_view_count and logs a
+  // prep_guide_views row) must never change content (GH Codex #3856 r16 P0).
+  if (visit.prep_sent_at || visit.prep_first_viewed_at || Number(visit.prep_view_count) > 0) return false;
   try {
+    const viewed = await db('prep_guide_views').where({ scheduled_service_id: visit.id }).first('id');
+    if (viewed) return false;
     if (await automatedDeliveryTrace(visit, takenKey, customerId)) return false;
     return !(await manualDeliveryTrace(visit, takenKey, customerId));
   } catch (err) {
@@ -308,37 +317,52 @@ async function releasePrepPage(serviceId, templateKey) {
 //   no_upcoming_visit — nothing for a page to describe
 //   prep_page_taken   — the row's page belongs to another guide (takenBy)
 //   prep_link_failed  — visit lookup or token mint threw (retryable)
-async function resolvePrepVisit(customer, config) {
-  let visit;
+// An abandoned reservation moves onto this guide atomically (only while
+// still that key and still undelivered) — a FRESH claim like any other,
+// handed back if nothing delivers. 0 = someone else moved first.
+async function rekeyAbandonedPage(visit, templateKey) {
   try {
-    visit = await nextUpcomingVisit(customer.id, config);
+    return Number(await db('scheduled_services')
+      .where({ id: visit.id, prep_template_key: visit.prep_template_key })
+      .whereNull('prep_sent_at')
+      .update({ prep_template_key: templateKey }));
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] prep page re-key failed for service ${visit.id}: ${err.message}`);
+    return 0;
+  }
+}
+
+async function resolvePrepVisit(customer, config) {
+  let visits;
+  try {
+    visits = await nextUpcomingVisits(customer.id, config);
   } catch (err) {
     logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${customer.id}: ${err.message}`);
     return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'prep_link_failed' };
   }
-  if (!visit?.id) return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'no_upcoming_visit' };
+  if (!visits.length) return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'no_upcoming_visit' };
+  // Soonest first: a free (or same-guide) page wins; a page another guide
+  // legitimately owns is skipped for the next visit; an abandoned
+  // reservation is re-keyed. Nothing usable = the soonest visit's refusal.
+  let visit = null;
   let claim = null;
-  if (visit.prep_template_key && visit.prep_template_key !== config.emailTemplateKey) {
-    const taken = {
-      visit, prepUrl: null, ownsPage: false, linkReason: 'prep_page_taken',
-      takenBy: guideLabelForTemplateKey(visit.prep_template_key),
-    };
-    if (!(await reservationAbandoned(visit, visit.prep_template_key, customer.id))) return taken;
-    // Abandoned automated reservation: move the key onto this guide
-    // atomically (only while still that key and still undelivered) — a
-    // FRESH claim like any other, handed back if nothing delivers.
-    let rekeyed = 0;
-    try {
-      rekeyed = await db('scheduled_services')
-        .where({ id: visit.id, prep_template_key: visit.prep_template_key })
-        .whereNull('prep_sent_at')
-        .update({ prep_template_key: config.emailTemplateKey });
-    } catch (err) {
-      logger.warn(`[prep-guide-sender] prep page re-key failed for service ${visit.id}: ${err.message}`);
+  let taken = null;
+  for (const candidate of visits) {
+    if (!candidate.prep_template_key || candidate.prep_template_key === config.emailTemplateKey) {
+      visit = candidate;
+      break;
     }
-    if (!Number(rekeyed)) return taken;
+    taken = taken || {
+      visit: candidate, prepUrl: null, ownsPage: false, linkReason: 'prep_page_taken',
+      takenBy: guideLabelForTemplateKey(candidate.prep_template_key),
+    };
+    if (!(await reservationAbandoned(candidate, candidate.prep_template_key, customer.id))) continue;
+    if (!(await rekeyAbandonedPage(candidate, config.emailTemplateKey))) continue;
+    visit = candidate;
     claim = { owned: true, fresh: true };
+    break;
   }
+  if (!visit) return taken;
   // Claim BEFORE the mint: ensureServicePrepToken initializes an unset key
   // itself, so a claim after it could never be fresh and a failed first
   // send would reserve the page forever (pre-push Codex P1 on cd6de743e).

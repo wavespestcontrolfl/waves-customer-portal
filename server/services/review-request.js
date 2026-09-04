@@ -269,6 +269,14 @@ const INLINE_EMAIL_RETRY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 // delivery record: a lost stamp leaves a delivered ask invisible to the
 // gates or the analytics for good. Returns whether a write landed; the
 // second failure is an error, never a shrug.
+// SendGrid exposes the HTTP status on its throw (sendgrid-mail.js): a 4xx is
+// a DEFINITE rejection — not accepted, safe to retry after a fix — where a
+// 5xx / network failure MAY have been accepted (r16 P2).
+function isDefiniteProviderRejection(err) {
+  const status = Number(err?.status);
+  return status >= 400 && status < 500;
+}
+
 async function stampWithRetry(makeQuery, label) {
   try {
     await makeQuery();
@@ -1923,16 +1931,19 @@ const ReviewService = {
     const since = new Date(Date.now() - INLINE_EMAIL_RETRY_WINDOW_MS);
     // Anchored on the claim stamp (email_leg_owed_at = claimed_at of the
     // Both claim): present on every candidate, set seconds before the text.
+    // Candidates are the TEXTED rows (sms_sent_at — whatever lifecycle
+    // status the customer's opening / rating moved them to since; r16 P2)
+    // plus stranded claims still in 'sending'.
     const row = await db("review_requests")
       .where({ customer_id: customerId, triggered_by: "auto_inline" })
-      .whereIn("status", ["sent", "sending"])
+      .where((q) => q.whereNotNull("sms_sent_at").orWhere({ status: "sending" }))
       .whereNull("sent_at")
       .whereNotNull("email_leg_owed_at")
       .where("email_leg_owed_at", ">=", since)
       .orderBy("email_leg_owed_at", "desc")
       .first("id", "status", "token", "customer_id", "claimed_at", "sms_sent_at");
     if (!row) return null;
-    if (row.status === "sent" && row.sms_sent_at) return { id: row.id };
+    if (row.sms_sent_at) return { id: row.id };
     // A stranded claim: the text left but both delivered-stamp attempts
     // failed, and the composer sent the operator here to email it. Only
     // PROOF the text reached the customer lets the email ride on this row
@@ -1997,6 +2008,7 @@ const ReviewService = {
 
   async sendInlineEmailCopy(requestId) {
     if (!requestId) return { sent: false, reason: "no_request" };
+    let request = null;
     // onQueued fires immediately before the provider call: a throw after it
     // MAY have reached SendGrid (the library's post-dispatch bookkeeping
     // carries no marker), so it is uncertain — never "try again" (r8 P2).
@@ -2006,7 +2018,7 @@ const ReviewService = {
     // provider may hold (r9 P2).
     let dispatched = false;
     try {
-      const request = await db("review_requests").where({ id: requestId }).first();
+      request = await db("review_requests").where({ id: requestId }).first();
       if (!request) return { sent: false, reason: "no_request" };
       const who = await this._inlineEmailRecipient(request);
       if (who.reason) return { sent: false, reason: who.reason };
@@ -2064,6 +2076,17 @@ const ReviewService = {
     } catch (err) {
       logger.error(`[review] inline email copy failed (requestId=${requestId} errType=${err?.name || "Error"} dispatched=${dispatched})`);
       if (!dispatched) return { sent: false, reason: "email_send_failed" };
+      if (isDefiniteProviderRejection(err)) {
+        // Definitely NOT accepted: hand the owed leg back (its original
+        // stamp keeps the retry window) so a corrected address can retry
+        // on the same row — the text's cooldown would refuse a fresh ask.
+        await db("review_requests")
+          .where({ id: requestId })
+          .whereNull("email_leg_owed_at")
+          .update({ email_leg_owed_at: request?.email_leg_owed_at || new Date() })
+          .catch((e) => logger.error(`[review] inline email owed restore failed after a provider rejection (requestId=${requestId}): ${e.message}`));
+        return { sent: false, reason: "email_send_failed" };
+      }
       // The provider may hold this email. The owed leg was already cleared
       // before dispatch, so the Quick Links retry path cannot re-send it —
       // the operator checks the email log instead.
@@ -3367,8 +3390,10 @@ const ReviewService = {
    *  • one-off before dispatch → nothing would ever retry it: mark 'failed',
    *    report a hard failure so the caller never says "queued".
    */
-  async _outreachEmailThrowOutcome({ request, manageRetryVia, dispatched }) {
-    if (dispatched && manageRetryVia !== "sequence") {
+  async _outreachEmailThrowOutcome({ request, manageRetryVia, dispatched, err }) {
+    // A definite 4xx rejection after dispatch is a plain failure, never an
+    // ask — no cooldown stamp for an email nobody received (r16 P2).
+    if (dispatched && !isDefiniteProviderRejection(err) && manageRetryVia !== "sequence") {
       const stamped = await stampWithRetry(
         () => db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() }),
         `uncertain outreach email cooldown stamp (requestId=${request.id})`,
@@ -3426,7 +3451,7 @@ const ReviewService = {
       });
     } catch (err) {
       logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"} dispatched=${dispatched})`);
-      return this._outreachEmailThrowOutcome({ request, manageRetryVia, dispatched });
+      return this._outreachEmailThrowOutcome({ request, manageRetryVia, dispatched, err });
     }
 
     // Send returned — bookkeeping failures here must NOT requeue (the email
