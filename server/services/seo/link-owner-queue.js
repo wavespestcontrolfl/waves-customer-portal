@@ -303,6 +303,15 @@ async function listOwnerQueue(db) {
       for (const p of sendable) reviewFor.set(p.id, { kind: 'error', recipient: p.outreach_to_email, matched: [], lookup_hash: null, error: err.message });
     }
   }
+  // §13 on a FOLLOW-UP whose thread recipient is a customer contact: there is no other address to take (the pitch's
+  // counterpart is re-addressed on the board), so the sender's terminal settlement applies here too — skipped now,
+  // instead of an unusable card holding the conversation and the domain open forever; the nightly ends the instance
+  // (followUpPending excludes a skipped follow-up). CAS on the drafted state, inside the sender's helper.
+  for (const p of sendable) {
+    if ((reviewFor.get(p.id) || {}).kind !== 'customer' || p.follow_up_status !== 'drafted') continue;
+    if (!rows.some((r) => r.prospect_id === p.id && isFollowUp(r) && !r.satisfied_at && isOwner(r.level))) continue;
+    if (await require('./link-prospect-outreach').closeCustomerRecipientFollowUp(db, p.id)) Object.assign(p, { follow_up_status: 'skipped', follow_up_skipped_reason: 'customer_recipient' });
+  }
   // the send click's inputs (§6.4 / §13) on a communication row: the draft the click sends — the pitch, or the
   // follow-up — its review, the recipient match to acknowledge; `hash` travels back with the click: the claim sends
   // only the text the card displayed (§3.6b)
@@ -324,9 +333,11 @@ async function listOwnerQueue(db) {
       let whyNot = !onBestPath ? 'placement is not on the domain\'s current best path — the nightly bridge rotates it'
         : r.path_id !== path.id ? 'the step was decided on a prior path — the nightly bridge rotates it'
           : (whyNotApprovable(r, path) || whyNotHere(p, r) || (p.claimed_at ? 'leased to a worker — refresh after it reports' : null));
+      // a follow-up closed above (or by the sender) for a customer recipient says so, not "no draft"
+      if (!whyNot && isFollowUp(r) && p.follow_up_status === 'skipped' && p.follow_up_skipped_reason === 'customer_recipient') whyNot = 'the recipient is a customer contact — the follow-up is closed (the thread\'s recipient cannot change)';
       // a send needs a draft to send (the bridge parks the row only once one exists; a re-draft in flight clears it)
       if (!whyNot && r.dimension === 'communication' && !draftReady(p, r)) whyNot = noDraftYet(r);
-      if (!whyNot && r.dimension === 'communication' && (reviewFor.get(p.id) || {}).kind === 'customer') whyNot = 'the recipient is a customer contact — outreach never goes to a customer; re-draft to another address';
+      if (!whyNot && r.dimension === 'communication' && (reviewFor.get(p.id) || {}).kind === 'customer') whyNot = isFollowUp(r) ? 'the recipient is a customer contact — the follow-up is closed (the thread\'s recipient cannot change)' : 'the recipient is a customer contact — outreach never goes to a customer; re-draft to another address';
       // the same freshness test the click applies — a stale stamp never shows a button that can only 409, and an
       // APPROVED row whose inputs moved since (price, policy, revision) is shown as awaiting the bridge's re-decision
       // rather than as live spending authority (the bridge invalidates it on its next pass)

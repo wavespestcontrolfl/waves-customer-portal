@@ -333,7 +333,7 @@ async function claimFollowUps(trx, { limit, preview }) {
     .whereIn('follow_up_status', ['none', 'due'])
     .whereNotNull('follow_up_due_at').where('follow_up_due_at', '<=', now)
     .whereIn('status', [...widest])
-    .whereNotNull('path_id')
+    // no path_id filter: a placement whose path was DELETED (FK ON DELETE SET NULL) is read so its follow-up can be retired below
     .orderBy('follow_up_due_at', 'asc')
     .select('*');
   if (!due.length) return [];
@@ -364,26 +364,27 @@ async function claimFollowUps(trx, { limit, preview }) {
     const dom = r.domain_id ? await trx('seo_link_domains').where({ id: r.domain_id }).first('id', 'agent_state', 'best_path_id') : null;
     if (dom && nonClaimableDomainStates().includes(dom.agent_state)) continue;
     const p = r.path_id ? await trx('seo_link_acquisition_paths').where({ id: r.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'revision', 'agent_completable', 'execution_after_send', 'acquisition_type', 'account_required') : null;
+    // the route is GONE — the path deleted (path_id NULL), or superseded during the wait — or the domain RE-RANKED to
+    // another (standing) path: a sent conversation is pinned to its path (the mover never re-paths it) and the selection
+    // freezes it off the best path, so no follow-up can ever be composed or authorized for it, and nothing else visits a
+    // none / due follow-up in that state (followUpPending excludes it from the bridge, the closure sweep reads sent /
+    // skipped only). It RETIRES here (skipped): the conversation completes and the closure sweep releases the inbox
+    const retire = async (reason, why) => {
+      await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
+        .update({ follow_up_status: 'skipped', follow_up_skipped_reason: reason, updated_at: now });
+      logger.info(`[link-worker] follow-up for ${r.id} retired — ${why}`);
+    };
+    if (!r.path_id || !p) { await retire('acquisition path deleted before the follow-up', 'its acquisition path was deleted'); continue; }
     // the domain was RE-RANKED to another (standing) path during the wait: a sent conversation is pinned to its path and
     // the selection freezes it off the best path — no authority instance is ever decided for its follow-up and the
     // sender's domainRefusal refuses the old path, so a draft could only ever hang. It RETIRES here (skipped), as a
     // superseded path does; the conversation completes and the closure sweep releases the inbox
-    if (dom && dom.best_path_id && r.path_id && dom.best_path_id !== r.path_id) {
-      await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
-        .update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'domain re-ranked to another path before the follow-up', updated_at: now });
-      logger.info(`[link-worker] follow-up for ${r.id} retired — its domain re-ranked to another path during the wait`);
-      continue;
-    }
+    if (dom && dom.best_path_id && dom.best_path_id !== r.path_id) { await retire('domain re-ranked to another path before the follow-up', 'its domain re-ranked to another path during the wait'); continue; }
     // the route the conversation was pitched on was SUPERSEDED during the wait: a sent conversation is pinned to its
     // path (the mover never re-paths it), so no follow-up can ever be composed for it — and nothing else visits a
     // none / due follow-up on a superseded path (followUpPending excludes it from the bridge, the closure sweep reads
     // sent / skipped only). It RETIRES here (skipped): the conversation completes and the closure sweep releases the inbox
-    if (p && p.superseded_by) {
-      await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
-        .update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'acquisition path superseded before the follow-up', updated_at: now });
-      logger.info(`[link-worker] follow-up for ${r.id} retired — its acquisition path was superseded during the wait`);
-      continue;
-    }
+    if (p.superseded_by) { await retire('acquisition path superseded before the follow-up', 'its acquisition path was superseded during the wait'); continue; }
     if (!eligible(r, p)) continue;
     const n = await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent', status: r.status, path_id: r.path_id, link_type: r.link_type }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
       .update({ claimed_at: now, claimed_by: WORKER, follow_up_status: 'due', leased_path_revision: p.revision == null ? null : Number(p.revision), updated_at: now });
@@ -602,10 +603,15 @@ async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
     // (`skipped`); the lane and the owner's domain ruling — a row edited out of outreach or a domain parked / refused
     // meanwhile returns to `due`, re-leased once it is claimable again
     const M = require('./link-outreach-mandate');
+    const dom = outcome === 'drafted' && row.domain_id ? await trx('seo_link_domains').where({ id: row.domain_id }).first('agent_state', 'best_path_id') : null;
     const moved = outcome === 'drafted' && followUpPathMoved(row, path);
-    const left = outcome === 'drafted' && !moved && !M.FOLLOW_UP_STATUSES(path).includes(row.status);
-    const blocked = outcome === 'drafted' && !moved && !left && (!OUTREACH_TYPES.includes(row.link_type)
-      || Boolean(row.domain_id && await trx('seo_link_domains').where({ id: row.domain_id }).whereIn('agent_state', nonClaimableDomainStates()).first('id')));
+    // the domain RE-RANKED to another path while the drafter held the lease (the old path neither superseded nor
+    // revised): a drafted follow-up on the pinned old path would be frozen off the best path with no authority and no
+    // send attempt to retire it — it RETIRES here, as the lease and the send do
+    const reranked = outcome === 'drafted' && !moved && Boolean(dom && dom.best_path_id && row.path_id && dom.best_path_id !== row.path_id);
+    const left = outcome === 'drafted' && !moved && !reranked && !M.FOLLOW_UP_STATUSES(path).includes(row.status);
+    const blocked = outcome === 'drafted' && !moved && !reranked && !left && (!OUTREACH_TYPES.includes(row.link_type)
+      || Boolean(dom && nonClaimableDomainStates().includes(dom.agent_state)));
     const failures = outcome === 'failed' ? (Number(row.follow_up_attempts) || 0) + 1 : null;
     const patch = moved || blocked
       ? { ...release, follow_up_status: 'due' }
@@ -613,6 +619,8 @@ async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
         ? (failures >= MAX_ATTEMPTS
           ? { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: `drafter failed ${failures} times${note ? ` (${note})` : ''}`, follow_up_attempts: failures }
           : { ...release, follow_up_status: 'due', follow_up_due_at: now, follow_up_attempts: failures })
+        : reranked
+        ? { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: 'domain re-ranked to another path before the follow-up' }
         : left
         ? { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: `placement left the follow-up lifecycle (${row.status})` }
         : outcome === 'drafted'
@@ -620,12 +628,16 @@ async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
           : { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: note || 'worker skipped' };
     // the same optimistic concurrency as the initial lane: only THIS lease writes, on the follow-up state it was taken in
     const n = await trx('seo_link_prospects').where({ id: prospect.id, follow_up_status: 'due', outreach_status: 'sent' }).where('claimed_at', leaseDate).update(patch);
-    return { n, moved, left, blocked, patch };
+    return { n, moved, reranked, left, blocked, patch };
   });
   if (!r.n) return { ok: false, code: 'stale_lease', error: 'lease expired or reclaimed; re-claim before reporting' };
   if (r.moved) {
     logger.info(`[link-worker] follow-up report ${prospect.id} outcome=drafted discarded — its acquisition path moved while drafting`);
     return { ok: false, code: 'path_moved', error: 'the placement\'s acquisition path changed while drafting; the follow-up was discarded — it is re-leased against the current path' };
+  }
+  if (r.reranked) {
+    logger.info(`[link-worker] follow-up report ${prospect.id} outcome=drafted discarded — the domain re-ranked to another path while drafting; follow-up retired`);
+    return { ok: false, code: 'follow_up_obsolete', error: 'the domain re-ranked to another path while drafting; the draft was discarded and the follow-up retired' };
   }
   if (r.left) {
     logger.info(`[link-worker] follow-up report ${prospect.id} outcome=drafted discarded — the placement left the follow-up lifecycle; follow-up retired`);

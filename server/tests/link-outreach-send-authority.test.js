@@ -1236,6 +1236,39 @@ describe('Codex r2 on #3854', () => {
     expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'sent' }); // the closed row untouched
     expect(await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).toEqual([]); // converged
   });
+  test('P2 (Codex r16): the owner queue CLOSES an owner-routed follow-up whose thread recipient became a customer contact instead of showing an unusable card', async () => {
+    const s = await conversation();
+    followUpRow(s.db).level = 'OWNER_OUTREACH'; // owner-routed (a marker, or the policy)
+    s.db._tables.customers.push({ id: 'c9', email: 'editor@example.org', service_contact_email: null, service_contact2_email: null, service_contact3_email: null });
+    const row = (await Q.listOwnerQueue(s.db)).cards[0].rows.find((r) => r.instance_kind === 'followup');
+    expect(row).toMatchObject({ approvable: false, why_not: expect.stringMatching(/follow-up is closed/) });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'skipped', follow_up_skipped_reason: 'customer_recipient' });
+    await nightly(s.db, { now: new Date(LATER.getTime() + DAY) });
+    expect(followUpRow(s.db)).toBeUndefined(); // the instance ends: nothing stranded
+  });
+  test('P2 (Codex r16): a follow-up whose path was DELETED (path_id NULL) is retired at the lease, not filtered out forever', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY), follow_up_subject: null, follow_up_body: null, path_id: null });
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toEqual([]);
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', outreach_status: 'sent', follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/deleted/) });
+  });
+  test('P2 (Codex r16): the domain RE-RANKED while the drafter held the lease — the drafted report retires the follow-up instead of parking a frozen draft', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY), follow_up_subject: null, follow_up_body: null });
+    const [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
+    expect(l).toBeTruthy();
+    const other = outreachPath(s.d); s.db._tables.seo_link_acquisition_paths.push(other); s.db._tables.seo_link_domains[0].best_path_id = other.id;
+    expect(await worker.report({ prospect_id: s.row.id, outcome: 'drafted', lease_token: l.lease_token, outreach_subject: 'Re: A resource for your readers', outreach_body: FOLLOW_UP_BODY })).toMatchObject({ ok: false, code: 'follow_up_obsolete', error: expect.stringMatching(/re-ranked/) });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/re-ranked/), claimed_at: null });
+  });
+  test('P2 (Codex r16): the nightly slice spends follow-up work BEFORE cold unbridged domains — a drafted follow-up awaiting its instance outranks an older unbridged domain', async () => {
+    const s = await conversation({ decide: false }); // drafted follow-up, no communication/followup instance yet
+    const d2 = domainRow({ domain: 'older-unbridged.org', updated_at: new Date(EARLIER.getTime() - DAY) }); const p2 = outreachPath(d2); d2.best_path_id = p2.id;
+    s.db._tables.seo_link_domains.push(d2); s.db._tables.seo_link_acquisition_paths.push(p2);
+    const picked = await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) });
+    expect(picked.map((x) => [x.domain, x.why])).toEqual([['example.org', 'stale'], ['older-unbridged.org', 'unbridged']]);
+    expect(await selection.selectDomains(s.db, { domainIds: null, limit: 1, policyUpdatedAt: new Date(0) })).toEqual([{ id: s.d.id, domain: 'example.org', why: 'stale' }]);
+  });
   test('P2: the domain RE-RANKED to another standing path retires the follow-up — at the lease (due) and at the send (drafted): the pinned conversation is frozen off the best path', async () => {
     const s = await conversation({ decide: false });
     Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY), follow_up_subject: null, follow_up_body: null });

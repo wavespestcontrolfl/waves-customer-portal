@@ -131,7 +131,11 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   for (const w of waivers) waiverAt.set(`${w.domain_id}|${w.path_id}`, Math.max(waiverAt.get(`${w.domain_id}|${w.path_id}`) || 0, ts(w.approved_at)));
 
   const picked = [];
-  const rank = { forced: 0, unbridged: 1, stale: 2 };
+  // the nightly slice (limit) is spent in this order: forced → FOLLOW-UP work (a drafted / in-flight follow-up still
+  // without its communication/followup instance, or one the sender routed to the owner on a marker — dated §6.4 work
+  // the auto dispatcher and the owner queue cannot act on until the bridge decides it) → cold unbridged domains → the
+  // rest of the stale set. A sustained investigator backlog of unbridged domains must never starve the follow-ups.
+  const rank = { forced: 0, followup: 1, unbridged: 2, stale: 3 };
   for (const d of domains) {
     const best = pathById.get(d.best_path_id) || null;
     // a baseline placeholder (an imported existing backlink, never investigated) is not an executable path: nothing to bridge
@@ -204,9 +208,11 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !covered(l))) why = 'unbridged';
     else if (contradicted || offShapeOpen || groupMismatch(best, mine) || withRows.some((p) => p.path_id !== d.best_path_id || instanceSetMoved(p) || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
     else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !withRows.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
-    if (why) picked.push({ id: d.id, domain: d.domain, why, at: ts(d.updated_at) });
+    const followUpWork = why === 'stale' && mine.some((p) => (followUpPending(p, best) && !(rowsByProspect.get(p.id) || []).some((r) => r.dimension === 'communication' && r.instance_kind === 'followup'))
+      || (rowsByProspect.get(p.id) || []).some((r) => ownerByMarker(r, p)));
+    if (why) picked.push({ id: d.id, domain: d.domain, why, tier: followUpWork ? 'followup' : why, at: ts(d.updated_at) });
   }
-  picked.sort((a, b) => rank[a.why] - rank[b.why] || a.at - b.at);
+  picked.sort((a, b) => rank[a.tier] - rank[b.tier] || a.at - b.at);
   return picked.slice(0, limit).map(({ id, domain, why }) => ({ id, domain, why }));
 }
 

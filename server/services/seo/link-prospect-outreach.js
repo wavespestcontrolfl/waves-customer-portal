@@ -394,6 +394,16 @@ const deliver = ({ draft, claimed, thread }) => (thread
   ? gmailClient.sendMessage(draft.outreach_to_email, draft.outreach_subject, textToHtml(draft.outreach_body), claimed.outreach_thread_ref, thread.inReplyTo)
   : gmailClient.sendMessage(draft.outreach_to_email, draft.outreach_subject, textToHtml(draft.outreach_body)));
 
+// §13 on a follow-up whose thread recipient is an identified customer / lead contact: the recipient cannot change (the
+// pitch's counterpart is re-addressed on the board), so the follow-up ENDS — skipped, the conversation completes and the
+// closure sweep releases the inbox. The sender applies it on either mode; the owner queue applies it in place of a card
+// nothing could ever send. CAS on the drafted state.
+async function closeCustomerRecipientFollowUp(q, prospectId, now = new Date()) {
+  const n = await q('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'customer_recipient', updated_at: now });
+  if (n) logger.info(`[link-outreach] follow-up for ${prospectId} skipped: the thread's recipient is a customer contact`);
+  return n;
+}
+
 // The follow-up a confirmed PITCH schedules (§6.4: one, ten ET days out) — under the authority contract ONLY: with
 // GATE_LINK_AUTHORITY off no follow-up can ever send (sendAuthority refuses it, the bridge decides nothing), so a
 // scheduled one would sit none / due forever and the closure sweep (sent / skipped only) would never release the inbox
@@ -473,8 +483,7 @@ async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLo
     // (skipped, the conversation completes and the closure sweep releases the inbox) rather than staying a drafted row
     // the nightly retries and the card can never send
     if (followUp && reviewed.code === 'customer_recipient') {
-      await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'customer_recipient', updated_at: attemptAt });
-      logger.info(`[link-outreach] follow-up for ${prospectId} skipped: the thread's recipient is a customer contact`);
+      await closeCustomerRecipientFollowUp(trx, prospectId, attemptAt);
       return { ...reviewed, error: `${reviewed.error} — the follow-up is closed (the thread's recipient cannot change)` };
     }
     // …a shared business domain is a STABLE refusal of an AUTOMATIC attempt (only the owner's click acknowledges the
@@ -1077,6 +1086,7 @@ async function closeSilentConversations({ now = new Date(), limit = 50 } = {}) {
 module.exports = {
   saveDraft,
   sendOutreach,
+  closeCustomerRecipientFollowUp,
   closeSilentConversations,
   CONVERSATION_SILENT_ET_DAYS,
   sendAuthority,
