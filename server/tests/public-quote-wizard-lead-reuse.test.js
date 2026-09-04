@@ -43,12 +43,18 @@ describe('findPriorOpenWizardLeadId', () => {
     expect(calls.whereIn[0]).toEqual(['status', OPEN_LEAD_STATUSES]);
     // An original whose FK-linked estimate already closed is not a live
     // courtship — the rerun files as a fresh lead (codex r4 P1).
-    expect(calls.whereRaw[3][0]).toMatch(/estimate_id IS NULL OR EXISTS \(SELECT 1 FROM estimates e WHERE e\.id = leads\.estimate_id AND e\.archived_at IS NULL AND e\.status IN \(\?, \?, \?, \?\)\)/);
-    expect(calls.whereRaw[3][1]).toEqual(OPEN_ESTIMATE_STATUSES);
+    expect(calls.whereRaw[4][0]).toMatch(/estimate_id IS NULL OR EXISTS \(SELECT 1 FROM estimates e WHERE e\.id = leads\.estimate_id AND e\.archived_at IS NULL AND e\.status IN \(\?, \?, \?, \?\)\)/);
+    expect(calls.whereRaw[4][1]).toEqual(OPEN_ESTIMATE_STATUSES);
     const [col, op, cutoff] = calls.where[1];
     expect([col, op]).toEqual(['created_at', '>']);
     expect(cutoff.getTime()).toBe(now - _internals.WIZARD_LEAD_REUSE_DAYS * 86400000);
     expect(calls.orderBy[0]).toEqual(['created_at', 'desc']);
+  });
+
+  test('a prior run that added properties is a wider inquiry — never a duplicate target (codex r20 P1)', async () => {
+    const { dbh, calls } = chainMock(null);
+    await _internals.findPriorOpenWizardLeadId(dbh, SAME);
+    expect(calls.whereRaw.some((c) => c[0] === "COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = 0")).toBe(true);
   });
 
   test('the token path excludes its OWN row from the candidates (a row is never its own prior)', async () => {
@@ -159,6 +165,11 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // never erased by this one's failed validation (codex r14 P1).
     expect(src).toMatch(/const reopened = await db\('leads'\)\n\s+\.where\(\{ id: lead\.id, status: 'duplicate' \}\)\n\s+\.whereRaw\("extracted_data->>'duplicate_of_lead_id' = \?", \[duplicateOfLeadId\]\)\n\s+\.modify\(scopedToTypedIdentity\)\n\s+\.update\(\{ status: 'new'/);
     expect(src).toMatch(/if \(reopened\) duplicateOfLeadId = null;/);
+    // ...but a target that closed only because its OWN relabel landed in
+    // flight (B → A → O) still reaches an open root through the recorded
+    // chain: this row keeps its marker, no second 'new' lead (codex r20 P1).
+    expect(src).toMatch(/const root = target && target\.status === 'duplicate' && !target\.deleted_at \? await followDuplicateLink\(db, target\) : null;\n\s+if \(root && root\.id !== target\.id && root\.id !== lead\.id\) \{\n\s+ancestryOpen = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: root\.id \}\);/);
+    expect(src).toMatch(/if \(!targetOpen && !ancestryOpen\) \{/);
     expect(src).toMatch(/if \(!lead && !additionalProperties\.length\) \{\n\s+duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
     // The replace path carries the marker forward...
     expect(src).toMatch(/'duplicate_of_lead_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'duplicate_of_lead_id'/);

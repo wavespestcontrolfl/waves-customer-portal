@@ -51,6 +51,13 @@ async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKe
     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
     .whereRaw("LOWER(regexp_replace(COALESCE(address, ''), '\\s+', ' ', 'g')) = ?", [addressLc])
     .whereIn('status', OPEN_LEAD_STATUSES)
+    // A prior run that added properties is a WIDER inquiry the pipeline keeps
+    // open for its manual follow-ups (r10 P1) — never a duplicate target for
+    // a single-property rerun, whose accepted draft would otherwise close
+    // that wider work as won (codex #3834 r20 P1). The caller only looks up
+    // when THIS run has none, so the identity is "no extra properties" on
+    // both sides.
+    .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = 0")
     // A lead whose FK-linked estimate already closed (expired / declined /
     // archived) is not a live courtship (codex #3834 r4 P1): a draft stamped
     // at it would be skipped at send behind the stale FK and mis-stamped at
@@ -2018,7 +2025,22 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // a staff transition on this row in the meantime still wins.
     if (duplicateOfLeadId) {
       const targetOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: duplicateOfLeadId });
+      // A target that is no longer open because ITS OWN relabel landed in
+      // flight (B picked A while A was filing as a repeat of O — the r10
+      // chain) still reaches an open root: the recorded ancestry is valid
+      // as a chain and every reader resolves it, so this row keeps its
+      // marker instead of reopening as a second 'new' lead (codex #3834 r20
+      // P1). Only a target whose ancestry reaches no live open root by the
+      // same predicate is a closed one.
+      let ancestryOpen = null;
       if (!targetOpen) {
+        const target = await db('leads').where({ id: duplicateOfLeadId }).first();
+        const root = target && target.status === 'duplicate' && !target.deleted_at ? await followDuplicateLink(db, target) : null;
+        if (root && root.id !== target.id && root.id !== lead.id) {
+          ancestryOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: root.id });
+        }
+      }
+      if (!targetOpen && !ancestryOpen) {
         // 0 rows ⇒ a staff transition on this row won; its marker stands and
         // the request keeps following the database (no second funnel row).
         // ...and to the identity this request typed plus the marker it just

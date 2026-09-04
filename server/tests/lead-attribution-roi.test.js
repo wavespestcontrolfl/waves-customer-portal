@@ -123,6 +123,11 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(aliased[1][1]).toMatch(/^\(l\.status IS DISTINCT FROM 'won' OR NOT EXISTS/);
     expect(aliased[1][1]).not.toMatch(/\bleads\.(status|extracted_data|customer_id|estimate_id|phone|email)\b/);
     expect(aliased[1][1]).toMatch(/FROM chain JOIN leads p ON/); // the inner walk still names the table
+    // The cross-source winner map (calculateAllSourceROI) is built over the
+    // same population, so a second win never claims a customer its own
+    // source cannot credit (codex r20 P2).
+    const attributionSrc = require('fs').readFileSync(require('path').join(__dirname, '../services/lead-attribution.js'), 'utf8');
+    expect(attributionSrc).toMatch(/\.whereNotNull\('customer_id'\)\n\s+\.modify\(\(qb\) => applyNameExclusion\(qb, excludeCustomerNames\)\)\n(\s+\/\/.*\n)*\s+\.modify\(scopeToProspects\)\n\s+\.orderByRaw\('COALESCE\(converted_at, \?\) ASC', \[start\]\)/);
     const dashboardSrc = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dashboard.js'), 'utf8');
     expect(dashboardSrc).toMatch(/\.whereNull\('l\.deleted_at'\)\n\s+\.modify\(\(qb\) => scopeToProspects\(qb, 'l'\)\),/);
     expect(dashboardSrc).toMatch(/applyETTimestampWindow\(db\('leads'\)\.whereNull\('deleted_at'\)\.modify\(scopeToProspects\), 'first_contact_at', win\.from, win\.to\)/);

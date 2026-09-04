@@ -585,6 +585,12 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
       .where('first_contact_at', '<=', end)
       .whereNotNull('customer_id')
       .modify((qb) => applyNameExclusion(qb, excludeCustomerNames))
+      // The same population each source's wonLeads counts (scopeToProspects):
+      // a second win beside its won original must not claim the customer in
+      // this map while its own source has no scoped conversion to credit —
+      // the original's source would then skip the customer too, and the
+      // revenue would vanish from every source (codex #3834 r20 P2).
+      .modify(scopeToProspects)
       .orderByRaw('COALESCE(converted_at, ?) ASC', [start])
       // Stable tiebreakers so ties on converted_at (esp. legacy NULLs that all
       // coalesce to `start`) attribute deterministically across runs/plans.
