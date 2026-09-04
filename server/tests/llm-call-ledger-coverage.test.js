@@ -33,23 +33,20 @@ const SESSION_RUNNERS = {
   agent_assistant: 'ai-assistant/managed-assistant.js',
 };
 
-// Call-ledger lanes with NO lane label at their call site after S2a — every
-// `ledger: 'call'` lane on main at the time (66). S2a ships only the plumbing
-// (payload.laneId on dispatchWithFallback, ledgerCall, the six session lanes);
-// S2b / S2c label the call sites by product area. Their calls ARE recorded —
-// labelled by provider/model or policy name — but carry lane_id NULL until then.
+// Call-ledger lanes with NO lane label at their call site — 66 after S2a
+// (the plumbing: payload.laneId on dispatchWithFallback / createDeepMessage,
+// ledgerCall, the six session lanes), 37 after S2b (SMS, calls, voice,
+// photos, estimates); S2c labels the rest by product area. Their calls ARE
+// recorded — labelled by provider/model or policy name — but carry lane_id
+// NULL until then.
 const UNLABELLED_LANES = new Set([
-  'churn_classify', 'email_classify', 'sms_intent', 'call_sentiment', 'parse_when', 'social_judge', 'job_screen',
-  'footprint_claim', 'estimator_sms_signal', 'sms_pathology', 'contact_correction', 'bounce_rescue', 'events_editorial',
-  'expense_categorize', 'tech_caption_vision', 'photo_scoring', 'vision_delta', 'sms_draft', 'sms_save_sale',
-  'sms_tone', 'sms_suggest', 'response_drafter', 'response_drafter_high_stakes', 'estimate_followup', 'sms_canary_default',
-  'sms_canary_save_sale', 'completion_recap', 'lawn_visit_narratives', 'social_copy', 'tech_caption_copy',
-  'review_ask', 'review_reply', 'review_gate_text', 'email_reply', 'invoice_summary', 'blog_draft', 'newsletter',
+  'churn_classify', 'email_classify', 'social_judge', 'job_screen',
+  'contact_correction', 'bounce_rescue', 'events_editorial',
+  'expense_categorize', 'completion_recap', 'lawn_visit_narratives', 'social_copy', 'review_ask', 'review_reply', 'review_gate_text', 'email_reply', 'invoice_summary', 'blog_draft', 'newsletter',
   'content_misc', 'previsit_brief', 'report_copy', 'treatment_narrative', 'rodent_narrative', 'project_report',
-  'ask_waves', 'link_investigator', 'chart_builder_image', 'chart_builder_sql', 'commercial_proposal', 'codex_remediation',
-  'signup_worker', 'sms_verifier', 'shadow_judge', 'intent_composer', 'fact_check_gate', 'compliance_gate',
-  'blog_optimize', 'kb_audit', 'wiki_compiler', 'quarantine_arbiter', 'call_self_audit', 'wdo_appt_brief',
-  'voice_profile', 'extreme_tier', 'call_extraction', 'call_research', 'sealed_eval',
+  'ask_waves', 'link_investigator', 'chart_builder_image', 'chart_builder_sql', 'codex_remediation',
+  'signup_worker', 'fact_check_gate', 'compliance_gate',
+  'blog_optimize', 'kb_audit', 'wiki_compiler', 'quarantine_arbiter', 'extreme_tier',
 ]);
 
 function resolveLaneFile(file) {
@@ -66,9 +63,12 @@ function read(file) {
 }
 
 // '<id>' as the argument of runInLane( or the value of laneId:
+// The lane literal may sit inside the expression a site labels with (a
+// route- or flag-chosen ternary — response-drafter, the shadow drafter) as
+// long as it is the runInLane argument or the laneId value on that line.
 function labelPattern(id) {
   const q = `['"\`]${id}['"\`]`;
-  return new RegExp(`(?:runInLane\\(\\s*|laneId:\\s*)${q}`);
+  return new RegExp(`(?:runInLane\\(|laneId\\s*[:=])[^\\n;]*?${q}`);
 }
 
 function isLabelled(lane) {
