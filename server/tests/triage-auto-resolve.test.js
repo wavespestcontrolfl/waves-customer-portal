@@ -562,14 +562,16 @@ describe('evidence helpers', () => {
     expect(serviceTypeMatches('Quarterly Pest Control', bundled)).toBe(true);
     expect(serviceTypeMatches('Lawn Care', bundled)).toBe(false);
     expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_general'] } } }))).toEqual([[['pest']]]);
-    // The specific service the caller named narrows the PRIMARY category
-    // into one requirement: a flea treatment filed under pest_general is
-    // not a generic pest booking, and it is one ask, not two.
+    // The specific service the caller named REPLACES the PRIMARY category
+    // as one requirement: a flea treatment filed under pest_general is not
+    // a generic pest booking, it is one ask, not two, and the exact
+    // call-created booking ("Flea Treatment", specialty, no category
+    // snapshot) answers it (codex r31 P2).
     const flea = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_general'], requested_specific_service: 'Flea Treatment' } } }));
-    expect(flea).toEqual([[['pest', 'flea']]]);
+    expect(flea).toEqual([[['flea']]]);
+    expect(serviceTypeMatches('Flea Treatment', flea[0])).toBe(true);
     expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: [], requested_specific_service: 'Flea Treatment' } } }))).toEqual([[['flea']]]);
-    // ...and it narrows every answer of the primary alike.
-    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['stinging_insect'], requested_specific_service: 'Yellow Jacket' } } }))).toEqual([[['stinging', 'insect', 'yellow', 'jacket'], ['wasp', 'nest', 'yellow', 'jacket'], ['bee', 'wasp', 'nest', 'removal', 'yellow', 'jacket']]]);
+    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['stinging_insect'], requested_specific_service: 'Yellow Jacket' } } }))).toEqual([[['yellow', 'jacket']]]);
     // quote_promised cards carry the same ask under quote_scope.
     expect(requestedServiceTokens(item({ payload: { quote_scope: { requested_service_categories: ['lawn_care'] } } }))).toEqual([[['lawn']]]);
     expect(flea.every((tokens) => serviceTypeMatches('Quarterly Pest Control pest_control', tokens))).toBe(false);
@@ -692,6 +694,14 @@ describe('evidence helpers', () => {
     // priced row a one-time job — a mixed quote keeps its one-time services
     // (codex r23 P2).
     const raw = est({ estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', name: 'Quarterly Pest Control', annual: 480, monthly: 40 }, { service: 'flea', name: 'Flea Treatment', price: 150 }, { service: 'rodent_exclusion', name: 'Rodent Exclusion', total: 900 }] } } });
+    // Components of ONE project share its service key and its words; they
+    // are one line, not several — an exclusion quote's wire mesh + minimum
+    // cannot answer "rodent exclusion" AND "rodent control" (codex r31 P1).
+    const rodentAsk = card({ requested_service_categories: ['rodent_exclusion', 'rodent'], requested_specific_service: null, requested_service_intent: 'preventative_one_time' });
+    const components = (extra) => est({ estimate_data: { engineResult: { lineItems: [{ service: 'rodent_exclusion', name: 'Rodent exclusion — wire mesh', price: 400 }, { service: 'rodent_exclusion', name: 'Rodent exclusion — minimum', price: 150 }, ...extra] } } });
+    expect(estimateCoversAsk(rodentAsk, components([]))).toBe(false);
+    expect(estimateCoversAsk(rodentAsk, components([{ service: 'rodent_control', name: 'Rodent Control', price: 200 }]))).toBe(true);
+    expect(deliveredEstimateScope(components([])).lines).toEqual([{ names: ['rodent_exclusion', 'Rodent exclusion — wire mesh', 'Rodent exclusion — minimum'], recurring: false, oneTime: true }]);
     expect(estimateCoversAsk(card({ requested_service_categories: ['pest_general'] }), raw)).toBe(true);
     expect(estimateCoversAsk(card(plan), raw)).toBe(true);
     expect(estimateCoversAsk(card({ ...plan, requested_specific_service: 'Flea Treatment' }), raw)).toBe(false);
@@ -823,6 +833,10 @@ describe('evidence helpers', () => {
     // Through the booking arm: this call's own booking at the wrong address
     // (a reprocess that moved the property) does not close the original ask.
     expect(bookingCoversRequest(card(none), [atOther], { singleProperty: true, places })).toBe(false);
+    // A recurring series occurrence generated after the card (an existing
+    // plan's next visit) is not a booking the call created (codex r31 P1).
+    expect(bookingCoversRequest(card(none), [atOnFile], { singleProperty: true, places })).toBe(true);
+    expect(bookingCoversRequest(card(none), [{ ...atOnFile, recurring_parent_id: 'series-1' }], { singleProperty: true, places })).toBe(false);
     expect(bookingCoversRequest(card(none), [atOnFile], { singleProperty: true, places })).toBe(true);
     // …and this call's own booking outside the requested days (a reprocess
     // that moved only the date) does not either.

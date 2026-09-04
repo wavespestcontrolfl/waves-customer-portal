@@ -1872,13 +1872,17 @@ async function clearLeadServiceRevertPending(estimateId) {
 
 
 // A sibling that left 'sending' before publication (the public flow
-// deliberately exposes and accepts siblings mid-'sending'; acceptance sets
-// price_locked_at, which zero-rows the guarded finalization update). The
-// customer SAW and accepted THIS delivery's scope, so: (1) merge the scope
-// stamp UNDER the terminal row's sendSnapshot (its bundle is kept, never
-// status / price lock), exactly as the superseded anchor path does — the
-// accept witness alone cannot close a quote_promised card without it
-// (codex r26 P1); real deliveries only. (2) Snapshot the terminal row for
+// deliberately exposes siblings mid-'sending', and both accept and decline
+// move the row off it; acceptance also sets price_locked_at — either way
+// the guarded finalization update zero-rows). The customer SAW THIS
+// delivery's scope, so: (1) merge the scope stamp UNDER the terminal row's
+// sendSnapshot (its bundle is kept, never status / price lock) AND the
+// anchor's deliveryState beside it — exactly as the superseded anchor path
+// does. The accept witness alone cannot close a quote_promised card
+// without the scope (codex r26 P1), and a DECLINED sibling has no accept
+// witness and no anchor inheritance (its status disqualifies it), so its
+// own deliveryState is the only proof the quote went out (codex r31 P1);
+// real deliveries only. (2) Snapshot the terminal row for
 // the pricing audit (GH codex P2), built from the PRE-ACCEPT sibling row +
 // THIS delivery's freshly built bundle — an accept rewrites result/totals,
 // and a stale prior sendSnapshot must not outrank the bundle just handed
@@ -1911,14 +1915,14 @@ async function snapshotPublishedSibling(sibling, siblingSnapshotPatch, { now, ne
   }
 }
 
-async function recordAcceptedSiblingDelivery(sibling, snapshot, { delivered, sendMethod }) {
-  logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
+async function recordTerminalSiblingDelivery(sibling, snapshot, { delivered, sendMethod, deliveryStatePatch }) {
+  logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (accepted or declined) — state preserved.`);
   if (delivered && snapshot.sendSnapshot.scope) {
     try {
       await db('estimates').where({ id: sibling.id }).update({
         estimate_data: db.raw(
-          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{sendSnapshot}', COALESCE(estimate_data -> 'sendSnapshot', '{}'::jsonb) || ?::jsonb, true)",
-          [JSON.stringify({ scope: snapshot.sendSnapshot.scope })],
+          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{sendSnapshot}', COALESCE(estimate_data -> 'sendSnapshot', '{}'::jsonb) || ?::jsonb, true) || ?::jsonb",
+          [JSON.stringify({ scope: snapshot.sendSnapshot.scope }), JSON.stringify(deliveryStatePatch)],
         ),
         updated_at: db.fn.now(),
       });
@@ -2658,7 +2662,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // the same (GH codex P2 r3).
           shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
           if (!updated) {
-            await recordAcceptedSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod });
+            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch });
           } else {
             await snapshotPublishedSibling(sibling, siblingSnapshotPatch, { now, nextExpiresAt, sendMethod });
           }

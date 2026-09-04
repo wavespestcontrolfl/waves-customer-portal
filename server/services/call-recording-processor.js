@@ -7101,6 +7101,13 @@ const CallRecordingProcessor = {
     } catch (e) {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
     }
+    // The linked customer's address AT FILING, snapshotted on every review
+    // card this pass files (buildTriageItem.onFileAddress) — enforce AND
+    // shadow lanes alike (codex r31 P2): the evidence sweep reads it
+    // instead of the customer's current columns.
+    const onFileAddress = knownCaller
+      ? { address_line1: knownCaller.addressLine1, address_line2: knownCaller.addressLine2, city: knownCaller.addressCity, zip: knownCaller.addressZip }
+      : null;
     // Cross-call threading context: the latest other call from this number in
     // the last week, so a continuation call completes the earlier record
     // instead of restarting from nothing. Fail-open — extraction proceeds
@@ -7835,12 +7842,6 @@ const CallRecordingProcessor = {
       try {
         const v2Extraction = v2Result?.extraction || null;
         const v2Valid = v2Result?.status === 'valid' && v2Extraction && isV2Extraction(v2Extraction);
-        // The linked customer's address AT FILING, snapshotted on every
-        // routing card (buildTriageItem.onFileAddress) — the evidence sweep
-        // reads it instead of the customer's current columns.
-        const onFileAddress = knownCaller
-          ? { address_line1: knownCaller.addressLine1, address_line2: knownCaller.addressLine2, city: knownCaller.addressCity, zip: knownCaller.addressZip }
-          : null;
 
         if (!v2Valid) {
           // Fail closed: block appointment + triage, but keep customer/lead
@@ -8280,6 +8281,7 @@ const CallRecordingProcessor = {
                   .insert(buildTriageItem({
                     callLogId: call.id,
                     flag,
+                    onFileAddress,
                     extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                     severity: 'advisory',
                     // Google's resolved building when it has one (a corrected
@@ -8308,6 +8310,7 @@ const CallRecordingProcessor = {
                 .insert(buildTriageItem({
                   callLogId: call.id,
                   flag,
+                  onFileAddress,
                   extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                   severity: 'advisory',
                   // The surname card's filing-time names include the merged
@@ -8349,6 +8352,7 @@ const CallRecordingProcessor = {
               .map((flag) => buildTriageItem({
                 callLogId: call.id,
                 flag,
+                onFileAddress,
                 extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                 severity: 'advisory',
                 // + the address the run adopted at filing time (the release
@@ -8430,6 +8434,7 @@ const CallRecordingProcessor = {
             cards: emailReasons.slice(0, 10).map((flag) => buildTriageItem({
               callLogId: call.id,
               flag,
+              onFileAddress,
               extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
               severity: 'advisory',
               // Same filing-time release-target snapshot as the shadow branch.
@@ -8690,6 +8695,7 @@ const CallRecordingProcessor = {
           .insert(buildTriageItem({
             callLogId: call.id,
             flag: 'shared_phone_ambiguous',
+            onFileAddress,
             extraction: v2CanonicalExtraction || undefined,
             extraPayload: {
               share_count: sharedPhoneAmbiguity.shareCount,
@@ -8884,6 +8890,7 @@ const CallRecordingProcessor = {
           .insert(buildTriageItem({
             callLogId: call.id,
             flag: 'second_service_address',
+            onFileAddress,
             extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
             severity: 'advisory',
           }))
@@ -8958,6 +8965,7 @@ const CallRecordingProcessor = {
             .insert(buildTriageItem({
               callLogId: call.id,
               flag: 'caller_phone_not_on_file',
+              onFileAddress,
               extraction: v2CanonicalExtraction,
               severity: 'advisory',
               extraPayload: {
@@ -9059,6 +9067,7 @@ const CallRecordingProcessor = {
               .insert(buildTriageItem({
                 callLogId: call.id,
                 flag: 'second_service_address',
+                onFileAddress,
                 extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                 severity: 'advisory',
               }))

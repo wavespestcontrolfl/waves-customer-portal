@@ -415,15 +415,19 @@ function requestedServiceTokens(item) {
     const answers = [...new Map([c, composeWordsForV2Category(c), v2PrimaryLabelForCategory(c)].map(serviceTokens).filter((tokens) => tokens.length).map((tokens) => [tokens.join(' '), tokens])).values()];
     if (answers.length) out.push(answers);
   }
-  // The specific service the caller named narrows the PRIMARY category —
+  // The specific service the caller named REPLACES the PRIMARY category —
   // one requirement, not two: a flea treatment filed under pest_general is
-  // not answered by a generic quarterly pest booking, and a second
-  // pest_general the model listed as a separate request stays its own
-  // requirement needing its own booking (codex r17 P1). It narrows every
-  // answer alike.
+  // not answered by a generic quarterly pest booking (its words carry no
+  // "flea"), and a second pest_general the model listed as a separate
+  // request stays its own requirement needing its own booking (codex r17
+  // P1). Replacing, not narrowing: a call-created booking stores the
+  // catalog name alone ("Flea Treatment", specialty category, no
+  // service_category_snapshot), so a requirement that also demanded the
+  // coarse category's words could never be answered by the exact booking
+  // (codex r31 P2).
   const specific = serviceTokens(ask?.requested_specific_service);
   if (specific.length) {
-    if (out.length) out[0] = out[0].map((tokens) => [...new Set([...tokens, ...specific])]);
+    if (out.length) out[0] = [specific];
     else out.push([specific]);
   }
   return out;
@@ -1095,7 +1099,12 @@ function visitAtOnFileAddress(item, visit, places) {
 function bookingCoversRequest(item, mine, { singleProperty, places }) {
   const categories = requestedServiceTokens(item);
   if (!categories.length) return false;
-  const parents = mine.filter((v) => !v.parent_service_id && strictlyAfter(v.created_at, item.created_at));
+  // Parent rows only: neither a follow-up child (parent_service_id) nor a
+  // recurring series occurrence (recurring_parent_id) is a booking the
+  // call created — an existing plan generating its next visit inside the
+  // requested window would otherwise answer a new-membership ask (codex
+  // r31 P1). The completed-visit address arm keeps both.
+  const parents = mine.filter((v) => !v.parent_service_id && !v.recurring_parent_id && strictlyAfter(v.created_at, item.created_at));
   // The requested days bind every booking, this call's own included — a
   // reprocess that moved only the date and minted a new booking must not
   // close the original ask. A card that asked for no date binds none. A
@@ -1252,9 +1261,29 @@ function proposalLines(row, add) {
   for (const work of proposal.correctiveWork || []) add([work.label, ...family(work.service)], ONE_TIME, work.amount > 0, AUTHORED);
 }
 
-// The engine result's typed lines, from both persisted roots.
+// The engine result's typed lines, from both persisted roots. Priced
+// entries sharing a service identity (`service` / `serviceKey`) at one
+// cadence are ONE line with their names pooled: the engine flattens a
+// project's components — wire mesh, bird boxes, minimum, urgency,
+// inspection fee — into lineItems, each carrying the parent's service key
+// and its words, and as separate records they would let one requirement
+// be "answered" by a component of another (a rodent-exclusion quote
+// closing a rodent-control ask, codex r31 P1). Entries with no identity
+// stay their own lines.
 function engineLines(data, add) {
   const { SERVICE_LINE_LABELS } = require('./estimate-service-lines');
+  const identityOf = (entry) => [entry.service, entry.serviceKey, entry.service_key].find((v) => typeof v === 'string' && v.trim()) || null;
+  const pooled = new Map();
+  const collect = (entry, cadence, priced) => {
+    const identity = identityOf(entry);
+    if (!identity) return add(entryNames(entry), cadence, priced);
+    const key = `${identity.trim().toLowerCase()}|${cadence.recurring}`;
+    const line = pooled.get(key) || { names: [], cadence, priced: false };
+    line.names.push(...entryNames(entry));
+    line.priced = line.priced || priced;
+    pooled.set(key, line);
+    return undefined;
+  };
   for (const root of [data.result, data.engineResult].filter((r) => r && typeof r === 'object')) {
     for (const source of ENGINE_LINE_SOURCES) {
       const entries = source.list(root);
@@ -1263,13 +1292,14 @@ function engineLines(data, add) {
         if (!entry || typeof entry !== 'object' || isPlaceholder(entry)) continue;
         const onProgram = entry.onProg === true || entry.includedOnProgram === true;
         const { cadence, amountKeys } = source.line(entry);
-        add(entryNames(entry), onProgram ? RECURRING : cadence, onProgram || amountOf(entry, amountKeys) > 0);
+        collect(entry, onProgram ? RECURRING : cadence, onProgram || amountOf(entry, amountKeys) > 0);
       }
     }
     const injection = root.results?.injection || root.injection || {};
     add(['palm_injection', SERVICE_LINE_LABELS.palm_injection], RECURRING,
       amountOf(injection, ['mo', 'monthly']) > 0 || amountOf(root.recurring || {}, ['palmInjectionMo', 'palm_injection_mo']) > 0);
   }
+  for (const line of pooled.values()) add([...new Set(line.names)], line.cadence, line.priced);
 }
 
 // A legacy or manual row with no typed lines: service_interest, the
@@ -1428,7 +1458,7 @@ async function loadVisitEvidence(conn, items, flag) {
     .whereIn('customer_id', customerIds)
     .whereIn('status', [...LIVE_BOOKING_STATUSES])
     .orderBy('id', 'asc')
-    .select('id', 'customer_id', 'source_call_log_id', 'parent_service_id', 'status', 'service_type', 'service_category_snapshot', 'scheduled_date',
+    .select('id', 'customer_id', 'source_call_log_id', 'parent_service_id', 'recurring_parent_id', 'status', 'service_type', 'service_category_snapshot', 'scheduled_date',
       'window_start', 'time_window', 'is_recurring', 'created_at', 'completed_at', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip', 'property_id');
   // Indexed once — the backlog is cards × a customer's own visits, not
   // cards × every fetched visit.
