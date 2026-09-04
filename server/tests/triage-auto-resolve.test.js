@@ -686,6 +686,11 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'commercial_pest', quoteRequired: true, price: null }))).toBe(false);
     expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'commercial_pest', quoteRequired: false, requiresManualReview: true, price: null }))).toBe(false);
     expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'commercial_pest', quoteRequired: false, price: null }))).toBe(false);
+    expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'One-Time Pest Treatment', requiresCustomQuote: true, price: 120 }))).toBe(false);
+    // A PRICED line that only asked for review was acknowledged and sent —
+    // the send gate refuses quoteRequired / requiresCustomQuote, not
+    // requiresManualReview — so it stays in the delivered scope (codex r39 P2).
+    expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'One-Time Pest Treatment', requiresManualReview: true, price: 120 }))).toBe(true);
     expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'One-Time Pest Treatment' }))).toBe(false);
     expect(estimateCoversAsk(oneTimePestAsk, withPlaceholder({ service: 'One-Time Pest Treatment', price: 120 }))).toBe(true);
     // An AUTHORED proposal is the quote: its programs / corrective work
@@ -799,6 +804,13 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(termiteQuote('inspection_only'), inspectionLine)).toBe(true);
     expect(estimateCoversAsk(termiteQuote('inspection_only'), treatmentLine)).toBe(false);
     expect(estimateCoversAsk(termiteQuote('preventative_one_time'), inspectionLine)).toBe(false);
+    // The inspection_only CATEGORY (no specific service) asks with the
+    // inspection vocabulary, not its enum spelling — "WDO Inspection" and
+    // "Waves Assessment" carry no "only" (codex r39 P2).
+    const inspectionCategory = (intent) => card({ requested_service_categories: ['inspection_only'], requested_specific_service: null, requested_service_intent: intent });
+    expect(estimateCoversAsk(inspectionCategory('inspection_only'), inspectionLine)).toBe(true);
+    expect(estimateCoversAsk(inspectionCategory('quote_only'), est({ estimate_data: { result: { oneTime: { items: [{ service: 'Waves Assessment', price: 75 }] } } } }))).toBe(true);
+    expect(estimateCoversAsk(inspectionCategory('inspection_only'), treatmentLine)).toBe(false);
     // A recurring engine row carries its cadence as a number, never a
     // word; the frozen line spells it as the catalog does, so the catalog
     // name a card cites is answered at its cadence and no other (codex
@@ -851,13 +863,24 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(bondAsk('Termite Bond Service (5-Year Term)'), bondLine('Termite Bond (5-Year Term)'))).toBe(true);
     expect(estimateCoversAsk(bondAsk('Termite Bond Service (5-Year Term)'), bondLine('Termite Bond (10-Year Term)'))).toBe(false);
     // The catalog stamp: exact name or its rename counterpart → service_key.
-    const catalog = [{ service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control Service' }, { service_key: 'lawn_care_recurring', name: 'Bi-Monthly Lawn Care Service' }];
-    const stamped = [cadenceAsk('quarterly pest control service'), cadenceAsk('Lawn Care Program Service'), cadenceAsk('Nothing Like It'), card({ requested_specific_service: null })];
+    const catalog = [{ service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control Service' }, { service_key: 'lawn_care_recurring', name: 'Bi-Monthly Lawn Care Service', engine_keys: '["lawn_care_x"]' }, { service_key: 'termite_slab_pretreat', name: 'Slab Pre-Treat Termite Service', engine_keys: ['pre_slab_termiticide', 'pre_slab_termidor'] }];
+    const stamped = [cadenceAsk('quarterly pest control service'), cadenceAsk('Lawn Care Program Service'), cadenceAsk('Nothing Like It'), card({ requested_specific_service: null }), bondAsk('Slab Pre-Treat Termite Service')];
     stampSpecificServiceKeys(stamped, catalog);
-    expect(stamped.map((i) => i.requested_specific_service_key)).toEqual(['pest_general_quarterly', 'lawn_care_recurring', null, undefined]);
-    expect(engineIdentityForCatalogKey('mosquito_seasonal')).toEqual({ service: 'mosquito', program: 'seasonal9', visits: 9 });
+    expect(stamped.map((i) => i.requested_specific_service_key)).toEqual(['pest_general_quarterly', 'lawn_care_recurring', null, undefined, 'termite_slab_pretreat']);
+    expect(stamped.map((i) => i.requested_specific_service_engine_keys)).toEqual([[], ['lawn_care_x'], [], undefined, ['pre_slab_termiticide', 'pre_slab_termidor']]);
+    expect(engineIdentityForCatalogKey('mosquito_seasonal')).toEqual({ services: ['mosquito'], program: 'seasonal9', visits: 9 });
     expect(engineIdentityForCatalogKey('rodent_trapping')).toBeNull();
     expect(engineIdentityForCatalogKey(null)).toBeNull();
+    // A quote-on-request product has no public request; its catalog row's
+    // registered engine keys are its identity, with no cadence of their own
+    // (codex r39 P2): the engine's "Pre-Slab Termiticide Treatment" line
+    // answers "Slab Pre-Treat Termite Service" by key, never by spelling.
+    expect(engineIdentityForCatalogKey('termite_slab_pretreat', ['pre_slab_termiticide', 'pre_slab_termidor'])).toEqual({ services: ['pre_slab_termiticide', 'pre_slab_termidor'], program: null, visits: null });
+    expect(engineIdentityForCatalogKey('termite_slab_pretreat', [])).toBeNull();
+    const preSlabLine = est({ estimate_data: { engineResult: { lineItems: [{ service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment', price: 950 }] } } });
+    expect(estimateCoversAsk(stamped[4], preSlabLine)).toBe(true);
+    expect(estimateCoversAsk(bondAsk('Slab Pre-Treat Termite Service'), preSlabLine)).toBe(false);
+    expect(estimateCoversAsk(stamped[4], bondLine('Termite Bond (5-Year Term)'))).toBe(false);
     expect(estimateCoversAsk(termiteQuote('quote_only'), treatmentLine)).toBe(true);
     // A quote-only ask takes either subtype — the category / specific
     // service says what was quoted, so a delivered inspection quote closes
@@ -1029,6 +1052,12 @@ describe('evidence helpers', () => {
     const assessment = booking({ service_type: 'Waves Assessment', service_category_snapshot: 'lawn_inspection' });
     expect(bookingCoversRequest(assessmentAsk('inspection_only'), [assessment], ctx)).toBe(true);
     expect(bookingCoversRequest(assessmentAsk('preventative_one_time'), [assessment], ctx)).toBe(false);
+    // The inspection_only category with no specific service is answered by
+    // any inspection booking, never by a treatment (codex r39 P2).
+    const inspectionOnly = card({ requested_date_range_start: '2026-07-30', requested_service_categories: ['inspection_only'], requested_service_intent: 'inspection_only' });
+    expect(bookingCoversRequest(inspectionOnly, [inspection], ctx)).toBe(true);
+    expect(bookingCoversRequest(inspectionOnly, [assessment], ctx)).toBe(true);
+    expect(bookingCoversRequest(inspectionOnly, [treatment], ctx)).toBe(false);
     expect(bookingCoversRequest(termite('active_infestation_treatment'), [inspection], ctx)).toBe(false);
     expect(bookingCoversRequest(termite('follow_up_existing_service'), [treatment], ctx)).toBe(true);
     expect(bookingCoversRequest(termite('follow_up_existing_service'), [booking({ service_type: 'Termite Treatment', service_category_snapshot: 'termite', is_recurring: true })], ctx)).toBe(false);

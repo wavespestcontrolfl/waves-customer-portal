@@ -170,6 +170,12 @@ const SPECIFIC_STOPWORDS = new Set(['service', 'services', 'and', 'the', 'of']);
 const tokensOf = (text, stopwords) => [...new Set(String(text || '').toLowerCase().split(/[^a-z0-9]+/).filter((t) => t && !stopwords.has(t)))];
 const serviceTokens = (text) => tokensOf(text, SERVICE_STOPWORDS);
 const specificServiceTokens = (text) => tokensOf(text, SPECIFIC_STOPWORDS);
+// The words that make a record an inspection — the ONE vocabulary the
+// intent rule reads (isInspection) and the inspection_only CATEGORY asks
+// with: the enum's own spelling would demand the word "only", which no
+// inspection booking or line ("WDO Inspection", "Waves Assessment")
+// carries, so the card could never close (codex r39 P2).
+const INSPECTION_WORDS = ['inspection', 'inspections', 'assessment', 'assessments'];
 
 function parseMaybeJson(raw) {
   if (raw == null) return null;
@@ -414,14 +420,17 @@ function bookingAtRequestedAddress(item, visit, places) {
 // P2). Never the call's ai_extraction_enriched: that
 // column is a rolling snapshot a force-reprocess overwrites while the open
 // card keeps its original ask. A card filed before the snapshot existed
-// yields no categories, so its association arm stays closed.
+// yields no categories, so its association arm stays closed. The
+// inspection_only category names no service: it asks with the inspection
+// vocabulary itself (codex r39 P2).
 function requestedServiceTokens(item) {
   const ask = requestAsk(item);
   const cats = ask?.requested_service_categories;
   if (!Array.isArray(cats)) return [];
   const out = [];
   for (const c of cats) {
-    const answers = [...new Map([c, composeWordsForV2Category(c), v2PrimaryLabelForCategory(c)].map(serviceTokens).filter((tokens) => tokens.length).map((tokens) => [tokens.join(' '), tokens])).values()];
+    const readings = c === 'inspection_only' ? INSPECTION_WORDS : [c, composeWordsForV2Category(c), v2PrimaryLabelForCategory(c)];
+    const answers = [...new Map(readings.map(serviceTokens).filter((tokens) => tokens.length).map((tokens) => [tokens.join(' '), tokens])).values()];
     if (answers.length) out.push(answers);
   }
   // The specific service the caller named REPLACES the PRIMARY category —
@@ -445,7 +454,7 @@ function requestedServiceTokens(item) {
     // Nest Removal Service"; a seasonal9 mosquito line answers "Seasonal
     // Mosquito Control Service" without the word).
     const requirement = [specific];
-    requirement.identity = engineIdentityForCatalogKey(item.requested_specific_service_key);
+    requirement.identity = engineIdentityForCatalogKey(item.requested_specific_service_key, item.requested_specific_service_engine_keys);
     requirement.family = specialtyFamilyOf(ask.requested_specific_service);
     if (out.length) out[0] = requirement;
     else out.push(requirement);
@@ -455,38 +464,53 @@ function requestedServiceTokens(item) {
 
 // The catalog service_key of the specific service each card names, from the
 // live catalog (exact name, either side of the cadence-convention rename)
-// — stamped on the item so the sync matchers can read the registry.
+// — and the engine keys the catalog row registers (services.engine_keys,
+// the accept path's own identity link) — stamped on the item so the sync
+// matchers can read the registry.
+const engineKeysOf = (row) => {
+  const raw = parseMaybeJson(row?.engine_keys);
+  return Array.isArray(raw) ? raw.filter((k) => typeof k === 'string' && k.trim()).map((k) => k.trim().toLowerCase()) : [];
+};
 function stampSpecificServiceKeys(items, catalogRows) {
   const { counterpartServiceName } = require('../config/service-name-aliases');
   const byName = new Map();
   for (const row of catalogRows || []) {
-    if (typeof row?.name === 'string' && row.service_key) byName.set(row.name.trim().toLowerCase(), row.service_key);
+    if (typeof row?.name === 'string' && row.service_key) byName.set(row.name.trim().toLowerCase(), row);
   }
   for (const item of items) {
     const name = requestAsk(item)?.requested_specific_service;
     if (typeof name !== 'string' || !name.trim()) continue;
     const alt = counterpartServiceName(name);
-    item.requested_specific_service_key = byName.get(name.trim().toLowerCase()) || (alt ? byName.get(String(alt).trim().toLowerCase()) : null) || null;
+    const row = byName.get(name.trim().toLowerCase()) || (alt ? byName.get(String(alt).trim().toLowerCase()) : null) || null;
+    item.requested_specific_service_key = row?.service_key || null;
+    item.requested_specific_service_engine_keys = engineKeysOf(row);
   }
 }
 
-// The engine identity a public catalog service prices as: the request the
-// public menu sends the engine for that service_key (PUBLIC_QUOTE_REQUESTS
-// — the ONE map from catalog product to engine options) read back as the
-// engine service id the pricers emit plus the cadence REQUEST_CADENCE
-// gives that option. Services the menu does not price (bonds, exclusion,
-// nest removal) have no engine identity and are judged by words / family.
+// The engine identity a catalog service prices as — the engine service
+// ids that ARE this product: the request the public menu sends the engine
+// for that service_key (PUBLIC_QUOTE_REQUESTS — the ONE map from instant
+// public product to engine options) read back as the engine service id the
+// pricers emit plus the cadence REQUEST_CADENCE gives that option, and the
+// engine keys the catalog row itself registers (services.engine_keys — a
+// quote-on-request product such as termite_slab_pretreat →
+// pre_slab_termiticide has no public request, codex r39 P2). Cadence-family
+// keys carry no engine_keys by design (the menu request owns their cadence)
+// and a registered key has no cadence of its own. Services neither prices
+// (bonds, nest removal) have no engine identity and are judged by words /
+// family.
 const ENGINE_SERVICE_BY_REQUEST = { pest: 'pest_control', oneTimePest: 'one_time_pest', lawn: 'lawn_care', mosquito: 'mosquito', oneTimeMosquito: 'mosquito', treeShrub: 'tree_shrub', rodentBait: 'rodent_bait', termite: 'termite_bait', pestInitialRoach: 'pest_initial_roach' };
-function engineIdentityForCatalogKey(serviceKey) {
+function engineIdentityForCatalogKey(serviceKey, engineKeys = []) {
   if (!serviceKey) return null;
   const { PUBLIC_QUOTE_REQUESTS, REQUEST_CADENCE } = require('./public-services-menu');
   const [family, options] = Object.entries(PUBLIC_QUOTE_REQUESTS[serviceKey] || {})[0] || [];
-  const service = ENGINE_SERVICE_BY_REQUEST[family];
-  if (!service) return null;
-  const program = options?.tier || options?.frequency || null;
-  const cadence = REQUEST_CADENCE[family];
+  const service = ENGINE_SERVICE_BY_REQUEST[family] || null;
+  const services = [...new Set([service, ...(Array.isArray(engineKeys) ? engineKeys : [])].filter((k) => typeof k === 'string' && k.trim()).map((k) => k.trim().toLowerCase()))];
+  if (!services.length) return null;
+  const program = (service && (options?.tier || options?.frequency)) || null;
+  const cadence = service ? REQUEST_CADENCE[family] : null;
   const visits = Array.isArray(cadence) ? cadence[0] : (program && cadence?.[program]?.[0]) || null;
-  return { service, program, visits };
+  return { services, program, visits };
 }
 const SPECIALTY_FAMILIES = new Set(['flea', 'stinging', 'bed_bug']);
 function specialtyFamilyOf(text) {
@@ -501,7 +525,7 @@ function specialtyFamilyOf(text) {
 function identityAnswers(requirement, identity) {
   if (!identity) return false;
   const want = requirement.identity;
-  if (want && identity.engine && identity.engine.service === want.service
+  if (want && identity.engine && want.services.includes(identity.engine.service)
     && (want.visits == null || identity.engine.visits === want.visits || (want.program && identity.engine.program === want.program))) return true;
   return Boolean(requirement.family && Array.isArray(identity.families) && identity.families.includes(requirement.family));
 }
@@ -607,8 +631,9 @@ const intentRule = (item) => INTENT_RULES[requestAsk(item)?.requested_service_in
 // consultation: the call pipeline books an uncertain "come look / diagnose"
 // ask as "Waves Assessment" (service_key lawn_inspection), and that
 // structured identity answers an inspection ask the way the word does; a
-// treatment row carries neither (codex r35 P2).
-const isInspection = (words) => /\binspections?\b|\bassessments?\b|\blawn_inspection\b/i.test(String(words || ''));
+// treatment row carries neither (codex r35 P2). Read as words, so the
+// lawn_inspection key is one.
+const isInspection = (words) => tokensOf(words, new Set()).some((w) => INSPECTION_WORDS.includes(w));
 // A record — a booking's service words and cadence, or an estimate line —
 // answers the intent when it carries a cadence the rule allows and is an
 // inspection exactly when the rule wants one (null: either).
@@ -1269,7 +1294,13 @@ const ENGINE_LINE_SOURCES = [
   { list: (root) => root.specItems, line: () => ONE_TIME_LINE },
   { list: (root) => root.lineItems, line: rawLine },
 ];
-const isPlaceholder = (entry) => entry.quoteRequired === true || entry.requiresManualReview === true;
+// A placeholder is what the send gate refuses to deliver (containsQuoteRequirement
+// in estimate-delivery-options: quoteRequired / requiresCustomQuote). A
+// PRICED line that merely asks for review (requiresManualReview — a
+// German-roach double selection, a turf-derived add-on) is sent once the
+// operator acknowledges it, so it was delivered and stays in scope (codex
+// r39 P2); an unpriced one still fails the amount check.
+const isPlaceholder = (entry) => entry.quoteRequired === true || entry.requiresCustomQuote === true;
 // A recurring engine row's cadence, as the catalog spells it: raw rows
 // (pricePestControl, priceLawnCare) carry a service key plus a numeric
 // visitsPerYear / frequency and no cadence word, while the catalog name a
@@ -1297,25 +1328,27 @@ const programOf = (entry) => [entry.selectedProgram, entry.tier, entry.program, 
 function lineIdentity(service, entry) {
   return service ? { service: String(service).trim().toLowerCase(), program: programOf(entry), visits: visitsOf(entry) } : null;
 }
+// The cadence readings of an entry in precedence order, each with the
+// lookup that reads it: the program keys by name pattern, then nine
+// visits on the MOSQUITO family as the seasonal program — not the lawn /
+// tree six-week cadence (codex r37 P2) — then the cadence fields by visit
+// count or word. The first reading that yields a key wins.
+const cadenceKeyOfProgram = (raw) => (CADENCE_KEY_BY_PROGRAM.find(([re]) => re.test(String(raw).toLowerCase())) || [])[1] || null;
+const cadenceKeyOfValue = (raw) => (Number.isFinite(Number(raw))
+  ? CADENCE_KEY_BY_VISITS[Math.round(Number(raw))]
+  : CADENCE_KEY_BY_WORD[String(raw).toLowerCase().replace(/[^a-z]/g, '')]) || null;
+const cadenceReadings = (entry) => [
+  ...[entry.selectedProgram, entry.program, entry.programKey].map((raw) => [raw, cadenceKeyOfProgram]),
+  [/mosquito/.test(String(entry.service || '').toLowerCase()) && visitsOf(entry) === 9 ? 'seasonal_feb_oct' : null, (key) => key],
+  ...[entry.frequency, entry.recurringPattern, entry.frequencyPerYear, entry.visitsPerYear, entry.visits].map((raw) => [raw, cadenceKeyOfValue]),
+];
 function cadenceWord(entry) {
   const { CADENCE_LABELS } = require('./public-services-menu');
-  let key = null;
-  for (const raw of [entry.selectedProgram, entry.program, entry.programKey]) {
-    if (typeof raw !== 'string') continue;
-    key = (CADENCE_KEY_BY_PROGRAM.find(([re]) => re.test(raw.toLowerCase())) || [])[1] || null;
-    if (key) break;
+  for (const [raw, keyOf] of cadenceReadings(entry)) {
+    const key = raw == null || raw === '' ? null : keyOf(raw);
+    if (key) return CADENCE_LABELS[key] || null;
   }
-  // Nine visits on the MOSQUITO family is the seasonal program, not the
-  // lawn / tree six-week cadence (codex r37 P2).
-  if (!key && /mosquito/.test(String(entry.service || '').toLowerCase()) && visitsOf(entry) === 9) key = 'seasonal_feb_oct';
-  for (const raw of key ? [] : [entry.frequency, entry.recurringPattern, entry.frequencyPerYear, entry.visitsPerYear, entry.visits]) {
-    if (raw == null || raw === '') continue;
-    key = typeof raw === 'number' || /^\d+$/.test(String(raw))
-      ? CADENCE_KEY_BY_VISITS[Math.round(Number(raw))] || null
-      : CADENCE_KEY_BY_WORD[String(raw).toLowerCase().replace(/[^a-z]/g, '')] || null;
-    if (key) break;
-  }
-  return key ? CADENCE_LABELS[key] || null : null;
+  return null;
 }
 const entryNames = (entry) => [entry.service, entry.serviceKey, entry.service_key, entry.name, entry.label, entry.description, entry.detail, entry.det];
 
@@ -1678,7 +1711,7 @@ async function loadEvidence(conn, items) {
     evidence.set(id, cur);
   };
   try {
-    stampSpecificServiceKeys(candidates, await conn('services').select('service_key', 'name'));
+    stampSpecificServiceKeys(candidates, await conn('services').select('service_key', 'name', 'engine_keys'));
   } catch (e) {
     logger.warn(`[triage-auto-resolve] catalog read for specific-service keys skipped: ${e.message}`);
   }
