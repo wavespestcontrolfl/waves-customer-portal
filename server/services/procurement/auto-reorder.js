@@ -207,7 +207,12 @@ async function handleLiveRequest(ctx, p, existing) {
   if (existing.source !== SOURCE || existing.status !== 'open') return;
   const request = await refreshOpenRequest(ctx, p, existing);
   if (!request) return;
-  if (await dispatcherOrders(ctx.conn, parseMeta(request.metadata).vendorId || p.auto_reorder_vendor_id)) return;
+  // The dispatcher only ever claims a request whose OWN metadata names an
+  // auto-orderable vendor (findDispatchable). A request that could not
+  // establish a vendor id (pinned to a vendor the product has since left)
+  // is nobody's — ring so a human works it (Codex r10 P1).
+  const { vendorId } = parseMeta(request.metadata);
+  if (vendorId && await dispatcherOrders(ctx.conn, vendorId)) return;
   await bellOrWarn(ctx, p, request, 'renotified');
 }
 
@@ -338,4 +343,4 @@ function sweepFailureError(result) {
   return new Error(`[auto-reorder] ${failed.length} product(s) failed: ${failed.map((e) => `${e.name} (${e.message})`).join('; ')}`);
 }
 
-module.exports = { runSuppliesAutoReorderSweep, sweepFailureError, findLowStockCandidates, vendorPricingFor, AUTO_REORDER_GATE: GATE, AUTO_REORDER_SOURCE: SOURCE };
+module.exports = { runSuppliesAutoReorderSweep, sweepFailureError, findLowStockCandidates, vendorPricingFor, lockProductPricing, AUTO_REORDER_GATE: GATE, AUTO_REORDER_SOURCE: SOURCE };

@@ -27,7 +27,12 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
-jest.mock('../services/procurement/auto-reorder', () => ({ vendorPricingFor: jest.fn(async () => mockState.pricing) }));
+jest.mock('../services/procurement/auto-reorder', () => ({
+  vendorPricingFor: jest.fn(async () => mockState.pricing),
+  // The claim takes the product's pricing advisory lock FIRST (Codex r10 P1)
+  // — recorded so the placed test can assert it precedes the row locks.
+  lockProductPricing: jest.fn(async (trx, productId) => { mockState.advisoryLocks = [...(mockState.advisoryLocks || []), productId]; }),
+}));
 
 const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null };
 
@@ -122,8 +127,10 @@ test('vendor without an adapter → skipped, no ledger row', async () => {
 });
 
 test('placed: claim first, then ledger placed + request ordered + audit, no bell', async () => {
+  mockState.advisoryLocks = [];
   const a = mockAdapter();
   const r = await run(a);
+  expect(mockState.advisoryLocks).toHaveLength(1); // pricing advisory lock taken by the claim (Codex r10 P1)
   expect(r.status).toBe('placed');
   expect(r.externalOrderNumber).toBe('SM-1');
   expect(mockState.ledgerRows[0]).toMatchObject({ status: 'placing', adapter: 'stickermule', restock_request_id: 'req-1' });
@@ -181,6 +188,14 @@ test('adapter refusal → needs_review with the refuse code', async () => {
   const r = await run(mockAdapter({ place: jest.fn(async () => { throw err; }) }));
   expect(r).toMatchObject({ status: 'needs_review', reason: 'multiple_addresses' });
   expect(notify).toHaveBeenCalledTimes(1);
+});
+
+test('an ambiguous submit that names the checkout total parks with THAT amount, not the (null) quote (pre-push P0)', async () => {
+  const err = new Error('siteone submit outcome unknown'); err.ambiguous = true; err.cents = 10593;
+  const r = await run(mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async () => { throw err; }) }));
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
+  const parked = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').map((u) => u.row.amount_cents);
+  expect(parked).toContain(10593);
 });
 
 test('ambiguous post-submit error → needs_review, never retried', async () => {

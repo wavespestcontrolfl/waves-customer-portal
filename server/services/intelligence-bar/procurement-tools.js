@@ -1290,6 +1290,100 @@ async function createRestockRequest(input) {
   });
 }
 
+
+// The two non-receive transitions, under the request lock (Codex r10 P2:
+// action routing is its own stage, apart from the locked receive).
+async function transitionRestockRequest(trx, { request, product, action }) {
+  if (action === 'mark_ordered') {
+    await trx('product_restock_requests').where('id', request.id).update({ status: 'ordered', updated_at: new Date() });
+    return { success: true, request_id: request.id, product: product.name, status: 'ordered' };
+  }
+  if (action === 'cancel') {
+    await trx('product_restock_requests').where('id', request.id).update({
+      status: 'cancelled', closed_at: new Date(), updated_at: new Date(),
+    });
+    return { success: true, request_id: request.id, product: product.name, status: 'cancelled' };
+  }
+}
+
+// The locked receive: quantity re-derived under the request + product locks,
+// the approved card's exact delta re-asserted, stock + movement + close.
+async function receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan }) {
+  // receive — recompute against the locked product row, never the preview.
+  // When the operator gave no quantity, the default is re-derived HERE,
+  // under the request lock: an automatic order that went placing → placed
+  // between the preview and this transaction must receive what it actually
+  // bought, not the requested figure (pre-push P0).
+  const fresh = await trx('products_catalog').where('id', request.product_id).forUpdate().first();
+  if (!fresh) return { error: 'Product not found' };
+  const enteredQuantity = toNumber(input.quantity)
+    ?? await require('../procurement/order-dispatch').orderedQuantityFor(trx, request.id)
+    ?? toNumber(lockedRequest.requested_quantity);
+  if (!enteredQuantity || enteredQuantity <= 0) return { error: 'Receive quantity is required' };
+  const inventoryUnit = fresh.inventory_unit || receivePlan.enteredUnit;
+  const received = describeInventoryConversion(enteredQuantity, receivePlan.enteredUnit, inventoryUnit);
+  if (!received.convertible || received.amount == null) {
+    return { error: `Cannot convert receive unit ${receivePlan.enteredUnit} to inventory unit ${inventoryUnit}` };
+  }
+  const stockBefore = toNumber(fresh.inventory_on_hand) ?? 0;
+  const stockAfter = round4(stockBefore + received.amount);
+
+  // The card approved an EXACT stock delta (GH r11 P1): re-assert it
+  // here, under the request + product row locks — the entered quantity
+  // and unit were derived from unlocked reads, so a request or product
+  // edited after the confirm-time preview could otherwise add a
+  // different amount than the operator saw.
+  const approvedReceive = input._verified_receive;
+  if (approvedReceive && (round4(received.amount) !== round4(toNumber(approvedReceive.adds) ?? NaN)
+    || String(inventoryUnit) !== String(approvedReceive.unit)
+    // The card shows exact before/after totals — the starting balance
+    // binds too (pre-push r11 P1), so a concurrent movement refuses
+    // rather than landing an unapproved final balance.
+    || round4(stockBefore) !== round4(toNumber(approvedReceive.stock_before) ?? NaN))) {
+    return {
+      error: 'The receive amounts changed after the card was shown (request, product, or stock level edited) — nothing was received. Ask again for a fresh confirmation card.',
+      preview_changed: true,
+    };
+  }
+
+  await trx('products_catalog').where('id', fresh.id).update({
+    inventory_on_hand: stockAfter,
+    inventory_unit: inventoryUnit,
+    updated_at: new Date(),
+  });
+  const [movement] = await trx('product_inventory_movements').insert({
+    product_id: fresh.id,
+    movement_type: 'restock',
+    quantity: received.amount,
+    unit: inventoryUnit,
+    stock_before: stockBefore,
+    stock_after: stockAfter,
+    metadata: {
+      source: 'intelligence_bar_restock_receive',
+      restockRequestId: request.id,
+      note: input.note || null,
+      enteredQuantity: enteredQuantity,
+      enteredUnit: receivePlan.enteredUnit,
+      conversionConfidence: received.confidence,
+    },
+  }).returning('*');
+  await trx('product_restock_requests').where('id', request.id).update({
+    status: 'received', closed_at: new Date(), updated_at: new Date(),
+  });
+
+  return {
+    success: true,
+    request_id: request.id,
+    product: fresh.name,
+    status: 'received',
+    stock_before: stockBefore,
+    added: received.amount,
+    stock_after: stockAfter,
+    unit: inventoryUnit,
+    movement_id: movement?.id || null,
+  };
+}
+
 async function updateRestockRequest(input) {
   const action = String(input.action || '').toLowerCase();
   if (!['mark_ordered', 'receive', 'cancel'].includes(action)) {
@@ -1358,90 +1452,8 @@ async function updateRestockRequest(input) {
     try { await require('../procurement/order-dispatch').assertManualActionAllowed(trx, request.id, action); }
     catch (err) { if (err.code === 'auto_order_placing' || err.code === 'auto_order_out') return { error: err.message, [err.code]: true }; throw err; }
 
-    if (action === 'mark_ordered') {
-      await trx('product_restock_requests').where('id', request.id).update({ status: 'ordered', updated_at: new Date() });
-      return { success: true, request_id: request.id, product: product.name, status: 'ordered' };
-    }
-    if (action === 'cancel') {
-      await trx('product_restock_requests').where('id', request.id).update({
-        status: 'cancelled', closed_at: new Date(), updated_at: new Date(),
-      });
-      return { success: true, request_id: request.id, product: product.name, status: 'cancelled' };
-    }
-
-    // receive — recompute against the locked product row, never the preview.
-    // When the operator gave no quantity, the default is re-derived HERE,
-    // under the request lock: an automatic order that went placing → placed
-    // between the preview and this transaction must receive what it actually
-    // bought, not the requested figure (pre-push P0).
-    const fresh = await trx('products_catalog').where('id', request.product_id).forUpdate().first();
-    if (!fresh) return { error: 'Product not found' };
-    const enteredQuantity = toNumber(input.quantity)
-      ?? await require('../procurement/order-dispatch').orderedQuantityFor(trx, request.id)
-      ?? toNumber(lockedRequest.requested_quantity);
-    if (!enteredQuantity || enteredQuantity <= 0) return { error: 'Receive quantity is required' };
-    const inventoryUnit = fresh.inventory_unit || receivePlan.enteredUnit;
-    const received = describeInventoryConversion(enteredQuantity, receivePlan.enteredUnit, inventoryUnit);
-    if (!received.convertible || received.amount == null) {
-      return { error: `Cannot convert receive unit ${receivePlan.enteredUnit} to inventory unit ${inventoryUnit}` };
-    }
-    const stockBefore = toNumber(fresh.inventory_on_hand) ?? 0;
-    const stockAfter = round4(stockBefore + received.amount);
-
-    // The card approved an EXACT stock delta (GH r11 P1): re-assert it
-    // here, under the request + product row locks — the entered quantity
-    // and unit were derived from unlocked reads, so a request or product
-    // edited after the confirm-time preview could otherwise add a
-    // different amount than the operator saw.
-    const approvedReceive = input._verified_receive;
-    if (approvedReceive && (round4(received.amount) !== round4(toNumber(approvedReceive.adds) ?? NaN)
-      || String(inventoryUnit) !== String(approvedReceive.unit)
-      // The card shows exact before/after totals — the starting balance
-      // binds too (pre-push r11 P1), so a concurrent movement refuses
-      // rather than landing an unapproved final balance.
-      || round4(stockBefore) !== round4(toNumber(approvedReceive.stock_before) ?? NaN))) {
-      return {
-        error: 'The receive amounts changed after the card was shown (request, product, or stock level edited) — nothing was received. Ask again for a fresh confirmation card.',
-        preview_changed: true,
-      };
-    }
-
-    await trx('products_catalog').where('id', fresh.id).update({
-      inventory_on_hand: stockAfter,
-      inventory_unit: inventoryUnit,
-      updated_at: new Date(),
-    });
-    const [movement] = await trx('product_inventory_movements').insert({
-      product_id: fresh.id,
-      movement_type: 'restock',
-      quantity: received.amount,
-      unit: inventoryUnit,
-      stock_before: stockBefore,
-      stock_after: stockAfter,
-      metadata: {
-        source: 'intelligence_bar_restock_receive',
-        restockRequestId: request.id,
-        note: input.note || null,
-        enteredQuantity: enteredQuantity,
-        enteredUnit: receivePlan.enteredUnit,
-        conversionConfidence: received.confidence,
-      },
-    }).returning('*');
-    await trx('product_restock_requests').where('id', request.id).update({
-      status: 'received', closed_at: new Date(), updated_at: new Date(),
-    });
-
-    return {
-      success: true,
-      request_id: request.id,
-      product: fresh.name,
-      status: 'received',
-      stock_before: stockBefore,
-      added: received.amount,
-      stock_after: stockAfter,
-      unit: inventoryUnit,
-      movement_id: movement?.id || null,
-    };
+    if (action !== 'receive') return transitionRestockRequest(trx, { request, product, action });
+    return receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan });
   });
 
   if (result.success && action === 'receive') {
