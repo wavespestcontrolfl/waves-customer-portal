@@ -2041,6 +2041,11 @@ const ReviewService = {
       // Aborted at the dispatch boundary (owed clear failed): nothing reached
       // the provider and the leg is still owed — a plain, retryable failure.
       if (result?.aborted) return { sent: false, reason: "email_send_failed" };
+      // A definitive not-sent (suppression, no active template) is decided
+      // BEFORE the library inserts its queued row and fires onQueued, so the
+      // owed leg is still set and the operator's next retry finds this row;
+      // after onQueued the provider call either succeeds or throws (the
+      // uncertain path below) — there is no post-dispatch sent:false.
       if (!result?.sent) return { sent: false, reason: result?.reason || "email_blocked" };
       // channel 'both': the row texted AND emailed — the outreach analytics
       // count it as an email touch (channel IN ('email','both')), so the
