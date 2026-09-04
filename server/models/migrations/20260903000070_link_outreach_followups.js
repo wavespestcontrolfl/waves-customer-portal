@@ -20,7 +20,9 @@
  *                          consumes the policy cap and the hard cap
  *   follow_up_sent_at      Gmail confirmed the follow-up
  *   follow_up_skipped_reason  why a follow-up was skipped (reply / bounce /
- *                          worker note)
+ *                          worker note) — or, while still drafted, the
+ *                          'reply_check_failed' marker that routes an
+ *                          automatic follow-up to the owner
  *
  * Additive and reversible. No backfill: rows sent before this migration carry
  * no due date and never grow a follow-up (their silence is the owner's read).

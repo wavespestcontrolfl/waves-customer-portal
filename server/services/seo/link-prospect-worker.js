@@ -341,20 +341,31 @@ async function claimFollowUps(trx, { limit, preview }) {
   const blockedDomains = new Set((await trx('seo_link_domains').whereIn('agent_state', nonClaimableDomainStates()).select('id')).map((d) => d.id));
   const candidates = due.filter((r) => !r.domain_id || !blockedDomains.has(r.domain_id));
   if (!candidates.length) return [];
-  const pathIds = [...new Set(candidates.map((r) => r.path_id))];
-  const paths = await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'superseded_by', 'confidence', 'revision', 'agent_completable', 'execution_after_send');
-  const pathById = new Map(paths.map((p) => [p.id, p]));
   const { isStandingConfidence } = require('./link-registry');
-  // the lifecycle set is PATH-dependent: placed / live / indexed follow up only on a submit-first path
-  const rows = candidates.filter((r) => {
-    const p = pathById.get(r.path_id);
-    return p && !p.superseded_by && isStandingConfidence(p.confidence) && p.agent_completable !== false && M.FOLLOW_UP_STATUSES(p).includes(r.status);
-  }).slice(0, limit);
-  if (preview) return rows.map((r) => ({ ...r }));
+  const { lockProspectDomain } = require('./prospect-domain-lock');
+  // a standing path, and the lifecycle set is PATH-dependent: placed / live / indexed follow up only on a submit-first path
+  const eligible = (r, p) => Boolean(p) && !p.superseded_by && isStandingConfidence(p.confidence) && p.agent_completable !== false && M.FOLLOW_UP_STATUSES(p).includes(r.status);
+  if (preview) {
+    const paths = await trx('seo_link_acquisition_paths').whereIn('id', [...new Set(candidates.map((r) => r.path_id))]).select('id', 'superseded_by', 'confidence', 'agent_completable', 'execution_after_send');
+    const pathById = new Map(paths.map((p) => [p.id, p]));
+    return candidates.filter((r) => eligible(r, pathById.get(r.path_id))).slice(0, limit).map((r) => ({ ...r }));
+  }
+  // EVERY eligibility condition is re-asserted under locks before the lease (the initial claim's guarantee): the
+  // per-domain advisory lock every domain writer takes first (the owner's Reject / Watch, the bridge, the
+  // investigator), then the row FOR UPDATE, then the path FOR UPDATE — and the owner's ruling, the path's standing,
+  // the lifecycle and the follow-up state are read again under them, so a decision that committed between the
+  // candidate read and this lease is honoured (nothing is leased, no draft is spent, against a stop)
   const out = [];
-  for (const r of rows) {
-    const n = await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
-      .update({ claimed_at: now, claimed_by: WORKER, follow_up_status: 'due', leased_path_revision: pathById.get(r.path_id).revision == null ? null : Number(pathById.get(r.path_id).revision), updated_at: now });
+  for (const c of candidates) {
+    if (out.length >= limit) break;
+    await lockProspectDomain(trx, c.target_domain);
+    const r = await trx('seo_link_prospects').where({ id: c.id }).forUpdate().first();
+    if (!r || r.claimed_at || r.outreach_status !== 'sent' || !['none', 'due'].includes(r.follow_up_status)) continue;
+    if (r.domain_id && await trx('seo_link_domains').where({ id: r.domain_id }).whereIn('agent_state', nonClaimableDomainStates()).first('id')) continue;
+    const p = r.path_id ? await trx('seo_link_acquisition_paths').where({ id: r.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'revision', 'agent_completable', 'execution_after_send') : null;
+    if (!eligible(r, p)) continue;
+    const n = await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent', status: r.status, path_id: r.path_id }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
+      .update({ claimed_at: now, claimed_by: WORKER, follow_up_status: 'due', leased_path_revision: p.revision == null ? null : Number(p.revision), updated_at: now });
     if (n) out.push({ ...r, follow_up_status: 'due', claimed_at: now, claimed_by: WORKER, lease_token: now.toISOString() });
   }
   return out;

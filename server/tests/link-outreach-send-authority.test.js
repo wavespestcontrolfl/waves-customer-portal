@@ -891,7 +891,7 @@ describe('the follow-up send', () => {
     expect(approvals(s.db)).toHaveLength(0);
     placement(s.db).outreach_thread_ref = null;
     gmail.getThread.mockResolvedValue({ id: 'thr1', messages: [ours('msg1')] });
-    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'reply_check_failed' });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(s.db)), now: LATER })).toMatchObject({ ok: false, code: 'reply_check_failed' });
   });
   test('the owner\'s click on an OWNER_OUTREACH follow-up writes an outreach_followup approval bound to the follow-up hash, sends, and consumes it; the queue routes it with the kind', async () => {
     const s = await conversation({ followUpBody: `${FOLLOW_UP_BODY}\nWe would gladly link back to you.` });
@@ -970,5 +970,66 @@ describe('the follow-up send', () => {
     expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'sent', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true });
     expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'sent' });
     expect(followUpRow(s.db)).toMatchObject({ satisfied_reason: 'sent' });
+  });
+});
+
+describe('Codex r1 on #3854', () => {
+  test('P1: a Watch / Reject, a path disproof or a lifecycle move that commits between the candidate read and the lease is honoured under the locks — nothing is leased', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY) });
+    // the owner parks the domain after the candidate read (the first resolve on seo_link_domains is the nonclaimable-state read; the second, under the lock, sees Watch)
+    let flipped = false;
+    s.db._beforeResolve = (table, db) => { if (table === 'seo_link_domains' && !flipped) { flipped = true; db._tables.seo_link_domains[0].agent_state = 'watching'; } };
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toEqual([]);
+    expect(placement(s.db).claimed_at).toBeFalsy();
+    expect(s.db._raws.some((r) => /FOR UPDATE seo_link_prospects/.test(r))).toBe(true);
+    s.db._beforeResolve = null;
+    s.db._tables.seo_link_domains[0].agent_state = 'acquiring';
+    // the path is disproven under the lock
+    s.db._beforeResolve = (table, db) => { if (table === 'seo_link_acquisition_paths') db._tables.seo_link_acquisition_paths[0].confidence = '0'; };
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toEqual([]);
+    s.db._beforeResolve = null;
+    storedPath(s.db).confidence = '0.80';
+    // the row moved to lost under the lock
+    s.db._beforeResolve = (table, db) => { if (table === 'seo_link_prospects') db._tables.seo_link_prospects[0].status = 'lost'; };
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toEqual([]);
+    s.db._beforeResolve = null;
+    placement(s.db).status = 'contacted';
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toHaveLength(1);
+    expect(s.db._raws.some((r) => /link_prospect_domain|advisory/i.test(r))).toBe(true); // the per-domain advisory lock every domain writer takes
+  });
+  test('P2: a failed reply check on an AUTOMATIC attempt routes the follow-up to the owner: the marker lands, the auto path refuses, the nightly re-decides OWNER_OUTREACH, the owner\'s click re-runs the check; a requeue clears the marker', async () => {
+    const s = await conversation();
+    gmail.getThread.mockRejectedValue(new Error('ECONNRESET'));
+    const ATTEMPT = new Date(LATER.getTime() + 1000); // after the decision (a re-decision follows a later placement change)
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: ATTEMPT })).toMatchObject({ ok: false, code: 'reply_check_failed', error: expect.stringMatching(/routed to the owner/) });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'drafted', follow_up_skipped_reason: 'reply_check_failed' });
+    expect(M.followUpReview(placement(s.db))).toMatchObject({ clean: false, reason: expect.stringMatching(/owner sends it/) });
+    // the marker alone stops the next automatic attempt, before the nightly re-decides
+    gmail.getThread.mockResolvedValue({ id: 'thr1', messages: [ours('msg1')] });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/owner/) });
+    await nightly(s.db, { now: new Date(LATER.getTime() + DAY) });
+    expect(followUpRow(s.db)).toMatchObject({ level: 'OWNER_OUTREACH' }); // the card's review line carries the why (followUpReview)
+    const r = await nightly(s.db, { now: new Date(LATER.getTime() + 2 * DAY), autoSend: true, send: jest.fn(async () => ({ ok: true })) });
+    expect(r.autoSend).toEqual({ attempted: 0, sent: 0, skipped: [] });
+    // the owner's click: the check runs again, fail-closed on a failure, sends on silence
+    gmail.getThread.mockRejectedValueOnce(new Error('timeout'));
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(s.db)), now: LATER })).toMatchObject({ ok: false, code: 'reply_check_failed', error: expect.stringMatching(/retry later/) });
+    gmail.sendMessage.mockResolvedValue({ id: 'msg2', threadId: 'thr1' });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(s.db)), now: LATER })).toMatchObject({ ok: true, authority: { level: 'OWNER_OUTREACH' } });
+    // a requeue after an ambiguous send clears the marker with the attempt
+    const t = await conversation();
+    Object.assign(placement(t.db), { follow_up_status: 'send_error', follow_up_skipped_reason: 'reply_check_failed' });
+    expect((await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'requeue', approvedBy: 'Adam', followUp: true })).ok).toBe(true);
+    expect(placement(t.db).follow_up_skipped_reason).toBeNull();
+  });
+  test('P2: a crashed follow-up send is aged from follow_up_attempted_at — a verifier bump of updated_at never hides it', async () => {
+    const s = await conversation();
+    Object.assign(placement(s.db), { follow_up_status: 'sending', follow_up_send_token: 'tok', follow_up_attempted_at: new Date(Date.now() - 60 * 60 * 1000), updated_at: new Date() }); // crashed an hour ago; the verifier touched the row just now
+    expect((await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'sent', approvedBy: 'Adam', followUp: true })).ok).toBe(true);
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'sent' });
+    const t = await conversation();
+    Object.assign(placement(t.db), { follow_up_status: 'sending', follow_up_send_token: 'tok', follow_up_attempted_at: new Date(), updated_at: new Date(Date.now() - 60 * 60 * 1000) }); // genuinely in flight
+    expect(await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'sent', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: false, code: 'send_in_flight' });
   });
 });

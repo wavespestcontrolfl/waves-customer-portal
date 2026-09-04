@@ -733,12 +733,13 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
           .where('outreach_status', 'send_error')
           .orWhere((s) => s.where('outreach_status', 'sending').andWhere('updated_at', '<', staleCutoff)))
     );
-    // …and a FOLLOW-UP send in the same ambiguous states (§6.4) — settled by the same decision over its own columns
+    // …and a FOLLOW-UP send in the same ambiguous states (§6.4) — settled by the same decision over its own columns;
+    // aged from the follow-up's own attempt stamp (the verifier bumps updated_at on a Judge-owned placed / live row)
     const followUpReconcile = await orderByPriority(
       db('seo_link_prospects')
         .where((b) => b
           .where('follow_up_status', 'send_error')
-          .orWhere((s) => s.where('follow_up_status', 'sending').andWhere('updated_at', '<', staleCutoff)))
+          .orWhere((s) => s.where('follow_up_status', 'sending').andWhere('follow_up_attempted_at', '<', staleCutoff)))
     );
     for (const p of followUpReconcile) needsReconcile.push({ ...p, follow_up: true, outreach_subject: p.follow_up_subject });
     const sentToday = await Outreach.dailySendCount();

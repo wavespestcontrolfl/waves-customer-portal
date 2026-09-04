@@ -79,8 +79,13 @@ function draftReview(placement) {
 function followUpReview(placement) {
   const p = placement || {};
   if (p.follow_up_status !== 'drafted') return { clean: false, flags: [], lint: [], reason: 'no follow-up draft' };
+  // a failed reply check on an automatic attempt routes the follow-up to the owner (§6.4: never sent by default) —
+  // the text may be clean, the SEND is not automatic
+  if (p.follow_up_skipped_reason === REPLY_CHECK_FAILED) return { ...reviewDraft({ to: p.outreach_to_email, subject: p.follow_up_subject, body: p.follow_up_body }), clean: false, reason: 'reply check failed on the automatic attempt — the owner sends it' };
   return reviewDraft({ to: p.outreach_to_email, subject: p.follow_up_subject, body: p.follow_up_body });
 }
+// the marker the sender stamps on follow_up_skipped_reason (the draft stays drafted) when an automatic attempt's reply check failed
+const REPLY_CHECK_FAILED = 'reply_check_failed';
 /** The mandate verdict over a bare draft — the sender re-reviews the LOCKED text of either send with it. */
 function reviewDraft({ to, subject, body }) {
   if (!isValidEmail(to)) return { clean: false, flags: [], lint: [], reason: 'invalid recipient' };
@@ -222,4 +227,4 @@ async function reviewByEmail(q, emails) {
 // have delivered the pitch, so the inbox stays held and the authority it was claimed under stays pinned until then
 const AMBIGUOUS_SEND_STATUSES = Object.freeze(['sending', 'send_error']);
 
-module.exports = { AMBIGUOUS_SEND_STATUSES, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_MS, FOLLOW_UP_STATUSES, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_MS, FOLLOW_UP_STATUSES, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };

@@ -44,7 +44,7 @@ Return ONLY JSON: {"subject": "...", "body": "..."}. The body is plain text with
 
 // The ONE follow-up (plan §6.4): ten days of silence after the pitch. Shorter than the pitch, no new ask, the same
 // mandate (no reciprocal promise, payment, discount, guarantee or commitment — the classifier and the owner read it).
-const FOLLOW_UP_SYSTEM_PROMPT = `You are the outreach drafter for Waves Pest Control & Lawn Care (family-owned, SW Florida). Ten days ago we sent the ONE-TO-ONE backlink-outreach email below and heard nothing. Write ONE short, courteous follow-up (~50–90 words) in the SAME thread. A human reviews it before any send.
+const FOLLOW_UP_SYSTEM_PROMPT = `You are the outreach drafter for Waves Pest Control (family-owned, SW Florida). Ten days ago we sent the ONE-TO-ONE backlink-outreach email below and heard nothing. Write ONE short, courteous follow-up (~50–90 words) in the SAME thread. A human reviews it before any send.
 
 RULES (mandatory):
 - Reply in the thread: the subject is "Re: " followed by the original subject, verbatim.

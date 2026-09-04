@@ -452,7 +452,7 @@ async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLo
   // §6.4 — the reply check, BEFORE any authority is granted: a follow-up is never sent without a successful
   // lookup proving silence; a reply or a bounce settles the follow-up as skipped (committed — no approval exists
   // yet), a lookup failure refuses it and leaves the draft for a later attempt
-  const thread = followUp ? await replyCheck(trx, { prospectId, current, now: attemptAt }) : null;
+  const thread = followUp ? await replyCheck(trx, { prospectId, current, mode, now: attemptAt }) : null;
   if (thread && !thread.ok) return thread;
   // §7 — the authority contract, re-validated under the same lock as the claim.
   // From here on the owner's approval may have been written: a refusal below
@@ -483,11 +483,19 @@ const withTimeout = (p, ms) => Promise.race([p, new Promise((_, reject) => setTi
  * §6.4 — the fail-closed reply check inside the locked claim: the pitch's Gmail thread is read (`threads.get` on
  * outreach_thread_ref); any message not from our own address is a reply, a mailer-daemon / postmaster message is a
  * bounce — either settles the follow-up `skipped` in this transaction (CAS on the drafted row) and refuses the send;
- * a lookup error, an empty thread or a timeout refuses without writing (reply_check_failed — retried later, never
- * sent by default). Silence returns the pitch's Message-ID so the follow-up answers it.
+ * a lookup error, an empty thread, a timeout or a missing thread ref refuses (reply_check_failed) and — on an
+ * AUTOMATIC attempt — parks the follow-up for the owner (plan §6.4: never sent by default after a failed lookup):
+ * the failure is stamped on the placement (follow_up_skipped_reason, the draft stays drafted), followUpReview then
+ * reads the follow-up as the owner's, the nightly re-decides it OWNER_OUTREACH and the auto dispatch leaves it; the
+ * owner's click re-runs the check, fail-closed the same way. Silence returns the pitch's Message-ID so the follow-up
+ * answers it.
  */
-async function replyCheck(trx, { prospectId, current, now }) {
-  if (!current.outreach_thread_ref) return { ok: false, code: 'reply_check_failed', error: 'the pitch carries no Gmail thread reference — the follow-up cannot prove silence' };
+async function replyCheck(trx, { prospectId, current, mode, now }) {
+  const failed = async (why) => {
+    if (mode === 'auto') await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_skipped_reason: M.REPLY_CHECK_FAILED, updated_at: now });
+    return { ok: false, code: 'reply_check_failed', error: `${why}; the follow-up is not sent without proof of silence${mode === 'auto' ? ' — routed to the owner' : ' — retry later'}` };
+  };
+  if (!current.outreach_thread_ref) return failed('the pitch carries no Gmail thread reference');
   let messages;
   try {
     const thread = await withTimeout(gmailClient.getThread(current.outreach_thread_ref), REPLY_CHECK_TIMEOUT_MS);
@@ -495,7 +503,7 @@ async function replyCheck(trx, { prospectId, current, now }) {
     if (!messages.length) throw new Error('empty thread');
   } catch (err) {
     logger.error(`[link-outreach] reply check failed for ${prospectId} (code=${(err && (err.code || err.name)) || 'unknown'}) — follow-up not sent`);
-    return { ok: false, code: 'reply_check_failed', error: 'the Gmail thread lookup failed; the follow-up is not sent without proof of silence — retry later' };
+    return failed('the Gmail thread lookup failed');
   }
   const own = M.normalizeEmail(gmailClient.ownAddress());
   const froms = messages.map((m) => addressOf(headerOf(m, 'From')));
@@ -536,6 +544,7 @@ async function lockedSendRow(trx, { prospectId, prospect, mode, inbox, followUp 
     ? current && current.outreach_status === 'sent' && current.follow_up_status === 'drafted'
     : current && SENDABLE_STATUSES.includes(current.status) && (mode !== 'auto' || current.status === 'prospect');
   if (!sendable) return { ok: false, code: 'not_actionable' };
+  if (followUp && mode === 'auto' && current.follow_up_skipped_reason === M.REPLY_CHECK_FAILED) return { ok: false, code: 'not_authorized', error: 'the reply check failed on an earlier automatic attempt — the follow-up is the owner\'s' };
   if (current.target_domain !== prospect.target_domain) return { ok: false, code: 'not_actionable', error: 'the placement moved to another domain while you looked at it — reload and send again' };
   if (!current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
   const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first();
@@ -855,8 +864,10 @@ async function reconcileInitial({ prospect, outcome, approvedBy }) {
 // the follow-up state and token the read observed.
 async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
   const st = prospect.follow_up_status;
-  const updatedMs = prospect.updated_at ? new Date(prospect.updated_at).getTime() : 0;
-  const staleSending = st === 'sending' && Date.now() - updatedMs >= STALE_SENDING_MS;
+  // aged from the follow-up's own attempt stamp (immutable for the attempt), never the shared updated_at: the daily
+  // verifier bumps that on a Judge-owned placed / live row and would make a crashed send read in flight again
+  const attemptedMs = prospect.follow_up_attempted_at ? new Date(prospect.follow_up_attempted_at).getTime() : 0;
+  const staleSending = st === 'sending' && Date.now() - attemptedMs >= STALE_SENDING_MS;
   if (st === 'sending' && !staleSending) return { ok: false, code: 'send_in_flight' };
   if (st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable' };
   const now = new Date();
@@ -866,7 +877,7 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
   const notes = prospect.notes ? `${prospect.notes}\n${note}` : note;
   const patch = outcome === 'sent'
     ? { follow_up_status: 'sent', follow_up_sent_at: prospect.follow_up_sent_at || now, follow_up_send_token: null, notes, updated_at: now }
-    : { follow_up_status: 'drafted', follow_up_send_token: null, follow_up_attempted_at: null, notes, updated_at: now };
+    : { follow_up_status: 'drafted', follow_up_send_token: null, follow_up_attempted_at: null, follow_up_skipped_reason: null, notes, updated_at: now };
   const rows = await db.transaction(async (trx) => {
     let q = trx('seo_link_prospects').where({ id: prospect.id, follow_up_status: st });
     q = prospect.follow_up_send_token ? q.where({ follow_up_send_token: prospect.follow_up_send_token }) : q.whereNull('follow_up_send_token');
