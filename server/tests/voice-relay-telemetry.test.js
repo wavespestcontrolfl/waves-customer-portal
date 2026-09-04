@@ -166,7 +166,7 @@ describe('per-turn stats', () => {
 
   test('the turn log waits for the agent-speaking event so firstAudio is real, and end() flushes the rest (codex r3 P2)', async () => {
     const { convo, stat } = convoWithSpokenTurn({ callSid: 'CA-tel-log' });
-    stat.callerSpeechStoppedAt = 900; // firstAudio is measured from the caller's stop
+    stat.callerSpeechStoppedAt = performance.now() - 100; // firstAudio is measured from the caller's stop, on the same clock as now()
     convo.say('One moment.');
     logger.info.mockClear();
     convo._finishTurn(stat);
