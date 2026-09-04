@@ -627,6 +627,22 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup9', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], funnelRowFor: expect.objectContaining({ id: 'lead-dup9' }) }));
   });
 
+  test('an indirectly resolved root that is SPAM (not answerable, not in CLOSED_LEAD_STATUSES) is never claimed and never has its funnel booked — the named repeat takes the win with its own funnel row (codex r26 P1)', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2s', estimate_data: { lead_id: 'lead-dupS' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-dupS': { id: 'lead-dupS', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-origS' } },
+        'lead-origS': { id: 'lead-origS', status: 'spam', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' },
+      },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2s', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-origS', expect.anything());
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dupS', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], funnelRowFor: expect.objectContaining({ id: 'lead-dupS' }) }));
+    expect(database._updates).toEqual([{ id: 'lead-dupS', patch: expect.objectContaining({ estimate_id: 'estimate-2s' }), conditional: true }]);
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+
   test('an original re-assigned to ANOTHER customer and marked won between the read and the claim is judged on its refreshed identity — the named row takes the win (codex r16 P1)', async () => {
     const database = makeAcceptDb({
       linked: [],

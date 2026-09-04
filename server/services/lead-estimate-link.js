@@ -768,7 +768,13 @@ async function markLinkedLeadEstimateAccepted({
       && leadMatchesEstimateContact(lead, estimate)
       && (!lead.customer_id || !customerId || lead.customer_id === customerId)
       && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
-    const eligible = () => !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at && (!indirect() || sameOpportunity());
+    // An indirect root is eligible by POSITIVE open membership, as every
+    // other resolved root in this module (r23 / r24): a spam or cancelled
+    // root is not answerable, so it neither takes the win nor has its
+    // funnel booked — the named repeat stands in (codex #3834 r26 P1). The
+    // named row itself keeps the not-closed rule (an open named lead
+    // converts as before; its own 'duplicate' label is closed here).
+    const eligible = () => !lead.deleted_at && (indirect() ? OPEN_LEAD_STATUSES.includes(lead.status) && sameOpportunity() : !CLOSED_LEAD_STATUSES.has(lead.status));
     // A claim that lost because the original was relabelled IN FLIGHT — a
     // concurrent /calculate marked it a duplicate of an older root while
     // this acceptance was between its read and its stamp — is not a
