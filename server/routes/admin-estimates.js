@@ -6,6 +6,8 @@ const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('.
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+// Real handoffs kept in deliveryState.deliveredAt (oldest dropped first).
+const DELIVERY_HISTORY_MAX = 25;
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
@@ -1868,6 +1870,77 @@ async function clearLeadServiceRevertPending(estimateId) {
     });
 }
 
+
+// A sibling that left 'sending' before publication (the public flow
+// deliberately exposes and accepts siblings mid-'sending'; acceptance sets
+// price_locked_at, which zero-rows the guarded finalization update). The
+// customer SAW and accepted THIS delivery's scope, so: (1) merge the scope
+// stamp UNDER the terminal row's sendSnapshot (its bundle is kept, never
+// status / price lock), exactly as the superseded anchor path does — the
+// accept witness alone cannot close a quote_promised card without it
+// (codex r26 P1); real deliveries only. (2) Snapshot the terminal row for
+// the pricing audit (GH codex P2), built from the PRE-ACCEPT sibling row +
+// THIS delivery's freshly built bundle — an accept rewrites result/totals,
+// and a stale prior sendSnapshot must not outrank the bundle just handed
+// to the customer (GH codex P1); status reflects the delivered state. Both
+// fail-soft: the accepted state stands. Lifted out of the publication
+// retry loop so the flow reads flat (codex r30 P2).
+// Send-time pricing snapshot for a PUBLISHED sibling (estimator audit M4):
+// only the anchor wrote one, so grouped properties had no frozen quote
+// provenance. NO re-read: a customer can accept the now-sent sibling
+// before a re-read completes, and the acceptance rewrite would contaminate
+// this permanent send-time record (GH codex P1). The pre-claim row + the
+// patch just written IS the published state; status/expiry override to the
+// delivered values, and the ANCHOR's channel is how it was delivered (the
+// sibling's own send_method is cleared at publication). Fail-soft like the
+// anchor's — an audit-snapshot failure never unwinds a delivered send.
+async function snapshotPublishedSibling(sibling, siblingSnapshotPatch, { now, nextExpiresAt, sendMethod }) {
+  try {
+    const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+    let publishedData = sibling.estimate_data;
+    if (typeof publishedData === 'string') { try { publishedData = JSON.parse(publishedData); } catch { publishedData = {}; } }
+    await saveEstimatePricingAuditSnapshot({
+      ...sibling,
+      status: sibling.viewed_at ? 'viewed' : 'sent',
+      sent_at: now,
+      expires_at: nextExpiresAt,
+      estimate_data: { ...(publishedData || {}), ...siblingSnapshotPatch },
+    }, { trigger: 'group_send', sendMethod });
+  } catch (auditErr) {
+    logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (send stands): ${auditErr.message}`);
+  }
+}
+
+async function recordAcceptedSiblingDelivery(sibling, snapshot, { delivered, sendMethod }) {
+  logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
+  if (delivered && snapshot.sendSnapshot.scope) {
+    try {
+      await db('estimates').where({ id: sibling.id }).update({
+        estimate_data: db.raw(
+          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{sendSnapshot}', COALESCE(estimate_data -> 'sendSnapshot', '{}'::jsonb) || ?::jsonb, true)",
+          [JSON.stringify({ scope: snapshot.sendSnapshot.scope })],
+        ),
+        updated_at: db.fn.now(),
+      });
+    } catch (scopeErr) {
+      logger.warn(`[admin-estimates] sibling ${sibling.id} delivered-scope merge failed (state stands): ${scopeErr.message}`);
+    }
+  }
+  try {
+    const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+    let preAcceptData = sibling.estimate_data;
+    if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
+    preAcceptData = preAcceptData || {};
+    await saveEstimatePricingAuditSnapshot({
+      ...sibling,
+      status: sibling.viewed_at ? 'viewed' : 'sent',
+      estimate_data: { ...preAcceptData, sendSnapshot: snapshot.sendSnapshot },
+    }, { trigger: 'group_send', sendMethod });
+  } catch (auditErr) {
+    logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (state stands): ${auditErr.message}`);
+  }
+}
+
 async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken) {
   if (!['sms', 'email', 'both'].includes(sendMethod)) {
     const err = new Error('Invalid sendMethod');
@@ -2319,6 +2392,14 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   const lastDeliveredAt = stampChannels.length
     ? now().toISOString()
     : (priorDeliveryState?.lastDeliveredAt || null);
+  // deliveredAt: EVERY real handoff, oldest first, capped — the durable
+  // send history. first/last alone lose the middle: an estimate delivered
+  // before a call, resent inside its fulfillment window and resent again
+  // after it would carry no in-window witness, and the commitment's
+  // association hint would clear on refresh (codex #3811 r30 P2). Carried
+  // forward untouched by suppressed attempts.
+  const priorDeliveredAt = Array.isArray(priorDeliveryState?.deliveredAt) ? priorDeliveryState.deliveredAt.filter((t) => typeof t === 'string') : [];
+  const deliveredAt = (stampChannels.length ? [...priorDeliveredAt, lastDeliveredAt] : priorDeliveredAt).slice(-DELIVERY_HISTORY_MAX);
   const deliveryStatePatch = {
     deliveryState: {
       attemptedAt: now().toISOString(),
@@ -2327,6 +2408,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       channels,
       ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
       ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
+      ...(deliveredAt.length ? { deliveredAt } : {}),
     },
     // The per-park handoff witness rides the finalization write too, so a
     // transient failure of the in-branch stamp can never leave a delivered
@@ -2576,74 +2658,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // the same (GH codex P2 r3).
           shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
           if (!updated) {
-            logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
-            // The customer SAW and accepted THIS delivery's scope: merge the
-            // stamp UNDER the terminal row's sendSnapshot (its bundle is
-            // kept, never status / price lock), exactly as the superseded
-            // anchor path does — the accept witness alone cannot close a
-            // quote_promised card without it (codex r26 P1). Real
-            // deliveries only; fail-soft.
-            if (stampChannels.length && snapshot.sendSnapshot.scope) {
-              try {
-                await db('estimates').where({ id: sibling.id }).update({
-                  estimate_data: db.raw(
-                    "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{sendSnapshot}', COALESCE(estimate_data -> 'sendSnapshot', '{}'::jsonb) || ?::jsonb, true)",
-                    [JSON.stringify({ scope: snapshot.sendSnapshot.scope })],
-                  ),
-                  updated_at: db.fn.now(),
-                });
-              } catch (scopeErr) {
-                logger.warn(`[admin-estimates] sibling ${sibling.id} delivered-scope merge failed (state stands): ${scopeErr.message}`);
-              }
-            }
-            // The customer still SAW this sibling's quote — the public flow
-            // deliberately exposes and accepts siblings mid-'sending', and
-            // acceptance sets price_locked_at which zero-rows the guarded
-            // update above. Snapshot the terminal row too (GH codex P2).
-            try {
-              const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
-              // Build from the PRE-ACCEPT sibling row + THIS delivery's
-              // freshly built bundle — an accept rewrites result/totals,
-              // and a stale prior sendSnapshot must not outrank the bundle
-              // that was just handed to the customer (GH codex P1). Status
-              // reflects the delivered state, not the pre-claim draft.
-              let preAcceptData = sibling.estimate_data;
-              if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
-              preAcceptData = preAcceptData || {};
-              await saveEstimatePricingAuditSnapshot({
-                ...sibling,
-                status: sibling.viewed_at ? 'viewed' : 'sent',
-                estimate_data: { ...preAcceptData, sendSnapshot: snapshot.sendSnapshot },
-              }, { trigger: 'group_send', sendMethod });
-            } catch (auditErr) {
-              logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (state stands): ${auditErr.message}`);
-            }
+            await recordAcceptedSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod });
           } else {
-            // Send-time pricing snapshot for the SIBLING too (estimator
-            // audit M4): only the anchor wrote one, so grouped properties
-            // had no frozen quote provenance. Fail-soft like the anchor's —
-            // an audit-snapshot failure never unwinds a delivered send.
-            try {
-              const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
-              // NO re-read: a customer can accept the now-sent sibling
-              // before a re-read completes, and the acceptance rewrite
-              // would contaminate this permanent send-time record (GH
-              // codex P1). The pre-claim row + the patch we just wrote IS
-              // the published state; status/expiry override to the
-              // delivered values, and the ANCHOR's channel is how it was
-              // delivered (its own send_method is cleared at publication).
-              let publishedData = sibling.estimate_data;
-              if (typeof publishedData === 'string') { try { publishedData = JSON.parse(publishedData); } catch { publishedData = {}; } }
-              await saveEstimatePricingAuditSnapshot({
-                ...sibling,
-                status: sibling.viewed_at ? 'viewed' : 'sent',
-                sent_at: now,
-                expires_at: nextExpiresAt,
-                estimate_data: { ...(publishedData || {}), ...siblingSnapshotPatch },
-              }, { trigger: 'group_send', sendMethod });
-            } catch (auditErr) {
-              logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (send stands): ${auditErr.message}`);
-            }
+            await snapshotPublishedSibling(sibling, siblingSnapshotPatch, { now, nextExpiresAt, sendMethod });
           }
         } catch (e) {
           logger.error(`[admin-estimates] sibling ${sibling.id} publication attempt ${attempt} failed: ${e.message}`);

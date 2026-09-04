@@ -294,6 +294,13 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       // A resend-only row (first and last both outside the window) is not a hint.
       await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: resent.toISOString(), lastDeliveredAt: resent.toISOString() } }) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // Delivered BEFORE the call, resent inside the window, resent again
+      // after it: first and last are both outside, the send history
+      // (deliveryState.deliveredAt) carries the in-window handoff (codex
+      // #3811 r30 P2). A malformed history element is skipped.
+      const before = new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000);
+      await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: before.toISOString(), lastDeliveredAt: resent.toISOString(), deliveredAt: [before.toISOString(), 'yesterday afternoon', inWindow.toISOString(), resent.toISOString()] } }) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'association', matched_at: inWindow });
     } finally {
       await db('estimates').where({ id: est.id }).del();
     }

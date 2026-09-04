@@ -808,6 +808,13 @@ const OWN_HANDOFF_SQL = isoInstantSql("estimates.estimate_data #>> '{deliverySta
 // must keep counting as the kept promise, or refreshFulfillment would
 // clear an association hint the facts still support (codex r29 P2).
 const FIRST_HANDOFF_SQL = isoInstantSql("estimates.estimate_data #>> '{deliveryState,firstDeliveredAt}'");
+// The durable send history (deliveryState.deliveredAt, every real handoff
+// oldest first — admin-estimates) carries the INTERMEDIATE handoffs first
+// and last cannot: delivered before the call, resent inside the window,
+// resent again after it (codex r30 P2). Read as a set of instants; a
+// malformed element is skipped, never fatal (same rule as isoInstantSql).
+const DELIVERIES_SQL = "(CASE WHEN jsonb_typeof(estimates.estimate_data #> '{deliveryState,deliveredAt}') = 'array' THEN estimates.estimate_data #> '{deliveryState,deliveredAt}' ELSE '[]'::jsonb END)";
+const historyInstants = (where) => `(SELECT MIN(d::timestamptz) FROM jsonb_array_elements_text(${DELIVERIES_SQL}) AS d WHERE pg_input_is_valid(d, 'timestamptz')${where})`;
 // Acceptance is a witness only when the CUSTOMER accepted: a manual accept
 // (mark-accepted — an admin recording a verbal yes) stamps accepted_at and
 // locks the price as 'manual_accept' with no document delivered, so it
@@ -836,6 +843,7 @@ const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWi
   const bind = until ? [after, until] : [after];
   this.whereRaw(within(OWN_HANDOFF_SQL), bind)
     .orWhereRaw(within(FIRST_HANDOFF_SQL), bind)
+    .orWhereRaw(`${historyInstants(` AND d::timestamptz > ?${until ? ' AND d::timestamptz <= ?' : ''}`)} IS NOT NULL`, bind)
     .orWhereRaw(within(ANCHOR_HANDOFF_SQL), bind)
     .orWhereRaw(within(ACCEPT_WITNESS_SQL), bind);
 });
@@ -848,12 +856,14 @@ const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWi
 const handoffOrder = (conn, after, until = null) => {
   const inWindow = (expr) => `CASE WHEN ${expr} > ?${until ? ` AND ${expr} <= ?` : ''} THEN ${expr} END`;
   const bind = until ? [after, until] : [after];
-  return conn.raw(`LEAST(${inWindow(OWN_HANDOFF_SQL)}, ${inWindow(FIRST_HANDOFF_SQL)}, ${inWindow(ANCHOR_HANDOFF_SQL)}, ${inWindow(ACCEPT_WITNESS_SQL)}) asc`, [...bind, ...bind, ...bind, ...bind]);
+  const history = historyInstants(` AND d::timestamptz > ?${until ? ' AND d::timestamptz <= ?' : ''}`);
+  return conn.raw(`LEAST(${inWindow(OWN_HANDOFF_SQL)}, ${inWindow(FIRST_HANDOFF_SQL)}, ${history}, ${inWindow(ANCHOR_HANDOFF_SQL)}, ${inWindow(ACCEPT_WITNESS_SQL)}) asc`, [...bind, ...bind, ...bind, ...bind, ...bind]);
 };
-const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${OWN_HANDOFF_SQL} as handed_off_at`), conn.raw(`${FIRST_HANDOFF_SQL} as first_handed_off_at`), conn.raw(`${ANCHOR_HANDOFF_SQL} as anchor_handed_off_at`), conn.raw(`${ACCEPT_WITNESS_SQL} as accept_witness_at`)];
+const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${OWN_HANDOFF_SQL} as handed_off_at`), conn.raw(`${FIRST_HANDOFF_SQL} as first_handed_off_at`), conn.raw(`${DELIVERIES_SQL} as delivered_at_history`), conn.raw(`${ANCHOR_HANDOFF_SQL} as anchor_handed_off_at`), conn.raw(`${ACCEPT_WITNESS_SQL} as accept_witness_at`)];
 // The EARLIEST post-boundary witness time on a fetched row, or null.
 const witnessAt = (row, after) => {
-  const times = [row.handed_off_at, row.first_handed_off_at, row.anchor_handed_off_at, row.accept_witness_at]
+  const history = Array.isArray(row.delivered_at_history) ? row.delivered_at_history : [];
+  const times = [row.handed_off_at, row.first_handed_off_at, ...history, row.anchor_handed_off_at, row.accept_witness_at]
     .map((t) => (t ? new Date(t) : null))
     .filter((d) => d && !Number.isNaN(d.getTime()) && d > after);
   return times.length ? new Date(Math.min(...times.map((d) => d.getTime()))) : null;
