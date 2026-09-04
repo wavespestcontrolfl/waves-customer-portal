@@ -97,7 +97,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
   // cancel defaults to texting (matching the appointment sidebar).
   const [bulkNotify, setBulkNotify] = useState('none');
 
-  const fetchList = useCallback(async () => {
+  const fetchList = useCallback(async (editedId = null) => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
@@ -121,20 +121,27 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
       // filtered page (date/status/tech/service changed). Its cached meta
       // is then unverifiable, so drop it from the selection rather than
       // bulk-act on a pre-edit snapshot (Codex #3868 r3 P2). Other-page
-      // selections are untouched: only the edited id is checked.
-      const edited = lastEditedIdRef.current;
-      lastEditedIdRef.current = null;
-      if (edited && selectedMetaRef.current.has(edited) && !(data.services || []).some((s) => s.id === edited)) {
-        selectedMetaRef.current.delete(edited);
-        setSelected((prev) => { const next = new Set(prev); next.delete(edited); return next; });
+      // selections are untouched: only the saved id is checked, and only
+      // on the refresh the host fires after a save.
+      if (editedId && selectedMetaRef.current.has(editedId) && !(data.services || []).some((s) => s.id === editedId)) {
+        selectedMetaRef.current.delete(editedId);
+        setSelected((prev) => { const next = new Set(prev); next.delete(editedId); return next; });
       }
     } catch { setServices([]); setTotal(0); }
     setLoading(false);
   }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page, rememberSelectedMeta]);
 
   // refreshKey: the host page bumps it after the Edit modal saves, so the
-  // list re-reads rows it did not itself change.
-  useEffect(() => { fetchList(); }, [fetchList, refreshKey]);
+  // list re-reads rows it did not itself change. The row last handed to
+  // the modal counts as edited only on that save-driven fetch; a filter or
+  // page fetch after a dismissed modal forgets it (pre-push hook P1).
+  const seenRefreshKeyRef = useRef(refreshKey);
+  useEffect(() => {
+    const saved = seenRefreshKeyRef.current !== refreshKey ? lastEditedIdRef.current : null;
+    seenRefreshKeyRef.current = refreshKey;
+    lastEditedIdRef.current = null;
+    fetchList(saved);
+  }, [fetchList, refreshKey]);
 
   const sorted = useMemo(() => {
     const arr = [...services];

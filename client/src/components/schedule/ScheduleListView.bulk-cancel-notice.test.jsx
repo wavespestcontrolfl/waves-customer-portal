@@ -91,6 +91,20 @@ describe('ScheduleListView bulk cancel — recurring plan notice', () => {
     expect(screen.queryByText('Sam Once')).not.toBeInTheDocument();
   });
 
+  it('keeps a row whose modal was opened but not saved when a later fetch omits it', async () => {
+    const onEdit = vi.fn();
+    const view = await renderWithRows({ refreshKey: 0, onEdit });
+    fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once
+    fireEvent.click(screen.getByText('Sam Once')); // modal opened…
+    // …and dismissed; then a filter/page fetch (no refreshKey bump) omits the row.
+    ROWS = ROWS.filter((r) => r.id !== 'svc-once');
+    fireEvent.change(screen.getByPlaceholderText('Name or service…'), { target: { value: 'Pat' } });
+    await waitFor(() => expect(fetch.mock.calls.filter(([u]) => String(u).includes('/admin/schedule/list')).length).toBeGreaterThan(1));
+    await waitFor(() => expect(screen.queryByText('Sam Once')).not.toBeInTheDocument());
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
+    view.unmount();
+  });
+
   it('shows nothing for a selection with no recurring visit', async () => {
     await renderWithRows();
     fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once only
