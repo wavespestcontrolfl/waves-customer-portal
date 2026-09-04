@@ -632,7 +632,9 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
         issueCode: issue.code || null,
         days: data?.readinessQueue?.days || 14,
       });
-      setNotice(`Restock request created for ${result.restockRequest?.productName || "product"}.`);
+      setNotice(result.restockRequest?.existing
+        ? `A restock request for ${result.restockRequest?.productName || "this product"} is already ${result.restockRequest?.status || "open"} — nothing new was created.`
+        : `Restock request created for ${result.restockRequest?.productName || "product"}.`);
       setData((prev) => ({
         ...(prev || {}),
         readinessQueue: result.readinessQueue || prev?.readinessQueue,

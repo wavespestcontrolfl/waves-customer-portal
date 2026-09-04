@@ -52,6 +52,11 @@ const SKIP_WHEN = [
   [(a) => !a.scheduledServiceId, 'no_scheduled_service_id'],
   [(a) => a.isIncompleteVisit, 'incomplete_visit'],
   [(a) => a.visitPerformed === false, 'visit_not_performed'],
+  // An internal-only completion profile (Waves Assessment: a consultation
+  // where treatment products are refused) is not an inspection by name and
+  // detectServiceLine reads it as pest — the completion's own posture is the
+  // authority (Codex r9 P2).
+  [(a) => a.isInternalOnlyCompletion === true, 'internal_only_completion'],
   [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)), 'inspection_service'],
 ];
 
@@ -75,11 +80,12 @@ async function consumeCompletionSupplies(db, {
   technicianId = null,
   isIncompleteVisit = false,
   visitPerformed = true,
+  isInternalOnlyCompletion = false,
   serviceLine = null,
   serviceType = null,
 } = {}) {
   const result = { consumed: [], skipped: [], errors: [] };
-  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, serviceType }));
+  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, isInternalOnlyCompletion, serviceType }));
   if (skip) { result.skipped.push({ reason: skip[1] }); return result; }
 
   let products;

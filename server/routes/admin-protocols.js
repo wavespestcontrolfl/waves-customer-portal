@@ -16,6 +16,7 @@ const {
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const { scopeFromText } = require('../services/service-report/action-scope');
+const { findLiveRestockRequest } = require('../services/procurement/live-restock-request');
 const {
   getActiveLawnProtocol,
   getProtocolWindowContext,
@@ -967,11 +968,12 @@ async function createRestockRequest(knex, req, serviceId) {
     err.statusCode = 400;
     throw err;
   }
-  // One transaction, product row LOCKED before the insert: every restock
-  // creator (this route, the forecast route, the Intelligence Bar tool, the
-  // auto-reorder sweep) inserts under this same row lock, so the sweep's
-  // any-source live-request check cannot interleave with a staff request —
-  // never a manual request and its automatic twin (Codex r8 P1).
+  // One transaction, product row LOCKED before the insert, then the SHARED
+  // any-source live-request check under that lock: every restock creator
+  // (this route, the forecast route, the Intelligence Bar tool, the
+  // auto-reorder sweep) runs the same read under the same row lock, so a
+  // writer that resumes after a concurrent commit hands back the request
+  // that already exists instead of raising its twin (Codex r8 P1, r9 P1).
   return knex.transaction(async (trx) => {
     const service = await trx('scheduled_services').where({ id: serviceId }).first();
     if (!service) {
@@ -985,10 +987,12 @@ async function createRestockRequest(knex, req, serviceId) {
       err.statusCode = 400;
       throw err;
     }
+    const live = await findLiveRestockRequest(trx, product.id);
+    if (live) return { ...live, existing: true, productName: product.name, productCategory: product.category || null };
     const [row] = await trx('product_restock_requests')
       .insert(readinessRestockRow({ product, service, body: req.body || {}, actor: actorFromRequest(req) }))
       .returning('*');
-    return { ...row, productName: product.name, productCategory: product.category || null };
+    return { ...row, existing: false, productName: product.name, productCategory: product.category || null };
   });
 }
 

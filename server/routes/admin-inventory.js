@@ -4,6 +4,8 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { eligibleVendorPricing } = require('../services/vendor-pricing-eligibility');
+const { findLiveRestockRequest } = require('../services/procurement/live-restock-request');
+const { AUTO_REORDER_SOURCE } = require('../services/procurement/auto-reorder');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
@@ -3101,11 +3103,14 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
     const body = req.body || {};
     const actor = req.technicianId || req.technician?.id || null;
     const actorName = req.technician?.name || req.technician?.email || null;
-    // One transaction, product row LOCKED before the insert: every restock
-    // creator (this route, the readiness route, the Intelligence Bar tool,
-    // the auto-reorder sweep) inserts under this same row lock, so the
-    // sweep's any-source live-request check cannot interleave with a staff
-    // request — never a manual request and its automatic twin (Codex r8 P1).
+    // One transaction, product row LOCKED before the insert, then the SHARED
+    // any-source live-request check under that lock: every restock creator
+    // (this route, the readiness route, the Intelligence Bar tool, the
+    // auto-reorder sweep) runs the same read under the same row lock, so a
+    // writer that resumes after a concurrent commit hands back the request
+    // that already exists instead of raising its twin (Codex r8 P1, r9 P1).
+    // allowDuplicate lets staff stack a second STAFF request on purpose; it
+    // never stacks one on the sweep's automatic request.
     const outcome = await db.transaction(async (trx) => {
       const product = await trx('products_catalog').where({ id: req.params.productId }).forUpdate().first();
       if (!product) return { status: 404, body: { error: 'Product not found' } };
@@ -3116,12 +3121,8 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
       }
       assertSupportedInventoryUnit(unit);
 
-      const existing = await trx('product_restock_requests')
-        .where({ product_id: product.id })
-        .whereIn('status', ['open', 'ordered'])
-        .where('source', 'waveguard_inventory_forecast')
-        .first();
-      if (existing && body.allowDuplicate !== true) {
+      const existing = await findLiveRestockRequest(trx, product.id);
+      if (existing && (body.allowDuplicate !== true || existing.source === AUTO_REORDER_SOURCE)) {
         return { status: 200, body: { success: true, existing: true, restockRequest: existing } };
       }
 

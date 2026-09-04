@@ -114,6 +114,13 @@ test('a service-line scope set between the scan and the lock is honored', async 
   expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'service_line_excluded' }]);
 });
 
+test('an internal-only completion profile (Waves Assessment) consumes nothing even though its name reads as pest (Codex r9 P2)', async () => {
+  const { db, inserts } = fakeDb({ products: [sign] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'Waves Assessment', isInternalOnlyCompletion: true });
+  expect(res.skipped).toEqual([{ reason: 'internal_only_completion' }]);
+  expect(inserts).toHaveLength(0);
+});
+
 test('a treatment service type is not an inspection', async () => {
   const { db, inserts } = fakeDb({ products: [sign] });
   await consumeCompletionSupplies(db, { ...args, serviceType: 'Quarterly Pest Control' });

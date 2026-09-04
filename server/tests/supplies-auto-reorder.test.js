@@ -12,15 +12,19 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const mockState = { candidates: [], existing: null, pricing: null, fresh: undefined, inserted: [], updates: [], insertThrows: false, insertConflict: false };
+const mockState = { candidates: [], existing: null, pricing: null, lockedPricing: undefined, locked: false, fresh: undefined, inserted: [], updates: [], insertThrows: false, insertConflict: false };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate']) q[m] = () => q;
+    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy']) q[m] = () => q;
+    // The product row lock: from here on the pricing row is the LOCKED one
+    // (a test sets lockedPricing to simulate a pricing edit that committed
+    // between an unlocked read and the lock).
+    q.forUpdate = () => { mockState.locked = true; return q; };
     q.first = async () => {
       if (table === 'product_restock_requests') return mockState.existing;
-      if (table === 'vendor_pricing') return mockState.pricing;
+      if (table === 'vendor_pricing') return mockState.locked && mockState.lockedPricing !== undefined ? mockState.lockedPricing : mockState.pricing;
       // The locked re-read before the insert: defaults to the candidate's own
       // stock (still low); a test sets mockState.fresh to simulate a receive /
       // disable landing between the scan and the insert.
@@ -62,6 +66,8 @@ beforeEach(() => {
   mockState.candidates = [];
   mockState.existing = null;
   mockState.pricing = null;
+  mockState.lockedPricing = undefined;
+  mockState.locked = false;
   mockState.fresh = undefined;
   mockState.inserted = [];
   mockState.updates = [];
@@ -217,6 +223,17 @@ test('reorder quantity edited between the scan and the lock → the request and 
   expect(mockState.inserted[0].target_stock).toBe(425);
   expect(res.created[0].requestedQuantity).toBe(325);
   expect(notify.mock.calls[0][2]).toContain('Reorder 325 each');
+});
+
+test('the vendor SKU/link come from the pricing row read UNDER the lock, not an unlocked scan (Codex r9 P2)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.pricing = { vendor_sku: 'old-sku', vendor_product_url: 'https://gemplers.com/old' };
+  mockState.lockedPricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/new' };
+  const notify = jest.fn(async () => ({}));
+  const res = await runSuppliesAutoReorderSweep({ notify });
+  expect(res.created).toHaveLength(1);
+  expect(mockState.inserted[0].metadata).toMatchObject({ vendorSku: '127544', vendorProductUrl: 'https://gemplers.com/new' });
+  expect(notify.mock.calls[0][3].metadata.vendorSku).toBe('127544');
 });
 
 test('reorder quantity cleared under the lock → unconfigured, no row', async () => {
