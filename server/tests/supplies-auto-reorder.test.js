@@ -12,15 +12,22 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const mockState = { candidates: [], existing: null, pricing: null, fresh: undefined, inserted: [], updates: [], insertThrows: false, insertConflict: false };
+const mockState = { candidates: [], existing: null, pricing: null, lockedPricing: undefined, locked: false, fresh: undefined, inserted: [], updates: [], insertThrows: false, insertConflict: false, raws: [], pricingThrows: false };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate']) q[m] = () => q;
+    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy']) q[m] = () => q;
+    // The product row lock: from here on the pricing row is the LOCKED one
+    // (a test sets lockedPricing to simulate a pricing edit that committed
+    // between an unlocked read and the lock).
+    q.forUpdate = () => { if (!mockState.raws.some((r) => /pg_advisory_xact_lock/.test(r))) throw new Error('row lock taken before the pricing advisory lock'); mockState.locked = true; return q; };
     q.first = async () => {
       if (table === 'product_restock_requests') return mockState.existing;
-      if (table === 'vendor_pricing') return mockState.pricing;
+      if (table === 'vendor_pricing') {
+        if (mockState.pricingThrows) throw new Error('relation "vendor_pricing" does not exist');
+        return mockState.locked && mockState.lockedPricing !== undefined ? mockState.lockedPricing : mockState.pricing;
+      }
       // The locked re-read before the insert: defaults to the candidate's own
       // stock (still low); a test sets mockState.fresh to simulate a receive /
       // disable landing between the scan and the insert.
@@ -45,7 +52,7 @@ jest.mock('../models/db', () => {
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(String(table)));
-  dbFn.raw = (sql) => sql;
+  dbFn.raw = (sql) => { mockState.raws.push(String(sql)); return sql; };
   dbFn.transaction = async (fn) => fn(dbFn);
   return dbFn;
 });
@@ -64,11 +71,15 @@ beforeEach(() => {
   mockState.candidates = [];
   mockState.existing = null;
   mockState.pricing = null;
+  mockState.lockedPricing = undefined;
+  mockState.locked = false;
   mockState.fresh = undefined;
   mockState.inserted = [];
   mockState.updates = [];
   mockState.insertThrows = false;
   mockState.insertConflict = false;
+  mockState.raws = [];
+  mockState.pricingThrows = false;
 });
 afterAll(() => { delete process.env.GATE_AUTO_REORDER; });
 
@@ -151,6 +162,20 @@ test('a vendor id learned alone (name already on the request, no SKU/URL yet) is
   expect(notify.mock.calls[0][3].metadata.vendorId).toBe('vend-gemplers');
 });
 
+test('a request pinned to another vendor learns nothing from the product\'s new vendor — no mixed SKU/link (Codex r8 P2)', async () => {
+  mockState.candidates = [{ ...lowSign, vendor_name: 'Amazon', auto_reorder_vendor_id: 'vend-amazon' }];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Gemplers', requested_quantity: '650', unit: 'each', metadata: { vendorId: 'vend-gemplers' } };
+  mockState.pricing = { vendor_sku: 'B0AMZ', vendor_product_url: 'https://amazon.com/y' };
+  const notify = jest.fn(async () => ({}));
+  const res = await runSuppliesAutoReorderSweep({ notify });
+  expect(res.refreshed).toEqual([]);
+  expect(mockState.updates).toHaveLength(0);
+  const [, , body, opts] = notify.mock.calls[0];
+  expect(body).toContain('from Gemplers');
+  expect(body).not.toContain('amazon');
+  expect(opts.metadata.vendorSku).toBeNull();
+});
+
 test('an existing ORDERED auto request does not re-ring', async () => {
   mockState.candidates = [lowSign];
   mockState.existing = { id: 'req-auto', status: 'ordered', source: 'auto_reorder' };
@@ -205,6 +230,30 @@ test('reorder quantity edited between the scan and the lock → the request and 
   expect(mockState.inserted[0].target_stock).toBe(425);
   expect(res.created[0].requestedQuantity).toBe(325);
   expect(notify.mock.calls[0][2]).toContain('Reorder 325 each');
+});
+
+test('the vendor SKU/link come from the pricing row read UNDER the lock, not an unlocked scan (Codex r9 P2)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.pricing = { vendor_sku: 'old-sku', vendor_product_url: 'https://gemplers.com/old' };
+  mockState.lockedPricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/new' };
+  const notify = jest.fn(async () => ({}));
+  const res = await runSuppliesAutoReorderSweep({ notify });
+  expect(res.created).toHaveLength(1);
+  expect(mockState.inserted[0].metadata).toMatchObject({ vendorSku: '127544', vendorProductUrl: 'https://gemplers.com/new' });
+  expect(notify.mock.calls[0][3].metadata.vendorSku).toBe('127544');
+});
+
+test('the pricing advisory lock is taken before the product row lock, and a failing pricing read is a recorded per-product error, not a silent linkless request (Codex r10 P1 + P2)', async () => {
+  mockState.candidates = [lowSign];
+  const notify = jest.fn(async () => ({}));
+  const ok = await runSuppliesAutoReorderSweep({ notify });
+  expect(ok.created).toHaveLength(1);
+  expect(mockState.raws.filter((r) => /pg_advisory_xact_lock/.test(r))).toHaveLength(1);
+  mockState.inserted = []; mockState.raws = []; mockState.pricingThrows = true;
+  const bad = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+  expect(bad.created).toHaveLength(0);
+  expect(bad.errors).toEqual([{ productId: 'prod-sign', name: lowSign.name, message: expect.stringMatching(/vendor_pricing/) }]);
+  expect(mockState.inserted).toHaveLength(0);
 });
 
 test('reorder quantity cleared under the lock → unconfigured, no row', async () => {

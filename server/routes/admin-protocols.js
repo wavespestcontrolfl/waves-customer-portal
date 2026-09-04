@@ -16,6 +16,7 @@ const {
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const { scopeFromText } = require('../services/service-report/action-scope');
+const { findLiveRestockRequest } = require('../services/procurement/live-restock-request');
 const {
   getActiveLawnProtocol,
   getProtocolWindowContext,
@@ -967,11 +968,14 @@ async function createRestockRequest(knex, req, serviceId) {
     err.statusCode = 400;
     throw err;
   }
-  // One transaction, product row LOCKED before the insert: the auto-order
-  // dispatcher checks for a live sibling request under this same lock before
-  // it claims an order, so a staff request either lands before that check
-  // (the dispatcher then stands down) or waits for the claim to commit (the
-  // tab shows the order) — never both orders (pre-push P0).
+  // One transaction, product row LOCKED before the insert, then — under that
+  // lock — the dispatcher's live-order check (409 while an automatic order is
+  // placing/placed: the Restock tab carries the order line, pre-push P0) and
+  // the SHARED any-source live-request check every restock creator runs
+  // (this route, the forecast route, the Intelligence Bar tool, the
+  // auto-reorder sweep), so a writer that resumes after a concurrent commit
+  // hands back the request that already exists instead of raising its twin
+  // (Codex r8 P1, r9 P1).
   return knex.transaction(async (trx) => {
     const service = await trx('scheduled_services').where({ id: serviceId }).first();
     if (!service) {
@@ -985,13 +989,13 @@ async function createRestockRequest(knex, req, serviceId) {
       err.statusCode = 400;
       throw err;
     }
-    // An automatic order already claimed/placed for this product → 409; the
-    // Restock tab carries the order line (pre-push P0).
     await require('../services/procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id);
+    const live = await findLiveRestockRequest(trx, product.id);
+    if (live) return { ...live, existing: true, productName: product.name, productCategory: product.category || null };
     const [row] = await trx('product_restock_requests')
       .insert(readinessRestockRow({ product, service, body: req.body || {}, actor: actorFromRequest(req) }))
       .returning('*');
-    return { ...row, productName: product.name, productCategory: product.category || null };
+    return { ...row, existing: false, productName: product.name, productCategory: product.category || null };
   });
 }
 

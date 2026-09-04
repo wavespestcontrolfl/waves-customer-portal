@@ -37,14 +37,19 @@
  * current configuration: an admin edit to the vendor, reorder quantity or
  * unit after the request was raised must not send the office to order
  * goods the Restock queue does not show (Codex r6 P2).
+ *
+ * The live-request check is the SHARED one in live-restock-request.js —
+ * the staff readiness route, the forecast route and the Intelligence Bar
+ * tool run the same read under the same product row lock (Codex r9 P1).
  */
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
+const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
+const { findLiveRestockRequest } = require('./live-restock-request');
 
 const GATE = 'GATE_AUTO_REORDER';
 const SOURCE = 'auto_reorder';
-const LIVE_STATUSES = ['open', 'ordered'];
 
 function num(v) {
   if (v == null || v === '') return null;
@@ -74,22 +79,28 @@ async function findLowStockCandidates(conn = db) {
     .orderBy('pc.name');
 }
 
-// Same eligibility as recalcBestPriceLocked (admin-inventory.js): a
-// deactivated, unapproved or expired row must not steer an order (Codex r4
-// P2). Any query failure (older schema) degrades to "no link", never throws.
+// THE eligibility predicate recalcBestPriceLocked uses (shared module):
+// a zero-priced, deactivated, unapproved or expired row must not steer an
+// order (Codex r4 P2, r8 P1). Runs inside the caller's transaction, so a
+// failure propagates — swallowing it would leave the transaction aborted
+// and the next write failing anyway (Codex r10 P2); the sweep's per-product
+// catch records it.
 async function vendorPricingFor(conn, productId, vendorId) {
   if (!vendorId) return null;
-  try {
-    return await conn('vendor_pricing')
-      .where({ product_id: productId, vendor_id: vendorId })
-      .where('is_active', true)
-      .whereIn('approval_status', ['approved', 'auto_approved'])
-      .where(function unexpired() { this.whereNull('expires_at').orWhere('expires_at', '>', new Date()); })
-      .orderBy('is_best_price', 'desc')
-      .first();
-  } catch {
-    return null;
-  }
+  return eligibleVendorPricing(conn('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }))
+    .orderBy('is_best_price', 'desc')
+    .first();
+}
+
+// The product's pricing advisory lock — the one every vendor_pricing writer
+// (manual price edit, approval, Hermes report, recalcBestPrice) takes FIRST
+// and holds to commit. Taken here BEFORE the product row lock, in the
+// repository's lock order (advisory, then rows), so the pricing row read
+// under it is the committed state no in-flight edit can still change
+// (Codex r10 P1): a writer holding this lock has not touched the product
+// row yet, and a writer waiting on it sees our request committed first.
+async function lockProductPricing(trx, productId) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(productId)]);
 }
 
 async function dispatcherOrders(conn, vendorId) {
@@ -132,37 +143,63 @@ async function bellOrWarn(ctx, product, request, bucket) {
   }
 }
 
-// Vendor configured after the request was raised (the seeded sticker starts
-// unpriced): carry the new vendor/SKU/URL onto the open request so the tab
-// and the refreshed bell show it. Only NULL fields are filled — a populated
-// request is never rewritten from the product's current configuration.
-// Returns the request as the bell must see it.
-async function refreshOpenRequest(ctx, p, existing, pricing) {
-  const meta = parseMeta(existing.metadata);
+// What an open request still has to learn from ITS vendor (SKU, URL, the
+// vendor id when it predates ids; the name when it has none): only NULL
+// fields are filled, and everything comes from ONE vendor — a request pinned
+// to a vendor the product has since left keeps its identity and gets no
+// mixed SKU/link (Codex r8 P2). Null = nothing to write.
+function requestOwnsVendor(request, meta, vendor) {
+  if (meta.vendorId) return meta.vendorId === vendor.vendorId;
+  return !request.vendor || request.vendor === vendor.vendorName;
+}
+function learnedVendorFields(request, vendor) {
+  const meta = parseMeta(request.metadata);
+  if (!requestOwnsVendor(request, meta, vendor)) return null;
+  const name = request.vendor || vendor.vendorName || null;
   const learned = {
-    vendorId: meta.vendorId || p.auto_reorder_vendor_id || null,
-    vendorSku: meta.vendorSku || pricing?.vendor_sku || null,
-    vendorProductUrl: meta.vendorProductUrl || pricing?.vendor_product_url || null,
+    vendorId: meta.vendorId || vendor.vendorId || null,
+    vendorSku: meta.vendorSku || vendor.pricing?.vendor_sku || null,
+    vendorProductUrl: meta.vendorProductUrl || vendor.pricing?.vendor_product_url || null,
   };
-  const vendor = existing.vendor || p.vendor_name || null;
-  const changed = vendor !== (existing.vendor || null)
-    || learned.vendorId !== (meta.vendorId || null)
-    || learned.vendorSku !== (meta.vendorSku || null)
-    || learned.vendorProductUrl !== (meta.vendorProductUrl || null);
-  if (!changed) return existing;
-  const metadata = { ...meta, ...learned };
-  await ctx.conn('product_restock_requests').where({ id: existing.id }).update({ vendor, metadata: JSON.stringify(metadata), updated_at: new Date() });
-  ctx.result.refreshed.push({ productId: p.id, requestId: existing.id });
-  return { ...existing, vendor, metadata };
+  const changed = name !== (request.vendor || null) || Object.keys(learned).some((k) => learned[k] !== (meta[k] || null));
+  return changed ? { vendor: name, metadata: { ...meta, ...learned } } : null;
+}
+
+// Vendor configured after the request was raised (the seeded sticker starts
+// unpriced): carry the vendor/SKU/URL onto the open request so the tab and
+// the refreshed bell show it. Request AND product are locked in one
+// transaction — the pricing advisory lock, then request, then product: the
+// repository's lock order (advisory before rows; the Restock action route,
+// the Intelligence Bar tool and the dispatcher all take the request row
+// before the product row), so this cannot deadlock against them (pre-push
+// P1, Codex r10 P1). The vendor is re-derived from the locked
+// product (an admin edit between the scan and here must not pin the request
+// to the old vendor), and a request that left 'open' meanwhile is neither
+// updated nor re-belled. Returns the request as the bell must see it, or
+// null when it is no longer an open auto request.
+async function refreshOpenRequest(ctx, p, existing) {
+  return ctx.conn.transaction(async (trx) => {
+    await lockProductPricing(trx, p.id);
+    const request = await trx('product_restock_requests').where({ id: existing.id }).forUpdate().first();
+    if (!request || request.status !== 'open' || request.source !== SOURCE) return null;
+    const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('auto_reorder_vendor_id');
+    if (!fresh) return null;
+    const learned = learnedVendorFields(request, await lockedVendor(trx, p, fresh));
+    if (!learned) return request;
+    await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ vendor: learned.vendor, metadata: JSON.stringify(learned.metadata), updated_at: new Date() });
+    ctx.result.refreshed.push({ productId: p.id, requestId: request.id });
+    return { ...request, ...learned };
+  });
 }
 
 // A still-open auto request whose bell failed earlier would otherwise sit
 // unworked forever: re-ring (the request-id dedupeKey makes a landed bell a
 // no-op). Requests of other sources, and ordered ones, are left alone.
-async function handleLiveRequest(ctx, p, existing, pricing) {
+async function handleLiveRequest(ctx, p, existing) {
   ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: existing.id });
   if (existing.source !== SOURCE || existing.status !== 'open') return;
-  const request = await refreshOpenRequest(ctx, p, existing, pricing);
+  const request = await refreshOpenRequest(ctx, p, existing);
+  if (!request) return;
   if (await dispatcherOrders(ctx.conn, parseMeta(request.metadata).vendorId || p.auto_reorder_vendor_id)) return;
   await bellOrWarn(ctx, p, request, 'renotified');
 }
@@ -175,12 +212,18 @@ function stillLow(fresh) {
 
 // The request is derived from the LOCKED configuration, not the scan
 // snapshot: a reorder-quantity or vendor edit between the two must not send
-// the office to the old vendor for the old count (Codex r4 P2).
-async function lockedVendor(trx, p, fresh, scanPricing) {
+// the office to the old vendor for the old count (Codex r4 P2). The vendor's
+// pricing row (SKU, URL, eligibility) is read here too, under the lock,
+// even when the vendor id did not change — the pricing writer recalculates
+// the product before it commits, so the lock can carry a newer SKU/link
+// than any unlocked read, and populated request metadata is never replaced
+// by a later sweep (Codex r9 P2).
+async function lockedVendor(trx, p, fresh) {
   const vendorId = fresh.auto_reorder_vendor_id || null;
-  if (vendorId === (p.auto_reorder_vendor_id || null)) return { vendorId, vendorName: p.vendor_name || null, pricing: scanPricing };
+  const pricing = await vendorPricingFor(trx, p.id, vendorId);
+  if (vendorId === (p.auto_reorder_vendor_id || null)) return { vendorId, vendorName: p.vendor_name || null, pricing };
   const v = vendorId ? await trx('vendors').where({ id: vendorId }).first('name') : null;
-  return { vendorId, vendorName: v?.name || null, pricing: await vendorPricingFor(trx, p.id, vendorId) };
+  return { vendorId, vendorName: v?.name || null, pricing };
 }
 
 // Re-read the product under a row lock right before the insert: a receive /
@@ -188,23 +231,25 @@ async function lockedVendor(trx, p, fresh, scanPricing) {
 // raise a stale request that no later sweep would revisit (Codex r3 P2).
 // Runs in one transaction with the insert so a concurrent receive waits on
 // the lock rather than racing past it.
-async function createRequestLocked(conn, p, scanPricing) {
+async function createRequestLocked(conn, p) {
   return conn.transaction(async (trx) => {
+    await lockProductPricing(trx, p.id);
     const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate()
       .first('inventory_on_hand', 'low_stock_threshold', 'auto_reorder_enabled', 'active', 'reorder_quantity', 'auto_reorder_vendor_id', 'inventory_unit');
     if (!fresh || !stillLow(fresh)) return { deduped: 'no_longer_low' };
-    // The live-request check again, UNDER the lock (pre-push P1): every
-    // creation path (staff, forecast, Intelligence Bar, the dispatcher's
-    // claim) locks this row first, so a request that committed between the
-    // scan and this lock is visible here — the partial unique index only
-    // spans auto rows, so without this read two live requests would survive.
-    const live = await trx('product_restock_requests').where({ product_id: p.id }).whereIn('status', LIVE_STATUSES).first('id', 'source');
+    // The SHARED live-request check again, UNDER the lock (pre-push P1,
+    // Codex r9 P1): every creation path (staff, forecast, Intelligence Bar,
+    // the dispatcher's claim) locks this row first and runs this same read,
+    // so a request that committed between the scan and this lock is visible
+    // here — the partial unique index only spans auto rows, so without this
+    // read two live requests would survive.
+    const live = await findLiveRestockRequest(trx, p.id);
     if (live) return { deduped: live.source === SOURCE ? 'concurrent_auto_request' : 'concurrent_staff_request' };
     const qty = num(fresh.reorder_quantity);
     const unit = fresh.inventory_unit || p.inventory_unit;
     if (!unit) return { unconfigured: 'no_unit' };
     if (!qty || qty <= 0) return { unconfigured: 'no_reorder_quantity' };
-    const vendor = await lockedVendor(trx, p, fresh, scanPricing);
+    const vendor = await lockedVendor(trx, p, fresh);
     const onHand = num(fresh.inventory_on_hand);
     const threshold = num(fresh.low_stock_threshold);
     const now = new Date();
@@ -242,11 +287,10 @@ async function sweepProduct(ctx, p) {
   if (!p.inventory_unit) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_unit' }); return; }
   const reorderQty = num(p.reorder_quantity);
   if (!reorderQty || reorderQty <= 0) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_reorder_quantity' }); return; }
-  const pricing = await vendorPricingFor(conn, p.id, p.auto_reorder_vendor_id);
-  const existing = await conn('product_restock_requests').where({ product_id: p.id }).whereIn('status', LIVE_STATUSES).first();
-  if (existing) { await handleLiveRequest(ctx, p, existing, pricing); return; }
+  const existing = await findLiveRestockRequest(conn, p.id);
+  if (existing) { await handleLiveRequest(ctx, p, existing); return; }
 
-  const outcome = await createRequestLocked(conn, p, pricing);
+  const outcome = await createRequestLocked(conn, p);
   if (outcome.deduped) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: outcome.deduped }); return; }
   if (outcome.unconfigured) { result.unconfigured.push({ productId: p.id, name: p.name, reason: outcome.unconfigured }); return; }
   const { request } = outcome;

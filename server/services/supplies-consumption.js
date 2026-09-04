@@ -52,6 +52,11 @@ const SKIP_WHEN = [
   [(a) => !a.scheduledServiceId, 'no_scheduled_service_id'],
   [(a) => a.isIncompleteVisit, 'incomplete_visit'],
   [(a) => a.visitPerformed === false, 'visit_not_performed'],
+  // An internal-only completion profile (Waves Assessment: a consultation
+  // where treatment products are refused) is not an inspection by name and
+  // detectServiceLine reads it as pest — the completion's own posture is the
+  // authority (Codex r9 P2).
+  [(a) => a.isInternalOnlyCompletion === true, 'internal_only_completion'],
   [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)), 'inspection_service'],
 ];
 
@@ -80,11 +85,12 @@ async function consumeCompletionSupplies(db, {
   technicianId = null,
   isIncompleteVisit = false,
   visitPerformed = true,
+  isInternalOnlyCompletion = false,
   serviceLine = null,
   serviceType = null,
 } = {}) {
   const result = { consumed: [], skipped: [], errors: [] };
-  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, serviceType }));
+  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, isInternalOnlyCompletion, serviceType }));
   if (skip) { result.skipped.push({ reason: skip[1] }); return result; }
 
   let products;
@@ -165,16 +171,22 @@ async function consumeCompletionSupplies(db, {
       // Not retried (the closeout must never depend on a supplies write and
       // stock is advisory) — but not silent either: one deduped bell per
       // (product, visit) so the office adjusts the count instead of the miss
-      // hiding in a log line (Codex r3 P2).
+      // hiding in a log line (Codex r3 P2). notifyAdmin resolves NULL when
+      // it could not persist the notification (its own catch), so the
+      // resolved row is checked like a throw: a lost bell is an error-level
+      // log and a second errors entry, never a silent success
+      // (Codex r11 P2).
       try {
-        await require('./notification-service').notifyAdmin(
+        const bell = await require('./notification-service').notifyAdmin(
           'system',
           `Inventory: ${product.name} was not deducted for a completed visit`,
           `Adjust the count by ${product.per_completion_usage} ${product.inventory_unit || ''} on the Inventory page. Reason: ${err.message}`,
           { bell: true, link: '/admin/inventory', dedupeKey: `supplies-consumption-failed:${product.id}:${scheduledServiceId}`, metadata: { productId: product.id, scheduledServiceId } },
         );
+        if (!bell) throw new Error('notification not persisted');
       } catch (bellErr) {
-        logger.warn(`[supplies-consumption] failure bell not sent for ${product.name}: ${bellErr.message}`);
+        logger.error(`[supplies-consumption] failure bell NOT sent for ${product.name} on visit ${scheduledServiceId} — missed deduction of ${product.per_completion_usage} ${product.inventory_unit || ''}: ${bellErr.message}`);
+        result.errors.push({ productId: product.id, reason: 'failure_bell_not_sent', message: bellErr.message });
       }
     }
   }
