@@ -177,10 +177,10 @@ const VISIT_FAMILY_TYPE_BY_TEMPLATE_KEY = {
 // have no project row — 20260714100000). Returns null when neither owns
 // the token or the guide can't render; the route answers a uniform 404
 // so unknown/expired/unmapped stay indistinguishable.
-// countView: the PAGE route stamps the visit's view inside the read (one
-// statement — see below); the PDF twin is read-only by contract
-// (docs/public-route-contracts.md: no view-analytics writes on that route).
-async function resolvePrepSource(token, { countView = false } = {}) {
+// Read-only. A scheduled-service source carries stampView(): the page
+// route commits the visit's view AFTER a successful render, fenced on the
+// key it rendered (see the handler); the PDF twin never stamps (contract).
+async function resolvePrepSource(token) {
   const now = new Date();
 
   const project = await db('projects').where({ prep_token: token }).first();
@@ -208,28 +208,15 @@ async function resolvePrepSource(token, { countView = false } = {}) {
     };
   }
 
-  // The view stamp and the key read are ONE statement: the manual prep
-  // sender may move an abandoned reservation onto another guide, fenced on
-  // these very columns (prep-guide-sender.js rekeyAbandonedPage), and the
-  // row lock orders the two — a page the customer has opened can never
-  // change guides behind them (GH Codex #3856 r17 P0). A token that is
-  // unknown, expired or keyless matches nothing (404, no view counted).
-  const SERVICE_COLUMNS = [
-    'id', 'customer_id', 'service_type', 'scheduled_date', 'prep_template_key', 'technician_id',
-    'service_address_line1', 'service_address_city', 'service_address_state', 'service_address_zip',
-  ];
-  const live = db('scheduled_services')
+  // A token that is unknown, expired or keyless matches nothing (404).
+  const service = await db('scheduled_services')
     .where({ prep_token: token })
     .whereNotNull('prep_template_key')
-    .where((q) => q.whereNull('prep_expires_at').orWhere('prep_expires_at', '>=', now));
-  const service = countView
-    ? (await live
-      .update({
-        prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
-        prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
-      })
-      .returning(SERVICE_COLUMNS))[0]
-    : await live.first(...SERVICE_COLUMNS);
+    .where((q) => q.whereNull('prep_expires_at').orWhere('prep_expires_at', '>=', now))
+    .first(
+      'id', 'customer_id', 'service_type', 'scheduled_date', 'prep_template_key', 'technician_id',
+      'service_address_line1', 'service_address_city', 'service_address_state', 'service_address_zip',
+    );
   if (!service) return null;
   const tech = service.technician_id
     ? await db('technicians').where({ id: service.technician_id }).first('name')
@@ -254,8 +241,21 @@ async function resolvePrepSource(token, { countView = false } = {}) {
     techName: String(tech?.name || '').trim() || 'your Waves technician',
     serviceAddress,
     viewRow: { scheduled_service_id: service.id },
-    // Already counted by the read above.
-    countView: () => Promise.resolve(),
+    // The view stamp, fenced on the key that was RENDERED: the manual prep
+    // sender may move an abandoned reservation onto another guide, fenced
+    // on these very view columns (prep-guide-sender.js rekeyAbandonedPage /
+    // releasePrepPage), and the row lock orders the two — either this stamp
+    // lands and the re-key matches nothing, or the re-key landed first and
+    // this stamp matches nothing (0), so the handler renders the NEW guide
+    // instead of stamping a view of a page the customer never saw (GH Codex
+    // #3856 r17 P0 + pre-push P1 on 92afc3361). Committed only after a
+    // successful render, so an unrenderable template never pins its token.
+    stampView: () => db('scheduled_services')
+      .where({ id: service.id, prep_template_key: service.prep_template_key })
+      .update({
+        prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
+        prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
+      }),
   };
 }
 
@@ -322,11 +322,29 @@ router.get('/:token', async (req, res) => {
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
 
   try {
-    const source = await resolvePrepSource(token, { countView: true });
+    let source = await resolvePrepSource(token);
     if (!source) return res.status(404).json({ error: 'Not found' });
-
-    const guide = await renderGuideForSource(source);
+    let guide = await renderGuideForSource(source);
     if (!guide) return res.status(404).json({ error: 'Not found' });
+    if (source.stampView) {
+      // Render first, then stamp the view of THAT key. A miss means the key
+      // moved between the read and the stamp — resolve and render once more
+      // so the customer sees the guide the row now carries.
+      let stamped = 0;
+      try {
+        stamped = Number(await source.stampView());
+      } catch (err) {
+        logger.warn(`[prep-public] view stamp failed: ${err.message}`);
+        stamped = -1; // unknown — do not re-resolve on a DB blip
+      }
+      if (stamped === 0) {
+        source = await resolvePrepSource(token);
+        if (!source) return res.status(404).json({ error: 'Not found' });
+        guide = await renderGuideForSource(source);
+        if (!guide) return res.status(404).json({ error: 'Not found' });
+        void source.stampView?.().catch((err) => logger.warn(`[prep-public] view re-stamp failed: ${err.message}`));
+      }
+    }
     const { customer } = source;
     const {
       customerFirstName, typeLabel, serviceDate, techName, propertyAddress, renderedBlocks,
@@ -342,8 +360,10 @@ router.get('/:token', async (req, res) => {
       ip_hash: ipHash,
       user_agent: String(req.get('user-agent') || '').slice(0, 512) || null,
     }).catch((err) => logger.warn(`[prep-public] view log failed: ${err.message}`));
-    void source.countView()
-      .catch((err) => logger.warn(`[prep-public] view count update failed: ${err.message}`));
+    if (source.countView) {
+      void source.countView()
+        .catch((err) => logger.warn(`[prep-public] view count update failed: ${err.message}`));
+    }
 
     return res.json({
       customerFirstName,
