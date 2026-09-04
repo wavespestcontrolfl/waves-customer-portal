@@ -644,7 +644,7 @@ describe('llm call ledger', () => {
       expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
     });
 
-    it('writes one session_turn row per recorded turn carrying that turn\'s delta of the counters, this turn\'s latency and outcome', async () => {
+    it('writes one session_turn row per turn that carries something new — its delta of the counters, a first record, or a new failure — and none for a re-recorded snapshot', async () => {
       const { metrics } = load();
       // first turn: no session row yet → the delta is the whole snapshot
       sessionPrev = null;
@@ -658,16 +658,21 @@ describe('llm call ledger', () => {
       global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 350, output_tokens: 45 } });
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'streaming_failed' });
       expect(turnRows()[1]).toMatchObject({ input_tokens: 100, output_tokens: 5, ok: false, error_code: 'streaming_failed' });
-      // a delayed lower snapshot never goes negative; a failed usage GET stays null, not zero
-      sessionPrev = { input_tokens: 400, cached_input_tokens: null, cache_write_tokens: null, output_tokens: 50, reasoning_tokens: null };
+      // nothing new → no turn row: a delayed lower snapshot, the same failure re-billed from a
+      // runner's finally, a failed usage GET whose outcome the session row already carries
+      sessionPrev = { input_tokens: 400, cached_input_tokens: null, cache_write_tokens: null, output_tokens: 50, reasoning_tokens: null, ok: false, error_code: 'streaming_failed' };
       global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 350, output_tokens: 45 } });
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9' });
-      expect(turnRows()[2]).toMatchObject({ input_tokens: 0, output_tokens: 0 });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'streaming_failed' });
       global.fetch = jest.fn(() => Promise.reject(new Error('network')));
-      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9' });
-      expect(turnRows()[3]).toMatchObject({ input_tokens: null, output_tokens: null });
-      // the session row itself is still the ONE cumulative upsert per turn
-      expect(mockMerge).toHaveBeenCalledTimes(4);
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'streaming_failed' });
+      expect(turnRows()).toHaveLength(2);
+      // a NEW failure on unchanged counters is a turn (its tokens null: the GET failed)
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'session_timeout' });
+      expect(turnRows()).toHaveLength(3);
+      expect(turnRows()[2]).toMatchObject({ ok: false, error_code: 'session_timeout', input_tokens: null });
+      // the session row itself is still the ONE cumulative upsert per record
+      expect(mockMerge).toHaveBeenCalledTimes(6);
       sessionPrev = null;
     });
 

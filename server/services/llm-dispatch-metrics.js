@@ -492,15 +492,24 @@ function messageText(value) {
 // turn rows, so a session live across a window edge contributes only what
 // it did inside the window (GH codex #3869 r2). The read-then-write runs in
 // one transaction under a per-session advisory lock, so two overlapping
-// turns of the same session cannot both subtract the same snapshot.
+// turns of the same session cannot both subtract the same snapshot. A
+// re-record that carries nothing new — a runner's finally re-billing the
+// same snapshot, a retried terminal write, a delayed lower snapshot — writes
+// NO turn row (pre-push audit P1 on #3869): a turn row means the counters
+// advanced, or this is the session's first record, or a failure the session
+// row did not already carry. A turn whose usage GET failed and whose outcome
+// the session row already has is folded into the next snapshot.
 const SESSION_COUNTERS = ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens'];
 function sessionTurnRow(row, prev) {
   const turn = { ...row, row_kind: 'session_turn' };
+  let advanced = false;
   for (const col of SESSION_COUNTERS) {
     // null = this turn's usage GET failed; no number is better than a false zero
     turn[col] = row[col] == null ? null : Math.max(row[col] - Number(prev?.[col] || 0), 0);
+    if (turn[col] > 0) advanced = true;
   }
-  return turn;
+  const newFailure = !row.ok && (prev?.ok !== false || prev.error_code !== row.error_code);
+  return !prev || advanced || newFailure ? turn : null;
 }
 async function upsertSessionRow(row) {
   try {
@@ -509,7 +518,7 @@ async function upsertSessionRow(row) {
     const first = (col) => db.raw(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
     return await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [row.provider_ref]);
-      const prev = await trx('llm_dispatch_log').where({ provider_ref: row.provider_ref, row_kind: 'session' }).first(SESSION_COUNTERS);
+      const prev = await trx('llm_dispatch_log').where({ provider_ref: row.provider_ref, row_kind: 'session' }).first([...SESSION_COUNTERS, 'ok', 'error_code']);
       const id = await writtenId(trx('llm_dispatch_log')
         .insert(row)
         .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
@@ -525,7 +534,8 @@ async function upsertSessionRow(row) {
           output_tokens: greatest('output_tokens'),
           reasoning_tokens: greatest('reasoning_tokens'),
         }));
-      await trx('llm_dispatch_log').insert(sessionTurnRow(row, prev || null));
+      const turn = sessionTurnRow(row, prev || null);
+      if (turn) await trx('llm_dispatch_log').insert(turn);
       return id;
     });
   } catch (err) {
