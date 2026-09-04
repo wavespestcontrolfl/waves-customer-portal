@@ -474,6 +474,18 @@ test('the cap check is an advisory-locked reservation written before the vendor 
   expect(a.place).toHaveBeenCalled();
 });
 
+test('a quotesAtPlace vendor whose confirmed total exceeds the reserved checkout figure past a cap parks post-submit, request ordered (pre-push P0)', async () => {
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { expect(await beforeSubmit(9900)).toEqual({ ok: true }); return { externalOrderNumber: 'S1-11', amountCents: 60000, evidence: { totalSource: 'vendor' } }; }) });
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'over_cap_after_placement' });
+  expect(requestStatus()).toBe('ordered');
+});
+
+test('a quotesAtPlace vendor whose confirmed total is at or under the reserved checkout figure is recorded placed', async () => {
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { await beforeSubmit(9900); return { externalOrderNumber: 'S1-12', amountCents: 9900, evidence: {} }; }) });
+  expect(await run(a)).toMatchObject({ status: 'placed' });
+});
+
 test('vendor total over cap after placement → needs_review, request ordered, bell says do NOT re-order', async () => {
   const a = mockAdapter({ place: jest.fn(async () => ({ externalOrderNumber: 'SM-2', amountCents: 60000, response: {}, evidence: { totalSource: 'vendor' } })) });
   const r = await run(a);

@@ -797,8 +797,15 @@ function parkIfUnpriced(conn, { ctx, pricing, order, vendor, product }) {
 // came out higher and breaks a cap, the order exists but parks for the owner
 // (cancel with the vendor / revoke); the request is ordered. Returns the park
 // result, or null when the final total fits.
-async function parkIfOverCapAfterPlacement(conn, { adapter, ctx, vendor, ledger, placed, finalCents, quoteCents, now, env }) {
-  if (adapter.quotesAtPlace || finalCents == null || finalCents <= (quoteCents ?? 0)) return null;
+// The baseline is whatever the caps already admitted: the pre-submit binding
+// quote, or — for a quotesAtPlace adapter — the amount beforeSubmit reserved
+// on the ledger row. A checkout-quoting vendor whose confirmation comes back
+// higher than the reserved checkout figure is re-checked exactly like a
+// quoted one (pre-push P0): no adapter kind skips the detector.
+async function parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, finalCents, quoteCents, env }) {
+  if (finalCents == null) return null;
+  const admitted = positiveCents(quoteCents) ?? await reservedCents(conn, ledger);
+  if (finalCents <= (admitted ?? 0)) return null;
   const finalCap = await reserveUnderCaps(conn, ledger.id, finalCents, { env });
   if (finalCap.ok) return null;
   return park(conn, { ...ctx, markRequestOrdered: true, reason: 'over_cap_after_placement', message: `${vendor.name} charged ${dollars(finalCents)} for order ${placed.externalOrderNumber || '?'}: ${finalCap.message}.`, amountCents: finalCents, evidence: placed.evidence || null, placed });
@@ -810,11 +817,13 @@ async function parkIfOverCapAfterPlacement(conn, { adapter, ctx, vendor, ledger,
 // overwrite the reservation and drop the order from the monthly cap
 // (pre-push P0). null = nothing positive anywhere: the caller parks.
 const positiveCents = (v) => (Number.isInteger(v) && v > 0 ? v : null);
-async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
-  const known = positiveCents(placed?.amountCents) ?? positiveCents(quoteCents);
-  if (known != null) return known;
+// The amount beforeSubmit reserved on the ledger row (null = nothing reserved).
+async function reservedCents(conn, ledger) {
   const row = await conn('vendor_orders').where({ id: ledger.id }).first('amount_cents');
   return positiveCents(row?.amount_cents == null ? null : Number(row.amount_cents));
+}
+async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
+  return positiveCents(placed?.amountCents) ?? positiveCents(quoteCents) ?? reservedCents(conn, ledger);
 }
 
 // Stages after a committed claim: price → binding total → vendor call →
@@ -855,7 +864,7 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
     const finalCents = await settledFinalCents(conn, { ledger, placed, quoteCents });
     if (finalCents == null) return await park(conn, { ...ctx, markRequestOrdered: true, reason: 'no_final_total', message: `${vendor.name} order ${placed.externalOrderNumber || '?'} was placed but no positive total was confirmed or reserved — verify the charge with the vendor and record it.`, evidence: placed.evidence || null, placed });
-    const overCap = await parkIfOverCapAfterPlacement(conn, { adapter, ctx, vendor, ledger, placed, finalCents, quoteCents, now, env });
+    const overCap = await parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, finalCents, quoteCents, env });
     if (overCap) return overCap;
     return await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
   } catch (err) {
