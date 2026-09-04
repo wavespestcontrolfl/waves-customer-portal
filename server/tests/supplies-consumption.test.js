@@ -23,7 +23,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 const { consumeCompletionSupplies, appliesToLine } = require('../services/supplies-consumption');
 const { notifyAdmin } = require('../services/notification-service');
 
-function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false }) {
+function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false, settledAfterBell = false }) {
   const updates = [];
   const inserts = [];
   const trx = (table) => {
@@ -57,6 +57,7 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
     for (const m of ['whereNotNull', 'where', 'whereRaw', 'whereNull']) q[m] = () => q;
     q.select = async () => products;
     q.update = async (row) => { updates.push({ table, row }); return 1; };
+    q.first = async () => (table === 'product_inventory_movements' && settledAfterBell ? { id: 'mv-race' } : null); // the post-bell settled re-check
     return q;
   };
   db.transaction = async (fn) => fn(trx);
@@ -168,6 +169,17 @@ test('a product whose hand-off bell landed on an earlier attempt is NOT deducted
   expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'handed_off' }]);
   expect(inserts).toHaveLength(0);
   expect(updates).toHaveLength(0);
+});
+
+test('a failure bell that lands after a concurrent retry already deducted the kit is retired right away (Codex r18 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = fakeDb({ products: [sign], throwOnInsert: true, settledAfterBell: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ productId: 'prod-sign', message: 'insert boom' }]);
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  const retired = updates.filter((u) => u.table === 'notifications');
+  expect(retired).toHaveLength(1);
+  expect(retired[0].row.read_at).toBeInstanceOf(Date);
 });
 
 test('duplicate (index ignored the insert) → no decrement', async () => {

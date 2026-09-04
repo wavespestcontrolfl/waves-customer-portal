@@ -905,7 +905,14 @@ async function bellUndispatchable(conn, requestId, notify) {
 }
 
 async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
-  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated' };
+  // The master gate closing between the 6:10 sweep (which stood down its own
+  // bell because this lane would order) and the dispatch is the same
+  // hand-off as a vendor gate: the request gets the sweep's deduped bell
+  // now, not after another silent day (Codex r18 P2).
+  if (!gateEnvValue(GATE)) {
+    const belled = await bellUndispatchable(conn, requestId, notify);
+    return { requestId, skipped: 'gated', ...(belled ? { belled: true } : { bellLost: true }) };
+  }
   const registry = adapters || loadAdapters();
   const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry }));
   if (claim.skipped) {
@@ -968,53 +975,63 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
   return { recovered, bellPending, unrecovered };
 }
 
-async function runVendorOrderDispatch({ conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
-  // Reconciliation runs BEFORE and REGARDLESS of the gate: a 'placing' claim
-  // the dispatcher died on, or a park whose bell never sent, is an order that
-  // may already exist at the vendor — killing the lane must surface it, not
-  // bury it (pre-push P0). Bells first: the one outcome that must not wait
-  // another day.
-  const bells = await reringPendingBells({ conn, notify });
-  const recovered = await recoverStalePlacing({ conn, notify, now });
-  const gated = !gateEnvValue(GATE);
+// The bounded dispatch passes (Codex r3 P2): a request another replica's
+// sweep raised while a slow vendor order was in flight is picked up now, not
+// tomorrow; a pass that finds nothing new ends. A run-level error (the
+// environment is broken for every remaining request) stops the batch with
+// its claims released — job_health records it, tomorrow retries.
+async function dispatchPasses({ conn, notify, adapters, now, env }) {
+  const seen = new Set();
   const results = [];
   let runLevelError = null;
-  // Rescan before releasing the lease (Codex r3 P2): a request another
-  // replica's sweep raised while a slow vendor order was in flight is
-  // picked up now, not tomorrow. Bounded; a pass that finds nothing new ends.
-  const seen = new Set();
-  let rows = [];
-  for (let pass = 0; pass < 3 && !runLevelError && !gated; pass += 1) {
-    rows = (await findDispatchable(conn)).filter((r) => !seen.has(r.id));
+  for (let pass = 0; pass < 3 && !runLevelError; pass += 1) {
+    const rows = (await findDispatchable(conn)).filter((r) => !seen.has(r.id));
     if (!rows.length) break;
     for (const row of rows) {
       seen.add(row.id);
       try {
         results.push(await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env }));
       } catch (err) {
-        // Run-level: the environment is broken for every remaining request —
-        // stop here (claims released), let job_health record it, retry tomorrow.
         runLevelError = err;
         logger.error(`[order-dispatch] run-level failure, batch aborted: ${err.message}`);
         break;
       }
     }
   }
-  const failed = results.filter((r) => r.status === 'failed');
-  const bellsPending = [...bells.pending, ...recovered.bellPending, ...results.filter((r) => r.bellPending).map((r) => r.ledgerId)];
-  logger.info(`[order-dispatch] ${results.filter((r) => r.status === 'placed').length} placed, ${results.filter((r) => r.status === 'needs_review').length} parked, ${failed.length} failed, ${results.filter((r) => r.skipped).length} skipped of ${seen.size}; ${bells.rung.length} bells re-rung, ${bellsPending.length} pending`);
-  if (runLevelError) throw runLevelError;
+  return { results, seen, runLevelError };
+}
+
+// What turns the run red after every request settled: failures, outcomes a
+// vendor call left unrecorded (Codex r2 P1), stale rows that could not be
+// parked, and bells — a parked order or a hand-off nobody was told about.
+function runProblems({ results, recovered, bellsPending }) {
   const problems = [];
+  const failed = results.filter((r) => r.status === 'failed');
   if (failed.length) problems.push(`${failed.length} order(s) failed (${failed.map((f) => f.reason).join(', ')})`);
-  // A vendor call that ran but whose outcome could not be written — the
-  // order may exist with no ledger state and no bell (Codex r2 P1).
   const unrecorded = results.filter((r) => r.status === 'unrecorded');
   if (unrecorded.length) problems.push(`${unrecorded.length} outcome(s) UNRECORDED — reconcile by hand (ledger ${unrecorded.map((r) => r.ledgerId).join(', ')})`);
   if (recovered.unrecovered.length) problems.push(`${recovered.unrecovered.length} stale placing row(s) could not be parked (ledger ${recovered.unrecovered.join(', ')})`);
-  // An undelivered bell is a parked order nobody knows about: red until it lands.
   if (bellsPending.length) problems.push(`${bellsPending.length} bell(s) not delivered, re-rung next run (ledger ${bellsPending.join(', ')})`);
   const bellLost = results.filter((r) => r.bellLost);
   if (bellLost.length) problems.push(`${bellLost.length} hand-off bell(s) not persisted, re-rung next run (request ${bellLost.map((r) => r.requestId).join(', ')})`);
+  return problems;
+}
+
+async function runVendorOrderDispatch({ conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
+  // Reconciliation runs BEFORE and REGARDLESS of the gate: a 'placing' claim
+  // the dispatcher died on, or a park whose bell never sent, is an order that
+  // may already exist at the vendor — killing the lane must surface it, not
+  // bury it (pre-push P0). Bells first: the one outcome that must not wait
+  // another day. A gated run still walks the dispatchable requests: each is
+  // handed off with its bell instead of ordered (Codex r18 P2).
+  const bells = await reringPendingBells({ conn, notify });
+  const recovered = await recoverStalePlacing({ conn, notify, now });
+  const gated = !gateEnvValue(GATE);
+  const { results, seen, runLevelError } = await dispatchPasses({ conn, notify, adapters, now, env });
+  const bellsPending = [...bells.pending, ...recovered.bellPending, ...results.filter((r) => r.bellPending).map((r) => r.ledgerId)];
+  logger.info(`[order-dispatch] ${results.filter((r) => r.status === 'placed').length} placed, ${results.filter((r) => r.status === 'needs_review').length} parked, ${results.filter((r) => r.status === 'failed').length} failed, ${results.filter((r) => r.skipped).length} skipped of ${seen.size}; ${bells.rung.length} bells re-rung, ${bellsPending.length} pending`);
+  if (runLevelError) throw runLevelError;
+  const problems = runProblems({ results, recovered, bellsPending });
   if (problems.length) throw new Error(`vendor order dispatch: ${problems.join('; ')}`);
   return { ...(gated ? { skipped: 'gated' } : {}), results, recovered: recovered.recovered, bells };
 }

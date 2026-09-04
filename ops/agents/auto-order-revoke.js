@@ -103,6 +103,13 @@ async function revoke(row) {
     const changed = !same(locked.external_order_number, row.external_order_number) || !same(locked.amount_cents, row.amount_cents)
       || !same(lockedEvidence.latePlacementAt, parseEvidence(row.evidence).latePlacementAt) || !same(new Date(locked.updated_at).toISOString(), new Date(row.updated_at).toISOString());
     if (changed) throw new Error(`ledger row changed since you read it (now ${locked.status}, #${locked.external_order_number || '—'} ${dollars(locked.amount_cents)}${lockedEvidence.latePlacementAt ? `, order confirmed late at ${lockedEvidence.latePlacementAt}` : ''}) — re-run to decide on the current facts`);
+    // LOCK ORDER ledger → request (the dispatcher's). The request must still
+    // be in flight — open or ordered — BEFORE the ledger is marked: a
+    // request received in between means the stock landed, so there is
+    // nothing to revoke and a revokedAt marker would falsely audit a vendor
+    // cancellation (Codex r18 P2).
+    const req = await trx('product_restock_requests').where({ id: row.restock_request_id }).forUpdate().first('status');
+    if (!req || !new Set(['open', 'ordered']).has(req.status)) throw new Error(`restock request is ${req?.status || 'missing'} — ${req?.status === 'received' ? 'the stock was received; nothing to revoke' : 'not an order in flight'}`);
     const revokedAt = new Date().toISOString();
     await trx('vendor_orders').where({ id: row.id }).update({
       status: 'needs_review',
@@ -110,8 +117,7 @@ async function revoke(row) {
       evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ revokedAt })]),
       updated_at: new Date(),
     });
-    const req = await trx('product_restock_requests').where({ id: row.restock_request_id }).forUpdate().first('status');
-    if (req?.status === 'ordered') await trx('product_restock_requests').where({ id: row.restock_request_id }).update({ status: 'open', updated_at: new Date() });
+    if (req.status === 'ordered') await trx('product_restock_requests').where({ id: row.restock_request_id }).update({ status: 'open', updated_at: new Date() });
     await auditVendorOrder({ vendor_order_id: row.id, restock_request_id: row.restock_request_id, vendor_id: row.vendor_id, adapter: row.adapter, outcome: 'revoked', amount_cents: row.amount_cents, external_order_number: row.external_order_number, reason: `operator revoke (was ${locked.status})`, actor_type: 'technician', trx });
   });
 }

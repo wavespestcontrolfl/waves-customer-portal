@@ -2,7 +2,7 @@
  * procurement/order-dispatch.js — the auto-order dispatcher.
  *
  * Contract:
- *   - master gate off → {skipped:'gated'} before any DB read
+ *   - master gate off → {skipped:'gated', belled} — no claim, the request is handed off
  *   - vendor gate off / no adapter → skipped, NO ledger row
  *   - the ledger claim (status placing) is inserted BEFORE the adapter is
  *     called; a conflicting claim skips (already_claimed) with no call
@@ -109,10 +109,12 @@ const lastLedgerPatch = () => mockState.updates.filter((u) => u.table === 'vendo
 const ledgerStatus = () => mockState.updates.filter((u) => u.table === 'vendor_orders').map((u) => u.row.status).filter(Boolean).pop();
 const requestStatus = () => mockState.updates.filter((u) => u.table === 'product_restock_requests').map((u) => u.row.status).pop();
 
-test('master gate off → skipped before any claim', async () => {
+test('master gate off → no claim; the request is handed off with the sweep\'s deduped bell (Codex r18 P2)', async () => {
   process.env.GATE_AUTO_ORDER = 'false';
   const a = mockAdapter();
-  expect(await run(a)).toEqual({ requestId: 'req-1', skipped: 'gated' });
+  expect(await run(a)).toEqual({ requestId: 'req-1', skipped: 'gated', belled: true });
+  expect(notify).toHaveBeenCalledTimes(1);
+  expect(notify.mock.calls[0][3].dedupeKey).toMatch(/^auto-reorder:/);
   expect(mockState.ledgerRows).toHaveLength(0);
   expect(a.place).not.toHaveBeenCalled();
 });
