@@ -93,8 +93,17 @@ const updatesOf = (table) => (tables[table]?.calls || []).filter(([m]) => m === 
 const closesOf = (table) => updatesOf(table).filter((p) => p.status);
 const insertsOf = (table) => (tables[table]?.calls || []).filter(([m]) => m === 'insert').map(([, p]) => p);
 
+// The fixtures are dated 2026-09-02 and the reconciler parks a notice older
+// than 48h at first decision — on the WALL clock, so the whole auto-apply
+// battery drifted into stale_notice at 17:00Z on 2026-09-04. Every decision
+// runs on this fixture clock; the stale test still builds its notice relative
+// to it.
+const FIXTURE_NOW = new Date('2026-09-02T18:00:00Z').getTime();
+afterAll(() => { if (typeof Date.now.mockRestore === 'function') Date.now.mockRestore(); });
+
 beforeEach(() => {
   jest.clearAllMocks();
+  jest.spyOn(Date, 'now').mockReturnValue(FIXTURE_NOW);
   tables = { inbound_payment_notices: { firsts: [], returning: [], calls: [] }, emails: { firsts: [], returning: [], calls: [] } };
   db.mockImplementation((table) => builder(table));
   delete process.env.GATE_ZELLE_NOTICE_RECONCILE;
