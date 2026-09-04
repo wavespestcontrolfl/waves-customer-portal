@@ -103,8 +103,16 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
     && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
     && !(root.estimate_id && repeat.estimate_id && String(root.estimate_id) !== String(repeat.estimate_id));
   if (!rootOurs) return repeat;
-  const bridged = await bridgeLeadFunnelStage(root.id, 'won', database, { onlyIfLead: { ...identityOf(root), status: root.status } });
-  const rootRow = bridged.updated ? null : await database('ad_service_attribution').where({ lead_id: root.id }).first('funnel_stage');
+  const onlyIfLead = { ...identityOf(root), status: root.status };
+  const bridged = await bridgeLeadFunnelStage(root.id, 'won', database, { onlyIfLead });
+  // A root row already at booked / completed counts as settled only under
+  // the SAME lead claim the advance carried — the fallback read must not
+  // accept an old stage on a root staff re-identified since (codex r30 P1).
+  const rootRow = bridged.updated ? null : await database('ad_service_attribution').where({ lead_id: root.id })
+    .whereExists(function leadStillMatches() {
+      this.select(1).from('leads').whereRaw('leads.id = ad_service_attribution.lead_id').where(onlyIfLead).whereNull('deleted_at');
+    })
+    .first('funnel_stage');
   const settled = !!bridged.updated || (!!rootRow && FUNNEL_STAGE_RANK[rootRow.funnel_stage] >= FUNNEL_STAGE_RANK.booked);
   if (!settled) return repeat;
   await database('ad_service_attribution').where({ lead_id: repeat.id }).whereNot({ funnel_stage: 'completed' }).del();

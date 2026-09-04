@@ -1316,15 +1316,23 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   describe('settleRepeatFunnelRow — where a converted repeat\'s win lands when the bridge found no row (codex r22 P2, r24 P1, r27 P1/P2)', () => {
     const repeat = (id, extra = {}) => ({ id, lead_type: 'quote_wizard', status: 'won', customer_id: 'c1', phone: '9415550142', email: 'a@example.com', estimate_id: null, extracted_data: { duplicate_of_lead_id: 'root' }, ...extra });
     // `funnelRows`: lead id → the funnel_stage its ad_service_attribution row
-    // sits at. Deletes on that table are recorded on `database._deleted`.
-    const dbOf = (rows, funnelRows = {}) => {
+    // sits at. Deletes on that table are recorded on `database._deleted`; the
+    // settled-root read's lead claim (whereExists) is recorded on
+    // `database._claims`, and `rootChanged` makes that claim fail (codex r30).
+    const dbOf = (rows, funnelRows = {}, { rootChanged = false } = {}) => {
       const deleted = [];
+      const claims = [];
       const database = (table) => ({
         where: (a, b) => {
           const q = {
             first: async () => (table === 'ad_service_attribution'
-              ? (a.lead_id in funnelRows ? { id: `asa-${a.lead_id}`, funnel_stage: funnelRows[a.lead_id] } : null)
+              ? (a.lead_id in funnelRows && !(q._claimed && rootChanged) ? { id: `asa-${a.lead_id}`, funnel_stage: funnelRows[a.lead_id] } : null)
               : rows[typeof a === 'string' ? b : a.id] || null),
+            whereExists: (fn) => {
+              const sub = {};
+              const bld = { select: () => bld, from: (t) => { sub.from = t; return bld; }, whereRaw: (r) => { sub.whereRaw = r; return bld; }, where: (c) => { sub.where = c; return bld; }, whereNull: (c) => { sub.whereNull = c; return bld; } };
+              fn.call(bld); claims.push(sub); q._claimed = true; return q;
+            },
             whereNot: (c) => { q._not = c; return q; },
             del: async () => { deleted.push({ table, where: a, not: q._not }); return 1; },
           };
@@ -1332,6 +1340,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
         },
       });
       database._deleted = deleted;
+      database._claims = claims;
       return database;
     };
     const ROOT_CLAIM = { onlyIfLead: { customer_id: 'c1', phone: '9415550142', email: null, estimate_id: null, status: 'contacted' } };
@@ -1376,7 +1385,18 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     test('a root row ALREADY at booked (a replayed conversion: the monotonic bridge updates 0 rows) is settled — the repeat is not rebuilt into a second row (codex r28 P1)', async () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
       bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 0 });
-      await expect(settleRepeatFunnelRow(dbOf(rows, { root: 'booked' }), 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      const database = dbOf(rows, { root: 'booked' });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      // The settled read carries the same lead claim as the advance.
+      expect(database._claims).toEqual([{ from: 'leads', whereRaw: 'leads.id = ad_service_attribution.lead_id', where: ROOT_CLAIM.onlyIfLead, whereNull: 'deleted_at' }]);
+    });
+
+    test('a pre-booked root row is NOT settled once the root was re-identified since the read (the claimed read finds nothing) — the repeat carries its own row (codex r30 P1)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 0 });
+      const database = dbOf(rows, { root: 'booked' }, { rootChanged: true });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      expect(database._deleted).toEqual([]);
     });
 
     test('an unlinked open root whose CURRENT contact matches the repeat is ours (the accept path\'s rule); a root with NO funnel row at all falls back to the repeat\'s own row', async () => {
