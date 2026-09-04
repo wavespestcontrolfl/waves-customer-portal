@@ -309,6 +309,19 @@ describe('interrupt(detail) — the record is what the caller heard', () => {
     expect(stat.interruptWithoutFollowupTranscript).toBe(true);
   });
 
+  test('a hang-up inside the window closes the watch as missing follow-up (codex r9 P2)', async () => {
+    const { convo, stat } = convoWithSpokenTurn();
+    convo.say('Let me check.');
+    convo.interrupt({ utteranceUntilInterrupt: 'Let me', durationUntilInterruptMs: 200 });
+    jest.advanceTimersByTime(300);
+    convo.leadCaptured = true; // keep the hangup capture floor out of this test
+    const p = convo.end('caller_hangup');
+    jest.advanceTimersByTime(5000);
+    await p;
+    expect(stat.interruptWithoutFollowupTranscript).toBe(true);
+    expect(convo._interruptFollowupTimer).toBeNull();
+  });
+
   test('a caller prompt inside the window clears the watch', async () => {
     const { convo, stat } = convoWithSpokenTurn();
     convo.say('Let me check.');

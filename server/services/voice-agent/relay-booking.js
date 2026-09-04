@@ -773,7 +773,16 @@ async function requestBookingText(input = {}, ctx = {}) {
   // customer, tier, slot, hours, account, service, property, address, live
   // slot re-check) ran as production; only the review-card write is skipped.
   // The row-level barrier just below stays behind it.
-  if (ctx.sandbox === true) return require('./relay-tools').sandboxDryRunText('request_booking', input, ctx);
+  // The in-memory one-request-per-call latch is simulated too (codex r9 P2):
+  // production sets it after the commit and refuses a retry, so a bake-off
+  // must see the same refusal — a model that re-calls request_booking after
+  // a success is exactly the behaviour the sandbox exists to catch. Safe:
+  // the capture floor and capture_lead's card back-fill both stop at the
+  // sandbox boundary, so nothing reads the latch to write.
+  if (ctx.sandbox === true) {
+    if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(null);
+    return require('./relay-tools').sandboxDryRunText('request_booking', input, ctx);
+  }
   let callLogId = null;
   if (ctx.callSid) {
     try {

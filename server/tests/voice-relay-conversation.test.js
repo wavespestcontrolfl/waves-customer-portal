@@ -452,13 +452,20 @@ describe('RelayConversation — explicit end after capture', () => {
     let IsolatedConvo;
     let stat;
     let firstStamp = null;
+    let stampRound = null;
     jest.isolateModules(() => {
       let call = 0;
       jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
         return {
           messages: {
             stream: () => ({
-              once: (event, cb) => { if (event === 'text') { cb(); if (firstStamp == null) firstStamp = stat.firstTokenAt; } },
+              on: (event, cb) => {
+                if (event !== 'streamEvent') return;
+                cb({ type: 'message_start' }); // no content yet — must not stamp
+                if (call === 0) expect(stat.firstTokenAt).toBeNull();
+                cb({ type: 'content_block_start' }); // round 1's block is tool_use
+                if (firstStamp == null) { firstStamp = stat.firstTokenAt; stampRound = call + 1; }
+              },
               finalMessage: async () => {
                 call += 1;
                 await new Promise((r) => setTimeout(r, 5));
@@ -483,6 +490,7 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(stat.toolCount).toBe(1);
     expect(firstStamp).not.toBeNull();
     expect(stat.firstTokenAt).toBe(firstStamp); // round 2's first token did not overwrite it
+    expect(stampRound).toBe(1); // stamped by round 1's tool_use block, not deferred to the text round
     expect(stat.modelMs).toBeGreaterThanOrEqual(8); // two ≥5ms rounds
   });
 

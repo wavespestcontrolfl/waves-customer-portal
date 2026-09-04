@@ -1070,9 +1070,11 @@ class RelayConversation {
       this._playing = [];
     }
     clearTimeout(this._interruptFollowupTimer);
+    this._interruptFollowupStat = stat;
     this._interruptFollowupTimer = setTimeout(() => {
       this._interruptFollowupTimer = null;
-      if (!this.ended) stat.interruptWithoutFollowupTranscript = true;
+      this._interruptFollowupStat = null;
+      stat.interruptWithoutFollowupTranscript = true;
     }, INTERRUPT_FOLLOWUP_MS);
     this._interruptFollowupTimer.unref?.();
   }
@@ -1473,9 +1475,12 @@ class RelayConversation {
           },
           { signal: this._controller.signal }
         );
-        // First-token latency (test doubles expose only finalMessage).
-        // Once per ROUND — the turn keeps its FIRST token, not the last round's.
-        stream.once?.('text', () => { stat.firstTokenAt ??= now(); });
+        // First-token latency (test doubles expose only finalMessage). The
+        // first streamed CONTENT BLOCK, not the first text event: a round that
+        // opens with tool_use has produced output, and stamping only text
+        // would charge the tool's latency to the model (codex r9 P2). The
+        // turn keeps its FIRST stamp, not the last round's.
+        stream.on?.('streamEvent', (ev) => { if (ev?.type === 'content_block_start') stat.firstTokenAt ??= now(); });
         msg = await stream.finalMessage();
       } catch (err) {
         if (streamTimedOut) {
@@ -1578,8 +1583,16 @@ class RelayConversation {
     if (this.ended) return;
     this.ended = true;
     this.interrupt();
-    clearTimeout(this._interruptFollowupTimer);
+    // A barge-in the caller never followed with speech before hanging up is
+    // still an interrupt without a follow-up transcript (codex r9 P2): close
+    // the pending watch as "missing" rather than dropping it, so abrupt
+    // hang-ups do not vanish from the metric.
+    if (this._interruptFollowupTimer) {
+      clearTimeout(this._interruptFollowupTimer);
+      if (this._interruptFollowupStat) this._interruptFollowupStat.interruptWithoutFollowupTranscript = true;
+    }
     this._interruptFollowupTimer = null;
+    this._interruptFollowupStat = null;
 
     // Drain the serialized prompt/tool chain BEFORE the capture floor runs. If
     // the caller hung up while executeTool('capture_lead') was mid-write, this
