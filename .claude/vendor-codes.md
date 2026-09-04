@@ -2,7 +2,7 @@
 
 Stable integer codes for referencing vendors in seed migrations. The UUID `vendors.id` is the FK; the `code` is the stable human-readable handle. If a vendor is renamed or replaced, edit the vendor row — the code stays.
 
-Codes assigned in original insertion order from `20260401000019_inventory.js:50-73`. Do not reorder. Append new vendors with `code = 24, 25, ...`.
+Codes assigned in original insertion order from `20260401000019_inventory.js:50-73`. Do not reorder. Append new vendors with `code = 25, 26, ...`.
 
 | Code | Vendor                    | Type                  |
 |------|---------------------------|-----------------------|
@@ -29,6 +29,7 @@ Codes assigned in original insertion order from `20260401000019_inventory.js:50-
 | 21   | BWI Companies             | distributor           |
 | 22   | Helena Agri-Enterprises   | distributor           |
 | 23   | TruGreen                  | competitor_reference  |
+| 24   | Gemplers                  | online                |
 
 ---
 

@@ -4420,7 +4420,8 @@ describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails
       reason: 'all_providers_failed',
       failures: [
         { provider: 'anthropic', model: 'a', reason: 'anthropic_529' },
-        { provider: 'openai', model: 'o', reason: 'ungrounded_novel_term:one-time (response truncated at max_tokens=2000)' },
+        // a truncated leg fails in the adapter as <provider>_incomplete before any validator runs
+        { provider: 'openai', model: 'o', reason: 'openai_incomplete' },
       ],
     }));
     let state = useDb(baseResponses());

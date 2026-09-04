@@ -306,7 +306,7 @@ const LANES = [
   L('form_filler', 'Backlink browser form filler (vision)', 'seo/browser-form-filler.js', 'reason', E('MODEL_SIGNUP_FILLER', T('FLAGSHIP'))),
 
   // ── Deep audit ──
-  L('sms_verifier', 'SMS draft fact-check verifier', 'sms-draft-verifier.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
+  L('sms_verifier', 'SMS draft fact-check verifier', 'sms-draft-verifier.js, sms-shadow-drafter.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('shadow_judge', 'SMS shadow judge', 'sms-shadow-judge.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('intent_composer', 'Estimator intent composer', 'estimator-engine/intent-composer.js', 'deep', E('ESTIMATOR_ENGINE_MODEL', T('DEEP'), { live: true }), P('deepAnalysis', 'fallback'), { inbound: true, note: 'prompt carries the call transcript, SMS thread and customer profile' }),
   L('fact_check_gate', 'Blog fact-check gate', 'content/fact-check-gate.js', 'deep', E('MODEL_FACTCHECK', P('deepAnalysis', 'primary')), P('deepAnalysis', 'fallback')),

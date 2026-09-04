@@ -235,6 +235,19 @@ describe('create_restock_request', () => {
     });
   });
 
+  test('a live request of any source (the sweep\'s here) under the product lock → reported, no twin inserted (Codex r9 P1)', async () => {
+    const mutations = useDb({
+      products_catalog: [TRACKED_PRODUCT],
+      product_restock_requests: [{ id: 'req-auto', product_id: 'prod-1', status: 'open', source: 'auto_reorder', requested_quantity: 256, unit: 'fl_oz' }],
+    });
+    const result = await executeProcurementTool('create_restock_request', {
+      product_name: 'Bifen', quantity: 128, priority: 'high', confirmed: true,
+    });
+    expect(result.error).toMatch(/already open/);
+    expect(result.existing_request).toMatchObject({ id: 'req-auto', source: 'auto_reorder', requested_quantity: 256 });
+    expect(mutations.some(m => m.table === 'product_restock_requests' && m.op === 'insert')).toBe(false);
+  });
+
   test('rejects a malformed needed_by date', async () => {
     const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
     const result = await executeProcurementTool('create_restock_request', {

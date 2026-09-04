@@ -11,7 +11,8 @@ jest.mock('../middleware/auth', () => ({
 jest.mock('../models/db', () => jest.fn());
 
 jest.mock('../services/referral-engine', () => ({
-  enrollPromoter: jest.fn(async () => ({ promoter: { id: 'promoter-1', first_name: 'Taylor', customer_email: 'taylor@waves.test' } })),
+  resolvePromoter: jest.fn(async () => ({ promoter: { id: 'promoter-1', first_name: 'Taylor', customer_email: 'taylor@waves.test' } })),
+  findHouseholdPromoter: jest.fn(async () => null),
   submitReferral: jest.fn(),
   getSettings: jest.fn(async () => ({ referee_discount_cents: 2500 })),
   getPromoterReferralLink: jest.fn(() => 'https://portal.wavespestcontrol.com/r/WAVES-J4KM'),
@@ -41,14 +42,19 @@ const referralEngine = require('../services/referral-engine');
 let recordedInserts = [];
 let recordedUpdates = [];
 let recordedDeletes = [];
-function installDb({ firstResults = {} } = {}) {
+let recordedWhereIns = [];
+function installDb({ firstResults = {}, rows = {} } = {}) {
   recordedInserts = [];
   recordedUpdates = [];
   recordedDeletes = [];
+  recordedWhereIns = [];
   const makeChain = (table) => {
     const chain = {
-      where() { return chain; },
+      where(arg) { if (typeof arg === 'function') arg.call(chain); return chain; },
       whereRaw() { return chain; },
+      orWhere() { return chain; },
+      orWhereIn(col, vals) { recordedWhereIns.push({ table, col, vals }); return chain; },
+      orderBy() { return Promise.resolve(rows[table] ?? []); },
       first() { return Promise.resolve(firstResults[table] ?? null); },
       insert(row) {
         recordedInserts.push({ table, row });
@@ -102,7 +108,7 @@ describe('referral phone validation', () => {
 
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'Enter a valid phone number' });
-    expect(referralEngine.enrollPromoter).not.toHaveBeenCalled();
+    expect(referralEngine.resolvePromoter).not.toHaveBeenCalled();
     expect(referralEngine.submitReferral).not.toHaveBeenCalled();
   });
 
@@ -111,7 +117,7 @@ describe('referral phone validation', () => {
 
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'Enter a valid phone number' });
-    expect(referralEngine.enrollPromoter).not.toHaveBeenCalled();
+    expect(referralEngine.resolvePromoter).not.toHaveBeenCalled();
   });
 });
 
@@ -267,5 +273,74 @@ describe('POST /api/referrals/invite-email — atomic dedupe', () => {
     const res = await post('/api/referrals/invite-email', { email: 'taylor.new@waves.test' });
     expect(res.status).toBe(400);
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /stats — a multi-property sibling sees the household promoter GET / resolves for it', () => {
+  test('own row missing → the account-scoped household promoter fills the card (read-only, never enrolls)', async () => {
+    installDb({ firstResults: { referral_promoters: null } });
+    referralEngine.findHouseholdPromoter.mockResolvedValueOnce({ id: 'promo-h', referral_code: 'WAVES-HOUSE01', total_referrals_sent: 2, total_earned_cents: 2500 });
+    const res = await fetch(`${base}/api/referrals/stats`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.enrolled).toBe(true);
+    expect(body.referralCode).toBe('WAVES-HOUSE01');
+    expect(body.totalReferrals).toBe(2);
+    expect(referralEngine.findHouseholdPromoter).toHaveBeenCalledWith('cust-1');
+    expect(recordedInserts).toHaveLength(0);
+  });
+
+  test('no own row and no household promoter → enrolled:false, nothing written', async () => {
+    installDb({ firstResults: { referral_promoters: null } });
+    const res = await fetch(`${base}/api/referrals/stats`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).enrolled).toBe(false);
+    expect(recordedInserts).toHaveLength(0);
+  });
+
+  test('an own row wins — the household read never runs', async () => {
+    installDb({ firstResults: { referral_promoters: { id: 'promo-own', referral_code: 'WAVES-OWN00001' } } });
+    referralEngine.findHouseholdPromoter.mockClear();
+    const body = await (await fetch(`${base}/api/referrals/stats`)).json();
+    expect(body.referralCode).toBe('WAVES-OWN00001');
+    expect(referralEngine.findHouseholdPromoter).not.toHaveBeenCalled();
+  });
+});
+
+describe('household sibling on the Refer tab (GH codex #3850 r2)', () => {
+  const household = { id: 'promo-h', customer_id: 'cust-owner', first_name: 'Taylor', referral_code: 'WAVES-HOUSE01', referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-J4KM' };
+
+  test('GET / lists the owner legacy referrals (promoter_id never backfilled) alongside the sibling ones', async () => {
+    installDb({ rows: { referrals: [{ id: 'r-legacy', referee_name: 'Pat', status: 'pending', created_at: '2026-01-01' }] } });
+    referralEngine.resolvePromoter.mockResolvedValueOnce({ promoter: household, household: true });
+    const res = await fetch(`${base}/api/referrals`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.referralCode).toBe('WAVES-HOUSE01');
+    expect(body.referrals.map((r) => r.id)).toEqual(['r-legacy']);
+    expect(recordedWhereIns).toContainEqual({ table: 'referrals', col: 'referrer_customer_id', vals: ['cust-1', 'cust-owner'] });
+  });
+
+  test('/invite texts the friend under the acting sibling name, with the household code', async () => {
+    installDb({ firstResults: { customers: { id: 'cust-1', first_name: 'Sam', email: 'sam@example.com' } } });
+    referralEngine.resolvePromoter.mockResolvedValueOnce({ promoter: household, household: true });
+    const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderRequiredSmsTemplate.mockResolvedValueOnce('body');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+    const res = await post('/api/referrals/invite', { phone: '(941) 555-0123', friendName: 'Jo' });
+    expect(res.status).toBe(200);
+    expect(renderRequiredSmsTemplate).toHaveBeenCalledWith('referral_invite', expect.objectContaining({
+      referrer_name: 'Sam',
+      referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-J4KM',
+    }), expect.objectContaining({ entity_id: 'promo-h' }));
+  });
+  test('POST / submits under the household promoter but names the acting sibling to the friend', async () => {
+    installDb({ firstResults: { customers: { id: 'cust-1', first_name: 'Sam', email: 'sam@example.com' } } });
+    referralEngine.resolvePromoter.mockResolvedValueOnce({ promoter: household, household: true });
+    referralEngine.submitReferral.mockResolvedValueOnce({ id: 'ref-1', referee_name: 'Jo', status: 'contacted', sms_sent: true, referee_phone: '+19415550123', created_at: '2026-09-03' });
+    const res = await post('/api/referrals', { name: 'Jo', phone: '(941) 555-0123' });
+    expect(res.status).toBe(201);
+    expect(referralEngine.submitReferral).toHaveBeenCalledWith('promo-h', expect.objectContaining({ referrerName: 'Sam', source: 'portal' }));
   });
 });

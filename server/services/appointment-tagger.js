@@ -251,6 +251,7 @@ class AppointmentTagger {
   async generateWDOBriefAI(service, rc) {
     try {
       const resp = await dispatchWithFallback(MODELS.TEXT_POLICIES.deepAnalysis, {
+        laneId: 'wdo_appt_brief',
         // Documented DEEP floor — MODEL_DEEP may point at a thinking model
         // (fable line) where thinking spends from the same token budget.
         maxTokens: 4096,

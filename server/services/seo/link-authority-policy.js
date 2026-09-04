@@ -111,8 +111,10 @@ function applyEnvTightening(policy, env = process.env) {
   return { policy: effective, overrides };
 }
 
-async function loadPolicy(db, { env = process.env } = {}) {
-  const row = await db('seo_link_policy').where({ id: 1 }).first();
+// `lock`: read FOR UPDATE — a writer deciding under the policy (the send claim) serializes with `updatePolicy`, which
+// locks the same row, so a tightening committed during the claim is seen by it (or waits for it), never raced past
+async function loadPolicy(db, { env = process.env, lock = false } = {}) {
+  const row = await (lock ? db('seo_link_policy').where({ id: 1 }).forUpdate().first() : db('seo_link_policy').where({ id: 1 }).first());
   const stored = normalizePolicyRow(row);
   const { policy, overrides } = applyEnvTightening(stored, env);
   return { stored, policy, overrides, updated_at: row?.updated_at || null, updated_by: row?.updated_by || null };
@@ -272,6 +274,12 @@ function requiredInstances(path) {
   return out;
 }
 
+// A SUBMIT-FIRST outreach path (§6.4 / §7): the pitch follows the publisher's acquire step — so the flag matters only
+// where that step EXISTS. An outreach path with no `execution:-` instance (no account, not a content submission) has
+// nothing to submit first and sends like any send-first path whatever `execution_after_send` reads.
+const submitFirst = (path) => OUTREACH_ACQUISITION_TYPES.includes(path.acquisition_type) && path.execution_after_send === false
+  && requiredInstances(path).some((i) => i.dimension === 'execution' && i.instance_kind === '-');
+
 // Number(null) is 0 and Number('') is 0: a missing signal must read as NaN,
 // never as a passing zero.
 const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
@@ -406,6 +414,6 @@ module.exports = {
   POLICY_FIELDS, POLICY_FIELD_NAMES, LEVELS, PG_INT_MAX, MEMBERSHIP_TYPES, BOOLEAN_FLAGS,
   DEFAULT_OUTREACH_DAILY_CAP, outreachDailyCeiling,
   normalizePolicyRow, applyEnvTightening, loadPolicy, updatePolicy, parseField,
-  requiredInstances, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
+  requiredInstances, submitFirst, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
   DIMENSION_INPUT_FIELDS, floorInputs, floorInputsHash, decisionInputs, decisionInputsHash,
 };

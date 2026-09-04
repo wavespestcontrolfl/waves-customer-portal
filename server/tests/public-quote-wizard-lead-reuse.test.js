@@ -47,8 +47,10 @@ describe('findPriorOpenWizardLeadId', () => {
     expect(calls.whereRaw[4][1]).toEqual(OPEN_ESTIMATE_STATUSES);
     // ...and a lead whose MIRRORED wizard draft (estimate_data.lead_id, no
     // FK until send/view) was declined, expired or archived is not a live
-    // courtship either (codex r24 P1).
-    expect(calls.whereRaw[5][0]).toMatch(/NOT EXISTS \(SELECT 1 FROM estimates e WHERE e\.estimate_data->>'lead_id' = leads\.id::text AND \(e\.archived_at IS NOT NULL OR e\.status NOT IN \(\?, \?, \?, \?\)\)\)/);
+    // courtship either (codex r24 P1) — judged on the LATEST mirror, so a
+    // newer open draft after a closed one keeps the lead a live target
+    // (codex r26 P1).
+    expect(calls.whereRaw[5][0]).toMatch(/NOT EXISTS \(SELECT 1 FROM estimates e WHERE e\.id = \(SELECT n\.id FROM estimates n WHERE n\.estimate_data->>'lead_id' = leads\.id::text ORDER BY n\.created_at DESC, n\.id DESC LIMIT 1\) AND \(e\.archived_at IS NOT NULL OR e\.status NOT IN \(\?, \?, \?, \?\)\)\)/);
     expect(calls.whereRaw[5][1]).toEqual(OPEN_ESTIMATE_STATUSES);
     const [col, op, cutoff] = calls.where[1];
     expect([col, op]).toEqual(['created_at', '>']);
@@ -148,6 +150,9 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // a keeper that filed as a duplicate meanwhile loses the row this request
     // added (codex r14 P1) — on both the current-touch and root-repair paths.
     expect(src).toMatch(/\}\)\.onConflict\('lead_id'\)\.ignore\(\)\.returning\('id'\);\n\s+stampedId = stamped \? stamped\.id : null;/);
+    // A retry after a partial run (insert landed, reconcile did not) adopts
+    // the existing row at the inserted stage and reconciles it (codex r26 P1).
+    expect(src).toMatch(/if \(!stampedId && keeperId && \(duplicateOfLeadId \|\| touch\)\) \{\n[\s\S]*?const existing = await db\('ad_service_attribution'\)\.where\(\{ lead_id: keeperId, funnel_stage: stampedStage \}\)\.first\('id'\);\n\s+stampedId = existing \? existing\.id : null;\n\s+\}\n\s+if \(stampedId\) \{/);
     // The drop is one statement conditioned on the keeper STILL being
     // duplicate and the row STILL at its repair stage, so a promotion that
     // advanced the row between the read and the delete keeps it (codex r19 P1).
@@ -160,7 +165,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(src).toMatch(/\} else if \(keeper && LEAD_STATUS_TO_FUNNEL_STAGE\[keeper\.status\]\) \{\n\s+await bridgeLeadFunnelStage\(keeperId, keeper\.status, db\);/);
     // A submission that adds properties is a wider inquiry, never a repeat
     // (codex r10 P1) — on both paths.
-    expect(src).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
+    expect(src).toMatch(/duplicateOfLeadId = !dedupeOn \? stored : widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
     // After the label lands (either path) the target is re-checked: a
     // target the office closed in the window makes this a fresh inquiry,
     // reopened on THIS row only (codex r12 P1).
@@ -175,7 +180,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // chain: this row keeps its marker, no second 'new' lead (codex r20 P1).
     expect(src).toMatch(/const root = target && target\.status === 'duplicate' && !target\.deleted_at \? await followDuplicateLink\(db, target\) : null;\n\s+if \(root && root\.id !== target\.id && root\.id !== lead\.id\) \{\n\s+ancestryOpen = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: root\.id \}\);/);
     expect(src).toMatch(/if \(!targetOpen && !ancestryOpen\) \{/);
-    expect(src).toMatch(/if \(!lead && !additionalProperties\.length\) \{\n\s+duplicateOfLeadId = await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
+    expect(src).toMatch(/if \(!lead && !additionalProperties\.length\) \{\n\s+duplicateOfLeadId = dedupeOn \? await findPriorOpenWizardLeadId\(db, \{ email: contactEmail/);
     // The replace path carries the marker forward...
     expect(src).toMatch(/'duplicate_of_lead_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'duplicate_of_lead_id'/);
     // ...and then the predicate is re-run on the new fields (codex r4 P1): a
@@ -188,7 +193,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // The stored additional-property list counts as well as the request's
     // (codex r12 P1).
     expect(block).toMatch(/const widerInquiry = additionalProperties\.length > 0 \|\| \(parseExtracted\(lead\.extracted_data\)\?\.additional_properties\?\.length > 0\);/);
-    expect(block).toMatch(/duplicateOfLeadId = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: lead\.id, beforeCreatedAt: lead\.created_at \}\)/);
+    expect(block).toMatch(/duplicateOfLeadId = !dedupeOn \? stored : widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: lead\.id, beforeCreatedAt: lead\.created_at \}\)/);
     expect(block).toMatch(/if \(duplicateOfLeadId !== stored\)/);
     // The relabel is scoped to the status just read (codex r9 P1): a staff
     // transition in between wins and this public retry updates 0 rows.
@@ -201,8 +206,12 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // it while the relabel was in flight) — the root carries the prospect
     // (codex r14 P1).
     // ...in ONE statement conditioned on the row still carrying this
-    // request's label, marker and typed identity (codex r24 P2).
-    expect(block).toMatch(/if \(relabelled && duplicateOfLeadId\) \{[\s\S]*?await db\('ad_service_attribution'\)\n\s+\.where\(\{ lead_id: lead\.id, funnel_stage: 'lead' \}\)\n\s+\.whereExists\(db\('leads'\)\.select\(db\.raw\('1'\)\)\.where\(\{ id: lead\.id, status: 'duplicate' \}\)\.whereRaw\("extracted_data->>'duplicate_of_lead_id' = \?", \[duplicateOfLeadId\]\)\.modify\(scopedToTypedIdentity\)\)\n\s+\.del\(\);/);
+    // request's label, marker and typed identity (codex r24 P2), and
+    // whenever the row carries the desired label — not only when THIS
+    // request wrote it — so a retry after a committed relabel + failed
+    // delete finishes the cleanup (codex r26 P2).
+    expect(block).not.toMatch(/if \(relabelled && duplicateOfLeadId\)/);
+    expect(block).toMatch(/if \(dedupeOn && duplicateOfLeadId\) \{[\s\S]*?await db\('ad_service_attribution'\)\n\s+\.where\(\{ lead_id: lead\.id, funnel_stage: 'lead' \}\)\n\s+\.whereExists\(db\('leads'\)\.select\(db\.raw\('1'\)\)\.where\(\{ id: lead\.id, status: 'duplicate' \}\)\.whereRaw\("extracted_data->>'duplicate_of_lead_id' = \?", \[duplicateOfLeadId\]\)\.modify\(scopedToTypedIdentity\)\)\n\s+\.del\(\);/);
     // ...and a relabel that did not land leaves the request on the marker
     // the row actually carries (pre-push P1 on r9).
     // ...re-read from the database, not the marker this request read before
@@ -212,6 +221,14 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(block).not.toMatch(/duplicateOfLeadId = stored;/);
     expect(block).toMatch(/\? \{ status: 'duplicate', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) \|\| \?::jsonb"/);
     expect(block).toMatch(/status: 'new', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) - 'duplicate_of_lead_id'"\)/);
+  });
+
+  test('DARK behind GATE_WIZARD_LEAD_DEDUPE, read at call time: off, no run is looked up as a repeat, the token path keeps a stored marker as is (no relabel, no re-validation) and the tokenless path files new', () => {
+    expect(src).toMatch(/const dedupeOn = require\('\.\.\/config\/feature-gates'\)\.gateEnvValue\('GATE_WIZARD_LEAD_DEDUPE'\);/);
+    expect(src).toMatch(/duplicateOfLeadId = !dedupeOn \? stored : widerInquiry \? null : await findPriorOpenWizardLeadId\(/);
+    expect(src).toMatch(/duplicateOfLeadId = dedupeOn \? await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest \}\) : null;/);
+    expect(src).toMatch(/if \(dedupeOn && duplicateOfLeadId\) \{\n\s+const targetOpen = await findPriorOpenWizardLeadId\(/);
+    expect(src.match(/gateEnvValue\('GATE_WIZARD_LEAD_DEDUPE'\)/g).length).toBe(1); // one read per request, every decision hangs off it
   });
 
   test("a repeat run's draft estimate stays on THIS run's row, and /upsell touches only the authenticated lead's draft", () => {

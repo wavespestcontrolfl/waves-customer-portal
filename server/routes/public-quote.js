@@ -72,9 +72,12 @@ async function findPriorOpenWizardLeadId(dbh, { email, phone, address, serviceKe
     // (the FK is rescued only at send/view): a draft the office declined —
     // or that expired or was archived — closed that courtship the same way,
     // and the 'new' lead it left behind is not a live target either
-    // (codex #3834 r24 P1).
+    // (codex #3834 r24 P1). Judged on the LATEST mirror: a rerun on the
+    // same token after its draft closed inserts a fresh draft (the draft
+    // lookup skips closed rows), and that newer open draft is the live
+    // courtship — an older closed one is history, not a verdict (r26 P1).
     .whereRaw(
-      `NOT EXISTS (SELECT 1 FROM estimates e WHERE e.estimate_data->>'lead_id' = leads.id::text AND (e.archived_at IS NOT NULL OR e.status NOT IN (${OPEN_ESTIMATE_STATUSES.map(() => '?').join(', ')})))`,
+      `NOT EXISTS (SELECT 1 FROM estimates e WHERE e.id = (SELECT n.id FROM estimates n WHERE n.estimate_data->>'lead_id' = leads.id::text ORDER BY n.created_at DESC, n.id DESC LIMIT 1) AND (e.archived_at IS NOT NULL OR e.status NOT IN (${OPEN_ESTIMATE_STATUSES.map(() => '?').join(', ')})))`,
       OPEN_ESTIMATE_STATUSES,
     )
     .where('created_at', '>', new Date(now - WIZARD_LEAD_REUSE_DAYS * 24 * 60 * 60 * 1000))
@@ -1814,6 +1817,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     const extractedData = JSON.stringify({
       stage: 'quote_calculated',
+      // When the visitor last submitted THIS stage — the token path re-types
+      // a lookup-minted row in place, so created_at is the mint, not the
+      // submission. The staleness sweep judges a repeat recent by this stamp
+      // (an admin edit bumps updated_at without the customer re-engaging —
+      // codex #3861 r1 P2).
+      wizard_submitted_at: new Date().toISOString(),
       entry_channel: entryChannel,
       homeSqFt: sqft,
       lotSqFt: lot,
@@ -1864,6 +1873,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const scopedToTypedIdentity = (qb) => qb
       .where({ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey, service_interest: serviceInterest })
       .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [observedExtraCount]);
+    // Repeat-run dedupe is DARK until GATE_WIZARD_LEAD_DEDUPE=true (read at
+    // call time). Off: no run is looked up as a repeat, so every run files
+    // as 'new' exactly as before this lane, and a row labelled while the
+    // gate was on keeps the marker it carries — the token path neither
+    // relabels nor re-validates it (the kill switch must not reopen the
+    // pipeline it labelled; pre-push P1). The conversion side of a repeat
+    // lands in its own PR; labelling ahead of it would leave accepted
+    // reruns crediting no lead.
+    const dedupeOn = require('../config/feature-gates').gateEnvValue('GATE_WIZARD_LEAD_DEDUPE');
     if (leadId) {
       // OWNERSHIP (atomic): leadId is a client-supplied id on a public,
       // PII-accepting write surface, so prove ownership the same way /upsell
@@ -1936,7 +1954,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // property-lookup stage stored counts too (the update above carried
         // it forward when this stage omitted the optional field, r12 P1).
         const widerInquiry = additionalProperties.length > 0 || (parseExtracted(lead.extracted_data)?.additional_properties?.length > 0);
-        duplicateOfLeadId = widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
+        duplicateOfLeadId = !dedupeOn ? stored : widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
         // Scoped to the status just read: a staff transition landing in
         // between (won / lost / contacted) wins, and this public retry
         // updates 0 rows instead of regressing it (codex #3834 r9 P1). On 0
@@ -1965,23 +1983,28 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             Object.assign(lead, await db('leads').where({ id: lead.id }).first('status', 'extracted_data'));
             duplicateOfLeadId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
           }
-          if (relabelled && duplicateOfLeadId) {
-            // The row just filed as a repeat: a funnel row it carries at the
-            // lead stage — its own earlier stamp, or a concurrent repeat's
-            // root repair that picked it as root while this relabel was in
-            // flight (the r10 chain B → A → O) — is a second row for a
-            // prospect the root now carries. Drop it; the root's own row is
-            // rebuilt below when missing (codex #3834 r14 P1). A row already
-            // advanced past 'lead' is real engagement and stays. Conditioned
-            // in the same statement on the row STILL carrying this request's
-            // label, marker and typed identity: a second request on the token
-            // that reopened the row as 'new' in between keeps its only funnel
-            // row (codex r24 P2).
-            await db('ad_service_attribution')
-              .where({ lead_id: lead.id, funnel_stage: 'lead' })
-              .whereExists(db('leads').select(db.raw('1')).where({ id: lead.id, status: 'duplicate' }).whereRaw("extracted_data->>'duplicate_of_lead_id' = ?", [duplicateOfLeadId]).modify(scopedToTypedIdentity))
-              .del();
-          }
+        }
+        if (dedupeOn && duplicateOfLeadId) {
+          // The row is filed as a repeat: a funnel row it carries at the
+          // lead stage — its own earlier stamp, or a concurrent repeat's
+          // root repair that picked it as root while this relabel was in
+          // flight (the r10 chain B → A → O) — is a second row for a
+          // prospect the root now carries. Drop it; the root's own row is
+          // rebuilt below when missing (codex #3834 r14 P1). A row already
+          // advanced past 'lead' is real engagement and stays. Conditioned
+          // in the same statement on the row STILL carrying this request's
+          // label, marker and typed identity: a second request on the token
+          // that reopened the row as 'new' in between keeps its only funnel
+          // row (codex r24 P2). Runs whenever the row carries the desired
+          // label, not only when this request wrote it: a retry after a
+          // relabel that committed but a delete that did not (stored ==
+          // desired), or a lost relabel re-read as this duplicate, finishes
+          // the cleanup — the statement's own guards make it 0 rows for any
+          // row that does not carry exactly this label (codex #3834 r26 P2).
+          await db('ad_service_attribution')
+            .where({ lead_id: lead.id, funnel_stage: 'lead' })
+            .whereExists(db('leads').select(db.raw('1')).where({ id: lead.id, status: 'duplicate' }).whereRaw("extracted_data->>'duplicate_of_lead_id' = ?", [duplicateOfLeadId]).modify(scopedToTypedIdentity))
+            .del();
         }
       }
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
@@ -1999,7 +2022,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // a trusted-path job (the office merge). Two concurrent first runs can
     // still both land 'new' — the office merges those by hand, as before.
     if (!lead && !additionalProperties.length) {
-      duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest });
+      duplicateOfLeadId = dedupeOn ? await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest }) : null;
     }
     if (!lead) {
       const rows = await db('leads').insert({
@@ -2038,7 +2061,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // declined / expired / archived estimate, identity), so the two cannot
     // drift — and reopen THIS row, scoped to the label it just received, so
     // a staff transition on this row in the meantime still wins.
-    if (duplicateOfLeadId) {
+    if (dedupeOn && duplicateOfLeadId) {
       const targetOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: duplicateOfLeadId });
       // A target that is no longer open because ITS OWN relabel landed in
       // flight (B picked A while A was filing as a repeat of O — the r10
@@ -2285,6 +2308,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             is_paid: touch.isPaid,
           }).onConflict('lead_id').ignore().returning('id');
           stampedId = stamped ? stamped.id : null;
+        }
+        if (!stampedId && keeperId && (duplicateOfLeadId || touch)) {
+          // A retry after a partial run: the earlier attempt's insert landed
+          // (ON CONFLICT now returns no id) but the reconcile below never
+          // ran, so a keeper that filed as a duplicate would keep two rows
+          // and one staff moved on would sit at the inserted stage forever.
+          // Adopt the row when it still sits at the stage this repair
+          // inserts (codex #3834 r26 P1); a row at any other stage is real
+          // engagement — or another writer's — and is left alone.
+          const existing = await db('ad_service_attribution').where({ lead_id: keeperId, funnel_stage: stampedStage }).first('id');
+          stampedId = existing ? existing.id : null;
         }
         if (stampedId) {
           // ...and reconciled with the keeper's CURRENT status: a keeper that

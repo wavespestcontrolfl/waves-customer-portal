@@ -535,7 +535,9 @@ class AutonomousRunner {
     }).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));
-    run.agent_ms = Date.now() - t3;
+    // The dispatcher's own duration excludes its session-ledger GET; the
+    // local clock is the fallback for the exits that return none.
+    run.agent_ms = Number.isFinite(dispatchResult.duration_ms) ? dispatchResult.duration_ms : Date.now() - t3;
     // Persist the session pointer on EVERY outcome, not just success — the
     // 2026-08-08→10 streaming_failed runs stored no agent_session_id, so the
     // hung sessions could not be correlated against the Managed Agents log.

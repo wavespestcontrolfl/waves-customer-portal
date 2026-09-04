@@ -61,13 +61,19 @@ function agentLabels() {
   return byId;
 }
 
-async function getManagedAgentRuns(input) {
-  const limit = Math.min(Math.max(Number(input.limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
+/**
+ * Authenticated GET against the Managed Agents sessions surface (beta header
+ * set, 15 s abort, status mapping). `path` is relative to the API base
+ * (`/v1/sessions?limit=20`, `/v1/sessions/<id>`). The ONE place the header
+ * set lives — the ops tool below and the call ledger's per-session usage
+ * recorder (services/llm-dispatch-metrics.js recordSessionUsage) both read
+ * through it. Read-only by construction: no method, no body.
+ */
+async function anthropicSessionsFetch(path) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  let json;
   try {
-    const res = await fetch(`${ANTHROPIC_API_BASE}/v1/sessions?limit=${limit}`, {
+    const res = await fetch(`${ANTHROPIC_API_BASE}${path}`, {
       headers: {
         'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01',
@@ -79,13 +85,18 @@ async function getManagedAgentRuns(input) {
       throw new Error('Anthropic rejected the key — check ANTHROPIC_API_KEY.');
     }
     if (!res.ok) throw new Error(`Anthropic API returned HTTP ${res.status}`);
-    json = await res.json();
+    return await res.json();
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`Anthropic API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
     throw err;
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function getManagedAgentRuns(input) {
+  const limit = Math.min(Math.max(Number(input.limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
+  const json = await anthropicSessionsFetch(`/v1/sessions?limit=${limit}`);
   const labels = agentLabels();
   const sessions = (json?.data || []).map(session => {
     const agentId = session.agent?.id || (typeof session.agent === 'string' ? session.agent : null);
@@ -130,4 +141,4 @@ async function executeManagedAgentsOpsTool(toolName, input = {}) {
   }
 }
 
-module.exports = { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool };
+module.exports = { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool, anthropicSessionsFetch };

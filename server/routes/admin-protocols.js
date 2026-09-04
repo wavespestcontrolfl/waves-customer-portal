@@ -16,6 +16,7 @@ const {
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const { scopeFromText } = require('../services/service-report/action-scope');
+const { findLiveRestockRequest } = require('../services/procurement/live-restock-request');
 const {
   getActiveLawnProtocol,
   getProtocolWindowContext,
@@ -967,52 +968,70 @@ async function createRestockRequest(knex, req, serviceId) {
     err.statusCode = 400;
     throw err;
   }
-  const [service, product] = await Promise.all([
-    knex('scheduled_services').where({ id: serviceId }).first(),
-    knex('products_catalog').where({ id: productId }).first(),
-  ]);
-  if (!service) {
-    const err = new Error('Scheduled service not found.');
-    err.statusCode = 404;
-    throw err;
-  }
-  if (!product) {
-    const err = new Error('Product not found.');
-    err.statusCode = 400;
-    throw err;
-  }
-  const actor = actorFromRequest(req);
+  // One transaction, product row LOCKED before the insert, then the SHARED
+  // any-source live-request check under that lock: every restock creator
+  // (this route, the forecast route, the Intelligence Bar tool, the
+  // auto-reorder sweep) runs the same read under the same row lock, so a
+  // writer that resumes after a concurrent commit hands back the request
+  // that already exists instead of raising its twin (Codex r8 P1, r9 P1).
+  return knex.transaction(async (trx) => {
+    const service = await trx('scheduled_services').where({ id: serviceId }).first();
+    if (!service) {
+      const err = new Error('Scheduled service not found.');
+      err.statusCode = 404;
+      throw err;
+    }
+    const product = await trx('products_catalog').where({ id: productId }).forUpdate().first();
+    if (!product) {
+      const err = new Error('Product not found.');
+      err.statusCode = 400;
+      throw err;
+    }
+    const live = await findLiveRestockRequest(trx, product.id);
+    if (live) return { ...live, existing: true, productName: product.name, productCategory: product.category || null };
+    const [row] = await trx('product_restock_requests')
+      .insert(readinessRestockRow({ product, service, body: req.body || {}, actor: actorFromRequest(req) }))
+      .returning('*');
+    return { ...row, existing: false, productName: product.name, productCategory: product.category || null };
+  });
+}
+
+// Requested quantity defaults to (target − on hand), target to 2× the
+// low-stock threshold — explicit body values win.
+function readinessQuantities(product, body) {
   const currentStock = numberOrNull(product.inventory_on_hand);
   const lowStock = numberOrNull(product.low_stock_threshold);
-  const targetStock = numberOrNull(req.body?.targetStock) ?? (lowStock != null ? lowStock * 2 : null);
-  const requestedQuantity = numberOrNull(req.body?.requestedQuantity)
+  const targetStock = numberOrNull(body.targetStock) ?? (lowStock != null ? lowStock * 2 : null);
+  const requestedQuantity = numberOrNull(body.requestedQuantity)
     ?? (targetStock != null && currentStock != null ? Math.max(0, targetStock - currentStock) : null);
-  const [row] = await knex('product_restock_requests').insert({
+  return { currentStock, targetStock, requestedQuantity };
+}
+
+// The readiness restock row from the LOCKED product, the service and the
+// request body. Pure — no decisions about whether to insert.
+function readinessRestockRow({ product, service, body, actor }) {
+  const { currentStock, targetStock, requestedQuantity } = readinessQuantities(product, body);
+  return {
     product_id: product.id,
     scheduled_service_id: service.id,
     customer_id: service.customer_id || null,
     status: 'open',
-    priority: req.body?.priority || 'high',
+    priority: body.priority || 'high',
     requested_quantity: requestedQuantity,
-    unit: String(req.body?.unit || product.inventory_unit || product.rate_unit || '').trim() || null,
+    unit: String(body.unit || product.inventory_unit || product.rate_unit || '').trim() || null,
     current_stock: currentStock,
     target_stock: targetStock,
-    vendor: String(req.body?.vendor || product.best_vendor || '').trim() || null,
-    needed_by: req.body?.neededBy ? String(req.body.neededBy).slice(0, 10) : service.scheduled_date || null,
-    reason: String(req.body?.reason || '').trim() || `Restock needed for WaveGuard readiness: ${product.name}`,
+    vendor: String(body.vendor || product.best_vendor || '').trim() || null,
+    needed_by: body.neededBy ? String(body.neededBy).slice(0, 10) : service.scheduled_date || null,
+    reason: String(body.reason || '').trim() || `Restock needed for WaveGuard readiness: ${product.name}`,
     source: 'lawn_readiness_exception',
     created_by: actor.id,
     created_by_name: actor.name || actor.email || null,
     metadata: JSON.stringify({
       serviceType: service.service_type || null,
       scheduledDate: service.scheduled_date || null,
-      issueCode: req.body?.issueCode || null,
+      issueCode: body.issueCode || null,
     }),
-  }).returning('*');
-  return {
-    ...row,
-    productName: product.name,
-    productCategory: product.category || null,
   };
 }
 
