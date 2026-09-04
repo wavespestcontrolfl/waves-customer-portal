@@ -1010,6 +1010,18 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/${'b'.repeat(32)}//`)).toEqual({ present: true, label: 'Service report' });
   });
 
+  test('percent-encoded bearer paths are decoded ONCE for the whole body before judging — every fenced kind, long and short (pre-push Codex audit)', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'ab12cd', kind: 'appointment', target_url: 'https://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY' } }) };
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/prep/%61${PREP.slice(1)}`)).toEqual({ present: true, label: 'Prep guide' });
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/%70rep/${PREP}`)).toEqual({ present: true, label: 'Prep guide' });
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com%2Fpay%2Fstatement%2F${'f'.repeat(64)}`)).toEqual({ present: true, label: 'Statement pay' });
+    expect(await immediateOnlyLinkSendCheck('portal.wavespestcontrol.com/appointment/%61bcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Appointment page' });
+    expect(await immediateOnlyLinkSendCheck('wavespest.co/l/%41b12cD')).toEqual({ present: true, label: 'Appointment page' });
+    expect(mockBuilders.short_codes.where).toHaveBeenLastCalledWith({ code: 'ab12cd' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/%62${'b'.repeat(31)}`)).toEqual({ present: true, label: 'Service report' });
+  });
+
   test('an explicit http:// owned bearer is a protected link the fence parks — the public mounts are protocol-agnostic (GH Codex #3844 r11 P1)', async () => {
     mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'ab12cd', kind: 'appointment', target_url: 'https://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY' } }) };
     expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: true, label: 'Prep guide' });
@@ -1265,6 +1277,15 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       // Neither kind nor target protected → not this seam's business.
       wireAccount({ shortRow: { code: 'est1', kind: 'estimate', target_url: 'https://portal.wavespestcontrol.com/estimate/xyz' } });
       expect(await bearerLinkSendCheck('See it: wavespest.co/l/est1', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    });
+
+    test('percent-encoded long and short bearers reach the seam decoded — judged, never dropped (pre-push Codex audit)', async () => {
+      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', target_url: `https://portal.wavespestcontrol.com/appointment/${RESCHEDULE}` } });
+      expect(await bearerLinkSendCheck('Your visit: wavespest.co/l/%41b12cD', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      expect(mockBuilders.short_codes.where).toHaveBeenCalledWith({ code: 'ab12cd' });
+      expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith({ reschedule_token: RESCHEDULE });
+      wireAccount({ recipientRows: [acct('c1')], linkCustomer: acct('c9', 'other'), visit: { id: 'v1', customer_id: 'c9' } });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/appointment/%65${RESCHEDULE.slice(1)}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/appointment link/);
     });
 
     test('an http:// short link is judged at the send and refused for its scheme — never dropped unseen (GH Codex #3844 r12 P1)', async () => {
