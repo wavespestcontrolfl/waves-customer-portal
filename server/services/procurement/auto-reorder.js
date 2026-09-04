@@ -63,17 +63,19 @@ function parseMeta(raw) {
   try { return JSON.parse(raw) || {}; } catch { return {}; }
 }
 
+// Every active auto-reorder product — NOT only the low ones: an open
+// request must be found and re-belled even after the threshold or count it
+// was raised against was cleared; the low-stock decision (stillLow) is made
+// per product after the live-request check, then again under the lock
+// (Codex r15 P2).
 async function findLowStockCandidates(conn = db) {
   return conn('products_catalog as pc')
     .leftJoin('vendors as v', 'v.id', 'pc.auto_reorder_vendor_id')
     .where('pc.auto_reorder_enabled', true)
     .where('pc.active', true)
-    .whereNotNull('pc.inventory_on_hand')
-    .whereNotNull('pc.low_stock_threshold')
-    .whereRaw('pc.inventory_on_hand <= pc.low_stock_threshold')
     .select(
       'pc.id', 'pc.name', 'pc.inventory_on_hand', 'pc.inventory_unit', 'pc.low_stock_threshold',
-      'pc.reorder_quantity', 'pc.auto_reorder_vendor_id',
+      'pc.reorder_quantity', 'pc.auto_reorder_vendor_id', 'pc.auto_reorder_enabled', 'pc.active',
       'v.name as vendor_name',
     )
     .orderBy('pc.name');
@@ -230,12 +232,15 @@ function stillLow(fresh) {
 // the product before it commits, so the lock can carry a newer SKU/link
 // than any unlocked read, and populated request metadata is never replaced
 // by a later sweep (Codex r9 P2).
+// A vendor that has been DEACTIVATED is no vendor: the request gets no
+// name, SKU or link from it and the bell says "order manually" — an
+// eligible price row under a retired vendor must not steer staff to buy
+// from it (Codex r15 P2).
 async function lockedVendor(trx, p, fresh) {
   const vendorId = fresh.auto_reorder_vendor_id || null;
-  const pricing = await vendorPricingFor(trx, p.id, vendorId);
-  if (vendorId === (p.auto_reorder_vendor_id || null)) return { vendorId, vendorName: p.vendor_name || null, pricing };
-  const v = vendorId ? await trx('vendors').where({ id: vendorId }).first('name') : null;
-  return { vendorId, vendorName: v?.name || null, pricing };
+  const v = vendorId ? await trx('vendors').where({ id: vendorId }).first('name', 'active') : null;
+  if (!v || v.active === false) return { vendorId: null, vendorName: null, pricing: null };
+  return { vendorId, vendorName: v.name || p.vendor_name || null, pricing: await vendorPricingFor(trx, p.id, vendorId) };
 }
 
 // Re-read the product under a row lock right before the insert: a receive /
@@ -272,7 +277,8 @@ async function createRequestLocked(conn, p) {
       requested_quantity: qty,
       unit,
       current_stock: onHand,
-      target_stock: Number((threshold + qty).toFixed(4)),
+      // The level receiving this request produces (Codex r15 P2).
+      target_stock: Number((onHand + qty).toFixed(4)),
       vendor: vendor.vendorName,
       reason: `Auto-reorder: ${p.name} at ${onHand} ${unit} (low-stock threshold ${threshold} ${unit})`,
       source: SOURCE,
@@ -296,11 +302,16 @@ async function createRequestLocked(conn, p) {
 
 async function sweepProduct(ctx, p) {
   const { conn, result } = ctx;
+  // A live request comes FIRST: it carries its own quantity and unit, so a
+  // reorder quantity cleared after it was raised must not stop its bell
+  // from being retried (Codex r14 P2). Creation-only configuration is
+  // checked only when there is something to create.
+  const existing = await findLiveRestockRequest(conn, p.id);
+  if (existing) { await handleLiveRequest(ctx, p, existing); return; }
+  if (!stillLow(p)) return;
   if (!p.inventory_unit) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_unit' }); return; }
   const reorderQty = num(p.reorder_quantity);
   if (!reorderQty || reorderQty <= 0) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_reorder_quantity' }); return; }
-  const existing = await findLiveRestockRequest(conn, p.id);
-  if (existing) { await handleLiveRequest(ctx, p, existing); return; }
 
   const outcome = await createRequestLocked(conn, p);
   if (outcome.deduped) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: outcome.deduped }); return; }

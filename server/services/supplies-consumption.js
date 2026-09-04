@@ -78,6 +78,44 @@ function appliesToLine(rawLines, serviceLine) {
   return !!serviceLine && lines.includes(String(serviceLine));
 }
 
+// The miss is never silent: one deduped bell so the office adjusts the
+// count by hand — per (product, visit), or per visit when the product
+// lookup itself failed (Codex r3 P2, r14 P2). notifyAdmin resolves NULL
+// when it could not persist the notification, so the resolved row is
+// checked like a throw: a lost bell is an error-level log and an errors
+// entry, never a silent success (Codex r11 P2).
+async function ringMissedDeductionBell(result, { scheduledServiceId, product = null, reason }) {
+  const title = product ? `Inventory: ${product.name} was not deducted for a completed visit` : 'Inventory: yard-sign supplies were not deducted for a completed visit';
+  // The lookup bell names no product: which kit items this visit should
+  // have consumed is decided only after the lookup (service-line scope), so
+  // it must not prescribe a deduction (Codex r15 P2).
+  const body = product
+    ? `Adjust the count by ${product.per_completion_usage} ${product.inventory_unit || ''} on the Inventory page. Reason: ${reason}`
+    : `The consumables lookup failed, so nothing was deducted for this visit — check on the Inventory page which per-visit supplies apply to this service line and adjust those counts by hand. Reason: ${reason}`;
+  const dedupeKey = product ? `supplies-consumption-failed:${product.id}:${scheduledServiceId}` : `supplies-consumption-failed:lookup:${scheduledServiceId}`;
+  try {
+    const bell = await require('./notification-service').notifyAdmin('system', title, body, { bell: true, link: '/admin/inventory', dedupeKey, metadata: { productId: product?.id || null, scheduledServiceId } });
+    if (!bell) throw new Error('notification not persisted');
+  } catch (bellErr) {
+    logger.error(`[supplies-consumption] failure bell NOT sent for ${product ? product.name : 'the visit'} on visit ${scheduledServiceId}: ${bellErr.message}`);
+    result.errors.push({ productId: product?.id || null, reason: 'failure_bell_not_sent', message: bellErr.message });
+  }
+}
+
+// A deduction that SUCCEEDS on a retried completion (the resume path runs
+// this hook again) retires the failure bell an earlier attempt rang for
+// the same (product, visit) — and the visit-scoped lookup bell — so staff
+// do not follow a stale "adjust by hand" on top of the real deduction
+// (Codex r15 P2). Best effort, never throws.
+async function clearMissedDeductionBells(db, { scheduledServiceId, productId }) {
+  const keys = [`supplies-consumption-failed:${productId}:${scheduledServiceId}`, `supplies-consumption-failed:lookup:${scheduledServiceId}`];
+  try {
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereNull('read_at').update({ read_at: new Date() });
+  } catch (err) {
+    logger.warn(`[supplies-consumption] could not retire the failure bell for ${productId} on visit ${scheduledServiceId}: ${err.message}`);
+  }
+}
+
 async function consumeCompletionSupplies(db, {
   scheduledServiceId,
   serviceRecordId = null,
@@ -103,6 +141,7 @@ async function consumeCompletionSupplies(db, {
   } catch (err) {
     logger.warn(`[supplies-consumption] product lookup failed (non-blocking): ${err.message}`);
     result.errors.push({ reason: 'lookup_failed', message: err.message });
+    await ringMissedDeductionBell(result, { scheduledServiceId, reason: err.message });
     return result;
   }
 
@@ -168,31 +207,14 @@ async function consumeCompletionSupplies(db, {
         await trx('products_catalog').where({ id: locked.id }).update({ inventory_on_hand: after, updated_at: new Date() });
         return { consumed: { productId: locked.id, name: locked.name, usage, unit, before, after, costUsed } };
       });
-      if (outcome.consumed) result.consumed.push(outcome.consumed);
+      if (outcome.consumed) { result.consumed.push(outcome.consumed); await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id }); }
       else result.skipped.push({ productId: product.id, reason: outcome.skipped });
     } catch (err) {
       logger.warn(`[supplies-consumption] ${product.name} failed for visit ${scheduledServiceId} (non-blocking): ${err.message}`);
       result.errors.push({ productId: product.id, message: err.message });
       // Not retried (the closeout must never depend on a supplies write and
-      // stock is advisory) — but not silent either: one deduped bell per
-      // (product, visit) so the office adjusts the count instead of the miss
-      // hiding in a log line (Codex r3 P2). notifyAdmin resolves NULL when
-      // it could not persist the notification (its own catch), so the
-      // resolved row is checked like a throw: a lost bell is an error-level
-      // log and a second errors entry, never a silent success
-      // (Codex r11 P2).
-      try {
-        const bell = await require('./notification-service').notifyAdmin(
-          'system',
-          `Inventory: ${product.name} was not deducted for a completed visit`,
-          `Adjust the count by ${product.per_completion_usage} ${product.inventory_unit || ''} on the Inventory page. Reason: ${err.message}`,
-          { bell: true, link: '/admin/inventory', dedupeKey: `supplies-consumption-failed:${product.id}:${scheduledServiceId}`, metadata: { productId: product.id, scheduledServiceId } },
-        );
-        if (!bell) throw new Error('notification not persisted');
-      } catch (bellErr) {
-        logger.error(`[supplies-consumption] failure bell NOT sent for ${product.name} on visit ${scheduledServiceId} — missed deduction of ${product.per_completion_usage} ${product.inventory_unit || ''}: ${bellErr.message}`);
-        result.errors.push({ productId: product.id, reason: 'failure_bell_not_sent', message: bellErr.message });
-      }
+      // stock is advisory) — but not silent either (ringMissedDeductionBell).
+      await ringMissedDeductionBell(result, { scheduledServiceId, product, reason: err.message });
     }
   }
   return result;
