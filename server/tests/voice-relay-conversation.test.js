@@ -496,12 +496,15 @@ describe('RelayConversation — explicit end after capture', () => {
       IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
     });
     const convo = new IsolatedConvo({ callSid: 'CA-late-block', from: '+19415551234', send: jest.fn() });
-    convo._lateContextBlockPending = true; // what onLateContext sets when blocks were frozen
-    convo._callerContext = { block: 'KNOWN CALLER: Pat Smith, full tier.', customer: { id: 'c-9' }, tier: 'full' };
+    const lateBlock = 'KNOWN CALLER: Pat Smith, full tier.';
+    convo._lateContextBlock = lateBlock; // what onLateContext sets when blocks were frozen
+    convo._callerContext = { block: lateBlock, customer: { id: 'c-9' }, tier: 'full' };
     await convo._runLoop('hi').catch(() => {});
     const userTurns = convo.messages.filter((m) => m.role === 'user').map((m) => JSON.stringify(m.content));
     expect(userTurns.some((t) => t.includes('ACCOUNT CONTEXT (hydrated after the call started'))).toBe(true);
-    expect(convo._lateContextBlockPending).toBe(false); // one-time seed
+    expect(convo._lateContextBlock).toBeNull(); // one-time seed
+    // The version record hashes the context the model actually saw (codex r2 P2).
+    expect(convo._contextSnapshotSha).toBe(require('crypto').createHash('sha256').update(lateBlock).digest('hex'));
   });
 
   test('text on a READ-tool turn is still spoken (filler is fine when nothing can be falsely promised)', async () => {

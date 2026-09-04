@@ -53,6 +53,10 @@ describe('classifyRelayEvent — tolerant of the undocumented payload', () => {
   test("Twilio's documented info envelope — the label in `name`, the text in `value` (codex r1 P1)", () => {
     const ev = classifyRelayEvent({ type: 'info', name: 'tokensPlayed', value: 'Waves, this is Sandy.' });
     expect(ev).toEqual({ kind: 'tokens_played', shape: 'info:name,type,value', text: 'Waves, this is Sandy.' });
+    // The label decides the kind BEFORE any value is read: a played sentence
+    // that mentions the speakers is still what the caller heard (codex r2 P1).
+    const spoken = classifyRelayEvent({ type: 'info', name: 'tokensPlayed', value: 'I hear the caller speaking over the agent speaking.' });
+    expect(spoken).toMatchObject({ kind: 'tokens_played', text: 'I hear the caller speaking over the agent speaking.' });
     // The label is read from label fields only — played TEXT mentioning a
     // token does not make an unrelated frame a tokens-played event.
     expect(classifyRelayEvent({ type: 'info', name: 'somethingElse', value: 'played a token' }).kind).toBe('unknown');
@@ -157,13 +161,20 @@ describe('per-turn stats', () => {
     expect(second).toMatchObject({ played: 'The office opens', done: false });
   });
 
-  test('Flux partial prompts are counted on the turn they precede, never acted on', async () => {
+  test('Flux partial prompts are counted on the turn they precede, never acted on — after the first turn too (codex r2 P1)', async () => {
     const convo = new RelayConversation({ callSid: 'CA-tel-4', from: '+19415551234', send: jest.fn() });
     convo.notePartialPrompt();
     convo.notePartialPrompt();
     await convo.handlePrompt('full utterance');
     expect(convo._turnStats[0].partialCount).toBe(2);
     expect(convo._userTurns).toEqual(['full utterance']);
+    // Turn 2's partials precede turn 2's final prompt — they never land on turn 1.
+    convo.notePartialPrompt();
+    convo.notePartialPrompt();
+    convo.notePartialPrompt();
+    await convo.handlePrompt('second utterance');
+    expect(convo._turnStats[0].partialCount).toBe(2);
+    expect(convo._turnStats[1].partialCount).toBe(3);
   });
 });
 

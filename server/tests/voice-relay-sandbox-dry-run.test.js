@@ -77,6 +77,8 @@ describe('every call reader drops the sandbox source', () => {
     'services/context-aggregator.js',
     'services/call-self-audit.js',
     'services/voice-agent/relay-history.js',
+    'services/seo/site-rollup.js',
+    'services/intelligence-bar/comms-tools.js',
   ])('%s applies whereNotSandboxCall', (rel) => {
     const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
     expect(src).toMatch(/whereNotSandboxCall\(/);

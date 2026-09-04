@@ -545,7 +545,7 @@ class RelayConversation {
     // The recent-texts DATA TURN — customer-AUTHORED SMS bodies, seeded into
     // the USER role ahead of the first caller turn, never into `system`.
     this._dataTurnSeeded = false;
-    this._lateContextBlockPending = false;
+    this._lateContextBlock = null; // a KNOWN CALLER block that arrived after the system prompt froze
     // Phase E — the audit trail. Ordered turn list (caller / agent / tool) for
     // the call_log transcript written at close, the model's own capture_lead
     // summary (so the close needs no second LLM round trip), and the
@@ -600,7 +600,7 @@ class RelayConversation {
             // The system prompt may already be FROZEN (prompt-cache prefix
             // stability) — the KNOWN CALLER block then rides the next user
             // turn instead, like the recent-texts data turn.
-            if (this._systemBlocks) this._lateContextBlockPending = true;
+            if (this._systemBlocks && ctx.block) this._lateContextBlock = ctx.block;
             // A late confident match still earns the language stamp (codex
             // #3561 P2) — same guarded, bounded, detached write as below.
             void this._persistLanguagePreference();
@@ -749,11 +749,14 @@ class RelayConversation {
     }
   }
 
-  /** A Flux partial prompt arrived (relay-server drops it; this only counts). */
+  /**
+   * A Flux partial prompt arrived (relay-server drops it; this only counts).
+   * Partials PRECEDE the final prompt that becomes their turn, so they
+   * accumulate here and the next turn's stat takes them — crediting the last
+   * finished turn would shift every partial one turn back.
+   */
   notePartialPrompt() {
-    const stat = this._turnStats[this._turnStats.length - 1];
-    if (stat) stat.partialCount += 1;
-    else this._partialsBeforeFirstTurn = (this._partialsBeforeFirstTurn || 0) + 1;
+    this._pendingPartials = (this._pendingPartials || 0) + 1;
   }
 
   /** One structured log line per caller turn — durations only, never text. */
@@ -961,11 +964,11 @@ class RelayConversation {
       durationUntilInterruptMs: null,
       interruptWithoutFollowupTranscript: false,
       timedOut: false,
-      partialCount: this._partialsBeforeFirstTurn || 0,
+      partialCount: this._pendingPartials || 0,
       playedSource: 'assumed', // best evidence across the turn's utterances
       agentEntries: [],
     };
-    this._partialsBeforeFirstTurn = 0;
+    this._pendingPartials = 0;
     this._turnStats.push(stat);
     // Append the turn to the shared transcript INSIDE the serialized chain —
     // right before the loop that handles it — so a turn that arrives while a
@@ -1330,21 +1333,6 @@ class RelayConversation {
         { role: 'assistant', content: 'Noted — I have the recent text history for this number.' },
       );
     }
-    // ⭐ A LATE-HYDRATED KNOWN CALLER BLOCK STILL REACHES THE MODEL. The system
-    // prompt is frozen per call (cache-prefix stability), so a context that
-    // settled after the first round would upgrade the tool ctx but never the
-    // prompt — the model kept treating a matched caller as a stranger. The
-    // block rides a one-time user/assistant pair instead (the recent-texts
-    // pattern); its content already passed the same injection filters the
-    // system placement uses.
-    if (this._lateContextBlockPending && this._callerContext && this._callerContext.block) {
-      this._lateContextBlockPending = false;
-      this.messages.push(
-        { role: 'user', content: `ACCOUNT CONTEXT (hydrated after the call started — same rules as a KNOWN CALLER block):\n\n${this._callerContext.block}` },
-        { role: 'assistant', content: 'Noted — I have the account context for this caller now.' },
-      );
-    }
-
     const toolCtx = this._buildToolCtx();
     const contextEnabled = isContextEnabled();
 
@@ -1367,9 +1355,7 @@ class RelayConversation {
     //      definition, so leaving it in the system prompt would invalidate the
     //      cache on every single turn — it now rides the user turn below.
     if (!this._systemBlocks) {
-      const callerBlock = contextEnabled && this._callerContext && this._callerContext.block
-        ? this._callerContext.block
-        : '';
+      const callerBlock = (contextEnabled && this._callerContext?.block) || '';
       const bareBase = buildBasePrompt(contextEnabled, this.language);
       const basePrompt = bareBase + (callerBlock ? `\n\n${callerBlock}` : '');
       const profileText = getVoiceProfileTextNonBlocking();
@@ -1384,13 +1370,32 @@ class RelayConversation {
       // Version stamps: the prompt WITHOUT the per-caller block (so two calls
       // on the same prompt hash alike), the caller block on its own, and the
       // tool schemas the model saw. Hashes only — nothing is stored twice.
-      try {
-        this._promptSha = sha256(composeSystemPrompt(bareBase, profileText));
-        this._contextSnapshotSha = callerBlock ? sha256(callerBlock) : null;
-        this._toolSchemaSha = sha256(JSON.stringify(this._tools || []));
-      } catch { /* telemetry only — never in the way of the turn */ }
+      this._promptSha = sha256(composeSystemPrompt(bareBase, profileText));
+      this._contextSnapshotSha = callerBlock ? sha256(callerBlock) : null;
+      this._toolSchemaSha = sha256(JSON.stringify(this._tools));
     }
-    const stat = this._currentTurn;
+    // ⭐ A LATE-HYDRATED KNOWN CALLER BLOCK STILL REACHES THE MODEL. The system
+    // prompt is frozen per call (cache-prefix stability), so a context that
+    // settled after the first round would upgrade the tool ctx but never the
+    // prompt — the model kept treating a matched caller as a stranger. The
+    // block rides a one-time user/assistant pair instead (the recent-texts
+    // pattern); its content already passed the same injection filters the
+    // system placement uses. Runs AFTER the freeze above so its hash is the
+    // one the version record keeps.
+    if (this._lateContextBlock) {
+      const lateBlock = this._lateContextBlock;
+      this._lateContextBlock = null;
+      // The version record hashes the context the model actually saw — the
+      // late block is that context for this call.
+      this._contextSnapshotSha = sha256(lateBlock);
+      this.messages.push(
+        { role: 'user', content: `ACCOUNT CONTEXT (hydrated after the call started — same rules as a KNOWN CALLER block):\n\n${lateBlock}` },
+        { role: 'assistant', content: 'Noted — I have the account context for this caller now.' },
+      );
+    }
+    // Always a stat to write into: a loop with no caller turn (tests, a
+    // future greeting round) records into a discarded one.
+    const stat = this._currentTurn || { modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0 };
 
     // The caller's turn, with the live clock attached as a per-turn note. Past
     // turns keep the time they actually happened at, so the message prefix stays
@@ -1436,19 +1441,13 @@ class RelayConversation {
           },
           { signal: this._controller.signal }
         );
-        // First-token latency. Guarded: test doubles expose only finalMessage.
-        if (stat && typeof stream.on === 'function') {
-          stream.on('text', () => { if (stat.firstTokenAt == null) stat.firstTokenAt = now(); });
-        }
+        // First-token latency (test doubles expose only finalMessage).
+        stream.once?.('text', () => { stat.firstTokenAt = now(); });
         msg = await stream.finalMessage();
-        if (stat) {
-          stat.modelMs += now() - modelStartAt;
-          stat.rounds += 1;
-        }
+        stat.rounds += 1;
       } catch (err) {
-        if (stat) stat.modelMs += now() - modelStartAt;
         if (streamTimedOut) {
-          if (stat) stat.timedOut = true;
+          stat.timedOut = true;
           logger.warn(`[voice-relay] model stream timeout (${STREAM_TIMEOUT_MS}ms) callSid=${this.callSid}`);
           this.say(require('./relay-language').copy('streamTimeout', this.language));
           return;
@@ -1514,10 +1513,8 @@ class RelayConversation {
           this._recordTurn('tool', block.name);
           const toolStartAt = now();
           const out = await this._executeToolBounded(block.name, block.input, toolCtx);
-          if (stat) {
-            stat.toolMs += now() - toolStartAt;
-            stat.toolCount += 1;
-          }
+          stat.toolMs += now() - toolStartAt;
+          stat.toolCount += 1;
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
         }
         this.messages.push({ role: 'user', content: results });

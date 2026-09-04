@@ -892,7 +892,9 @@ async function getTodaysActivity() {
   const [smsIn, smsOut, calls, unanswered] = await Promise.all([
     db('sms_log').where('direction', 'inbound').where('created_at', '>=', since).count('* as c').first(),
     db('sms_log').where('direction', 'outbound').where('created_at', '>=', since).count('* as c').first(),
-    db('call_log').where('created_at', '>=', since).select(
+    db('call_log').where('created_at', '>=', since)
+      .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb)) // bake-off calls are not today's activity
+      .select(
       db.raw('COUNT(*) as total'),
       db.raw("COUNT(*) FILTER (WHERE direction = 'inbound') as inbound"),
       db.raw("COUNT(*) FILTER (WHERE status = 'no-answer' OR status = 'busy') as missed"),

@@ -329,9 +329,10 @@ router.post('/collections-vestibule-key', async (req, res) => {
         callSid: call.callSid,
         welcomeGreeting: script.relayGreeting({ firstName: call.customer.first_name }),
         action: `${RELAY_COMPLETE_ACTION}?callLogId=${encodeURIComponent(call.row.id)}`,
-        // The production relay profile (STT / turn-taking tuning) applies to
-        // every relay leg; absent ⇒ byte-identical to before.
-        ...require('../services/voice-agent/relay-profiles').activeRelayTwiMLOptions(),
+        // NOT tuned by VOICE_RELAY_PROFILE: CollectionsConversation persists
+        // no version stamps, so a profile here would change STT behaviour on
+        // a production call with nothing in the record to attribute it to.
+        // The profile reaches this leg with the stamps (a later PR).
         parameters: { session_mode: 'collections' },
       });
       return sendTwiml(res, xml);

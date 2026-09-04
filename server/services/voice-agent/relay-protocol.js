@@ -47,10 +47,6 @@ const VOICE_RELAY_SANDBOX_SOURCE = 'voice_relay_sandbox';
 const RELAY_FAILED_OUTCOME = 'relay_failed';
 const RELAY_TERMINAL_OUTCOMES = Object.freeze(['voicemail', RELAY_FAILED_OUTCOME]);
 
-// The frame types the relay loop handles by name; anything else is an event
-// notification (or a future frame) and goes through classifyRelayEvent.
-const KNOWN_FRAME_TYPES = new Set(['setup', 'prompt', 'dtmf', 'interrupt', 'error']);
-
 /**
  * Is the ConversationRelay WebSocket server enabled? Single source of truth for
  * the `VOICE_RELAY_ENABLED` flag — read by both `relay-server` (whether to
@@ -338,42 +334,42 @@ const LABEL_KEY_RE = /^(?:[a-z]+\.)?(?:name|event|kind)$/i;
  * log), and `text` is the played text for tokens_played (our own agent
  * speech, never caller-authored). Never throws, never inspects deeper than
  * one nested object.
+ *
+ * ⭐ THE LABEL DECIDES THE KIND. Only the frame's label fields vote — its
+ * `type` and key names (the shape) plus `name` / `event` / `kind` values —
+ * never an arbitrary value: a tokens-played VALUE is our own spoken sentence
+ * and may well say "the agent speaking".
  */
 function classifyRelayEvent(frame) {
   if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return { kind: 'unknown', shape: '', text: null };
   const shape = `${typeof frame.type === 'string' ? frame.type : '?'}:${Object.keys(frame).sort().join(',')}`;
+  // Scalar values, one level deep, as [key, value] pairs.
   const fields = [];
   for (const [k, v] of Object.entries(frame)) {
-    if (typeof v === 'string' || typeof v === 'boolean') fields.push([k, String(v)]);
-    else if (v && typeof v === 'object' && !Array.isArray(v)) {
-      for (const [k2, v2] of Object.entries(v)) {
-        if (typeof v2 === 'string' || typeof v2 === 'boolean') fields.push([`${k}.${k2}`, String(v2)]);
-      }
+    const nested = v && typeof v === 'object' ? Object.entries(v).map(([k2, v2]) => [`${k}.${k2}`, v2]) : [[k, v]];
+    for (const [key, val] of nested) {
+      if (typeof val === 'string' || typeof val === 'boolean') fields.push([key, String(val)]);
     }
   }
-  const haystack = fields.map(([k, v]) => `${k} ${v}`).join(' ');
-  const agent = AGENT_SPEAKER_RE.test(haystack);
-  const caller = !agent && CALLER_SPEAKER_RE.test(haystack);
-  if (agent || caller) {
-    // Direction is decided on VALUES only (a key like `speaking: false` must
-    // not vote "start"), camelCase split, with the speaker label itself
-    // removed so "agentSpeakingStopped" reads as "stopped" and a bare
-    // "agentSpeaking" reads as nothing.
-    const directional = fields
-      .map(([, v]) => v.replace(/([a-z])([A-Z])/g, '$1 $2').replace(AGENT_SPEAKER_RE, ' ').replace(CALLER_SPEAKER_RE, ' '))
-      .join(' ');
-    const ended = END_RE.test(directional) && !START_RE.test(directional);
-    return { kind: `${agent ? 'agent' : 'caller'}_speaking_${ended ? 'end' : 'start'}`, shape, text: null };
-  }
-  const playedFrame = /token|played/i.test(shape)
-    || fields.some(([k, v]) => LABEL_KEY_RE.test(k) && /token|played/i.test(v));
-  if (playedFrame) {
+  const label = [shape, ...fields.filter(([k]) => LABEL_KEY_RE.test(k)).map(([, v]) => v)].join(' ');
+  if (/token|played/i.test(label)) {
     const played = fields.filter(([k]) => PLAYED_KEY_RE.test(k)).map(([, v]) => v).filter((v) => v.trim());
-    if (played.length) {
-      return { kind: 'tokens_played', shape, text: played.sort((a, b) => b.length - a.length)[0] };
-    }
+    return played.length
+      ? { kind: 'tokens_played', shape, text: played.sort((a, b) => b.length - a.length)[0] }
+      : { kind: 'unknown', shape, text: null };
   }
-  return { kind: 'unknown', shape, text: null };
+  const agent = AGENT_SPEAKER_RE.test(label);
+  const caller = !agent && CALLER_SPEAKER_RE.test(label);
+  if (!agent && !caller) return { kind: 'unknown', shape, text: null };
+  // Direction is decided on VALUES only (a key like `speaking: false` must
+  // not vote "start"), camelCase split, with the speaker label itself
+  // removed so "agentSpeakingStopped" reads as "stopped" and a bare
+  // "agentSpeaking" reads as nothing.
+  const directional = fields
+    .map(([, v]) => v.replace(/([a-z])([A-Z])/g, '$1 $2').replace(AGENT_SPEAKER_RE, ' ').replace(CALLER_SPEAKER_RE, ' '))
+    .join(' ');
+  const ended = END_RE.test(directional) && !START_RE.test(directional);
+  return { kind: `${agent ? 'agent' : 'caller'}_speaking_${ended ? 'end' : 'start'}`, shape, text: null };
 }
 
 /**
@@ -421,14 +417,14 @@ function buildRelayTwiML({
   // values are hints only: relay-server treats every setup-frame field as
   // unverified input, so the session mode is re-proven server-side against
   // the call_log row for the AUTHENTICATED CallSid before anything acts on it.
-  parameters = null,
+  parameters,
   // Tuning attributes from a relay profile (relay-profiles.js is the only
   // chooser and has already validated them). ABSENT ⇒ byte-identical TwiML.
   // The profile id rides a <Parameter> so the session can stamp it into the
   // call's version record; the rendered voice rides alongside for the same
   // reason (the Spanish leg's voice differs from the env default).
-  relayAttrs = null,
-  relayProfileId = null,
+  relayAttrs,
+  relayProfileId,
 } = {}) {
   if (!wsUrl) throw new Error('buildRelayTwiML: wsUrl is required');
   // Authenticate the upgrade with a token minted for THIS CallSid — validated
@@ -447,12 +443,13 @@ function buildRelayTwiML({
     `ttsProvider="${escapeXmlAttr(ttsProvider)}"`,
     `language="${escapeXmlAttr(language)}"`,
   ];
-  if (voice) attrs.push(`voice="${escapeXmlAttr(voice)}"`);
+  const voiceAttr = voice || '';
+  if (voiceAttr) attrs.push(`voice="${escapeXmlAttr(voiceAttr)}"`);
   // Defense in depth on the tuning attrs: only attribute-shaped names, never
-  // one of the fixed attributes above.
-  const tuning = relayAttrs && typeof relayAttrs === 'object' && !Array.isArray(relayAttrs)
-    ? Object.entries(relayAttrs).filter(([k, v]) => /^[a-zA-Z][a-zA-Z0-9]{0,40}$/.test(k) && !RESERVED_RELAY_ATTRS.has(k) && v != null && String(v) !== '')
-    : [];
+  // one of the fixed attributes above (an array or a string has index keys,
+  // which the name pattern already rejects).
+  const tuning = Object.entries(relayAttrs || {})
+    .filter(([k, v]) => /^[a-zA-Z][a-zA-Z0-9]{0,40}$/.test(k) && !RESERVED_RELAY_ATTRS.has(k) && v != null && String(v) !== '');
   for (const [k, v] of tuning) attrs.push(`${k}="${escapeXmlAttr(v)}"`);
   // <Connect action> lets Twilio hit a fallback URL when the relay session ends
   // or fails (e.g. a rejected upgrade or transient WS error) instead of
@@ -465,9 +462,11 @@ function buildRelayTwiML({
   // voice therefore stays the exact self-closing element it always was.
   const telemetryParams = {};
   if (relayProfileId) telemetryParams.relay_profile = String(relayProfileId);
-  if (relayProfileId || (voice || '') !== defaultTtsVoice()) telemetryParams.tts_voice = voice || '';
-  const mergedParams = { ...telemetryParams, ...(parameters && typeof parameters === 'object' ? parameters : {}) };
-  const paramEntries = Object.entries(mergedParams).filter(([k, v]) => k && v != null);
+  if (relayProfileId || voiceAttr !== defaultTtsVoice()) telemetryParams.tts_voice = voiceAttr;
+  // Parameter names must be name-shaped (a spread string or array would
+  // contribute index keys).
+  const paramEntries = Object.entries({ ...telemetryParams, ...(parameters || {}) })
+    .filter(([k, v]) => /^[a-zA-Z_]/.test(k) && v != null);
   const relayElement = paramEntries.length
     ? `<ConversationRelay ${attrs.join(' ')}>`
       + paramEntries
@@ -489,7 +488,6 @@ module.exports = {
   whereNotSandboxCall,
   RELAY_FAILED_OUTCOME,
   RELAY_TERMINAL_OUTCOMES,
-  KNOWN_FRAME_TYPES,
   classifyRelayEvent,
   DEFAULT_WELCOME_GREETING,
   defaultWelcomeGreeting,

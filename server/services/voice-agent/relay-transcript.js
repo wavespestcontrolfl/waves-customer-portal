@@ -247,7 +247,7 @@ function buildCallSummary({ modelSummary, turns = [], reason, leadCaptured } = {
  * Never throws: a composition failure returns null and the reconcile proceeds
  * with the original outcome/duration columns.
  */
-function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null, leadCaptured = false, reserviceFiled = false, callSid = null, model = null, startedAt = null, latency = null, versions = null } = {}) {
+function buildTranscriptUpdate({ turns = [], modelSummary = null, reason, leadCaptured = false, reserviceFiled = false, callSid, model, startedAt = null, latency, versions } = {}) {
   try {
     const transcription = buildTranscriptText(turns);
     if (!transcription && !clean(modelSummary, MAX_SUMMARY_CHARS)) return null;
@@ -278,8 +278,8 @@ function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null,
         // Per-call latency summary (summarizeTurnStats) and the version
         // stamps that make every later bake-off and audit finding
         // attributable to the exact model / prompt / profile that spoke.
-        latency: latency && typeof latency === 'object' ? latency : null,
-        versions: versions && typeof versions === 'object' ? versions : null,
+        latency: latency || null,
+        versions: versions || null,
       }),
       call_summary: buildCallSummary({ modelSummary, turns, reason, leadCaptured }),
       // ⚠️ `processing_status` IS DELIBERATELY NOT WRITTEN HERE.

@@ -54,8 +54,6 @@ const RELAY_ATTR_VALIDATORS = Object.freeze({
   deepgramSmartFormat: bool,
 });
 
-const RELAY_ATTR_KEYS = Object.freeze(Object.keys(RELAY_ATTR_VALIDATORS));
-
 // `hints: 'default'` resolves to the shared vocabulary list at validation time.
 const HINTS_DEFAULT = 'default';
 
@@ -248,7 +246,6 @@ function parseTtsVoice(voice, ttsProvider = 'ElevenLabs') {
 }
 
 module.exports = {
-  RELAY_ATTR_KEYS,
   RELAY_PROFILES,
   SANDBOX_CELLS,
   SANDBOX_RAW_CELL,
