@@ -824,8 +824,17 @@ test('a login-required vendor without its stored login is handed back before any
   mockState.product = talstar;
   mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
   const place = jest.fn();
-  const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: (c) => !!(c && c.password && c.accountNumber), place });
+  // The decrypt's wrong-key fallback must not run inside the claim transaction (r13 P0): a distinct trx sentinel proves the lookup got the POOL connection
+  const dbFn = require('../models/db');
+  const origTransaction = dbFn.transaction;
+  const trxSentinel = Object.assign((t) => dbFn(t), { raw: dbFn.raw });
+  dbFn.transaction = async (fn) => fn(trxSentinel);
+  let r;
+  try { r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: (c) => !!(c && c.password && c.accountNumber), place }); }
+  finally { dbFn.transaction = origTransaction; }
   expect(r).toMatchObject({ skipped: 'adapter_unconfigured', belled: true });
+  expect(getVendorLoginCredentials).toHaveBeenLastCalledWith(dbFn, 'vend-s1');
+  expect(getVendorLoginCredentials).not.toHaveBeenCalledWith(trxSentinel, expect.anything());
   expect(place).not.toHaveBeenCalled();
   expect(mockState.ledgerRows).toHaveLength(0);
   // canAutoOrder makes the same call, so the sweep never stands down its bell for that vendor

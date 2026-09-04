@@ -572,7 +572,7 @@ function claimIneligibility({ product, request, vendor }) {
  * the claim ({ request, vendor, adapterKey, product, ledger, pricing, order }).
  */
 // The request's vendor must be active, have an adapter, and be gated on.
-async function resolveClaimVendor(trx, { request, registry, deadAdapters = null }) {
+async function resolveClaimVendor(trx, { request, registry, deadAdapters = null, loginConn = null }) {
   const m = meta(request.metadata);
   if (!m.vendorId) return { skipped: 'no_vendor' };
   const vendor = await trx('vendors').where({ id: m.vendorId }).first('id', 'name', 'code', 'active');
@@ -593,8 +593,12 @@ async function resolveClaimVendor(trx, { request, registry, deadAdapters = null 
   // so a missing login hands the request back (retryable once the owner
   // stores it) instead of parking a claim as no_credentials (Codex #3853 r12
   // P2). A lookup that THROWS is run-level for this adapter: nothing written.
+  // The lookup runs on the POOL connection (loginConn), never inside the claim
+  // transaction: the decrypt tries the promoted key first and a wrong-key
+  // failure would abort the transaction (39000 → 25P02), stranding every row
+  // still encrypted under the fallback key (Codex #3853 r13 P0).
   if (!adapter.loginRequired) return { vendor, adapterKey, m };
-  const credentials = await lookupVendorLogin(trx, vendor, adapterKey);
+  const credentials = await lookupVendorLogin(loginConn || db, vendor, adapterKey);
   if (typeof adapter.loginConfigured === 'function' && adapter.loginConfigured(credentials) !== true) return { skipped: 'adapter_unconfigured' };
   return { vendor, adapterKey, m, credentials };
 }
@@ -705,7 +709,7 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   return { ledger, pricing, order };
 }
 
-async function claimRequest(trx, { requestId, registry, deadAdapters = null }) {
+async function claimRequest(trx, { requestId, registry, deadAdapters = null, loginConn = null }) {
   // The product's pricing advisory lock FIRST — the lock every
   // vendor_pricing writer holds to commit — then the request row, then the
   // product row: the sweep's order (auto-reorder.js lockProductPricing), so
@@ -718,7 +722,7 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null }) {
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request) return { skipped: 'not_found' };
   if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
-  const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters });
+  const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters, loginConn });
   if (resolved.skipped) return resolved;
   const { vendor, adapterKey, m, credentials = null } = resolved;
   const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit');
@@ -1069,7 +1073,7 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
     return { requestId, skipped: 'gated', ...(belled ? { belled: true } : { bellLost: true }) };
   }
   const registry = adapters || loadAdapters();
-  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters }));
+  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, loginConn: conn }));
   if (claim.skipped) {
     const belled = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : false;
     // A lost hand-off bell is reported, not swallowed: the request stays open

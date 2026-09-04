@@ -193,7 +193,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const st = { cart: [], removable: true, accountSelectable: true, url: 'https://www.siteone.com/en/login', loggedIn: false, placeClicked: 0, addClicked: 0, qty: null, ...opts };
     const el = (spec = {}) => ({
       count: async () => spec.count ?? 0,
-      evaluate: async () => spec.tag || 'input',
+      evaluate: async (fn) => fn({ tagName: (spec.tag || 'input').toUpperCase(), id: spec.id || '', name: spec.name || '', value: spec.value ?? '' }),
       getAttribute: async (n) => (spec.attrs ? spec.attrs[n] ?? null : null),
       first() { return this; },
       nth: (i) => spec.nth ? spec.nth(i) : el(spec),
@@ -234,14 +234,18 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       }
       // `checked` is a live getter: a real locator re-resolves, so the option clicked a moment ago reads its CURRENT state
       // The option: a radio input, or (billIsLabel) a wrapping label whose radio is the sub-locator
-      const radio = () => el({ count: 1, visible: st.radioVisible ?? true, get checked() { return st.accountChecked === true; } });
+      const radio = (id = 'acct-radio') => el({ count: 1, id, visible: st.radioVisible ?? true, get checked() { return st.accountChecked === true; } });
       const billOption = () => el({ count: 1, visible: true, tag: st.billIsLabel ? 'label' : 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; }, sub: (sub) => (sub === 'input[type="radio"]' ? radio() : el()) });
       // billHiddenFirst: a hidden responsive copy of the option precedes the usable visible one; billVisibleCopies: N visible copies
       if (sel === S.billToAccount) {
         if (st.billHiddenFirst) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, tag: 'input', checked: false }) : billOption()) });
-        if (st.billVisibleCopies) return el({ count: st.billVisibleCopies, nth: () => billOption() });
+        // billVisibleCopies: N visible copies, each its OWN radio (distinct ids)
+        if (st.billVisibleCopies) return el({ count: st.billVisibleCopies, nth: (i) => el({ count: 1, id: `acct-${i}`, visible: true, tag: 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } }) });
+        // billLabelAndRadio: ordinary markup — the selector union matches the visible radio AND its visible label (for=acct-radio) = ONE option
+        if (st.billLabelAndRadio) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, id: 'acct-radio', visible: true, tag: 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } }) : el({ count: 1, visible: true, tag: 'label', attrs: { for: 'acct-radio' }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } })) });
         return billOption();
       }
+      if (sel === '#acct-radio') return radio();
       // extraCheckedAccounts = checked account radios ELSEWHERE on the page (hidden responsive duplicates, stale nodes)
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
       if (sel === S.billToAccountSelected) return el({ count: (st.accountChecked ? 1 : 0) + (st.extraCheckedAccounts || 0) });
@@ -422,6 +426,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const dup = fakeSiteOne({ billVisibleCopies: 2 });
     await expect(s1.place(args(), dup.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_ambiguous' });
     expect(dup.st.placeClicked).toBe(0);
+  });
+
+  test('a visible radio and its visible label are ONE bill-to option — counted by the associated radio, the order places (r13 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ billLabelAndRadio: true });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.placeClicked).toBe(1);
   });
 
   test('the cart total is the ONE visible total — a hidden stale copy ahead of it is never the dry-run or cap figure (r12 P2)', async () => {

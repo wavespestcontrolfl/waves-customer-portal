@@ -433,6 +433,22 @@ async function readExactlyOne(page, selector) {
   return { count, text: String(text || ''), visible: isVisible };
 }
 
+// The bill-to selector unions radio inputs and their labels, so ordinary
+// markup (a visible radio + its visible "Bill to account" label) matches the
+// SAME control twice. Options are counted by the radio they resolve to, not by
+// locator — one labeled radio is one option (Codex #3853 r13 P1). An option
+// with no associated radio counts on its own (it will refuse as unverified).
+async function distinctBillToOptions(page, shown) {
+  const byRadio = new Map();
+  for (let i = 0; i < shown.length; i += 1) {
+    const radio = await associatedRadio(page, shown[i]);
+    const key = radio ? await radio.evaluate((el) => `${el.id}|${el.name}|${el.value}`).catch(() => null) : null;
+    const k = key || `option-${i}`;
+    if (!byRadio.has(k)) byRadio.set(k, shown[i]);
+  }
+  return [...byRadio.values()];
+}
+
 // The radio input a bill-to option resolves to: the element itself when it
 // is an input; for a label, its `for` target or the radio it wraps. Null
 // when no radio is associated (never fall back to a document-wide search).
@@ -469,8 +485,9 @@ async function verifyBillToAccount(page, { evidence, upload }) {
   const billOptions = await matches(page, SELECTORS.billToAccount);
   if (!billOptions.all.length) await refuse('no_bill_to_account', 'bill-to-account option not offered at checkout');
   if (!billOptions.shown.length) await refuse('bill_to_account_hidden', 'the bill-to-account option at checkout is not visible — not the tender the checkout shows');
-  if (billOptions.shown.length > 1) await refuse('bill_to_account_ambiguous', `${billOptions.shown.length} visible bill-to-account options at checkout — cannot tell which the order bills`);
-  const bill = billOptions.shown[0];
+  const options = await distinctBillToOptions(page, billOptions.shown);
+  if (options.length > 1) await refuse('bill_to_account_ambiguous', `${options.length} visible bill-to-account options at checkout — cannot tell which the order bills`);
+  const bill = options[0];
   try { await bill.click({ timeout: 5000 }); }
   catch (e) { await refuse('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`); }
   await page.waitForTimeout(1500);
