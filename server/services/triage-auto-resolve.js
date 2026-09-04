@@ -1357,15 +1357,18 @@ function deliveredEstimateScope(row) {
 // an earlier delivery) is judged on its latest scope, as before; a row
 // with no stamp at all (sent before the stamp existed, or a sibling never
 // in a group send) has no delivered content to judge — fail closed, the
-// card parks for the owner.
+// card parks for the owner. Each entry keeps its handoff instant — the
+// GROUP's, stamped alike on the anchor and the siblings it published — so
+// scopes one handoff delivered together can be paired; the fallback
+// carries none.
 function deliveredScopesOf(row, after) {
   const snap = (require('./estimate-service-lines').parseEstimateData(row.estimate_data) || {}).sendSnapshot;
   const valid = (scope) => Boolean(scope && typeof scope === 'object' && Array.isArray(scope.lines));
   const revisions = (Array.isArray(snap?.scopeHistory) ? snap.scopeHistory : [])
     .filter((h) => h && typeof h === 'object' && valid(h.scope) && strictlyAfter(h.deliveredAt, after))
-    .map((h) => h.scope);
+    .map((h) => ({ deliveredAt: h.deliveredAt, scope: h.scope }));
   if (revisions.length) return revisions;
-  return valid(snap?.scope) ? [snap.scope] : [];
+  return valid(snap?.scope) ? [{ deliveredAt: null, scope: snap.scope }] : [];
 }
 
 // A delivered scope as the address-bearing record the booking rules
@@ -1426,11 +1429,17 @@ function estimateCoversAsk(item, row, siblings = []) {
   };
   // Each revision the cited row delivered after the card is judged as ITS
   // OWN complete quote (revisions never pool — two incomplete ones are not
-  // one complete one); a sibling contributes its latest post-card scope.
-  const siblingScopes = siblings.map((s) => deliveredScopesOf(s, item.created_at).at(-1)).filter(Boolean);
-  return deliveredScopesOf(row, item.created_at).some((citedScope) => {
+  // one complete one); a sibling contributes the scope it delivered in the
+  // SAME group handoff (equal handoff instant), never a later or earlier
+  // one — an anchor complete only at property A in delivery 1 beside a
+  // sibling complete only at property B in delivery 2 is two incomplete
+  // handoffs, not one quote (codex r33 P1). Legacy stamps with no
+  // history pair on their absent instant, as before.
+  const siblingRevisions = siblings.map((s) => deliveredScopesOf(s, item.created_at));
+  return deliveredScopesOf(row, item.created_at).some(({ deliveredAt, scope: citedScope }) => {
     const cited = estimateAsVisit(citedScope);
     if (!cited || !bookingAtRequestedAddress(item, cited, new Map())) return false;
+    const siblingScopes = siblingRevisions.map((revs) => revs.find((h) => h.deliveredAt === deliveredAt)?.scope).filter(Boolean);
     const group = [citedScope, ...siblingScopes];
     return asked.every((readings) => coveredByDistinct(requirements,
       group.filter((scope) => at(scope, readings)).flatMap((scope) => scope.lines.map((l) => ({ ...l, words: lineWords(l) }))).filter((l) => intentAnswered(rule, l)), (l) => l.words));

@@ -633,6 +633,17 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(card({}), partial, [lawnSibling({ address: '5 Pine Ave, Sarasota, FL 34236' })])).toBe(false);
     expect(estimateCoversAsk(card({}), partial, [lawnSibling({ address: null })])).toBe(false);
     expect(estimateCoversAsk(card({}), partial, [lawnSibling({ onetime_total: null })])).toBe(false);
+    // Sibling revisions pair with the cited revision's GROUP handoff, never
+    // with a later one: a flea-only anchor delivered at T1 beside a lawn
+    // sibling delivered at T2 is two incomplete handoffs, not one quote
+    // (codex r33 P1).
+    const t2 = new Date(new Date(FRESH).getTime() + 2 * 3600 * 1000).toISOString();
+    const withHistory = (row, scopeHistory) => ({ ...row, estimate_data: { ...row.estimate_data, sendSnapshot: { scope: scopeHistory.at(-1).scope, scopeHistory } } });
+    const anchorT1 = withHistory(partial, [{ deliveredAt: later, scope: fleaOnlyStamp }]);
+    const lawnScope = deliveredEstimateScope(lawnSibling({}));
+    expect(estimateCoversAsk(card({}), anchorT1, [withHistory(lawnSibling({}), [{ deliveredAt: later, scope: lawnScope }])])).toBe(true);
+    expect(estimateCoversAsk(card({}), anchorT1, [withHistory(lawnSibling({}), [{ deliveredAt: t2, scope: lawnScope }])])).toBe(false);
+    expect(estimateCoversAsk(card({}), anchorT1, [withHistory(lawnSibling({}), [{ deliveredAt: t2, scope: lawnScope }, { deliveredAt: later, scope: lawnScope }])])).toBe(true);
     // Cadence binds to the LINE answering the service (codex r19 P1): a
     // recurring-plan ask for pest is not kept by a one-time pest job beside
     // a recurring lawn program; an explicit one-time ask is.

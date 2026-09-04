@@ -574,7 +574,11 @@ async function pricedPropertyAddress(propertyId) {
 // sendSnapshot.scope, so without the history a complete quote delivered
 // after a call and then edited and resent before the nightly sweep would
 // leave only the incomplete latest scope for the triage sweep to judge
-// (codex #3811 r32 P2). Malformed prior entries are dropped.
+// (codex #3811 r32 P2). Malformed prior entries are dropped. deliveredAt is
+// the GROUP handoff instant (the anchor's lastDeliveredAt) for the anchor
+// and every sibling it publishes, so the sweep can pair the scopes one
+// handoff delivered together and never combine an anchor's old revision
+// with a sibling's newer one (codex r33 P1).
 function scopeRevision(priorSendSnapshot, scope, deliveredAt) {
   const prior = Array.isArray(priorSendSnapshot?.scopeHistory)
     ? priorSendSnapshot.scopeHistory.filter((h) => h && typeof h === 'object' && typeof h.deliveredAt === 'string' && h.scope && typeof h.scope === 'object')
@@ -582,7 +586,7 @@ function scopeRevision(priorSendSnapshot, scope, deliveredAt) {
   return { scope, scopeHistory: [...prior, { deliveredAt, scope }].slice(-DELIVERY_HISTORY_MAX) };
 }
 
-async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { delivered = true } = {}) {
+async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { delivered = true, deliveredAt = null } = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data) || {};
   const estimateDataForBundle = { ...estimateData };
   delete estimateDataForBundle.sendSnapshot;
@@ -603,7 +607,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // undelivered content under the old witness (pre-push hook P1).
   // Independent of the bundle build below — it is content, not pricing.
   if (delivered) {
-    Object.assign(sendSnapshot, scopeRevision(sendSnapshot, deliveredEstimateScope({ ...estimate, estimate_data: estimateDataForBundle, ...(await pricedPropertyAddress(estimate.property_id)) }), snapshotAt));
+    Object.assign(sendSnapshot, scopeRevision(sendSnapshot, deliveredEstimateScope({ ...estimate, estimate_data: estimateDataForBundle, ...(await pricedPropertyAddress(estimate.property_id)) }), deliveredAt || snapshotAt));
   }
 
   try {
@@ -2455,7 +2459,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // into ITS audit snapshot too (GH codex P2 on #3628).
   let builtSendSnapshot = null;
   try {
-    const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0 });
+    const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
     // Only a VALIDATED bundle feeds the audit — same rule as the sibling
     // and superseded branches (codex pre-push P1).
     builtSendSnapshot = snapshot.sendSnapshot && !snapshot.sendSnapshot.pricingBundleError
@@ -2640,7 +2644,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // final attempt the sibling is released for an operator re-send.
           // A sibling is delivered by the anchor's handoff — the same
           // real-channel test decides whether its scope stamp moves.
-          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0 });
+          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
           if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
           }
