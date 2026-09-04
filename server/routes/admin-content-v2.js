@@ -1195,6 +1195,7 @@ router.post('/generate', aiContentLimiter, async (req, res, next) => {
 
     try {
       const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+        laneId: 'content_misc',
         maxTokens: 4000,
         jsonMode: false,
         system: `You write hyper-local pest control and lawn care content for Waves Pest Control in Southwest Florida.

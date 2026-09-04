@@ -1122,6 +1122,7 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
     // rides user-priority text only — inbound email must never be able to
     // out-rank the drafting rules (prompt injection).
     const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+      laneId: 'email_reply',
       system: [
         'You draft reply emails from Waves Pest Control (a family-owned pest control and lawn care company in SW Florida).',
         `Greeting name: ${firstName}. Tone: warm, professional, concise (under 150 words). ${tone === 'complaint' ? 'This is a COMPLAINT — acknowledge specifically, apologize once without admitting fault beyond what the message states, and commit to a concrete next step.' : 'Answer what can be answered and offer a concrete next step.'}`,

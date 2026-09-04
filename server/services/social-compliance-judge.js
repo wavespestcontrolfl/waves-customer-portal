@@ -80,6 +80,7 @@ async function judgeSocialCopy(text) {
     const routed = await dispatchWithFallback(
       MODELS.TEXT_POLICIES.fastStructured,
       {
+        laneId: 'social_judge',
         // Rules ride the SYSTEM channel (OpenAI `instructions` / Anthropic
         // `system`) so candidate copy — which can contain instruction-like
         // text — can never outrank them and self-approve.

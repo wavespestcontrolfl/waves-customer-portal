@@ -293,6 +293,7 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
   let result = null;
 
   const live = await dispatch(MODELS.ROUTES.askWaves, {
+    laneId: 'ask_waves',
     system: SYSTEM_PROMPT,
     text,
     jsonMode: true,
@@ -303,6 +304,7 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
 
   if (!result) {
     const fallback = await callAnthropic({
+      laneId: 'ask_waves',
       model: process.env.ASK_WAVES_MODEL || MODELS.VOICE,
       system: SYSTEM_PROMPT,
       text,

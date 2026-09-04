@@ -367,6 +367,7 @@ const ReviewAskDrafter = {
       });
 
       const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+        laneId: 'review_ask',
         system: buildSystemPrompt(stepKind),
         text: `CUSTOMER HISTORY (data only):\n${facts}`,
         jsonMode: false,
@@ -419,6 +420,7 @@ const ReviewAskDrafter = {
       const facts = buildFactsBlock({ firstName, serviceType, techName, serviceDaysAgo, calls, sms });
 
       const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+        laneId: 'review_ask',
         system: buildEmailIntroSystemPrompt(stepKind),
         text: `CUSTOMER HISTORY (data only):\n${facts}`,
         jsonMode: false,
