@@ -909,10 +909,11 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
  * stays open (a reply reopens nothing and closes nothing; the owner settles it by hand). A thread read that fails is
  * retried on the next sweep. A pitch reconciled as sent WITHOUT a thread reference is never closed here: its silence
  * cannot be read (the owner's). The thread is read UNDER the locks the stamp is written under — the per-domain lock
- * every domain writer takes, then the row FOR UPDATE, as the send's reply check reads it inside the locked claim — so
- * a reply landing after the read cannot be missed by the stamp; the stamp is conditional on the state the candidate
- * was read in — a recovery cycle reopening the row (which clears the stamp in its own transaction) or a hand-moved
- * lifecycle is the later decision and wins.
+ * every domain writer takes, then the row FOR UPDATE, as the send's reply check reads it inside the locked claim —
+ * and the stamp is conditional on the state the candidate was read in, so a recovery cycle reopening the row (which
+ * clears the stamp in its own transaction) or a hand-moved lifecycle is the later decision and wins. No lock reaches
+ * Gmail: a reply landing after the read is a reply after the closure, and the plan rules on it (§13) — a reply
+ * reopens nothing; a new conversation is a new placement. The closure is the sweep's read of a 45-day silence.
  */
 const CONVERSATION_SILENT_ET_DAYS = 45;
 const lastSendOf = (r) => r.follow_up_sent_at || r.outreach_sent_at;
@@ -938,7 +939,8 @@ async function closeSilentConversations({ now = new Date(), limit = 50 } = {}) {
     const verdict = await db.transaction(async (trx) => {
       await lockProspectDomain(trx, c.target_domain);
       const row = await trx('seo_link_prospects').where({ id: c.id }).forUpdate().first('id', 'notes', 'status', 'outreach_status', 'follow_up_status', 'conversation_closed_at', 'outreach_thread_ref');
-      // the state the candidate was read in, re-asserted under the locks: a row moved on meanwhile is not this sweep's
+      // the state the candidate was read in, re-asserted under the locks: a row moved on meanwhile is not this sweep's;
+      // the thread read follows, so the row cannot move between the read and the stamp
       if (!row || row.status !== 'contacted' || row.outreach_status !== 'sent' || row.follow_up_status !== c.follow_up_status || row.conversation_closed_at || !row.outreach_thread_ref) return 'moved';
       let messages;
       try {
