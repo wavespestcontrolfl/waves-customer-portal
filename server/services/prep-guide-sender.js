@@ -107,7 +107,10 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
       // visit that came and went — the appointment page renders it 'past';
       // prep for it is prep for nothing, so walk on to the next matching
       // visit (GH Codex #3844 r10 P2). One predicate: the page's own.
-      const row = rows.find((r) => pageState(r).state !== 'past');
+      // Only what the page renders as upcoming: a visit already underway
+      // (en_route / on_site) is too late to prep for and would hide the
+      // customer's later treatment (GH Codex #3844 r13 P2).
+      const row = rows.find((r) => pageState(r).state === 'upcoming');
       if (row || rows.length < PAGE) return row || null;
     }
   } catch (err) {

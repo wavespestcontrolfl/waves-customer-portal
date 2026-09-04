@@ -909,17 +909,19 @@ async function checkStatementLinks(ctx, statements) {
 // Appointment pages (long form by reschedule_token, or the branded short
 // form): the visit must still resolve and bind to the recipient's account.
 async function checkAppointmentLinks(ctx, shortRows, onRecipientAccount) {
-  // Liveness NOW, not at the insert: the page's own state predicate, and
-  // the dispatch-owned-pending hide every visit-backed link shares (r5 P1)
-  // — a visit cancelled, completed, moved to a pending rebook, elapsed, or
-  // still unreviewed since the link was inserted is not the upcoming
-  // appointment the text promises (pre-push Codex P1).
-  const { pageState, dispatchOwnedUnreviewed } = require('../routes/appointment-public');
+  // Liveness NOW, not at the insert: the state the page would render —
+  // grouped (a sibling in pending rebook / underway, or a membership that
+  // no longer forms one stop, fails closed — GH Codex #3844 r13 P1) or the
+  // row's own — plus the dispatch-owned-pending hide every visit-backed
+  // link shares (r5 P1). A visit cancelled, completed, moved to a pending
+  // rebook, elapsed, underway, or still unreviewed since the link was
+  // inserted is not the upcoming appointment the text promises.
+  const appointmentPublic = require('../routes/appointment-public');
   const visitById = async (where) => db('scheduled_services').where(where)
-    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_start', 'source_action', 'customer_confirmed');
+    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_start', 'window_end', 'source_action', 'customer_confirmed', 'visit_id');
   const bind = async (visit) => {
     if (!visit) return refuseSend('This appointment link no longer resolves — remove it and insert a fresh one.');
-    if (dispatchOwnedUnreviewed(visit) || pageState(visit).state !== 'upcoming') {
+    if (appointmentPublic.dispatchOwnedUnreviewed(visit) || (await appointmentPublic.pageStateForVisit(visit)).state !== 'upcoming') {
       return refuseSend('This appointment is no longer upcoming — remove the appointment link and insert a fresh one.');
     }
     const bad = await onRecipientAccount(visit.customer_id, 'appointment link');

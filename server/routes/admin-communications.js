@@ -1842,7 +1842,7 @@ function composerLinkBuilders() {
     // builder takes the picked row so the pick stays route-owned.
     appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids, {
     statuses: ['pending', 'confirmed'],
-    skip: (svc) => require('./appointment-public').pageState(svc).state === 'past',
+    skip: (svc) => require('./appointment-public').pageState(svc).state !== 'upcoming',
     })),
     // The prep page shows its customer's name and address and the /sms
     // send requires the recipient to own it (GH Codex #3844 r3 P2), so

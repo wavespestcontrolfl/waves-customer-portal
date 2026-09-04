@@ -33,6 +33,10 @@ function customersQuery() {
 // upcomingVisitRow, the same table also serves ensureServicePrepToken's
 // chains (.select()…first() token read + .update().returning() mint).
 let upcomingVisitRow = null;
+// A live upcoming visit as the appointment page's pageState reads it —
+// status + a date ahead of the run (the pick requires state 'upcoming').
+const FUTURE = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+const liveVisit = (extra = {}) => ({ id: 'svc-9', status: 'confirmed', scheduled_date: FUTURE, ...extra });
 let servicePrepRow = null;
 let serviceUpdates = [];
 function scheduledQuery() {
@@ -221,7 +225,7 @@ describe('sendPrepToCustomer', () => {
   });
 
   test('upcoming visit → prep_url is the tokened public prep page', async () => {
-    upcomingVisitRow = { id: 'svc-9', scheduled_date: '2026-08-01' };
+    upcomingVisitRow = liveVisit();
 
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
 
@@ -239,7 +243,7 @@ describe('sendPrepToCustomer', () => {
   });
 
   test('a rejected email never stamps prep_sent_at', async () => {
-    upcomingVisitRow = { id: 'svc-9', scheduled_date: '2026-08-01' };
+    upcomingVisitRow = liveVisit();
     EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'blocked' });
 
     await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
@@ -255,7 +259,7 @@ describe('sendPrepToCustomer', () => {
       if (table === 'scheduled_services') { visitsQuery = scheduledQuery(); return visitsQuery; }
       return customersQuery();
     });
-    upcomingVisitRow = { id: 'svc-9', scheduled_date: '2026-09-20' };
+    upcomingVisitRow = liveVisit();
     expect(await nextUpcomingVisit('cust-1', 'flea')).toEqual(upcomingVisitRow);
     const predicate = visitsQuery.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
     expect(predicate).toBeInstanceOf(Function);
@@ -265,6 +269,14 @@ describe('sendPrepToCustomer', () => {
     expect(qb.orWhereNotIn).toHaveBeenCalledWith('source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
     expect(qb.orWhereNot).toHaveBeenCalledWith('status', 'pending');
     expect(qb.orWhere).toHaveBeenCalledWith('customer_confirmed', true);
+  });
+
+  test('nextUpcomingVisit skips a visit already underway — too late to prep for, and it would hide the later treatment (GH Codex #3844 r13 P2)', async () => {
+    const { nextUpcomingVisit } = require('../services/prep-guide-sender');
+    upcomingVisitRow = liveVisit({ status: 'en_route' });
+    expect(await nextUpcomingVisit('cust-1', 'flea')).toBeNull();
+    upcomingVisitRow = liveVisit({ status: 'on_site' });
+    expect(await nextUpcomingVisit('cust-1', 'flea')).toBeNull();
   });
 
   test('no upcoming visit → prep_url stays the portal visits tab', async () => {

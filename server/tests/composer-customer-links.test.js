@@ -1313,6 +1313,7 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
         { id: 'v1', customer_id: 'c1', status: 'cancelled' },
         { id: 'v1', customer_id: 'c1', status: 'completed' },
         { id: 'v1', customer_id: 'c1', status: 'rescheduled' },
+        { id: 'v1', customer_id: 'c1', status: 'en_route' },
         { id: 'v1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2020-01-01', window_start: '09:00' },
         { id: 'v1', customer_id: 'c1', status: 'pending', source_action: require('../services/call-booking-source-actions').DISPATCH_OWNED_PENDING_SOURCE_ACTIONS[0], customer_confirmed: false },
       ]) {
@@ -1321,6 +1322,25 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       }
       wireAccount({ visit: { id: 'v1', customer_id: 'c1', status: 'pending', source_action: require('../services/call-booking-source-actions').DISPATCH_OWNED_PENDING_SOURCE_ACTIONS[0], customer_confirmed: true } });
       expect(await bearerLinkSendCheck(link, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    });
+
+    test('a GROUPED visit is judged by the stop\'s state, as the page renders it — a sibling in pending rebook or underway, or an unreadable membership, refuses (GH Codex #3844 r13 P1)', async () => {
+      const appointmentPublic = require('../routes/appointment-public');
+      const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit');
+      try {
+        const link = `portal.wavespestcontrol.com/appointment/${RESCHEDULE}`;
+        for (const state of ['pending_rebook', 'in_progress', 'not_available']) {
+          spy.mockResolvedValueOnce({ state, phase: null });
+          wireAccount({ visit: { id: 'v1', customer_id: 'c1', visit_id: 'grp-1' } });
+          expect((await bearerLinkSendCheck(link, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
+          expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'v1', visit_id: 'grp-1' }));
+        }
+        spy.mockResolvedValueOnce({ state: 'upcoming', phase: null });
+        wireAccount({ visit: { id: 'v1', customer_id: 'c1', visit_id: 'grp-1' } });
+        expect(await bearerLinkSendCheck(link, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('a visit whose owning customer was deleted refuses — the public route 404s it, and a live sibling on the account must not be texted a dead link (pre-push Codex P1)', async () => {
