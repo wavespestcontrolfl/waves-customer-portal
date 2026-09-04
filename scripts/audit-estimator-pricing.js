@@ -747,6 +747,9 @@ function runPestMatrix() {
     { features: { poolCage: true, poolCageSize: 'small' } }, { features: { poolCage: true, poolCageSize: 'large' } }, { features: { poolCage: true, poolCageSize: 'oversized' } },
     { features: { pool: true } }, { features: { shrubs: 'heavy' } }, { features: { shrubs: 'light' } }, { features: { complexity: 'complex' } }, { features: { complexity: 'simple' } },
     { features: { nearWater: 'YES' } }, { features: { indoor: true } },
+    // attachedGarage (codex r26 P2): PEST.additionalAdjustments.attachedGarage via
+    // hasAttachedGarageForPest (service-pricing.js:1478-1508) on the normalised feature.
+    { features: { attachedGarage: true } }, { features: { attachedGarage: true, pool: true } },
   ];
   for (const fc of featureCases) {
     const norm = { ...fc.features, nearWater: fc.features.nearWater === 'YES' };
@@ -834,6 +837,14 @@ function runLawnMatrix() {
     { name: 'input.routeDriveMinutes=20 (explicit drive replaces route density)', property: { routeDriveMinutes: 20 }, routeDriveMinutes: 20 },
     { name: 'services.lawn.routeDriveMinutes=15 (service line wins)', property: {}, routeDriveMinutes: 15, lawnLine: { routeDriveMinutes: 15 } },
     { name: 'unrecognised values are neutral', property: { landscapeComplexity: 'wild', shrubDensity: 'sparse', maintenanceCondition: 'GOOD', overallPestPressure: 'LOW', fenceType: 'chain link' } },
+    // Route density is NOT an estimate input (codex r26 P2, re-verified): the
+    // floor reads options.routeDensity || property.routeDensity (service-pricing.js:1983)
+    // but neither is populated from the profile, the features object or the lawn
+    // line, so SPARSE at every placement must price exactly like the neutral case
+    // (the expectation carries no density) — the explicit routeDriveMinutes input
+    // above is the only reachable drive-time lever. A future wiring of the input
+    // shows here as a mismatch and must add the density to the expectation.
+    { name: 'routeDensity=SPARSE at input / features / services.lawn is unreachable (neutral)', property: { routeDensity: 'SPARSE', features: { routeDensity: 'SPARSE' } }, lawnLine: { routeDensity: 'SPARSE' } },
   ];
   Object.assign(V, { useLawnCostFloor: true, programMinimumMonthly: 0 });
   let anyPropertyFloored = false;
@@ -1045,6 +1056,9 @@ function runRodentMatrix() {
   const solo = runEngine({ ...BASE, services: { rodentBait: {} } }).result;
   const bundled = runEngine({ ...BASE, services: { rodentBait: {}, pest: { frequency: 'quarterly' } } }).result;
   record(section, 'setup fee standalone', {}, constants.RODENT.baitSetupFee, solo.summary.rodentBaitSetupTotal);
+  // FROZEN literal (codex r26 P2): the line above moves with RODENT.baitSetupFee;
+  // this one pins the $99 standalone charge independently of the constant.
+  record(section, 'setup fee standalone (frozen $99)', {}, 99, solo.summary.rodentBaitSetupTotal);
   record(section, 'setup fee bundled with pest (waived)', {}, 0, bundled.summary.rodentBaitSetupTotal);
   for (const b of [{ name: 'zero homeSqFt', homeSqFt: 0 }, { name: 'negative homeSqFt', homeSqFt: -2000 }, { name: 'missing homeSqFt', homeSqFt: undefined }]) {
     const r = runEngine({ ...BASE, homeSqFt: b.homeSqFt, services: { rodentBait: {} } });
@@ -1221,6 +1235,16 @@ function runSpecialtyMatrix() {
     const li = line(runEngine({ ...BASE, services: { foam: { points } } }).result, 'foam_drill');
     record(section, `foam drill points=${points}`, { points }, exp.price, li ? li.price : null, { extra: { cost: exp.cost, targetMargin: exp.targetMargin, realizedMargin: exp.realizedMargin, refusedOverMaxPoints: !!exp.refusedOverMaxPoints } });
     flagIf(exp.refusedOverMaxPoints && li, 'P1', section, `foam drill points=${points} priced above the ${exp.maxPoints}-point ceiling`, `engine price ${li && li.price} — expected a refusal`);
+  }
+  // Foam drill urgency / after-hours multipliers (codex r26 P2): the same matrix
+  // one-time pest runs; the engine forwards services.foam.urgency / afterHours to
+  // priceFoamDrill (estimate-engine.js:1613-1616).
+  for (const points of [5, 12]) {
+    for (const [urgency, afterHours] of [['ROUTINE', false], ['SOON', false], ['SOON', true], ['URGENT', false], ['URGENT', true]]) {
+      const exp = expectFoamDrill(points, urgency, afterHours);
+      const li = line(runEngine({ ...BASE, services: { foam: { points, urgency, afterHours } } }).result, 'foam_drill');
+      record(section, `foam drill points=${points} urgency=${urgency} afterHours=${afterHours}`, { points, urgency, afterHours }, exp.price, li ? li.price : null, { extra: { multiplier: li ? li.urgencyMultiplier ?? li.multiplier ?? null : null } });
+    }
   }
   // Top dressing (codex r19 P2): the engine's only explicit area input is
   // services.topDressing.lawnSqFt — priced in full, exactly as entered;
@@ -1479,15 +1503,20 @@ function runCommercialMatrix() {
     // auto-priced or a manual quote (codex r18 P1): a dispatcher regression that
     // drops the requested line, or downgrades an auto-priced program to a manual
     // quote (or vice versa), must fail the run rather than record engine_only.
-    { name: 'commercial pest office 5,000 sf', expect: { service: 'commercial_pest', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 20000, isCommercial: true, propertyType: 'commercial', commercialRiskType: 'office_low', services: { pest: { frequency: 'monthly' } } } },
-    { name: 'commercial lawn 60,000 sf turf', expect: { service: 'commercial_lawn', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 100000, lawnSqFt: 60000, isCommercial: true, propertyType: 'commercial', services: { lawn: {} } } },
-    { name: 'commercial mosquito 40,000 sf lot', expect: { service: 'commercial_mosquito', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 40000, isCommercial: true, propertyType: 'commercial', services: { mosquito: {} } } },
+    // `frozen` (codex r26 P2): literal customer amounts captured 2026-09-04 from the
+    // in-code constants and compared as normal match/mismatch rows — the commercial
+    // cost-plus pricers share their constants with any reconstruction, so only a
+    // literal catches a doubled quote. A deliberate commercial price move updates
+    // these in the same PR.
+    { name: 'commercial pest office 5,000 sf', frozen: { annual: 715.83, perApp: 178.96 }, expect: { service: 'commercial_pest', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 20000, isCommercial: true, propertyType: 'commercial', commercialRiskType: 'office_low', services: { pest: { frequency: 'monthly' } } } },
+    { name: 'commercial lawn 60,000 sf turf', frozen: { annual: 6231.52, perApp: 778.94 }, expect: { service: 'commercial_lawn', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 100000, lawnSqFt: 60000, isCommercial: true, propertyType: 'commercial', services: { lawn: {} } } },
+    { name: 'commercial mosquito 40,000 sf lot', frozen: { annual: 1321.09, perApp: 146.79 }, expect: { service: 'commercial_mosquito', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 40000, isCommercial: true, propertyType: 'commercial', services: { mosquito: {} } } },
     { name: 'commercial one-time pest (manual quote)', expect: { service: 'commercial_pest', manual: true }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { oneTimePest: {} } } },
     { name: 'commercial WDO (manual quote)', expect: { service: 'commercial_pest', manual: true }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { wdo: {} } } },
     { name: 'commercial german roach (manual quote)', expect: { service: 'commercial_pest', manual: true }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { germanRoach: { severity: 'moderate' } } } },
-    { name: 'commercial rodent bait', expect: { service: 'commercial_rodent_bait', manual: false }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { rodentBait: {} } } },
-    { name: 'commercial termite bait', expect: { service: 'commercial_termite_bait', manual: false }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { termite: { system: 'trelona' } } } },
-    { name: 'commercial tree & shrub', expect: { service: 'commercial_tree_shrub', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 40000, bedArea: 6000, isCommercial: true, propertyType: 'commercial', services: { treeShrub: { tier: 'standard', treeCount: 20 } } } },
+    { name: 'commercial rodent bait', frozen: { annual: 476, perApp: 119 }, expect: { service: 'commercial_rodent_bait', manual: false }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { rodentBait: {} } } },
+    { name: 'commercial termite bait', frozen: { annual: 813.27, perApp: 203.32 }, expect: { service: 'commercial_termite_bait', manual: false }, input: { ...BASE, homeSqFt: 5000, isCommercial: true, propertyType: 'commercial', services: { termite: { system: 'trelona' } } } },
+    { name: 'commercial tree & shrub', frozen: { annual: 2670.91, perApp: 445.15 }, expect: { service: 'commercial_tree_shrub', manual: false }, input: { ...BASE, homeSqFt: 5000, lotSqFt: 40000, bedArea: 6000, isCommercial: true, propertyType: 'commercial', services: { treeShrub: { tier: 'standard', treeCount: 20 } } } },
   ];
   // Auto-priced commercial lines must carry finite, POSITIVE amounts (codex r17
   // P1): this section bypasses record()/offBy, so a NaN / Infinity / missing
@@ -1520,6 +1549,11 @@ function runCommercialMatrix() {
     // P1, r17 P1).
     if (!r.ok) findings.push({ severity: 'P1', section, name: c.name, detail: `generateEstimate threw: ${r.error}` });
     else if (badAmounts.length) findings.push({ severity: 'P1', section, name: c.name, detail: engineError });
+    if (c.frozen) {
+      const main = r.ok ? lines.find((l) => l.service === c.expect.service) : null;
+      record(section, `${c.name} annual (frozen)`, c.input, c.frozen.annual, main ? main.annual : null, { extra: { engineError } });
+      record(section, `${c.name} perApp (frozen)`, c.input, c.frozen.perApp, main ? main.perApp : null, { extra: { engineError } });
+    }
   }
 }
 

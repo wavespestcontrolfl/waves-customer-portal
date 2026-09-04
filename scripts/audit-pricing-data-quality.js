@@ -203,7 +203,11 @@ const CHECKS = [
     // positive package size AND a usage unit the ounce table converts (normalizeUnit:
     // trim, lower, spaces → _, drop one trailing "s"). A product with a price but no
     // package size or an unconvertible unit costs $0 there, so it counts here
-    // (codex r16 P2). A $0 price stays "no cost" for audit purposes.
+    // (codex r16 P2). A $0 price stays "no cost" for audit purposes. The calculator
+    // takes ANY non-null cost_per_unit >= 0 first (product-costing.js:243-255), so an
+    // explicit zero costs $0 and never reaches the best_price fallback — it counts here
+    // regardless of the fallback fields; a NEGATIVE cost_per_unit is skipped by that
+    // guard and falls through to the fallback like a NULL (codex r26 P2).
     // no_quantity mirrors the same calculator's usage resolution: a usage of zero or
     // less resolves as missing and costs $0 with a warning, and the admin create /
     // update endpoints accept zero and negative values unvalidated — so a row counts
@@ -214,10 +218,11 @@ const CHECKS = [
                  count(*) filter (where u.usage_unit is null) as no_unit,
                  count(*) filter (where p.id is null) as product_missing,
                  count(*) filter (where p.id is not null
-                   and coalesce(p.cost_per_unit, 0) <= 0
+                   and ((p.cost_per_unit is not null and p.cost_per_unit >= 0 and p.cost_per_unit = 0)
+                     or ((p.cost_per_unit is null or p.cost_per_unit < 0)
                    and (coalesce(p.best_price, 0) <= 0 or coalesce(p.unit_size_oz, 0) <= 0
                         or coalesce(regexp_replace(lower(regexp_replace(btrim(u.usage_unit), '\\s+', '_', 'g')), 's$', ''), '')
-                           not in ('fl_oz','floz','oz','ounce','gal','gallon','qt','quart','pt','pint','ml','milliliter','millilitre','cc','l','liter','litre','lb','pound','g','gram','gm','kg'))) as product_no_cost,
+                           not in ('fl_oz','floz','oz','ounce','gal','gallon','qt','quart','pt','pint','ml','milliliter','millilitre','cc','l','liter','litre','lb','pound','g','gram','gm','kg'))))) as product_no_cost,
                  count(*) filter (where not exists (select 1 from services s where s.service_key = u.service_type)) as service_type_not_a_catalog_key
           from service_product_usage u left join products_catalog p on p.id = u.product_id`,
   },

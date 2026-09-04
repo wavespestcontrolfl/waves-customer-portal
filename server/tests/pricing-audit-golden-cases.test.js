@@ -149,6 +149,9 @@ describe('pricing audit — mosquito, rodent bait, termite bait', () => {
   test('rodent bait $99 setup fee applies stand-alone and is waived beside a qualifying recurring service', () => {
     const solo = generateEstimate({ ...BASE, services: { rodentBait: {} } });
     const bundled = generateEstimate({ ...BASE, services: { rodentBait: {}, pest: { frequency: 'quarterly' } } });
+    // Literal, not the constant (codex r26 P2): an accidental edit to
+    // RODENT.baitSetupFee must fail here rather than move both sides together.
+    expect(solo.summary.rodentBaitSetupTotal).toBe(99);
     expect(solo.summary.rodentBaitSetupTotal).toBe(constants.RODENT.baitSetupFee);
     expect(bundled.summary.rodentBaitSetupTotal).toBe(0);
   });
