@@ -766,12 +766,13 @@ function unconfirmedAmount(env) {
   const amountCents = caps(env).perOrder ?? null;
   return { amountCents, counted: amountCents != null ? ` No total was confirmed or reserved, so it is counted against the monthly cap at the per-order cap (${dollars(amountCents)}) until received or revoked.` : '' };
 }
-// That fallback reaches the row UNDER the cap lock before the park — the
-// park itself holds no lock, and a concurrent dispatcher summing the month
-// in the gap would read this placing row at its null amount (Codex r24 P1).
+// EVERY post-submit figure — the vendor's, a quote, or that fallback —
+// reaches the row UNDER the cap lock before the park: the park itself holds
+// no lock, and a concurrent dispatcher summing the month in the gap would
+// read this placing row at its stale or null amount (Codex r24 P1, hook P0).
 // The row's cap-accounting month is kept. claim_lost = the row already left
-// placing; the caller settles that (late placement / already_settled).
-async function reserveFallbackUnderLock(conn, ledger, cents, env) {
+// placing; the caller settles that as a late placement.
+async function reservePostSubmitAmount(conn, ledger, cents, env) {
   if (cents == null) return { ok: false, reason: 'caps_unconfigured' };
   const reservation = await ledgerReservation(conn, ledger);
   return reserveUnderCaps(conn, ledger.id, cents, { env, accountingAt: reservation.createdAt, postPlacement: true });
@@ -788,7 +789,13 @@ async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
   if (err.ambiguous) {
     const known = positiveCents(err.cents) ?? positiveCents(quoteCents) ?? (await ledgerReservation(conn, ctx.ledger)).cents;
     const { amountCents, counted } = known == null ? unconfirmedAmount(env) : { amountCents: known, counted: '' };
-    if (known == null) await reserveFallbackUnderLock(conn, ctx.ledger, amountCents, env);
+    const reserved = await reservePostSubmitAmount(conn, ctx.ledger, amountCents, env);
+    // The row left placing while the call ran (stale park, maybe a revoke on
+    // top): a skipped park would leave the revoke marker standing beside an
+    // order that MAY exist — a replacement purchase. Attach it as a late
+    // placement (marker replaced, request ordered, reconcile bell) that
+    // blocks a replacement until reconciled (hook P0).
+    if (reserved.reason === 'claim_lost') return recordPlaced(conn, { ctx, placed: { externalOrderNumber: null, amountCents, response: err.body || null, evidence: err.evidence || null, ambiguous: true }, finalCents: amountCents, quoteCents });
     return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.${counted}`, amountCents, evidence: err.evidence || null, placed: err.body ? { response: err.body } : null });
   }
   return park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
@@ -820,19 +827,22 @@ async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCe
   const parked = await trx('vendor_orders').where({ id: ledger.id }).first('evidence');
   const wasRevoked = !!meta(parked?.evidence).revokedAt;
   const after = wasRevoked ? 'the operator revoked it' : `it was parked and the request marked ${fresh?.status || 'missing'}`;
+  // An ambiguous submit (the call left the process, outcome unknown) is
+  // attached the same way — conservatively, as an order that MAY exist.
+  const landed = placed.ambiguous ? 'MAY have been placed (the submit outcome is unknown — check the account)' : 'was confirmed';
   const bell = versioned({
-    title: `Auto-order landed after ${wasRevoked ? 'revoke' : 'stale recovery'}: ${product.name}`,
-    body: `${vendor.name} order ${placed.externalOrderNumber || '(number unknown)'} (${dollars(orderFacts.amount_cents ?? quoteCents)}) was confirmed after ${after}. The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke again.`,
+    title: `Auto-order ${placed.ambiguous ? 'may have landed' : 'landed'} after ${wasRevoked ? 'revoke' : 'stale recovery'}: ${product.name}`,
+    body: `${vendor.name} order ${placed.externalOrderNumber || '(number unknown)'} (${dollars(orderFacts.amount_cents ?? quoteCents)}) ${landed} after ${after}. The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke again.`,
   });
   await trx('vendor_orders').where({ id: ledger.id }).update({
     ...orderFacts,
     // The adapter's confirmed facts (item / address / payment / read-back)
     // are kept for the reconciliation, as the green path keeps them (Codex r24 P2).
     evidence: conn.raw("(COALESCE(evidence, '{}'::jsonb) - 'revokedAt' - 'bellAt') || ?::jsonb", [JSON.stringify({ ...(placed.evidence || {}), bell, latePlacementAt: new Date().toISOString(), latePlacementAfterRevoke: wasRevoked })]),
-    error: conn.raw("COALESCE(error, '') || ?", [` | order confirmed placed after stale recovery${wasRevoked ? ' and revoke' : ''}: ${placed.externalOrderNumber || '?'}`]),
+    error: conn.raw("COALESCE(error, '') || ?", [` | order ${placed.ambiguous ? 'MAY have been placed' : 'confirmed placed'} after stale recovery${wasRevoked ? ' and revoke' : ''}: ${placed.externalOrderNumber || '?'}`]),
   });
   await requestToOrdered(trx, request.id);
-  await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: orderFacts.amount_cents, external_order_number: placed.externalOrderNumber || null, reason: `the row was parked by stale recovery${wasRevoked ? ' and revoked' : ''} while the vendor call ran; the order exists`, trx });
+  await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: orderFacts.amount_cents, external_order_number: placed.externalOrderNumber || null, reason: `the row was parked by stale recovery${wasRevoked ? ' and revoked' : ''} while the vendor call ran; the order ${placed.ambiguous ? 'may exist (ambiguous submit)' : 'exists'}`, trx });
   return { bell, settledElsewhere: true };
 }
 
@@ -884,7 +894,7 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
     return { bell };
   });
   const bellDelivered = outcome.bell ? await deliverBell(conn, { notify, ledgerId: ledger.id, requestId: request.id, productName: product.name, vendorName: vendor.name, ...outcome.bell }) : true;
-  logger.info(`[order-dispatch] placed ${vendor.name} order ${placed.externalOrderNumber || '?'} for ${product.name} (${dollars(placed.amountCents ?? quoteCents)})`);
+  logger.info(`[order-dispatch] ${placed.ambiguous ? 'ambiguous submit attached for' : 'placed'} ${vendor.name} order ${placed.externalOrderNumber || '?'} for ${product.name} (${dollars(placed.amountCents ?? quoteCents)})`);
   return {
     requestId: request.id,
     ledgerId: ledger.id,
@@ -1024,7 +1034,7 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     const finalCents = await settledFinalCents(conn, { ledger, placed, quoteCents });
     if (finalCents == null) {
       const { amountCents, counted } = unconfirmedAmount(env);
-      const reserved = await reserveFallbackUnderLock(conn, ledger, amountCents, env);
+      const reserved = await reservePostSubmitAmount(conn, ledger, amountCents, env);
       // The row left placing while the vendor call ran: the order exists at
       // (at least) the fallback figure — attach it as a late placement.
       if (reserved.reason === 'claim_lost') return await recordPlaced(conn, { ctx, placed, finalCents: amountCents, quoteCents });

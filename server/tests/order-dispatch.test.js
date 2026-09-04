@@ -316,6 +316,23 @@ test('an ambiguous submit that names the checkout total parks with THAT amount, 
   expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
   const parked = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').map((u) => u.row.amount_cents);
   expect(parked).toContain(10593);
+  // A KNOWN post-submit figure is reserved under the cap lock before the park too (hook P0).
+  expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.amount_cents === 10593).map((u) => !!u.row.status)).toEqual([false, true]);
+});
+
+test('an ambiguous submit whose claim was lost meanwhile (stale park + revoke) is attached as a late placement — marker replaced, request ordered, bell says it MAY exist (hook P0)', async () => {
+  const dbFn = require('../models/db');
+  dbFn.raw.mockClear();
+  mockState.parkedEvidence = { bell: { title: 'x', body: 'y' }, bellAt: '2026-09-03T10:00:00Z', revokedAt: '2026-09-03T10:05:00Z' };
+  const err = new Error('504 after POST'); err.ambiguous = true; err.cents = 10593;
+  const r = await run(mockAdapter({ place: jest.fn(async () => { mockState.ledgerSettled = true; throw err; }) }));
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: null, amountCents: 10593 });
+  expect(dbFn.raw.mock.calls.some((c) => /- 'revokedAt'/.test(c[0]))).toBe(true); // the revoke marker is replaced, not left beside a possible order
+  expect(mockState.updates.find((u) => u.table === 'product_restock_requests').row).toMatchObject({ status: 'ordered', closed_at: null });
+  expect(auditVendorOrder.mock.calls[0][0]).toMatchObject({ outcome: 'placed_after_stale_park', amount_cents: 10593 });
+  expect(auditVendorOrder.mock.calls[0][0].reason).toMatch(/may exist \(ambiguous submit\)/);
+  expect(notify.mock.calls[0][1]).toMatch(/may have landed after revoke/);
+  expect(notify.mock.calls[0][2]).toMatch(/MAY have been placed/);
 });
 
 test('an ambiguous submit with NO known total — no click figure, no quote, nothing reserved — parks at the per-order cap, never $0 (pre-push P1)', async () => {
