@@ -354,7 +354,9 @@ describe('recap consumption hook — retry window (source contract)', () => {
     expect(hook).toMatch(/let consumeNow = result\.priorCompleted !== true;/);
     expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('field_flags'\)/);
     expect(hook).toMatch(/if \(flags\.completion_supplies_owed === true\) consumeNow = true;/);
-    expect(hook).toMatch(/if \(result\.recordId && !consumption\?\.errors\?\.length\) await db\('service_records'\)/); // cleared only when nothing errored
+    // Cleared unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell means staff adjust by hand, so a retry must not deduct again.
+    expect(hook).toMatch(/const handoffLost = \(consumption\?\.errors \|\| \[\]\)\.some\(\(e\) => e\.reason === 'failure_bell_not_sent'\);/);
+    expect(hook).toMatch(/if \(result\.recordId && !handoffLost\) await db\('service_records'\)/);
     expect(hook).toMatch(/- 'completion_supplies_owed'/); // cleared after the at-most-once consume
     expect(hook).not.toMatch(/RECAP_RETRY_WINDOW_MS|created_at/);
     expect(hook).toMatch(/if \(consumeNow\) \{/);
