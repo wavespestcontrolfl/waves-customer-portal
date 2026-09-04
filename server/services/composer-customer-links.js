@@ -1255,9 +1255,18 @@ async function claimCardRequestSends(cards) {
     // token, or a text that went out between the seam's check and this
     // claim would otherwise ride a stale payment-adjacent link out under a
     // claim nobody finalizes.
-    const row = await db('appointment_card_requests')
-      .where({ scheduled_service_id: card.scheduledServiceId })
-      .first('status', 'token', 'sent_at');
+    let row;
+    try {
+      row = await db('appointment_card_requests')
+        .where({ scheduled_service_id: card.scheduledServiceId })
+        .first('status', 'token', 'sent_at');
+    } catch (err) {
+      // A read that fails after the stamp landed: hand every claim back
+      // before surfacing, or the visit sits claimed with nobody to finalize
+      // it until the stale lease (GH Codex #3851 r3 P2).
+      await releaseCardRequestSends({ stamp, cards: won });
+      throw err;
+    }
     if (!row || row.status !== 'pending' || row.sent_at || row.token !== card.token) {
       await releaseCardRequestSends({ stamp, cards: won });
       return { ok: false, error: row?.sent_at ? CLAIMED : 'This card request link is no longer live — remove it and insert a fresh one.' };
@@ -1558,26 +1567,13 @@ const CONTRACT_LINKABLE_STATUSES = ['draft', 'sent', 'viewed'];
 // The customer_contracts columns the marketing-guide predicate reads (plus
 // the template id its joined columns come from).
 const CONTRACT_GUIDE_COLUMNS = ['contract_type', 'document_template_id', 'document_render_summary', 'requires_signature_snapshot'];
+// payment_method_id feeds the public sign handler's eligibility re-read
+// (unsignableContractReason, the share-link writer's — GH Codex #3851 r2 P2).
 const CONTRACT_SIGN_COLUMNS = ['payment_method_id'];
 
-// The public /:token/sign handler's own eligibility, re-read at the send
-// (GH Codex #3851 r2 P2): an Auto Pay authorization whose payment method is
-// gone answers 409 there, a contract on an inactive customer 410 — the
-// composer never texts a signing link the page cannot complete. (A deleted
-// customer already fails ownedByRecipient.)
 async function unsignableContractRefusal(contract) {
-  if (contract.contract_type === 'autopay_authorization') {
-    const method = contract.payment_method_id
-      ? await db('payment_methods')
-        .where({ id: contract.payment_method_id, customer_id: contract.customer_id })
-        .whereNotNull('stripe_payment_method_id')
-        .first('id')
-      : null;
-    if (!method) return refuseSend('The payment method on this Auto Pay authorization is no longer available — remove the signing link and pick a method on the Contracts page first.');
-  }
-  const customer = await db('customers').where({ id: contract.customer_id }).first('id', 'active');
-  if (!customer || customer.active === false) return refuseSend('This contract belongs to an inactive customer — remove the signing link before sending.');
-  return null;
+  const reason = await require('../routes/admin-contracts').unsignableContractReason(contract);
+  return reason ? refuseSend(reason) : null;
 }
 const MARKETING_GUIDE_REFUSAL = 'This is a customer guide — it goes out from Document Templates (marketing opt-in and opt-out footer), never the composer. Remove the link before sending.';
 
@@ -1635,7 +1631,10 @@ async function buildContractSigningLink(customerIds) {
       .where((qb) => qb
         .whereIn('status', CONTRACT_LINKABLE_STATUSES)
         .orWhere({ status: 'expired', contract_type: 'document_template' }))
-      .orderBy('created_at', 'desc')
+      // A unique final key: bulk-created document requests share created_at,
+      // and an OFFSET page over a non-unique order may repeat and skip rows
+      // (GH Codex #3851 r3 P2).
+      .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
       .offset(offset)
       .limit(PAGE);
     for (const candidate of rows) {

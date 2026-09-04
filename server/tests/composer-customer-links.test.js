@@ -70,6 +70,7 @@ jest.mock('../routes/admin-contracts', () => ({
   createShareLink: jest.fn(),
   deliveredLiveShareLink: jest.requireActual('../routes/admin-contracts').deliveredLiveShareLink,
   shareLinkWritableStatuses: jest.requireActual('../routes/admin-contracts').shareLinkWritableStatuses,
+  unsignableContractReason: jest.requireActual('../routes/admin-contracts').unsignableContractReason,
 }));
 // The public prep page's own resolver (token → source; expiry enforced there).
 jest.mock('../routes/prep-public', () => ({ resolvePrepSource: jest.fn() }));
@@ -1842,6 +1843,18 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect(visits.where).toHaveBeenCalledWith({ id: 'v2', card_link_sent_at: expect.any(Date) });
         expect(visits.update).toHaveBeenCalledTimes(2);
       }
+    });
+
+    test('claim: the post-claim read THROWING releases every claim this call won before the error surfaces (GH Codex #3851 r3 P2)', async () => {
+      claimCardLinkSend.mockReset().mockResolvedValue(true);
+      const visits = chainBuilder();
+      const requests = wireRequests();
+      requests.first = jest.fn(async () => { if (requests.where.mock.calls.at(-1)[0].scheduled_service_id === 'v2') throw new Error('connection reset'); return pendingRows.v1; });
+      mockBuilders = { scheduled_services: visits, appointment_card_requests: requests };
+      await expect(claimCardRequestSends(cards)).rejects.toThrow('connection reset');
+      expect(visits.where).toHaveBeenCalledWith({ id: 'v1', card_link_sent_at: expect.any(Date) });
+      expect(visits.where).toHaveBeenCalledWith({ id: 'v2', card_link_sent_at: expect.any(Date) });
+      expect(visits.update).toHaveBeenCalledTimes(2);
     });
 
     test('claim: a visit already claimed refuses and hands back the claims won before it', async () => {

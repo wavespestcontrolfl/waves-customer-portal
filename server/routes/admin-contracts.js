@@ -390,6 +390,28 @@ async function createShareLink(contractId, req) {
 
 const NOT_LIVE = 'This contract signing link is no longer live — remove it and insert a fresh one.';
 
+// The public /:token/sign handler's own eligibility (GH Codex #3851 r2 P2):
+// an Auto Pay authorization whose payment method is gone answers 409 there,
+// a contract on an inactive customer 410 — a signing link the page cannot
+// complete is never texted. Read at the composer's seam AND again from the
+// locked rows at activation (r3 P2: a method deleted between the two waits
+// on the customer lock this activation then takes). Returns the refusal
+// message or null.
+async function unsignableContractReason(contract, conn = db) {
+  if (contract.contract_type === 'autopay_authorization') {
+    const method = contract.payment_method_id
+      ? await conn('payment_methods')
+        .where({ id: contract.payment_method_id, customer_id: contract.customer_id })
+        .whereNotNull('stripe_payment_method_id')
+        .first('id')
+      : null;
+    if (!method) return 'The payment method on this Auto Pay authorization is no longer available — remove the signing link and pick a method on the Contracts page first.';
+  }
+  const customer = await conn('customers').where({ id: contract.customer_id }).whereNull('deleted_at').first('id', 'active');
+  if (!customer || customer.active === false) return 'This contract belongs to an inactive customer — remove the signing link before sending.';
+  return null;
+}
+
 /**
  * The composer's contract signing link, second half (GH Codex #3844 r3 P1):
  * the Insert Link sheet mints the token IN MEMORY and writes nothing — a
@@ -442,6 +464,9 @@ async function activateEachPreparedShareLink(links, req, activations) {
         refusal = 'This contract is no longer awaiting a signature — remove the signing link before sending.';
         return;
       }
+      // Signability from the LOCKED rows (the customer row is held above).
+      const unsignable = await unsignableContractReason(locked, trx);
+      if (unsignable) { refusal = unsignable; return; }
       if (link.delivered) {
         if (locked.share_token_hash !== link.tokenHash || !deliveredLiveShareLink(locked)) { refusal = NOT_LIVE; return; }
         activations.push({ id: locked.id, customerId: locked.customer_id, tokenHash: link.tokenHash, expiresAt: locked.share_token_expires_at, previous: null });
@@ -672,6 +697,7 @@ module.exports = router;
 module.exports.createShareLink = createShareLink;
 module.exports.deliveredLiveShareLink = deliveredLiveShareLink;
 module.exports.shareLinkWritableStatuses = shareLinkWritableStatuses;
+module.exports.unsignableContractReason = unsignableContractReason;
 module.exports.activatePreparedShareLinks = activatePreparedShareLinks;
 module.exports.restorePreparedShareLinks = restorePreparedShareLinks;
 module.exports.recordPreparedShareLinkSends = recordPreparedShareLinkSends;

@@ -13,12 +13,17 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockWrites = [];
 let mockRows = {};
+// Signability rows the activation re-reads under its lock: a live customer
+// and a present Stripe payment method unless a test says otherwise.
+const DEFAULT_ROWS = { customers: { id: 'c1', active: true }, payment_methods: { id: 'pm-1' } };
 function mockBuilder(table) {
   const b = { table, filters: [] };
   const chain = () => b;
-  for (const m of ['leftJoin', 'select', 'whereIn', 'forUpdate', 'orderBy']) b[m] = jest.fn(chain);
+  for (const m of ['leftJoin', 'select', 'whereIn', 'whereNull', 'whereNotNull', 'forUpdate', 'orderBy']) b[m] = jest.fn(chain);
   b.where = jest.fn((arg) => { b.filters.push(arg); return b; });
-  b.first = jest.fn(async () => (typeof mockRows[table] === 'function' ? mockRows[table](b) : mockRows[table]) ?? null);
+  b.first = jest.fn(async () => (table in mockRows
+    ? (typeof mockRows[table] === 'function' ? mockRows[table](b) : mockRows[table])
+    : DEFAULT_ROWS[table]) ?? null);
   b.update = jest.fn(async (payload) => { mockWrites.push({ table, op: 'update', payload, filters: b.filters.slice() }); return mockRows.__updateResult ?? 1; });
   b.insert = jest.fn(async (payload) => { mockWrites.push({ table, op: 'insert', payload }); return [1]; });
   return b;
@@ -42,7 +47,7 @@ const {
 
 const req = { technicianId: 'admin-1', ip: '127.0.0.1', get: () => 'jest' };
 const DAY = 86400e3;
-const base = { id: 'k1', customer_id: 'c1', title: 'Auto Pay Authorization', status: 'draft', contract_type: 'autopay_authorization', share_token_hash: null, share_token_expires_at: null, shared_at: null };
+const base = { id: 'k1', customer_id: 'c1', title: 'Auto Pay Authorization', status: 'draft', contract_type: 'autopay_authorization', payment_method_id: 'pm-1', share_token_hash: null, share_token_expires_at: null, shared_at: null };
 const HASH = hashContractToken('tok-1');
 const updates = (table) => mockWrites.filter((w) => w.table === table && w.op === 'update');
 const events = () => mockWrites.filter((w) => w.table === 'customer_contract_events').map((w) => ({ type: w.payload.event_type, meta: JSON.parse(w.payload.metadata) }));
@@ -112,6 +117,21 @@ describe('activatePreparedShareLinks (the /sms send, before the provider call)',
     mockRows = { customer_contracts: () => (n++ === 0 ? base : { ...base, customer_id: 'c2' }) };
     expect(await activatePreparedShareLinks([{ id: 'k1', tokenHash: HASH, delivered: false }], req)).toEqual({ ok: false, error: expect.stringMatching(/status changed/) });
     expect(updates('customer_contracts')).toHaveLength(0);
+  });
+
+  test('signability is re-read from the LOCKED rows: an Auto Pay method deleted meanwhile, or a customer gone inactive, refuses with nothing written — a pasted delivered link too (GH Codex #3851 r3 P2)', async () => {
+    const db = require('../models/db');
+    mockRows = { customer_contracts: base, payment_methods: null };
+    expect(await activatePreparedShareLinks([{ id: 'k1', tokenHash: HASH, delivered: false }], req)).toEqual({ ok: false, error: expect.stringMatching(/payment method.*no longer available/) });
+    const pm = db.mock.results.map((x) => x.value).find((b) => b.table === 'payment_methods');
+    expect(pm.filters).toContainEqual({ id: 'pm-1', customer_id: 'c1' });
+    expect(pm.whereNotNull).toHaveBeenCalledWith('stripe_payment_method_id');
+    expect(updates('customer_contracts')).toHaveLength(0);
+    mockRows = { customer_contracts: base, customers: { id: 'c1', active: false } };
+    expect(await activatePreparedShareLinks([{ id: 'k1', tokenHash: HASH, delivered: false }], req)).toEqual({ ok: false, error: expect.stringMatching(/inactive customer/) });
+    expect(updates('customer_contracts')).toHaveLength(0);
+    mockRows = { customer_contracts: { ...base, status: 'sent', share_token_hash: HASH, share_token_expires_at: new Date(Date.now() + DAY) }, customers: { id: 'c1', active: false } };
+    expect(await activatePreparedShareLinks([{ id: 'k1', tokenHash: HASH, delivered: true }], req)).toEqual({ ok: false, error: expect.stringMatching(/inactive customer/) });
   });
 
   test('an expired earlier link is replaced — the prior hash/window/shared_at ride back for the restore', async () => {
