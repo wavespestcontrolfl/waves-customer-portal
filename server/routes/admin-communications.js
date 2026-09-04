@@ -1777,7 +1777,8 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     }
     if (channel === 'email') {
       const ReviewService = require('../services/review-request');
-      const ask = await ReviewService.sendGatedAsk({ customerId: primaryId, channel: 'email', triggeredBy: 'admin' });
+      // strictChannel: the operator chose Email — never fall back to a text.
+      const ask = await ReviewService.sendGatedAsk({ customerId: primaryId, channel: 'email', triggeredBy: 'admin', strictChannel: true });
       if (ask.outcome === 'sent') {
         return res.json({ kind, channel, sent: true, requestId: ask.requestId, firstName: recipientFirstName });
       }

@@ -764,6 +764,26 @@ describe('review request follow-up flow', () => {
     });
   });
 
+  test('sendOutreachTouch strictChannel: an unavailable chosen channel refuses instead of swapping', async () => {
+    const insert = jest.fn();
+    getServiceContact.mockReturnValue({ email: '', name: 'Megan' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550101', name: 'Megan' });
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') {
+        return chain({ first: jest.fn().mockResolvedValue({ review_request: true, sms_enabled: true, email_enabled: true }) });
+      }
+      if (table === 'review_requests') return { ...chain({ first: jest.fn().mockResolvedValue(null) }), insert };
+      return chain({ first: jest.fn().mockResolvedValue(null) });
+    });
+    const customer = { id: 'cust-1', first_name: 'Megan', city: 'Bradenton' };
+
+    // Email chosen, no email on file: strict = refused, no text goes out.
+    const strict = await ReviewService.sendOutreachTouch({ customer, channel: 'email', strictChannel: true });
+    expect(strict).toMatchObject({ ok: false, reason: 'no_contact', terminal: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+  });
+
   test('composer mint refuses an email-only review preference', async () => {
     const insert = insertReturning({ id: 'rr-new', token: null });
     db.mockImplementation((table) => {

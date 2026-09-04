@@ -356,7 +356,7 @@ describe('POST /admin/communications/customer-link', () => {
         expect(body).toMatchObject({ kind: 'review_request', channel: 'email', sent: true, requestId: 'rr-9' });
         expect(body.url).toBeUndefined();
         expect(ReviewService.sendGatedAsk).toHaveBeenCalledWith(
-          expect.objectContaining({ customerId: CUSTOMER_UUID, channel: 'email', triggeredBy: 'admin' }),
+          expect.objectContaining({ customerId: CUSTOMER_UUID, channel: 'email', triggeredBy: 'admin', strictChannel: true }),
         );
         expect(builders.buildReviewRequestLink).not.toHaveBeenCalled();
       });

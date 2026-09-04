@@ -2704,6 +2704,10 @@ const ReviewService = {
     // template-less send to friendly_ask — the satisfaction fold needs the
     // canonical body incl. its {reservice_line} clause (codex #3285 r5b).
     canonicalTemplate = false,
+    // Quick Links Email-only (owner ruling 2026-09-03): the operator chose
+    // the channel, so an unavailable channel is a refusal, never a swap to
+    // the other one. Default false keeps the cadence's cross-channel fallback.
+    strictChannel = false,
   }) {
     if (!customer || !customer.id) return { ok: false, reason: "no_customer", terminal: true };
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
@@ -2855,8 +2859,8 @@ const ReviewService = {
     if (!noLinkSend && prefChannel === "email") intended = "email";
 
     let actualChannel = intended;
-    if (actualChannel === "sms" && !allowSms) actualChannel = allowEmail ? "email" : null;
-    if (actualChannel === "email" && !allowEmail) actualChannel = allowSms ? "sms" : null;
+    if (actualChannel === "sms" && !allowSms) actualChannel = !strictChannel && allowEmail ? "email" : null;
+    if (actualChannel === "email" && !allowEmail) actualChannel = !strictChannel && allowSms ? "sms" : null;
     if (!actualChannel) {
       const optedOut = reviewBlocked || (intended === "email" ? emailBlocked : smsBlocked);
       return { ok: false, reason: optedOut ? "opted_out" : "no_contact", blocked: optedOut, terminal: true };
@@ -3382,6 +3386,7 @@ const ReviewService = {
     manageRetryVia = "cron",
     skipLegacyFollowup = false,
     canonicalTemplate = false,
+    strictChannel = false,
   }) {
     const customer = customerArg
       || (customerId ? await db("customers").where({ id: customerId }).first() : null);
@@ -3457,6 +3462,7 @@ const ReviewService = {
         manageRetryVia,
         skipLegacyFollowup,
         canonicalTemplate,
+        strictChannel,
       });
 
       if (touch.ok && touch.sent) {
