@@ -1457,6 +1457,7 @@ export default function DispatchPageV2({
             }
           }}
           onRefresh={() => fetchSchedule(date)}
+          refreshKey={scheduleRefreshKey}
         />
       )}
 

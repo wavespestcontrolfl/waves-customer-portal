@@ -36,7 +36,7 @@ const STATUS_LABELS = {
   on_site: 'On Site', completed: 'Completed', skipped: 'Skipped', cancelled: 'Cancelled',
 };
 
-export default function ScheduleListView({ technicians = [], onEdit, onRefresh }) {
+export default function ScheduleListView({ technicians = [], onEdit, onRefresh, refreshKey = 0 }) {
   const [services, setServices] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -48,7 +48,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   // bulk conflict check must cover rows no longer loaded. Entries follow
   // the selection: deleted on deselect, cleared when it empties.
   const selectedMetaRef = useRef(new Map());
-  const rememberSelectedMeta = (s) => {
+  const rememberSelectedMeta = useCallback((s) => {
     selectedMetaRef.current.set(s.id, {
       id: s.id,
       windowStart: s.windowStart,
@@ -63,7 +63,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
       // one alone leaves its plan running just the same (Codex #3868 r1).
       inPlan: !!(s.isRecurring ?? s.is_recurring) || !!(s.recurringParentId ?? s.recurring_parent_id),
     });
-  };
+  }, []);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [sortCol, setSortCol] = useState('scheduledDate');
   const [sortDir, setSortDir] = useState('asc');
@@ -112,11 +112,17 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
       const data = await adminFetch(`/admin/schedule/list?${params}`);
       setServices(data.services || []);
       setTotal(data.total || 0);
+      // A selected row edited meanwhile (e.g. made recurring in the Edit
+      // modal) comes back changed — refresh its meta from the fresh page
+      // so the bulk pre-flights read the saved row (Codex #3868 r2 P2).
+      (data.services || []).forEach((s) => { if (selectedMetaRef.current.has(s.id)) rememberSelectedMeta(s); });
     } catch { setServices([]); setTotal(0); }
     setLoading(false);
-  }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page]);
+  }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page, rememberSelectedMeta]);
 
-  useEffect(() => { fetchList(); }, [fetchList]);
+  // refreshKey: the host page bumps it after the Edit modal saves, so the
+  // list re-reads rows it did not itself change.
+  useEffect(() => { fetchList(); }, [fetchList, refreshKey]);
 
   const sorted = useMemo(() => {
     const arr = [...services];
@@ -188,23 +194,17 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   // has no scope, so a selected visit of a recurring plan is cancelled
   // alone and its plan keeps generating visits. Say so in the bar while
   // Cancel is chosen, and once more on Apply. Ending a plan stays with the
-  // scoped cancel (appointment sidebar / Edit appointment modal). The
-  // meta ref is filled synchronously before setSelected, so keying the
-  // memo on `selected` reads a complete map.
-  const recurringSelectedCount = useMemo(
-    () => Array.from(selected).filter((id) => selectedMetaRef.current.get(id)?.inPlan).length,
-    [selected],
-  );
-  const bulkCancelPlanNotice = recurringSelectedCount > 0
-    ? `${recurringSelectedCount} of the selected visits ${recurringSelectedCount === 1 ? 'is' : 'are'} part of a recurring plan. Only ${recurringSelectedCount === 1 ? 'that visit is' : 'those visits are'} cancelled and each plan continues. To end a plan, cancel it from the appointment sidebar or the Edit appointment modal.`
+  // scoped cancel (appointment sidebar / Edit appointment modal). Computed
+  // per render (not memoised on `selected`) so a meta refresh after an
+  // edit is picked up without a version counter.
+  const inPlanSelectedCount = Array.from(selected).filter((id) => selectedMetaRef.current.get(id)?.inPlan).length;
+  const bulkCancelPlanNotice = bulkAction === 'cancel' && inPlanSelectedCount > 0
+    ? `Selected visits that belong to a recurring plan: ${inPlanSelectedCount}. Only those visits are cancelled and each plan continues. To end a plan, cancel it from the appointment sidebar or the Edit appointment modal.`
     : '';
 
   const executeBulkAction = async () => {
     if (!bulkAction || selected.size === 0) return;
-    if (bulkAction === 'cancel' && bulkCancelPlanNotice) {
-      const ok = window.confirm(`${bulkCancelPlanNotice}\n\nCancel ${selected.size} selected visit${selected.size === 1 ? '' : 's'}?`);
-      if (!ok) return;
-    }
+    if (bulkCancelPlanNotice && !window.confirm(`${bulkCancelPlanNotice}\n\nCancel ${selected.size} selected?`)) return;
     setBulkBusy(true);
     try {
       // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this bulk mover
@@ -431,7 +431,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
               {bulkConflicts.conflictCount > 0 && bulkConflicts.truncated ? ' (checked first 25)' : ''}
             </span>
           )}
-          {bulkAction === 'cancel' && bulkCancelPlanNotice && (
+          {bulkCancelPlanNotice && (
             <span className="basis-full text-11" style={{ color: '#FDE68A' }}>
               ⚠️ {bulkCancelPlanNotice}
             </span>
