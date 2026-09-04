@@ -15,8 +15,8 @@
  *   - RefusedError → needs_review (reason = refuse code); ambiguous →
  *     needs_review 'ambiguous_after_submit'; other error → failed + bell
  *   - run-level error → claim released (row deleted), error propagates
- *   - a request closed while the vendor call was in flight stays closed,
- *     the ledger is still placed, and ONE reconcile bell rings
+ *   - a request cancelled while the vendor call was in flight goes back to
+ *     ordered, the ledger is placed, and ONE reconcile bell rings
  *   - canAutoOrder mirrors the gates + adapter map + vendor active
  *   - the claim re-checks the sweep's eligibility (active, enabled, still
  *     low) and CANCELS a request the catalog no longer authorizes
@@ -294,6 +294,8 @@ test('a placed order with no positive total anywhere parks post-submit as no_fin
   expect(mockState.updates.some((u) => u.table === 'product_restock_requests' && u.row.status === 'ordered')).toBe(true);
   const parked = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review');
   expect(parked.row.placed_at).toBeInstanceOf(Date); // post-submit: cap-counted, guarded, do-not-reorder bell
+  expect(parked.row.amount_cents).toBe(50000); // ENV per-order cap: a placed order with no figure is never $0 against the month (Codex r23 P1)
+  expect(parked.row.error).toMatch(/counted against the monthly cap at the per-order cap/);
   expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
 });
 
@@ -319,6 +321,15 @@ test('an ambiguous submit with NO known total — no click figure, no quote, not
   const parkedRow = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').pop().row;
   expect(parkedRow.amount_cents).toBe(50000); // ENV per-order cap
   expect(parkedRow.error).toMatch(/counted against the monthly cap at the per-order cap/);
+});
+
+test('an ambiguous submit whose vendor response carried no order number persists that response as response_payload (Codex r23 P2)', async () => {
+  const err = new Error('Sticker Mule accepted the order but returned no order number'); err.ambiguous = true; err.body = { status: 'queued', id: 'q-77' };
+  const r = await run(mockAdapter({ place: jest.fn(async () => { throw err; }) }));
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
+  const parkedRow = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').pop().row;
+  expect(JSON.parse(parkedRow.response_payload)).toEqual({ status: 'queued', id: 'q-77' });
+  expect(parkedRow.external_order_number).toBeNull();
 });
 
 test('ambiguous post-submit error → needs_review, never retried', async () => {
@@ -393,14 +404,15 @@ test('vendor call outlives a stale park the operator already REVOKED and cancell
   expect(notify.mock.calls[0][2]).toMatch(/record the revoke again/);
 });
 
-test('request closed mid-flight: ledger still placed, request untouched, one reconcile bell', async () => {
+test('request cancelled mid-flight: ledger placed, request back to ordered (receive / revoke can close it), one reconcile bell (Codex r23 P1)', async () => {
   mockState.freshRequestStatus = 'cancelled';
   const r = await run(mockAdapter());
   expect(r.status).toBe('placed');
   expect(ledgerStatus()).toBe('placed');
-  expect(requestStatus()).toBeUndefined();
+  expect(mockState.updates.find((u) => u.table === 'product_restock_requests').row).toMatchObject({ status: 'ordered', closed_at: null });
   expect(notify).toHaveBeenCalledTimes(1);
   expect(notify.mock.calls[0][1]).toMatch(/cancelled request/);
+  expect(notify.mock.calls[0][2]).toMatch(/back to ordered/);
 });
 
 test('an adapter with no static quote (quotesAtPlace) gets the cap check as beforeSubmit and a dry run parks', async () => {
@@ -606,6 +618,20 @@ test('vendor total over cap after placement → needs_review, request ordered, b
   expect(notify.mock.calls[0][2]).not.toMatch(/order manually/);
 });
 
+test('a higher final total whose post-placement re-check finds the claim lost lands as a late placement UNDER the cap lock, at the actual charge (Codex r23 P1)', async () => {
+  const dbFn = require('../models/db');
+  dbFn.raw.mockClear();
+  mockState.parkedEvidence = { bell: { title: 'x', body: 'y' }, bellAt: '2026-09-03T10:00:00Z' };
+  const a = mockAdapter({ place: jest.fn(async () => { mockState.ledgerSettled = true; return { externalOrderNumber: 'SM-2', amountCents: 60000, response: {}, evidence: { totalSource: 'vendor' } }; }) }); // stale recovery parked the row while the vendor call was out
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: 'SM-2', amountCents: 60000 });
+  const capLocks = dbFn.raw.mock.calls.filter((c) => /pg_advisory_xact_lock/.test(c[0]) && c[1] && c[1][0] === 'vendor-order-caps');
+  expect(capLocks).toHaveLength(3); // the pre-submit reservation, the post-placement re-check, then the record transaction that attached the late placement
+  const attached = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.external_order_number === 'SM-2' && u.row.amount_cents === 60000);
+  expect(attached).toBeDefined();
+  expect(mockState.updates.find((u) => u.table === 'product_restock_requests').row).toMatchObject({ status: 'ordered', closed_at: null });
+});
+
 test('a DB failure inside the late-placement attachment (the row already left placing) is UNRECORDED, never a harmless skip (Codex r17 P1)', async () => {
   const dbFn = require('../models/db');
   const realTx = dbFn.transaction;
@@ -730,6 +756,8 @@ test('a delivered bell whose version stamp hits zero rows (the bell was replaced
   mockState.request = { ...baseRequest(), status: 'ordered' };
   await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
   mockState.bellStampMiss = false;
+  // The just-inserted v1 notification is retired — staff never read v1's instructions beside v2 (Codex r23 P1).
+  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(1);
 });
 
 test('the run goes red while a bell is undelivered', async () => {

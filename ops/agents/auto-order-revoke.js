@@ -52,7 +52,10 @@ const parseEvidence = (raw) => (typeof raw === 'string' ? (() => { try { return 
 // revocable), placed, and post-submit needs_review rows (placed_at set:
 // "may or may not have gone out"), which are precisely the ones an operator
 // must reconcile (Codex r2 P2). No month filter: an order outstanding across
-// an ET month boundary still needs its ledger id here (Codex r12 P2).
+// an ET month boundary still needs its ledger id here (Codex r12 P2). A row
+// already revoked (evidence.revokedAt) is reconciled — its request is
+// cancelled, not received — and stays off the list (Codex r23 P2); a late
+// placement strips the marker and puts it back.
 async function listDispatched() {
   const rows = await db('vendor_orders as vo')
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
@@ -60,12 +63,12 @@ async function listDispatched() {
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
     .whereRaw("(vo.status IN ('placing', 'placed') OR (vo.status = 'needs_review' AND vo.placed_at IS NOT NULL))")
     .whereNot('prr.status', 'received')
+    .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
     .orderBy('vo.created_at', 'desc')
-    .select('vo.id', 'vo.status', 'vo.amount_cents', 'vo.external_order_number', 'vo.placed_at', 'vo.evidence', 'v.name as vendor', 'pc.name as product', 'prr.status as request_status');
+    .select('vo.id', 'vo.status', 'vo.amount_cents', 'vo.external_order_number', 'vo.placed_at', 'v.name as vendor', 'pc.name as product', 'prr.status as request_status');
   if (!rows.length) console.log('No unreconciled dispatched automatic orders.');
   for (const r of rows) {
-    const revoked = parseEvidence(r.evidence).revokedAt ? '  REVOKED' : '';
-    console.log(`${r.id}  ${r.status.padEnd(12)} ${(r.vendor || '?').padEnd(14)} ${dollars(r.amount_cents).padStart(9)}  #${r.external_order_number || '—'}  ${r.product || '?'}  (request ${r.request_status})${revoked}`);
+    console.log(`${r.id}  ${r.status.padEnd(12)} ${(r.vendor || '?').padEnd(14)} ${dollars(r.amount_cents).padStart(9)}  #${r.external_order_number || '—'}  ${r.product || '?'}  (request ${r.request_status})`);
   }
 }
 

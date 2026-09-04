@@ -430,6 +430,7 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
     logger.warn(`[order-dispatch] bell for ledger ${ledgerId} was not persisted (re-rung next run)`);
     return false;
   }
+  let superseded = false;
   try {
     // Stamp ONLY the bell version that was delivered: if the row's bell was
     // replaced meanwhile, the replacement stays pending for the re-ring.
@@ -441,12 +442,22 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
     });
     // Zero rows = the row's bell was replaced after this one was delivered:
     // the REPLACEMENT is still pending, so this is not a delivery (hook P1).
-    if (n !== 1) { logger.warn(`[order-dispatch] bell v${v || '?'} for ledger ${ledgerId} was superseded before its stamp — replacement re-rung next run`); return false; }
+    superseded = n !== 1;
   } catch (err) {
     // The bell landed; the dedupeKey makes the re-ring a refresh, not a double.
     logger.warn(`[order-dispatch] bell stamp failed for ledger ${ledgerId}: ${err.message}`);
   }
-  return true;
+  if (!superseded) return true;
+  // The notification just inserted carries the superseded version's
+  // instructions (a stale reconcile / dry-run text beside the replacement):
+  // retire it now rather than leave it unread (Codex r23 P1).
+  try {
+    await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-order:${ledgerId}:${v}`]).whereNull('read_at').update({ read_at: new Date() });
+  } catch (err) {
+    logger.warn(`[order-dispatch] superseded bell v${v} for ledger ${ledgerId} could not be retired: ${err.message}`);
+  }
+  logger.warn(`[order-dispatch] bell v${v || '?'} for ledger ${ledgerId} was superseded before its stamp — retired; replacement re-rung next run`);
+  return false;
 }
 
 /** Re-ring every terminal ledger row whose persisted bell never landed. */
@@ -522,7 +533,7 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
     if (staleBefore) transition.where('updated_at', '<', staleBefore);
     const n = await transition.update(patch);
     if (!n) return false;
-    if (markRequestOrdered) await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ status: 'ordered', updated_at: new Date() });
+    if (markRequestOrdered) await requestToOrdered(trx, request.id);
     await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: status, amount_cents: amountCents, reason: `${reason}: ${message}`.slice(0, 400), trx });
     return true;
   });
@@ -734,19 +745,28 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
 
 // What an adapter.place() rejection means. Run-level errors are the caller's
 // (claim released, batch aborts); everything else is this request's park.
+// A post-submit park with NO positive total anywhere (nothing confirmed, no
+// quote, nothing reserved) is counted at the per-order cap: a placed_at row
+// with a null amount would count as $0 against the monthly cap while the
+// money may have moved (pre-push P0 / P1, Codex r23 P1). Fail closed; the
+// receive or revoke corrects the figure.
+function unconfirmedAmount(env) {
+  const amountCents = caps(env).perOrder ?? null;
+  return { amountCents, counted: amountCents != null ? ` No total was confirmed or reserved, so it is counted against the monthly cap at the per-order cap (${dollars(amountCents)}) until received or revoked.` : '' };
+}
+
 async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
   if (err.refuse) return park(conn, { ...ctx, reason: err.refuse, message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
   // An ambiguous submit (the click happened) parks with the best figure
   // known: the total the adapter had at the click, else the binding quote,
-  // else what beforeSubmit reserved on the ledger — and when NONE is known,
-  // the per-order cap: a placed_at row with a null amount would count as $0
-  // against the monthly cap while the money may have moved (pre-push P0 /
-  // P1). Fail closed; the receive or revoke corrects the figure.
+  // else what beforeSubmit reserved on the ledger — else the per-order cap.
+  // The vendor's response body (err.body: Sticker Mule accepted the POST but
+  // returned no recognizable number) is persisted as response_payload — it
+  // is what staff locate the possibly-placed order with (Codex r23 P2).
   if (err.ambiguous) {
     const known = positiveCents(err.cents) ?? positiveCents(quoteCents) ?? (await ledgerReservation(conn, ctx.ledger)).cents;
-    const amountCents = known ?? caps(env).perOrder ?? null;
-    const counted = known == null && amountCents != null ? ` No total was confirmed or reserved, so it is counted against the monthly cap at the per-order cap (${dollars(amountCents)}) until received or revoked.` : '';
-    return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.${counted}`, amountCents, evidence: err.evidence || null });
+    const { amountCents, counted } = known == null ? unconfirmedAmount(env) : { amountCents: known, counted: '' };
+    return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.${counted}`, amountCents, evidence: err.evidence || null, placed: err.body ? { response: err.body } : null });
   }
   return park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
 }
@@ -762,6 +782,16 @@ async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
  * and the outcome is audited placed_after_stale_park. Status stays
  * needs_review: a human still has to look.
  */
+// The order exists now: the request goes to 'ordered' from open — and from
+// cancelled, when it was closed while the vendor call was in flight (stock is
+// coming; receive or revoke is the way to close it — a cancelled request with
+// an unreceived, unrevoked ledger row could be reconciled by neither: both
+// receive endpoints and the revoke CLI refuse it while the live-order guard
+// blocks a replacement, Codex r23 P1). Any other status is left alone.
+function requestToOrdered(trx, requestId) {
+  return trx('product_restock_requests').where({ id: requestId }).whereIn('status', ['open', 'cancelled']).update({ status: 'ordered', closed_at: null, updated_at: new Date() });
+}
+
 async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCents, fresh }) {
   const { ledger, request, product, vendor, adapterKey } = ctx;
   const parked = await trx('vendor_orders').where({ id: ledger.id }).first('evidence');
@@ -776,15 +806,16 @@ async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCe
     evidence: conn.raw("(COALESCE(evidence, '{}'::jsonb) - 'revokedAt' - 'bellAt') || ?::jsonb", [JSON.stringify({ bell, latePlacementAt: new Date().toISOString(), latePlacementAfterRevoke: wasRevoked })]),
     error: conn.raw("COALESCE(error, '') || ?", [` | order confirmed placed after stale recovery${wasRevoked ? ' and revoke' : ''}: ${placed.externalOrderNumber || '?'}`]),
   });
-  await trx('product_restock_requests').where({ id: request.id }).whereIn('status', ['open', 'cancelled']).update({ status: 'ordered', closed_at: null, updated_at: new Date() });
+  await requestToOrdered(trx, request.id);
   await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: orderFacts.amount_cents, external_order_number: placed.externalOrderNumber || null, reason: `the row was parked by stale recovery${wasRevoked ? ' and revoked' : ''} while the vendor call ran; the order exists`, trx });
   return { bell, settledElsewhere: true };
 }
 
 /**
  * Green path: ledger placed + request ordered + audit in ONE transaction, no
- * bell — unless the office closed the request mid-flight (one reconcile
- * bell) or stale recovery already parked the row (attachLatePlacement).
+ * bell — unless the office closed the request mid-flight (back to ordered,
+ * one reconcile bell) or stale recovery already parked the row
+ * (attachLatePlacement).
  */
 async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
   const { ledger, request, product, vendor, adapterKey, notify } = ctx;
@@ -796,10 +827,19 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
     updated_at: new Date(),
   };
   // The office closed the request while the vendor call was in flight: an
-  // order exists that the tab no longer expects — say so once.
-  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. Reconcile by hand.` });
+  // order exists that the tab no longer expects — say so once. A cancelled
+  // request is put back to ordered (requestToOrdered).
+  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. ${freshStatus === 'cancelled' ? 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke.' : 'Reconcile by hand.'}` });
   const outcome = await conn.transaction(async (trx) => {
-    // LOCK ORDER: ledger row first, then the request — the same order the
+    // The cap lock FIRST — the reservation's own order (cap lock → ledger
+    // row): the amount this commit records lands while no concurrent
+    // reservation can sum the month against the row's old figure or its
+    // revoked marker. That matters for a late placement whose higher final
+    // total the post-placement re-check could not write (claim_lost: stale
+    // recovery had parked the row) — attachLatePlacement restores it here,
+    // under the same lock (Codex r23 P1).
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAPS_LOCK_KEY]);
+    // LOCK ORDER: ledger row next, then the request — the same order the
     // revoke script and every park use, so a late placement racing an
     // operator revoke waits instead of deadlocking (Codex r3 P1).
     await trx('vendor_orders').where({ id: ledger.id }).forUpdate().first('id');
@@ -814,7 +854,7 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
       error: stillOpen ? null : `request_state_changed: request was ${fresh?.status || 'missing'} when the order landed`,
     });
     if (!n) return attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCents, fresh });
-    if (stillOpen) await trx('product_restock_requests').where({ id: request.id }).update({ status: 'ordered', updated_at: new Date() });
+    await requestToOrdered(trx, request.id);
     await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, trx });
     return { bell };
   });
@@ -957,7 +997,10 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
     const finalCents = await settledFinalCents(conn, { ledger, placed, quoteCents });
-    if (finalCents == null) return await park(conn, { ...ctx, markRequestOrdered: true, reason: 'no_final_total', message: `${vendor.name} order ${placed.externalOrderNumber || '?'} was placed but no positive total was confirmed or reserved — verify the charge with the vendor and record it.`, evidence: placed.evidence || null, placed });
+    if (finalCents == null) {
+      const { amountCents, counted } = unconfirmedAmount(env);
+      return await park(conn, { ...ctx, markRequestOrdered: true, reason: 'no_final_total', message: `${vendor.name} order ${placed.externalOrderNumber || '?'} was placed but no positive total was confirmed or reserved — verify the charge with the vendor and record it.${counted}`, amountCents, evidence: placed.evidence || null, placed });
+    }
     const overCap = await parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, finalCents, quoteCents, env });
     if (overCap) return overCap;
     return await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
