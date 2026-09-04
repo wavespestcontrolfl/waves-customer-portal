@@ -949,6 +949,9 @@ async function livePayloadForRun(run, storedPayload = {}) {
       setLiveValue(live, 'status', row.status);
     }
     if (hasOwn(row, 'service_type')) setLiveValue(live, 'service_type', row.service_type);
+    // The visit's prep page owner (one page per visit — see the prep gate
+    // before dispatch).
+    if (hasOwn(row, 'prep_template_key')) setLiveValue(live, 'prep_template_key', row.prep_template_key);
     // Rendered appointment details refresh at send time: runs queue at
     // booking (delay/retry can defer the send), and a corrected slot or
     // address must not reach the customer with the values captured at
@@ -1081,6 +1084,18 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     const conditionFailure = conditionFailureFor(asObject(resolvedAutomation.conditions), executionPayload, now);
     if (conditionFailure) {
       return markRunSkipped(claimedRun, conditionFailure, { guard: 'conditions', attempt: attemptNumber });
+    }
+    // One prep page per visit, across lanes: a visit whose /prep/:token
+    // page is keyed to ANOTHER guide (a manual send owns it, or another
+    // automation delivered it) must not be emailed a link that renders that
+    // other guide, and the post-send stamp (markServicePrepSent) no longer
+    // retargets an owned page — so the run skips instead (GH Codex #3856
+    // r19 P0). An unkeyed page is claimed by the stamp as before.
+    const ownedBy = String(executionPayload.prep_template_key || '');
+    if (String(claimedRun.entity_type || '') === 'scheduled_service'
+      && String(claimedRun.template_key || '').startsWith('prep.')
+      && ownedBy && ownedBy !== String(claimedRun.template_key)) {
+      return markRunSkipped(claimedRun, `prep page owned by ${ownedBy}`, { guard: 'prep_page_owned', attempt: attemptNumber });
     }
 
     const result = await EmailTemplates.sendTemplate({
