@@ -34,12 +34,17 @@ function mockRes() {
   return res;
 }
 
-function primeInsert() {
+// The answer handler inserts, then re-reads the row's source (ownership proof).
+function primeInsert({ source = VOICE_RELAY_SANDBOX_SOURCE } = {}) {
   const ignore = jest.fn().mockResolvedValue([]);
   const onConflict = jest.fn(() => ({ ignore }));
   const insert = jest.fn(() => ({ onConflict }));
-  db.mockImplementation(() => ({ insert }));
-  return { insert, onConflict, ignore };
+  const update = jest.fn().mockResolvedValue(1);
+  const first = jest.fn(async () => (source == null ? undefined : { source }));
+  const where = jest.fn(() => ({ first, update }));
+  db.mockImplementation(() => ({ insert, where }));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  return { insert, onConflict, ignore, update, first, where };
 }
 
 beforeEach(() => {
@@ -114,14 +119,27 @@ describe('POST /relay-sandbox', () => {
     expect(res.body).toContain('<Parameter name="relay_profile" value="nova_hints_v1" />');
   });
 
-  test('relay not attached ⇒ spoken notice + hangup, no row', async () => {
-    const { insert } = primeInsert();
+  test('a CallSid whose row is NOT sandbox-sourced is refused — never a production session through the sandbox door (hook P0)', async () => {
+    const { insert, update } = primeInsert({ source: 'twilio_voice' });
+    const res = mockRes();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-foreign', From: '+19415550100', To: SANDBOX } }, res);
+    expect(insert).toHaveBeenCalled(); // the retry-safe insert ran (and was ignored on the conflict)
+    expect(res.statusCode).toBe(403);
+    expect(res.body).not.toContain('<ConversationRelay');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('relay not attached ⇒ the row still lands, stamped relay_failed, then a spoken notice + hangup', async () => {
+    const { insert, update, where } = primeInsert();
     isRelayAttached.mockImplementation(() => false);
     const res = mockRes();
     await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-3', From: '+19415550100', To: SANDBOX } }, res);
     expect(res.body).toContain('not attached');
     expect(res.body).toContain('<Hangup/>');
-    expect(insert).not.toHaveBeenCalled();
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ twilio_call_sid: 'CA-sb-3', source: VOICE_RELAY_SANDBOX_SOURCE }));
+    expect(where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-sb-3' });
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', call_outcome: 'relay_failed' }));
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_sandbox_failed: 'relay_not_attached' });
   });
 
   test('a DB failure still answers with valid TwiML (hangup), never a 500 into the call', async () => {
@@ -134,14 +152,25 @@ describe('POST /relay-sandbox', () => {
 });
 
 describe('POST /relay-sandbox/cell', () => {
-  function primeStamp() {
+  function primeStamp({ source = VOICE_RELAY_SANDBOX_SOURCE } = {}) {
     const update = jest.fn().mockResolvedValue(1);
-    const where = jest.fn(() => ({ update }));
+    const first = jest.fn(async () => (source == null ? undefined : { source }));
+    const where = jest.fn(() => ({ update, first }));
     db.mockImplementation(() => ({ where }));
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
-    return { update, where };
+    return { update, where, first };
   }
   beforeEach(() => primeStamp());
+
+  test('a row that is not sandbox-sourced (or missing) renders no relay (hook P0)', async () => {
+    for (const source of ['twilio_voice', null]) {
+      primeStamp({ source });
+      const res = mockRes();
+      await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-foreign', To: SANDBOX, Digits: '09' } }, res);
+      expect(res.statusCode).toBe(403);
+      expect(res.body).not.toContain('<ConversationRelay');
+    }
+  });
 
   test('a known code selects that profile (sandbox-only ones included), stamps it on the row, and replays the disclosure first', async () => {
     const { update, where } = primeStamp();
@@ -166,7 +195,8 @@ describe('POST /relay-sandbox/cell', () => {
   });
 
   test('a stamp failure never costs the caller the call', async () => {
-    db.mockImplementation(() => { throw new Error('pool down'); });
+    const { update } = primeStamp();
+    update.mockRejectedValue(new Error('pool down'));
     const res = mockRes();
     await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-5b', To: SANDBOX, Digits: '09' } }, res);
     expect(res.body).toContain('<ConversationRelay');

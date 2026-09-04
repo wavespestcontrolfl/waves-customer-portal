@@ -1562,6 +1562,14 @@ function sandboxRelayXml({ callSid, cell }) {
   });
 }
 
+// The call_log row for this CallSid exists AND carries the sandbox source —
+// the row-level proof the WS upgrade will later trust.
+async function sandboxRowOwned(callSid) {
+  const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+  const row = await db('call_log').where({ twilio_call_sid: callSid }).first('source');
+  return Boolean(row) && row.source === VOICE_RELAY_SANDBOX_SOURCE;
+}
+
 function refuseSandbox(req, res, why) {
   logger.warn(`[relay-sandbox] refused: ${why} (To=${maskPhone(req.body?.To)} ${maskSid(req.body?.CallSid)})`);
   return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
@@ -1573,15 +1581,11 @@ router.post('/relay-sandbox', async (req, res) => {
     const { CallSid, From, To, CallStatus } = req.body || {};
     if (!CallSid) return refuseSandbox(req, res, 'no CallSid');
     const twiml = new VoiceResponse();
-    if (!isRelayAttached()) {
-      logger.warn(`[relay-sandbox] relay not attached — hanging up ${maskSid(CallSid)}`);
-      twiml.say({ voice: SAY_VOICE }, 'The voice relay is not attached on this deploy. Goodbye.');
-      twiml.hangup();
-      return res.type('text/xml').send(twiml.toString());
-    }
-    const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
-    // Retry-safe on the CallSid unique index: a Twilio redelivery re-renders
-    // the same TwiML without a second row.
+    const { VOICE_RELAY_SANDBOX_SOURCE, RELAY_FAILED_OUTCOME } = require('../services/voice-agent/relay-protocol');
+    // EVERY sandbox call gets its row (the public-route contract), the
+    // relay-unavailable ones included — a failed bake-off attempt must be
+    // attributable. Retry-safe on the CallSid unique index: a Twilio
+    // redelivery re-renders the same TwiML without a second row.
     await db('call_log')
       .insert({
         direction: 'inbound',
@@ -1594,6 +1598,26 @@ router.post('/relay-sandbox', async (req, res) => {
       })
       .onConflict('twilio_call_sid')
       .ignore();
+    // ⭐ FAIL CLOSED ON A FOREIGN ROW. The WS upgrade derives `sandbox` from
+    // this row's source, so a pre-existing NON-sandbox row under this CallSid
+    // (the insert above ignores the conflict) would open a PRODUCTION session
+    // for a call admitted through the sandbox route. The row must be ours.
+    if (!(await sandboxRowOwned(CallSid))) return refuseSandbox(req, res, 'call_log row is not sandbox-sourced');
+    if (!isRelayAttached()) {
+      logger.warn(`[relay-sandbox] relay not attached — hanging up ${maskSid(CallSid)}`);
+      // The same terminal stamp /relay-complete?sandbox=1 writes, with the reason.
+      await db('call_log')
+        .where({ twilio_call_sid: CallSid })
+        .update({
+          status: 'failed',
+          call_outcome: RELAY_FAILED_OUTCOME,
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_sandbox_failed: 'relay_not_attached' })]),
+          updated_at: new Date(),
+        });
+      twiml.say({ voice: SAY_VOICE }, 'The voice relay is not attached on this deploy. Goodbye.');
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
     // The recording disclosure (FL §934.03 — the sandbox number is publicly
     // dialable and the relay transcribes every caller) plays INSIDE the cell
     // <Gather>, so digits count from the first second of the call: a runner
@@ -1625,6 +1649,9 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
     const { CallSid } = req.body || {};
     if (!CallSid) return refuseSandbox(req, res, 'no CallSid');
+    // The same ownership check the answer handler applies: no relay renders
+    // over a row that is not sandbox-sourced.
+    if (!(await sandboxRowOwned(CallSid))) return refuseSandbox(req, res, 'call_log row is not sandbox-sourced');
     const digits = String(req.body?.Digits || '').trim();
     const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
     const cell = resolveSandboxCell(digits);
