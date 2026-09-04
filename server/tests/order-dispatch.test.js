@@ -32,6 +32,8 @@ jest.mock('../services/procurement/auto-reorder', () => ({
   // The claim takes the product's pricing advisory lock FIRST (Codex r10 P1)
   // — recorded so the placed test can assert it precedes the row locks.
   lockProductPricing: jest.fn(async (trx, productId) => { mockState.advisoryLocks = [...(mockState.advisoryLocks || []), productId]; }),
+  // The sweep's request-id-deduped bell, reused for the undispatchable hand-off (Codex r12 P2).
+  ringRestockBell: jest.fn(async ({ notify, product, request }) => notify('system', `Restock: ${product.name} is low`, 'order manually', { bell: true, dedupeKey: `auto-reorder:${request.id}` })),
 }));
 
 const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null };
@@ -195,6 +197,14 @@ test('the monthly cap buckets by PURCHASE month (placed_at, else the reservation
   const reservation = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.amount_cents === 31400 && u.row.created_at);
   expect(reservation).toBeTruthy();
   expect(reservation.row.created_at.getTime()).toBeGreaterThanOrEqual(before);
+});
+
+test('a request the claim finds undispatchable (vendor deactivated / gated after the sweep stood down) is handed off with the sweep\'s deduped bell (Codex r12 P2)', async () => {
+  mockState.vendor = { ...mockState.vendor, active: false };
+  const r = await run(mockAdapter());
+  expect(r).toMatchObject({ skipped: 'no_adapter', belled: true });
+  expect(notify).toHaveBeenCalledTimes(1);
+  expect(notify.mock.calls[0][3].dedupeKey).toMatch(/^auto-reorder:/);
 });
 
 test('adapter refusal → needs_review with the refuse code', async () => {

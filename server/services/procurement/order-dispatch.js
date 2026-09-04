@@ -840,11 +840,28 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
   }
 }
 
+// A request the sweep left to the dispatcher (its vendor auto-ordered at
+// sweep time) that the claim now finds undispatchable — vendor deactivated
+// or its gate flipped in between — would otherwise have neither bell: hand
+// it to the office with the sweep's own request-id-deduped bell (Codex r12
+// P2). Idempotent: a bell the sweep already rang is a no-op.
+const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated']);
+async function bellUndispatchable(conn, requestId, notify) {
+  const request = await conn('product_restock_requests').where({ id: requestId }).first();
+  const product = request && await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
+  if (!request || !product) return false;
+  await require('./auto-reorder').ringRestockBell({ notify, product, request });
+  return true;
+}
+
 async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
   if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated' };
   const registry = adapters || loadAdapters();
   const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry }));
-  if (claim.skipped) return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}) };
+  if (claim.skipped) {
+    const belled = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : false;
+    return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...(belled ? { belled: true } : {}) };
+  }
   return dispatchClaimed(conn, claim, { registry, notify, now, env });
 }
 
