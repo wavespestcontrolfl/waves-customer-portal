@@ -27,6 +27,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { isRealProviderSend } = require('./sms-auto-send');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { resolveProjectEmailRecipient, ensureServicePrepToken, markServicePrepSent } = require('./project-email');
 const { portalUrl } = require('../utils/portal-url');
@@ -229,8 +230,10 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
       adminUserId: actorId || undefined,
     },
   });
-  if (!res.sent) {
-    logger.warn(`[prep-guide-sender] prep SMS not sent for customer ${customer.id}: ${res.code || res.reason || 'unknown'}`);
+  // sent:true with a suppression sentinel (gate off, template disabled, owner
+  // SMS kill) means nothing left — never record that as a delivery.
+  if (!isRealProviderSend(res)) {
+    logger.warn(`[prep-guide-sender] prep SMS not sent for customer ${customer.id}: ${res.code || res.reason || res.providerMessageId || 'unknown'}`);
     return false;
   }
   return true;

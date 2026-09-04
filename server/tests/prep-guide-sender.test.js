@@ -3,6 +3,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
+jest.mock('../services/sms-auto-send', () => ({ isRealProviderSend: jest.requireActual('../services/sms-auto-send').isRealProviderSend }));
 jest.mock('../services/project-email', () => ({
   // Mirrors the real resolver: a configured service contact wins the email
   // recipient (address + name); otherwise the primary customer.
@@ -70,7 +71,7 @@ beforeEach(() => {
   serviceUpdates = [];
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
   renderSmsTemplate.mockResolvedValue('Prep text...');
-  sendCustomerMessage.mockResolvedValue({ sent: true });
+  sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM123' });
 });
 
 describe('sendPrepToCustomer', () => {
@@ -270,6 +271,17 @@ describe('sendPrepToCustomer', () => {
       prep_sent_at: 'NOW()',
       prep_template_key: 'prep.flea',
     }));
+  });
+
+  test('a suppressed text (sent:true sentinel, no provider id) is not a delivery', async () => {
+    upcomingVisitRow = VISIT;
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
+
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+
+    expect(result).toMatchObject({ ok: false, reason: 'send_failed', smsSent: false });
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
+    expect(interactionsInsert).not.toHaveBeenCalled();
   });
 
   test('nothing delivered never stamps prep_sent_at', async () => {
