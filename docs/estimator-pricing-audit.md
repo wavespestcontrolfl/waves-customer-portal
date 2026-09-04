@@ -139,7 +139,7 @@ Owner decisions that block implementation: §16 (11 items).
 | Cockroach Treatment | 3 | 15–25 extra | 36 | 35 | 40 | 42 | — | $32.67 | fine ($231 avg) | — |
 | WDO Inspection Service | 9 | none | 60 | 60 | 60 | 60 | $0 | $46.67 | 18.7% of $250 unmodeled | 60 min |
 | Rodent Trapping Service | 7 | none | 92 | 92 | 92 | 92 | $0 | $65.33 (+ unlimited callbacks) | 28% of $235 avg unmodeled | 90 min + callback reserve |
-| Pest Control Re-Service (callbacks) | 4–7 | none | 28 | 30 | 38 | 44 | $0 | $28 | 8 of 307 visits (2.6%) ⇒ ≈$0.73/visit | add reserve |
+| Pest Control Re-Service (callbacks) | 4–7 | none | 28 | 30 | 38 | 44 | $0 | $16.33 (recorded span, drive inside — no second drive allowance) | 8 of 307 visits (2.6%) ⇒ ≈$0.43/visit | add reserve |
 
 Realized revenue per hour of RECORDED span (production; the span already contains drive, so no drive minutes are added — MON-004; from the data-quality appendix): quarterly pest $305/h, one-time pest $295/h, cockroach $445/h, monthly pest $124/h, **lawn 9x $101/h**, **lawn 12x $92/h**, **lawn visit $77/h**. These are revenue per recorded hour, not margins, and carry no pricing recommendation; even so, at a $35 loaded hour plus materials, lawn is the thin line.
 
