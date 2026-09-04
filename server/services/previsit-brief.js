@@ -2397,6 +2397,7 @@ async function generateBriefBody(grounding, deps = {}) {
   };
   const callModel = deps.callModel
     || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.visitBrief, {
+      laneId: 'previsit_brief',
       jsonMode: true,
       jsonSchema: BRIEF_SCHEMA,
       // 1000 truncated real responses mid-JSON (prod 08-14/15: 36 empty_json

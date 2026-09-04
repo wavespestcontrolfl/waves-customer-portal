@@ -272,6 +272,7 @@ async function classifyBatch(events, todayIso) {
   // A miss on both legs throws, exactly like the old SDK path — the run
   // loop's catch leaves the batch un-examined for the next run.
   const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    laneId: 'events_editorial',
     system: 'You are a precise, demanding events editor.',
     text: buildCurationPrompt(events, todayIso),
     jsonMode: true,

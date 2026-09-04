@@ -31,7 +31,7 @@
  */
 
 const LEDGER = Object.freeze(['call', 'session', 'unrecordable']);
-const UNRECORDABLE_REASON = Object.freeze(['audio', 'embedding', 'image', 'video', 'search', 'direct_sdk']);
+const UNRECORDABLE_REASON = Object.freeze(['audio', 'embedding', 'image', 'video', 'search', 'direct_sdk', 'no_call_site']);
 const CADENCE = Object.freeze(['hourly', 'daily', 'weekly', 'event']);
 
 const DEFAULT_RUNTIME = Object.freeze({
@@ -295,7 +295,8 @@ const LANE_RUNTIME = {
   kb_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
   wiki_compiler: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
   embeddings: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'embedding', fallback_class: 'offline', eval_family: null },
-  extreme_tier: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: null, expected_duration_ms: 300_000 },
+  // no_call_site: the EXTREME tier is a deliberate opt-in with no automatic lane — nothing dispatches on it today, so there is no call to label (S2c).
+  extreme_tier: { side_effect_class: 'read_only', ledger: 'unrecordable', unrecordable_reason: 'no_call_site', fallback_class: 'interactive', eval_family: null, expected_duration_ms: 300_000 },
 
   // ── Customer portal ──
   // M3 (Codex r17): processIntakeMessage returns the reply to the public intake route and records it sent_to_customer with its session audit.

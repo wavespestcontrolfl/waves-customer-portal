@@ -36,18 +36,10 @@ const SESSION_RUNNERS = {
 // Call-ledger lanes with NO lane label at their call site — 66 after S2a
 // (the plumbing: payload.laneId on dispatchWithFallback / createDeepMessage,
 // ledgerCall, the six session lanes), 37 after S2b (SMS, calls, voice,
-// photos, estimates); S2c labels the rest by product area. Their calls ARE
-// recorded — labelled by provider/model or policy name — but carry lane_id
-// NULL until then.
-const UNLABELLED_LANES = new Set([
-  'churn_classify', 'email_classify', 'social_judge', 'job_screen',
-  'contact_correction', 'bounce_rescue', 'events_editorial',
-  'expense_categorize', 'completion_recap', 'lawn_visit_narratives', 'social_copy', 'review_ask', 'review_reply', 'review_gate_text', 'email_reply', 'invoice_summary', 'blog_draft', 'newsletter',
-  'content_misc', 'previsit_brief', 'report_copy', 'treatment_narrative', 'rodent_narrative', 'project_report',
-  'ask_waves', 'link_investigator', 'chart_builder_image', 'chart_builder_sql', 'codex_remediation',
-  'signup_worker', 'fact_check_gate', 'compliance_gate',
-  'blog_optimize', 'kb_audit', 'wiki_compiler', 'quarantine_arbiter', 'extreme_tier',
-]);
+// photos, estimates), 0 after S2c (reports, email, content, IB, portal,
+// office). Keep the set: a new call lane that ships without a label lands
+// here deliberately, with a reason, or fails the drift test below.
+const UNLABELLED_LANES = new Set([]);
 
 function resolveLaneFile(file) {
   for (const candidate of [path.join(SERVICES_DIR, file), path.join(SERVER_DIR, file)]) {

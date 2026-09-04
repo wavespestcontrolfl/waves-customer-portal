@@ -298,6 +298,7 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
       }
       : MODELS.TEXT_POLICIES.deepAnalysis;
     response = await dispatchWithFallback(policy, {
+      laneId: 'compliance_gate',
       maxTokens: 6000,
       timeoutMs: COMPLIANCE_TIMEOUT_MS,
       jsonMode: true,

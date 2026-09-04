@@ -315,6 +315,7 @@ async function extractSmsContactCorrections({ body }) {
     // stays harmless.
     if (wrongPersonDetected(String(body || '').replace(/[\u2018\u2019]/g, "'"))) return [];
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+      laneId: 'contact_correction',
       system: EXTRACT_SYSTEM,
       // The COMPLETE body goes to the extractor (codex #3413 r57): the
       // prefilter examined all of it, so truncating here would silently

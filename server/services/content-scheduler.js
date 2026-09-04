@@ -192,6 +192,7 @@ async function generateNewsletterSocialContent(send) {
   };
 
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    laneId: 'content_misc',
     maxTokens: 800,
     jsonMode: true,
     jsonSchema,
