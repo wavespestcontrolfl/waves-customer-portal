@@ -14,7 +14,7 @@ const { WAVES_LOCATIONS } = require('../../config/locations');
 const { SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
 const { isOutreachLocked } = require('./link-registry');
 const { requiredInstances } = require('./link-authority-policy');
-const { followUpPending, REPLY_CHECK_FAILED } = require('./link-outreach-mandate');
+const { followUpPending, OWNER_MARKERS } = require('./link-outreach-mandate');
 
 const AUTH = 'seo_link_placement_authorities';
 // The aggregate states the bridge OWNS. `new`/`investigating`/`watching`/
@@ -162,11 +162,12 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     const frozen = (p) => pinned(p) && p.path_id !== d.best_path_id;
     const onBest = mine.filter((p) => p.path_id === d.best_path_id || pinned(p));
     const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
-    // an AUTOMATIC follow-up whose reply check failed carries the sender's marker (follow_up_skipped_reason =
-    // reply_check_failed, the draft still drafted): its authority is the owner's now (followUpReview reads the marker →
-    // OWNER_OUTREACH, §6.4). Stale by the MARKER, not by the clock — the nightly's own auto dispatch stamps the failure
-    // with the run's `now`, EQUAL to decided_at, so the timestamp test alone would never re-select the row
-    const ownerByMarker = (r, p) => r.dimension === 'communication' && r.instance_kind === 'followup' && String(r.level || '').startsWith('AUTO_') && p.follow_up_skipped_reason === REPLY_CHECK_FAILED;
+    // an AUTOMATIC follow-up the sender refused for a reason only the owner resolves carries a marker on
+    // follow_up_skipped_reason (reply check failed, recipient review required — the draft still drafted): its authority
+    // is the owner's now (followUpReview reads the marker → OWNER_OUTREACH, §6.4). Stale by the MARKER, not by the
+    // clock — the nightly's own auto dispatch stamps the refusal with the run's `now`, EQUAL to decided_at, so the
+    // timestamp test alone would never re-select the row
+    const ownerByMarker = (r, p) => r.dimension === 'communication' && r.instance_kind === 'followup' && String(r.level || '').startsWith('AUTO_') && OWNER_MARKERS.includes(p.follow_up_skipped_reason);
     const staleRow = (r, p) => (best && rotationOutcome(r, best) !== null)
       || (!r.satisfied_at && (ownerByMarker(r, p) || ts(r.decided_at) < cutoff || ts(r.decided_at) < ts(p.updated_at)));
     // the OPEN instance set must cover what the path REQUIRES now (policy requiredInstances): an in-place

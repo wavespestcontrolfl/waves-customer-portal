@@ -19,9 +19,9 @@ function fakeKnex({ hasColumn }) {
   };
   return { knex, raws, altered };
 }
-const COLS = ['follow_up_status', 'follow_up_due_at', 'follow_up_subject', 'follow_up_body', 'follow_up_send_token', 'follow_up_attempted_at', 'follow_up_sent_at', 'follow_up_skipped_reason'];
+const COLS = ['follow_up_status', 'follow_up_due_at', 'follow_up_subject', 'follow_up_body', 'follow_up_send_token', 'follow_up_attempted_at', 'follow_up_sent_at', 'follow_up_skipped_reason', 'follow_up_attempts'];
 
-test('up adds the eight follow-up columns, the status CHECK and the due index; idempotent when present', async () => {
+test('up adds the nine follow-up columns, the status CHECK and the due index; idempotent when present', async () => {
   const f = fakeKnex({ hasColumn: false });
   await migration.up(f.knex);
   expect(f.altered).toHaveLength(1);

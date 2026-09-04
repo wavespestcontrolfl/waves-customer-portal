@@ -409,7 +409,7 @@ async function finalizeSend({ prospectId, sendToken, claimed, authority, threadR
     if (followUp) {
       // the follow-up settles on its own columns only — the row's lifecycle (contacted, or a Judge-owned placed /
       // live / indexed on a submit-first path) is never touched by it (§6.4)
-      r = await own().update({ ...release, follow_up_status: 'sent', follow_up_sent_at: now, follow_up_send_token: null }).returning('*');
+      r = await own().update({ ...release, follow_up_status: 'sent', follow_up_sent_at: now, follow_up_send_token: null, follow_up_skipped_reason: null }).returning('*'); // an owner-routing marker is spent by the send
     } else {
       // the initial pitch schedules its ONE follow-up (+10 days, §6.4); the draft for it is leased once it is due
       const sent = { ...release, outreach_status: 'sent', outreach_sent_at: now, outreach_thread_ref: threadRef, outreach_send_token: null, follow_up_status: 'none', follow_up_due_at: M.followUpDueAt(now) };
@@ -457,9 +457,18 @@ async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLo
   if (!locked.ok) return locked;
   const { current, onPath, draft } = locked;
   if (draftHash != null && M.draftHash(draft) !== draftHash) return { ok: false, code: 'draft_changed', error: 'the draft changed while you looked at it — reload and read the current text before sending' };
-  const reviewed = await reviewRecipient(trx, { prospectId, recipient: draft.outreach_to_email, mode, reviewedLookupHash });
-  if (!reviewed.ok) return reviewed;
   const attemptAt = now || new Date();
+  const reviewed = await reviewRecipient(trx, { prospectId, recipient: draft.outreach_to_email, mode, reviewedLookupHash });
+  if (!reviewed.ok) {
+    // §13 on an AUTOMATIC follow-up: a shared business domain is a STABLE refusal (only the owner's click acknowledges
+    // the match) — marked on the row so the nightly re-decides the follow-up OWNER_OUTREACH and the card offers it,
+    // rather than retrying an invisible AUTO row every night (the pitch's counterpart is the board's drafts list)
+    if (followUp && mode === 'auto' && reviewed.code === 'recipient_review_required') {
+      await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_skipped_reason: M.RECIPIENT_REVIEW_REQUIRED, updated_at: attemptAt });
+      return { ...reviewed, error: `${reviewed.error} — routed to the owner` };
+    }
+    return reviewed;
+  }
   // checked BEFORE the authority step so a capped click never records an approval for a send that did not happen
   const capped = await capRefusal(trx, { mode, policy, cap, now: attemptAt });
   if (capped) return capped;
@@ -559,11 +568,24 @@ async function lockedSendRow(trx, { prospectId, prospect, mode, inbox, followUp 
     ? current && current.outreach_status === 'sent' && current.follow_up_status === 'drafted'
     : current && SENDABLE_STATUSES.includes(current.status) && (mode !== 'auto' || current.status === 'prospect') && !M.AMBIGUOUS_SEND_STATUSES.includes(current.follow_up_status);
   if (!sendable) return { ok: false, code: 'not_actionable' };
-  if (followUp && mode === 'auto' && current.follow_up_skipped_reason === M.REPLY_CHECK_FAILED) return { ok: false, code: 'not_authorized', error: 'the reply check failed on an earlier automatic attempt — the follow-up is the owner\'s' };
+  if (followUp && mode === 'auto' && M.OWNER_MARKERS.includes(current.follow_up_skipped_reason)) return { ok: false, code: 'not_authorized', error: `an earlier automatic attempt was refused (${current.follow_up_skipped_reason}) — the follow-up is the owner's` };
   if (current.target_domain !== prospect.target_domain) return { ok: false, code: 'not_actionable', error: 'the placement moved to another domain while you looked at it — reload and send again' };
   if (!current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
   const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first();
-  if (!pathStanding(onPath) || !boundToRevision(current, onPath)) return { ok: false, code: 'path_moved' };
+  if (!pathStanding(onPath)) return { ok: false, code: 'path_moved' };
+  if (!boundToRevision(current, onPath)) {
+    // a drafted FOLLOW-UP bound to an earlier revision of a path that is still standing: the route changed in place
+    // (terms, lane, URL) after the draft was accepted. The mover never touches a sent conversation and the drafter
+    // re-leases only none / due — so the stale draft is settled HERE, the one place that reads the binding: the
+    // follow-up returns to due (the draft cleared) and is re-drafted against the current route by the next sweep
+    if (followUp) {
+      await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted', path_id: current.path_id })
+        .update({ follow_up_status: 'due', follow_up_subject: null, follow_up_body: null, follow_up_skipped_reason: null, updated_at: new Date() });
+      logger.info(`[link-outreach] follow-up for ${prospectId} drafted on path revision ${current.leased_path_revision}, path now ${onPath.revision} — back to due for a re-draft`);
+      return { ok: false, code: 'path_moved', error: 'the acquisition path changed after the follow-up was drafted; the draft was discarded — it is re-drafted against the current route' };
+    }
+    return { ok: false, code: 'path_moved' };
+  }
   // the follow-up's lifecycle set depends on the PATH (§6.4): contacted, plus the Judge-owned statuses on a submit-first path only
   if (followUp && !M.FOLLOW_UP_STATUSES(onPath).includes(current.status)) return { ok: false, code: 'not_actionable', error: `the placement is ${current.status} — no follow-up on this path from there` };
   const draft = M.draftOf(current, followUp);

@@ -549,8 +549,11 @@ const followUpLease = (p) => p.follow_up_status === 'due' && p.outreach_status =
 // its write orders before or after the report, never between the revision check and the acceptance
 const followUpPathMoved = (row, path) => !path || Boolean(path.superseded_by)
   || (row.leased_path_revision != null && path.revision != null && Number(path.revision) !== Number(row.leased_path_revision));
-// the follow-up lane's report: drafted → the follow-up parked for the bridge's decision; failed → due again (the next
-// sweep re-leases it); skipped → skipped for good, with the worker's reason. Any other outcome is not this lane's.
+// the follow-up lane's report: drafted → the follow-up parked for the bridge's decision; failed → due again behind
+// every follow-up due now (follow_up_due_at re-stamped: the sweep orders by it, so a batch of drafter failures never
+// holds the head of the queue), `follow_up_attempts` counted and capped at MAX_ATTEMPTS — the initial lane's rule —
+// after which the follow-up is skipped; skipped → skipped for good, with the worker's reason. Any other outcome is
+// not this lane's. A discarded draft (path moved, no longer claimable) is not a drafter failure: due, uncounted.
 const FOLLOW_UP_OUTCOMES = ['drafted', 'failed', 'skipped'];
 async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
   if (!FOLLOW_UP_OUTCOMES.includes(outcome)) return { ok: false, code: 'not_follow_up_outcome', error: `a follow-up lease reports drafted, failed or skipped — not ${outcome}` };
@@ -582,9 +585,14 @@ async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
     const left = outcome === 'drafted' && !moved && !M.FOLLOW_UP_STATUSES(path).includes(row.status);
     const blocked = outcome === 'drafted' && !moved && !left && (!OUTREACH_TYPES.includes(row.link_type)
       || Boolean(row.domain_id && await trx('seo_link_domains').where({ id: row.domain_id }).whereIn('agent_state', nonClaimableDomainStates()).first('id')));
-    const patch = moved || blocked || outcome === 'failed'
+    const failures = outcome === 'failed' ? (Number(row.follow_up_attempts) || 0) + 1 : null;
+    const patch = moved || blocked
       ? { ...release, follow_up_status: 'due' }
-      : left
+      : outcome === 'failed'
+        ? (failures >= MAX_ATTEMPTS
+          ? { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: `drafter failed ${failures} times${note ? ` (${note})` : ''}`, follow_up_attempts: failures }
+          : { ...release, follow_up_status: 'due', follow_up_due_at: now, follow_up_attempts: failures })
+        : left
         ? { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: `placement left the follow-up lifecycle (${row.status})` }
         : outcome === 'drafted'
           ? { ...release, follow_up_subject: body.outreach_subject, follow_up_body: body.outreach_body, follow_up_status: 'drafted', ...(note ? { notes: row.notes ? `${row.notes}\n${note}` : note } : {}) }

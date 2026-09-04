@@ -88,7 +88,7 @@ describe('run', () => {
     claims([prospect()], [sent]);
     const a = fakeAnthropic('{"subject":"Re: Add Waves to your vendor resources?","body":"Hi Michael, a quick nudge.\\n— The Waves Pest Control Team"}');
     const r = await drafter.run({ batchSize: 1, anthropic: a, fetchPageFn: noFetch });
-    expect(r).toMatchObject({ claimed: 0, followUps: { claimed: 1, drafted: 1, failed: 0 } });
+    expect(r).toMatchObject({ claimed: 1, drafted: 1, skipped: 0, failed: 0, followUps: { claimed: 1, drafted: 1, failed: 0 } }); // the totals the cron log and the CLI print carry both lanes
     expect(worker.claim).toHaveBeenCalledTimes(1); // the follow-up lease only — no pitch claim on a spent budget
     expect(worker.claim).toHaveBeenCalledWith({ n: 1, type: 'outreach', followUp: true });
     worker.claim.mockClear();

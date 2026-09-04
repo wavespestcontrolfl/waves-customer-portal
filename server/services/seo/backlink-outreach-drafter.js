@@ -168,7 +168,9 @@ async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageT
 
 /**
  * run — claim a batch of outreach prospects (email-bearing only), draft each, park
- * as 'drafted'. dryRun prints without writing. Returns { claimed, drafted, skipped, failed }.
+ * as 'drafted'. dryRun prints without writing. Returns { claimed, drafted, skipped, failed }
+ * summed over BOTH lanes (the follow-up pass + the pitches — what the cron log and the
+ * CLI print), with the follow-up pass itemized under `followUps`.
  */
 async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = {}) {
   let client = anthropic;
@@ -190,7 +192,7 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
   const claimed = remaining ? await worker.claim({ n: remaining, type: 'outreach', requireContactEmail: true, ...(dryRun ? { preview: true } : {}) }) : [];
   if (!claimed.length) {
     logger.info(remaining ? '[outreach-drafter] no claimable outreach prospects with a contact email' : `[outreach-drafter] the batch of ${batchSize} went to follow-ups — no pitch claimed`);
-    return { claimed: 0, drafted: 0, skipped: 0, failed: 0, followUps: { claimed: followUps.claimed, drafted: followUps.drafted, failed: followUps.failed }, ...(dryRun ? { samples: followUps.samples } : {}) };
+    return { claimed: followUps.claimed, drafted: followUps.drafted, skipped: 0, failed: followUps.failed, followUps: { claimed: followUps.claimed, drafted: followUps.drafted, failed: followUps.failed }, ...(dryRun ? { samples: followUps.samples } : {}) };
   }
   let drafted = 0, skipped = 0, failed = 0;
   const samples = []; // dry-run previews — returned to the CLI's stdout, NOT logged (email/body are PII)
@@ -229,7 +231,7 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
   // (a dry run previewed without leasing — there is nothing to release)
 
   logger.info(`[outreach-drafter] claimed=${claimed.length} drafted=${drafted} skipped=${skipped} failed=${failed} follow-ups=${followUps.drafted}/${followUps.claimed}${dryRun ? ' (DRY-RUN)' : ''}`);
-  return { claimed: claimed.length, drafted, skipped, failed, followUps: { claimed: followUps.claimed, drafted: followUps.drafted, failed: followUps.failed }, ...(dryRun ? { samples: [...followUps.samples, ...samples] } : {}) };
+  return { claimed: claimed.length + followUps.claimed, drafted: drafted + followUps.drafted, skipped, failed: failed + followUps.failed, followUps: { claimed: followUps.claimed, drafted: followUps.drafted, failed: followUps.failed }, ...(dryRun ? { samples: [...followUps.samples, ...samples] } : {}) };
 }
 
 module.exports = { run };

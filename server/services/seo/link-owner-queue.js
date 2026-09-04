@@ -221,7 +221,7 @@ const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v))
 async function listOwnerQueue(db) {
   const { policy } = await P.loadPolicy(db);
   const candidates = await db('seo_link_prospects').whereIn('status', [...CARD_STATUSES]).whereNotNull('domain_id')
-    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'follow_up_status', 'follow_up_subject', 'follow_up_body', 'claimed_at', 'updated_at');
+    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'follow_up_status', 'follow_up_subject', 'follow_up_body', 'follow_up_skipped_reason', 'claimed_at', 'updated_at'); // follow_up_skipped_reason: followUpReview reads the owner-routing markers from it — the card must judge the SAME inputs as the bridge
   const liveRows = candidates.length ? await db(AUTH).whereIn('prospect_id', candidates.map((p) => p.id)).whereNull('ended_at') : [];
   // a parked prospect is a card outright; a checkout / placed placement only while an OPEN owner-level row it decides
   // here exists — otherwise every placed link would be a card with nothing to click

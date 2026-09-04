@@ -96,14 +96,24 @@ function followUpReview(placement) {
   const shape = followUpShape(p);
   const flags = [...text.flags, ...shape];
   const reasons = [text.reason, ...shape].filter(Boolean);
-  // a failed reply check on an automatic attempt routes the follow-up to the owner (§6.4: never sent by default) —
-  // the text may be clean, the SEND is not automatic
-  if (p.follow_up_skipped_reason === REPLY_CHECK_FAILED) reasons.push('reply check failed on the automatic attempt — the owner sends it');
-  const clean = text.clean && shape.length === 0 && p.follow_up_skipped_reason !== REPLY_CHECK_FAILED;
+  // a stable refusal of an AUTOMATIC attempt routes the follow-up to the owner (§6.4: never sent by default) — the
+  // text may be clean, the SEND is not automatic: a failed reply check, or a recipient sharing a domain with a
+  // customer / lead contact (§13: acknowledged only by the owner's click)
+  const marker = OWNER_MARKER_REASONS[p.follow_up_skipped_reason];
+  if (marker) reasons.push(marker);
+  const clean = text.clean && shape.length === 0 && !marker;
   return { clean, flags, lint: text.lint, reason: clean ? null : reasons.join(', ') };
 }
-// the marker the sender stamps on follow_up_skipped_reason (the draft stays drafted) when an automatic attempt's reply check failed
+// the markers the sender stamps on follow_up_skipped_reason (the draft stays drafted) when an automatic attempt was
+// refused for a reason only the owner resolves — followUpReview reads them as unclean, the selection re-selects the
+// domain on them, the bridge re-decides the follow-up OWNER_OUTREACH, the auto sender refuses while one stands
 const REPLY_CHECK_FAILED = 'reply_check_failed';
+const RECIPIENT_REVIEW_REQUIRED = 'recipient_review_required';
+const OWNER_MARKER_REASONS = Object.freeze({
+  [REPLY_CHECK_FAILED]: 'reply check failed on the automatic attempt — the owner sends it',
+  [RECIPIENT_REVIEW_REQUIRED]: 'the recipient shares a domain with a customer or lead contact — the owner reviews the match and sends it',
+});
+const OWNER_MARKERS = Object.freeze(Object.keys(OWNER_MARKER_REASONS));
 /** The mandate verdict over a bare draft — the sender re-reviews the LOCKED text of either send with it. */
 function reviewDraft({ to, subject, body }) {
   if (!isValidEmail(to)) return { clean: false, flags: [], lint: [], reason: 'invalid recipient' };
@@ -251,4 +261,4 @@ async function reviewByEmail(q, emails) {
 // have delivered the pitch, so the inbox stays held and the authority it was claimed under stays pinned until then
 const AMBIGUOUS_SEND_STATUSES = Object.freeze(['sending', 'send_error']);
 
-module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, RECIPIENT_REVIEW_REQUIRED, OWNER_MARKERS, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };

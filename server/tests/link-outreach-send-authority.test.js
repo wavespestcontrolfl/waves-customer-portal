@@ -834,13 +834,37 @@ describe('the follow-up lifecycle (§6.4)', () => {
     Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY) });
     let [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
     expect(await worker.report({ prospect_id: s.row.id, outcome: 'placed', lease_token: l.lease_token, live_url: 'https://example.org/x' })).toMatchObject({ ok: false, code: 'not_follow_up_outcome' });
+    const dueBefore = placement(s.db).follow_up_due_at;
     expect(await worker.report({ prospect_id: s.row.id, outcome: 'failed', lease_token: l.lease_token })).toMatchObject({ ok: true, follow_up_status: 'due' });
-    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'due', claimed_at: null });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'due', claimed_at: null, follow_up_attempts: 1 });
+    expect(new Date(placement(s.db).follow_up_due_at).getTime()).toBeGreaterThan(new Date(dueBefore).getTime()); // a drafter failure rotates the follow-up behind every one due now (Codex r9 P1)
     [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
     expect(await worker.report({ prospect_id: s.row.id, outcome: 'skipped', lease_token: l.lease_token, notes: 'publisher closed' })).toMatchObject({ ok: true, follow_up_status: 'skipped' });
     expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'skipped', follow_up_skipped_reason: 'publisher closed' });
     // a stale lease writes nothing
     expect(await worker.report({ prospect_id: s.row.id, outcome: 'drafted', lease_token: l.lease_token, outreach_subject: 'x', outreach_body: 'y' })).toMatchObject({ ok: false });
+  });
+  test('P1: drafter failures on a follow-up are counted and capped at the worker\'s MAX_ATTEMPTS — the follow-up is skipped, not re-leased forever; a discarded draft is not a failure', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY) });
+    for (let i = 1; i < worker.MAX_ATTEMPTS; i++) {
+      const [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
+      expect(l).toBeTruthy();
+      expect(await worker.report({ prospect_id: s.row.id, outcome: 'failed', lease_token: l.lease_token, notes: 'drafter produced no usable follow-up' })).toMatchObject({ ok: true, follow_up_status: 'due' });
+      expect(placement(s.db).follow_up_attempts).toBe(i);
+    }
+    const [last] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
+    expect(await worker.report({ prospect_id: s.row.id, outcome: 'failed', lease_token: last.lease_token, notes: 'drafter produced no usable follow-up' })).toMatchObject({ ok: true, follow_up_status: 'skipped' });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'skipped', follow_up_attempts: worker.MAX_ATTEMPTS, follow_up_skipped_reason: expect.stringMatching(/^drafter failed 4 times/) });
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toEqual([]);
+    // a draft discarded because the row is no longer claimable returns to due WITHOUT counting (not the drafter's failure)
+    const t = await conversation({ decide: false });
+    Object.assign(placement(t.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY) });
+    const [l2] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
+    t.db._tables.seo_link_domains[0].agent_state = 'watching';
+    expect(await worker.report({ prospect_id: t.row.id, outcome: 'drafted', lease_token: l2.lease_token, outreach_subject: 'Re: A resource for your readers', outreach_body: FOLLOW_UP_BODY })).toMatchObject({ ok: false, code: 'not_eligible' });
+    expect(placement(t.db)).toMatchObject({ follow_up_status: 'due' });
+    expect(placement(t.db).follow_up_attempts || 0).toBe(0);
   });
   test('the stale sweep releases a stuck follow-up lease (the row is not `prospect`)', async () => {
     const s = await conversation({ decide: false });
@@ -1048,6 +1072,9 @@ describe('Codex r1 on #3854', () => {
     expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/owner/) });
     expect(await nightly(s.db, { now: new Date(LATER.getTime() + DAY) })).toMatchObject({ selected: 1 });
     expect(followUpRow(s.db)).toMatchObject({ level: 'OWNER_OUTREACH' }); // the card's review line carries the why (followUpReview)
+    // the card reads the marker too (Codex r9 P1): its staleness test re-decides on the SAME inputs as the bridge — Send is offered
+    const card = (await Q.listOwnerQueue(s.db)).cards[0].rows.find((r) => r.instance_kind === 'followup');
+    expect(card).toMatchObject({ level: 'OWNER_OUTREACH', approvable: true, why_not: null, action: 'outreach_followup', draft: { follow_up: true, review: { clean: false, reason: expect.stringMatching(/owner sends it/) } } });
     expect(await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).toEqual([]); // converged: the marker on an OWNER row is settled
     const r = await nightly(s.db, { now: new Date(LATER.getTime() + 2 * DAY), autoSend: true, send: jest.fn(async () => ({ ok: true })) });
     expect(r.autoSend).toEqual({ attempted: 0, sent: 0, skipped: [] });
@@ -1061,6 +1088,36 @@ describe('Codex r1 on #3854', () => {
     Object.assign(placement(t.db), { follow_up_status: 'send_error', follow_up_skipped_reason: 'reply_check_failed' });
     expect((await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'requeue', approvedBy: 'Adam', followUp: true })).ok).toBe(true);
     expect(placement(t.db).follow_up_skipped_reason).toBeNull();
+  });
+  test('P1: an AUTO follow-up to a shared business domain is a stable refusal — marked recipient_review_required, re-selected on the marker, re-decided OWNER_OUTREACH; the card offers Send with the acknowledged hash; the send clears the marker', async () => {
+    const s = await conversation();
+    s.db._tables.customers.push({ id: 'c7', email: 'ads@example.org' }); // a lead / customer on the recipient's domain appeared after the pitch
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'recipient_review_required', review: { kind: 'ambiguous' }, error: expect.stringMatching(/routed to the owner/) });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'drafted', follow_up_skipped_reason: 'recipient_review_required' });
+    expect(M.followUpReview(placement(s.db))).toMatchObject({ clean: false, reason: expect.stringMatching(/owner reviews the match/) });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/owner/) }); // the marker alone stops the next automatic attempt
+    expect((await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).map((x) => x.why)).toEqual(['stale']);
+    expect(await nightly(s.db, { now: new Date(LATER.getTime() + DAY) })).toMatchObject({ selected: 1 });
+    expect(followUpRow(s.db)).toMatchObject({ level: 'OWNER_OUTREACH' });
+    const card = (await Q.listOwnerQueue(s.db)).cards[0].rows.find((r) => r.instance_kind === 'followup');
+    expect(card).toMatchObject({ approvable: true, why_not: null, draft: { follow_up: true, recipient_review: { kind: 'ambiguous' } } });
+    const first = await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(s.db)), now: LATER });
+    expect(first).toMatchObject({ ok: false, code: 'recipient_review_required' });
+    gmail.sendMessage.mockResolvedValue({ id: 'msg2', threadId: 'thr1' });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(s.db)), reviewedLookupHash: first.review.lookup_hash, now: LATER })).toMatchObject({ ok: true, authority: { level: 'OWNER_OUTREACH' } });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'sent', follow_up_skipped_reason: null });
+  });
+  test('P2: a follow-up drafted against a path later revised IN PLACE is settled at the send: back to due, the draft cleared, re-leased against the current route', async () => {
+    const s = await conversation();
+    Object.assign(storedPath(s.db), { revision: 2, revision_communication: 2, updated_at: new Date(LATER.getTime() + 1000) }); // the investigator revised the route after the draft was accepted
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'drafted', leased_path_revision: 1 });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'path_moved', error: expect.stringMatching(/re-drafted/) });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', outreach_status: 'sent', follow_up_status: 'due', follow_up_subject: null, follow_up_body: null });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    placement(s.db).follow_up_due_at = new Date(Date.now() - DAY);
+    const [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
+    expect(l).toBeTruthy();
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'due', leased_path_revision: 2 });
   });
   test('audit: an AUTO follow-up whose LOCKED text no longer passes the follow-up\'s own review (a subject edited off "Re: …") is refused automatically; the owner may still send it', async () => {
     const s = await conversation();
