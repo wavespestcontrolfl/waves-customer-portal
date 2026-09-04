@@ -60,16 +60,21 @@ const SKIP_WHEN = [
   [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)), 'inspection_service'],
 ];
 
+// SQL NULL = every line. Anything else must be an array of line keys —
+// a malformed value is INVALID, never "every line": a bad row must not
+// deduct a pest-scoped kit on a termite or rodent visit (pre-push P1).
+const INVALID_LINES = Symbol('invalid_service_lines');
 function parseLines(raw) {
   if (raw == null) return null;
-  const arr = typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : raw;
-  return Array.isArray(arr) ? arr.map((x) => String(x)) : null;
+  const arr = typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return INVALID_LINES; } })() : raw;
+  return Array.isArray(arr) ? arr.map((x) => String(x)) : INVALID_LINES;
 }
 
-// null/unparseable = every line. A scoped list needs a resolvable line.
+// null = every line; invalid = none; a scoped list needs a resolvable line.
 function appliesToLine(rawLines, serviceLine) {
   const lines = parseLines(rawLines);
-  if (!lines) return true;
+  if (lines === null) return true;
+  if (lines === INVALID_LINES) return false;
   return !!serviceLine && lines.includes(String(serviceLine));
 }
 
@@ -102,6 +107,11 @@ async function consumeCompletionSupplies(db, {
   }
 
   for (const product of products) {
+    if (parseLines(product.per_completion_service_lines) === INVALID_LINES) {
+      logger.warn(`[supplies-consumption] ${product.name}: per_completion_service_lines is not a list — nothing consumed (fix it on the Inventory page)`);
+      result.errors.push({ productId: product.id, reason: 'invalid_service_lines' });
+      continue;
+    }
     if (!appliesToLine(product.per_completion_service_lines, serviceLine)) {
       result.skipped.push({ productId: product.id, reason: 'service_line_excluded' });
       continue;

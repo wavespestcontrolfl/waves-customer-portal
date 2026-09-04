@@ -172,7 +172,18 @@ describe('service-line scope', () => {
     expect(appliesToLine(JSON.stringify(['pest']), 'pest')).toBe(true);
     expect(appliesToLine(['pest'], 'termite')).toBe(false);
     expect(appliesToLine(['pest'], null)).toBe(false);
-    expect(appliesToLine('not json', 'termite')).toBe(true);
+    // Malformed scope fails CLOSED (pre-push P1): not "every line".
+    expect(appliesToLine('not json', 'termite')).toBe(false);
+    expect(appliesToLine('not json', 'pest')).toBe(false);
+    expect(appliesToLine({ pest: true }, 'pest')).toBe(false);
+  });
+
+  test('a product whose scope is malformed is skipped with a recorded error, no movement', async () => {
+    const { db, inserts } = fakeDb({ products: [{ ...sign, per_completion_service_lines: 'not json' }] });
+    const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' });
+    expect(res.errors).toEqual([{ productId: 'prod-sign', reason: 'invalid_service_lines' }]);
+    expect(res.consumed).toHaveLength(0);
+    expect(inserts).toHaveLength(0);
   });
 
   test('a pest visit consumes the kit item', async () => {
