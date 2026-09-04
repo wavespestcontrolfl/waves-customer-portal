@@ -306,4 +306,4 @@ async function isPublicSelectableServiceKey(serviceKey, conn = db) {
 }
 
 module.exports = {
-  COCKROACH_PACKAGE_VISITS, cockroachPackageCountVerified, LAWN_TRACKS, loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS, CADENCE_LABELS };
+  COCKROACH_PACKAGE_VISITS, cockroachPackageCountVerified, LAWN_TRACKS, loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FORMERLY_PUBLIC_KEYS, FAMILY_LABELS, CADENCE_LABELS, REQUEST_CADENCE };

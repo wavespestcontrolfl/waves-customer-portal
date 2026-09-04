@@ -379,7 +379,7 @@ const {
   heardAddressMatchesOnFile,
   callerPhoneOnFile,
   capturedEmails,
-  requestedServiceTokens,
+  requestedServiceTokens, stampSpecificServiceKeys, engineIdentityForCatalogKey,
   serviceTypeMatches,
   estimateCoversAsk,
   deliveredEstimateScope,
@@ -567,18 +567,22 @@ describe('evidence helpers', () => {
     // a generic pest booking, it is one ask, not two, and the exact
     // call-created booking ("Flea Treatment", specialty, no category
     // snapshot) answers it (codex r31 P2).
+    // (a specific requirement also carries its registered identity beside
+    // the token lists — compared as plain token lists here)
+    const plain = (reqs) => reqs.map((r) => [...r]);
     const flea = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_general'], requested_specific_service: 'Flea Treatment' } } }));
-    expect(flea).toEqual([[['flea', 'treatment']]]);
+    expect(plain(flea)).toEqual([[['flea', 'treatment']]]);
+    expect(flea[0].family).toBe('flea');
     expect(serviceTypeMatches('Flea Treatment', flea[0])).toBe(true);
-    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: [], requested_specific_service: 'Flea Treatment' } } }))).toEqual([[['flea', 'treatment']]]);
+    expect(plain(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: [], requested_specific_service: 'Flea Treatment' } } })))).toEqual([[['flea', 'treatment']]]);
     // A specific name keeps its subtype words — only connectors and the
     // bare "service" wrapper drop — so "Rodent Control" named by the
     // caller is not answered by a rodent exclusion (codex r34 P1).
     const [rodentControl] = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['rodent'], requested_specific_service: 'Rodent Control Service' } } }));
-    expect(rodentControl).toEqual([['rodent', 'control']]);
+    expect([...rodentControl]).toEqual([['rodent', 'control']]);
     expect(serviceTypeMatches('Rodent Exclusion rodent_exclusion', rodentControl)).toBe(false);
     expect(serviceTypeMatches('Rodent Control rodent', rodentControl)).toBe(true);
-    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['stinging_insect'], requested_specific_service: 'Yellow Jacket' } } }))).toEqual([[['yellow', 'jacket']]]);
+    expect(plain(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['stinging_insect'], requested_specific_service: 'Yellow Jacket' } } })))).toEqual([[['yellow', 'jacket']]]);
     // quote_promised cards carry the same ask under quote_scope.
     expect(requestedServiceTokens(item({ payload: { quote_scope: { requested_service_categories: ['lawn_care'] } } }))).toEqual([[['lawn']]]);
     expect(flea.every((tokens) => serviceTypeMatches('Quarterly Pest Control pest_control', tokens))).toBe(false);
@@ -627,10 +631,10 @@ describe('evidence helpers', () => {
     const fleaOnly = card({ requested_service_categories: ['pest_general'] });
     expect(estimateCoversAsk(fleaOnly, legacy({}))).toBe(true);
     expect(estimateCoversAsk(fleaOnly, legacy({ onetime_total: null, monthly_total: 40 }))).toBe(false);
-    // ...but a flag-only legacy row is the bare "Flea" — no catalog label
-    // carries the subtype word the caller's "Flea Treatment" keeps — so the
-    // card parks for the owner rather than auto-resolving (codex r34 P1).
-    expect(estimateCoversAsk(fleaOnly, legacy({ estimate_data: { inputs: { svcFlea: true } }, service_interest: 'Pest Control' }))).toBe(false);
+    // ...and a flag-only legacy row — the bare "Flea", no "treatment" word
+    // — still answers it by IDENTITY: the compose vocabulary reads the flea
+    // family from both the ask and the line (codex r37 P2).
+    expect(estimateCoversAsk(fleaOnly, legacy({ estimate_data: { inputs: { svcFlea: true } }, service_interest: 'Pest Control' }))).toBe(true);
     expect(estimateCoversAsk(card({ requested_service_categories: ['pest_general'], requested_specific_service: null }), legacy({ estimate_data: { inputs: { svcFlea: true } }, service_interest: 'Pest Control' }))).toBe(true);
     // ...and one line answers one service: the lawn ask needs a sibling.
     expect(estimateCoversAsk(card({}), legacy({}))).toBe(false);
@@ -718,7 +722,7 @@ describe('evidence helpers', () => {
     const turfProgram = est({ estimate_data: { proposal: { enabled: true, programs: [{ service: 'lawn', label: 'Bermuda program', frequencyPerYear: 8, pricePerApplication: 90 }] } } });
     expect(estimateCoversAsk(card(plan), turfProgram)).toBe(false);
     expect(estimateCoversAsk(lawnAsk, turfProgram)).toBe(true);
-    expect(deliveredEstimateScope(turfProgram).lines).toEqual([{ names: ['Bermuda program', 'lawn', 'Lawn Care', 'Every 6 Weeks'], recurring: true, oneTime: false, authored: true }]);
+    expect(deliveredEstimateScope(turfProgram).lines).toEqual([{ names: ['Bermuda program', 'lawn', 'Lawn Care', 'Every 6 Weeks'], recurring: true, oneTime: false, authored: true, identity: { service: 'lawn_care', program: null, visits: 8 } }]);
     // The engine's stinging line carries the category enum as its service
     // key; the enum's own words answer it (codex r22 P2).
     const wasps = card({ requested_service_categories: ['stinging_insect'], requested_specific_service: null });
@@ -736,7 +740,7 @@ describe('evidence helpers', () => {
     const components = (extra) => est({ estimate_data: { engineResult: { lineItems: [{ service: 'rodent_exclusion', name: 'Rodent exclusion — wire mesh', price: 400 }, { service: 'rodent_exclusion', name: 'Rodent exclusion — minimum', price: 150 }, ...extra] } } });
     expect(estimateCoversAsk(rodentAsk, components([]))).toBe(false);
     expect(estimateCoversAsk(rodentAsk, components([{ service: 'rodent_control', name: 'Rodent Control', price: 200 }]))).toBe(true);
-    expect(deliveredEstimateScope(components([])).lines).toEqual([{ names: ['rodent_exclusion', 'Rodent exclusion — wire mesh', 'Rodent exclusion — minimum'], recurring: false, oneTime: true }]);
+    expect(deliveredEstimateScope(components([])).lines).toEqual([{ names: ['rodent_exclusion', 'Rodent exclusion — wire mesh', 'Rodent exclusion — minimum'], recurring: false, oneTime: true, identity: { service: 'rodent_exclusion', program: null, visits: null }}]);
     expect(estimateCoversAsk(card({ requested_service_categories: ['pest_general'] }), raw)).toBe(true);
     expect(estimateCoversAsk(card(plan), raw)).toBe(true);
     expect(estimateCoversAsk(card({ ...plan, requested_specific_service: 'Flea Treatment' }), raw)).toBe(false);
@@ -815,6 +819,45 @@ describe('evidence helpers', () => {
     const authoredQuarterly = est({ estimate_data: { proposal: { enabled: true, programs: [{ service: 'pest', label: 'Pest Control', frequencyPerYear: 4, pricePerApplication: 100 }] } } });
     expect(estimateCoversAsk(cadenceAsk('Quarterly Pest Control Service'), authoredQuarterly)).toBe(true);
     expect(estimateCoversAsk(cadenceAsk('Bi-Monthly Pest Control Service'), authoredQuarterly)).toBe(false);
+    // Registered identity before spelling (codex r37): the card's catalog
+    // service_key (stamped from the live catalog) resolves through the
+    // public menu's request registry to the engine service + cadence, and
+    // a frozen line's engine identity answers it with no words at all.
+    const keyed = (c, key) => ({ ...c, requested_specific_service_key: key });
+    const wordless = (over) => est({ estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 40, ...over }] } } });
+    expect(estimateCoversAsk(keyed(cadenceAsk('Some Renamed Pest Product'), 'pest_general_quarterly'), wordless({ visitsPerYear: 4 }))).toBe(true);
+    expect(estimateCoversAsk(keyed(cadenceAsk('Some Renamed Pest Product'), 'pest_general_quarterly'), wordless({ visitsPerYear: 6 }))).toBe(false);
+    expect(estimateCoversAsk(keyed(cadenceAsk('Some Renamed Pest Product'), 'pest_general_quarterly'), wordless({}))).toBe(false);
+    expect(estimateCoversAsk(cadenceAsk('Some Renamed Pest Product'), wordless({ visitsPerYear: 4 }))).toBe(false);
+    // An authored mosquito program at nine visits is the seasonal program —
+    // by identity (mosquito_seasonal → seasonal9 / 9 visits) and by word.
+    const authoredSeasonal = est({ estimate_data: { proposal: { enabled: true, programs: [{ service: 'mosquito', label: 'Mosquito', frequencyPerYear: 9, pricePerApplication: 60 }] } } });
+    expect(estimateCoversAsk(keyed(mosquitoAsk('Seasonal Mosquito Control Service'), 'mosquito_seasonal'), authoredSeasonal)).toBe(true);
+    expect(estimateCoversAsk(mosquitoAsk('Seasonal Mosquito Control Service'), authoredSeasonal)).toBe(true);
+    expect(estimateCoversAsk(keyed(mosquitoAsk('Monthly Mosquito Control Service'), 'mosquito_monthly'), authoredSeasonal)).toBe(false);
+    // A building line item carries its cadence as a number too.
+    const buildingLine = est({ estimate_data: { proposal: { enabled: true, buildings: [{ name: 'Main', lineItems: [{ description: 'Pest Control', frequency: 'per_application', visitsPerYear: 4, quantity: 1, unitPrice: 100 }] }] } } });
+    expect(estimateCoversAsk(cadenceAsk('Quarterly Pest Control Service'), buildingLine)).toBe(true);
+    expect(estimateCoversAsk(cadenceAsk('Monthly Pest Control Service'), buildingLine)).toBe(false);
+    // A specialty family is an identity: the pricer's "Stinging Insect —
+    // Paper Wasp" answers the catalog's "Bee / Wasp Nest Removal Service".
+    const waspAsk = card({ requested_service_categories: ['stinging_insect'], requested_specific_service: 'Bee / Wasp Nest Removal Service', requested_service_intent: 'preventative_one_time' });
+    const paperWasp = est({ estimate_data: { result: { oneTime: { items: [{ service: 'Stinging Insect — Paper Wasp', price: 175 }] } } } });
+    expect(estimateCoversAsk(waspAsk, paperWasp)).toBe(true);
+    expect(estimateCoversAsk(waspAsk, est({ estimate_data: { result: { oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } } } }))).toBe(false);
+    // Numbers are words: a 10-year bond never closes a 5-year bond ask.
+    const bondAsk = (name) => card({ requested_service_categories: ['termite'], requested_specific_service: name, requested_service_intent: 'quote_only' });
+    const bondLine = (name) => est({ estimate_data: { result: { oneTime: { items: [{ service: name, price: 1200 }] } } } });
+    expect(estimateCoversAsk(bondAsk('Termite Bond Service (5-Year Term)'), bondLine('Termite Bond (5-Year Term)'))).toBe(true);
+    expect(estimateCoversAsk(bondAsk('Termite Bond Service (5-Year Term)'), bondLine('Termite Bond (10-Year Term)'))).toBe(false);
+    // The catalog stamp: exact name or its rename counterpart → service_key.
+    const catalog = [{ service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control Service' }, { service_key: 'lawn_care_recurring', name: 'Bi-Monthly Lawn Care Service' }];
+    const stamped = [cadenceAsk('quarterly pest control service'), cadenceAsk('Lawn Care Program Service'), cadenceAsk('Nothing Like It'), card({ requested_specific_service: null })];
+    stampSpecificServiceKeys(stamped, catalog);
+    expect(stamped.map((i) => i.requested_specific_service_key)).toEqual(['pest_general_quarterly', 'lawn_care_recurring', null, undefined]);
+    expect(engineIdentityForCatalogKey('mosquito_seasonal')).toEqual({ service: 'mosquito', program: 'seasonal9', visits: 9 });
+    expect(engineIdentityForCatalogKey('rodent_trapping')).toBeNull();
+    expect(engineIdentityForCatalogKey(null)).toBeNull();
     expect(estimateCoversAsk(termiteQuote('quote_only'), treatmentLine)).toBe(true);
     // A quote-only ask takes either subtype — the category / specific
     // service says what was quoted, so a delivered inspection quote closes

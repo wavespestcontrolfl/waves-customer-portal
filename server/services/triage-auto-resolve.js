@@ -164,8 +164,10 @@ const SERVICE_STOPWORDS = new Set(['control', 'care', 'service', 'services', 'tr
 // "treatment") are what tell "Rodent Control" from "Rodent Exclusion", so
 // the narrowing requirement keeps them (codex r34 P1).
 const SPECIFIC_STOPWORDS = new Set(['service', 'services', 'and', 'the', 'of']);
-// The meaningful service words of a text.
-const tokensOf = (text, stopwords) => [...new Set(String(text || '').toLowerCase().split(/[^a-z]+/).filter((t) => t && !stopwords.has(t)))];
+// The meaningful service words of a text. Digits are words: the catalog
+// tells "Termite Bond Service (5-Year Term)" from "(10-Year Term)" by the
+// number alone (codex r37 P1).
+const tokensOf = (text, stopwords) => [...new Set(String(text || '').toLowerCase().split(/[^a-z0-9]+/).filter((t) => t && !stopwords.has(t)))];
 const serviceTokens = (text) => tokensOf(text, SERVICE_STOPWORDS);
 const specificServiceTokens = (text) => tokensOf(text, SPECIFIC_STOPWORDS);
 
@@ -435,22 +437,85 @@ function requestedServiceTokens(item) {
   // answered by a rodent exclusion booking or quote (codex r34 P1).
   const specific = specificServiceTokens(ask?.requested_specific_service);
   if (specific.length) {
-    if (out.length) out[0] = [specific];
-    else out.push([specific]);
+    // Beside its words, the catalog service's REGISTERED identity (codex
+    // r37 P2): the engine identity the public menu maps its service_key
+    // to, and the specialty pest family the compose vocabulary reads from
+    // its name — so a priced line is judged by what it IS before by how
+    // it is spelled ("Stinging Insect — Paper Wasp" answers "Bee / Wasp
+    // Nest Removal Service"; a seasonal9 mosquito line answers "Seasonal
+    // Mosquito Control Service" without the word).
+    const requirement = [specific];
+    requirement.identity = engineIdentityForCatalogKey(item.requested_specific_service_key);
+    requirement.family = specialtyFamilyOf(ask.requested_specific_service);
+    if (out.length) out[0] = requirement;
+    else out.push(requirement);
   }
   return out;
+}
+
+// The catalog service_key of the specific service each card names, from the
+// live catalog (exact name, either side of the cadence-convention rename)
+// — stamped on the item so the sync matchers can read the registry.
+function stampSpecificServiceKeys(items, catalogRows) {
+  const { counterpartServiceName } = require('../config/service-name-aliases');
+  const byName = new Map();
+  for (const row of catalogRows || []) {
+    if (typeof row?.name === 'string' && row.service_key) byName.set(row.name.trim().toLowerCase(), row.service_key);
+  }
+  for (const item of items) {
+    const name = requestAsk(item)?.requested_specific_service;
+    if (typeof name !== 'string' || !name.trim()) continue;
+    const alt = counterpartServiceName(name);
+    item.requested_specific_service_key = byName.get(name.trim().toLowerCase()) || (alt ? byName.get(String(alt).trim().toLowerCase()) : null) || null;
+  }
+}
+
+// The engine identity a public catalog service prices as: the request the
+// public menu sends the engine for that service_key (PUBLIC_QUOTE_REQUESTS
+// — the ONE map from catalog product to engine options) read back as the
+// engine service id the pricers emit plus the cadence REQUEST_CADENCE
+// gives that option. Services the menu does not price (bonds, exclusion,
+// nest removal) have no engine identity and are judged by words / family.
+const ENGINE_SERVICE_BY_REQUEST = { pest: 'pest_control', oneTimePest: 'one_time_pest', lawn: 'lawn_care', mosquito: 'mosquito', oneTimeMosquito: 'mosquito', treeShrub: 'tree_shrub', rodentBait: 'rodent_bait', termite: 'termite_bait', pestInitialRoach: 'pest_initial_roach' };
+function engineIdentityForCatalogKey(serviceKey) {
+  if (!serviceKey) return null;
+  const { PUBLIC_QUOTE_REQUESTS, REQUEST_CADENCE } = require('./public-services-menu');
+  const [family, options] = Object.entries(PUBLIC_QUOTE_REQUESTS[serviceKey] || {})[0] || [];
+  const service = ENGINE_SERVICE_BY_REQUEST[family];
+  if (!service) return null;
+  const program = options?.tier || options?.frequency || null;
+  const cadence = REQUEST_CADENCE[family];
+  const visits = Array.isArray(cadence) ? cadence[0] : (program && cadence?.[program]?.[0]) || null;
+  return { service, program, visits };
+}
+const SPECIALTY_FAMILIES = new Set(['flea', 'stinging', 'bed_bug']);
+function specialtyFamilyOf(text) {
+  const { familiesIn } = require('../utils/lead-service-interest');
+  const keys = [...new Set(familiesIn(String(text || '')).map((f) => f.key))].filter((k) => SPECIALTY_FAMILIES.has(k));
+  return keys.length === 1 ? keys[0] : null;
+}
+// A record's identity answers a requirement's: the same engine service at
+// the asked cadence (visits per year, or the same program key), or the
+// same specialty pest family. A record with no identity answers nothing
+// here — its words still can.
+function identityAnswers(requirement, identity) {
+  if (!identity) return false;
+  const want = requirement.identity;
+  if (want && identity.engine && identity.engine.service === want.service
+    && (want.visits == null || identity.engine.visits === want.visits || (want.program && identity.engine.program === want.program))) return true;
+  return Boolean(requirement.family && Array.isArray(identity.families) && identity.families.includes(requirement.family));
 }
 
 // Every requirement answered by a DIFFERENT record: a caller who asked for
 // a flea treatment AND a separate general-pest visit is not answered by one
 // flea booking that happens to match both token lists. Backtracking over
 // tiny lists (a handful of requirements, a customer's live bookings).
-function coveredByDistinct(requirements, records, wordsOf) {
+function coveredByDistinct(requirements, records, wordsOf, identityOf = () => null) {
   const used = new Set();
   const place = (i) => {
     if (i === requirements.length) return true;
     for (const r of records) {
-      if (used.has(r) || !serviceTypeMatches(wordsOf(r), requirements[i])) continue;
+      if (used.has(r) || !serviceTypeMatches(wordsOf(r), requirements[i], identityOf(r))) continue;
       used.add(r);
       if (place(i + 1)) return true;
       used.delete(r);
@@ -465,8 +530,10 @@ function coveredByDistinct(requirements, records, wordsOf) {
 // canonical category snapshot admin-schedule stamps; an estimate line's
 // names and families): "Subterranean Termite" is not drywood_termite,
 // "Rodent Control" is not rodent_exclusion.
-function serviceTypeMatches(serviceText, requirement) {
-  const words = new Set(String(serviceText || '').toLowerCase().split(/[^a-z]+/).filter(Boolean));
+// A registered identity answers before the words do (codex r37 P2).
+function serviceTypeMatches(serviceText, requirement, identity = null) {
+  if (identityAnswers(requirement, identity)) return true;
+  const words = new Set(String(serviceText || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
   return requirement.some((tokens) => tokens.length > 0 && tokens.every((t) => words.has(t)));
 }
 
@@ -1216,6 +1283,20 @@ const CADENCE_KEY_BY_WORD = { monthly: 'monthly', bimonthly: 'bimonthly', everyw
 // not the lawn / tree nine-visit cadence (codex r36 P2). An authored
 // proposal program carries frequencyPerYear (codex r36 P2).
 const CADENCE_KEY_BY_PROGRAM = [[/seasonal/, 'seasonal_feb_oct'], [/monthly/, 'monthly']];
+// The structured identity a frozen line keeps beside its words: the engine
+// service id, the program key and the visits per year the entry carries
+// (codex r37 P2) — what the registry compares before spelling.
+const visitsOf = (entry) => {
+  for (const raw of [entry.frequencyPerYear, entry.visitsPerYear, entry.visits, entry.frequency]) {
+    if (typeof raw === 'number' && Number.isFinite(raw)) return Math.round(raw);
+    if (typeof raw === 'string' && /^\d+$/.test(raw)) return Number(raw);
+  }
+  return null;
+};
+const programOf = (entry) => [entry.selectedProgram, entry.tier, entry.program, entry.programKey].find((v) => typeof v === 'string' && v.trim()) || null;
+function lineIdentity(service, entry) {
+  return service ? { service: String(service).trim().toLowerCase(), program: programOf(entry), visits: visitsOf(entry) } : null;
+}
 function cadenceWord(entry) {
   const { CADENCE_LABELS } = require('./public-services-menu');
   let key = null;
@@ -1224,6 +1305,9 @@ function cadenceWord(entry) {
     key = (CADENCE_KEY_BY_PROGRAM.find(([re]) => re.test(raw.toLowerCase())) || [])[1] || null;
     if (key) break;
   }
+  // Nine visits on the MOSQUITO family is the seasonal program, not the
+  // lawn / tree six-week cadence (codex r37 P2).
+  if (!key && /mosquito/.test(String(entry.service || '').toLowerCase()) && visitsOf(entry) === 9) key = 'seasonal_feb_oct';
   for (const raw of key ? [] : [entry.frequency, entry.recurringPattern, entry.frequencyPerYear, entry.visitsPerYear, entry.visits]) {
     if (raw == null || raw === '') continue;
     key = typeof raw === 'number' || /^\d+$/.test(String(raw))
@@ -1241,13 +1325,13 @@ const entryNames = (entry) => [entry.service, entry.serviceKey, entry.service_ke
 function lineCollector() {
   const lines = [];
   const seen = new Set();
-  const add = (rawNames, cadence, priced, { authored = false } = {}) => {
+  const add = (rawNames, cadence, priced, { authored = false, identity = null } = {}) => {
     if (!priced) return;
     const names = rawNames.filter((w) => typeof w === 'string' && w.trim());
-    const identity = [...names, cadence.recurring].join('|');
-    if (seen.has(identity)) return;
-    seen.add(identity);
-    lines.push({ names, ...cadence, ...(authored ? { authored } : {}) });
+    const key = [...names, cadence.recurring].join('|');
+    if (seen.has(key)) return;
+    seen.add(key);
+    lines.push({ names, ...cadence, ...(authored ? { authored } : {}), ...(identity ? { identity } : {}) });
   };
   return { lines, add };
 }
@@ -1302,10 +1386,19 @@ function proposalLines(row, add) {
   if (proposal.enabled !== true) return;
   const AUTHORED = { authored: true };
   const family = (key) => (key && key !== 'other' ? [key, SERVICE_LINE_LABELS[key]] : []);
-  for (const program of proposal.programs || []) add([program.label, ...family(program.service), cadenceWord(program)], RECURRING, program.annual > 0, AUTHORED);
+  // An authored program's family is the engine service it stands for
+  // (pest / lawn / mosquito / tree & shrub price as one engine service
+  // each); its frequencyPerYear is its cadence. A building line item
+  // carries frequency + visitsPerYear too (codex r37 P2).
+  const PROGRAM_ENGINE_SERVICE = { pest: 'pest_control', lawn: 'lawn_care', mosquito: 'mosquito', tree_shrub: 'tree_shrub' };
+  for (const program of proposal.programs || []) {
+    add([program.label, ...family(program.service), cadenceWord(program)], RECURRING, program.annual > 0,
+      { ...AUTHORED, identity: lineIdentity(PROGRAM_ENGINE_SERVICE[program.service], program) });
+  }
   for (const building of proposal.buildings || []) {
     for (const item of building.lineItems || []) {
-      add([item.description], item.frequency === 'one_time' ? ONE_TIME : RECURRING, item.amount > 0, AUTHORED);
+      const cadence = item.frequency === 'one_time' ? ONE_TIME : RECURRING;
+      add([item.description, ...(cadence.recurring ? [cadenceWord(item)] : [])], cadence, item.amount > 0, AUTHORED);
     }
   }
   for (const work of proposal.correctiveWork || []) add([work.label, ...family(work.service)], ONE_TIME, work.amount > 0, AUTHORED);
@@ -1328,7 +1421,7 @@ function engineLines(data, add) {
     const identity = identityOf(entry);
     if (!identity) return add(entryNames(entry), cadence, priced);
     const key = `${identity.trim().toLowerCase()}|${cadence.recurring}`;
-    const line = pooled.get(key) || { names: [], cadence, priced: false };
+    const line = pooled.get(key) || { names: [], cadence, priced: false, identity: lineIdentity(identity, entry) };
     line.names.push(...entryNames(entry), ...(cadence.recurring ? [cadenceWord(entry)] : []));
     line.priced = line.priced || priced;
     pooled.set(key, line);
@@ -1349,7 +1442,7 @@ function engineLines(data, add) {
     add(['palm_injection', SERVICE_LINE_LABELS.palm_injection], RECURRING,
       amountOf(injection, ['mo', 'monthly']) > 0 || amountOf(root.recurring || {}, ['palmInjectionMo', 'palm_injection_mo']) > 0);
   }
-  for (const line of pooled.values()) add([...new Set(line.names)], line.cadence, line.priced);
+  for (const line of pooled.values()) add([...new Set(line.names)], line.cadence, line.priced, { identity: line.identity });
 }
 
 // A legacy or manual row with no typed lines: service_interest, the
@@ -1492,8 +1585,17 @@ function estimateCoversAsk(item, row, siblings = []) {
     const siblingScopes = siblingRevisions.map((revs) => revs.find((h) => h.deliveredAt === deliveredAt)?.scope).filter(Boolean);
     const group = [citedScope, ...siblingScopes];
     return asked.every((readings) => coveredByDistinct(requirements,
-      group.filter((scope) => at(scope, readings)).flatMap((scope) => scope.lines.map((l) => ({ ...l, words: lineWords(l) }))).filter((l) => intentAnswered(rule, l)), (l) => l.words));
+      group.filter((scope) => at(scope, readings)).flatMap((scope) => scope.lines.map((l) => ({ ...l, words: lineWords(l) }))).filter((l) => intentAnswered(rule, l)), (l) => l.words, lineRecordIdentity));
   });
+}
+// A frozen line's identity for the registry: the engine identity it was
+// stamped with (older stamps carry none — words judge them) and the
+// specialty families the compose vocabulary reads from its names.
+function lineRecordIdentity(line) {
+  const { familiesIn } = require('../utils/lead-service-interest');
+  const names = Array.isArray(line.names) ? line.names.filter((w) => typeof w === 'string') : [];
+  const engine = line.identity && typeof line.identity === 'object' && typeof line.identity.service === 'string' ? line.identity : null;
+  return { engine, families: [...new Set(familiesIn(names.join('. ')).map((f) => f.key))] };
 }
 
 // Bookings and completed visits for the not_confirmed / address arms.
@@ -1575,6 +1677,11 @@ async function loadEvidence(conn, items) {
     cur[key] = true;
     evidence.set(id, cur);
   };
+  try {
+    stampSpecificServiceKeys(candidates, await conn('services').select('service_key', 'name'));
+  } catch (e) {
+    logger.warn(`[triage-auto-resolve] catalog read for specific-service keys skipped: ${e.message}`);
+  }
   await loadEstimateEvidence(conn, candidates, flag);
   await loadEmailEvidence(conn, candidates, flag);
   await loadContactEvidence(conn, candidates, flag);
@@ -1719,6 +1826,8 @@ module.exports = {
   callerPhoneOnFile,
   capturedEmails,
   requestedServiceTokens,
+  stampSpecificServiceKeys,
+  engineIdentityForCatalogKey,
   serviceTypeMatches,
   estimateCoversAsk,
   deliveredEstimateScope,
