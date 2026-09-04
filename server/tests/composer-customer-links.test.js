@@ -1418,8 +1418,14 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     expect(r.error).toMatch(/different customer/);
   });
 
-  test('a send without the owner as the trusted customer refuses (the link must ride the owner policy)', async () => {
+  test('a send without a trusted customer rides the seam-wide owner rule (GH Codex #3844 r9 P1): a unique live owner rides back as customerId, an ambiguous number refuses', async () => {
+    const owner = { id: 'c1', phone: '+1 (941) 555-0100' };
     wire();
+    mockBuilders.customers = chainBuilder({ firstRow: owner, rows: [{ id: 'c1' }] });
+    expect(await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: null }))
+      .toEqual({ ok: true, contracts: [{ id: 'k1', tokenHash: hashContractToken(TOKEN), delivered: true }], customerId: 'c1' });
+    wire();
+    mockBuilders.customers = chainBuilder({ firstRow: owner, rows: [{ id: 'c1' }, { id: 'c2' }] });
     const r = await bearerLinkSendCheck(CONTRACT_BODY, '9415550100', { trustedCustomerId: null });
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/search dropdown/);

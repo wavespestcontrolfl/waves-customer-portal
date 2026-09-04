@@ -1048,7 +1048,7 @@ async function checkContractLinks(ctx, contracts) {
   const NOT_LIVE = 'This contract signing link is expired or no longer live — remove it and insert a fresh one.';
   const terminal = (status) => ['signed', 'cancelled', 'voided', 'expired'].includes(String(status || '').toLowerCase());
   for (const run of linkRuns(ctx.runs, /\/contract\//i)) {
-    const token = canonicalPortalToken(run, ctx.host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i);
+    const token = canonicalPortalToken(run, ctx.hosts, /^\/contract\/([A-Za-z0-9_-]{16,})$/i);
     if (!token) return refuseSend('A contract link in this message is not on the Waves portal — remove it before sending.');
     const tokenHash = require('./contracts').hashContractToken(token);
     const row = await db('customer_contracts')
@@ -1090,7 +1090,7 @@ async function checkContractLinks(ctx, contracts) {
 // (GH Codex #3844 r2 P1). Every live link lands in `cards` for the claim.
 async function checkCardLinks(ctx, cards) {
   for (const run of secureLinkRuns(ctx.runs)) {
-    const token = canonicalSecureToken(run, ctx.host);
+    const token = canonicalSecureToken(run, ctx.hosts);
     if (!token) continue; // the Auto Pay seam already refused a non-canonical /secure run
     const row = await db('appointment_card_requests').where({ token }).first('id', 'kind', 'status', 'customer_id', 'scheduled_service_id', 'sent_at');
     if (!row || row.kind !== 'visit') continue; // unknown → the Auto Pay seam's verdict; customer-kind → its own

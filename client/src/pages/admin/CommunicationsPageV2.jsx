@@ -1206,7 +1206,8 @@ function SmsTab() {
     }
     // A per-row bearer credential (Auto Pay setup, contract signing, prep
     // guide — anything the server minted with an expiresAt — plus the
-    // kinds it flags immediateOnly: card request, statement pay) is only
+    // kinds it flags immediateOnly: card request, statement pay, appointment
+    // page, service report) is only
     // re-checked at delivery on the immediate send; the schedule picker has
     // no upper bound and a draft dispatches without a re-check. Immediate
     // sends only, same rule as review links (the server re-fences).
