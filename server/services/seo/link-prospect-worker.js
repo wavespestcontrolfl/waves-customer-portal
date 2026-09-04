@@ -361,8 +361,19 @@ async function claimFollowUps(trx, { limit, preview }) {
     await lockProspectDomain(trx, c.target_domain);
     const r = await trx('seo_link_prospects').where({ id: c.id }).forUpdate().first();
     if (!r || r.claimed_at || r.outreach_status !== 'sent' || !['none', 'due'].includes(r.follow_up_status) || !OUTREACH_TYPES.includes(r.link_type)) continue;
-    if (r.domain_id && await trx('seo_link_domains').where({ id: r.domain_id }).whereIn('agent_state', nonClaimableDomainStates()).first('id')) continue;
+    const dom = r.domain_id ? await trx('seo_link_domains').where({ id: r.domain_id }).first('id', 'agent_state', 'best_path_id') : null;
+    if (dom && nonClaimableDomainStates().includes(dom.agent_state)) continue;
     const p = r.path_id ? await trx('seo_link_acquisition_paths').where({ id: r.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'revision', 'agent_completable', 'execution_after_send') : null;
+    // the domain was RE-RANKED to another (standing) path during the wait: a sent conversation is pinned to its path and
+    // the selection freezes it off the best path — no authority instance is ever decided for its follow-up and the
+    // sender's domainRefusal refuses the old path, so a draft could only ever hang. It RETIRES here (skipped), as a
+    // superseded path does; the conversation completes and the closure sweep releases the inbox
+    if (dom && dom.best_path_id && r.path_id && dom.best_path_id !== r.path_id) {
+      await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
+        .update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'domain re-ranked to another path before the follow-up', updated_at: now });
+      logger.info(`[link-worker] follow-up for ${r.id} retired — its domain re-ranked to another path during the wait`);
+      continue;
+    }
     // the route the conversation was pitched on was SUPERSEDED during the wait: a sent conversation is pinned to its
     // path (the mover never re-paths it), so no follow-up can ever be composed for it — and nothing else visits a
     // none / due follow-up on a superseded path (followUpPending excludes it from the bridge, the closure sweep reads

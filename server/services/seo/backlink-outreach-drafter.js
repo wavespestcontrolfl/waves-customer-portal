@@ -18,7 +18,7 @@ const logger = require('../logger');
 const worker = require('./link-prospect-worker');
 const { fetchPageText } = require('./contact-finder');
 const { callAnthropic } = require('../llm/call');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, etParts } = require('../../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -62,7 +62,9 @@ Return ONLY JSON: {"subject": "...", "body": "..."}. The body is plain text with
 function sentLine(prospect, now = new Date()) {
   const sentAt = prospect.outreach_sent_at ? new Date(prospect.outreach_sent_at) : null;
   if (!sentAt || Number.isNaN(sentAt.getTime())) return '- sent: (date unknown — refer to it only as "a little while ago")';
-  const days = Math.max(0, Math.floor((now.getTime() - sentAt.getTime()) / 86400000));
+  // ET CALENDAR days (the dates shown are ET dates): an elapsed-hours count reads 9 across the spring seam beside dates ten apart
+  const etDay = (d) => { const p = etParts(d); return Date.UTC(p.year, p.month - 1, p.day) / 86400000; };
+  const days = Math.max(0, Math.round(etDay(now) - etDay(sentAt)));
   return `- sent: ${etDateString(sentAt)} (${days} day${days === 1 ? '' : 's'} ago, as of ${etDateString(now)})`;
 }
 

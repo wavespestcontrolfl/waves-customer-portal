@@ -71,6 +71,8 @@ describe('the follow-up prompt timing (Codex r13 P2)', () => {
     expect(sentLine(p, now)).toBe('- sent: 2026-09-10 (25 days ago, as of 2026-10-05)');
     expect(buildFollowUpPrompt(p, profile, profile.locations[0], now)).toContain('- sent: 2026-09-10 (25 days ago, as of 2026-10-05)');
     expect(sentLine({ ...p, outreach_sent_at: null }, now)).toMatch(/date unknown/);
+    // ET calendar days, not elapsed hours: 02:30 EST → 02:30 EDT ten calendar days later is 239 hours (Codex r14 P2)
+    expect(sentLine({ ...p, outreach_sent_at: '2026-03-05T07:30:00Z' }, new Date('2026-03-15T06:30:00Z'))).toBe('- sent: 2026-03-05 (10 days ago, as of 2026-03-15)');
     expect(FOLLOW_UP_SYSTEM_PROMPT).not.toMatch(/Ten days ago/);
     expect(FOLLOW_UP_SYSTEM_PROMPT).toMatch(/never state a number of days or weeks/);
   });

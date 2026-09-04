@@ -126,6 +126,14 @@ async function queueLostDomains(losses, { scorer } = {}) {
   return out;
 }
 
+// a placement of the domain (ANY page) whose follow-up send is ambiguous — the conversation may still be alive in the inbox
+const ambiguousFollowUp = async (q, domain) => {
+  const AMBIGUOUS = require('./link-outreach-mandate').AMBIGUOUS_SEND_STATUSES;
+  const row = await byDomain(q('seo_link_prospects'), domain).whereIn('follow_up_status', [...AMBIGUOUS]).first('id', 'status', 'follow_up_status', 'target_page');
+  return row && AMBIGUOUS.includes(row.follow_up_status) ? row : null; // belt and braces for test doubles / stale readers, as claimProspectDomain
+};
+const ambiguousReason = (row) => `a placement's follow-up is ${row.follow_up_status}${row.target_page ? ` (${targetPathOf(row.target_page)})` : ''} — deferred until it is reconciled`;
+
 async function queueOne(loss, out, scoreMod) {
   {
     const domain = normalizeDomain(loss.domain);
@@ -159,16 +167,20 @@ async function queueOne(loss, out, scoreMod) {
     // it to 'lost' when the inbound link disappears — that EXACT-page row is
     // REOPENED as a fresh prospect (the worker only claims status='prospect').
     // Rows rejected by the owner are left alone.
-    const exists = await byDomain(db('seo_link_prospects'), domain).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type', 'domain_id', 'path_id', 'target_url', 'follow_up_status');
     // a follow-up whose send is still ambiguous (claimed `sending`, or errored before the Sent-folder reconcile) may
     // have reached the inbox: the conversation is not over, and a re-pitch cannot open beside it — reconcile first.
-    // Not a terminal verdict: the monitor stamps recovery_queued_at on every outcome but 'error' / 'deferred', so a
-    // bare skip here would drop the loss for good once the operator reconciles — deferred, it is swept again next scan
-    if (exists && exists.status === 'lost' && ['sending', 'send_error'].includes(exists.follow_up_status)) {
+    // DOMAIN-wide, like the in-flight probe (recovery is domain-scoped): the ambiguous follow-up may sit on a sibling
+    // placement of the same publisher, not the representative loss's page, and a re-pitch from another address would
+    // pass the inbox guard beside it. Not a terminal verdict: the monitor stamps recovery_queued_at on every outcome
+    // but 'error' / 'deferred', so a bare skip here would drop the loss for good once the operator reconciles the
+    // follow-up — deferred, it is swept again next scan. Repeated under the admission lock in both writers below.
+    const ambiguous = await ambiguousFollowUp(db, domain);
+    if (ambiguous) {
       out.skipped++;
-      out.reasons.push({ domain, reason: `lost placement's follow-up is ${exists.follow_up_status} — deferred until it is reconciled` });
+      out.reasons.push({ domain, reason: ambiguousReason(ambiguous) });
       return 'deferred';
     }
+    const exists = await byDomain(db('seo_link_prospects'), domain).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type', 'domain_id', 'path_id', 'target_url', 'follow_up_status');
     if (exists && exists.status === 'lost' && NON_OUTREACH_TYPES.has(exists.link_type)) {
       // A lost signup-lane placement (citation/directory/social) is not an
       // outreach target; reopening it would hand it to the citation runner.
@@ -196,6 +208,8 @@ async function queueOne(loss, out, scoreMod) {
       const reopened = await db.transaction(async (trx) => {
         const { inFlight: raced } = await claimProspectDomain(trx, domain, { statuses: IN_FLIGHT_STATUSES, lanes: 'all' });
         if (raced) return { raced };
+        const ambiguousNow = await ambiguousFollowUp(trx, domain);
+        if (ambiguousNow) return { deferred: ambiguousReason(ambiguousNow) };
         // The reopened row must sit on a path a worker may CLAIM. A baseline-
         // imported placement is linked to its baseline path, which is
         // deliberately not agent-completable (the link was never acquired by
@@ -327,6 +341,8 @@ async function queueOne(loss, out, scoreMod) {
       // conflict — it would land beside this one, both claimable.
       const { inFlight: raced } = await claimProspectDomain(trx, domain, { statuses: IN_FLIGHT_STATUSES, lanes: 'all' });
       if (raced) return { raced };
+      const ambiguousNow = await ambiguousFollowUp(trx, domain);
+      if (ambiguousNow) return { deferred: ambiguousReason(ambiguousNow) };
       return trx('seo_link_prospects').insert({
       target_domain: domain,
       target_url: loss.source_url || null,
@@ -353,6 +369,11 @@ async function queueOne(loss, out, scoreMod) {
       owner: 'backlink_monitor',
       }).onConflict().ignore().returning('id'); // constraintless: matches the legacy 2-col unique AND the v2 location_key key across the rolling deploy
     });
+    if (inserted && inserted.deferred) {
+      out.skipped++;
+      out.reasons.push({ domain, reason: inserted.deferred });
+      return 'deferred';
+    }
     if (inserted && inserted.raced) {
       out.skipped++;
       out.reasons.push({ domain, reason: `already on board (concurrent ${inserted.raced.status}${inserted.raced.target_page ? ` for ${targetPathOf(inserted.raced.target_page)}` : ''})` });

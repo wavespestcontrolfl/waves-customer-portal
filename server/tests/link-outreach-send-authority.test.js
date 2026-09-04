@@ -1200,6 +1200,18 @@ describe('Codex r2 on #3854', () => {
     expect(await Outreach.sendOutreach({ prospectId: t.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'path_moved' });
     expect(placement(t.db).follow_up_status).toBe('drafted');
   });
+  test('P2: the domain RE-RANKED to another standing path retires the follow-up — at the lease (due) and at the send (drafted): the pinned conversation is frozen off the best path', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY), follow_up_subject: null, follow_up_body: null });
+    const other = outreachPath(s.d); s.db._tables.seo_link_acquisition_paths.push(other); s.db._tables.seo_link_domains[0].best_path_id = other.id;
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toEqual([]);
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', outreach_status: 'sent', follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/re-ranked/), claimed_at: null });
+    const t = await conversation();
+    const other2 = outreachPath(t.d); t.db._tables.seo_link_acquisition_paths.push(other2); t.db._tables.seo_link_domains[0].best_path_id = other2.id;
+    expect(await Outreach.sendOutreach({ prospectId: t.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/retired/) });
+    expect(placement(t.db)).toMatchObject({ follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/re-ranked/) });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+  });
   test('P2: a path SUPERSEDED during the ten-day wait retires the follow-up at the lease (skipped) — the pinned conversation completes instead of holding its inbox forever', async () => {
     const s = await conversation({ decide: false });
     Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY), follow_up_subject: null, follow_up_body: null });

@@ -618,6 +618,18 @@ async function lockedSendRow(trx, { prospectId, prospect, mode, inbox, followUp 
   }
   // the follow-up's lifecycle set depends on the PATH (§6.4): contacted, plus the Judge-owned statuses on a submit-first path only
   if (followUp && !M.FOLLOW_UP_STATUSES(onPath).includes(current.status)) return { ok: false, code: 'not_actionable', error: `the placement is ${current.status} — no follow-up on this path from there` };
+  // a drafted follow-up whose DOMAIN re-ranked to another path after the draft: the pinned conversation is frozen off
+  // the best path (no authority is decided for it; domainRefusal would refuse every attempt) — it RETIRES, as
+  // claimFollowUps retires a due one, so the conversation completes and the closure sweep releases the inbox
+  if (followUp && current.domain_id) {
+    const dom = await trx('seo_link_domains').where({ id: current.domain_id }).first('best_path_id');
+    if (dom && dom.best_path_id && dom.best_path_id !== current.path_id) {
+      await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted', path_id: current.path_id })
+        .update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'domain re-ranked to another path before the follow-up', updated_at: new Date() });
+      logger.info(`[link-outreach] follow-up for ${prospectId} retired — its domain re-ranked to another path after the draft`);
+      return { ok: false, code: 'not_authorized', error: 'the domain re-ranked to another path after the follow-up was drafted; the follow-up is retired' };
+    }
+  }
   const draft = M.draftOf(current, followUp);
   if (!isValidEmail(draft.outreach_to_email) || !draft.outreach_subject || !draft.outreach_body) return { ok: false, code: 'incomplete_draft' };
   if (M.normalizeEmail(draft.outreach_to_email) !== inbox) return { ok: false, code: 'recipient_changed', error: 'the draft was re-addressed while you looked at it — reload and send again' };
