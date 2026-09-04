@@ -155,9 +155,10 @@ const defaultSend = (args) => require('./link-prospect-outreach').sendOutreach(a
 const AUTO_SEND_BATCH = 100;
 async function autoSendDecided(db, { send, now }) {
   const out = { attempted: 0, sent: 0, skipped: [] };
-  // the initial pitches, then the follow-ups (§6.4) — one cap decision under the sender's lock ends both
-  const capped = await dispatchBatch(db, out, { send, now, followUp: false });
-  if (!capped) await dispatchBatch(db, out, { send, now, followUp: true });
+  // the due follow-ups FIRST (§6.4: few and dated — a sustained pitch backlog that fills the cap every night must
+  // never starve them), then the initial pitches — one cap decision under the sender's lock ends both
+  const capped = await dispatchBatch(db, out, { send, now, followUp: true });
+  if (!capped) await dispatchBatch(db, out, { send, now, followUp: false });
   return out;
 }
 // one lane's batch: the AUTO_OUTREACH rows of its instance kind on drafted, unleased rows. Returns true when the cap ended it.

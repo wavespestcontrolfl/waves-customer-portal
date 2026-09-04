@@ -462,6 +462,26 @@ describe('one conversation per inbox (§13)', () => {
 });
 
 describe('inboxConflict is the guard every conversation writer takes', () => {
+  test('a submit-first Judge-owned row (placed / live / indexed) holds its inbox while its ONE follow-up is still owed — scheduled, due or drafted — and releases it once the follow-up is sent or skipped; a send-first row that reached live holds nothing (Codex r5)', async () => {
+    const d = domainRow();
+    const submitFirst = outreachPath(d, { execution_after_send: false, account_required: true });
+    const sendFirst = outreachPath(d);
+    const row = draftedRow(d, submitFirst, { status: 'placed', outreach_status: 'sent', outreach_sent_at: NOW, outreach_thread_ref: 'thr1', follow_up_status: 'none', follow_up_due_at: LATER, live_url: 'https://example.org/resources' });
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [submitFirst, sendFirst], seo_link_prospects: [row] });
+    const stored = db._tables.seo_link_prospects[0]; // the store copies its seed — edit the stored row
+    const held = async () => (await Outreach.inboxConflict(db, { recipient: 'editor@example.org' }))?.id || null;
+    for (const st of ['placed', 'live', 'indexed']) {
+      stored.status = st;
+      for (const fu of ['none', 'due', 'drafted']) { stored.follow_up_status = fu; expect(await held()).toBe(row.id); }
+      for (const fu of ['sent', 'skipped']) { stored.follow_up_status = fu; expect(await held()).toBeNull(); }
+    }
+    Object.assign(stored, { status: 'live', follow_up_status: 'drafted', path_id: sendFirst.id }); // the same lifecycle on a send-first path: the follow-up is no longer sendable — nothing owed, the inbox is free
+    expect(await held()).toBeNull();
+    Object.assign(stored, { path_id: submitFirst.id, follow_up_status: 'none', follow_up_due_at: null }); // a pitch reconciled without a thread ref grows no follow-up: nothing owed
+    expect(await held()).toBeNull();
+    Object.assign(stored, { follow_up_status: 'sending' }); // an ambiguous follow-up send holds it whatever the path
+    expect(await held()).toBe(row.id);
+  });
   test('returns the open conversation for the recipient (canonical, gmail aliases), null when the inbox is free', async () => {
     const s = scenario();
     const db = s.db;
@@ -942,7 +962,7 @@ describe('the follow-up send', () => {
     expect(placement(s.db)).toMatchObject({ status: 'placed', follow_up_status: 'sent' });
     expect(followUpRow(s.db)).toMatchObject({ satisfied_reason: 'sent' });
   });
-  test('the nightly dispatches follow-ups after the pitches; the cap ends both', async () => {
+  test('the nightly dispatches due follow-ups BEFORE the pitches (a cap-filling pitch backlog never starves them); the cap ends both', async () => {
     const s = await conversation();
     const send = jest.fn(async () => ({ ok: true }));
     const r = await nightly(s.db, { now: LATER, autoSend: true, send });
@@ -952,10 +972,21 @@ describe('the follow-up send', () => {
     const capped = jest.fn(async () => ({ ok: false, code: 'rate_limited' }));
     const t = await conversation();
     t.db._tables.seo_link_prospects.push(draftedRow(t.d, t.p, { location_key: 'x', target_domain: 'example.org', outreach_to_email: 'other@example.org', follow_up_status: 'none' }));
-    // (a second drafted pitch on the same domain is not this test's concern — the cap refusal on the first attempt ends the run)
+    // the follow-up is attempted first — the cap refusal on it ends the run before the drafted pitch is tried
     const r2 = await nightly(t.db, { now: LATER, autoSend: true, send: capped });
     expect(capped).toHaveBeenCalledTimes(1);
     expect(r2.autoSend.skipped).toEqual([{ id: t.row.id, code: 'rate_limited', follow_up: true }]);
+    // the order under an open cap: the due follow-up, then a clean pitch on ANOTHER domain the same nightly decided AUTO
+    const u = await conversation();
+    const d2 = domainRow({ domain: 'second.example' });
+    const p2 = outreachPath(d2);
+    d2.best_path_id = p2.id;
+    u.db._tables.seo_link_domains.push(d2);
+    u.db._tables.seo_link_acquisition_paths.push(p2);
+    u.db._tables.seo_link_prospects.push(draftedRow(d2, p2, { target_domain: 'second.example', outreach_to_email: 'ed@second.example', follow_up_status: 'none' }));
+    const order = jest.fn(async () => ({ ok: true }));
+    await nightly(u.db, { now: LATER, autoSend: true, send: order });
+    expect(order.mock.calls.map((c) => c[0].followUp)).toEqual([true, false]);
   });
   test('reconciling an ambiguous follow-up: sent settles it (instance satisfied, lifecycle untouched); requeue returns it to drafted with the attempt cleared', async () => {
     const s = await conversation();

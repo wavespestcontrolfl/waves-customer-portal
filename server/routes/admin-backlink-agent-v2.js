@@ -611,7 +611,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     // (prospect-domain-lock) and is refused while another row for the domain is
     // already in active outreach — otherwise both are claimable by the worker.
     const result = await db.transaction(async (trx) => {
-      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'conversation_closed_at');
+      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'path_id');
       if (!current) return { missing: true };
       // "In outreach" = active-outreach status AND an outreach-lane link_type:
       // a status flip OR a link_type change out of the signup lane can put a
@@ -635,7 +635,9 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // on a row the reopen above just made active again) while the current row is not one OPENS it for the
       // recipient: the same recipient-level lock + predicate the send claim takes, so no two writers open the same inbox
       const Outreach = require('../services/seo/link-prospect-outreach');
-      const opensConversation = Outreach.conversationOpen({ ...current, ...patch }) && !Outreach.conversationOpen(current);
+      // the predicate is path-aware (a submit-first row's follow-up is owed past its outcome): the row's path rides along
+      const currentPath = current.path_id ? await trx('seo_link_acquisition_paths').where({ id: current.path_id }).first('id', 'execution_after_send') : null;
+      const opensConversation = Outreach.conversationOpen({ ...current, ...patch }, currentPath) && !Outreach.conversationOpen(current, currentPath);
       if (opensConversation) {
         // the same lock ORDER as the send claim (domain → inbox advisory lock → row lock) for EVERY conversation-opening
         // edit, not only a board admission — a page move below re-takes the domain lock, which must never follow the

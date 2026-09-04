@@ -57,9 +57,17 @@ const CONVERSATION_CLOSED_STATUSES = Object.freeze(['placed', 'live', 'indexed',
 // the pitch, so the inbox stays held whatever the status reads until the reconcile settles the outcome
 // (a follow-up in flight / errored holds the inbox the same way — its send may have been delivered too)
 const ambiguousSend = (row) => M.AMBIGUOUS_SEND_STATUSES.includes(row.outreach_status) || M.AMBIGUOUS_SEND_STATUSES.includes(row.follow_up_status);
-const conversationClosed = (row) => !ambiguousSend(row)
-  && (Boolean(row.conversation_closed_at) || CONVERSATION_CLOSED_STATUSES.includes(row.status));
-const CONVERSATION_OPEN = (row) => !conversationClosed(row) && (
+// — and EXCEPT while a submit-first placement's ONE follow-up is still owed past its outcome: on a submit-first path
+// the Judge-owned row (placed / live / indexed, FOLLOW_UP_STATUSES(path)) still has the follow-up to send — scheduled
+// (a due date), due, or drafted — so its conversation is not over and the inbox stays held (a send-first row that
+// reached live has no follow-up left: the sender refuses it by the same rule)
+const followUpOwed = (row, path) => row.outreach_status === 'sent'
+  && (['due', 'drafted'].includes(row.follow_up_status) || (row.follow_up_status === 'none' && Boolean(row.follow_up_due_at)))
+  && M.FOLLOW_UP_JUDGE_STATUSES.includes(row.status) && M.FOLLOW_UP_STATUSES(path).includes(row.status);
+const conversationClosed = (row, path) => !ambiguousSend(row)
+  && (Boolean(row.conversation_closed_at) || (CONVERSATION_CLOSED_STATUSES.includes(row.status) && !followUpOwed(row, path)));
+// `path` = the placement's acquisition path (execution_after_send) — the follow-up lifecycle is path-dependent
+const CONVERSATION_OPEN = (row, path = null) => !conversationClosed(row, path) && (
   ['contacted', 'negotiating'].includes(row.status)
   || (row.status === 'awaiting_owner' && ['contacted', 'negotiating'].includes(row.parked_from_status))
   || ['sending', 'sent', 'send_error'].includes(row.outreach_status));
@@ -79,8 +87,11 @@ async function inboxConflict(trx, { recipient, excludeId = null }) {
   const hosts = M.GOOGLE_HOSTS.includes(inboxHost) ? [...M.GOOGLE_HOSTS] : [inboxHost];
   let q = trx('seo_link_prospects').whereRaw(`split_part(${M.STORED_SQL}, '@', 2) = ANY(?)`, ['outreach_to_email', hosts]);
   if (excludeId) q = q.where('id', '<>', excludeId);
-  const others = (await q.select('id', 'status', 'parked_from_status', 'outreach_status', 'follow_up_status', 'conversation_closed_at', 'outreach_to_email')).filter((o) => M.normalizeEmail(o.outreach_to_email) === inbox);
-  return others.find(CONVERSATION_OPEN) || null;
+  const others = (await q.select('id', 'status', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'outreach_to_email', 'path_id')).filter((o) => M.normalizeEmail(o.outreach_to_email) === inbox);
+  const pathIds = [...new Set(others.map((o) => o.path_id).filter(Boolean))];
+  const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'execution_after_send') : [];
+  const pathById = new Map(paths.map((p) => [p.id, p]));
+  return others.find((o) => CONVERSATION_OPEN(o, pathById.get(o.path_id) || null)) || null;
 }
 const P = require('./link-authority-policy');
 const M = require('./link-outreach-mandate');
