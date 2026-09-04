@@ -1675,7 +1675,12 @@ function runPrepayAndCadence() {
     const tag = overlay ? ` [overlay lawn min=${overlay.programMinimumMonthly}/mo]` : '';
     try {
       for (const b of bundles) {
-        const res = runEngine({ ...BASE, bedArea: 2000, services: b.services }).result;
+        const r = runEngine({ ...BASE, bedArea: 2000, services: b.services });
+        // A throwing bundle is a counted discrepancy with its error attached, never
+        // a crash before the artifacts are written (codex r27 P2 — same guard as
+        // the standalone cadence loop).
+        if (!r.ok) { record(section, `bundle ${b.name}${tag}: engine threw`, { bundle: b.keys, overlay }, 1, null, { extra: { engineError: r.error } }); findings.push({ severity: 'P1', section, name: `bundle ${b.name}${tag}`, detail: `generateEstimate threw: ${r.error}` }); continue; }
+        const res = r.result;
         const lis = b.keys.map((k) => line(res, k)).filter(Boolean);
         if (lis.length !== b.keys.length) { findings.push({ severity: 'P1', section, name: `bundle ${b.name}${tag}`, detail: `engine returned ${lis.length} of ${b.keys.length} recurring lines` }); continue; }
         const rows = lis.map((li) => ({ service: li.service, service_key: li.service, serviceKey: li.service, name: li.name || li.service, frequency: li.frequency || null, visits_per_year: li.visitsPerYear ?? li.visits ?? null, visitsPerYear: li.visitsPerYear ?? li.visits ?? null, annual: li.annualAfterDiscount ?? li.annual, perApp: li.perApp ?? li.perVisit }));
