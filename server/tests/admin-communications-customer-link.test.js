@@ -79,6 +79,10 @@ jest.mock('../services/composer-customer-links', () => ({
   buildLatestEstimateLink: jest.fn(),
   buildReferralLink: jest.fn(),
   buildAutopaySetupLink: jest.fn(),
+  buildAppointmentPageLink: jest.fn(),
+  buildPrepGuideLink: jest.fn(),
+  buildServiceReportLink: jest.fn(),
+  buildStatementLink: jest.fn(),
 }));
 jest.mock('../services/review-request', () => ({
 }));
@@ -162,8 +166,21 @@ function soloCustomer(id = CUSTOMER_UUID, firstName = 'PersonA') {
   });
 }
 
-function wireDb({ customers, reviewRequests = makeReviewRequestsBuilder() }) {
-  db.mockImplementation((table) => (table === 'customers' ? customers : reviewRequests));
+// scheduled_services: the shared soonestUpcomingVisit pick (whereIn/where/
+// orderBy/limit/offset chain ending in select).
+function makeVisitsBuilder(rows = []) {
+  const b = {};
+  for (const m of ['whereIn', 'where', 'orderBy', 'limit', 'offset']) b[m] = jest.fn(() => b);
+  b.select = jest.fn(() => Promise.resolve(rows));
+  return b;
+}
+
+function wireDb({ customers, reviewRequests = makeReviewRequestsBuilder(), visits = makeVisitsBuilder() }) {
+  db.mockImplementation((table) => {
+    if (table === 'customers') return customers;
+    if (table === 'scheduled_services') return visits;
+    return reviewRequests;
+  });
 }
 
 describe('POST /admin/communications/customer-link', () => {
@@ -338,6 +355,197 @@ describe('POST /admin/communications/customer-link', () => {
       expect((await res.json()).error).toBe('No open balance on this account');
     });
   });
+
+  test('statement: resolved as a PAYER from the recipient number; a unique customer on that number rides back for consent only (GH Codex #3844 r6 P1)', async () => {
+    wireDb({ customers: makeCustomersBuilder({ selectResults: [[]] }) });
+    builders.buildStatementLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64),
+      line: 'You can view and pay statement S-31 securely here: https://portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64) + '\n\n',
+      immediateOnly: true,
+      statement: { id: 31, number: 'S-31', total: 412.5, payerName: 'Gulf Coast PM' },
+    });
+    await withServer(async (baseUrl) => {
+      // A customerId that does NOT own the number would 400 every other kind; a statement ignores it.
+      const res = await post(baseUrl, 'customer-link', { phone: '+19415550100', kind: 'statement', customerId: CUSTOMER_UUID });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildStatementLink).toHaveBeenCalledWith('9415550100');
+      expect(body.statement).toEqual({ id: 31, number: 'S-31', total: 412.5, payerName: 'Gulf Coast PM' });
+      expect(body.immediateOnly).toBe(true);
+      // The AP phone is normally no customer's phone: nothing rides back.
+      expect(body.customerId).toBeUndefined();
+      expect(body.url).toBe('portal.wavespestcontrol.com/pay/statement/' + 'f'.repeat(64));
+    });
+
+    // One live customer row on the number → it rides back so the /sms send
+    // carries customerId and the recipient's own consent policy applies; the
+    // statement itself stays authorized against the payer (the builder is
+    // called the same way). Two rows → the composer's selected customer when
+    // it is one of them, else 409 — never a guess, never the lead policy for
+    // a number one of those rows has opted out (GH Codex #3844 r7 P1).
+    wireDb({ customers: makeCustomersBuilder({ selectResults: [[{ id: CUSTOMER_UUID }]] }) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+19415550100', kind: 'statement' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).customerId).toBe(CUSTOMER_UUID);
+      expect(builders.buildStatementLink).toHaveBeenLastCalledWith('9415550100');
+    });
+    const SIBLING_UUID = 'bbbb2222-0000-4000-8000-000000000002';
+    wireDb({ customers: makeCustomersBuilder({ selectResults: [[{ id: CUSTOMER_UUID }, { id: SIBLING_UUID }]] }) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+19415550100', kind: 'statement' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/more than one customer/);
+    });
+    wireDb({ customers: makeCustomersBuilder({ selectResults: [[{ id: CUSTOMER_UUID }, { id: SIBLING_UUID }]] }) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+19415550100', kind: 'statement', customerId: SIBLING_UUID });
+      expect(res.status).toBe(200);
+      expect((await res.json()).customerId).toBe(SIBLING_UUID);
+    });
+
+    builders.buildStatementLink.mockResolvedValue({ url: null, line: '', reason: "This number is not a payer's AP phone on file" });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'statement' });
+      expect(res.status).toBe(404);
+      expect((await res.json()).error).toMatch(/not a payer's AP phone/);
+    });
+  });
+
+  test('appointment: the pick skips a candidate the page would not render as upcoming — grouped state included — and takes the next one (GH Codex #3844 r14 P2)', async () => {
+    const NEXT_WEEK = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86_400_000));
+    const appointmentPublic = require('./../routes/appointment-public');
+    const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit');
+    try {
+      const grouped = { id: 'v-grp', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '08:00', status: 'confirmed', visit_id: 'grp-1' };
+      const later = { id: 'v-later', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '13:00', status: 'confirmed' };
+      spy.mockResolvedValueOnce({ state: 'pending_rebook', phase: null }).mockResolvedValueOnce({ state: 'upcoming', phase: null });
+      wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([grouped, later]) });
+      builders.buildAppointmentPageLink.mockResolvedValue({ url: 'https://wavespest.co/a/abc', line: 'x', appointment: { id: 'v-later' } });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'appointment' });
+        expect(res.status).toBe(200);
+      });
+      expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(expect.objectContaining({ id: 'v-later' }));
+      expect(spy).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 'v-grp', visit_id: 'grp-1' }));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('appointment: the route picks the soonest live visit and hands the row to the builder', async () => {
+    // A week out in ET — a fixed near-today date rots into pageState 'past' (pre-push Codex P1).
+    const NEXT_WEEK = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86_400_000));
+    const visit = { id: 'v1', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '09:00', window_end: '11:00', service_type: 'Flea Treatment', status: 'confirmed' };
+    wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([visit]) });
+    builders.buildAppointmentPageLink.mockResolvedValue({
+      url: 'https://wavespest.co/a/abc',
+      line: 'Everything about your visit: https://wavespest.co/a/abc\n\n',
+      appointment: { id: 'v1', scheduledDate: NEXT_WEEK, serviceType: 'Flea Treatment' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'appointment' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(visit);
+      expect(body.appointment).toEqual({ id: 'v1', scheduledDate: NEXT_WEEK, serviceType: 'Flea Treatment' });
+      // Account-scoped pick, but the text is a customer-specific bearer: the
+      // phone owner rides back so the /sms send carries customerId and the
+      // recipient's own consent policy applies (GH Codex #3844 r4 P1).
+      expect(body.customerId).toBe(CUSTOMER_UUID);
+    });
+  });
+
+  test('service_report: dispatches the whole account id set, with the phone owner riding back (the text is customer-specific — GH Codex #3844 r4 P1)', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildServiceReportLink.mockResolvedValue({
+      url: 'https://wavespest.co/report/abc',
+      line: 'Here is your latest service report: https://wavespest.co/report/abc\n\n',
+      immediateOnly: true,
+      report: { id: 'r1', serviceDate: '2026-09-01', serviceType: 'Lawn Care' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'service_report' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildServiceReportLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
+      expect(body.customerId).toBe(CUSTOMER_UUID);
+      expect(body.immediateOnly).toBe(true);
+      expect(body.report).toEqual({ id: 'r1', serviceDate: '2026-09-01', serviceType: 'Lawn Care' });
+    });
+  });
+
+  test('prep_guide: per customer ROW too — the phone owner\'s visits only (the page shows their name + address; /sms requires them to own it)', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildPrepGuideLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/prep/' + 'a'.repeat(32),
+      line: 'Your prep checklist for the upcoming Flea Treatment is here: https://portal.wavespestcontrol.com/prep/' + 'a'.repeat(32) + '\n\n',
+      prep: { pestType: 'flea', label: 'Flea Treatment', scheduledDate: '2026-09-20' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'prep_guide' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildPrepGuideLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
+      expect(body.customerId).toBe(CUSTOMER_UUID);
+    });
+  });
+
+  test('appointment: the visit pick excludes rescheduled placeholders — the page renders them as pending_rebook (pre-push Codex P1); the reschedule link keeps them', async () => {
+    const visits = makeVisitsBuilder([]);
+    wireDb({ customers: makeCustomersBuilder({ firstRow: { id: CUSTOMER_UUID, phone: '+15551234567', account_id: CUSTOMER_UUID }, selectResults: [[{ id: CUSTOMER_UUID }], [{ first_name: 'Ann' }], [{ id: CUSTOMER_UUID }]] }), visits });
+    builders.buildAppointmentPageLink.mockResolvedValue({ url: null, line: '', reason: 'No upcoming appointment' });
+    await withServer(async (baseUrl) => {
+      await post(baseUrl, 'customer-link', { phone: '+15551234567', customerId: CUSTOMER_UUID, kind: 'appointment' });
+      expect(visits.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed']);
+    });
+  });
+
+  test('appointment: a same-day live visit past its quoted window is skipped for the later real one — the page renders it as past (GH Codex #3844 r10 P1)', async () => {
+    const elapsed = { id: 'v-past', customer_id: CUSTOMER_UUID, scheduled_date: '2020-01-01', window_start: '08:00', status: 'confirmed' };
+    const later = { id: 'v-next', customer_id: CUSTOMER_UUID, scheduled_date: '2099-01-01', window_start: '08:00', status: 'pending' };
+    const visits = makeVisitsBuilder([elapsed, later]);
+    wireDb({ customers: makeCustomersBuilder({ firstRow: { id: CUSTOMER_UUID, phone: '+15551234567', account_id: CUSTOMER_UUID }, selectResults: [[{ id: CUSTOMER_UUID }], [{ first_name: 'Ann' }], [{ id: CUSTOMER_UUID }]] }), visits });
+    builders.buildAppointmentPageLink.mockResolvedValue({ url: null, line: '', reason: 'x' });
+    await withServer(async (baseUrl) => {
+      await post(baseUrl, 'customer-link', { phone: '+15551234567', customerId: CUSTOMER_UUID, kind: 'appointment' });
+      expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(later);
+    });
+  });
+
+  test.each(['appointment', 'service_report'])('%s: 409 when two live siblings on the account share the phone and no customer was picked — the owner that rides back is never an arbitrary row (GH Codex #3844 r9 P1)', async (kind) => {
+    wireDb({ customers: makeCustomersBuilder({
+      selectResults: [
+        [{ id: CUSTOMER_UUID, account_id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002', account_id: CUSTOMER_UUID }], // number → one account
+        [{ id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002' }], // account expansion
+        [{ first_name: 'PersonA' }, { first_name: 'PersonA' }], // greeting name
+        [{ id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002' }], // phone rows on the account
+      ],
+    }) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/more than one customer on this account/);
+    });
+  });
+
+  test.each(['prep_guide'])('%s: 409 when the phone belongs to more than one sibling — same rule as Auto Pay', async (kind) => {
+    const other = 'bbbb2222-0000-4000-8000-000000000002';
+    wireDb({
+      customers: makeCustomersBuilder({
+        selectResults: [
+          [{ id: CUSTOMER_UUID, account_id: CUSTOMER_UUID }, { id: other, account_id: CUSTOMER_UUID }],
+          [{ id: CUSTOMER_UUID }, { id: other }],
+          [{ first_name: 'PersonA' }, { first_name: 'PersonA' }],
+          [{ id: CUSTOMER_UUID }, { id: other }],
+        ],
+      }),
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/more than one customer on this account/);
+      expect(builders.buildPrepGuideLink).not.toHaveBeenCalled();
+    });
+  });
 });
-
-
