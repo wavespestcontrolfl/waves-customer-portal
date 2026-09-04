@@ -219,6 +219,9 @@ test('a placed order with no positive total anywhere parks post-submit as no_fin
   const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async () => ({ externalOrderNumber: 'S1-9', amountCents: 0, evidence: {} })) });
   expect(await run(a)).toMatchObject({ status: 'needs_review', reason: 'no_final_total' });
   expect(mockState.updates.some((u) => u.table === 'product_restock_requests' && u.row.status === 'ordered')).toBe(true);
+  const parked = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review');
+  expect(parked.row.placed_at).toBeInstanceOf(Date); // post-submit: cap-counted, guarded, do-not-reorder bell
+  expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
 });
 
 test('adapter refusal → needs_review with the refuse code', async () => {

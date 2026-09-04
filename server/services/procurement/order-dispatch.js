@@ -100,7 +100,11 @@ const RESTOCK_TAB = '/admin/inventory?tab=restock';
 const CAPS_LOCK_KEY = 'vendor-order-caps';
 // Ledger outcomes AFTER the vendor call was dispatched: the order may or does
 // exist, so the bell must never say "order manually".
-const POST_SUBMIT_REASONS = new Set(['ambiguous_after_submit', 'persist_after_placement', 'over_cap_after_placement', 'stale_placing']);
+// Every reason a row can park AFTER the vendor call went out: placed_at is
+// stamped, the bell says do-not-reorder, the spend and duplicate-order
+// guards cover it. no_final_total = placed, no positive total anywhere
+// (pre-push P0).
+const POST_SUBMIT_REASONS = new Set(['ambiguous_after_submit', 'persist_after_placement', 'over_cap_after_placement', 'stale_placing', 'no_final_total']);
 
 // vendors.code → adapter (.claude/vendor-codes.md). Name is the fallback for
 // a row that predates the code column.
