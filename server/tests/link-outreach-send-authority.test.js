@@ -1181,6 +1181,19 @@ describe('Codex r2 on #3854', () => {
     [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
     expect(await worker.report({ prospect_id: s.row.id, outcome: 'drafted', lease_token: l.lease_token, outreach_subject: 'Re: A resource for your readers', outreach_body: FOLLOW_UP_BODY })).toMatchObject({ ok: true, follow_up_status: 'drafted' });
   });
+  test('P2: a path SUPERSEDED during the ten-day wait retires the follow-up at the lease (skipped) — the pinned conversation completes instead of holding its inbox forever', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY), follow_up_subject: null, follow_up_body: null });
+    storedPath(s.db).superseded_by = uid();
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toEqual([]);
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', outreach_status: 'sent', follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/superseded/), claimed_at: null });
+    // a preview writes nothing
+    const t = await conversation({ decide: false });
+    Object.assign(placement(t.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY) });
+    storedPath(t.db).superseded_by = uid();
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true, preview: true })).toEqual([]);
+    expect(placement(t.db).follow_up_status).toBe('due');
+  });
   test('P2: a lane edit out of outreach committed under the lock leases nothing', async () => {
     const s = await conversation({ decide: false });
     Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_due_at: new Date(Date.now() - DAY) });

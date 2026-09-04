@@ -363,6 +363,16 @@ async function claimFollowUps(trx, { limit, preview }) {
     if (!r || r.claimed_at || r.outreach_status !== 'sent' || !['none', 'due'].includes(r.follow_up_status) || !OUTREACH_TYPES.includes(r.link_type)) continue;
     if (r.domain_id && await trx('seo_link_domains').where({ id: r.domain_id }).whereIn('agent_state', nonClaimableDomainStates()).first('id')) continue;
     const p = r.path_id ? await trx('seo_link_acquisition_paths').where({ id: r.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'revision', 'agent_completable', 'execution_after_send') : null;
+    // the route the conversation was pitched on was SUPERSEDED during the wait: a sent conversation is pinned to its
+    // path (the mover never re-paths it), so no follow-up can ever be composed for it — and nothing else visits a
+    // none / due follow-up on a superseded path (followUpPending excludes it from the bridge, the closure sweep reads
+    // sent / skipped only). It RETIRES here (skipped): the conversation completes and the closure sweep releases the inbox
+    if (p && p.superseded_by) {
+      await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
+        .update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'acquisition path superseded before the follow-up', updated_at: now });
+      logger.info(`[link-worker] follow-up for ${r.id} retired — its acquisition path was superseded during the wait`);
+      continue;
+    }
     if (!eligible(r, p)) continue;
     const n = await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent', status: r.status, path_id: r.path_id, link_type: r.link_type }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
       .update({ claimed_at: now, claimed_by: WORKER, follow_up_status: 'due', leased_path_revision: p.revision == null ? null : Number(p.revision), updated_at: now });

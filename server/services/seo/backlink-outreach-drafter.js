@@ -192,11 +192,27 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
   const claimed = remaining ? await worker.claim({ n: remaining, type: 'outreach', requireContactEmail: true, ...(dryRun ? { preview: true } : {}) }) : [];
   if (!claimed.length) {
     logger.info(remaining ? '[outreach-drafter] no claimable outreach prospects with a contact email' : `[outreach-drafter] the batch of ${batchSize} went to follow-ups — no pitch claimed`);
-    return { claimed: followUps.claimed, drafted: followUps.drafted, skipped: 0, failed: followUps.failed, followUps: { claimed: followUps.claimed, drafted: followUps.drafted, failed: followUps.failed }, ...(dryRun ? { samples: followUps.samples } : {}) };
+    return totals(followUps, { claimed: 0, drafted: 0, skipped: 0, failed: 0, samples: [] }, dryRun);
   }
+  const pitches = await draftPitches({ claimed, dryRun, client, profile, fetchPageFn });
+  // (a dry run previewed without leasing — there is nothing to release)
+  logger.info(`[outreach-drafter] claimed=${claimed.length} drafted=${pitches.drafted} skipped=${pitches.skipped} failed=${pitches.failed} follow-ups=${followUps.drafted}/${followUps.claimed}${dryRun ? ' (DRY-RUN)' : ''}`);
+  return totals(followUps, pitches, dryRun);
+}
+
+// the two lanes summed into the totals the cron log and the CLI print, the follow-up pass itemized
+function totals(followUps, pitches, dryRun) {
+  return {
+    claimed: pitches.claimed + followUps.claimed, drafted: pitches.drafted + followUps.drafted, skipped: pitches.skipped, failed: pitches.failed + followUps.failed,
+    followUps: { claimed: followUps.claimed, drafted: followUps.drafted, failed: followUps.failed },
+    ...(dryRun ? { samples: [...followUps.samples, ...pitches.samples] } : {}),
+  };
+}
+
+// the pitch lane: one draft per leased prospect, reported drafted / failed / skipped on its lease
+async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn }) {
   let drafted = 0, skipped = 0, failed = 0;
   const samples = []; // dry-run previews — returned to the CLI's stdout, NOT logged (email/body are PII)
-
   for (const p of claimed) {
     const email = p.contact_email;
     if (!email || !worker.isValidEmail(email)) { // defensive — claim already required a contact_email
@@ -227,11 +243,7 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
       failed++;
     }
   }
-
-  // (a dry run previewed without leasing — there is nothing to release)
-
-  logger.info(`[outreach-drafter] claimed=${claimed.length} drafted=${drafted} skipped=${skipped} failed=${failed} follow-ups=${followUps.drafted}/${followUps.claimed}${dryRun ? ' (DRY-RUN)' : ''}`);
-  return { claimed: claimed.length + followUps.claimed, drafted: drafted + followUps.drafted, skipped, failed: failed + followUps.failed, followUps: { claimed: followUps.claimed, drafted: followUps.drafted, failed: followUps.failed }, ...(dryRun ? { samples: [...followUps.samples, ...samples] } : {}) };
+  return { claimed: claimed.length, drafted, skipped, failed, samples };
 }
 
 module.exports = { run };

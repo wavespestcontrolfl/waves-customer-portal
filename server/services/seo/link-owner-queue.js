@@ -496,11 +496,13 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     if (R.LANE_OWNED_STATES.includes(domain.agent_state)) refuse(409, `agent_state '${domain.agent_state}' is lane-owned: a placement is already approved or in flight — reject or watch it from the board first`);
     // every other state is decidable here — the Registry table's Reject / Watch is THIS decision too, and a domain that
     // left the queue (Reopen → investigating) can still carry approved rows a plain state flip would leave live
-    const placements = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'path_id', 'status', 'outreach_status');
-    // a pitch whose outcome is not settled (the claim committed `sending` and Gmail is being called outside any lock, or
-    // it errored and may still have been delivered): deciding the domain now would invalidate the approval that send
-    // stands on and land a `contacted` placement under a rejected / watching domain — it finalizes or reconciles first
-    if (placements.some((p) => require('./link-outreach-mandate').AMBIGUOUS_SEND_STATUSES.includes(p.outreach_status))) refuse(409, 'a pitch for this domain is being sent or awaits reconciliation — let it finish (or reconcile it from the Link Building board) before deciding the domain');
+    const placements = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'path_id', 'status', 'outreach_status', 'follow_up_status');
+    // a send whose outcome is not settled — the pitch's, or the follow-up's (§6.4: its own claim commits `sending` and
+    // errors to `send_error` on its own columns) — the claim committed `sending` and Gmail is being called outside any
+    // lock, or it errored and may still have been delivered: deciding the domain now would invalidate the approval that
+    // send stands on and land a `contacted` placement under a rejected / watching domain — it finalizes or reconciles first
+    const { AMBIGUOUS_SEND_STATUSES } = require('./link-outreach-mandate');
+    if (placements.some((p) => AMBIGUOUS_SEND_STATUSES.includes(p.outreach_status) || AMBIGUOUS_SEND_STATUSES.includes(p.follow_up_status))) refuse(409, 'a pitch or follow-up for this domain is being sent or awaits reconciliation — let it finish (or reconcile it from the Link Building board) before deciding the domain');
     const ids = placements.map((p) => p.id);
     const open = ids.length ? await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at')) : [];
     // every owner-level row is audited, the already-approved ones included: a Reject / Watch is the owner's LATER word
