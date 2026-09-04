@@ -990,6 +990,16 @@ describe('review request follow-up flow', () => {
       wire({ prefs: { review_request: true, email_enabled: true } });
       rrUpdate.mockResolvedValueOnce(1).mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down'));
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_retry_lost' });
+      // A 408 (timeout-style — the provider may have processed the POST)
+      // stays uncertain like a 5xx; only conclusive 4xx codes are definite.
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        await opts.onQueued({ id: 'em-1' });
+        const err = new Error('SendGrid 408');
+        err.status = 408;
+        throw err;
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_uncertain' });
       // A 5xx stays uncertain.
       wire({ prefs: { review_request: true, email_enabled: true } });
       EmailLib.sendTemplate.mockImplementation(async (opts) => {

@@ -352,12 +352,15 @@ async function sendBroadcast(args) {
   });
 }
 
-// A throw from sendOne carries the HTTP status: 4xx = DEFINITE rejection
-// (not accepted, safe to retry after a fix); 5xx / network = ambiguous (may
-// have been accepted). Callers that hold send-once claims key off this.
+// A throw from sendOne carries the HTTP status. Only statuses that
+// conclusively reject the payload count as a DEFINITE rejection (not
+// accepted, safe to retry after a fix); a timeout-style 408, any other 4xx
+// and every 5xx / network failure are ambiguous for a POST — the provider
+// may have processed it before answering — so callers keep their send-once
+// claim consumed (pre-push Codex P1 on 574aca27a).
+const DEFINITE_REJECTION_STATUSES = new Set([400, 401, 403, 404, 405, 413, 415, 422, 429]);
 function isDefiniteRejection(err) {
-  const status = Number(err?.status);
-  return status >= 400 && status < 500;
+  return DEFINITE_REJECTION_STATUSES.has(Number(err?.status));
 }
 
 module.exports = {
