@@ -195,10 +195,8 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
     is_qualified: true,
     updated_at: new Date(),
   };
-  if (customerId !== undefined) updates.customer_id = customerId || null;
-  if (monthlyValue !== undefined) updates.monthly_value = monthlyValue || null;
-  if (initialServiceValue !== undefined) updates.initial_service_value = initialServiceValue || null;
-  if (waveguardTier !== undefined) updates.waveguard_tier = waveguardTier || null;
+  const supplied = [['customer_id', customerId], ['monthly_value', monthlyValue], ['initial_service_value', initialServiceValue], ['waveguard_tier', waveguardTier]];
+  for (const [column, value] of supplied) if (value !== undefined) updates[column] = value || null;
 
   // Soft-deleted leads are out of every live mutation path: 0 rows updated
   // means the lead is missing or deleted, and nothing below should run.
@@ -207,7 +205,7 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   if (onlyIfIdentity) claim.where(onlyIfIdentity);
   const updatedRows = await claim.update(updates);
   if (!updatedRows) {
-    logger.info(`[LeadAttribution] markConverted skipped — lead ${leadId} missing, deleted, or no longer in ${onlyIfStatusIn ? onlyIfStatusIn.join('/') : 'a live state'}`);
+    logger.info(`[LeadAttribution] markConverted skipped — lead ${leadId} missing, deleted, or no longer in the state the caller read`);
     return false;
   }
 

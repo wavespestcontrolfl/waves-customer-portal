@@ -68,13 +68,16 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
     // original is not stale. The marker can chain (B → A → O when two
     // repeats raced), so every ancestor of a recent repeat is exempt, not
     // just the row it names (pre-push P1 on r12); a removed repeat or hop
-    // says nothing about re-engagement (codex r11 P2).
+    // says nothing about re-engagement (codex r11 P2). A repeat is recent by
+    // its LAST wizard submission, not its filing: a rerun on the repeat's
+    // own token re-types the row in place (updated_at, marker kept), and
+    // that re-engagement must exempt the original too (codex r23 P1).
     .whereRaw(
       `leads.id::text NOT IN (
         WITH RECURSIVE chain AS (
           SELECT r.extracted_data->>'duplicate_of_lead_id' AS parent_id, 1 AS depth
           FROM leads r
-          WHERE r.lead_type = 'quote_wizard' AND r.status = 'duplicate' AND r.created_at >= ?${excludeSoftDeleted ? ' AND r.deleted_at IS NULL' : ''}
+          WHERE r.lead_type = 'quote_wizard' AND r.status = 'duplicate' AND COALESCE(r.updated_at, r.created_at) >= ?${excludeSoftDeleted ? ' AND r.deleted_at IS NULL' : ''}
           UNION ALL
           SELECT p.extracted_data->>'duplicate_of_lead_id', chain.depth + 1
           FROM chain JOIN leads p ON p.id::text = chain.parent_id

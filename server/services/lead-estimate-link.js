@@ -632,7 +632,7 @@ async function markLinkedLeadEstimateAccepted({
   // onlyIfStatusIn), so a staff closure landing between the stamp and the
   // conversion is never overwritten (codex #3834 r11 P1). The direct path
   // keeps its unconditional stamp and conversion as before.
-  const convert = async (lead, { claim = null, funnelRow = false } = {}) => {
+  const convert = async (lead, claim, funnelRow) => {
     let stamped = 0;
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
@@ -647,15 +647,15 @@ async function markLinkedLeadEstimateAccepted({
       // below pins it (codex r22 P1).
       if (stamped) lead.estimate_id = estimateId;
       if (claim && !stamped) {
-        const current = await database('leads').where({ id: lead.id }).first();
         // Refresh the caller's row from the re-read — the WHOLE row — so the
         // fallback judges the original AS IT IS NOW: its status (an original
         // the office closed as won between the read and the stamp must not
         // let the duplicate row record a second win — pre-push P1 on #3834
         // r8) and its identity (an original staff re-assigned or re-contacted
         // in the same window is no longer this opportunity — codex r16 P1).
-        if (current) Object.assign(lead, current);
-        if (!current || String(current.estimate_id) !== String(estimateId) || CLOSED_LEAD_STATUSES.has(current.status)) return false;
+        // A vanished row leaves the read as it was: unlinked, so it loses.
+        Object.assign(lead, await database('leads').where({ id: lead.id }).first());
+        if (String(lead.estimate_id) !== String(estimateId) || CLOSED_LEAD_STATUSES.has(lead.status)) return false;
       }
     }
     const converted = await leadAttributionService.markConverted(lead.id, {
@@ -685,18 +685,13 @@ async function markLinkedLeadEstimateAccepted({
       // off so the fallback's win is the only one on this estimate (codex
       // r22 P1).
       if (stamped) {
-        const wonByThisAcceptance = {
-          status: 'won',
-          customer_id: customerId !== undefined ? (customerId || null) : (lead.customer_id ?? null),
-          phone: lead.phone ?? null,
-          email: lead.email ?? null,
-        };
+        const identity = identityOf(lead);
+        const wonByThisAcceptance = { ...identity, status: 'won', customer_id: customerId === undefined ? identity.customer_id : (customerId || null) };
         await database('leads').where({ id: lead.id }).where({ estimate_id: estimateId })
           .whereNot((q) => q.where(wonByThisAcceptance))
           .update({ estimate_id: null, updated_at: new Date() });
       }
-      const current = await database('leads').where({ id: lead.id }).first();
-      if (current) Object.assign(lead, current);
+      Object.assign(lead, await database('leads').where({ id: lead.id }).first());
       return false;
     }
     return true;
@@ -763,9 +758,10 @@ async function markLinkedLeadEstimateAccepted({
     // r21 P1). Bounded like every marker walk; a dead or unchanged hop ends
     // it and the fallback below judges whatever `lead` is now.
     for (let hops = 0; eligible(); hops++) {
-      if (await convert(lead, { claim: indirect() ? OPEN_LEAD_CLAIM : null })) return;
-      if (hops >= 2 || lead.status !== 'duplicate' || lead.deleted_at || !duplicateMarkerOf(lead)) break;
-      const next = await followDuplicateLink(database, lead);
+      if (await convert(lead, indirect() ? OPEN_LEAD_CLAIM : null)) return;
+      // followDuplicateLink hands back the row itself unless it is a live
+      // duplicate whose marker reaches further — exactly the relabel case.
+      const next = hops < 2 ? await followDuplicateLink(database, lead) : lead;
       if (next.id === lead.id) break;
       lead = next;
     }
@@ -804,8 +800,9 @@ async function markLinkedLeadEstimateAccepted({
       // reaches no funnel row at all, so the named row gets the one its own
       // run would have stamped, straight at the booked stage (codex #3834
       // r14 P2).
-      const stillOurs = sameOpportunity() && !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at;
-      if (await convert(named, { claim: DUPLICATE_LEAD_CLAIM, funnelRow: !stillOurs }) && stillOurs) {
+      // ...i.e. a resolved original that would still qualify for the hop.
+      const stillOurs = indirect() && eligible();
+      if (await convert(named, DUPLICATE_LEAD_CLAIM, !stillOurs) && stillOurs) {
         await bridgeLeadFunnelStage(lead.id, 'won', database);
       }
     }
@@ -1087,12 +1084,16 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
     // (customerHasWonLead cannot see it) — codex #3834 r17 P1. A root won
     // through a DIFFERENT estimate than this event's is a different deal, as
     // the accept path judges it, and the repeat stands in as before.
-    if (root && root.status === 'won' && ownedByUs(root) && (!estimateId || !root.estimate_id || root.estimate_id === estimateId)) {
+    const rootOurs = !!root && ownedByUs(root) && inScope(root);
+    if (rootOurs && root.status === 'won') {
       wonAncestry = true;
       continue;
     }
-    const rootIsOurs = !!root && !CLOSED_LEAD_STATUSES.has(root.status) && ownedByUs(root) && inScope(root);
-    if (rootIsOurs) {
+    // Open by positive membership (OPEN_LEAD_STATUSES), never NOT-closed: a
+    // spam or cancelled root is not answerable and the open-status claim
+    // would reject it, so the repeat stands in — as it does for a lost root
+    // (codex #3834 r23 P1).
+    if (rootOurs && OPEN_LEAD_STATUSES.includes(root.status)) {
       if (!keepers.has(ancestryKey)) keepers.set(ancestryKey, root);
       continue;
     }

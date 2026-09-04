@@ -1953,8 +1953,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // filed this row as a repeat (and dropped its lead-stage funnel
             // row), and trusting the stale read would re-validate a null
             // marker and re-insert that row (codex #3834 r17 P1).
-            const current = await db('leads').where({ id: lead.id }).first('status', 'extracted_data');
-            if (current) Object.assign(lead, current);
+            Object.assign(lead, await db('leads').where({ id: lead.id }).first('status', 'extracted_data'));
             duplicateOfLeadId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
           }
           if (relabelled && duplicateOfLeadId) {

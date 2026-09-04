@@ -412,7 +412,7 @@ describe('lead-estimate link service', () => {
     // THIS estimate: won, this customer, the contact the row was read with
     // — an admin edit that re-identified and won the row in one write loses
     // the link (codex r22 P1).
-    expect(database._claims[1]).toEqual({ id: 'lead-origM', identity: { estimate_id: 'estimate-2m' }, not: { status: 'won', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com' } });
+    expect(database._claims[1]).toEqual({ id: 'lead-origM', identity: { estimate_id: 'estimate-2m' }, not: { status: 'won', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com', estimate_id: 'estimate-2m' } });
     expect(database._updates[0].patch.updated_at).toBeInstanceOf(Date);
   });
 
@@ -1219,6 +1219,21 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     // The foreign root's funnel is not ours to book and the booking recorder
     // skips a converted lead: the repeat gets its own row at booked (codex r14 P2).
     expect(markConverted).toHaveBeenCalledWith('L-rep2', expect.objectContaining({ customerId: 'c2', onlyIfStatusIn: ['duplicate'], onlyIfIdentity: { customer_id: 'c2', phone: null, email: null, estimate_id: null }, funnelRowFor: expect.objectContaining({ id: 'L-rep2' }) }));
+  });
+
+  test('self-booking: a repeat whose root is SPAM (not answerable, not in CLOSED_LEAD_STATUSES) stands in for it — the root is never claimed on the open statuses (codex r23 P1)', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [],
+      customerDuplicateLead: { id: 'L-rep-spam', status: 'duplicate', customer_id: 'c1', extracted_data: { duplicate_of_lead_id: 'L-root-spam' }, first_contact_at: '2026-09-01T12:00:00Z' },
+      leadsById: { 'L-root-spam': { id: 'L-root-spam', status: 'spam', customer_id: 'c1', first_contact_at: '2026-08-30T12:00:00Z' } },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep-spam'] });
+    expect(markConverted).not.toHaveBeenCalledWith('L-root-spam', expect.anything());
   });
 
   test('deposit_paid: a repeat whose open root is linked to a DIFFERENT estimate stands in for it — the root is out of scope, the repeat converts (codex r22 P1)', async () => {

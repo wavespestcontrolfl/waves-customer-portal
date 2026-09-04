@@ -201,7 +201,7 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // ...re-read from the database, not the marker this request read before
     // the race: a concurrent request on the same token may have just filed
     // this row as a repeat (codex r17 P1).
-    expect(block).toMatch(/if \(!relabelled\) \{[\s\S]*?const current = await db\('leads'\)\.where\(\{ id: lead\.id \}\)\.first\('status', 'extracted_data'\);\n\s+if \(current\) Object\.assign\(lead, current\);\n\s+duplicateOfLeadId = lead\.status === 'duplicate' \? duplicateOfFromExtracted\(lead\.extracted_data\) : null;/);
+    expect(block).toMatch(/if \(!relabelled\) \{[\s\S]*?Object\.assign\(lead, await db\('leads'\)\.where\(\{ id: lead\.id \}\)\.first\('status', 'extracted_data'\)\);\n\s+duplicateOfLeadId = lead\.status === 'duplicate' \? duplicateOfFromExtracted\(lead\.extracted_data\) : null;/);
     expect(block).not.toMatch(/duplicateOfLeadId = stored;/);
     expect(block).toMatch(/\? \{ status: 'duplicate', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) \|\| \?::jsonb"/);
     expect(block).toMatch(/status: 'new', extracted_data: db\.raw\("COALESCE\(extracted_data, '\{\}'::jsonb\) - 'duplicate_of_lead_id'"\)/);
