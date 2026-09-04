@@ -632,7 +632,6 @@ async function markLinkedLeadEstimateAccepted({
   // keeps its unconditional stamp and conversion as before.
   const convert = async (lead, { claim = null, funnelRow = false } = {}) => {
     let stamped = 0;
-    let stampedAt = null;
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
       // ...and, for a claimed row, the identity it was read with (customer
@@ -641,8 +640,7 @@ async function markLinkedLeadEstimateAccepted({
       // opportunity, and the stamp must lose rather than let markConverted
       // overwrite the row's customer with this one (codex #3834 r17 P1).
       if (claim) stamp.whereNull('estimate_id').whereIn('status', claim).where(identityOf(lead));
-      stampedAt = new Date();
-      stamped = await stamp.update({ estimate_id: estimateId, updated_at: stampedAt });
+      stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
       if (claim && !stamped) {
         const current = await database('leads').where({ id: lead.id }).first();
         // Refresh the caller's row from the re-read — the WHOLE row — so the
@@ -670,10 +668,14 @@ async function markLinkedLeadEstimateAccepted({
       // The stamp landed but the status claim lost (a closure in between):
       // a closed original must not stay linked to the accepted repeat
       // estimate, so the stamp THIS call made is reverted (pre-push P1) —
-      // proven by its own write: the row must still carry this stamp's
-      // updated_at, so a link another writer made since is never erased
-      // (pre-push P1 on r20).
-      if (stamped) await database('leads').where({ id: lead.id }).where({ estimate_id: estimateId, updated_at: stampedAt }).update({ estimate_id: null, updated_at: new Date() });
+      // keyed on what the stamp wrote, never on updated_at: the competing
+      // status write that made the claim lose is exactly the write that
+      // bumps updated_at, so a timestamp key misses the very race it is
+      // meant to repair (codex #3834 r21 P1). A link another writer made
+      // since carries THAT estimate's id and is never erased; a row a
+      // concurrent acceptance of this same estimate already converted is
+      // won with this link and keeps it (pre-push P1 on r20).
+      if (stamped) await database('leads').where({ id: lead.id }).where({ estimate_id: estimateId }).whereNot({ status: 'won' }).update({ estimate_id: null, updated_at: new Date() });
       const current = await database('leads').where({ id: lead.id }).first();
       if (current) Object.assign(lead, current);
       return false;
@@ -713,7 +715,7 @@ async function markLinkedLeadEstimateAccepted({
     if (!named) return;
     // followDuplicateLink returns the original when the marker resolves and
     // the named row itself otherwise, so `lead` is always a row here.
-    const lead = await followDuplicateLink(database, named);
+    let lead = await followDuplicateLink(database, named);
     // An INDIRECTLY resolved original (via a duplicate marker) is validated
     // like the send/view path validates the named lead: its contact must
     // match the accepted estimate, it must not already belong to a different
@@ -723,16 +725,31 @@ async function markLinkedLeadEstimateAccepted({
     // original after the repeat was filed — converting it here would credit
     // the win to that estimate and leave the accepted one unlinked, codex
     // #3834 r4 P1). A named lead that is itself open converts as before.
-    const indirect = lead.id !== named.id;
-    // A function of the row AS IT IS NOW: `lead` is refreshed in full when a
-    // claim loses, and every later judgement re-reads the identity (codex
-    // #3834 r16 P1) — not a value computed before the race.
-    const sameOpportunity = () => indirect
+    // Functions of the row AS IT IS NOW: `lead` is refreshed in full when a
+    // claim loses (and re-pointed when the chain grew, below), and every
+    // later judgement re-reads the identity (codex #3834 r16 P1) — not a
+    // value computed before the race.
+    const indirect = () => lead.id !== named.id;
+    const sameOpportunity = () => indirect()
       && leadMatchesEstimateContact(lead, estimate)
       && (!lead.customer_id || !customerId || lead.customer_id === customerId)
       && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
-    const eligible = !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at && (!indirect || sameOpportunity());
-    if (eligible && (await convert(lead, { claim: indirect ? OPEN_LEAD_CLAIM : null }))) return;
+    const eligible = () => !CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at && (!indirect() || sameOpportunity());
+    // A claim that lost because the original was relabelled IN FLIGHT — a
+    // concurrent /calculate marked it a duplicate of an older root while
+    // this acceptance was between its read and its stamp — is not a
+    // closure: the refreshed row now carries a marker that reaches further,
+    // so the hop follows it and claims the root it reaches, instead of
+    // promoting the named repeat while that root stays open (codex #3834
+    // r21 P1). Bounded like every marker walk; a dead or unchanged hop ends
+    // it and the fallback below judges whatever `lead` is now.
+    for (let hops = 0; eligible(); hops++) {
+      if (await convert(lead, { claim: indirect() ? OPEN_LEAD_CLAIM : null })) return;
+      if (hops >= 2 || lead.status !== 'duplicate' || lead.deleted_at || !duplicateMarkerOf(lead)) break;
+      const next = await followDuplicateLink(database, lead);
+      if (next.id === lead.id) break;
+      lead = next;
+    }
     // The hop could not land (original gone, another customer's, contact
     // mismatch, already FK-linked to a different estimate, or lost the
     // stamp race to a concurrent link). An accepted
@@ -942,8 +959,12 @@ async function customerHasWonLead(database, customerId) {
 // (else the customer's created date) is the same "became a customer" date the
 // KPI conversion windows use (server/services/customer-stages.js). Fail-closed:
 // if either date is unknown, treat the lead as NOT originating (don't convert).
+// `inquiryBeganAt` is the in-memory annotation a repeat keeper carries (see
+// resolveCustomerLinkCandidates) — the ancestry's first contact, kept apart
+// from the row's own first_contact_at so nothing downstream writes a
+// synthetic date (codex #3834 r21 P2).
 async function isOriginatingLead(database, customerId, lead) {
-  const leadStart = lead.first_contact_at || lead.created_at;
+  const leadStart = lead.inquiryBeganAt || lead.first_contact_at || lead.created_at;
   if (!leadStart) return false;
   const customer = await database('customers')
     .where({ id: customerId })
@@ -1023,7 +1044,10 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
   // carries the ancestry's first contact for the origination test below —
   // and every OLDER sibling of the same ancestry folds its own inquiry date
   // in, since the sibling that created the customer row is the one that
-  // says when this customer's inquiry began (codex #3834 r16 P1).
+  // says when this customer's inquiry began (codex #3834 r16 P1). It rides
+  // on `inquiryBeganAt`, NOT the row's first_contact_at: the keeper is the
+  // row the conversion stamps a funnel row for, and that row must date from
+  // the repeat's real first contact, not a sibling's (codex r21 P2).
   const keepers = new Map(); // ancestry key → keeper
   let wonAncestry = false;
   for (const repeat of repeats) {
@@ -1048,8 +1072,8 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
     }
     const began = await ancestryFirstContactAt(database, repeat, ownedByUs);
     const keeper = keepers.get(ancestryKey);
-    if (keeper) keeper.first_contact_at = earlierOf(keeper.first_contact_at, began);
-    else keepers.set(ancestryKey, { ...repeat, first_contact_at: began });
+    if (keeper) keeper.inquiryBeganAt = earlierOf(keeper.inquiryBeganAt, began);
+    else keepers.set(ancestryKey, { ...repeat, inquiryBeganAt: began });
   }
   linked.push(...keepers.values());
   // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
