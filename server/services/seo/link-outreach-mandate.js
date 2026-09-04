@@ -34,6 +34,7 @@ const { lintComms } = require('../comms-lint');
 const { canonicalEmail } = require('../ads/ad-audience-consent');
 const { SERVICE_CONTACT_SLOTS } = require('../customer-contact');
 const { isValidEmail } = require('./link-prospect-worker');
+const { etParts, etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 // The commitments §6.4 keeps out of an automatic send. Conservative by design:
 // a false positive costs one owner click; a false negative sends a promise.
@@ -144,9 +145,17 @@ const draftOf = (placement, followUp = false) => (followUp
   ? { outreach_to_email: placement.outreach_to_email, outreach_subject: placement.follow_up_subject, outreach_body: placement.follow_up_body }
   : { outreach_to_email: placement.outreach_to_email, outreach_subject: placement.outreach_subject, outreach_body: placement.outreach_body });
 
-// §6.4 — the follow-up: ONE per placement, +10 days after the initial pitch, only if no reply
-const FOLLOW_UP_DELAY_MS = 10 * 24 * 60 * 60 * 1000;
-const followUpDueAt = (sentAt) => new Date(new Date(sentAt).getTime() + FOLLOW_UP_DELAY_MS);
+// §6.4 — the follow-up: ONE per outreach cycle, due 10 ET calendar days after the pitch at the pitch's ET wall-clock
+// time — never raw elapsed milliseconds, which land an hour early or late across a DST seam (the America/New_York
+// discipline: every day-offset goes through datetime-et)
+const FOLLOW_UP_DELAY_DAYS = 10;
+const followUpDueAt = (sentAt) => {
+  const at = new Date(sentAt);
+  const t = etParts(at);
+  const pad = (n) => String(n).padStart(2, '0');
+  const due = parseETDateTime(`${etDateString(addETDays(at, FOLLOW_UP_DELAY_DAYS))}T${pad(t.hour)}:${pad(t.minute)}:${pad(t.second || 0)}`);
+  return new Date(due.getTime() + at.getUTCMilliseconds());
+};
 // the lifecycle statuses a follow-up may act on: `contacted` (the initial send left the row there), plus the
 // Judge-owned statuses on a SUBMIT-FIRST path (execution_after_send=false), where the acquisition moved the row on
 // before the pitch — a follow-up there is claimable and never demotes the row (the follow-up writes its own columns)
@@ -244,4 +253,4 @@ async function reviewByEmail(q, emails) {
 // have delivered the pitch, so the inbox stays held and the authority it was claimed under stays pinned until then
 const AMBIGUOUS_SEND_STATUSES = Object.freeze(['sending', 'send_error']);
 
-module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_MS, FOLLOW_UP_STATUSES, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_JUDGE_STATUSES, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };

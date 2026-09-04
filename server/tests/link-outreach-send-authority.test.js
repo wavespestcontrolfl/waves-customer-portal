@@ -790,7 +790,8 @@ describe('the follow-up lifecycle (§6.4)', () => {
     await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', now: NOW });
     const p = placement(s.db);
     expect(p).toMatchObject({ status: 'contacted', outreach_status: 'sent', follow_up_status: 'none' });
-    expect(new Date(p.follow_up_due_at).getTime() - new Date(p.outreach_sent_at).getTime()).toBe(10 * DAY);
+    expect(new Date(p.follow_up_due_at)).toEqual(M.followUpDueAt(p.outreach_sent_at)); // ten ET calendar days at the send's ET wall-clock time
+    expect(new Date(p.follow_up_due_at).getTime()).toBeGreaterThan(new Date(p.outreach_sent_at).getTime() + 9 * DAY);
     // not due yet: the sweep leases nothing (the store's clock is real time — the due date is ten days ahead of NOW... which is in the past here)
     p.follow_up_due_at = new Date(Date.now() + DAY);
     expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toEqual([]);

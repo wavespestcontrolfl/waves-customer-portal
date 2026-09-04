@@ -212,6 +212,9 @@ describe('the follow-up (§6.4)', () => {
   });
   test('followUpDueAt is ten days after the send; followUpPending = sent pitch with a drafted / in-flight / errored follow-up', () => {
     expect(M.followUpDueAt('2026-09-03T00:00:00Z').toISOString()).toBe('2026-09-13T00:00:00.000Z');
+    // ten ET CALENDAR days at the pitch's ET wall-clock time, across the DST seam (2026-11-01): 08:00 EDT → 08:00 EST, not 240 elapsed hours (07:00 EST)
+    expect(M.followUpDueAt('2026-10-28T12:00:00Z').toISOString()).toBe('2026-11-07T13:00:00.000Z');
+    expect(M.followUpDueAt(new Date('2026-03-05T13:30:00Z')).toISOString()).toBe('2026-03-15T12:30:00.000Z'); // 08:30 EST → 08:30 EDT
     expect(M.followUpPending(sent)).toBe(true);
     expect(M.followUpPending({ ...sent, follow_up_status: 'sending' })).toBe(true);
     expect(M.followUpPending({ ...sent, follow_up_status: 'send_error' })).toBe(true);
