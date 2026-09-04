@@ -341,6 +341,7 @@ async function callClaude(systemPrompt, userPrompt) {
   try {
     const client = new Anthropic();
     const response = await createDeepMessage(client, {
+      laneId: 'wiki_compiler',
       model: MODEL,
       max_tokens: 8192, // DEEP: thinking spends from max_tokens — keep headroom for the visible answer
       system: systemPrompt,

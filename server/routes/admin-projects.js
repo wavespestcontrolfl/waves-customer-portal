@@ -1133,6 +1133,7 @@ async function draftProjectReport({ typeCfg, findings, rawRecommendations, custo
     archivedFeeValues,
   });
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.report, {
+    laneId: 'project_report',
     text: prompt,
     images,
     jsonMode: false,

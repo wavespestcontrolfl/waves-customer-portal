@@ -610,6 +610,7 @@ function stripCodeFence(text) {
 async function generateFix(markdown, findings, deps = {}) {
   const call = deps.callAnthropic || callAnthropic;
   const res = await call({
+    laneId: 'codex_remediation',
     model: MODELS.FLAGSHIP,
     system: FIX_SYSTEM,
     text: buildFixUserMessage(markdown, findings),

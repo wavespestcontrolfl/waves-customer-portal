@@ -217,7 +217,7 @@ async function buildTreatmentNarrative({
       const productActives = products.map((p) => p.activeIngredient).filter(Boolean);
       const generated = await dispatchWithFallback(
         MODELS.TEXT_POLICIES.report,
-        { text: prompt, jsonMode: false, maxTokens: 400 },
+        { laneId: 'treatment_narrative', text: prompt, jsonMode: false, maxTokens: 400 },
         { validate: (result) => validateNarrative(result.text, productNames, productActives) },
       );
       const text = generated.ok ? String(generated.text || '').trim() : '';

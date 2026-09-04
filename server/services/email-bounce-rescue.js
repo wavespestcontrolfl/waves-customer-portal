@@ -224,6 +224,7 @@ function extractSpelledContexts(transcription) {
 async function llmDecodeCandidate({ contexts, bouncedEmail, transcription }) {
   if (!contexts.length) return null;
   const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    laneId: 'bounce_rescue',
     system: [
       'You reconstruct email addresses that a phone-call transcriber mis-heard.',
       'The stored address is KNOWN WRONG (it hard-bounced). Use only the spelled',

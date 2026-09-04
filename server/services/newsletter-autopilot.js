@@ -135,6 +135,7 @@ async function applyListwiseRerank(scored) {
     const { dispatchWithFallback } = require('./llm/call');
     const lines = pool.map((ev) => `- id: ${ev.id}\n  title: ${ev.title}\n  score: ${ev.editorial_score}\n  desc: ${(ev.description || '').replace(/\s+/g, ' ').slice(0, 180)}`);
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      laneId: 'newsletter',
       maxTokens: 1200,
       jsonMode: true,
       jsonSchema: RANKING_SCHEMA,

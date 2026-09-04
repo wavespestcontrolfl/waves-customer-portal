@@ -335,6 +335,7 @@ ${faqFormatInstruction([post.category, post.tag])}
 - End with a practical takeaway + soft Waves mention`;
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      laneId: 'blog_draft',
       maxTokens: 3000,
       jsonMode: false,
       system: systemPrompt,
@@ -392,6 +393,7 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
     if (!post) throw new Error('Post not found');
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.deepAnalysis, {
+      laneId: 'blog_optimize',
       // Documented DEEP floor — MODEL_DEEP may point at a thinking model
       // (fable line) where thinking spends from the same token budget, so a
       // sub-4096 cap can starve the visible JSON.
@@ -573,6 +575,7 @@ Return JSON: {
     const requestCount = Math.min(Math.ceil(count * 1.4), 60);
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      laneId: 'blog_draft',
       maxTokens: 6000,
       jsonMode: true,
       system: `You are the editorial planner for Waves Pest Control's local blog in Southwest Florida. Generate ${requestCount} genuinely distinct blog post ideas.
