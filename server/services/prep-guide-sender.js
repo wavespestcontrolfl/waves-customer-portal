@@ -129,7 +129,7 @@ async function nextUpcomingVisit(customerId, config) {
     // email would say "To be confirmed" despite a real upcoming appointment.
     .where('scheduled_date', '>=', etDateString())
     .orderBy('scheduled_date', 'asc')
-    .first('id', 'scheduled_date', 'prep_template_key', 'prep_sent_at', 'prep_token');
+    .first('id', 'scheduled_date', 'prep_template_key', 'prep_sent_at', 'prep_token', 'created_at');
   return row || null;
 }
 
@@ -155,12 +155,19 @@ async function nextUpcomingVisit(customerId, config) {
 // delivered URL.
 const LIVE_ENROLLMENT_STATUSES = ['queued', 'active'];
 const SEQUENCE_KEY_BY_PREP_TEMPLATE = Object.freeze({ 'prep.bed_bug': 'bed_bug', 'prep.cockroach': 'cockroach', 'prep.flea': 'flea' });
+// The manual email's trigger id — VISIT-scoped, so a guide emailed for an
+// older appointment never reads as this visit's delivery (pre-push Codex
+// P1 on b5d05dd14).
+function manualPrepTriggerId(customerId, templateKey, visitId) {
+  return `manual_prep:${customerId}:${templateKey}:${visitId || 'none'}`;
+}
+
 // Any trace that a MANUAL send of takenKey reached (or may have reached)
-// the customer on this visit — see reservationAbandoned. Throws on a read
+// the customer on THIS visit — see reservationAbandoned. Throws on a read
 // failure (the caller fails closed).
 async function manualDeliveryTrace(visit, takenKey, customerId) {
   const email = await db('email_messages')
-    .where({ trigger_event_id: `manual_prep:${customerId}:${takenKey}` })
+    .where({ trigger_event_id: manualPrepTriggerId(customerId, takenKey, visit.id) })
     .whereNot('status', 'blocked')
     .whereRaw("COALESCE(error_message, '') <> ?", [ABORTED_BEFORE_DISPATCH])
     .first('id');
@@ -173,10 +180,14 @@ async function manualDeliveryTrace(visit, takenKey, customerId) {
       .first('id');
     if (text) return true;
   }
+  // The confirmed-text marker is customer + pest wide (the tagger's replay
+  // guard) — bounded to this visit's lifetime so an older appointment's
+  // prep text cannot pin a later visit's reservation.
   const pestType = Object.keys(PREP_CONFIG).find((k) => PREP_CONFIG[k].emailTemplateKey === takenKey);
-  if (pestType) {
+  if (pestType && visit.created_at) {
     const marker = await db('customer_interactions')
       .where({ customer_id: customerId, interaction_type: 'sms_outbound', subject: `${pestType} prep info sent` })
+      .where('created_at', '>=', visit.created_at)
       .first('id');
     if (marker) return true;
   }
@@ -380,7 +391,7 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
       recipientId: customer.id,
       suppressionGroupKey: SERVICE_GROUP,
       categories: ['project_prep', 'manual_prep', `prep_${config.emailTemplateKey.replace(/\./g, '_')}`],
-      triggerEventId: `manual_prep:${customer.id}:${config.emailTemplateKey}`,
+      triggerEventId: manualPrepTriggerId(customer.id, config.emailTemplateKey, visit?.id),
       // Provider rejections can echo the recipient address; keep the raw
       // SendGrid body out of the logs (email addresses in logs are a P1).
       suppressProviderErrorLog: true,

@@ -51,6 +51,8 @@ let stepSendRow = null;
 let lastRunsQuery = null;
 // Manual-delivery traces for the abandoned-reservation check: null = none.
 let manualEmailRow = null;
+let manualEmailQueries = [];
+let interactionQueries = [];
 let manualSmsRow = null;
 let interactionMarkerRow = null;
 function traceQuery(row) {
@@ -101,8 +103,8 @@ beforeEach(() => {
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery();
     if (table === 'scheduled_services') { const q = scheduledQuery(); scheduledQueries.push(q); return q; }
-    if (table === 'customer_interactions') return { insert: interactionsInsert, ...traceQuery(interactionMarkerRow) };
-    if (table === 'email_messages') return traceQuery(manualEmailRow);
+    if (table === 'customer_interactions') { const q = { insert: interactionsInsert, ...traceQuery(interactionMarkerRow) }; interactionQueries.push(q); return q; }
+    if (table === 'email_messages') { const q = traceQuery(manualEmailRow); manualEmailQueries.push(q); return q; }
     if (table === 'sms_log') return traceQuery(manualSmsRow);
     if (table === 'email_template_automation_runs') { lastRunsQuery = livenessQuery(runRows); return lastRunsQuery; }
     if (table === 'automation_enrollments') return livenessQuery(enrollmentRows);
@@ -114,6 +116,8 @@ beforeEach(() => {
   enrollmentRows = [];
   stepSendRow = null;
   manualEmailRow = null;
+  manualEmailQueries = [];
+  interactionQueries = [];
   manualSmsRow = null;
   interactionMarkerRow = null;
   scheduledQueries = [];
@@ -524,18 +528,21 @@ describe('sendPrepToCustomer', () => {
 
     // A MANUAL send that kept the key without a stamp (uncertain email /
     // lost stamp) may have put the page in the customer's hands: an
-    // email_messages row past the dispatch boundary, an outbound text
-    // carrying the /prep/:token link, or the confirmed-text marker each
-    // keep the page (r13 P0).
-    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea', prep_sent_at: null, prep_token: 'f'.repeat(32) };
+    // email_messages row (VISIT-scoped trigger id) past the dispatch
+    // boundary, an outbound text carrying the /prep/:token link, or the
+    // confirmed-text marker written since this visit was created each keep
+    // the page (r13 P0; visit scoping = pre-push P1 on b5d05dd14).
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea', prep_sent_at: null, prep_token: 'f'.repeat(32), created_at: new Date('2026-06-01T00:00:00Z') };
     manualEmailRow = { id: 'em-1' };
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' })).toMatchObject({ ok: false, reason: 'prep_page_taken' });
+    expect(manualEmailQueries.some((q) => q.where.mock.calls.some(([arg]) => arg && arg.trigger_event_id === `manual_prep:cust-1:prep.flea:${VISIT.id}`))).toBe(true);
     manualEmailRow = null;
     manualSmsRow = { id: 'sms-1' };
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' })).toMatchObject({ ok: false, reason: 'prep_page_taken' });
     manualSmsRow = null;
     interactionMarkerRow = { id: 'ci-1' };
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' })).toMatchObject({ ok: false, reason: 'prep_page_taken' });
+    expect(interactionQueries.some((q) => q.where.mock.calls.some(([col, op, v]) => col === 'created_at' && op === '>=' && v instanceof Date))).toBe(true);
     interactionMarkerRow = null;
     expect(serviceUpdates).toEqual([]);
 
