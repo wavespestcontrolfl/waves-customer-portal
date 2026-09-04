@@ -890,24 +890,30 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
   if (st === 'sending' && !staleSending) return { ok: false, code: 'send_in_flight' };
   if (st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable' };
   const now = new Date();
-  // a requeue on a row that has LEFT the path-specific follow-up lifecycle (a send-first row promoted to live while
-  // the send was in flight) cannot yield a sendable draft — the sender refuses it, followUpPending excludes it, the
-  // bridge ends its instance — so the follow-up RETIRES (`skipped`) instead of parking a draft nowhere lists
-  const path = prospect.path_id ? await db('seo_link_acquisition_paths').where({ id: prospect.path_id }).first('id', 'execution_after_send') : null;
-  const retired = outcome !== 'sent' && !M.FOLLOW_UP_STATUSES(path).includes(prospect.status);
-  const note = outcome === 'sent'
-    ? `Follow-up reconciled as SENT ${now.toISOString()} by ${approvedBy}`
-    : retired
-      ? `Follow-up reconciled as NOT sent ${now.toISOString()} by ${approvedBy} — the placement moved on (${prospect.status}); follow-up retired`
-      : `Follow-up reconciled as NOT sent (re-queued) ${now.toISOString()} by ${approvedBy}`;
-  const notes = prospect.notes ? `${prospect.notes}\n${note}` : note;
-  const patch = outcome === 'sent'
-    ? { follow_up_status: 'sent', follow_up_sent_at: prospect.follow_up_sent_at || now, follow_up_send_token: null, notes, updated_at: now }
-    : retired
-      ? { follow_up_status: 'skipped', follow_up_skipped_reason: `placement left the follow-up lifecycle (${prospect.status})`, follow_up_send_token: null, follow_up_attempted_at: null, notes, updated_at: now }
-      : { follow_up_status: 'drafted', follow_up_send_token: null, follow_up_attempted_at: null, follow_up_skipped_reason: null, notes, updated_at: now };
+  // the decision is taken UNDER the row lock, on the row and path as they are in this transaction (never the caller's
+  // pre-read): a requeue on a row that has LEFT the path-specific follow-up lifecycle (a send-first row the verifier
+  // promoted to live while the send was in flight, or between the pre-read and this write) cannot yield a sendable
+  // draft — the sender refuses it, followUpPending excludes it, the bridge ends its instance — so the follow-up
+  // RETIRES (`skipped`) instead of parking a draft nowhere lists
+  let retired = false;
   const rows = await db.transaction(async (trx) => {
-    let q = trx('seo_link_prospects').where({ id: prospect.id, follow_up_status: st });
+    const row = await trx('seo_link_prospects').where({ id: prospect.id }).forUpdate().first('id', 'status', 'path_id', 'notes', 'follow_up_sent_at');
+    if (!row) return [];
+    const path = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first('id', 'execution_after_send') : null;
+    retired = outcome !== 'sent' && !M.FOLLOW_UP_STATUSES(path).includes(row.status);
+    const note = outcome === 'sent'
+      ? `Follow-up reconciled as SENT ${now.toISOString()} by ${approvedBy}`
+      : retired
+        ? `Follow-up reconciled as NOT sent ${now.toISOString()} by ${approvedBy} — the placement moved on (${row.status}); follow-up retired`
+        : `Follow-up reconciled as NOT sent (re-queued) ${now.toISOString()} by ${approvedBy}`;
+    const notes = row.notes ? `${row.notes}\n${note}` : note;
+    const patch = outcome === 'sent'
+      ? { follow_up_status: 'sent', follow_up_sent_at: row.follow_up_sent_at || now, follow_up_send_token: null, notes, updated_at: now }
+      : retired
+        ? { follow_up_status: 'skipped', follow_up_skipped_reason: `placement left the follow-up lifecycle (${row.status})`, follow_up_send_token: null, follow_up_attempted_at: null, notes, updated_at: now }
+        : { follow_up_status: 'drafted', follow_up_send_token: null, follow_up_attempted_at: null, follow_up_skipped_reason: null, notes, updated_at: now };
+    // the CAS the lane has always had (state + token), plus the lifecycle the decision was taken on
+    let q = trx('seo_link_prospects').where({ id: prospect.id, follow_up_status: st, status: row.status, path_id: row.path_id });
     q = prospect.follow_up_send_token ? q.where({ follow_up_send_token: prospect.follow_up_send_token }) : q.whereNull('follow_up_send_token');
     const r = await q.update(patch).returning('*');
     if (outcome === 'sent' && r && r.length === 1) await satisfySendInstance(trx, { prospectId: prospect.id, now, followUp: true });

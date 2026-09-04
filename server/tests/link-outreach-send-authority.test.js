@@ -1258,8 +1258,11 @@ describe('Codex r3 on #3854', () => {
     const s = await conversation();
     gmail.sendMessage.mockRejectedValueOnce(new Error('ETIMEDOUT'));
     expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'send_failed' });
-    Object.assign(placement(s.db), { status: 'live', live_url: 'https://example.org/resources/' }); // promoted while the send was in flight
+    // promoted between the reconcile's pre-read and its write (Codex r7): the decision is taken on the LOCKED row, so the promotion still retires it
+    s.db._raws.length = 0;
+    s.db._beforeResolve = (table, db) => { if (table === 'seo_link_prospects' && db._raws.some((r) => /FOR UPDATE seo_link_prospects/.test(String(r)))) Object.assign(db._tables.seo_link_prospects[0], { status: 'live', live_url: 'https://example.org/resources/' }); };
     expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'requeue', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true, retired: true });
+    s.db._beforeResolve = null;
     expect(placement(s.db)).toMatchObject({ status: 'live', follow_up_status: 'skipped', follow_up_send_token: null, follow_up_attempted_at: null });
     expect(placement(s.db).notes).toMatch(/follow-up retired/);
     expect(Outreach.conversationOpen(placement(s.db), storedPath(s.db))).toBe(false); // nothing owed: the inbox is free
