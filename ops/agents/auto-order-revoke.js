@@ -25,7 +25,6 @@ process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
 const path = require('path');
 const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
 const { auditVendorOrder } = require(path.join(__dirname, '..', '..', 'server', 'services', 'audit-log'));
-const { startOfETMonth } = require(path.join(__dirname, '..', '..', 'server', 'utils', 'datetime-et'));
 
 function arg(name) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -38,20 +37,22 @@ const dollars = (c) => `$${(Number(c || 0) / 100).toFixed(2)}`;
 
 const parseEvidence = (raw) => (typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return {}; } })() : raw) || {};
 
-// --list: every automatic order this month whose vendor call was dispatched
-// or is in flight — placing (shown, not revocable), placed, and post-submit
-// needs_review rows (placed_at set: "may or may not have gone out"), which
-// are precisely the ones an operator must reconcile (Codex r2 P2).
+// --list: every automatic order whose vendor call was dispatched or is in
+// flight and whose request is not yet received — placing (shown, not
+// revocable), placed, and post-submit needs_review rows (placed_at set:
+// "may or may not have gone out"), which are precisely the ones an operator
+// must reconcile (Codex r2 P2). No month filter: an order outstanding across
+// an ET month boundary still needs its ledger id here (Codex r12 P2).
 async function listDispatched() {
   const rows = await db('vendor_orders as vo')
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .leftJoin('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
-    .where('vo.created_at', '>=', startOfETMonth(new Date()))
     .whereRaw("(vo.status IN ('placing', 'placed') OR (vo.status = 'needs_review' AND vo.placed_at IS NOT NULL))")
+    .whereNot('prr.status', 'received')
     .orderBy('vo.created_at', 'desc')
     .select('vo.id', 'vo.status', 'vo.amount_cents', 'vo.external_order_number', 'vo.placed_at', 'vo.evidence', 'v.name as vendor', 'pc.name as product', 'prr.status as request_status');
-  if (!rows.length) console.log('No dispatched automatic orders this month.');
+  if (!rows.length) console.log('No unreconciled dispatched automatic orders.');
   for (const r of rows) {
     const revoked = parseEvidence(r.evidence).revokedAt ? '  REVOKED' : '';
     console.log(`${r.id}  ${r.status.padEnd(12)} ${(r.vendor || '?').padEnd(14)} ${dollars(r.amount_cents).padStart(9)}  #${r.external_order_number || '—'}  ${r.product || '?'}  (request ${r.request_status})${revoked}`);

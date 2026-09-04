@@ -343,4 +343,4 @@ function sweepFailureError(result) {
   return new Error(`[auto-reorder] ${failed.length} product(s) failed: ${failed.map((e) => `${e.name} (${e.message})`).join('; ')}`);
 }
 
-module.exports = { runSuppliesAutoReorderSweep, sweepFailureError, findLowStockCandidates, vendorPricingFor, lockProductPricing, AUTO_REORDER_GATE: GATE, AUTO_REORDER_SOURCE: SOURCE };
+module.exports = { runSuppliesAutoReorderSweep, sweepFailureError, findLowStockCandidates, vendorPricingFor, lockProductPricing, ringRestockBell, AUTO_REORDER_GATE: GATE, AUTO_REORDER_SOURCE: SOURCE };
