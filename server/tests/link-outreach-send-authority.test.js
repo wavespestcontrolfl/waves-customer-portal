@@ -1224,6 +1224,14 @@ describe('Codex r2 on #3854', () => {
     const until = addETDaysAtWallClock(new Date(placement(s.db).follow_up_sent_at), 45);
     expect(await Outreach.closeSilentConversations({ now: until })).toMatchObject({ closed: 1 });
     expect(placement(s.db).conversation_closed_at).toBeTruthy();
+    // Codex r18: the stored `acquiring` is CONTRADICTED by the closure (the conversation is no longer an active
+    // intermediate) — selected stale ONCE, re-aggregated to qualified (the domain released: Reject / Watch usable)
+    expect(s.db._tables.seo_link_domains[0].agent_state).toBe('acquiring');
+    expect(await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).toEqual([{ id: s.d.id, domain: 'example.org', why: 'stale' }]);
+    expect(await nightly(s.db, { now: new Date(until.getTime() + DAY) })).toMatchObject({ aggregateChanges: 1, placementsCreated: 0 }); // no successor fabricated: a re-pitch is a NEW prospect the registry admits
+    expect(s.db._tables.seo_link_prospects).toHaveLength(1);
+    expect(s.db._tables.seo_link_domains[0].agent_state).toBe('qualified');
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'sent' }); // the closed row untouched
     // alone: the closed row's satisfied rows are the slot's history — nothing to bridge, no nightly slot spent
     expect(await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).toEqual([]);
     // a fresh prospect for the released publisher, linked to the same best path (the registry catch-up): selected, decided
@@ -1263,11 +1271,23 @@ describe('Codex r2 on #3854', () => {
     expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true, retired: true });
     expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/^skipped by Adam after review \(reply_check_failed\)/) });
     expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: 'x', now: LATER })).toMatchObject({ ok: false, code: 'no_draft' });
-    // an unmarked drafted follow-up is the queue's to send, not skippable; a sent one is settled
+    // an AUTO-decided drafted follow-up is the queue's to send, not skippable; a sent one is settled
     const t = await conversation();
     expect(await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: false, code: 'not_reconcilable' });
     Object.assign(placement(t.db), { follow_up_status: 'sent' });
     expect(await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: false, code: 'not_reconcilable' });
+  });
+  test('P2 (Codex r18): the owner SKIPS a follow-up the POLICY routed to them (OWNER_OUTREACH, no marker) — the Owner queue card\'s terminal action; the conversation then closes on silence', async () => {
+    const s = await conversation();
+    followUpRow(s.db).level = 'OWNER_OUTREACH'; // unclean copy / a score outside the automatic threshold: the owner's to send
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'drafted', follow_up_skipped_reason: null });
+    expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true, retired: true });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'skipped', follow_up_skipped_reason: 'skipped by Adam after review' });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: 'x', now: LATER })).toMatchObject({ ok: false, code: 'no_draft' });
+    // the lane is complete (pitch sent, follow-up skipped): the closure sweep reads the silence and releases the inbox
+    const until = addETDaysAtWallClock(new Date(placement(s.db).outreach_sent_at), 45);
+    expect(await Outreach.closeSilentConversations({ now: until })).toMatchObject({ closed: 1 });
+    expect(placement(s.db).conversation_closed_at).toBeTruthy();
   });
   test('P2 (Codex r16): the owner queue CLOSES an owner-routed follow-up whose thread recipient became a customer contact instead of showing an unusable card', async () => {
     const s = await conversation();

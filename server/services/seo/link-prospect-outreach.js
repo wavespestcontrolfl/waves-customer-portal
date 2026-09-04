@@ -967,12 +967,15 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
   const attemptedMs = prospect.follow_up_attempted_at ? new Date(prospect.follow_up_attempted_at).getTime() : 0;
   const staleSending = st === 'sending' && Date.now() - attemptedMs >= STALE_SENDING_MS;
   if (st === 'sending' && !staleSending) return { ok: false, code: 'send_in_flight' };
-  // the owner's TERMINAL review (§6.4): a drafted follow-up the automatic attempt routed to the owner on a marker — the
-  // thread unreadable for good (deleted, a 404 on every read), a recipient match the owner will not acknowledge — may be
-  // skipped outright: every Send click would re-run the same check, no other action ends it, and the conversation holds
-  // its inbox and domain until it is settled. Only the marked drafted state and the ambiguous send states skip.
-  const unverifiable = st === 'drafted' && M.OWNER_MARKERS.includes(prospect.follow_up_skipped_reason);
-  if (outcome === 'skip' && !unverifiable && st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable', error: 'only a follow-up the automatic attempt routed to you, or an ambiguous send, can be skipped' };
+  // the owner's TERMINAL review (§6.4): a drafted follow-up that is the OWNER'S to send — routed by the automatic
+  // attempt on a marker (the thread unreadable for good: deleted, a 404 on every read; a recipient match the owner
+  // will not acknowledge) or by the policy (unclean copy, a score outside the automatic threshold: the open follow-up
+  // instance decided OWNER_*) — may be skipped outright: the queue never sends it, the Owner queue offers only Send,
+  // and the conversation holds its inbox and domain until it is settled. Only an owner-routed drafted follow-up and the
+  // ambiguous send states skip: an AUTO-decided draft is the queue's to send.
+  const ownerRouted = st === 'drafted' && (M.OWNER_MARKERS.includes(prospect.follow_up_skipped_reason)
+    || (await db(AUTH).where({ prospect_id: prospect.id, dimension: 'communication', instance_kind: 'followup' }).whereNull('ended_at').whereNull('satisfied_at').select('level')).some((r) => String(r.level || '').startsWith('OWNER_')));
+  if (outcome === 'skip' && !ownerRouted && st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable', error: 'only a follow-up that is yours to send (routed to you by the automatic attempt or the policy), or an ambiguous send, can be skipped' };
   if (outcome !== 'skip' && st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable' };
   const now = new Date();
   // the decision is taken UNDER the row lock, on the row and path as they are in this transaction (never the caller's

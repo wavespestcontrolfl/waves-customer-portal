@@ -279,6 +279,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   for (const location of expectedLocations(path)) {
     let row = null;
     let conversation = false;
+    let closedHere = null;
     if (location === '-') {
       // the lane's conversation when one is already bridged: the domain-bound unscoped row on the best path that
       // carries open rows — looked up FIRST, so the answer never depends on which active row the inbox lock
@@ -290,6 +291,10 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
         // conversation: it never shadows a live row, so a prospect admitted for the released publisher is bridged
         row = bound.find((p) => withOpen.has(p.id) && !p.conversation_closed_at) || null;
         conversation = Boolean(row);
+        // …and with NOTHING live at the location, the closed conversation stays the slot's placement (as selection's
+        // `covered` reads it): re-aggregated as history, never replaced — a re-pitch of a silent publisher is a NEW
+        // prospect the registry admits, not a row the nightly fabricates the moment the closure releases the domain
+        if (!row) closedHere = bound.find((p) => withOpen.has(p.id) && p.conversation_closed_at) || null;
       }
     }
     if (!row) row = await findPlacementRow(trx, domain.domain, HOMEPAGE, { location, columns: ['*'] });
@@ -336,6 +341,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
       if (!applied) { delete adopt.status; await trx('seo_link_prospects').where({ id: row.id }).update(adopt); }
       Object.assign(row, applied ? adopt : { ...adopt, status: (await trx('seo_link_prospects').where({ id: row.id }).first('status')).status });
     }
+    if (!row && closedHere && !inFlight) row = closedHere;
     if (!row) {
       const [created] = await trx('seo_link_prospects').insert({
         target_domain: domain.domain, target_page: HOMEPAGE, target_url: path.submission_url || null, location_key: location,
@@ -584,12 +590,12 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
   // (bridgeRejected) — the worker excludes `rejected` domains, so a lifted
   // DENY that never reached the aggregate would strand the domain for good.
   if (BRIDGE_STATES.includes(domain.agent_state) || (domain.agent_state === 'rejected' && (waiver || bridgeRejected))) {
-    const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'path_id', 'claimed_at', 'location_key');
+    const all = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'path_id', 'claimed_at', 'location_key', 'conversation_closed_at');
     // the bridged placements' status + lease come from THIS read, not the
     // pre-decision snapshot: a claim or report that landed meanwhile (the
     // worker locks the row without this domain lock) is what the aggregate sees
     const fresh = new Map(all.map((p) => [p.id, p]));
-    const seen = new Map(summaries.map((s) => { const f = fresh.get(s.id); return [s.id, f ? { ...s, status: f.status, claimed_at: f.claimed_at || null } : s]; }));
+    const seen = new Map(summaries.map((s) => { const f = fresh.get(s.id); return [s.id, f ? { ...s, status: f.status, claimed_at: f.claimed_at || null, conversation_closed_at: f.conversation_closed_at || null } : s]; }));
     const others = all.filter((p) => !seen.has(p.id));
     const otherRows = others.length ? await annotateApprovals(trx, await trx(AUTH).whereIn('prospect_id', others.map((p) => p.id)).whereNull('ended_at').select('*')) : [];
     const otherPathIds = [...new Set(others.map((p) => p.path_id).filter(Boolean))];
@@ -597,7 +603,7 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
     const laneById = new Map(otherPaths.map((p) => { const outreach = OUTREACH_ACQUISITION_TYPES.includes(p.acquisition_type); return [p.id, { outreach, sendFirst: outreach && !P.submitFirst(p) }]; }));
     // an off-shape row (the other lane's keys) is INERT in the aggregate except for a live/indexed link it already won:
     // its workflow status cannot progress (no authority) and must not hold the domain at acquiring / qualified
-    for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), ...(laneById.get(p.path_id) || { outreach: false, sendFirst: false }), claimed_at: p.claimed_at || null, offShape: !shape.has(p.location_key) });
+    for (const p of others) seen.set(p.id, { id: p.id, status: p.status, rows: otherRows.filter((r) => r.prospect_id === p.id), ...(laneById.get(p.path_id) || { outreach: false, sendFirst: false }), claimed_at: p.claimed_at || null, conversation_closed_at: p.conversation_closed_at || null, offShape: !shape.has(p.location_key) });
     const next = aggregateState([...seen.values()]);
     if (next !== domain.agent_state) {
       const moved = await trx('seo_link_domains').where({ id: domain.id, agent_state: domain.agent_state }).update({ agent_state: next, rejected_by: next === 'rejected' ? 'bridge' : null, updated_at: now });
@@ -611,7 +617,9 @@ async function bridgeDomain(trx, { domainId, policy, policyUpdatedAt, now }) {
 // acquired once live with NOTHING pending (no active intermediate, no
 // owner-held sibling); acquiring for the active intermediates — a leased
 // placement, `placed`, `contacted`/`negotiating`, or parked at a handoff
-// (`ready_for_credentials`/`ready_for_payment`); qualified while the owner
+// (`ready_for_credentials`/`ready_for_payment`) — a CLOSED conversation
+// (§13: conversation_closed_at, silent, its inbox and domain released) is
+// history, not an active intermediate; qualified while the owner
 // (or a deferred owner decision) holds it; back to investigating when EVERY
 // placement's current BLOCKING decision is INVALID; rejected ONLY when every
 // one is DENY (a single DENY beside a pending sibling never rejects; a carried
@@ -633,7 +641,7 @@ function aggregateState(placements) {
   const live = (p) => !p.offShape;
   const judged = placements.filter((p) => live(p) && blocking(p).length > 0);
   const every = (level) => judged.length > 0 && judged.every((p) => blocking(p).every((r) => r.level === level));
-  const active = (p) => live(p) && (leased(p) || ACQUIRING_STATUSES.includes(p.status));
+  const active = (p) => live(p) && (leased(p) || (ACQUIRING_STATUSES.includes(p.status) && !p.conversation_closed_at));
   const held = (p) => live(p) && (p.status === PARKED || ownerPending(p));
   if (placements.some((p) => live(p) && authorizedPending(p))) return 'ready_to_acquire';
   if (placements.some((p) => LIVE_STATUSES.includes(p.status)) && !placements.some(active) && !placements.some(held)) return 'acquired';

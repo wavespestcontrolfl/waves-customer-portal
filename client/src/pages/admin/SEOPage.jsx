@@ -3576,6 +3576,23 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     }
   };
 
+  // the owner's TERMINAL review of a follow-up that is theirs to send (§6.4): skipped, the conversation settles and
+  // its inbox and domain are released on the closure sweep — the queue never sends an owner-routed follow-up
+  const skipFollowUp = async (card, row) => {
+    setBusy(row.id);
+    setError(null);
+    setResult(null);
+    try {
+      await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/outreach/reconcile`, { method: "POST", body: { outcome: "skip", follow_up: true } });
+      setResult({ tone: D.muted, text: `Skipped the follow-up on ${card.domain.domain} — the conversation settles without it` });
+      await refresh();
+    } catch (e) {
+      setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Skip failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   // the send click IS the approval of a communication row (§6.3 2c)
   const send = async (card, row) => {
     setBusy(row.id);
@@ -3771,6 +3788,9 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                                 <button onClick={() => send(c, r)} disabled={rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`])} style={btn(rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]), D.green)}>
                                   {rowBusy ? "Sending…" : r.action === "outreach_followup" ? "Send the follow-up" : "Send the pitch"}
                                 </button>
+                                {r.action === "outreach_followup" && (
+                                  <button onClick={() => skipFollowUp(c, r)} disabled={rowBusy || domainBusy} style={{ ...btn(rowBusy || domainBusy, D.muted), marginLeft: 6 }}>Skip the follow-up</button>
+                                )}
                               </span>
                             </div>
                           ) : r.approvable ? (

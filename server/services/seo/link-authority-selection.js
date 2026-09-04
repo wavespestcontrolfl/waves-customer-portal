@@ -31,10 +31,11 @@ const PARKABLE = 'prospect';
 // those moves either — and the verifier bumps updated_at on every live check. The aggregate is therefore re-run
 // exactly when the STORED state contradicts what the statuses imply: `acquired` needs a live link (off-shape links
 // count — they win the aggregate too); `acquiring` needs an in-shape placement that is leased or in an active
-// intermediate. Anything else the aggregate would say is held / pending — states the rows already re-select on.
+// intermediate — a CLOSED conversation (§13: conversation_closed_at, its inbox and domain released) is not one, so the
+// closure sweep's stamp re-selects the domain here and the bridge re-aggregates it. Anything else the aggregate would say is held / pending — states the rows already re-select on.
 const CONTRADICTED = Object.freeze({
   acquired: ({ all }) => !all.some((p) => LIVE_STATUSES.includes(p.status)),
-  acquiring: ({ mine }) => !mine.some((p) => p.claimed_at || ACQUIRING_STATUSES.includes(p.status)),
+  acquiring: ({ mine }) => !mine.some((p) => p.claimed_at || (ACQUIRING_STATUSES.includes(p.status) && !p.conversation_closed_at)),
   // pending authorized work means an UNLEASED `prospect` row; a worker that claimed and reported it moved the
   // placement straight to placed / contacted / live without the domain knowing
   ready_to_acquire: ({ mine }) => !mine.some((p) => p.status === PARKABLE && !p.claimed_at),
