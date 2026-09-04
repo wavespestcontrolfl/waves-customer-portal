@@ -988,40 +988,50 @@ async function createRestockRequest(knex, req, serviceId) {
     // An automatic order already claimed/placed for this product → 409; the
     // Restock tab carries the order line (pre-push P0).
     await require('../services/procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id);
-    const actor = actorFromRequest(req);
-    const currentStock = numberOrNull(product.inventory_on_hand);
-    const lowStock = numberOrNull(product.low_stock_threshold);
-    const targetStock = numberOrNull(req.body?.targetStock) ?? (lowStock != null ? lowStock * 2 : null);
-    const requestedQuantity = numberOrNull(req.body?.requestedQuantity)
-      ?? (targetStock != null && currentStock != null ? Math.max(0, targetStock - currentStock) : null);
-    const [row] = await trx('product_restock_requests').insert({
-      product_id: product.id,
-      scheduled_service_id: service.id,
-      customer_id: service.customer_id || null,
-      status: 'open',
-      priority: req.body?.priority || 'high',
-      requested_quantity: requestedQuantity,
-      unit: String(req.body?.unit || product.inventory_unit || product.rate_unit || '').trim() || null,
-      current_stock: currentStock,
-      target_stock: targetStock,
-      vendor: String(req.body?.vendor || product.best_vendor || '').trim() || null,
-      needed_by: req.body?.neededBy ? String(req.body.neededBy).slice(0, 10) : service.scheduled_date || null,
-      reason: String(req.body?.reason || '').trim() || `Restock needed for WaveGuard readiness: ${product.name}`,
-      source: 'lawn_readiness_exception',
-      created_by: actor.id,
-      created_by_name: actor.name || actor.email || null,
-      metadata: JSON.stringify({
-        serviceType: service.service_type || null,
-        scheduledDate: service.scheduled_date || null,
-        issueCode: req.body?.issueCode || null,
-      }),
-    }).returning('*');
-    return {
-      ...row,
-      productName: product.name,
-      productCategory: product.category || null,
-    };
+    const [row] = await trx('product_restock_requests')
+      .insert(readinessRestockRow({ product, service, body: req.body || {}, actor: actorFromRequest(req) }))
+      .returning('*');
+    return { ...row, productName: product.name, productCategory: product.category || null };
   });
+}
+
+// Requested quantity defaults to (target − on hand), target to 2× the
+// low-stock threshold — explicit body values win.
+function readinessQuantities(product, body) {
+  const currentStock = numberOrNull(product.inventory_on_hand);
+  const lowStock = numberOrNull(product.low_stock_threshold);
+  const targetStock = numberOrNull(body.targetStock) ?? (lowStock != null ? lowStock * 2 : null);
+  const requestedQuantity = numberOrNull(body.requestedQuantity)
+    ?? (targetStock != null && currentStock != null ? Math.max(0, targetStock - currentStock) : null);
+  return { currentStock, targetStock, requestedQuantity };
+}
+
+// The readiness restock row from the LOCKED product, the service and the
+// request body. Pure — no decisions about whether to insert.
+function readinessRestockRow({ product, service, body, actor }) {
+  const { currentStock, targetStock, requestedQuantity } = readinessQuantities(product, body);
+  return {
+    product_id: product.id,
+    scheduled_service_id: service.id,
+    customer_id: service.customer_id || null,
+    status: 'open',
+    priority: body.priority || 'high',
+    requested_quantity: requestedQuantity,
+    unit: String(body.unit || product.inventory_unit || product.rate_unit || '').trim() || null,
+    current_stock: currentStock,
+    target_stock: targetStock,
+    vendor: String(body.vendor || product.best_vendor || '').trim() || null,
+    needed_by: body.neededBy ? String(body.neededBy).slice(0, 10) : service.scheduled_date || null,
+    reason: String(body.reason || '').trim() || `Restock needed for WaveGuard readiness: ${product.name}`,
+    source: 'lawn_readiness_exception',
+    created_by: actor.id,
+    created_by_name: actor.name || actor.email || null,
+    metadata: JSON.stringify({
+      serviceType: service.service_type || null,
+      scheduledDate: service.scheduled_date || null,
+      issueCode: body.issueCode || null,
+    }),
+  };
 }
 
 function actorFromRequest(req) {

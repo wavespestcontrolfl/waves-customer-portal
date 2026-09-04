@@ -146,6 +146,7 @@ async function refreshOpenRequest(ctx, p, existing, pricing) {
   };
   const vendor = existing.vendor || p.vendor_name || null;
   const changed = vendor !== (existing.vendor || null)
+    || learned.vendorId !== (meta.vendorId || null)
     || learned.vendorSku !== (meta.vendorSku || null)
     || learned.vendorProductUrl !== (meta.vendorProductUrl || null);
   if (!changed) return existing;
