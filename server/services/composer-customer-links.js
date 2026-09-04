@@ -802,6 +802,7 @@ async function immediateOnlyLinkSendCheck(body) {
 // 40-branch function); the shared parts are the parsed runs, the canonical
 // host and the two binding rules below.
 const refuseSend = (error) => ({ ok: false, error });
+const NON_US_REFUSAL = 'Customer links only go to a US number — check the recipient before sending.';
 const digitsLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
 
 // Per-ROW binding: the row's customer must own the recipient number and —
@@ -1104,6 +1105,10 @@ async function checkCardLinks(ctx, cards) {
     const bad = await ownedByRecipient(ctx, row.customer_id, 'card request link');
     if (bad) return bad;
     ctx.bearers += 1;
+    // The destination rule BEFORE the funnel (pre-push Codex P1): the
+    // funnel is stateful — it can auto-secure the visit from a saved card —
+    // and a non-US number sharing the owner's last ten must not drive it.
+    if (!ctx.usDestination) return refuseSend(NON_US_REFUSAL);
     // auto_secured = a consented saved card covered the ask meanwhile (the
     // funnel secured the visit, as any trigger would) — nothing to ask.
     const funnel = await require('./appointment-card-request').requestCardForAppointment({
@@ -1138,6 +1143,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
     trustedCustomerId,
+    usDestination,
     bearers: 0, // verified bearers seen — the owner rule below applies to any
     contractId,
   };
@@ -1151,9 +1157,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     || (await checkAccountBoundLinks(ctx))
     || (await checkCardLinks(ctx, cards));
   if (refusal) return refusal;
-  if (ctx.bearers && !usDestination) {
-    return refuseSend('Customer links only go to a US number — check the recipient before sending.');
-  }
+  if (ctx.bearers && !ctx.usDestination) return refuseSend(NON_US_REFUSAL);
   const out = {
     ok: true,
     ...(cards.length ? { cards } : {}),

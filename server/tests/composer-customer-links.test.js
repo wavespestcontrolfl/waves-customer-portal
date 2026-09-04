@@ -1549,6 +1549,12 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     expect(requestCardForAppointment).not.toHaveBeenCalled();
   });
 
+  test('a non-US destination refuses a visit card link BEFORE the stateful funnel runs — it can auto-secure the visit (pre-push Codex P1)', async () => {
+    wire({ card: { id: 'r1', kind: 'visit', status: 'pending', customer_id: 'c1', scheduled_service_id: 'v1' } });
+    expect((await bearerLinkSendCheck(`Secure your visit: portal.wavespestcontrol.com/secure/${TOKEN}`, '9415550100', { trustedCustomerId: 'c1', usDestination: false })).error).toMatch(/only go to a US number/);
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+  });
+
   test('an http:// or look-alike /secure link refuses here in its own right — never skipped on the Auto Pay seam\'s order (GH Codex #3851 r2 P1)', async () => {
     wire({ card: { id: 'r1', kind: 'visit', status: 'pending', customer_id: 'c1', scheduled_service_id: 'v1' } });
     expect((await bearerLinkSendCheck(`Secure your visit: http://portal.wavespestcontrol.com/secure/${TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
