@@ -781,16 +781,16 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // one provider for every generation in the loop, fallback disabled.
   const pinned = Boolean(routeOverride);
   const route = routeOverride || draftRouteFor({ intentName: intent?.intent, inboundMessage });
-  // The call-ledger lane: the caller's when it has one of its own (the
-  // estimate follow-up, the sealed exam), else the route decides — the
-  // save-the-sale route is its own lane.
-  const laneId = presetLaneId || (route === MODELS.ROUTES.smsDraftSaveSale ? 'sms_save_sale' : 'sms_draft');
+  // The call-ledger lane, spread into every generation's options: the
+  // caller's when it has one of its own (the estimate follow-up, the sealed
+  // exam), else the route decides — the save-the-sale route is its own lane.
+  const lane = { laneId: presetLaneId || (route === MODELS.ROUTES.smsDraftSaveSale ? 'sms_save_sale' : 'sms_draft') };
   // Stamp only what actually shaped the prompt (Codex r4): a fetched profile
   // that failed to compose (or sanitized to nothing) drafted on the BASE
   // prompt, and every cohort/exam consumer of this stamp must see that as
   // profile-free.
   const voiceProfileVersion = profileApplied ? (voiceProfile?.version ?? null) : null;
-  const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, laneId });
+  const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return { parsed: null, passes: 1, converged: false, model: null, voiceProfileVersion };
   let { parsed, model } = first;
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
@@ -834,7 +834,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
         system,
         `${userContent}\n\n${verifier.buildReviseAddendum(verdict.violations)}`,
         route,
-        { pinned, metricsLane, laneId }
+        { pinned, metricsLane, ...lane }
       );
     } catch (err) {
       // A revise call that times out / rate-limits must NOT drop the whole
