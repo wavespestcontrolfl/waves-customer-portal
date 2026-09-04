@@ -281,12 +281,32 @@ test('notifyAdmin resolving null (its own persistence failure) counts as a lost 
 
 test('a failed consumables lookup rings ONE visit-scoped deduped bell (Codex r14 P2)', async () => {
   notifyAdmin.mockClear();
-  const db = () => { throw new Error('relation lost'); };
+  const db = (table) => {
+    if (table === 'products_catalog') throw new Error('relation lost');
+    const q = {}; for (const m of ['where', 'whereRaw', 'whereNull']) q[m] = () => q; q.first = async () => null; q.update = async () => 1; return q; // the post-bell settled re-check finds nothing
+  };
   db.transaction = async () => { throw new Error('unreachable'); };
   const res = await consumeCompletionSupplies(db, args);
   expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
   expect(notifyAdmin).toHaveBeenCalledTimes(1);
   expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('supplies-consumption-failed:lookup:svc-1');
+});
+
+test('a lookup bell rung after a concurrent retry already deducted the visit\'s kit is retired at once (Codex r24 P1)', async () => {
+  notifyAdmin.mockClear();
+  const updates = [];
+  const db = (table) => {
+    if (table === 'products_catalog') throw new Error('relation lost');
+    const q = {};
+    for (const m of ['where', 'whereRaw', 'whereNull']) q[m] = () => q;
+    q.first = async () => ({ id: 'mv-race' }); // the visit-wide settled re-check finds the retry's movement
+    q.update = async (row) => { updates.push({ table, row }); return 1; };
+    return q;
+  };
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(updates).toEqual([{ table: 'notifications', row: expect.objectContaining({ read_at: expect.any(Date) }) }]);
 });
 
 test('a successful deduction retires the failure bells an earlier attempt rang for this product + visit (Codex r15 P2)', async () => {

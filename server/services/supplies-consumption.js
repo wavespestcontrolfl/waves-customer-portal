@@ -126,13 +126,13 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
   try {
     const bell = await require('./notification-service').notifyAdmin('system', title, body, { bell: true, link: '/admin/inventory', dedupeKey, metadata: { productId: product?.id || null, scheduledServiceId } });
     if (!bell) throw new Error('notification not persisted');
-    // Race (Codex r18 P1): a concurrent retry may have deducted this product
-    // between our failed transaction and this insert — its bell clear ran
+    // Race (Codex r18 P1, r24 P1): a concurrent retry may have deducted
+    // this product — or, for the visit-wide lookup bell, any of the visit's
+    // kit — between our failed attempt and this insert; its bell clear ran
     // before our bell existed. Re-check the settled movement AFTER the bell
     // persisted and retire our own bell when the kit is in fact deducted.
-    if (product && await db('product_inventory_movements').where({ product_id: product.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).whereRaw("metadata->>'source' = ?", [SOURCE]).first('id')) {
-      await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id });
-    }
+    const settled = await db('product_inventory_movements').where({ scheduled_service_id: scheduledServiceId, movement_type: 'usage', ...(product ? { product_id: product.id } : {}) }).whereRaw("metadata->>'source' = ?", [SOURCE]).first('id');
+    if (settled) await clearMissedDeductionBells(db, { scheduledServiceId, productId: product?.id || null });
   } catch (bellErr) {
     logger.error(`[supplies-consumption] failure bell NOT sent for ${product ? product.name : 'the visit'} on visit ${scheduledServiceId}: ${bellErr.message}`);
     result.errors.push({ productId: product?.id || null, reason: 'failure_bell_not_sent', message: bellErr.message });
@@ -144,8 +144,8 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
 // the same (product, visit) — and the visit-scoped lookup bell — so staff
 // do not follow a stale "adjust by hand" on top of the real deduction
 // (Codex r15 P2). Best effort, never throws.
-async function clearMissedDeductionBells(db, { scheduledServiceId, productId }) {
-  const keys = [`supplies-consumption-failed:${productId}:${scheduledServiceId}`, `supplies-consumption-failed:lookup:${scheduledServiceId}`];
+async function clearMissedDeductionBells(db, { scheduledServiceId, productId = null }) {
+  const keys = [`supplies-consumption-failed:lookup:${scheduledServiceId}`, ...(productId ? [`supplies-consumption-failed:${productId}:${scheduledServiceId}`] : [])];
   try {
     await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereNull('read_at').update({ read_at: new Date() });
   } catch (err) {

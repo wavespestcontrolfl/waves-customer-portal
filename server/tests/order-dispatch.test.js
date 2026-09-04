@@ -295,6 +295,10 @@ test('a placed order with no positive total anywhere parks post-submit as no_fin
   const parked = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review');
   expect(parked.row.placed_at).toBeInstanceOf(Date); // post-submit: cap-counted, guarded, do-not-reorder bell
   expect(parked.row.amount_cents).toBe(50000); // ENV per-order cap: a placed order with no figure is never $0 against the month (Codex r23 P1)
+  // The fallback reached the row under the cap lock BEFORE the park (Codex r24 P1): an amount-only write precedes the parked one.
+  const amounts = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.amount_cents === 50000).map((u) => !!u.row.status);
+  expect(amounts).toEqual([false, true]);
+  expect(require('../models/db').raw.mock.calls.some((c) => /pg_advisory_xact_lock/.test(c[0]) && c[1] && c[1][0] === 'vendor-order-caps')).toBe(true);
   expect(parked.row.error).toMatch(/counted against the monthly cap at the per-order cap/);
   expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
 });
@@ -321,6 +325,13 @@ test('an ambiguous submit with NO known total — no click figure, no quote, not
   const parkedRow = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').pop().row;
   expect(parkedRow.amount_cents).toBe(50000); // ENV per-order cap
   expect(parkedRow.error).toMatch(/counted against the monthly cap at the per-order cap/);
+  expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.amount_cents === 50000).map((u) => !!u.row.status)).toEqual([false, true]); // reserved under the lock, then parked (Codex r24 P1)
+});
+
+test('a placed order with no total whose claim was lost meanwhile lands as a late placement at the per-order cap (Codex r24 P1)', async () => {
+  mockState.parkedEvidence = {};
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async () => { mockState.ledgerSettled = true; return { externalOrderNumber: 'S1-9', amountCents: 0, evidence: {} }; }) });
+  expect(await run(a)).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: 'S1-9', amountCents: 50000 });
 });
 
 test('an ambiguous submit whose vendor response carried no order number persists that response as response_payload (Codex r23 P2)', async () => {
@@ -496,6 +507,8 @@ test.each([
   expect(cancel.status).toBe('cancelled');
   expect(cancel.closed_at).toBeInstanceOf(Date);
   expect(JSON.parse(cancel.metadata)).toMatchObject({ vendorId: 'vend-sm', autoOrderCancelled: reason });
+  // The sweep's manual bell for the withdrawn need is retired with the cancel (Codex r24 P1).
+  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(1);
 });
 
 test('master gate off: the run still re-rings pending bells and recovers stale placing rows, places nothing (pre-push P0)', async () => {
@@ -629,6 +642,8 @@ test('a higher final total whose post-placement re-check finds the claim lost la
   expect(capLocks).toHaveLength(3); // the pre-submit reservation, the post-placement re-check, then the record transaction that attached the late placement
   const attached = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.external_order_number === 'SM-2' && u.row.amount_cents === 60000);
   expect(attached).toBeDefined();
+  // The adapter's confirmed facts ride along into the retained evidence (Codex r24 P2).
+  expect(dbFn.raw.mock.calls.some((c) => /revokedAt/.test(c[0]) && c[1] && String(c[1][0]).includes('"totalSource":"vendor"'))).toBe(true);
   expect(mockState.updates.find((u) => u.table === 'product_restock_requests').row).toMatchObject({ status: 'ordered', closed_at: null });
 });
 
@@ -665,6 +680,7 @@ test('a DB failure after the vendor call parks as persist_after_placement, never
     const r = await run(mockAdapter());
     expect(r).toMatchObject({ status: 'needs_review', reason: 'persist_after_placement' });
     expect(ledgerStatus()).toBe('needs_review');
+    expect(requestStatus()).toBe('ordered'); // the fallback park restores the request like the green path (Codex r24 P1)
     const ledger = lastLedgerPatch();
     expect(ledger.external_order_number).toBe('SM-1');
     expect(notify).toHaveBeenCalledTimes(1);
