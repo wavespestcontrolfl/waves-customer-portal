@@ -206,8 +206,8 @@ test('the claim retires the request\'s manual bell in its own transaction; a fai
   const a = mockAdapter();
   expect(await run(a)).toMatchObject({ status: 'placed' });
   const retired = mockState.updates.filter((u) => u.table === 'notifications');
-  expect(retired).toHaveLength(1);
-  expect(retired[0].row.read_at).toBeInstanceOf(Date);
+  expect(retired).toHaveLength(2); // the request's manual bell + the ledger's (dry-run) bell keyspace
+  expect(retired.every((u) => u.row.read_at instanceof Date)).toBe(true);
   mockState.updates = []; mockState.ledgerRows = [];
   mockState.bellRetireThrows = true;
   const b = mockAdapter();
@@ -233,6 +233,15 @@ test('an adapter without its credential does not own requests: canAutoOrder is f
     expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(false);
   } finally { process.env.STICKERMULE_API_KEY = key; }
   expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(true);
+});
+
+test('re-arming a dry-run row retires its "nothing was submitted" bell inside the claim (pre-push P0)', async () => {
+  const dry = mockAdapter({ place: jest.fn(async () => ({ dryRun: true, amountCents: 31400, evidence: { dryRun: true } })) });
+  expect(await run(dry)).toMatchObject({ status: 'needs_review', reason: 'dry_run' });
+  mockState.updates = []; mockState.ledgerRows = [];
+  expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
+  const retired = mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at instanceof Date);
+  expect(retired.length).toBeGreaterThanOrEqual(2); // the request's manual bell + the ledger's dry-run bell
 });
 
 test('an adapter without its credential does not CLAIM either: handed back with the bell, no ledger row, manual bell untouched (Codex r21 P2)', async () => {

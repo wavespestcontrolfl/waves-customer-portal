@@ -611,6 +611,27 @@ async function lockedProductGuards(trx, { request }) {
   return null;
 }
 
+// A re-armed dry-run row still has its "nothing was submitted — turn dry run
+// off to order for real" bell out: retire it in the claim's own transaction,
+// before this claim can submit, or staff act on it beside a real order
+// (pre-push P0). The versioned key is auto-order:<ledger>[:<v>].
+function retireLedgerBells(trx, ledgerId) {
+  return trx('notifications').whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${ledgerId}`, `auto-order:${ledgerId}:%`]).whereNull('read_at').update({ read_at: new Date() });
+}
+
+// The Restock tab renders the request's OWN vendorSku / vendorProductUrl as
+// the order link: when the eligible price row changed between the request
+// and the claim, stamp what the claim actually authorized so the tab (and a
+// pre-submit park's "order by hand" link) shows the SKU being bought
+// (Codex r21 P2). Unchanged = no write.
+async function stampAuthorizedSku(trx, { request, pricing }) {
+  if (!pricing?.vendor_sku) return;
+  const m = meta(request.metadata);
+  const learned = { vendorSku: pricing.vendor_sku, vendorProductUrl: pricing.vendor_product_url || m.vendorProductUrl || null };
+  if (m.vendorSku === learned.vendorSku && (m.vendorProductUrl || null) === learned.vendorProductUrl) return;
+  await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ metadata: JSON.stringify({ ...m, ...learned }), updated_at: new Date() });
+}
+
 // The eligible price row is read under the same lock so the claim's payload
 // records the SKU + vendor quantity the order will carry.
 async function insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity }) {
@@ -629,17 +650,9 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
     .whereRaw(DRY_RUN_RECLAIMABLE_SQL)
     .returning('*');
   const ledger = inserted && inserted[0];
-  // The Restock tab renders the request's OWN vendorSku / vendorProductUrl as
-  // the order link: when the eligible price row changed between the request
-  // and the claim, stamp what the claim actually authorized so the tab (and a
-  // pre-submit park's "order by hand" link) shows the SKU being bought
-  // (Codex r21 P2).
-  if (ledger && pricing?.vendor_sku) {
-    const m = meta(request.metadata);
-    const learned = { vendorSku: pricing.vendor_sku, vendorProductUrl: pricing.vendor_product_url || m.vendorProductUrl || null };
-    if (m.vendorSku !== learned.vendorSku || (m.vendorProductUrl || null) !== learned.vendorProductUrl) {
-      await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ metadata: JSON.stringify({ ...m, ...learned }), updated_at: new Date() });
-    }
+  if (ledger) {
+    await retireLedgerBells(trx, ledger.id);
+    await stampAuthorizedSku(trx, { request, pricing });
   }
   return { ledger, pricing, order };
 }
