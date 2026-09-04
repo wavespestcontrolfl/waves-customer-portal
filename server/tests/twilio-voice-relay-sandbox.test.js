@@ -123,7 +123,7 @@ describe('POST /relay-sandbox', () => {
       twilio_call_sid: 'CA-sb-1', direction: 'inbound', from_phone: '+19415550100', to_phone: SANDBOX,
       status: 'ringing', source: VOICE_RELAY_SANDBOX_SOURCE,
     }));
-    expect(JSON.parse(insert.mock.calls[0][0].metadata)).toEqual({ relay_sandbox: true });
+    expect(JSON.parse(insert.mock.calls[0][0].metadata)).toEqual({ relay_sandbox: true, stir_verstat: null });
     const xml = res.body;
     // The recording disclosure MP3 plays INSIDE the cell <Gather>, before the
     // relay — a sandbox caller is transcribed like any other (codex r3 P1),
@@ -176,9 +176,21 @@ describe('POST /relay-sandbox', () => {
     expect(insert).not.toHaveBeenCalled();
     expect(where).toHaveBeenCalledWith({ id: 7 });
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ source: VOICE_RELAY_SANDBOX_SOURCE, customer_id: null }));
-    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_sandbox: true });
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_sandbox: true, stir_verstat: null });
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('<ConversationRelay');
+  });
+
+  // The sandbox row carries the caller's STIR attestation where /voice puts it
+  // (metadata.stir_verstat — verifyInboundCaller's only source), so an
+  // A-attested known caller's bake-off is as verified as production (codex r13 P2).
+  test('the sandbox row keeps StirVerstat on both the insert and the adoption path', async () => {
+    const { insert } = primeInsert();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-att', From: '+19415550100', To: SANDBOX, StirVerstat: 'TN-Validation-Passed-A' } }, mockRes());
+    expect(JSON.parse(insert.mock.calls[0][0].metadata)).toEqual({ relay_sandbox: true, stir_verstat: 'TN-Validation-Passed-A' });
+    const adopted = primeInsert({ existing: { id: 9, source: null } });
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-att2', From: '+19415550100', To: SANDBOX, StirVerstat: 'TN-Validation-Passed-A' } }, mockRes());
+    expect(JSON.parse(adopted.update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_sandbox: true, stir_verstat: 'TN-Validation-Passed-A' });
   });
 
   test('relay not attached ⇒ the row still lands, stamped relay_failed, then a spoken notice + hangup', async () => {

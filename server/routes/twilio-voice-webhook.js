@@ -810,7 +810,14 @@ const RELAY_COMPLETE_ACTION_ES = `${RELAY_COMPLETE_ACTION}?lang=es`;
 function relayCompleteLanguage(req) {
   return req && req.query && req.query.lang === 'es' ? 'es' : null;
 }
-function buildSpanishRelayTwiML({ vestibule, callSid }) {
+// Resolved ONCE per call so the row stamp and the rendered TwiML agree.
+function spanishRelayOptions() {
+  const { SPANISH_LANGUAGE } = require('../services/voice-agent/relay-protocol');
+  // An English-only recognizer profile (Deepgram Flux) is dropped for this
+  // leg — the leg runs untuned rather than fail setup (codex r10 P1).
+  return activeRelayTwiMLOptions({ language: SPANISH_LANGUAGE });
+}
+function buildSpanishRelayTwiML({ vestibule, callSid, relayOpts = spanishRelayOptions() }) {
   const { buildRelayTwiML, spanishWelcomeGreeting, SPANISH_LANGUAGE } = require('../services/voice-agent/relay-protocol');
   return buildRelayTwiML({
     wsUrl: vestibule.relayUrl,
@@ -819,9 +826,7 @@ function buildSpanishRelayTwiML({ vestibule, callSid }) {
     language: SPANISH_LANGUAGE,
     voice: vestibule.voice || null,
     welcomeGreeting: spanishWelcomeGreeting(),
-    // An English-only recognizer profile (Deepgram Flux) is dropped for this
-    // leg — the leg runs untuned rather than fail setup (codex r10 P1).
-    ...activeRelayTwiMLOptions({ language: SPANISH_LANGUAGE }),
+    ...relayOpts,
     parameters: { lang: 'es' },
   });
 }
@@ -1232,7 +1237,11 @@ router.post('/voice', async (req, res) => {
                 .catch((err) => { logger.warn(`[voice] Spanish language stamp skipped for ${maskSid(CallSid)}: ${err.message}`); return null; }),
             );
             if (stamped == null) logger.warn(`[voice] Spanish language stamp did not settle in time for ${maskSid(CallSid)} — routing anyway`);
-            return res.type('text/xml').send(buildSpanishRelayTwiML({ vestibule: spanishLeg, callSid: CallSid }));
+            // Profile stamped before the relay opens — same reason as the
+            // English legs (codex r13 P2).
+            const relayOpts = spanishRelayOptions();
+            await withDeadline(stampRelayProfile(CallSid, relayOpts));
+            return res.type('text/xml').send(buildSpanishRelayTwiML({ vestibule: spanishLeg, callSid: CallSid, relayOpts }));
           }
           logger.warn(`[voice] Spanish chosen but no Spanish session can start (${handoffKind}) for ${maskSid(CallSid)} — continuing in English`);
         }
@@ -1643,6 +1652,11 @@ router.post('/relay-sandbox', async (req, res) => {
     // the authority on what the call is — it ADOPTS that row (sandbox source,
     // no customer link) instead of losing the conflict and refusing the call.
     // Any row with a NON-null foreign source is left alone and refused below.
+    // The caller's STIR attestation rides the row exactly as /voice stores it
+    // (metadata.stir_verstat — what verifyInboundCaller reads), so a bake-off
+    // from an A-attested known caller gets production's account context and
+    // tool posture (codex r13 P2).
+    const sandboxMeta = { relay_sandbox: true, stir_verstat: req.body.StirVerstat || null };
     await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CallSid]);
       const existing = await trx('call_log').where({ twilio_call_sid: CallSid }).first('id', 'source');
@@ -1654,13 +1668,13 @@ router.post('/relay-sandbox', async (req, res) => {
           twilio_call_sid: CallSid,
           status: CallStatus || 'ringing',
           source: VOICE_RELAY_SANDBOX_SOURCE,
-          metadata: JSON.stringify({ relay_sandbox: true }),
+          metadata: JSON.stringify(sandboxMeta),
         });
       } else if (existing.source == null) {
         await trx('call_log').where({ id: existing.id }).update({
           source: VOICE_RELAY_SANDBOX_SOURCE,
           customer_id: null,
-          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_sandbox: true })]),
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(sandboxMeta)]),
           updated_at: new Date(),
         });
       }

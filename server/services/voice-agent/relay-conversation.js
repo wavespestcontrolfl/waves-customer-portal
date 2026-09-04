@@ -646,11 +646,30 @@ class RelayConversation {
     return entry;
   }
 
-  /** The turn whose speech events (agent speaking start/end) are still arriving. */
-  _speechTurn() {
-    for (let i = this._turnStats.length - 1; i >= 0 && i >= this._turnStats.length - 2; i--) {
-      if (this._turnStats[i].firstSendAt != null) return this._turnStats[i];
+  /**
+   * The turn a speech event belongs to. Twilio's events arrive in send order,
+   * so 'start' is the OLDEST sent turn still waiting for its audio and 'end'
+   * the oldest turn speaking but not yet ended — searched from the newest
+   * turn that already started (an earlier one cannot still be pending), so a
+   * burst of queued caller prompts cannot push turn 1 out of reach (codex
+   * r13 P2). Anything else (an interrupt) wants the turn speaking now, else
+   * the latest sent turn.
+   */
+  _speechTurn(kind = 'start') {
+    const stats = this._turnStats;
+    let from = 0;
+    for (let i = stats.length - 1; i >= 0; i--) if (stats[i].agentSpeakingStartAt != null) { from = i; break; }
+    if (kind === 'start') {
+      for (let i = from; i < stats.length; i++) {
+        const s = stats[i];
+        if (s.firstSendAt != null && s.agentSpeakingStartAt == null && !s.interrupted) return s;
+      }
     }
+    for (let i = from; i < stats.length; i++) {
+      const s = stats[i];
+      if (s.agentSpeakingStartAt != null && s.agentSpeakingEndAt == null) return s;
+    }
+    for (let i = stats.length - 1; i >= 0; i--) if (stats[i].firstSendAt != null) return stats[i];
     return null;
   }
 
@@ -751,13 +770,13 @@ class RelayConversation {
         this._lastCallerSpeechStopAt = t;
         break;
       case 'agent_speaking_start': {
-        const stat = this._speechTurn();
+        const stat = this._speechTurn('start');
         if (stat && stat.agentSpeakingStartAt == null) stat.agentSpeakingStartAt = t;
         if (stat && stat.awaitingAudio) this._finishTurn(stat);
         break;
       }
       case 'agent_speaking_end': {
-        const stat = this._speechTurn();
+        const stat = this._speechTurn('end');
         if (stat && stat.agentSpeakingStartAt != null && stat.agentSpeakingEndAt == null) stat.agentSpeakingEndAt = t;
         break;
       }
@@ -1038,7 +1057,7 @@ class RelayConversation {
       /* no-op */
     }
     if (!detail || typeof detail !== 'object') return;
-    const stat = this._speechTurn() || this._currentTurn;
+    const stat = this._speechTurn('end') || this._currentTurn;
     if (!stat) return;
     stat.interrupted = true;
     const duration = Number(detail.durationUntilInterruptMs);

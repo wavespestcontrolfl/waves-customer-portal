@@ -128,6 +128,25 @@ describe('per-turn stats', () => {
     expect(entry.done).toBe(false); // not the whole utterance yet
   });
 
+  // ⭐ A BURST OF QUEUED PROMPTS. Three final prompts land while turn 1 is
+  // still processing: three stats exist, only turn 1 has sent. Its speaking
+  // events must still find it (codex r13 P2 — the old two-entry window lost it).
+  test('agent speaking events find the sent turn behind two queued, unsent prompts', () => {
+    const { convo, stat } = convoWithSpokenTurn();
+    convo.say('One moment.'); // turn 1 sent
+    const queued = (turn) => ({ ...stat, turn, firstSendAt: null, agentSpeakingStartAt: null, agentSpeakingEndAt: null, interrupted: false, agentEntries: [] });
+    convo._turnStats.push(queued(2), queued(3));
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', state: 'started' });
+    expect(stat.agentSpeakingStartAt).not.toBeNull();
+    expect(convo._turnStats[1].agentSpeakingStartAt).toBeNull();
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', state: 'stopped' });
+    expect(stat.agentSpeakingEndAt).toBeGreaterThanOrEqual(stat.agentSpeakingStartAt);
+    // …and a later sent turn takes the NEXT start, not turn 1's slot again.
+    convo._turnStats[1].firstSendAt = stat.firstSendAt + 10;
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', state: 'started' });
+    expect(convo._turnStats[1].agentSpeakingStartAt).not.toBeNull();
+  });
+
   test('a cumulative tokens-played snapshot replaces rather than duplicates, and a complete utterance retires', () => {
     const { convo } = convoWithSpokenTurn();
     convo.say('Hello there, this is Sandy.');
