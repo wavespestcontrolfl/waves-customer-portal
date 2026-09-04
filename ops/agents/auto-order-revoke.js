@@ -124,12 +124,16 @@ async function revoke(row) {
     const req = await trx('product_restock_requests').where({ id: row.restock_request_id }).forUpdate().first('status', 'metadata');
     assertRequestInFlight(req);
     const revokedAt = new Date().toISOString();
+    // The row's reconciliation bell ("cancel with the vendor or record the
+    // revoke") is now obsolete: retire the notification and strip the
+    // persisted bell so reringPendingBells never re-sends it (Codex r22 P2).
     await trx('vendor_orders').where({ id: row.id }).update({
       status: 'needs_review',
       error: `revoked: operator revoke ${revokedAt} (was ${locked.status})`.slice(0, 400),
-      evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ revokedAt })]),
+      evidence: trx.raw("(COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt') || ?::jsonb", [JSON.stringify({ revokedAt })]),
       updated_at: new Date(),
     });
+    await trx('notifications').whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${row.id}`, `auto-order:${row.id}:%`]).whereNull('read_at').update({ read_at: new Date() });
     // Cancelled, not reopened (pre-push P1): the next sweep raises a fresh
     // request the dispatcher can claim; the office can also order by hand.
     await trx('product_restock_requests').where({ id: row.restock_request_id }).update({
@@ -138,7 +142,7 @@ async function revoke(row) {
       metadata: JSON.stringify({ ...parseEvidence(req.metadata), autoOrderCancelled: 'revoked_vendor_order', autoOrderCancelledAt: revokedAt, revokedVendorOrderId: row.id }),
       updated_at: new Date(),
     });
-    await auditVendorOrder({ vendor_order_id: row.id, restock_request_id: row.restock_request_id, vendor_id: row.vendor_id, adapter: row.adapter, outcome: 'revoked', amount_cents: row.amount_cents, external_order_number: row.external_order_number, reason: `operator revoke (was ${locked.status})`, actor_type: 'technician', trx });
+    await auditVendorOrder({ vendor_order_id: row.id, restock_request_id: row.restock_request_id, vendor_id: row.vendor_id, adapter: row.adapter, outcome: 'revoked', amount_cents: row.amount_cents, external_order_number: row.external_order_number, reason: `operator revoke (was ${locked.status})`, actor_type: 'system', trx }); // no technicians.id to carry: the CLI is a system actor (Codex r22 P2)
   });
 }
 

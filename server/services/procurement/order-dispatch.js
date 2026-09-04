@@ -237,9 +237,12 @@ function vendorOrderQuantity({ adapter, request, pricing }) {
 
 /**
  * Refuse a staff / forecast / Intelligence Bar restock request while an
- * AUTOMATIC order for the product is live: an auto request still open|ordered
- * whose vendor_orders row is 'placing' or was dispatched (placed_at set —
- * placed, and the post-submit parks whose money may have moved). Call under
+ * AUTOMATIC order for the product is live: a vendor_orders row that is
+ * 'placing' or was dispatched (placed_at set — placed, and the post-submit
+ * parks whose money may have moved) and is neither received nor revoked —
+ * whatever the request's status now says: an order that landed after its
+ * request was cancelled is still coming (Codex r22 P1; mirrors
+ * lockedProductGuards). Call under
  * the products_catalog row lock, in the same transaction as the insert. The
  * dispatcher's own lock is released when its claim commits, BEFORE the vendor
  * call, so the claim row — not the lock — is what carries the exclusion
@@ -251,8 +254,9 @@ async function assertNoLiveAutoOrder(trx, productId) {
     .join('vendor_orders as vo', 'vo.restock_request_id', 'prr.id')
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .where('prr.product_id', productId)
-    .whereIn('prr.status', ['open', 'ordered'])
+    .whereNot('prr.status', 'received')
     .whereRaw("(vo.status = 'placing' OR vo.placed_at IS NOT NULL)")
+    .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
     .first('vo.status', 'vo.external_order_number', 'v.name as vendor_name');
   if (!live) return;
   const vendor = live.vendor_name || 'vendor';
@@ -623,11 +627,13 @@ function retireLedgerBells(trx, ledgerId) {
 // the order link: when the eligible price row changed between the request
 // and the claim, stamp what the claim actually authorized so the tab (and a
 // pre-submit park's "order by hand" link) shows the SKU being bought
-// (Codex r21 P2). Unchanged = no write.
+// (Codex r21 P2). The link is the CURRENT row's — null included: a row with
+// no URL must not keep sending staff to the previous SKU's page (Codex r22
+// P2). Unchanged = no write.
 async function stampAuthorizedSku(trx, { request, pricing }) {
   if (!pricing?.vendor_sku) return;
   const m = meta(request.metadata);
-  const learned = { vendorSku: pricing.vendor_sku, vendorProductUrl: pricing.vendor_product_url || m.vendorProductUrl || null };
+  const learned = { vendorSku: pricing.vendor_sku, vendorProductUrl: pricing.vendor_product_url || null };
   if (m.vendorSku === learned.vendorSku && (m.vendorProductUrl || null) === learned.vendorProductUrl) return;
   await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ metadata: JSON.stringify({ ...m, ...learned }), updated_at: new Date() });
 }

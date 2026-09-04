@@ -259,8 +259,15 @@ test('the claim stamps the SKU + link it actually authorized onto the request wh
   expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
   const stamped = mockState.updates.find((u) => u.table === 'product_restock_requests' && u.row.metadata);
   expect(JSON.parse(stamped.row.metadata)).toMatchObject({ vendorId: 'vend-sm', vendorSku: '4242', vendorProductUrl: 'https://stickermule.com/4242' });
+  // …a row whose new SKU has no URL clears the old link (Codex r22 P2)
+  mockState.updates = []; mockState.ledgerRows = [];
+  mockState.request = { ...baseRequest(), metadata: { vendorId: 'vend-sm', vendorSku: 'OLD-1', vendorProductUrl: 'https://old.example/1' } };
+  mockState.pricing = { vendor_sku: '4242', price: '314.00', quantity: '500', vendor_product_url: null };
+  expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
+  expect(JSON.parse(mockState.updates.find((u) => u.table === 'product_restock_requests' && u.row.metadata).row.metadata)).toMatchObject({ vendorSku: '4242', vendorProductUrl: null });
   // …and an unchanged row writes nothing
   mockState.updates = []; mockState.ledgerRows = [];
+  mockState.pricing = { vendor_sku: '4242', price: '314.00', quantity: '500', vendor_product_url: 'https://stickermule.com/4242' };
   mockState.request = { ...baseRequest(), metadata: { vendorId: 'vend-sm', vendorSku: '4242', vendorProductUrl: 'https://stickermule.com/4242' } };
   expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
   expect(mockState.updates.find((u) => u.table === 'product_restock_requests' && u.row.metadata)).toBeUndefined();
