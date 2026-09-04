@@ -37,16 +37,26 @@ let upcomingVisitRow = null;
 let visitLookupError = null;
 let servicePrepRow = null;
 let serviceUpdates = [];
+// Rows affected by an awaited .update() (the prep-page claim); 1 = claimed.
+let serviceUpdateCount = 1;
 function scheduledQuery() {
   let tokenMode = false;
   const q = {
     select: jest.fn(() => { tokenMode = true; return q; }),
     where: jest.fn(() => q), whereRaw: jest.fn(() => q), whereNotIn: jest.fn(() => q),
-    whereNull: jest.fn(() => q), update: jest.fn((patch) => { serviceUpdates.push(patch); return q; }),
+    whereNull: jest.fn(() => q),
+    update: jest.fn((patch) => {
+      serviceUpdates.push(patch);
+      // Thenable so `await …update()` yields the row count, while
+      // `.update().returning()` still chains.
+      return { ...q, then: (resolve) => resolve(serviceUpdateCount) };
+    }),
     returning: jest.fn(async () => [{}]),
     catch: jest.fn(async () => undefined),
     orderBy: jest.fn(() => q),
-    first: jest.fn(async () => {
+    first: jest.fn(async (...cols) => {
+      // The post-claim key re-read asks for the key column alone.
+      if (cols.length === 1 && cols[0] === 'prep_template_key') return servicePrepRow;
       if (!tokenMode && visitLookupError) throw visitLookupError;
       return tokenMode ? servicePrepRow : upcomingVisitRow;
     }),
@@ -72,6 +82,7 @@ beforeEach(() => {
   db.fn = { now: jest.fn(() => 'NOW()') };
   upcomingVisitRow = null;
   visitLookupError = null;
+  serviceUpdateCount = 1;
   servicePrepRow = { prep_token: null, prep_template_key: null };
   serviceUpdates = [];
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
@@ -320,6 +331,22 @@ describe('sendPrepToCustomer', () => {
     expect(payload.prep_url).toContain('?tab=visits');
     expect(payload.service_date).not.toBe('To be confirmed');
     expect(serviceUpdates).toEqual([]);
+  });
+
+  test('losing the prep-page claim (another guide keyed the row after the read) refuses the text', async () => {
+    // The read sees an unkeyed row; the conditional claim then affects 0
+    // rows because a concurrent send keyed it to interior pest.
+    upcomingVisitRow = { ...VISIT, prep_template_key: null };
+    servicePrepRow = { prep_token: 'c'.repeat(32), prep_template_key: 'prep.interior_pest' };
+    serviceUpdateCount = 0;
+
+    const refused = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' });
+
+    expect(refused).toMatchObject({ ok: false, reason: 'prep_page_taken', takenBy: 'Interior Pest Treatment' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // The claim is the only write attempted, and it is conditional.
+    expect(serviceUpdates).toEqual([{ prep_template_key: 'prep.lawn' }]);
+    expect(serviceUpdates.some((p) => p.prep_sent_at)).toBe(false);
   });
 
   test('a visit whose page is this guide (or unkeyed) reuses its token and stamps normally', async () => {

@@ -814,6 +814,20 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('a real send whose delivery stamp throws twice reports the withheld email', async () => {
+      const ReviewService = require('../services/review-request');
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM999' });
+      ReviewService.markInlineDelivered.mockRejectedValue(new Error('db down'));
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { reviewRequestEmail: true });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ reviewEmail: { sent: false, reason: 'email_not_attempted' } });
+        expect(ReviewService.markInlineDelivered).toHaveBeenCalledTimes(2);
+        expect(ReviewService.sendInlineEmailCopy).not.toHaveBeenCalled();
+      });
+    });
+
     test('never emails when the text did not really send (claim released)', async () => {
       const ReviewService = require('../services/review-request');
       // sent:true without a providerMessageId = a suppression sentinel, not a real send.

@@ -131,13 +131,29 @@ function guideLabelForTemplateKey(templateKey) {
   return match ? match.label : String(templateKey || '').replace(/^prep\./, '');
 }
 
+// Atomic claim of the row's prep page for this guide: the key moves onto
+// this guide only while it is unset or already ours. 0 rows = another
+// guide owns the page (two operators sending different guides for one
+// unkeyed combined visit both pass the read above — only one can claim;
+// GH Codex #3856 r3 P1).
+async function claimPrepPage(serviceId, templateKey) {
+  const claimed = await db('scheduled_services')
+    .where({ id: serviceId })
+    .where(function ownable() {
+      this.whereNull('prep_template_key').orWhere('prep_template_key', templateKey);
+    })
+    .update({ prep_template_key: templateKey });
+  return Number(claimed) > 0;
+}
+
 // The visit the guide hangs on, plus its tokened page URL. A visit row holds
 // ONE prep token, and /prep/:token renders the row's prep_template_key — so
 // a row that already carries a DIFFERENT guide (a combined "Pest + Lawn"
 // visit whose page went out as interior pest) is never re-keyed or linked
 // for this guide: every URL already delivered would flip to the new guide
-// (GH Codex #3856 r2 P1). Such a row still dates the email but is not
-// linked or stamped. linkReason says why prepUrl is null:
+// (GH Codex #3856 r2 P1). The read below is the cheap early-out; the
+// conditional claim after the mint is the gate. Such a row still dates the
+// email but is not linked or stamped. linkReason says why prepUrl is null:
 //   no_upcoming_visit — nothing for a page to describe
 //   prep_page_taken   — the row's page belongs to another guide (takenBy)
 //   prep_link_failed  — visit lookup or token mint threw (retryable)
@@ -157,8 +173,15 @@ async function resolvePrepVisit(customer, config) {
     };
   }
   try {
-    const prepUrl = portalUrl(`/prep/${await ensureServicePrepToken(visit.id, config.emailTemplateKey)}`);
-    return { visit, prepUrl, ownsPage: true, linkReason: null };
+    const token = await ensureServicePrepToken(visit.id, config.emailTemplateKey);
+    if (!(await claimPrepPage(visit.id, config.emailTemplateKey))) {
+      const now = await db('scheduled_services').where({ id: visit.id }).first('prep_template_key');
+      return {
+        visit, prepUrl: null, ownsPage: false, linkReason: 'prep_page_taken',
+        takenBy: guideLabelForTemplateKey(now?.prep_template_key),
+      };
+    }
+    return { visit, prepUrl: portalUrl(`/prep/${token}`), ownsPage: true, linkReason: null };
   } catch (tokenErr) {
     logger.warn(`[prep-guide-sender] prep token mint failed for service ${visit.id}: ${tokenErr.message}`);
     return { visit, prepUrl: null, ownsPage: true, linkReason: 'prep_link_failed' };

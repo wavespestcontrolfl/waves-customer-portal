@@ -707,6 +707,7 @@ export function reviewEmailNote(outcome) {
     email_off: "review emails are off in their preferences",
     email_blocked: "the address is suppressed",
     prefs_unavailable: "preferences could not be read",
+    email_not_attempted: "the text went out but its delivery could not be recorded, so the email was held back — send it from Quick Links",
   }[outcome.reason] || "it could not be sent";
   return ` Review email skipped — ${why}.`;
 }

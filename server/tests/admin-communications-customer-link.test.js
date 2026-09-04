@@ -362,6 +362,37 @@ describe('POST /admin/communications/customer-link', () => {
       });
     });
 
+    test('email: the toast names the resolved email contact, not the phone owner', async () => {
+      const customers = soloCustomer();
+      customers.first = jest.fn(() => Promise.resolve({
+        first_name: 'PersonA', email: 'a@example.com', phone: '+15551234567',
+        service_contact_name: 'Jamie Onsite', service_contact_email: 'jamie@example.com',
+      }));
+      wireDb({ customers });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'sent', requestId: 'rr-9' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(200);
+        expect((await res.json()).firstName).toBe('Jamie');
+      });
+    });
+
+    test('email: a blocked outcome keeps the touch\'s own reason (transient ≠ no email on file)', async () => {
+      wireDb({ customers: soloCustomer() });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'blocked', reason: 'prefs_unavailable' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/could not be read — try again/);
+      });
+      wireDb({ customers: soloCustomer() });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'blocked', reason: 'opted_out' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect((await res.json()).error).toMatch(/turned off/);
+      });
+    });
+
     test('email: a gate refusal is a 409 with the shared gate copy', async () => {
       wireDb({ customers: soloCustomer() });
       ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'cooldown' });

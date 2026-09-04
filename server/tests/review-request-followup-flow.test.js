@@ -709,7 +709,7 @@ describe('review request follow-up flow', () => {
             first: jest.fn().mockResolvedValue({ id: 'rr-1', customer_id: 'cust-1', token: 'tok-1', status: 'sent' }),
             update: rrUpdate,
           });
-          q.update = jest.fn(() => ({ ...q, catch: jest.fn(async () => rrUpdate()) }));
+          q.update = jest.fn((patch) => ({ ...q, catch: jest.fn(async () => rrUpdate(patch)) }));
           return q;
         }
         if (table === 'customers') {
@@ -728,6 +728,9 @@ describe('review request follow-up flow', () => {
       EmailLib.sendTemplate.mockResolvedValue({ sent: true });
 
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      // The row texted AND emailed — recorded as channel 'both' so the
+      // outreach analytics count the email leg.
+      expect(rrUpdate).toHaveBeenCalledWith(expect.objectContaining({ sent_at: expect.any(Date), channel: 'both' }));
       const call = EmailLib.sendTemplate.mock.calls[0][0];
       expect(call).toMatchObject({
         templateKey: 'review_request_email',

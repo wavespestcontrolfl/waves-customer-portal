@@ -1921,10 +1921,13 @@ const ReviewService = {
         categories: ["review_request"],
       });
       if (!result?.sent) return { sent: false, reason: result?.reason || "email_blocked" };
+      // channel 'both': the row texted AND emailed — the outreach analytics
+      // count it as an email touch (channel IN ('email','both')), so the
+      // Both path no longer reads as SMS-only.
       await db("review_requests")
         .where({ id: request.id })
         .whereNull("sent_at")
-        .update({ sent_at: new Date() })
+        .update({ sent_at: new Date(), channel: "both" })
         .catch((err) => logger.warn(`[review] inline email sent_at stamp failed (requestId=${request.id}): ${err.message}`));
       return { sent: true };
     } catch (err) {
@@ -4827,7 +4830,7 @@ const ReviewService = {
         db.raw(`COUNT(*) FILTER (WHERE ${RATED_SQL}) AS rated`),
         db.raw(`COUNT(*) FILTER (WHERE ${PROMOTER_SQL}) AS promoters`),
         db.raw(`COUNT(*) FILTER (WHERE ${REVIEWED_SQL}) AS reviewed`),
-        db.raw("COUNT(*) FILTER (WHERE channel = 'email') AS email_touches"),
+        db.raw("COUNT(*) FILTER (WHERE channel IN ('email', 'both')) AS email_touches"),
       );
 
     const breakdown = (col) =>

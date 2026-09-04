@@ -662,6 +662,12 @@ router.post('/sms', async (req, res, next) => {
         }
       } catch (markErr) {
         logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
+        // Both: the text left but its delivery stamp (or the email copy)
+        // threw — say the email leg did not go out rather than reporting a
+        // bare "Message sent." (GH Codex #3856 r3 P2).
+        if (reviewRequestEmail === true && !reviewEmailOutcome) {
+          reviewEmailOutcome = { sent: false, reason: 'email_not_attempted' };
+        }
       }
     }
 
@@ -1795,8 +1801,25 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // strictChannel: the operator chose Email — never fall back to a text.
       const ask = await ReviewService.sendGatedAsk({ customerId: primaryId, channel: 'email', triggeredBy: 'admin', strictChannel: true });
       if (ask.outcome === 'sent') {
-        return res.json({ kind, channel, sent: true, requestId: ask.requestId, firstName: recipientFirstName });
+        // The email went to the resolved email contact (a service contact
+        // when one is on file) — name THAT person, not the phone's owner.
+        let emailFirstName;
+        try {
+          const { getServiceContact, firstNameFrom, SERVICE_CONTACT_COLUMNS } = require('../services/customer-contact');
+          const row = await db('customers').where({ id: primaryId }).first('first_name', 'last_name', 'email', 'phone', ...SERVICE_CONTACT_COLUMNS);
+          emailFirstName = row ? (firstNameFrom(getServiceContact(row).name) || undefined) : undefined;
+        } catch { /* the name is a nicety; the email already went */ }
+        return res.json({ kind, channel, sent: true, requestId: ask.requestId, firstName: emailFirstName });
       }
+      // A 'blocked' outcome carries the touch's own reason — transient ones
+      // (prefs read, provider throw) are retryable and must not read as a
+      // missing address or an opt-out.
+      const blockedReasons = {
+        prefs_unavailable: 'Notification preferences could not be read — try again',
+        email_send_failed: 'The review email could not be sent — try again',
+        opted_out: 'Review emails are turned off in this customer\'s notification preferences',
+        no_contact: 'No review email for this customer — no email on file',
+      };
       const emailReasons = {
         already_reviewed: 'This customer is already marked as having left a review',
         no_customer: 'That customer could not be found',
@@ -1805,7 +1828,10 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
         blocked: 'No review email for this customer — no email on file, or review emails are turned off in their notification preferences',
         deferred: 'A review request to this customer is already queued and will send automatically.',
       };
-      const error = builders.REVIEW_GATE_REASONS[ask.outcome] || emailReasons[ask.outcome] || 'Review request email could not be sent';
+      const error = builders.REVIEW_GATE_REASONS[ask.outcome]
+        || (ask.outcome === 'blocked' && blockedReasons[ask.reason])
+        || emailReasons[ask.outcome]
+        || 'Review request email could not be sent';
       return res.status(ask.outcome === 'no_customer' ? 404 : 409).json({ error, outcome: ask.outcome });
     }
 
