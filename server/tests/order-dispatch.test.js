@@ -312,6 +312,15 @@ test('an ambiguous submit that names the checkout total parks with THAT amount, 
   expect(parked).toContain(10593);
 });
 
+test('an ambiguous submit with NO known total — no click figure, no quote, nothing reserved — parks at the per-order cap, never $0 (pre-push P1)', async () => {
+  const err = new Error('siteone submit outcome unknown'); err.ambiguous = true;
+  const r = await run(mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async () => { throw err; }) }));
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
+  const parkedRow = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').pop().row;
+  expect(parkedRow.amount_cents).toBe(50000); // ENV per-order cap
+  expect(parkedRow.error).toMatch(/counted against the monthly cap at the per-order cap/);
+});
+
 test('ambiguous post-submit error → needs_review, never retried', async () => {
   const err = new Error('504 after POST'); err.ambiguous = true;
   expect(await run(mockAdapter({ place: jest.fn(async () => { throw err; }) }))).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });

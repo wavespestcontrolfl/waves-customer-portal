@@ -724,13 +724,20 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
 
 // What an adapter.place() rejection means. Run-level errors are the caller's
 // (claim released, batch aborts); everything else is this request's park.
-function parkForPlaceError(conn, err, { ctx, vendor, quoteCents }) {
+async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
   if (err.refuse) return park(conn, { ...ctx, reason: err.refuse, message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
-  // An ambiguous submit (the click happened) parks with the total the
-  // adapter had in hand at the click — a vendor that quotes at place time
-  // has no earlier quote, and a null amount on a placed_at row would count
-  // as $0 against the monthly cap (pre-push P0).
-  if (err.ambiguous) return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.`, amountCents: err.cents ?? quoteCents, evidence: err.evidence || null });
+  // An ambiguous submit (the click happened) parks with the best figure
+  // known: the total the adapter had at the click, else the binding quote,
+  // else what beforeSubmit reserved on the ledger — and when NONE is known,
+  // the per-order cap: a placed_at row with a null amount would count as $0
+  // against the monthly cap while the money may have moved (pre-push P0 /
+  // P1). Fail closed; the receive or revoke corrects the figure.
+  if (err.ambiguous) {
+    const known = positiveCents(err.cents) ?? positiveCents(quoteCents) ?? (await ledgerReservation(conn, ctx.ledger)).cents;
+    const amountCents = known ?? caps(env).perOrder ?? null;
+    const counted = known == null && amountCents != null ? ` No total was confirmed or reserved, so it is counted against the monthly cap at the per-order cap (${dollars(amountCents)}) until received or revoked.` : '';
+    return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.${counted}`, amountCents, evidence: err.evidence || null });
+  }
   return park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
 }
 
@@ -935,7 +942,7 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     } catch (err) {
       if (err.runLevel) { await releaseClaim(); throw err; }
       if (err.ambiguous) submitted = true;
-      return await parkForPlaceError(conn, err, { ctx, vendor, quoteCents });
+      return await parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env });
     } finally { stopHeartbeat(); }
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
