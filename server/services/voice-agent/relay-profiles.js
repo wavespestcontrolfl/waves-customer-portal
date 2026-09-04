@@ -205,9 +205,24 @@ function activeRelayProfile() {
  * The buildRelayTwiML options every production relay call site spreads in:
  * `{ relayAttrs, relayProfileId }` for the active profile, `{}` otherwise.
  */
-function activeRelayTwiMLOptions() {
+function activeRelayTwiMLOptions({ language = null } = {}) {
   const profile = activeRelayProfile();
-  return profile ? { relayAttrs: profile.attrs, relayProfileId: profile.id } : {};
+  if (!profile) return {};
+  // Deepgram Flux is English-only: a leg rendered in another language (the
+  // Spanish vestibule's es-US relay) gets NO tuning — and no profile stamp,
+  // so the row attributes what actually produced the call — rather than a
+  // recognizer that cannot transcribe it (codex r10 P1 on #3852).
+  if (language && !ENGLISH_RE.test(language) && !profileSupportsLanguage(profile, language)) {
+    warnOnce(`lang:${profile.id}:${language}`, `[relay-profiles] ${profile.id} is English-only — Spanish leg (${language}) runs untuned`);
+    return {};
+  }
+  return { relayAttrs: profile.attrs, relayProfileId: profile.id };
+}
+
+const ENGLISH_RE = /^en(?:[-_]|$)/i;
+function profileSupportsLanguage(profile, language) {
+  if (ENGLISH_RE.test(language)) return true;
+  return String(profile.attrs.speechModel || '').toLowerCase() !== 'flux';
 }
 
 /**

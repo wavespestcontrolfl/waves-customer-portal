@@ -999,8 +999,13 @@ mount like every Twilio inbound route, and additionally fail-closed to a 403
 `<Hangup/>` unless the posted `To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`
 (unset ⇒ every request refused) and a `CallSid` is present; relay not
 attached ⇒ a spoken notice and hangup. The first hit inserts a `call_log`
-row for the CallSid (`direction` inbound, `source` 'voice_relay_sandbox',
-retry-safe on the CallSid unique index) and renders a 3-second two-digit DTMF
+row for the CallSid (`direction` inbound, `source` 'voice_relay_sandbox')
+under the same per-CallSid advisory lock `/voice` and `/call-status` take;
+a generic `/call-status` fallback row that won the race (`source` NULL) is
+adopted — sandbox source, customer link cleared — and any row with a foreign
+non-null source is refused (403 hangup). `/call-status` itself writes the
+sandbox-sourced row, with no customer link or touchpoint, when it sees the
+sandbox number first. The handler then renders a 3-second two-digit DTMF
 `<Gather>` (a relay-profile cell code, `relay-profiles.SANDBOX_CELLS`;
 '99' = the raw env attributes; no digits ⇒ the production profile) followed
 by the same `<Connect><ConversationRelay>` + per-call minted token that

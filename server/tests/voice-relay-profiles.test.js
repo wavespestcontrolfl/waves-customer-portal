@@ -116,6 +116,15 @@ describe('activeRelayProfile — VOICE_RELAY_PROFILE, fail closed', () => {
     });
   });
 
+  test('an English-only Flux profile is dropped for a Spanish leg — untuned and unstamped (codex r10 P1)', () => {
+    process.env.VOICE_RELAY_PROFILE = 'flux_balanced_v1';
+    expect(activeRelayTwiMLOptions({ language: 'es-US' })).toEqual({});
+    expect(activeRelayTwiMLOptions({ language: 'en-US' }).relayProfileId).toBe('flux_balanced_v1');
+    expect(activeRelayTwiMLOptions().relayProfileId).toBe('flux_balanced_v1');
+    process.env.VOICE_RELAY_PROFILE = 'nova_hints_v1';
+    expect(activeRelayTwiMLOptions({ language: 'es-US' }).relayProfileId).toBe('nova_hints_v1'); // Nova speaks Spanish
+  });
+
   test('an unknown id ⇒ null, warned ONCE', () => {
     process.env.VOICE_RELAY_PROFILE = 'no_such_profile_zz';
     expect(activeRelayProfile()).toBeNull();

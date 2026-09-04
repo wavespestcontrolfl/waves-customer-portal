@@ -725,8 +725,8 @@ const RELAY_COMPLETE_ACTION = '/api/webhooks/twilio/relay-complete';
 // The production relay profile (STT / turn-taking tuning attributes + the
 // telemetry <Parameter>s). relay-profiles is the only chooser; every relay
 // leg spreads this in. Unset ⇒ {} ⇒ byte-identical TwiML.
-function activeRelayTwiMLOptions() {
-  return require('../services/voice-agent/relay-profiles').activeRelayTwiMLOptions();
+function activeRelayTwiMLOptions(opts) {
+  return require('../services/voice-agent/relay-profiles').activeRelayTwiMLOptions(opts);
 }
 
 // ── Spanish language vestibule (GATE_VOICE_SPANISH_MENU) ───────────────────
@@ -819,7 +819,9 @@ function buildSpanishRelayTwiML({ vestibule, callSid }) {
     language: SPANISH_LANGUAGE,
     voice: vestibule.voice || null,
     welcomeGreeting: spanishWelcomeGreeting(),
-    ...activeRelayTwiMLOptions(),
+    // An English-only recognizer profile (Deepgram Flux) is dropped for this
+    // leg — the leg runs untuned rather than fail setup (codex r10 P1).
+    ...activeRelayTwiMLOptions({ language: SPANISH_LANGUAGE }),
     parameters: { lang: 'es' },
   });
 }
@@ -1626,22 +1628,39 @@ router.post('/relay-sandbox', async (req, res) => {
     // relay-unavailable ones included — a failed bake-off attempt must be
     // attributable. Retry-safe on the CallSid unique index: a Twilio
     // redelivery re-renders the same TwiML without a second row.
-    await db('call_log')
-      .insert({
-        direction: 'inbound',
-        from_phone: toE164(From) || null,
-        to_phone: toE164(To) || null,
-        twilio_call_sid: CallSid,
-        status: CallStatus || 'ringing',
-        source: VOICE_RELAY_SANDBOX_SOURCE,
-        metadata: JSON.stringify({ relay_sandbox: true }),
-      })
-      .onConflict('twilio_call_sid')
-      .ignore();
+    // Same per-CallSid advisory lock as /voice and /call-status (codex r10
+    // P1): when the status callback wins the webhook-ordering race it has
+    // already written its generic fallback row (source column NULL). This
+    // request is Twilio-signed AND addressed to the sandbox number, so it is
+    // the authority on what the call is — it ADOPTS that row (sandbox source,
+    // no customer link) instead of losing the conflict and refusing the call.
+    // Any row with a NON-null foreign source is left alone and refused below.
+    await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CallSid]);
+      const existing = await trx('call_log').where({ twilio_call_sid: CallSid }).first('id', 'source');
+      if (!existing) {
+        await trx('call_log').insert({
+          direction: 'inbound',
+          from_phone: toE164(From) || null,
+          to_phone: toE164(To) || null,
+          twilio_call_sid: CallSid,
+          status: CallStatus || 'ringing',
+          source: VOICE_RELAY_SANDBOX_SOURCE,
+          metadata: JSON.stringify({ relay_sandbox: true }),
+        });
+      } else if (existing.source == null) {
+        await trx('call_log').where({ id: existing.id }).update({
+          source: VOICE_RELAY_SANDBOX_SOURCE,
+          customer_id: null,
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_sandbox: true })]),
+          updated_at: new Date(),
+        });
+      }
+    });
     // ⭐ FAIL CLOSED ON A FOREIGN ROW. The WS upgrade derives `sandbox` from
-    // this row's source, so a pre-existing NON-sandbox row under this CallSid
-    // (the insert above ignores the conflict) would open a PRODUCTION session
-    // for a call admitted through the sandbox route. The row must be ours.
+    // this row's source, so a pre-existing row with a NON-sandbox source under
+    // this CallSid would open a PRODUCTION session for a call admitted through
+    // the sandbox route. The row must be ours.
     if (!(await sandboxRowOwned(CallSid))) return refuseSandbox(req, res, 'call_log row is not sandbox-sourced');
     if (!isRelayAttached()) {
       logger.warn(`[relay-sandbox] relay not attached — hanging up ${maskSid(CallSid)}`);
@@ -2653,6 +2672,24 @@ router.post('/call-status', async (req, res) => {
       const fromPhone = toE164(From);
       const toPhone = toE164(To);
       const numberConfig = TWILIO_NUMBERS.findByNumber(toPhone);
+      // A status callback for the SANDBOX number that beats /relay-sandbox to
+      // the row writes the sandbox row itself: no customer link and no
+      // touchpoint — a bake-off call must never reach a customer's history
+      // (codex r10 P1). /relay-sandbox finds it already owned.
+      if (isSandboxCall(req)) {
+        const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+        await trx('call_log').insert({
+          direction: 'inbound',
+          from_phone: fromPhone,
+          to_phone: toPhone,
+          twilio_call_sid: CallSid,
+          status: CallStatus,
+          duration_seconds: parseInt(CallDuration || 0),
+          source: VOICE_RELAY_SANDBOX_SOURCE,
+          metadata: JSON.stringify({ relay_sandbox: true, source: 'status_callback' }),
+        });
+        return;
+      }
       const customer = From
         ? await findSingleCustomerByPhone(trx, From)
         : null;

@@ -139,6 +139,18 @@ describe('per-turn stats', () => {
     expect(convo._playing).toHaveLength(0);
   });
 
+  test('a legitimately repeated chunk is appended when the planned text continues with it; a true duplicate is not (codex r10 P2)', () => {
+    const { convo } = convoWithSpokenTurn();
+    convo.say('It is very very effective.');
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'It is very' });
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'very' });
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'very' }); // a redelivered chunk — planned does not continue with a third
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'effective.' });
+    const entry = agentEntries(convo)[0];
+    expect(entry.played).toBe('It is very very effective.');
+    expect(entry.done).toBe(true);
+  });
+
   // ⭐ ONE CALLER TURN, TWO UTTERANCES. A read-tool round speaks its filler,
   // the tool runs, then the answer is spoken. Tokens belong to the utterance
   // they fit, never to "the latest one".

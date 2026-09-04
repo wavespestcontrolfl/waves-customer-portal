@@ -705,8 +705,12 @@ class RelayConversation {
     const extend = (entry) => {
       const prev = entry.played || '';
       if (!prev || text.startsWith(prev)) return text;
-      if (prev.endsWith(text)) return prev;
-      return `${prev}${/^[,.;:!?]/.test(text) ? '' : ' '}${text}`;
+      const appended = `${prev}${/^[,.;:!?]/.test(text) ? '' : ' '}${text}`;
+      // A chunk that repeats the tail is a duplicate notification ONLY when
+      // the planned text does not continue with it — "very very effective"
+      // legitimately plays "very" twice (codex r10 P2).
+      if (prev.endsWith(text) && !norm(entry.planned).startsWith(norm(appended))) return prev;
+      return appended;
     };
     let target = null;
     let idx = -1;
@@ -804,7 +808,12 @@ class RelayConversation {
     const { parseTtsVoice } = require('./relay-profiles');
     const voice = this._ttsVoice != null ? this._ttsVoice : defaultTtsVoice();
     const tts = parseTtsVoice(voice, DEFAULT_TTS_PROVIDER);
-    const language = this.language || DEFAULT_LANGUAGE;
+    // The Spanish leg's <Parameter lang=es> is the setup-frame fallback when
+    // Twilio omits msg.lang; the TwiML rendered language="es-US", and that is
+    // what the stamp must say (codex r10 P2).
+    const { isSpanish } = require('./relay-language');
+    const raw = this.language || DEFAULT_LANGUAGE;
+    const language = !/[-_]/.test(raw) && isSpanish(raw) ? require('./relay-protocol').SPANISH_LANGUAGE : raw;
     return {
       git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
       model: MODEL,

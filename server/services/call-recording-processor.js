@@ -1054,8 +1054,9 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db,
     // Both directions: an office CALLBACK stores the contact's number in
     // to_phone (Waves line in from_phone) — that conversation is prior
     // context for the contact's next inbound call too.
-    const q = conn('call_log')
-      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
+    // A bake-off call is not prior context for a real caller — modifier
+    // called on the chain (the conn may be a where-family-only double).
+    const q = require('./voice-agent/relay-protocol').whereNotSandboxCall(conn('call_log'))
       .whereRaw(
         "(right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ? OR right(regexp_replace(coalesce(to_phone,''),'\\D','','g'),10) = ?)",
         [digits, digits],
@@ -3346,7 +3347,7 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
       // rejection will reconcile it.
       const eq = (a, b) => (a ?? null) === (b ?? null);
       const successors = (await trx('call_log')
-      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
+        .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
         .whereRaw("metadata->>'lead_id' = ?", [stampedLeadId])
         .whereNot('id', call.id)
         .select('id', 'metadata'))
@@ -10782,7 +10783,7 @@ const CallRecordingProcessor = {
                 // re-parenting). Allocation is race-free because every
                 // stamper holds this lead's row lock.
                 const seqRow = await trx('call_log')
-      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
+                  .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
                   .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
                   .select(db.raw("COALESCE(MAX((metadata->>'lead_stamp_seq')::bigint), 0) + 1 AS next_seq"))
                   .first();
