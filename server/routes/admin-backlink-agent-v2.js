@@ -752,6 +752,14 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
           .orWhere((s) => s.where('follow_up_status', 'sending').andWhere('follow_up_attempted_at', '<', staleCutoff)))
     );
     for (const p of followUpReconcile) needsReconcile.push({ ...p, follow_up: true, outreach_subject: p.follow_up_subject });
+    // …and a DRAFTED follow-up the automatic attempt routed to the owner on a marker (reply check failed, recipient review
+    // required): sendable from the Owner queue while the cause is transient — and, when it is not (a thread deleted, a
+    // match the owner declines), skippable HERE, the one terminal action (`outcome: 'skip'`); "It sent" / "Re-queue"
+    // do not apply to it (the endpoint refuses them)
+    const unverifiable = await orderByPriority(
+      db('seo_link_prospects').where({ follow_up_status: 'drafted' }).whereIn('follow_up_skipped_reason', [...M.OWNER_MARKERS])
+    );
+    for (const p of unverifiable) needsReconcile.push({ ...p, follow_up: true, unverifiable: true, outreach_subject: p.follow_up_subject });
     const sentToday = await Outreach.dailySendCount();
     // §6.4 / §13 — what the owner sees before Approve & send: the draft review and the recipient match to acknowledge
     let byEmail = null; let reviewError = null;
@@ -821,7 +829,8 @@ router.post('/prospects/:id/outreach/send', requireAdmin, async (req, res, next)
 });
 
 // POST /api/admin/backlink-agent/prospects/:id/outreach/reconcile — resolve a
-// send_error (ambiguous Gmail failure) deliberately: { outcome: 'sent' | 'requeue' }.
+// send_error (ambiguous Gmail failure) deliberately: { outcome: 'sent' | 'requeue' } — and, with follow_up: true,
+// { outcome: 'skip' } settles a follow-up the owner has reviewed and will not send (§6.4).
 // requireAdmin: it records/clears a primary-inbox send, same privilege as send.
 router.post('/prospects/:id/outreach/reconcile', requireAdmin, async (req, res, next) => {
   try {
@@ -830,7 +839,7 @@ router.post('/prospects/:id/outreach/reconcile', requireAdmin, async (req, res, 
       prospectId: req.params.id, outcome: req.body?.outcome, approvedBy: req.technician?.name || 'admin', followUp: req.body?.follow_up === true,
     });
     if (!result.ok) {
-      const status = { not_found: 404, not_reconcilable: 409, not_requeueable: 409, send_in_flight: 409 }[result.code] || 400;
+      const status = { not_found: 404, not_reconcilable: 409, not_requeueable: 409, send_in_flight: 409, bad_outcome: 400 }[result.code] || 400;
       return res.status(status).json(result);
     }
     res.json(result);

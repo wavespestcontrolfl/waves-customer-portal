@@ -844,14 +844,18 @@ async function satisfySendInstance(trx, { prospectId, rowId = null, now, followU
   let rows;
   if (rowId) rows = await trx(AUTH).where({ id: rowId }).whereNull('satisfied_at').select('id', 'approval_id');
   else {
-    // the draft's stamp is the path's OVERALL revision; the row's is the COMMUNICATION revision (§3.6b): the send's
-    // instance is the open row at the path's current communication revision, provided the path did not change AT ALL
-    // since the draft (overall revision still equals the stamp) — any in-place change bumps the overall revision
+    // the draft's stamp is the path's OVERALL revision at the draft; the row's is the COMMUNICATION revision (§3.6b): the
+    // send's instance is the open row at the path's current communication revision, provided the COMMUNICATION inputs did
+    // not change since the draft — a per-dimension revision carries the overall revision of the change that last moved
+    // it, so a communication revision above the draft's stamp is a later generation (never satisfied by this send),
+    // while a payment / execution change after the attempt (overall revision moved, communication revision not) leaves
+    // the send's own instance in place — it is satisfied, and the approval the owner gave for it is consumed
     const p = await trx('seo_link_prospects').where({ id: prospectId }).first('path_id', 'leased_path_revision');
     if (!p || !p.path_id || p.leased_path_revision == null) return 0;
     const path = await trx('seo_link_acquisition_paths').where({ id: p.path_id }).first('id', 'revision', 'revision_communication');
-    if (!path || Number(path.revision) !== Number(p.leased_path_revision)) return 0;
+    if (!path) return 0;
     const commRevision = Number(path.revision_communication ?? path.revision ?? 1);
+    if (commRevision > Number(p.leased_path_revision)) return 0;
     rows = (await trx(AUTH).where({ prospect_id: prospectId, dimension: 'communication', instance_kind: kindOf(followUp).instanceKind, path_id: p.path_id }).whereNull('ended_at').whereNull('satisfied_at').select('id', 'approval_id', 'path_revision'))
       .filter((r) => Number(r.path_revision) === commRevision);
   }
@@ -873,7 +877,7 @@ async function markSendError(prospectId, sendToken, followUp = false) {
     .update({ [K.status]: 'send_error', [K.token]: null, updated_at: new Date() });
 }
 
-const RECONCILE_OUTCOMES = ['sent', 'requeue'];
+const RECONCILE_OUTCOMES = ['sent', 'requeue', 'skip']; // 'skip' = a follow-up only (the owner's terminal review of one nothing can verify)
 /**
  * Explicit operator reconciliation of an AMBIGUOUS send — a send_error (Gmail errored)
  * or a stuck 'sending' (crashed mid-send, past the stale window). After checking the
@@ -888,6 +892,7 @@ async function reconcileSendError({ prospectId, outcome, approvedBy = 'admin', f
   if (!RECONCILE_OUTCOMES.includes(outcome)) return { ok: false, code: 'bad_outcome' };
   const prospect = await db('seo_link_prospects').where({ id: prospectId }).first();
   if (!prospect) return { ok: false, code: 'not_found' };
+  if (outcome === 'skip' && !followUp) return { ok: false, code: 'bad_outcome', error: 'skip settles a follow-up only — a pitch is re-queued or re-drafted' };
   return followUp ? reconcileFollowUp({ prospect, outcome, approvedBy }) : reconcileInitial({ prospect, outcome, approvedBy });
 }
 
@@ -962,7 +967,13 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
   const attemptedMs = prospect.follow_up_attempted_at ? new Date(prospect.follow_up_attempted_at).getTime() : 0;
   const staleSending = st === 'sending' && Date.now() - attemptedMs >= STALE_SENDING_MS;
   if (st === 'sending' && !staleSending) return { ok: false, code: 'send_in_flight' };
-  if (st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable' };
+  // the owner's TERMINAL review (§6.4): a drafted follow-up the automatic attempt routed to the owner on a marker — the
+  // thread unreadable for good (deleted, a 404 on every read), a recipient match the owner will not acknowledge — may be
+  // skipped outright: every Send click would re-run the same check, no other action ends it, and the conversation holds
+  // its inbox and domain until it is settled. Only the marked drafted state and the ambiguous send states skip.
+  const unverifiable = st === 'drafted' && M.OWNER_MARKERS.includes(prospect.follow_up_skipped_reason);
+  if (outcome === 'skip' && !unverifiable && st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable', error: 'only a follow-up the automatic attempt routed to you, or an ambiguous send, can be skipped' };
+  if (outcome !== 'skip' && st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable' };
   const now = new Date();
   // the decision is taken UNDER the row lock, on the row and path as they are in this transaction (never the caller's
   // pre-read): a requeue on a row that has LEFT the path-specific follow-up lifecycle (a send-first row the verifier
@@ -978,14 +989,17 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
     // …and a requeue cannot yield a sendable draft either when the ROUTE moved on under the pinned conversation — the
     // path superseded, or the domain re-ranked to another path — exactly the states the lease and the send retire
     const gone = outcome === 'sent' ? null
+      : outcome === 'skip' ? `skipped by ${approvedBy} after review${prospect.follow_up_skipped_reason ? ` (${prospect.follow_up_skipped_reason})` : ''}`
       : path && path.superseded_by ? 'acquisition path superseded before the follow-up'
         : dom && dom.best_path_id && row.path_id && dom.best_path_id !== row.path_id ? 'domain re-ranked to another path before the follow-up'
           : !M.FOLLOW_UP_STATUSES(path).includes(row.status) ? `placement left the follow-up lifecycle (${row.status})` : null;
     retired = Boolean(gone);
     const note = outcome === 'sent'
       ? `Follow-up reconciled as SENT ${now.toISOString()} by ${approvedBy}`
-      : retired
-        ? `Follow-up reconciled as NOT sent ${now.toISOString()} by ${approvedBy} — ${gone}; follow-up retired`
+      : outcome === 'skip'
+        ? `Follow-up skipped ${now.toISOString()} by ${approvedBy} after review — ${gone}`
+        : retired
+          ? `Follow-up reconciled as NOT sent ${now.toISOString()} by ${approvedBy} — ${gone}; follow-up retired`
         : `Follow-up reconciled as NOT sent (re-queued) ${now.toISOString()} by ${approvedBy}`;
     const notes = row.notes ? `${row.notes}\n${note}` : note;
     const patch = outcome === 'sent'

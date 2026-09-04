@@ -2846,7 +2846,7 @@ function OutreachApprovals({ canRun, onChange }) {
     const id = p.id;
     setBusyId(id); setMsg(null);
     const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/reconcile`, { outcome, ...(p.follow_up ? { follow_up: true } : {}) });
-    setMsg({ ok, text: ok ? (outcome === "sent" ? "Marked as sent." : r.retired ? "Not sent — the placement moved on; the follow-up is retired." : "Returned to drafts.") : (OUTREACH_CODE_MSG[r.code] || r.error || "Reconcile failed.") });
+    setMsg({ ok, text: ok ? (outcome === "sent" ? "Marked as sent." : outcome === "skip" ? "Follow-up skipped." : r.retired ? "Not sent — the placement moved on; the follow-up is retired." : "Returned to drafts.") : (OUTREACH_CODE_MSG[r.code] || r.error || "Reconcile failed.") });
     setBusyId(null); refresh();
   };
 
@@ -2926,10 +2926,12 @@ function OutreachApprovals({ canRun, onChange }) {
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>{p.target_domain}{p.follow_up ? " · follow-up" : ""}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email} · <b>{p.outreach_subject}</b></div>
+                  {p.unverifiable && <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{`The automatic attempt could not verify this follow-up (${String(p.follow_up_skipped_reason || "").replace(/_/g, " ")}). Send it from the Owner queue once the cause clears, or skip it.`}</div>}
                 </div>
                 <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                  <button onClick={() => reconcile(p, "sent")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.green, false, busyId === p.id)}>It sent</button>
-                  <button onClick={() => reconcile(p, "requeue")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.amber, false, busyId === p.id)}>Re-queue</button>
+                  {!p.unverifiable && <button onClick={() => reconcile(p, "sent")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.green, false, busyId === p.id)}>It sent</button>}
+                  {!p.unverifiable && <button onClick={() => reconcile(p, "requeue")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.amber, false, busyId === p.id)}>Re-queue</button>}
+                  {p.follow_up && <button onClick={() => reconcile(p, "skip")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.muted, false, busyId === p.id)}>Skip follow-up</button>}
                 </div>
               </div>
             </div>

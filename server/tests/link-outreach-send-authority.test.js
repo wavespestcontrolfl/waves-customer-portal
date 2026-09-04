@@ -1236,6 +1236,39 @@ describe('Codex r2 on #3854', () => {
     expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'sent' }); // the closed row untouched
     expect(await selection.selectDomains(s.db, { domainIds: null, limit: 10, policyUpdatedAt: new Date(0) })).toEqual([]); // converged
   });
+  test('P2 (Codex r17): "It sent" on an ambiguous follow-up satisfies the instance the send was claimed under when only ANOTHER dimension was revised meanwhile; a communication revision after the draft is a later generation', async () => {
+    const s = await conversation();
+    const claim = await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER });
+    expect(claim.ok).toBe(true);
+    // rewind the finalize to the ambiguous state the reconcile settles, with the instance still open
+    Object.assign(placement(s.db), { follow_up_status: 'send_error', follow_up_send_token: null, follow_up_sent_at: null });
+    Object.assign(followUpRow(s.db), { satisfied_at: null, satisfied_reason: null });
+    Object.assign(storedPath(s.db), { revision: 2, revision_payment: 2 }); // a payment-only change after the attempt: overall 2, communication still 1
+    expect((await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'sent', approvedBy: 'Adam', followUp: true })).ok).toBe(true);
+    expect(followUpRow(s.db)).toMatchObject({ satisfied_reason: 'sent' });
+    const t = await conversation();
+    expect((await Outreach.sendOutreach({ prospectId: t.row.id, mode: 'auto', followUp: true, now: LATER })).ok).toBe(true);
+    Object.assign(placement(t.db), { follow_up_status: 'send_error', follow_up_send_token: null, follow_up_sent_at: null });
+    Object.assign(followUpRow(t.db), { satisfied_at: null, satisfied_reason: null, path_revision: 2 });
+    Object.assign(storedPath(t.db), { revision: 2, revision_communication: 2 }); // the communication inputs changed: a later generation
+    expect((await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'sent', approvedBy: 'Adam', followUp: true })).ok).toBe(true);
+    expect(followUpRow(t.db).satisfied_at).toBeFalsy();
+  });
+  test('P2 (Codex r17): the owner SKIPS an unverifiable follow-up (routed on a marker) through the reconcile — terminal; a pitch, an unmarked draft or a sent follow-up cannot be skipped', async () => {
+    const s = await conversation();
+    gmail.getThread.mockRejectedValue(Object.assign(new Error('Requested entity was not found.'), { code: 404 }));
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'reply_check_failed' });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'drafted', follow_up_skipped_reason: 'reply_check_failed' });
+    expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'skip', approvedBy: 'Adam' })).toMatchObject({ ok: false, code: 'bad_outcome' }); // a pitch is never skipped here
+    expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true, retired: true });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/^skipped by Adam after review \(reply_check_failed\)/) });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: 'x', now: LATER })).toMatchObject({ ok: false, code: 'no_draft' });
+    // an unmarked drafted follow-up is the queue's to send, not skippable; a sent one is settled
+    const t = await conversation();
+    expect(await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: false, code: 'not_reconcilable' });
+    Object.assign(placement(t.db), { follow_up_status: 'sent' });
+    expect(await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: false, code: 'not_reconcilable' });
+  });
   test('P2 (Codex r16): the owner queue CLOSES an owner-routed follow-up whose thread recipient became a customer contact instead of showing an unusable card', async () => {
     const s = await conversation();
     followUpRow(s.db).level = 'OWNER_OUTREACH'; // owner-routed (a marker, or the policy)
