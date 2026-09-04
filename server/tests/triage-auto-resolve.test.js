@@ -881,6 +881,36 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(stamped[4], preSlabLine)).toBe(true);
     expect(estimateCoversAsk(bondAsk('Slab Pre-Treat Termite Service'), preSlabLine)).toBe(false);
     expect(estimateCoversAsk(stamped[4], bondLine('Termite Bond (5-Year Term)'))).toBe(false);
+    // Only a UNIQUE live row is evidence (codex r40 P1): a name two live
+    // rows share, a name whose rename counterpart is live too, and an
+    // inactive row all stamp nothing — never the last row read.
+    const ambiguous = [
+      { service_key: 'pre_slab_a', name: 'Slab Pre-Treat Termite Service', engine_keys: ['pre_slab_termiticide'] },
+      { service_key: 'pre_slab_b', name: 'Slab Pre-Treat Termite Service', engine_keys: ['termite_foam'] },
+      { service_key: 'old_pest', name: 'Quarterly Pest Control Service', is_active: false, engine_keys: ['pest_control'] },
+      { service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control Service' },
+      { service_key: 'lawn_care_recurring', name: 'Bi-Monthly Lawn Care Service' },
+      { service_key: 'lawn_care_legacy', name: 'Lawn Care Program Service' },
+    ];
+    const ambiguousAsks = [bondAsk('Slab Pre-Treat Termite Service'), cadenceAsk('Lawn Care Program Service'), cadenceAsk('Quarterly Pest Control Service')];
+    stampSpecificServiceKeys(ambiguousAsks, ambiguous);
+    expect(ambiguousAsks.map((i) => [i.requested_specific_service_key, i.requested_specific_service_engine_keys])).toEqual([[null, []], [null, []], ['pest_general_quarterly', []]]);
+    stampSpecificServiceKeys(ambiguousAsks, ambiguous.slice(2, 5));
+    expect(ambiguousAsks.map((i) => i.requested_specific_service_key)).toEqual([null, 'lawn_care_recurring', 'pest_general_quarterly']);
+    // An authored corrective line carries its engine service id as
+    // identity, so the registered pre-slab identity answers through it
+    // (codex r40 P2).
+    const correctivePreSlab = est({ estimate_data: { proposal: { enabled: true, programs: [], correctiveWork: [{ service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950 }] } } });
+    expect(estimateCoversAsk(stamped[4], correctivePreSlab)).toBe(true);
+    expect(estimateCoversAsk(bondAsk('Slab Pre-Treat Termite Service'), correctivePreSlab)).toBe(false);
+    // After a SERVER-authoritative reprice the old engineResult is stale:
+    // a service the result no longer prices is not in the delivered scope;
+    // any other row keeps the mixed shape (codex r40 P1).
+    const rodentQuoteAsk = card({ requested_service_categories: ['rodent'], requested_specific_service: null, requested_service_intent: 'quote_only' });
+    const repriced = { result: { oneTime: { items: [{ service: 'Flea Treatment', price: 150 }] } }, engineResult: { lineItems: [{ service: 'rodent_exclusion', name: 'Rodent Exclusion', total: 900 }] } };
+    expect(estimateCoversAsk(rodentQuoteAsk, est({ pricing_authority: 'SERVER', estimate_data: repriced }))).toBe(false);
+    expect(estimateCoversAsk(rodentQuoteAsk, est({ pricing_authority: 'CLIENT', estimate_data: repriced }))).toBe(true);
+    expect(estimateCoversAsk(rodentQuoteAsk, est({ pricing_authority: 'SERVER', estimate_data: { engineResult: repriced.engineResult } }))).toBe(true);
     expect(estimateCoversAsk(termiteQuote('quote_only'), treatmentLine)).toBe(true);
     // A quote-only ask takes either subtype — the category / specific
     // service says what was quoted, so a delivered inspection quote closes

@@ -471,17 +471,28 @@ const engineKeysOf = (row) => {
   const raw = parseMaybeJson(row?.engine_keys);
   return Array.isArray(raw) ? raw.filter((k) => typeof k === 'string' && k.trim()).map((k) => k.trim().toLowerCase()) : [];
 };
+// Only a UNIQUE live catalog row is evidence — the catalog-name rule the
+// booking path applies (service-catalog-names: services.name is not
+// unique, the Service Library can reactivate an old spelling as its own
+// row): a name two live rows share, or a name whose rename counterpart is
+// live as well, resolves to nothing rather than to whichever row the
+// unordered read returned last, whose engine keys could then close a card
+// by identity for a different product (codex r40 P1). Inactive rows are
+// not in the catalog.
 function stampSpecificServiceKeys(items, catalogRows) {
   const { counterpartServiceName } = require('../config/service-name-aliases');
   const byName = new Map();
   for (const row of catalogRows || []) {
-    if (typeof row?.name === 'string' && row.service_key) byName.set(row.name.trim().toLowerCase(), row);
+    if (typeof row?.name !== 'string' || !row.service_key || row.is_active === false) continue;
+    const key = row.name.trim().toLowerCase();
+    byName.set(key, byName.has(key) ? null : row);
   }
   for (const item of items) {
     const name = requestAsk(item)?.requested_specific_service;
     if (typeof name !== 'string' || !name.trim()) continue;
     const alt = counterpartServiceName(name);
-    const row = byName.get(name.trim().toLowerCase()) || (alt ? byName.get(String(alt).trim().toLowerCase()) : null) || null;
+    const hits = [byName.get(name.trim().toLowerCase()), alt ? byName.get(String(alt).trim().toLowerCase()) : undefined].filter((r) => r !== undefined);
+    const row = hits.length === 1 ? hits[0] : null;
     item.requested_specific_service_key = row?.service_key || null;
     item.requested_specific_service_engine_keys = engineKeysOf(row);
   }
@@ -1434,7 +1445,14 @@ function proposalLines(row, add) {
       add([item.description, ...(cadence.recurring ? [cadenceWord(item)] : [])], cadence, item.amount > 0, AUTHORED);
     }
   }
-  for (const work of proposal.correctiveWork || []) add([work.label, ...family(work.service)], ONE_TIME, work.amount > 0, AUTHORED);
+  // A corrective line's engine service id is its identity too, so a
+  // registered catalog identity (pre-slab) answers through an authored
+  // "Pre-Slab Termiticide Treatment" whose words are not the catalog's
+  // (codex r40 P2).
+  for (const work of proposal.correctiveWork || []) {
+    add([work.label, ...family(work.service)], ONE_TIME, work.amount > 0,
+      { ...AUTHORED, identity: lineIdentity(work.service && work.service !== 'other' ? work.service : null, work) });
+  }
 }
 
 // The engine result's typed lines, from both persisted roots. Priced
@@ -1445,8 +1463,9 @@ function proposalLines(row, add) {
 // and its words, and as separate records they would let one requirement
 // be "answered" by a component of another (a rodent-exclusion quote
 // closing a rodent-control ask, codex r31 P1). Entries with no identity
-// stay their own lines.
-function engineLines(data, add) {
+// stay their own lines. The roots are the containers the delivered quote
+// is read from (estimateLines decides which).
+function engineLines(roots, add) {
   const { SERVICE_LINE_LABELS } = require('./estimate-service-lines');
   const identityOf = (entry) => [entry.service, entry.serviceKey, entry.service_key].find((v) => typeof v === 'string' && v.trim()) || null;
   const pooled = new Map();
@@ -1460,7 +1479,7 @@ function engineLines(data, add) {
     pooled.set(key, line);
     return undefined;
   };
-  for (const root of [data.result, data.engineResult].filter((r) => r && typeof r === 'object')) {
+  for (const root of roots.filter((r) => r && typeof r === 'object')) {
     for (const source of ENGINE_LINE_SOURCES) {
       const entries = source.list(root);
       if (!Array.isArray(entries)) continue;
@@ -1503,7 +1522,14 @@ function estimateLines(row) {
   const data = require('./estimate-service-lines').parseEstimateData(row.estimate_data) || {};
   const { lines, add } = lineCollector();
   if (data.proposal?.enabled === true) proposalLines(row, add);
-  if (!lines.length) engineLines(data, add);
+  // A SERVER-authoritative reprice rewrites data.result WHOLESALE and
+  // leaves the earlier engineResult behind (admin-estimate-persistence), so
+  // there an engine row the result no longer carries is a removed or
+  // re-priced service — the pricing audit's stale-container rule — and only
+  // the result is the delivered quote; every other shape is the legitimate
+  // mixed one and both roots merge (codex r40 P1).
+  const staleEngineResult = String(row.pricing_authority || '').toUpperCase() === 'SERVER' && !!data.result && data.result !== data.engineResult;
+  if (!lines.length) engineLines([data.result, ...(staleEngineResult ? [] : [data.engineResult])], add);
   return lines.length ? lines : [legacyLine(row, data)];
 }
 
@@ -1711,7 +1737,7 @@ async function loadEvidence(conn, items) {
     evidence.set(id, cur);
   };
   try {
-    stampSpecificServiceKeys(candidates, await conn('services').select('service_key', 'name', 'engine_keys'));
+    stampSpecificServiceKeys(candidates, await conn('services').select('service_key', 'name', 'engine_keys', 'is_active'));
   } catch (e) {
     logger.warn(`[triage-auto-resolve] catalog read for specific-service keys skipped: ${e.message}`);
   }
