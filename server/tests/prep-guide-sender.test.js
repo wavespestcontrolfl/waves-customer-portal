@@ -355,6 +355,26 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
   });
 
+  test('prep sends for one customer are serialized — the second waits for the first to settle', async () => {
+    upcomingVisitRow = VISIT;
+    let finishFirst;
+    sendCustomerMessage.mockImplementationOnce(() => new Promise((resolve) => {
+      finishFirst = () => resolve({ sent: true, providerMessageId: 'SM1' });
+    }));
+
+    const first = sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    const second = sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
+    await new Promise((r) => setTimeout(r, 20));
+    // The second attempt has not reached the provider while the first holds the lock.
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+
+    finishFirst();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+  });
+
   test('a delivered guide keeps its page claim; a partial Both does not release it', async () => {
     upcomingVisitRow = VISIT;
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'suppressed' });

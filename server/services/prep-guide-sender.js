@@ -418,6 +418,25 @@ async function logPrepInteraction({ customer, config, contacts, result, pestType
   }
 }
 
+// Per-customer serialization of claim → send → release/stamp. Two operators
+// sending this customer's prep within the same seconds is the only way a
+// fresh claim's release can race a sibling's non-fresh reuse of the same
+// key (the sibling's delivered URL would lose its guide); a keyed promise
+// chain makes the second wait for the first. In-process: the portal runs
+// as one Railway replica (pre-push Codex P1 on 8dbc30cc1).
+const customerPrepLocks = new Map();
+async function withCustomerPrepLock(customerId, fn) {
+  const prev = customerPrepLocks.get(customerId) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  const settled = run.then(() => {}, () => {});
+  customerPrepLocks.set(customerId, settled);
+  try {
+    return await run;
+  } finally {
+    if (customerPrepLocks.get(customerId) === settled) customerPrepLocks.delete(customerId);
+  }
+}
+
 // Sends prep to a customer on the operator-chosen channel. Returns a
 // structured result the route turns into an operator-facing message. Never
 // throws — every failure surfaces as { ok: false, reason }.
@@ -442,19 +461,21 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   };
   if (contacts.refusal) return { ...result, reason: contacts.refusal };
 
-  const page = await resolvePrepVisit(customer, config);
-  // The stamp target: only a visit whose page this guide owns.
-  page.stampVisit = page.ownsPage ? page.visit : null;
-  const smsPlan = planPrepSms(config, page.prepUrl);
-  // Refused with the link's own reason (no visit / page taken / link
-  // failed), never a blanket "no visit".
-  if (contacts.wantSms && !smsPlan) {
-    return { ...result, reason: page.linkReason, ...(page.takenBy ? { takenBy: page.takenBy } : {}) };
-  }
+  return withCustomerPrepLock(customer.id, async () => {
+    const page = await resolvePrepVisit(customer, config);
+    // The stamp target: only a visit whose page this guide owns.
+    page.stampVisit = page.ownsPage ? page.visit : null;
+    const smsPlan = planPrepSms(config, page.prepUrl);
+    // Refused with the link's own reason (no visit / page taken / link
+    // failed), never a blanket "no visit".
+    if (contacts.wantSms && !smsPlan) {
+      return { ...result, reason: page.linkReason, ...(page.takenBy ? { takenBy: page.takenBy } : {}) };
+    }
 
-  await deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result });
-  if (result.ok) await logPrepInteraction({ customer, config, contacts, result, pestType, actorId });
-  return result;
+    await deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result });
+    if (result.ok) await logPrepInteraction({ customer, config, contacts, result, pestType, actorId });
+    return result;
+  });
 }
 
 module.exports = {
