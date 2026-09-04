@@ -594,6 +594,10 @@ export default function DispatchPageV2({
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
+  // The visit the Edit / prepay modal last saved (fresh object per save):
+  // the list view re-verifies that row on the refresh it triggers, unlike
+  // the generic key bumps for creates, completions and payments.
+  const [lastSavedVisit, setLastSavedVisit] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
   const [showMoreSheet, setShowMoreSheet] = useState(false);
@@ -1458,6 +1462,7 @@ export default function DispatchPageV2({
           }}
           onRefresh={() => fetchSchedule(date)}
           refreshKey={scheduleRefreshKey}
+          lastSave={lastSavedVisit}
         />
       )}
 
@@ -2028,6 +2033,7 @@ export default function DispatchPageV2({
               (r) => String(r.id) === String(editedId),
             );
             setEditingService(null);
+            setLastSavedVisit({ id: editedId });
             // Week rows cache their own /week payload — invalidate it so a
             // saved date/price/tech change can't be re-served pre-edit from
             // a week row into checkout/details (Codex r11 P1).
@@ -2384,6 +2390,7 @@ export default function DispatchPageV2({
             const entry = prepaidEntryContext;
             setPrepaidService(null);
             setPrepaidEntryContext(null);
+            setLastSavedVisit({ id: svc?.id });
             // Week rows cache their own /week payload — without a bump a
             // week-origin visit keeps showing unpaid and can reopen
             // checkout/prepay off stale totals (Codex r12 P2).

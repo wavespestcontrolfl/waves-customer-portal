@@ -36,7 +36,7 @@ const STATUS_LABELS = {
   on_site: 'On Site', completed: 'Completed', skipped: 'Skipped', cancelled: 'Cancelled',
 };
 
-export default function ScheduleListView({ technicians = [], onEdit, onRefresh, refreshKey = 0 }) {
+export default function ScheduleListView({ technicians = [], onEdit, onRefresh, refreshKey = 0, lastSave = null }) {
   const [services, setServices] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -48,7 +48,6 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
   // bulk conflict check must cover rows no longer loaded. Entries follow
   // the selection: deleted on deselect, cleared when it empties.
   const selectedMetaRef = useRef(new Map());
-  const lastEditedIdRef = useRef(null);
   const rememberSelectedMeta = useCallback((s) => {
     selectedMetaRef.current.set(s.id, {
       id: s.id,
@@ -125,12 +124,12 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
       // modal) comes back changed — refresh its meta from the fresh page
       // so the bulk pre-flights read the saved row (Codex #3868 r2 P2).
       (data.services || []).forEach((s) => { if (selectedMetaRef.current.has(s.id)) rememberSelectedMeta(s); });
-      // The row this list handed to the Edit modal may have left the
-      // filtered page (date/status/tech/service changed). Its cached meta
-      // is then unverifiable, so drop it from the selection rather than
-      // bulk-act on a pre-edit snapshot (Codex #3868 r3 P2). Other-page
-      // selections are untouched: only the saved id is checked, and only
-      // on the refresh the host fires after a save.
+      // The row the host just saved may have left the filtered page
+      // (date/status/tech/service changed). Its cached meta is then
+      // unverifiable, so drop it from the selection rather than bulk-act
+      // on a pre-edit snapshot (Codex #3868 r3 P2). Other-page selections
+      // are untouched: only the saved id is checked, and only on the
+      // refresh that save triggers.
       if (editedId && selectedMetaRef.current.has(editedId) && !(data.services || []).some((s) => s.id === editedId)) {
         selectedMetaRef.current.delete(editedId);
         setSelected((prev) => { const next = new Set(prev); next.delete(editedId); return next; });
@@ -148,21 +147,19 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
     setLoading(false);
   }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page, rememberSelectedMeta]);
 
-  // refreshKey: the host page bumps it after the Edit modal saves, so the
-  // list re-reads rows it did not itself change. The row last handed to
-  // the modal counts as edited only on save-driven fetches, and the marker
-  // survives them: a nested save (Mark prepaid) bumps the key and re-seats
-  // the same modal, so the final edit still needs it (Codex r5). A filter
-  // or page fetch — only possible once the modal is closed — forgets it,
-  // so a dismissed modal never drops a row (pre-push hook P1).
-  const seenRefreshKeyRef = useRef(refreshKey);
+  // refreshKey: the host bumps it after any mutation (edit, create,
+  // completion, payment…) so the list re-reads rows it did not itself
+  // change. lastSave: the host names the visit its Edit / prepay modal
+  // just saved (a fresh object per save, so a nested Mark prepaid save
+  // followed by the real edit counts twice); only that row is re-verified
+  // against the fresh page — a generic bump or a dismissed modal never
+  // drops a selection (Codex r3/r5 + pre-push hook P1s).
+  const seenSaveRef = useRef(lastSave);
   useEffect(() => {
-    const saveDriven = seenRefreshKeyRef.current !== refreshKey;
-    seenRefreshKeyRef.current = refreshKey;
-    const saved = saveDriven ? lastEditedIdRef.current : null;
-    if (!saveDriven) lastEditedIdRef.current = null;
+    const saved = lastSave && lastSave !== seenSaveRef.current ? lastSave.id : null;
+    seenSaveRef.current = lastSave;
     fetchList(saved);
-  }, [fetchList, refreshKey]);
+  }, [fetchList, refreshKey, lastSave]);
 
   const sorted = useMemo(() => {
     const arr = [...services];
@@ -514,7 +511,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
                 <tr
                   key={s.id}
                   className={cn('hover:bg-zinc-50 cursor-pointer', isSelected && 'bg-zinc-50')}
-                  onClick={() => { lastEditedIdRef.current = s.id; onEdit?.(s); }}
+                  onClick={() => onEdit?.(s)}
                 >
                   <td className={tdClass} onClick={e => e.stopPropagation()}>
                     <input type="checkbox" checked={isSelected}

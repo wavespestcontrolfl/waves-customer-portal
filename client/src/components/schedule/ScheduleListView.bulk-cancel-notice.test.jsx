@@ -119,50 +119,40 @@ describe('ScheduleListView bulk cancel — recurring plan notice', () => {
     await screen.findByText(/belong to a recurring plan: 1\./);
   });
 
-  it('drops the edited row from the selection when the refresh no longer returns it', async () => {
-    const onEdit = vi.fn();
-    const view = await renderWithRows({ refreshKey: 0, onEdit });
+  it('drops the saved row from the selection when the save-driven refresh no longer returns it', async () => {
+    const view = await renderWithRows({ refreshKey: 0, lastSave: null });
     const boxes = screen.getAllByRole('checkbox');
     fireEvent.click(boxes[1]); // svc-plan stays selected (other-page semantics)
-    fireEvent.click(boxes[2]); // svc-once, then edited
+    fireEvent.click(boxes[2]); // svc-once, then saved out of the window
     expect(screen.getByText('2 selected')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Sam Once')); // row click opens the Edit modal
-    expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-once' }));
-    // The edit moved it out of the filtered window; the host bumps the key.
     ROWS = ROWS.filter((r) => r.id !== 'svc-once');
-    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} onEdit={onEdit} />);
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} lastSave={{ id: 'svc-once' }} />);
     await screen.findByText('1 selected');
     expect(screen.queryByText('Sam Once')).not.toBeInTheDocument();
   });
 
-  it('keeps the edited-row marker across a nested save that re-seats the modal', async () => {
-    const onEdit = vi.fn();
-    const view = await renderWithRows({ refreshKey: 0, onEdit });
+  it('keeps a selected row absent from a generic refresh (no save signal)', async () => {
+    const view = await renderWithRows({ refreshKey: 0, lastSave: null });
+    fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once
+    ROWS = ROWS.filter((r) => r.id !== 'svc-once');
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} lastSave={null} />);
+    await waitFor(() => expect(screen.queryByText('Sam Once')).not.toBeInTheDocument());
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
+  });
+
+  it('re-verifies the saved row on each save, not only the first', async () => {
+    const view = await renderWithRows({ refreshKey: 0, lastSave: null });
     const boxes = screen.getAllByRole('checkbox');
     fireEvent.click(boxes[1]); // svc-plan
     fireEvent.click(boxes[2]); // svc-once
-    fireEvent.click(screen.getByText('Sam Once')); // Edit modal opens
-    // Mark prepaid saves inside the modal: key bumps, row still on the page.
-    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} onEdit={onEdit} />);
+    // Mark prepaid saves inside the modal: row still on the page → kept.
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} lastSave={{ id: 'svc-once' }} />);
     await waitFor(() => expect(fetch.mock.calls.filter(([u]) => String(u).includes('/admin/schedule/list')).length).toBe(2));
-    // The real edit then moves the row out of the filtered window.
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+    // The real edit then moves it out of the filtered window.
     ROWS = ROWS.filter((r) => r.id !== 'svc-once');
-    view.rerender(<ScheduleListView technicians={[]} refreshKey={2} onEdit={onEdit} />);
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={2} lastSave={{ id: 'svc-once' }} />);
     await screen.findByText('1 selected');
-  });
-
-  it('keeps a row whose modal was opened but not saved when a later fetch omits it', async () => {
-    const onEdit = vi.fn();
-    const view = await renderWithRows({ refreshKey: 0, onEdit });
-    fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once
-    fireEvent.click(screen.getByText('Sam Once')); // modal opened…
-    // …and dismissed; then a filter/page fetch (no refreshKey bump) omits the row.
-    ROWS = ROWS.filter((r) => r.id !== 'svc-once');
-    fireEvent.change(screen.getByPlaceholderText('Name or service…'), { target: { value: 'Pat' } });
-    await waitFor(() => expect(fetch.mock.calls.filter(([u]) => String(u).includes('/admin/schedule/list')).length).toBeGreaterThan(1));
-    await waitFor(() => expect(screen.queryByText('Sam Once')).not.toBeInTheDocument());
-    expect(screen.getByText('1 selected')).toBeInTheDocument();
-    view.unmount();
   });
 
   it('shows nothing for a selection with no recurring visit', async () => {
