@@ -89,7 +89,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
-const { startOfETMonth } = require('../../utils/datetime-et');
+const { startOfETMonth, addETDays } = require('../../utils/datetime-et');
 const { auditVendorOrder } = require('../audit-log');
 const { parsePackSize, convertToOz } = require('../product-costing');
 const { normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
@@ -312,10 +312,17 @@ async function orderedQuantityFor(conn, requestId) {
 // in-flight amount cannot vacate one month and land in the next on top of
 // headroom another dispatcher reserved there meanwhile (pre-push P0, Codex
 // r14 P1).
+// Spend of ONE ET accounting month: [start of the month `now` is in, start
+// of the next). Bounded above so an anchored re-check of an earlier month
+// (a placement that crossed the boundary) never sums later months' rows
+// (pre-push P1).
 async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = {}) {
+  const monthStart = startOfETMonth(now);
+  const nextMonthStart = startOfETMonth(addETDays(monthStart, 32));
   let q = conn('vendor_orders')
     .whereNot('status', 'failed')
-    .where('created_at', '>=', startOfETMonth(now))
+    .where('created_at', '>=', monthStart)
+    .where('created_at', '<', nextMonthStart)
     .where(function dispatched() { this.where('status', 'placing').orWhereNotNull('placed_at'); });
   if (excludeId) q = q.whereNot('id', excludeId);
   const row = await q.sum({ total: 'amount_cents' }).first();
