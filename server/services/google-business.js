@@ -589,7 +589,8 @@ class GoogleBusinessService {
    * GATE_REVIEW_CLICK_AUTOLINK: link an unlinked review to the ONE customer
    * whose tracked review-link click confidently explains it (sole clicker in
    * the correlation window, location match, tight before-window — see
-   * findConfidentClickMatch). Runs from the deferred end-of-batch phase so
+   * findConfidentClickMatch; its surname rung additionally needs
+   * GATE_REVIEW_CLICK_AUTOLINK_SURNAME). Runs from the deferred end-of-batch phase so
    * the sole-clicker exclusion sees the whole batch's links, and re-reads
    * the live row so a manual match landed mid-sync always wins.
    *

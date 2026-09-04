@@ -30,7 +30,9 @@ const SCAN_LIMIT = 200;
  * A name for matching: lowercased, diacritics stripped, punctuation trimmed,
  * whitespace collapsed ("Muñoz-Pérez" → "munoz-perez", "De La Cruz" →
  * "de la cruz", "O’Connor" / "O'Connor" / "OConnor" → "oconnor"). '' when
- * nothing usable remains. Apostrophes go in EVERY form (ASCII ', typographic
+ * nothing usable remains. Digits STAY: a handle-suffixed token ("Smith2")
+ * is not the surname Smith, and dropping the digit manufactured one (GH
+ * codex r6 P1). Apostrophes go in EVERY form (ASCII ', typographic
  * ’ ‘, modifier ʼ): Google's display name and the customer record rarely
  * agree on one, and keeping only the ASCII form let "O’Connor" match a
  * customer stored "OConnor" while missing one stored "O'Connor" — two such
@@ -41,7 +43,7 @@ function normalizeName(value) {
   return String(value || '')
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/[^a-z\- ]/g, '')
+    .replace(/[^a-z0-9\- ]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -107,9 +109,13 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
     const windowEnd = new Date(reviewAt.getTime() + WINDOW_AFTER_HOURS * 3600 * 1000);
 
     const reviewLocationId = review?.location_id || null;
+    // Archived customers (customers.deleted_at) STAY in the scan: the
+    // archive path leaves their review_requests rows, and a click is a
+    // click — an archived same-surname clicker is ambiguity the surname
+    // rung must count (GH codex r6 P1). They are dropped from the
+    // SUGGESTION list and never eligible for an auto-link (customerActive).
     let query = conn('review_requests as rr')
       .join('customers as c', 'rr.customer_id', 'c.id')
-      .whereNull('c.deleted_at')
       .whereNotNull('rr.redirected_at')
       // Only server-observed clicks: the tracked redirect (review-gate)
       // stamps google_review_clicked when the browser actually follows the
@@ -164,8 +170,10 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         'c.zip',
         'c.has_left_google_review',
         'c.active',
+        'c.deleted_at',
       );
     if (!clicks.length) return [];
+    const archived = new Set(clicks.filter((r) => r.deleted_at).map((r) => r.customer_id));
 
     // A customer already linked to a synced review is attributed — their click
     // explains their OWN review, not this one. Excluded rather than annotated
@@ -268,8 +276,9 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         pairTrusted: pairTrusted === true,
         // STRICT true only (GH codex r8): a legacy NULL active must not
         // auto-link — the confirmation UI's candidate search requires
-        // active=true, so a null-active link would be unconfirmable.
-        customerActive: row.active === true,
+        // active=true, so a null-active link would be unconfirmable. An
+        // archived customer is likewise unconfirmable (GH codex r6 P1).
+        customerActive: row.active === true && !row.deleted_at,
         // Another of this customer's pairs is stamped for a DIFFERENT
         // location — see `conflicting` above.
         locationConflict: conflicting.has(row.customer_id),
@@ -303,15 +312,18 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       // other-location rows count too — a second review_requests row
       // stamped elsewhere is the "any pair" conflict the main scan cannot
       // see (pre-push r5 P1). Auto-link path only.
-      _meta.surnameClickerElsewhere = Boolean(reviewLocationId && surnames.length)
+      // Only when the surname rung can act (GATE_REVIEW_CLICK_AUTOLINK_SURNAME
+      // via `_meta.surnameRung`) — dark, the scan would be a wasted query.
+      _meta.surnameClickerElsewhere = Boolean(_meta.surnameRung && reviewLocationId && surnames.length)
         && await surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames });
     }
 
     // A customer already linked to a synced review is attributed — excluded
-    // from the SUGGESTION list so it only holds open questions (codex #3264).
-    // Surname matches lead; within a tier the nearest click wins.
+    // from the SUGGESTION list so it only holds open questions (codex #3264);
+    // so is an archived one, who cannot be confirmed. Surname matches lead;
+    // within a tier the nearest click wins.
     return all
-      .filter((c) => !linked.has(c.customerId))
+      .filter((c) => !linked.has(c.customerId) && !archived.has(c.customerId))
       .sort((a, b) => Number(b.nameMatch) - Number(a.nameMatch) || Math.abs(a.clickOffsetMs) - Math.abs(b.clickOffsetMs))
       .slice(0, Math.max(1, limit));
   } catch (err) {
@@ -331,12 +343,12 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
  * tap stamped elsewhere). A competing customer is ambiguity; the matched
  * customer's own row is a conflicting pair. True on a truncated scan (the
  * window can't be proven clean). The pair predicate repeats JS-side, as in
- * the main scan.
+ * the main scan. Archived customers count (GH codex r6 P1), as in the main
+ * scan.
  */
 async function surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames }) {
   const rows = await conn('review_requests as rr')
     .join('customers as c', 'rr.customer_id', 'c.id')
-    .whereNull('c.deleted_at')
     .whereNotNull('rr.redirected_at')
     .where('rr.google_review_clicked', true)
     .whereRaw(
@@ -357,7 +369,8 @@ async function surnameClickerElsewhere({ conn, reviewLocationId, windowStart, wi
       || elsewhereInWindow(row.last_redirected_at, row.last_google_location)));
 }
 
-// ── Confident auto-link (GATE_REVIEW_CLICK_AUTOLINK) ────────────────────────
+// ── Confident auto-link (GATE_REVIEW_CLICK_AUTOLINK; the click_name rung also
+// needs GATE_REVIEW_CLICK_AUTOLINK_SURNAME) ──────────────────────────────────
 //
 // The suggestion list above tolerates ambiguity because a person reads it.
 // Auto-linking tolerates none: a wrong link suppresses that customer's future
@@ -398,8 +411,12 @@ const AUTO_LINK_FAR_MS = 6 * 3600 * 1000;
 async function findConfidentClickMatch(review, { conn = db } = {}) {
   try {
     // SCAN_LIMIT bounds the underlying query; a limit above it returns every
-    // deduped candidate, which the rungs below need.
-    const meta = {};
+    // deduped candidate, which the rungs below need. The surname rung ships
+    // DARK on its own gate (#3822 r6: its ambiguity semantics were still
+    // converging) — off, click_name never links and the inverse-location
+    // scan it alone needs is skipped.
+    const { isEnabled } = require('../config/feature-gates');
+    const meta = { surnameRung: isEnabled('reviewClickAutoLinkSurname') };
     const candidates = await findLikelyReviewers(review, { conn, limit: SCAN_LIMIT, _meta: meta });
     if (!candidates.length) return null;
     // A scan that hit its row cap can't prove what else the window held
@@ -459,9 +476,11 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     // location is not — the retained pair may be the untrusted first click
     // while their newer tap went elsewhere (GH codex r1 P1), or a second
     // request row of theirs may be stamped elsewhere (pre-push r5 P1).
+    // `all` holds archived clickers too — competition, never `named`
+    // (their customerActive is false; GH codex r6 P1).
     const all = meta.allCandidates;
     const namedAll = all.filter((c) => c.nameMatch === true);
-    const named = namedAll.length === 1 && meta.surnameClickerElsewhere !== true
+    const named = meta.surnameRung && namedAll.length === 1 && meta.surnameClickerElsewhere !== true
       ? candidates.find((c) => c.customerId === namedAll[0].customerId)
       : null;
     if (named && eligible(named) && named.locationConflict !== true) {

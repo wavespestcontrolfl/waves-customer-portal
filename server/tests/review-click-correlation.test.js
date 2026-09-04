@@ -1,7 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The surname rung ships DARK on GATE_REVIEW_CLICK_AUTOLINK_SURNAME; the
+// suite runs it ON except where a test flips it.
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((gate) => gate === 'reviewClickAutoLinkSurname') }));
 
 const logger = require('../services/logger');
+const { isEnabled } = require('../config/feature-gates');
 const { findLikelyReviewers, findConfidentClickMatch, describeClickOffset, reviewerSurnames, AUTO_LINK_NEAR_MS, AUTO_LINK_FAR_MS } = require('../services/review-click-correlation');
 
 const REVIEW_AT = '2026-08-07T18:00:00.000Z';
@@ -35,13 +39,16 @@ function clickRow(overrides = {}) {
 // Chainable capture mock: filters are SQL-side in prod, so the mock returns
 // the configured rows verbatim and records where() args for window assertions.
 function makeConn({ clickRows = [], linkedRows = [], failClicks = false, failLinked = false } = {}) {
-  const captured = { where: [], whereRaw: [] };
+  const captured = { where: [], whereRaw: [], whereNull: [] };
   const conn = (table) => {
     const isClicks = String(table).startsWith('review_requests');
     const q = {};
     const chain = () => q;
     q.join = chain;
-    q.whereNull = chain;
+    q.whereNull = (...args) => {
+      if (isClicks) captured.whereNull.push(args);
+      return q;
+    };
     q.whereNotNull = chain;
     q.orderBy = chain;
     q.orderByRaw = chain;
@@ -340,6 +347,9 @@ describe('reviewerSurnames', () => {
     expect(reviewerSurnames("Pat O'Connor")).toEqual(['pat oconnor', 'oconnor']);
     expect(reviewerSurnames('Pat OConnor')).toEqual(['pat oconnor', 'oconnor']);
     expect(reviewerSurnames('SunshineGal88')).toEqual([]);
+    // Digits stay: a handle suffix is not the surname it resembles (GH
+    // codex r6 P1).
+    expect(reviewerSurnames('Sunshine Smith2')).toEqual(['sunshine smith2', 'smith2']);
     expect(reviewerSurnames('Dana B.')).toEqual(['dana b']);
     expect(reviewerSurnames('')).toEqual([]);
   });
@@ -425,6 +435,57 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     // elsewhere: the surname links.
     const stale = makeConn({ clickRows: [northgate(legacy), { ...nullFirst, last_redirected_at: '2026-08-01T12:00:00.000Z' }, other()] });
     expect((await findConfidentClickMatch(REVIEW, { conn: stale }))?.rung).toBe('click_name');
+  });
+
+  test('a handle-suffixed display name is not surname evidence: "Sunshine Smith2" never links a Smith clicker (GH codex r6 P1)', async () => {
+    // A legacy pair, so click_near cannot link it either — only a surname could.
+    const legacy = { last_redirected_at: null, last_google_location: null };
+    const conn = makeConn({ clickRows: [northgate({ last_name: 'Smith', ...legacy }), other({ last_name: 'Jones' })] });
+    expect((await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'Sunshine Smith' }, { conn }))?.rung).toBe('click_name');
+    expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'Sunshine Smith2' }, { conn })).toBeNull();
+    expect((await findLikelyReviewers({ ...REVIEW, reviewer_name: 'Sunshine Smith2' }, { conn })).map((c) => c.nameMatch)).toEqual([false, false]);
+  });
+
+  test('an ARCHIVED same-surname clicker still counts as ambiguity — unselectable, never suggested, never linked (GH codex r6 P1)', async () => {
+    const archivedAt = '2026-08-07T18:30:00.000Z'; // stamped after the tap, before correlation
+    const archived = northgate({ customer_id: 'cust-northgate-2', first_name: 'Blake', redirected_at: '2026-08-07T16:00:00.000Z', deleted_at: archivedAt });
+    const conn = makeConn({ clickRows: [northgate(), archived, other()] });
+    // Neither scan filters archived customers out in SQL — their clicks are
+    // evidence the JS pass must see.
+    expect((await findLikelyReviewers(REVIEW, { conn })).map((c) => c.customerId)).toEqual(['cust-northgate', 'cust-riverside']);
+    expect(conn.captured.whereNull.flat()).not.toContain('c.deleted_at');
+    expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
+    expect(conn.captured.whereNull.flat()).not.toContain('c.deleted_at');
+    // An archived clicker is never the match itself, by any rung.
+    const soleArchived = makeConn({ clickRows: [northgate({ deleted_at: archivedAt })] });
+    expect(await findLikelyReviewers(REVIEW, { conn: soleArchived })).toEqual([]);
+    expect(await findConfidentClickMatch(REVIEW, { conn: soleArchived })).toBeNull();
+    // Nor is one the click_near nearest.
+    const nearArchived = makeConn({ clickRows: [northgate({ deleted_at: archivedAt }), other()] });
+    expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'SunshineGal88' }, { conn: nearArchived })).toBeNull();
+  });
+
+  test('GATE_REVIEW_CLICK_AUTOLINK_SURNAME off: click_name never links and the inverse-location scan is skipped; suggestions still rank the surname first', async () => {
+    // A legacy pair: with the gate ON the surname links it (the test above
+    // this block's fixtures); click_near never can.
+    const legacy = { last_redirected_at: null, last_google_location: null };
+    const conn = makeConn({ clickRows: [northgate(legacy), other()] });
+    expect((await findConfidentClickMatch(REVIEW, { conn }))?.rung).toBe('click_name');
+    isEnabled.mockImplementation(() => false);
+    try {
+      let clickScans = 0;
+      const counting = (table) => { if (String(table).startsWith('review_requests')) clickScans += 1; return conn(table); };
+      expect(await findConfidentClickMatch(REVIEW, { conn: counting })).toBeNull();
+      expect(clickScans).toBe(1);
+      expect((await findLikelyReviewers(REVIEW, { conn })).map((c) => [c.customerId, c.nameMatch])).toEqual([['cust-northgate', true], ['cust-riverside', false]]);
+      // The other rungs are untouched by this gate.
+      const sole = makeConn({ clickRows: [northgate()] });
+      expect((await findConfidentClickMatch(REVIEW, { conn: sole }))?.rung).toBe('sole_click');
+      const near = makeConn({ clickRows: [other({ customer_id: 'cust-riverside-2', redirected_at: '2026-08-07T17:59:15.000Z' }), other()] });
+      expect((await findConfidentClickMatch(REVIEW, { conn: near }))?.rung).toBe('click_near');
+    } finally {
+      isEnabled.mockImplementation((gate) => gate === 'reviewClickAutoLinkSurname');
+    }
   });
 
   test('refuses two same-surname clickers (neither minutes-vs-hours apart) — a human decides', async () => {
