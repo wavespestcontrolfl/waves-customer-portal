@@ -138,6 +138,17 @@ test('vendor pricing learned after the request was raised → request refreshed 
   expect(notify.mock.calls[0][3].refreshOnDedupe).toBe(true);
 });
 
+test('a vendor id learned alone (name already on the request, no SKU/URL yet) is still written to the request (pre-push P1)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Gemplers', metadata: {} };
+  mockState.pricing = null;
+  const notify = jest.fn(async () => ({}));
+  const res = await runSuppliesAutoReorderSweep({ notify });
+  expect(res.refreshed).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
+  expect(JSON.parse(mockState.updates[0].row.metadata)).toMatchObject({ vendorId: 'vend-gemplers' });
+  expect(notify.mock.calls[0][3].metadata.vendorId).toBe('vend-gemplers');
+});
+
 test('an existing ORDERED auto request does not re-ring', async () => {
   mockState.candidates = [lowSign];
   mockState.existing = { id: 'req-auto', status: 'ordered', source: 'auto_reorder' };
