@@ -159,8 +159,15 @@ const LIVE_BOOKING_STATUSES = new Set(['pending', 'confirmed', 'en_route', 'on_s
 const HUMAN_CONTACT_SOURCES = new Set(['admin', 'portal']);
 // Category words too generic to prove a visit is for the requested service.
 const SERVICE_STOPWORDS = new Set(['control', 'care', 'service', 'services', 'treatment', 'general', 'and', 'the', 'of']);
+// A SPECIFIC catalog name the caller used sheds only connectors and the
+// bare "service" wrapper: the subtype words a category sheds ("control",
+// "treatment") are what tell "Rodent Control" from "Rodent Exclusion", so
+// the narrowing requirement keeps them (codex r34 P1).
+const SPECIFIC_STOPWORDS = new Set(['service', 'services', 'and', 'the', 'of']);
 // The meaningful service words of a text.
-const serviceTokens = (text) => [...new Set(String(text || '').toLowerCase().split(/[^a-z]+/).filter((t) => t && !SERVICE_STOPWORDS.has(t)))];
+const tokensOf = (text, stopwords) => [...new Set(String(text || '').toLowerCase().split(/[^a-z]+/).filter((t) => t && !stopwords.has(t)))];
+const serviceTokens = (text) => tokensOf(text, SERVICE_STOPWORDS);
+const specificServiceTokens = (text) => tokensOf(text, SPECIFIC_STOPWORDS);
 
 function parseMaybeJson(raw) {
   if (raw == null) return null;
@@ -424,8 +431,9 @@ function requestedServiceTokens(item) {
   // catalog name alone ("Flea Treatment", specialty category, no
   // service_category_snapshot), so a requirement that also demanded the
   // coarse category's words could never be answered by the exact booking
-  // (codex r31 P2).
-  const specific = serviceTokens(ask?.requested_specific_service);
+  // (codex r31 P2). Its subtype words stay: "Rodent Control" is not
+  // answered by a rodent exclusion booking or quote (codex r34 P1).
+  const specific = specificServiceTokens(ask?.requested_specific_service);
   if (specific.length) {
     if (out.length) out[0] = [specific];
     else out.push([specific]);

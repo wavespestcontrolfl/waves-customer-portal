@@ -191,6 +191,50 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     expect(patches[0].deliveryState.lastDeliveredAt).toBe(last);
   });
 
+  test('a REAL group handoff appends each already-published sibling\'s frozen scope at the GROUP instant, pricing snapshot untouched (codex #3811 r34 P2)', async () => {
+    // The triage sweep pairs a cited revision only with sibling revisions
+    // of the same handoff instant; a sibling stamped only at its own
+    // earlier send would drop out of a genuinely complete group quote.
+    const anchor = estimateRow({ estimate_group_id: 'grp-1' });
+    const frozenScope = { lines: [{ names: ['Lawn Care'], recurring: true, oneTime: false }], address: '77 Oak St, Bradenton, FL 34205', property: null };
+    const earlier = '2026-06-01T09:00:00.000Z';
+    const sibling = {
+      id: 'est-sib', status: 'sent', estimate_group_id: 'grp-1',
+      estimate_data: JSON.stringify({ sendSnapshot: { pricingBundle: { frozen: true }, scope: frozenScope, scopeHistory: [{ deliveredAt: earlier, scope: frozenScope }] } }),
+    };
+    // One builder shape for every query the group send issues: the live
+    // (sent/viewed) sibling read resolves the sibling; the mid-send and
+    // blocking-sibling probes and the claimable-sibling read find nothing.
+    db.mockImplementation(() => {
+      const b = makeBuilder(anchor);
+      let live = false; let probe = false;
+      b.where = jest.fn((clause) => { if (clause && typeof clause === 'object' && clause.estimate_group_id && clause.id !== anchor.id) probe = true; return b; });
+      b.whereNot = jest.fn(() => b);
+      b.whereRaw = jest.fn(() => b);
+      b.modify = jest.fn((fn) => { fn(b); return b; });
+      b.whereIn = jest.fn((col, vals) => { if (col === 'status' && vals.includes('viewed')) live = true; return b; });
+      b.first = jest.fn(async () => (probe ? null : anchor));
+      b.select = jest.fn(() => Promise.resolve(live ? [sibling] : []));
+      b.then = (resolve, reject) => Promise.resolve(live ? [sibling] : []).then(resolve, reject);
+      return b;
+    });
+    const result = await router.sendEstimateNow(anchor, 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    const groupInstant = deliveryPatches()[0].deliveryState.lastDeliveredAt;
+    expect(groupInstant).toBeTruthy();
+    const siblingPatch = db.raw.mock.calls
+      .filter(([sql, bindings]) => /jsonb/.test(String(sql)) && Array.isArray(bindings))
+      .map(([, bindings]) => { try { return JSON.parse(bindings[0]); } catch { return null; } })
+      .find((patch) => patch && patch.groupPublishedByEstimateId === anchor.id);
+    expect(siblingPatch).toBeTruthy();
+    expect(siblingPatch.sendSnapshot.pricingBundle).toEqual({ frozen: true });
+    expect(siblingPatch.sendSnapshot.scope).toEqual(frozenScope);
+    expect(siblingPatch.sendSnapshot.scopeHistory).toEqual([
+      { deliveredAt: earlier, scope: frozenScope },
+      { deliveredAt: groupInstant, scope: frozenScope },
+    ]);
+  });
+
   test('a REAL provider send advances lastDeliveredAt past the prior stamp', async () => {
     const last = '2026-07-03T09:00:00.000Z';
     const row = estimateRow({

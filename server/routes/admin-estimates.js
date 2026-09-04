@@ -2703,31 +2703,47 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // reminders alongside the group's anchor and drops off the combined link
   // when its earlier expiry hits. Reconcile without any channel delivery:
   // align expiry forward-only and pre-burn the follow-up flags — the group's
-  // anchor owns all further comms. Status/snapshot untouched (their original
-  // send froze them).
+  // anchor owns all further comms. Status and pricing snapshot untouched
+  // (their original send froze them) — but the combined link this REAL
+  // handoff delivered carries the sibling's frozen scope too, so that scope
+  // is appended to its history at the GROUP handoff instant: the triage
+  // sweep pairs a cited revision only with sibling revisions of the same
+  // instant, and a sibling stamped only at its own earlier send would drop
+  // out of a genuinely complete group quote (codex #3811 r34 P2).
   if (estimate.estimate_group_id) {
     try {
-      await db('estimates')
+      const liveSiblings = await db('estimates')
         .where({ estimate_group_id: estimate.estimate_group_id })
         .whereNot({ id: estimate.id })
         .whereIn('status', ['sent', 'viewed'])
         .whereNull('archived_at')
         .whereNull('price_locked_at')
-        .update({
-          // Forward-only expiry inside the SET (not the WHERE): a sibling
-          // already extended past this send still needs its reminder flags
-          // burned — the anchor owns all group comms (codex #3244 r5).
-          expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [nextExpiresAt, nextExpiresAt]),
-          followup_unviewed_sent: true,
-          followup_viewed_sent: true,
-          followup_final_sent: true,
-          followup_expiring_sent: true,
-          estimate_data: db.raw(
-            "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
-            [JSON.stringify({ groupPublishedByEstimateId: estimate.id })],
-          ),
-          updated_at: db.fn.now(),
-        });
+        .select('id', 'estimate_data');
+      for (const sibling of liveSiblings) {
+        const patch = { groupPublishedByEstimateId: estimate.id };
+        const priorSnapshot = (parseEstimateData(sibling.estimate_data) || {}).sendSnapshot;
+        const frozenScope = priorSnapshot?.scope;
+        if (stampChannels.length > 0 && frozenScope && typeof frozenScope === 'object' && Array.isArray(frozenScope.lines)) {
+          patch.sendSnapshot = { ...priorSnapshot, ...scopeRevision(priorSnapshot, frozenScope, lastDeliveredAt) };
+        }
+        await db('estimates')
+          .where({ id: sibling.id })
+          .update({
+            // Forward-only expiry inside the SET (not the WHERE): a sibling
+            // already extended past this send still needs its reminder flags
+            // burned — the anchor owns all group comms (codex #3244 r5).
+            expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [nextExpiresAt, nextExpiresAt]),
+            followup_unviewed_sent: true,
+            followup_viewed_sent: true,
+            followup_final_sent: true,
+            followup_expiring_sent: true,
+            estimate_data: db.raw(
+              "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
+              [JSON.stringify(patch)],
+            ),
+            updated_at: db.fn.now(),
+          });
+      }
     } catch (e) {
       logger.warn(`[admin-estimates] live-sibling group reconciliation failed for estimate ${estimate.id}: ${e.message}`);
     }

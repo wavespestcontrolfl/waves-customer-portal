@@ -568,9 +568,16 @@ describe('evidence helpers', () => {
     // call-created booking ("Flea Treatment", specialty, no category
     // snapshot) answers it (codex r31 P2).
     const flea = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['pest_general'], requested_specific_service: 'Flea Treatment' } } }));
-    expect(flea).toEqual([[['flea']]]);
+    expect(flea).toEqual([[['flea', 'treatment']]]);
     expect(serviceTypeMatches('Flea Treatment', flea[0])).toBe(true);
-    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: [], requested_specific_service: 'Flea Treatment' } } }))).toEqual([[['flea']]]);
+    expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: [], requested_specific_service: 'Flea Treatment' } } }))).toEqual([[['flea', 'treatment']]]);
+    // A specific name keeps its subtype words — only connectors and the
+    // bare "service" wrapper drop — so "Rodent Control" named by the
+    // caller is not answered by a rodent exclusion (codex r34 P1).
+    const [rodentControl] = requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['rodent'], requested_specific_service: 'Rodent Control Service' } } }));
+    expect(rodentControl).toEqual([['rodent', 'control']]);
+    expect(serviceTypeMatches('Rodent Exclusion rodent_exclusion', rodentControl)).toBe(false);
+    expect(serviceTypeMatches('Rodent Control rodent', rodentControl)).toBe(true);
     expect(requestedServiceTokens(item({ payload: { scheduling_window: { requested_service_categories: ['stinging_insect'], requested_specific_service: 'Yellow Jacket' } } }))).toEqual([[['yellow', 'jacket']]]);
     // quote_promised cards carry the same ask under quote_scope.
     expect(requestedServiceTokens(item({ payload: { quote_scope: { requested_service_categories: ['lawn_care'] } } }))).toEqual([[['lawn']]]);
@@ -620,7 +627,11 @@ describe('evidence helpers', () => {
     const fleaOnly = card({ requested_service_categories: ['pest_general'] });
     expect(estimateCoversAsk(fleaOnly, legacy({}))).toBe(true);
     expect(estimateCoversAsk(fleaOnly, legacy({ onetime_total: null, monthly_total: 40 }))).toBe(false);
-    expect(estimateCoversAsk(fleaOnly, legacy({ estimate_data: { inputs: { svcFlea: true } }, service_interest: 'Pest Control' }))).toBe(true);
+    // ...but a flag-only legacy row is the bare "Flea" — no catalog label
+    // carries the subtype word the caller's "Flea Treatment" keeps — so the
+    // card parks for the owner rather than auto-resolving (codex r34 P1).
+    expect(estimateCoversAsk(fleaOnly, legacy({ estimate_data: { inputs: { svcFlea: true } }, service_interest: 'Pest Control' }))).toBe(false);
+    expect(estimateCoversAsk(card({ requested_service_categories: ['pest_general'], requested_specific_service: null }), legacy({ estimate_data: { inputs: { svcFlea: true } }, service_interest: 'Pest Control' }))).toBe(true);
     // ...and one line answers one service: the lawn ask needs a sibling.
     expect(estimateCoversAsk(card({}), legacy({}))).toBe(false);
     // A service the estimate lacks counts when a sibling in its group prices
