@@ -150,13 +150,17 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
 
   // refreshKey: the host page bumps it after the Edit modal saves, so the
   // list re-reads rows it did not itself change. The row last handed to
-  // the modal counts as edited only on that save-driven fetch; a filter or
-  // page fetch after a dismissed modal forgets it (pre-push hook P1).
+  // the modal counts as edited only on save-driven fetches, and the marker
+  // survives them: a nested save (Mark prepaid) bumps the key and re-seats
+  // the same modal, so the final edit still needs it (Codex r5). A filter
+  // or page fetch — only possible once the modal is closed — forgets it,
+  // so a dismissed modal never drops a row (pre-push hook P1).
   const seenRefreshKeyRef = useRef(refreshKey);
   useEffect(() => {
-    const saved = seenRefreshKeyRef.current !== refreshKey ? lastEditedIdRef.current : null;
+    const saveDriven = seenRefreshKeyRef.current !== refreshKey;
     seenRefreshKeyRef.current = refreshKey;
-    lastEditedIdRef.current = null;
+    const saved = saveDriven ? lastEditedIdRef.current : null;
+    if (!saveDriven) lastEditedIdRef.current = null;
     fetchList(saved);
   }, [fetchList, refreshKey]);
 

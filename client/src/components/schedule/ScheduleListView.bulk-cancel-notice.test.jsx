@@ -135,6 +135,22 @@ describe('ScheduleListView bulk cancel — recurring plan notice', () => {
     expect(screen.queryByText('Sam Once')).not.toBeInTheDocument();
   });
 
+  it('keeps the edited-row marker across a nested save that re-seats the modal', async () => {
+    const onEdit = vi.fn();
+    const view = await renderWithRows({ refreshKey: 0, onEdit });
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[1]); // svc-plan
+    fireEvent.click(boxes[2]); // svc-once
+    fireEvent.click(screen.getByText('Sam Once')); // Edit modal opens
+    // Mark prepaid saves inside the modal: key bumps, row still on the page.
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} onEdit={onEdit} />);
+    await waitFor(() => expect(fetch.mock.calls.filter(([u]) => String(u).includes('/admin/schedule/list')).length).toBe(2));
+    // The real edit then moves the row out of the filtered window.
+    ROWS = ROWS.filter((r) => r.id !== 'svc-once');
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={2} onEdit={onEdit} />);
+    await screen.findByText('1 selected');
+  });
+
   it('keeps a row whose modal was opened but not saved when a later fetch omits it', async () => {
     const onEdit = vi.fn();
     const view = await renderWithRows({ refreshKey: 0, onEdit });
