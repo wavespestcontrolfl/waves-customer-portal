@@ -1820,38 +1820,98 @@ async function resolveComposerRecipient(customerId, last10) {
   return customerIds.length ? { customerIds } : { status: 404, error: 'No customer found for that number' };
 }
 
+// Per-kind builders for /customer-link. Visit-anchored kinds share the
+// reschedule-link pick (one set of exclusions — dispatch-owned pendings,
+// elapsed placeholders); the builder takes the picked row so the pick stays
+// route-owned. Statement is handled by statementLinkInsert before any
+// customer resolution (the key here only admits the kind).
+function composerLinkBuilders() {
+  const builders = require('../services/composer-customer-links');
+  return {
+    review_request: (ids, primaryId) => builders.buildReviewRequestLink(primaryId),
+    pay_balance: (ids) => builders.buildPayBalanceLink(ids),
+    estimate: (ids) => builders.buildLatestEstimateLink(ids),
+    referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
+    // Auto Pay is per customer row (the phone's owner), same as referral.
+    // The builder delegates to autopay-setup-link's single entry point —
+    // gate, payer exemption, dedup and the saved-card auto-secure all
+    // live there; a link_created outcome is the ONLY thing inserted.
+    autopay_setup: (ids, primaryId) => builders.buildAutopaySetupLink(primaryId),
+    // Visit-anchored kinds share the reschedule-link pick (one set of
+    // exclusions — dispatch-owned pendings, elapsed placeholders); the
+    // builder takes the picked row so the pick stays route-owned.
+    appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids, {
+    statuses: ['pending', 'confirmed'],
+    skip: (svc) => require('./appointment-public').pageState(svc).state === 'past',
+    })),
+    // The prep page shows its customer's name and address and the /sms
+    // send requires the recipient to own it (GH Codex #3844 r3 P2), so
+    // the visit pick is the phone owner's row — never an account sibling's
+    // (a sibling's visit would insert a link the send then refuses; pre-
+    // push Codex P1). STRICT_OWNER_KINDS below.
+    prep_guide: (ids, primaryId) => builders.buildPrepGuideLink([primaryId]),
+    service_report: (ids) => builders.buildServiceReportLink(ids),
+    // Handled by statementLinkInsert before any customer resolution (the
+    // key here only admits the kind).
+    statement: null,
+  };
+}
+
+// Auto Pay is money-affecting and per row (a consented saved card can enroll
+// on the spot) — never guess the row. The body's customerId is NOT proof of
+// an operator pick (opening a thread auto-fills whichever sibling the latest
+// message carried — see firstNameForPhone), so the check runs whether or not
+// one was supplied: the phone must belong to exactly ONE row on the account,
+// else 409 to the customer's own profile card (GH Codex #3812 r1 P1 +
+// pre-push P0). A prep page is the owner's too (name + address on the page,
+// ownership re-checked at /sms).
+const STRICT_OWNER_KINDS = ['autopay_setup', 'prep_guide'];
+// Appointment pages and service reports are account-scoped (any sibling's
+// visit or report) but the TEXT is a customer-specific bearer, so the
+// resolved phone owner rides back for them too: the /sms send then carries
+// customerId and the recipient's own consent policy applies — without it a
+// typed-in number sends as an unverified conversational lead, whose consent
+// read can miss the customer's notification_prefs entirely when the number
+// is formatted differently on file (GH Codex #3844 r4 P1).
+const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report'];
+
+// The row a /customer-link kind targets: the operator-selected row first,
+// else the account row whose phone matches the number, else the first
+// sibling (sorted — the account expansion has no ORDER BY of its own).
+// Returns { primaryId } or { status, error }.
+async function resolveLinkOwner(kind, customerIds, customerId, last10) {
+  const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
+  const strictOwner = STRICT_OWNER_KINDS.includes(kind);
+  if (selectedId && !strictOwner) return { primaryId: selectedId };
+  const phoneRows = await db('customers')
+    .whereNull('deleted_at')
+    .whereIn('id', customerIds)
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .select('id');
+  if (strictOwner && phoneRows.length !== 1) {
+    return { status: 409, error: 'That number is on file for more than one customer on this account — send this link from that customer\'s profile instead' };
+  }
+  if (selectedId) return { primaryId: selectedId };
+  // A number two live siblings on the account share: the owner that rides
+  // back would be an arbitrary pick, and /sms would apply only that row's
+  // consent — refuse, like the strict kinds, until the operator picks (GH
+  // Codex #3844 r9 P1); the send seam refuses the same ambiguity.
+  if (OWNER_RIDES_BACK_KINDS.includes(kind) && phoneRows.length > 1) {
+    return { status: 409, error: 'That number is on file for more than one customer on this account — pick the customer from the search dropdown first' };
+  }
+  return { primaryId: phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0] };
+}
+
+// Builder fields that ride to the composer verbatim when set. immediateOnly:
+// the composer refuses to schedule or draft those kinds; /schedule-sms +
+// drafts re-fence. standalone: the line is a complete greeted message,
+// inserted as-is.
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'statement', 'expiresAt', 'immediateOnly', 'standalone'];
+
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
     const kind = String(req.body?.kind || '');
-    const builders = require('../services/composer-customer-links');
-    const builderByKind = {
-      review_request: (ids, primaryId) => builders.buildReviewRequestLink(primaryId),
-      pay_balance: (ids) => builders.buildPayBalanceLink(ids),
-      estimate: (ids) => builders.buildLatestEstimateLink(ids),
-      referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
-      // Auto Pay is per customer row (the phone's owner), same as referral.
-      // The builder delegates to autopay-setup-link's single entry point —
-      // gate, payer exemption, dedup and the saved-card auto-secure all
-      // live there; a link_created outcome is the ONLY thing inserted.
-      autopay_setup: (ids, primaryId) => builders.buildAutopaySetupLink(primaryId),
-      // Visit-anchored kinds share the reschedule-link pick (one set of
-      // exclusions — dispatch-owned pendings, elapsed placeholders); the
-      // builder takes the picked row so the pick stays route-owned.
-      appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids, {
-        statuses: ['pending', 'confirmed'],
-        skip: (svc) => require('./appointment-public').pageState(svc).state === 'past',
-      })),
-      // The prep page shows its customer's name and address and the /sms
-      // send requires the recipient to own it (GH Codex #3844 r3 P2), so
-      // the visit pick is the phone owner's row — never an account sibling's
-      // (a sibling's visit would insert a link the send then refuses; pre-
-      // push Codex P1). STRICT_OWNER_KINDS below.
-      prep_guide: (ids, primaryId) => builders.buildPrepGuideLink([primaryId]),
-      service_report: (ids) => builders.buildServiceReportLink(ids),
-      // Handled by statementLinkInsert before any customer resolution (the
-      // key here only admits the kind).
-      statement: null,
-    };
+    const builderByKind = composerLinkBuilders();
     if (!(kind in builderByKind)) {
       return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
     }
@@ -1861,7 +1921,7 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
     }
     if (kind === 'statement') {
-      const { status, body } = await statementLinkInsert(builders, last10, req.body?.customerId);
+      const { status, body } = await statementLinkInsert(require('../services/composer-customer-links'), last10, req.body?.customerId);
       return res.status(status).json(body);
     }
 
@@ -1871,55 +1931,9 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     const { customerIds } = recipient;
 
     const recipientFirstName = await firstNameForPhone(last10, customerIds);
-
-    // The single-customer kinds (review ask, referral) target the phone's
-    // owner: the operator-selected row first, else the account row whose
-    // phone matches the number, else the first sibling (sorted — the account
-    // expansion has no ORDER BY of its own).
-    const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
-    let primaryId = selectedId;
-    // Auto Pay is money-affecting and per row (a consented saved card can
-    // enroll on the spot) — never guess the row. The body's customerId is
-    // NOT proof of an operator pick (opening a thread auto-fills whichever
-    // sibling the latest message carried — see firstNameForPhone), so the
-    // check runs whether or not one was supplied: the phone must belong to
-    // exactly ONE row on the account, else 409 to the customer's own
-    // profile card (GH Codex #3812 r1 P1 + pre-push P0). A prep page is the
-    // owner's too (name + address on the page, ownership re-checked at /sms).
-    const STRICT_OWNER_KINDS = ['autopay_setup', 'prep_guide'];
-    const strictOwner = STRICT_OWNER_KINDS.includes(kind);
-    // Appointment pages and service reports are account-scoped (any sibling's
-    // visit or report) but the TEXT is a customer-specific bearer, so the
-    // resolved phone owner rides back for them too: the /sms send then
-    // carries customerId and the recipient's own consent policy applies —
-    // without it a typed-in number sends as an unverified conversational
-    // lead, whose consent read can miss the customer's notification_prefs
-    // entirely when the number is formatted differently on file (GH Codex
-    // #3844 r4 P1).
-    const ownerRidesBack = strictOwner || ['appointment', 'service_report'].includes(kind);
-    if (!primaryId || strictOwner) {
-      const phoneRows = await db('customers')
-        .whereNull('deleted_at')
-        .whereIn('id', customerIds)
-        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-        .select('id');
-      if (strictOwner && phoneRows.length !== 1) {
-        return res.status(409).json({
-          error: 'That number is on file for more than one customer on this account — send this link from that customer\'s profile instead',
-        });
-      }
-      // A number two live siblings on the account share: the owner that
-      // rides back would be an arbitrary pick, and /sms would apply only
-      // that row's consent — refuse, like the strict kinds, until the
-      // operator picks (GH Codex #3844 r9 P1); the send seam refuses the
-      // same ambiguity.
-      if (!primaryId && ownerRidesBack && phoneRows.length > 1) {
-        return res.status(409).json({
-          error: 'That number is on file for more than one customer on this account — pick the customer from the search dropdown first',
-        });
-      }
-      if (!primaryId) primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
-    }
+    const owner = await resolveLinkOwner(kind, customerIds, customerId, last10);
+    if (owner.error) return res.status(owner.status).json({ error: owner.error });
+    const { primaryId } = owner;
 
     const result = await builderByKind[kind](customerIds, primaryId);
     // Auto Pay auto-secure: a consented saved card was enrolled instead of a
@@ -1935,25 +1949,12 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       url: stripSmsLinkScheme(result.url),
       line: stripSmsLinkScheme(result.line),
       firstName: recipientFirstName,
-      requestId: result.requestId || undefined,
-      balance: result.balance || undefined,
-      estimate: result.estimate || undefined,
-      appointment: result.appointment || undefined,
-      prep: result.prep || undefined,
-      report: result.report || undefined,
-      statement: result.statement || undefined,
-      expiresAt: result.expiresAt || undefined,
-      // Immediate-send-only kinds (statement, prep guide, appointment page,
-      // service report): the composer refuses to schedule or draft them;
-      // /schedule-sms + drafts re-fence.
-      immediateOnly: result.immediateOnly || undefined,
+      ...Object.fromEntries(LINK_RESULT_FIELDS.map((field) => [field, result[field] || undefined])),
       // Owner-bound kinds (and the account-scoped bearers above): the
       // resolved owner rides back so the composer can select it — the /sms
       // send then carries customerId and the link's owner policy applies
-      // (GH Codex #3812 r3 P1). standalone: the line is a complete greeted
-      // message, inserted as-is.
-      customerId: ownerRidesBack ? primaryId : undefined,
-      standalone: result.standalone || undefined,
+      // (GH Codex #3812 r3 P1).
+      customerId: OWNER_RIDES_BACK_KINDS.includes(kind) ? primaryId : undefined,
     });
   } catch (err) {
     logger.error(`customer-link lookup failed: ${err.message}`);

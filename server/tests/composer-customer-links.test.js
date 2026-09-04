@@ -818,6 +818,19 @@ describe('buildPrepGuideLink', () => {
     expect(r.expiresAt).toBeNull();
   });
 
+  test('a windowless same-day visit sorts AFTER a timed one, as each family\'s SQL orders it (GH Codex #3844 r12 P2)', async () => {
+    nextUpcomingVisit.mockImplementation(async (_ids, keyword) => (
+      keyword === 'flea'
+        ? { id: 'v-flea', customer_id: 'c1', scheduled_date: '2026-09-10', window_start: null, service_type: 'Flea Treatment', prep_expires_at: null }
+        : keyword === 'bed bug'
+          ? { id: 'v-bb', customer_id: 'c1', scheduled_date: '2026-09-10', window_start: '09:00:00', service_type: 'Bed Bug Treatment', prep_expires_at: null }
+          : null
+    ));
+    const r = await buildPrepGuideLink(['c1']);
+    expect(ensureServicePrepToken).toHaveBeenCalledWith('v-bb', 'prep.bed_bug');
+    expect(r.prep.pestType).toBe('bed_bug');
+  });
+
   test('a visit whose stored guide differs from the keyword match is labeled with the STORED guide (what the page renders)', async () => {
     nextUpcomingVisit.mockImplementation(async (_ids, keyword) => (
       keyword === 'flea'
@@ -1252,6 +1265,13 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
       // Neither kind nor target protected → not this seam's business.
       wireAccount({ shortRow: { code: 'est1', kind: 'estimate', target_url: 'https://portal.wavespestcontrol.com/estimate/xyz' } });
       expect(await bearerLinkSendCheck('See it: wavespest.co/l/est1', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    });
+
+    test('an http:// short link is judged at the send and refused for its scheme — never dropped unseen (GH Codex #3844 r12 P1)', async () => {
+      wireAccount({ shortRow: { code: 'ab12cd', kind: 'appointment', target_url: `https://portal.wavespestcontrol.com/appointment/${RESCHEDULE}` } });
+      expect((await bearerLinkSendCheck('Your visit: http://wavespest.co/l/Ab12cD', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/uses http:\/\//);
+      expect(mockBuilders.short_codes.where).toHaveBeenCalledWith({ code: 'ab12cd' });
+      expect(mockBuilders.scheduled_services.where).not.toHaveBeenCalled();
     });
 
     test('an expired short link refuses — /l/:code answers 410 past expires_at even while the visit or report still exists (pre-push Codex P1)', async () => {

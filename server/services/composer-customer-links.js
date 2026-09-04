@@ -684,7 +684,8 @@ async function shortCodeRows(runs, scheme = {}) {
     if (!code) continue;
     const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'target_url', 'expires_at');
     const dest = row && shortRowDestination(row, hosts);
-    if (dest) rows.push({ code: row.code, expires_at: row.expires_at, ...dest });
+    // The seam refuses a plaintext run outright; the fence only needs presence.
+    if (dest) rows.push({ code: row.code, expires_at: row.expires_at, plaintext: /^http:\/\//i.test(run), ...dest });
   }
   return rows;
 }
@@ -977,7 +978,13 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
 // send (every /appointment route 404s the moment it is off — r2 P1), then
 // each kind binds to the recipient's account.
 async function checkAccountBoundLinks(ctx) {
-  const shortRows = await shortCodeRows(ctx.runs);
+  // ANY_SCHEME here too: an http://<owned>/l/<code> run must not vanish from
+  // the seam (nothing later sees the /l/ occurrence) — it is judged, and its
+  // plaintext scheme refused like the long forms' (GH Codex #3844 r12 P1).
+  const shortRows = await shortCodeRows(ctx.runs, ANY_SCHEME);
+  if (shortRows.some((row) => row.plaintext)) {
+    return refuseSend('A short link in this message uses http:// — remove it and insert a fresh one.');
+  }
   if (appointmentLinkPresent(ctx.runs, ctx.hosts, shortRows) && process.env.GATE_APPOINTMENT_PAGE !== 'true') {
     return refuseSend('Appointment pages are switched off (GATE_APPOINTMENT_PAGE) — remove the appointment link before sending.');
   }
@@ -1117,7 +1124,10 @@ async function buildPrepGuideLink(customerIds) {
   const { ensureServicePrepToken } = require('./project-email');
   // Soonest across families by date THEN arrival window (two same-day
   // visits of different families must not pick arbitrarily), id last.
-  const sortKey = (v) => `${dateOnly(v.scheduled_date)} ${String(v.window_start || '').padStart(8, '0')} ${v.id}`;
+  // A NULL window sorts LAST ('~' > any digit), as each family's SQL
+  // orders it — a windowless same-day visit must not beat a timed one
+  // (GH Codex #3844 r12 P2).
+  const sortKey = (v) => `${dateOnly(v.scheduled_date)} ${v.window_start ? String(v.window_start).padStart(8, '0') : '~'} ${v.id}`;
   let pick = null;
   for (const [pestType, config] of Object.entries(PREP_CONFIG)) {
     const visit = await nextUpcomingVisit(customerIds, config.serviceKeyword);
