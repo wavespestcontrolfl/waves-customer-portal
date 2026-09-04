@@ -202,7 +202,6 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/knowledge-index/resolution-sync.js': 'requires ai_extraction_enriched, which the relay never writes',
     'services/ai-assistant/assistant.js': 'writer keyed by CallSid',
     'routes/admin-triage.js': 'keyed by id',
-    'routes/admin-leads.js': 'keyed by the lead CallSid / stamp',
     'routes/admin-communications.js': 'keyed by id',
     'routes/admin-call-recordings.js': 'requires a recording',
     'services/call-ingest-watchdog.js': 'a known-SID set — a sandbox call IS an ingested call',
@@ -283,7 +282,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/intelligence-bar/comms-tools.js', 'services/dashboard-alerts.js',
     'services/ads/google-call-bridge.js', 'services/email-bounce-rescue.js',
     'services/agent-estimate-context.js', 'services/estimator-engine/context-builder.js',
-    '../scripts/twilio/audit-inbound-routing.js', 'services/call-retranscription-backfill.js',
+    '../scripts/twilio/audit-inbound-routing.js', 'services/call-retranscription-backfill.js', 'routes/admin-leads.js',
   ])('%s applies whereNotSandboxCall', (rel) => {
     expect(fs.readFileSync(path.join(ROOT, rel), 'utf8')).toMatch(/whereNotSandboxCall\(/);
   });
