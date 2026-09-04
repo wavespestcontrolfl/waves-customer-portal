@@ -34,6 +34,7 @@ function customersQuery() {
 // upcomingVisitRow, the same table also serves ensureServicePrepToken's
 // chains (.select()…first() token read + .update().returning() mint).
 let upcomingVisitRow = null;
+let visitLookupError = null;
 let servicePrepRow = null;
 let serviceUpdates = [];
 function scheduledQuery() {
@@ -45,7 +46,10 @@ function scheduledQuery() {
     returning: jest.fn(async () => [{}]),
     catch: jest.fn(async () => undefined),
     orderBy: jest.fn(() => q),
-    first: jest.fn(async () => (tokenMode ? servicePrepRow : upcomingVisitRow)),
+    first: jest.fn(async () => {
+      if (!tokenMode && visitLookupError) throw visitLookupError;
+      return tokenMode ? servicePrepRow : upcomingVisitRow;
+    }),
   };
   return q;
 }
@@ -67,6 +71,7 @@ beforeEach(() => {
   });
   db.fn = { now: jest.fn(() => 'NOW()') };
   upcomingVisitRow = null;
+  visitLookupError = null;
   servicePrepRow = { prep_token: null, prep_template_key: null };
   serviceUpdates = [];
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
@@ -293,6 +298,85 @@ describe('sendPrepToCustomer', () => {
 
     expect(result).toMatchObject({ ok: false, reason: 'send_failed' });
     expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
+  });
+
+  test('a visit whose prep page already carries another guide is never re-keyed or linked', async () => {
+    // A combined "Pest + Lawn" row whose page went out as interior pest.
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.interior_pest' };
+    servicePrepRow = { prep_token: 'a'.repeat(32), prep_template_key: 'prep.interior_pest' };
+
+    // Text: refused with its own reason (not "no visit"), naming the guide
+    // the page belongs to.
+    const refused = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' });
+    expect(refused).toMatchObject({ ok: false, reason: 'prep_page_taken', takenBy: 'Interior Pest Treatment' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+    // Email: still goes out (dated by the visit) but links the portal, not
+    // the other guide's page, and never moves the row's key onto lawn — the
+    // interior-pest URLs already delivered keep rendering interior pest.
+    const emailed = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'email' });
+    expect(emailed).toMatchObject({ ok: true, emailSent: true });
+    const payload = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;
+    expect(payload.prep_url).toContain('?tab=visits');
+    expect(payload.service_date).not.toBe('To be confirmed');
+    expect(serviceUpdates).toEqual([]);
+  });
+
+  test('a visit whose page is this guide (or unkeyed) reuses its token and stamps normally', async () => {
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.lawn' };
+    servicePrepRow = { prep_token: 'b'.repeat(32), prep_template_key: 'prep.lawn' };
+
+    const sent = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' });
+
+    expect(sent).toMatchObject({ ok: true, smsSent: true });
+    expect(renderSmsTemplate.mock.calls[0][1].prep_url).toMatch(new RegExp(`/prep/${'b'.repeat(32)}$`));
+    expect(serviceUpdates).toContainEqual(expect.objectContaining({ prep_sent_at: 'NOW()', prep_template_key: 'prep.lawn' }));
+  });
+
+  test('a failed visit lookup or token mint is reported as a link failure, not a missing visit', async () => {
+    visitLookupError = new Error('connection reset');
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'prep_link_failed' });
+
+    visitLookupError = null;
+    upcomingVisitRow = VISIT;
+    servicePrepRow = { prep_token: null, prep_template_key: 'not-a-prep-key' };
+    // Token read says no token; the mint's .returning() finds no row and the
+    // post-race re-read has none either → ensureServicePrepToken throws.
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customersQuery();
+      if (table === 'scheduled_services') {
+        const q = scheduledQuery();
+        q.returning = jest.fn(async () => []);
+        return q;
+      }
+      if (table === 'customer_interactions') return { insert: interactionsInsert };
+      return customersQuery();
+    });
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'prep_link_failed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('both with one leg down reports a partial send naming the failed channel', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
+    const textDown = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
+    expect(textDown).toMatchObject({ ok: true, emailSent: true, smsSent: false, reason: 'partial', failedChannel: 'sms' });
+
+    jest.clearAllMocks();
+    EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'blocked' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM123' });
+    renderSmsTemplate.mockResolvedValue('Prep text...');
+    const emailDown = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
+    expect(emailDown).toMatchObject({ ok: true, emailSent: false, smsSent: true, reason: 'partial', failedChannel: 'email' });
+
+    // A clean Both carries no reason at all.
+    jest.clearAllMocks();
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+    renderSmsTemplate.mockResolvedValue('Prep text...');
+    const clean = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
+    expect(clean.ok).toBe(true);
+    expect(clean.reason).toBeUndefined();
   });
 
   test('no upcoming visit → the email prep_url stays the portal visits tab', async () => {

@@ -108,46 +108,66 @@ function isSupportedChannel(channel) {
 
 // Soonest upcoming visit of this pest family, so the emailed guide's "Service
 // date" row references the real appointment and the prep token can hang off
-// the visit row. Null when there is no matching upcoming visit.
+// the visit row. Null when there is no matching upcoming visit; throws on a
+// lookup error (the caller reports it apart from "no visit").
 async function nextUpcomingVisit(customerId, serviceKeywords) {
-  try {
-    const row = await db('scheduled_services')
-      .where({ customer_id: customerId })
-      .where(function familyMatch() {
-        for (const kw of serviceKeywords) this.orWhereRaw('LOWER(service_type) LIKE ?', [`%${kw}%`]);
-      })
-      .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
-      // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
-      // midnight ET "today's" visit would fall before the UTC date and the
-      // email would say "To be confirmed" despite a real upcoming appointment.
-      .where('scheduled_date', '>=', etDateString())
-      .orderBy('scheduled_date', 'asc')
-      .first('id', 'scheduled_date');
-    return row || null;
-  } catch (err) {
-    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${customerId}: ${err.message}`);
-    return null;
-  }
+  const row = await db('scheduled_services')
+    .where({ customer_id: customerId })
+    .where(function familyMatch() {
+      for (const kw of serviceKeywords) this.orWhereRaw('LOWER(service_type) LIKE ?', [`%${kw}%`]);
+    })
+    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
+    // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
+    // midnight ET "today's" visit would fall before the UTC date and the
+    // email would say "To be confirmed" despite a real upcoming appointment.
+    .where('scheduled_date', '>=', etDateString())
+    .orderBy('scheduled_date', 'asc')
+    .first('id', 'scheduled_date', 'prep_template_key');
+  return row || null;
 }
 
-// The visit the guide hangs on, plus its tokened page URL. prepUrl is null
-// when there is no matching upcoming visit (nothing for the page to
-// describe) or the token mint failed soft — callers pick their fallback.
+function guideLabelForTemplateKey(templateKey) {
+  const match = Object.values(PREP_CONFIG).find((c) => c.emailTemplateKey === templateKey);
+  return match ? match.label : String(templateKey || '').replace(/^prep\./, '');
+}
+
+// The visit the guide hangs on, plus its tokened page URL. A visit row holds
+// ONE prep token, and /prep/:token renders the row's prep_template_key — so
+// a row that already carries a DIFFERENT guide (a combined "Pest + Lawn"
+// visit whose page went out as interior pest) is never re-keyed or linked
+// for this guide: every URL already delivered would flip to the new guide
+// (GH Codex #3856 r2 P1). Such a row still dates the email but is not
+// linked or stamped. linkReason says why prepUrl is null:
+//   no_upcoming_visit — nothing for a page to describe
+//   prep_page_taken   — the row's page belongs to another guide (takenBy)
+//   prep_link_failed  — visit lookup or token mint threw (retryable)
 async function resolvePrepVisit(customer, config) {
-  const visit = await nextUpcomingVisit(customer.id, config.serviceKeywords);
-  let prepUrl = null;
-  if (visit?.id) {
-    try {
-      prepUrl = portalUrl(`/prep/${await ensureServicePrepToken(visit.id, config.emailTemplateKey)}`);
-    } catch (tokenErr) {
-      logger.warn(`[prep-guide-sender] prep token mint failed for service ${visit.id}: ${tokenErr.message}`);
-    }
+  let visit;
+  try {
+    visit = await nextUpcomingVisit(customer.id, config.serviceKeywords);
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${customer.id}: ${err.message}`);
+    return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'prep_link_failed' };
   }
-  return { visit, prepUrl };
+  if (!visit?.id) return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'no_upcoming_visit' };
+  if (visit.prep_template_key && visit.prep_template_key !== config.emailTemplateKey) {
+    return {
+      visit, prepUrl: null, ownsPage: false, linkReason: 'prep_page_taken',
+      takenBy: guideLabelForTemplateKey(visit.prep_template_key),
+    };
+  }
+  try {
+    const prepUrl = portalUrl(`/prep/${await ensureServicePrepToken(visit.id, config.emailTemplateKey)}`);
+    return { visit, prepUrl, ownsPage: true, linkReason: null };
+  } catch (tokenErr) {
+    logger.warn(`[prep-guide-sender] prep token mint failed for service ${visit.id}: ${tokenErr.message}`);
+    return { visit, prepUrl: null, ownsPage: true, linkReason: 'prep_link_failed' };
+  }
 }
 
 // Confirmed delivery of the guide (either channel): stamp the tracker's
 // prep_sent_at proof and align the rendered guide to what was delivered.
+// Only for a visit whose page this guide owns (resolvePrepVisit.ownsPage).
 async function stampPrepSent(visit, config) {
   if (!visit?.id) return;
   try {
@@ -157,7 +177,7 @@ async function stampPrepSent(visit, config) {
   }
 }
 
-async function sendPrepEmail({ customer, recipient, firstName, config, visit, prepUrl }) {
+async function sendPrepEmail({ customer, recipient, firstName, config, visit, prepUrl, stampVisit }) {
   try {
     const portalVisitsUrl = portalUrl('/?tab=visits');
     const address = [customer.address_line1, customer.city, customer.state, customer.zip]
@@ -191,7 +211,7 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
         company_email: CONTACT_EMAIL,
       },
     });
-    if (result?.sent) await stampPrepSent(visit, config);
+    if (result?.sent) await stampPrepSent(stampVisit, config);
     return !!result?.sent;
   } catch (err) {
     // Sanitized: never log err.message — provider errors can carry the email.
@@ -276,28 +296,40 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   if (wantEmail && !recipient.email) return { ...result, reason: 'no_email' };
   if (wantSms && !phone) return { ...result, reason: 'no_phone' };
 
-  const { visit, prepUrl } = await resolvePrepVisit(customer, config);
+  const { visit, prepUrl, ownsPage, linkReason, takenBy } = await resolvePrepVisit(customer, config);
+  // The stamp target: only a visit whose page this guide owns.
+  const stampVisit = ownsPage ? visit : null;
   // Text body: the guide-page link when a visit exists, else the pest's
-  // inline-steps text, else nothing to text.
+  // inline-steps text, else nothing to text — refused with the link's own
+  // reason (no visit / page taken / link failed), never a blanket "no visit".
   const smsPlan = prepUrl
     ? { templateKey: SMS_GUIDE_LINK_KEY, vars: { prep_label: config.label, prep_url: prepUrl }, variant: 'guide_link' }
     : config.smsStandaloneKey
       ? { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone' }
       : null;
-  if (wantSms && !smsPlan) return { ...result, reason: 'no_upcoming_visit' };
+  if (wantSms && !smsPlan) return { ...result, reason: linkReason, ...(takenBy ? { takenBy } : {}) };
 
   if (wantEmail) {
-    result.emailSent = await sendPrepEmail({ customer, recipient, firstName: emailFirstName, config, visit, prepUrl });
+    result.emailSent = await sendPrepEmail({
+      customer, recipient, firstName: emailFirstName, config, visit, prepUrl, stampVisit,
+    });
   }
   if (wantSms) {
     result.smsSent = await sendPrepSms({
       customer, firstName: smsFirstName, phone, pestType, actorId, ...smsPlan,
     });
-    if (result.smsSent && smsPlan.variant === 'guide_link' && !result.emailSent) await stampPrepSent(visit, config);
+    if (result.smsSent && smsPlan.variant === 'guide_link' && !result.emailSent) await stampPrepSent(stampVisit, config);
   }
 
   result.ok = result.emailSent || result.smsSent;
-  if (!result.ok) result.reason = 'send_failed';
+  if (!result.ok) {
+    result.reason = 'send_failed';
+  } else if (wantEmail && wantSms && result.emailSent !== result.smsSent) {
+    // Both: one leg delivered, the other did not — say which, or the
+    // operator reads a half-delivered ask as fully sent (GH Codex #3856 r2 P2).
+    result.reason = 'partial';
+    result.failedChannel = result.emailSent ? 'sms' : 'email';
+  }
 
   if (result.ok) {
     try {

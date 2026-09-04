@@ -1789,8 +1789,22 @@ function SmsTab() {
         return;
       }
       if (d.sent && channel === "email") {
-        // Email channel: the server sent the review email — nothing to insert.
-        setSendResult({ ok: true, text: `Review request emailed${d.firstName ? ` to ${d.firstName}` : ""}.` });
+        // Email channel: the server sent the review email — nothing to
+        // insert, and a Text/Both review link still in the draft comes OUT:
+        // the email started the ask's cooldown, so the composer send would
+        // be refused for the stale reviewRequestId (GH Codex #3856 r2 P2).
+        const staleUrl = insertedCustomerLinks[kind]?.url || null;
+        if (staleUrl) {
+          setMsgBody((b) => stripLinkLines(b, staleUrl));
+          setInsertedCustomerLinks((m) => {
+            const { [kind]: _dropped, ...rest } = m;
+            return rest;
+          });
+        }
+        setSendResult({
+          ok: true,
+          text: `Review request emailed${d.firstName ? ` to ${d.firstName}` : ""}.${staleUrl ? " The review link was removed from the text." : ""}`,
+        });
         return;
       }
       if (d.autoSecured) {
@@ -3185,7 +3199,8 @@ function PrepSendDialog({ open, onClose }) {
         method: "POST",
         body: JSON.stringify({ customerId: selected.id, pestType, channel }),
       });
-      setResult({ ok: true, text: data?.message || "Prep sent." });
+      // A Both send with one leg down is flagged, not celebrated.
+      setResult({ ok: !data?.partial, text: data?.message || "Prep sent." });
     } catch (e) {
       setResult({ ok: false, text: e.message || "Couldn't send the prep." });
     } finally {

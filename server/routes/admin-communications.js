@@ -833,6 +833,10 @@ function manualPrepMessage(result) {
       case 'no_email': return 'This customer has no email on file — choose Text instead.';
       case 'no_phone': return 'This customer has no phone number on file — choose Email instead.';
       case 'no_upcoming_visit': return 'This guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to — email it, or book the visit first.';
+      // One prep page per visit: the row's page already renders another
+      // guide, and re-keying it would flip every link already delivered.
+      case 'prep_page_taken': return `This guide can only be texted as a link, and the customer's next visit already carries the ${result.takenBy || 'other'} prep page — email this guide instead.`;
+      case 'prep_link_failed': return "Couldn't build the guide page link for this visit — try again.";
       case 'unsupported_pest_type': return 'That prep type is not available yet.';
       case 'unsupported_channel': return 'Choose Email, Text, or Both.';
       default: return "Couldn't send the prep — check the customer's contact info and try again.";
@@ -841,7 +845,12 @@ function manualPrepMessage(result) {
   const parts = [];
   if (result.emailSent) parts.push(`emailed to ${result.emailAddress}`);
   if (result.smsSent) parts.push(`texted to ${result.phone}`);
-  return `${result.label} prep ${parts.join(' and ')}.`;
+  const sent = `${result.label} prep ${parts.join(' and ')}.`;
+  if (result.reason !== 'partial') return sent;
+  // Both with one leg down: name the leg that did not go out.
+  return result.failedChannel === 'sms'
+    ? `${sent} The text did not go out — send it again as Text once the number is confirmed.`
+    : `${sent} The email did not go out — send it again as Email once the address is confirmed.`;
 }
 
 router.post('/send-prep', async (req, res, next) => {
@@ -861,7 +870,7 @@ router.post('/send-prep', async (req, res, next) => {
       const status = result.reason === 'customer_not_found' ? 404 : 400;
       return res.status(status).json({ error: message, result });
     }
-    res.json({ success: true, message, result });
+    res.json({ success: true, partial: result.reason === 'partial', message, result });
   } catch (err) { next(err); }
 });
 
