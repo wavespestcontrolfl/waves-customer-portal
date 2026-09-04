@@ -630,7 +630,7 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
   {
     label: 'Contract signing',
     fragment: /\/contract\//i,
-    token: (run, host) => canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i),
+    token: (run, host) => canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i, ANY_SCHEME),
     applies: async () => true,
   },
   {
@@ -1251,12 +1251,28 @@ async function releaseCardRequestSends(claim) {
 async function markCardRequestSends(claim) {
   const card = require('./appointment-card-request');
   let allMarked = true;
+  // Every claimed visit finalizes on its own (GH Codex #3851 r1 P1): the
+  // text already carried every link, so a marker that throws — or the
+  // best-effort visit read for one email twin — must never leave a LATER
+  // claim with neither sent_at nor a park, where the stale-claim lease
+  // would let a later trigger text the same link again.
+  for (const { scheduledServiceId } of claim.cards) {
+    try {
+      if (!await card.markCardLinkSendOutcome(scheduledServiceId, claim.stamp)) allMarked = false;
+    } catch (err) {
+      allMarked = false;
+      logger.warn(`[composer-links] card request sent marker threw for visit ${scheduledServiceId}: ${err.message}`);
+    }
+  }
   for (const { scheduledServiceId, token } of claim.cards) {
-    if (!await card.markCardLinkSendOutcome(scheduledServiceId, claim.stamp)) allMarked = false;
-    const visit = await db('scheduled_services')
-      .where({ id: scheduledServiceId })
-      .first('id', 'customer_id', 'service_type', 'scheduled_date');
-    if (visit) card.startInvitationEmailLeg({ visit, secureUrl: `${publicPortalUrl()}/secure/${token}`, planChoice: false });
+    try {
+      const visit = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('id', 'customer_id', 'service_type', 'scheduled_date');
+      if (visit) card.startInvitationEmailLeg({ visit, secureUrl: `${publicPortalUrl()}/secure/${token}`, planChoice: false });
+    } catch (err) {
+      logger.warn(`[composer-links] card request email twin did not start for visit ${scheduledServiceId}: ${err.message}`);
+    }
   }
   return allMarked;
 }

@@ -1177,6 +1177,8 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
   test('an explicit http:// owned bearer is a protected link the fence parks — the public mounts are protocol-agnostic (GH Codex #3844 r11 P1)', async () => {
     mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'ab12cd', kind: 'appointment', target_url: 'https://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY' } }) };
     expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/prep/${PREP}`)).toEqual({ present: true, label: 'Prep guide' });
+    // A contract signing link too (GH Codex #3851 r1 P1) — /sms then refuses it for its scheme.
+    expect(await immediateOnlyLinkSendCheck('http://portal.wavespestcontrol.com/contract/abcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Contract signing' });
     expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/pay/statement/${'f'.repeat(64)}`)).toEqual({ present: true, label: 'Statement pay' });
     expect(await immediateOnlyLinkSendCheck('http://portal.wavespestcontrol.com/appointment/abcDEF123_-xyz789QWERTY')).toEqual({ present: true, label: 'Appointment page' });
     expect(await immediateOnlyLinkSendCheck('http://wavespest.co/l/Ab12cD')).toEqual({ present: true, label: 'Appointment page' });
@@ -1796,6 +1798,30 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(await markCardRequestSends({ stamp, cards })).toBe(false);
       expect(markCardLinkSendOutcome).toHaveBeenCalledTimes(2); // never short-circuits — every claimed visit is finalized
       expect(startInvitationEmailLeg).toHaveBeenCalledTimes(2); // the text went out either way — so does its twin
+    });
+
+    test('mark: a marker that throws, or a visit read that fails for one email twin, never leaves a later claim unfinalized (GH Codex #3851 r1 P1)', async () => {
+      const stamp = new Date();
+      const visitsBuilder = chainBuilder();
+      // v1's visit read fails (transient) — v2 still marks and still gets its twin.
+      visitsBuilder.first = jest.fn(async () => {
+        const id = visitsBuilder.where.mock.calls.at(-1)[0].id;
+        if (id === 'v1') throw new Error('connection reset');
+        return { id, customer_id: 'c1', service_type: 'Bed Bug Treatment', scheduled_date: '2026-09-09' };
+      });
+      mockBuilders = { scheduled_services: visitsBuilder };
+      markCardLinkSendOutcome.mockReset().mockResolvedValue(true);
+      startInvitationEmailLeg.mockReset();
+      expect(await markCardRequestSends({ stamp, cards })).toBe(true);
+      expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v1', stamp);
+      expect(markCardLinkSendOutcome).toHaveBeenCalledWith('v2', stamp);
+      expect(startInvitationEmailLeg).toHaveBeenCalledTimes(1);
+      expect(startInvitationEmailLeg).toHaveBeenCalledWith(expect.objectContaining({ visit: expect.objectContaining({ id: 'v2' }) }));
+      // A marker that THROWS for v1 reports not-all-marked and still finalizes v2.
+      markCardLinkSendOutcome.mockReset().mockRejectedValueOnce(new Error('deadlock')).mockResolvedValueOnce(true);
+      startInvitationEmailLeg.mockReset();
+      expect(await markCardRequestSends({ stamp, cards })).toBe(false);
+      expect(markCardLinkSendOutcome).toHaveBeenCalledTimes(2);
     });
   });
 });
