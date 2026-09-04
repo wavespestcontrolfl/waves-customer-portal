@@ -220,11 +220,12 @@ describe('sendPrepToCustomer', () => {
     const [key, vars] = renderSmsTemplate.mock.calls[0];
     expect(key).toBe('auto_prep_guide_link');
     expect(vars.prep_label).toBe('Termite Service');
-    // The texted link IS the guide delivery: prep_sent_at is stamped for it.
-    expect(serviceUpdates).toContainEqual(expect.objectContaining({
-      prep_sent_at: 'NOW()',
-      prep_template_key: 'prep.termite',
-    }));
+    // The texted link IS the guide delivery: prep_sent_at is stamped for it —
+    // conditional on the key still being ours (P1 on b909d8007).
+    expect(scheduledQueries.some((q) => q.where.mock.calls.some(([arg]) => arg && arg.id === VISIT.id && arg.prep_template_key === 'prep.termite')
+      && q.update.mock.calls.some(([p]) => p && p.prep_sent_at))).toBe(true);
+    // The stamp carries only prep_sent_at; the key is the WHERE fence (prep.termite).
+    expect(serviceUpdates).toContainEqual({ prep_sent_at: 'NOW()' });
   });
 
   test('every live prep guide is sendable by email', async () => {
@@ -340,10 +341,8 @@ describe('sendPrepToCustomer', () => {
     expect(payload.service_date).not.toBe('To be confirmed');
     // Confirmed send → the track page's "prep actually went out" marker,
     // aligned to the guide THIS email delivered.
-    expect(serviceUpdates).toContainEqual(expect.objectContaining({
-      prep_sent_at: 'NOW()',
-      prep_template_key: 'prep.flea',
-    }));
+    // The stamp carries only prep_sent_at; the key is the WHERE fence (prep.flea).
+    expect(serviceUpdates).toContainEqual({ prep_sent_at: 'NOW()' });
   });
 
   test('a suppressed text (sent:true sentinel, no provider id) is not a delivery', async () => {
@@ -654,7 +653,7 @@ describe('sendPrepToCustomer', () => {
 
     expect(sent).toMatchObject({ ok: true, smsSent: true });
     expect(renderSmsTemplate.mock.calls[0][1].prep_url).toMatch(new RegExp(`/prep/${'b'.repeat(32)}$`));
-    expect(serviceUpdates).toContainEqual(expect.objectContaining({ prep_sent_at: 'NOW()', prep_template_key: 'prep.lawn' }));
+    expect(serviceUpdates).toContainEqual({ prep_sent_at: 'NOW()' }); // key is the WHERE fence (prep.lawn)
   });
 
   test('a failed visit lookup or token mint is reported as a link failure, not a missing visit', async () => {

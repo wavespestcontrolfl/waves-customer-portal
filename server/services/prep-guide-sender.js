@@ -29,7 +29,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend } = require('./sms-auto-send');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { resolveProjectEmailRecipient, ensureServicePrepToken, markServicePrepSent } = require('./project-email');
+const { resolveProjectEmailRecipient, ensureServicePrepToken } = require('./project-email');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
@@ -400,12 +400,20 @@ async function resolvePrepVisit(customer, config) {
 }
 
 // Confirmed delivery of the guide (either channel): stamp the tracker's
-// prep_sent_at proof and align the rendered guide to what was delivered.
-// Only for a visit whose page this guide owns (resolvePrepVisit.ownsPage).
+// prep_sent_at proof. Only for a visit whose page this guide owns
+// (resolvePrepVisit.ownsPage), and CONDITIONAL on the key still being ours:
+// the automated lanes take no lock with this sender, so one may have
+// delivered a different guide on this row meanwhile — the executor's
+// unconditional markServicePrepSent would retarget that customer's link
+// (pre-push Codex P1 on b909d8007). 0 rows = not ours any more; the other
+// lane's delivered key stays.
 async function stampPrepSent(visit, config) {
   if (!visit?.id) return;
   try {
-    await markServicePrepSent(visit.id, config.emailTemplateKey);
+    const stamped = await db('scheduled_services')
+      .where({ id: visit.id, prep_template_key: config.emailTemplateKey })
+      .update({ prep_sent_at: db.fn.now() });
+    if (!Number(stamped)) logger.warn(`[prep-guide-sender] prep_sent_at stamp skipped for service ${visit.id}: page no longer keyed to ${config.emailTemplateKey}`);
   } catch (stampErr) {
     logger.warn(`[prep-guide-sender] prep_sent_at stamp failed for service ${visit.id}: ${stampErr.message}`);
   }
