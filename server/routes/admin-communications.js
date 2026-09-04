@@ -448,6 +448,9 @@ router.post('/sms', async (req, res, next) => {
       const { bearerLinkSendCheck } = require('../services/composer-customer-links');
       const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), {
         trustedCustomerId: trustedCustomerId || null,
+        // The seam binds by the last ten digits; a non-US E.164 destination
+        // sharing them with a customer's US number is a different phone.
+        usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
       });
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
@@ -1442,7 +1445,11 @@ function isElapsedSameDayReschedulePlaceholder(svc, now = new Date()) {
 // pending_rebook (its retained date/window is stale — appointment-public),
 // so the appointment link passes the statuses the page treats as upcoming
 // (pre-push Codex P1).
-async function soonestUpcomingVisit(customerIds, { statuses = ['pending', 'confirmed', 'rescheduled'] } = {}) {
+// `skip`: the candidate predicate — the reschedule link skips only elapsed
+// 'rescheduled' placeholders (a same-day pending/confirmed row past its
+// window is a MISSED visit the rebook page serves); the appointment link
+// skips whatever its page renders as 'past' (GH Codex #3844 r10 P1).
+async function soonestUpcomingVisit(customerIds, { statuses = ['pending', 'confirmed', 'rescheduled'], skip = isElapsedSameDayReschedulePlaceholder } = {}) {
   const PAGE = 25;
   let svc = null;
   for (let offset = 0; ; offset += PAGE) {
@@ -1466,7 +1473,7 @@ async function soonestUpcomingVisit(customerIds, { statuses = ['pending', 'confi
       .limit(PAGE)
       .offset(offset)
       .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_type', 'status');
-    svc = candidates.find((c) => !isElapsedSameDayReschedulePlaceholder(c)) || null;
+    svc = candidates.find((c) => !skip(c)) || null;
     if (svc || candidates.length < PAGE) break;
   }
   return svc;
@@ -1830,7 +1837,10 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       // Visit-anchored kinds share the reschedule-link pick (one set of
       // exclusions — dispatch-owned pendings, elapsed placeholders); the
       // builder takes the picked row so the pick stays route-owned.
-      appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids, { statuses: ['pending', 'confirmed'] })),
+      appointment: async (ids) => builders.buildAppointmentPageLink(await soonestUpcomingVisit(ids, {
+        statuses: ['pending', 'confirmed'],
+        skip: (svc) => require('./appointment-public').pageState(svc).state === 'past',
+      })),
       // The prep page shows its customer's name and address and the /sms
       // send requires the recipient to own it (GH Codex #3844 r3 P2), so
       // the visit pick is the phone owner's row — never an account sibling's

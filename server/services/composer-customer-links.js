@@ -518,7 +518,10 @@ function canonicalPortalToken(run, hosts, pathRe) {
   // HTTPS or the schemeless canonical form only — an explicit http:// would
   // expose the 30-day bearer before any redirect reaches HTTPS.
   if (url.protocol !== 'https:') return null;
-  if (![].concat(hosts).includes(url.host.toLowerCase())) return null;
+  // A DNS-equivalent FQDN form (`portal.wavespestcontrol.com.`) keeps its
+  // terminal dot through WHATWG parsing and still resolves to us — the
+  // same working page, judged the same (GH Codex #3844 r10 P1).
+  if (![].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, ''))) return null;
   // The public routes match with a trailing slash too (React Router and the
   // Express /l and /secure mounts alike), so /prep/<token>/ is the same
   // working page as /prep/<token> — judged the same, or it would slip the
@@ -938,7 +941,13 @@ async function checkAccountBoundLinks(ctx) {
     || checkReportLinks(ctx, shortRows, onRecipientAccount);
 }
 
-async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
+// `usDestination` (default true): the route says whether `to` normalizes to a
+// US number. Every check here binds by the LAST TEN digits, so a non-US
+// E.164 destination whose last ten equal a customer's or payer's US number
+// would pass ownership and even adopt that customer while the provider
+// texts the other country (GH Codex #3844 r10 P1) — a bearer never goes to
+// a non-US destination.
+async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestination = true } = {}) {
   const ctx = {
     runs: decodedRuns(body),
     hosts: ownedPortalHosts(),
@@ -952,6 +961,9 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
     || (await checkStatementLinks(ctx, statements))
     || (await checkAccountBoundLinks(ctx));
   if (refusal) return refusal;
+  if (ctx.bearers && !usDestination) {
+    return refuseSend('Customer links only go to a US number — check the recipient before sending.');
+  }
   const out = { ok: true, ...(statements.length ? { statements } : {}), ...(preps.length ? { preps } : {}) };
   // Owner rule for EVERY bearer send (GH Codex #3844 r7 + r9 P1s): the text
   // goes to a phone that may be a customer's, and /sms applies that

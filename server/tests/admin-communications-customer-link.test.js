@@ -478,6 +478,18 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
+  test('appointment: a same-day live visit past its quoted window is skipped for the later real one — the page renders it as past (GH Codex #3844 r10 P1)', async () => {
+    const elapsed = { id: 'v-past', customer_id: CUSTOMER_UUID, scheduled_date: '2020-01-01', window_start: '08:00', status: 'confirmed' };
+    const later = { id: 'v-next', customer_id: CUSTOMER_UUID, scheduled_date: '2099-01-01', window_start: '08:00', status: 'pending' };
+    const visits = makeVisitsBuilder([elapsed, later]);
+    wireDb({ customers: makeCustomersBuilder({ firstRow: { id: CUSTOMER_UUID, phone: '+15551234567', account_id: CUSTOMER_UUID }, selectResults: [[{ id: CUSTOMER_UUID }], [{ first_name: 'Ann' }], [{ id: CUSTOMER_UUID }]] }), visits });
+    builders.buildAppointmentPageLink.mockResolvedValue({ url: null, line: '', reason: 'x' });
+    await withServer(async (baseUrl) => {
+      await post(baseUrl, 'customer-link', { phone: '+15551234567', customerId: CUSTOMER_UUID, kind: 'appointment' });
+      expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(later);
+    });
+  });
+
   test.each(['appointment', 'service_report'])('%s: 409 when two live siblings on the account share the phone and no customer was picked — the owner that rides back is never an arbitrary row (GH Codex #3844 r9 P1)', async (kind) => {
     wireDb({ customers: makeCustomersBuilder({
       selectResults: [

@@ -512,6 +512,16 @@ describe('admin communications SMS route', () => {
           audience: 'customer', customerId: 'cust-A', identityTrustLevel: 'phone_matches_customer',
         }));
       });
+      // A +44 destination whose last ten digits are the payer's US number is a
+      // different phone: the bearer never goes there (GH Codex #3844 r10 P1).
+      sendCustomerMessage.mockClear();
+      wireOwners([{ id: 'cust-A' }]);
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: STMT_BODY, to: '+445551234567' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/US number/);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
       sendCustomerMessage.mockClear();
       wireOwners([{ id: 'cust-A' }, { id: 'cust-B' }]);
       await withServer(async (baseUrl) => {

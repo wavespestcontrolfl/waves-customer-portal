@@ -37,8 +37,13 @@ let servicePrepRow = null;
 let serviceUpdates = [];
 function scheduledQuery() {
   let tokenMode = false;
+  let listMode = false; // nextUpcomingVisit: .limit(n).select(cols) → rows
   const q = {
-    select: jest.fn(() => { tokenMode = true; return q; }),
+    limit: jest.fn(() => { listMode = true; return q; }),
+    select: jest.fn(() => {
+      if (listMode) return Promise.resolve(upcomingVisitRow ? [upcomingVisitRow] : []);
+      tokenMode = true; return q;
+    }),
     where: jest.fn(() => q), whereIn: jest.fn(() => q), whereRaw: jest.fn(() => q), whereNotIn: jest.fn(() => q),
     whereNull: jest.fn(() => q), update: jest.fn((patch) => { serviceUpdates.push(patch); return q; }),
     returning: jest.fn(async () => [{}]),

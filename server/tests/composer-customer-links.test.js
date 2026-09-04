@@ -1005,6 +1005,12 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck(`wavespest.co/report/${'b'.repeat(32)}`)).toEqual({ present: true, label: 'Service report' });
     expect(await immediateOnlyLinkSendCheck(`wavespest.co.evil.example/prep/${PREP}`)).toEqual({ present: false });
   });
+
+  test('the DNS-equivalent trailing-dot host is the same served page — fenced (GH Codex #3844 r10 P1)', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`https://portal.wavespestcontrol.com./prep/${PREP}`)).toEqual({ present: true, label: 'Prep guide' });
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com./pay/statement/${'f'.repeat(64)}`)).toEqual({ present: true, label: 'Statement pay' });
+  });
 });
 
 describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointment + report links)', () => {
@@ -1120,6 +1126,18 @@ describe('bearerLinkSendCheck (immediate-send seam for prep, statement, appointm
     expect((await bearerLinkSendCheck(body, '9415550100', {})).error).toMatch(/no longer payable/);
     wireStmt({ stmt: { id: 31, payer_id: 7, status: 'sent' }, payer: null });
     expect((await bearerLinkSendCheck(body, '9415550100', {})).error).toMatch(/payer's AP phone/);
+  });
+
+  test('a bearer to a non-US destination refuses — the last-ten binding cannot tell +44…5550100 from the customer\'s US number (GH Codex #3844 r10 P1); plain text is unaffected', async () => {
+    const STMT = 'f'.repeat(64);
+    isEnabled.mockImplementation((g) => g === 'payerStatements');
+    mockBuilders = {
+      payer_statements: chainBuilder({ firstRow: { id: 31, payer_id: 7, status: 'sent' } }),
+      payers: chainBuilder({ firstRow: { id: 7, ap_phone: '(941) 555-0100' } }),
+      customers: chainBuilder({ rows: [{ id: 'c1' }] }),
+    };
+    expect((await bearerLinkSendCheck(`Pay here: portal.wavespestcontrol.com/pay/statement/${STMT}`, '9415550100', { trustedCustomerId: null, usDestination: false })).error).toMatch(/US number/);
+    expect(await bearerLinkSendCheck('No links here', '9415550100', { trustedCustomerId: null, usDestination: false })).toEqual({ ok: true });
   });
 
   test('a statement to a number on file for several live customers refuses unless the send trusts one of them — never the unverified-lead policy (GH Codex #3844 r7 P1)', async () => {

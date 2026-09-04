@@ -69,7 +69,7 @@ function isSupportedPestType(pestType) {
 async function nextUpcomingVisit(customerIds, serviceKeyword) {
   const ids = [].concat(customerIds).filter(Boolean);
   try {
-    const row = await db('scheduled_services')
+    const rows = await db('scheduled_services')
       .whereIn('customer_id', ids)
       .whereRaw('LOWER(service_type) LIKE ?', [`%${serviceKeyword}%`])
       .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
@@ -95,8 +95,14 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
         { column: 'window_start', order: 'asc' },
         { column: 'id', order: 'asc' },
       ])
-      .first('id', 'customer_id', 'scheduled_date', 'window_start', 'service_type', 'prep_template_key', 'prep_expires_at');
-    return row || null;
+      .limit(10)
+      .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'service_type', 'prep_template_key', 'prep_expires_at');
+    // A same-day row still pending/confirmed after its quoted window is a
+    // visit that came and went — the appointment page renders it 'past';
+    // prep for it is prep for nothing, so walk on to the next matching
+    // visit (GH Codex #3844 r10 P2). One predicate: the page's own.
+    const { pageState } = require('../routes/appointment-public');
+    return rows.find((r) => pageState(r).state !== 'past') || null;
   } catch (err) {
     logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${ids.join(',')}: ${err.message}`);
     return null;
