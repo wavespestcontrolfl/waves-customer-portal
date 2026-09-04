@@ -454,6 +454,7 @@ async function activateEachPreparedShareLink(links, req, activations) {
         customerId: locked.customer_id,
         tokenHash: link.tokenHash,
         expiresAt,
+        sharedAt: now,
         previous: {
           status: locked.status,
           share_token_hash: locked.share_token_hash,
@@ -477,8 +478,15 @@ async function activateEachPreparedShareLink(links, req, activations) {
 async function restorePreparedShareLinks(activations, req, { reason = null } = {}) {
   for (const a of activations) {
     if (!a.previous) continue;
+    // Put back ONLY the exact state activation stamped — sent, this hash, this
+    // shared_at and window. A row that progressed meanwhile (the customer
+    // opened it → viewed, signed it, an admin cancelled/voided or re-shared
+    // it) keeps that transition: the conditional UPDATE matches nothing and
+    // the activated link simply lives out its window (pre-push Codex P0).
+    // Postgres re-evaluates this WHERE under the row lock after a concurrent
+    // writer commits, so the check and the write are one atomic step.
     const restored = await db('customer_contracts')
-      .where({ id: a.id, share_token_hash: a.tokenHash })
+      .where({ id: a.id, share_token_hash: a.tokenHash, status: 'sent', shared_at: a.sharedAt, share_token_expires_at: a.expiresAt })
       .update({ ...a.previous, updated_at: new Date() });
     if (restored === 1) {
       await insertEvent(db, a.id, a.customerId, 'delivery_failed', req, { channel: 'sms', action: 'composer', reason });

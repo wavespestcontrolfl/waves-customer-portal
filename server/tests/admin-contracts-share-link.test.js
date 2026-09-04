@@ -89,7 +89,7 @@ describe('activatePreparedShareLinks (the /sms send, before the provider call)',
     expect(w.payload).toEqual({ status: 'sent', share_token_hash: HASH, share_token_expires_at: expect.any(Date), shared_at: expect.any(Date), updated_at: expect.any(Date) });
     expect(w.payload.share_token_expires_at.getTime() - Date.now()).toBeGreaterThan(13 * DAY);
     expect(r.activations).toEqual([{
-      id: 'k1', customerId: 'c1', tokenHash: HASH, expiresAt: w.payload.share_token_expires_at,
+      id: 'k1', customerId: 'c1', tokenHash: HASH, expiresAt: w.payload.share_token_expires_at, sharedAt: w.payload.shared_at,
       previous: { status: 'draft', share_token_hash: null, share_token_expires_at: null, shared_at: null },
     }]);
     expect(events()).toEqual([{ type: 'share_link_created', meta: { expiresAt: w.payload.share_token_expires_at.toISOString(), source: 'composer' } }]);
@@ -135,7 +135,8 @@ describe('activatePreparedShareLinks (the /sms send, before the provider call)',
     await expect(activatePreparedShareLinks([{ id: 'k1', tokenHash: HASH, delivered: false }, { id: 'k2', tokenHash: H2, delivered: false }], req)).rejects.toThrow('lock timeout');
     const [activate, restore] = updates('customer_contracts');
     expect(activate.payload.share_token_hash).toBe(HASH);
-    expect(restore.filters).toContainEqual({ id: 'k1', share_token_hash: HASH });
+    // The restore matches the exact activated state — the row a signature or cancellation progressed meanwhile is left alone (pre-push Codex P0).
+    expect(restore.filters).toContainEqual({ id: 'k1', share_token_hash: HASH, status: 'sent', shared_at: activate.payload.shared_at, share_token_expires_at: activate.payload.share_token_expires_at });
     expect(restore.payload).toEqual({ status: 'draft', share_token_hash: null, share_token_expires_at: null, shared_at: null, updated_at: expect.any(Date) });
     expect(events().map((e) => e.type)).toEqual(['share_link_created', 'delivery_failed']);
   });
@@ -147,26 +148,29 @@ describe('activatePreparedShareLinks (the /sms send, before the provider call)',
     expect(r.ok).toBe(false);
     const [activate, restore] = updates('customer_contracts');
     expect(activate.payload.share_token_hash).toBe(HASH);
-    expect(restore.filters).toContainEqual({ id: 'k1', share_token_hash: HASH });
+    // The restore matches the exact activated state — the row a signature or cancellation progressed meanwhile is left alone (pre-push Codex P0).
+    expect(restore.filters).toContainEqual({ id: 'k1', share_token_hash: HASH, status: 'sent', shared_at: activate.payload.shared_at, share_token_expires_at: activate.payload.share_token_expires_at });
     expect(restore.payload).toEqual({ status: 'draft', share_token_hash: null, share_token_expires_at: null, shared_at: null, updated_at: expect.any(Date) });
   });
 });
 
 describe('restorePreparedShareLinks / recordPreparedShareLinkSends', () => {
-  test('restore puts the row back exactly as it was, conditional on the hash, and records delivery_failed; a link the customer already held is left alone', async () => {
+  test('restore puts the row back exactly as it was, conditional on the EXACT activated state (hash + sent + the stamped shared_at and window — a row that was viewed, signed, cancelled or re-shared meanwhile never matches; pre-push Codex P0), and records delivery_failed; a link the customer already held is left alone', async () => {
     const previous = { status: 'viewed', share_token_hash: 'x'.repeat(64), share_token_expires_at: new Date(Date.now() - DAY), shared_at: new Date(Date.now() - 20 * DAY) };
+    const sharedAt = new Date();
+    const expiresAt = new Date(Date.now() + 14 * DAY);
     await restorePreparedShareLinks([
-      { id: 'k1', customerId: 'c1', tokenHash: HASH, previous },
-      { id: 'k2', customerId: 'c1', tokenHash: HASH, previous: null },
+      { id: 'k1', customerId: 'c1', tokenHash: HASH, expiresAt, sharedAt, previous },
+      { id: 'k2', customerId: 'c1', tokenHash: HASH, expiresAt, sharedAt, previous: null },
     ], req, { reason: 'blocked' });
     const ws = updates('customer_contracts');
     expect(ws).toHaveLength(1);
-    expect(ws[0].filters).toContainEqual({ id: 'k1', share_token_hash: HASH });
+    expect(ws[0].filters).toContainEqual({ id: 'k1', share_token_hash: HASH, status: 'sent', shared_at: sharedAt, share_token_expires_at: expiresAt });
     expect(ws[0].payload).toEqual({ ...previous, updated_at: expect.any(Date) });
     expect(events()).toEqual([{ type: 'delivery_failed', meta: { channel: 'sms', action: 'composer', reason: 'blocked' } }]);
   });
 
-  test('a restore that matches nothing (rotated meanwhile) records nothing', async () => {
+  test('a restore that matches nothing (rotated, viewed, signed or cancelled meanwhile) records nothing', async () => {
     mockRows = { __updateResult: 0 };
     await restorePreparedShareLinks([{ id: 'k1', customerId: 'c1', tokenHash: HASH, previous: { status: 'draft', share_token_hash: null, share_token_expires_at: null, shared_at: null } }], req);
     expect(events()).toEqual([]);
