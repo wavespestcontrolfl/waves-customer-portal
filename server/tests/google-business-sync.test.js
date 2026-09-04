@@ -607,6 +607,60 @@ describe('Google Business review sync', () => {
     markOk.mockRestore(); enroll.mockRestore();
   });
 
+  test('GBP path: a connection-class failure in the edited-after-post bell is tagged systemic (codex r9 P1); the park itself is durable', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Paula Placeholder',
+      star_rating: 5,
+      review_text: 'Original text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hello Paula! Thanks!',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+      auto_reply_status: 'posted',
+      auto_reply_reason: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-1',
+        reviewer: { displayName: 'Paula Placeholder' },
+        starRating: 'ONE',
+        comment: 'Completely different text',
+        reviewReply: { comment: 'Hello Paula! Thanks!' },
+        createTime: '2026-04-09T20:54:35Z',
+      }] });
+    });
+    const timeout = Object.assign(new Error('Knex: Timeout acquiring a connection. The pool is probably full.'), { name: 'KnexTimeoutError' });
+    const bell = jest.spyOn(service, '_bellEditedAfterPost').mockRejectedValue(timeout);
+    const upsert = jest.spyOn(service, '_upsertGbpReview');
+
+    await service.syncAllReviews();
+
+    expect(bell).toHaveBeenCalledTimes(1);
+    const outcome = await upsert.mock.results[0].value;
+    expect(outcome).toMatchObject({ id: 'gbp-row-1', inserted: false, sideEffectError: timeout.message, systemicError: timeout });
+    const row = db.__state.rows.google_reviews.find(r => r.id === 'gbp-row-1');
+    expect(row).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+
+    // A row-specific bell failure stays a side-effect error only.
+    db.__state.rows.google_reviews.find(r => r.id === 'gbp-row-1').auto_reply_status = 'posted';
+    db.__state.rows.google_reviews.find(r => r.id === 'gbp-row-1').auto_reply_reason = null;
+    db.__state.rows.google_reviews.find(r => r.id === 'gbp-row-1').review_text = 'Original text';
+    const rowErr = Object.assign(new Error('invalid input syntax'), { code: '22P02' });
+    bell.mockRejectedValue(rowErr);
+    upsert.mockClear();
+    await service.syncAllReviews();
+    const second = await upsert.mock.results[0].value;
+    expect(second.sideEffectError).toBe(rowErr.message);
+    expect(second.systemicError).toBeUndefined();
+    bell.mockRestore(); upsert.mockRestore();
+  });
+
   test('a null client after a FAILED stored-token lookup is reported as that failure, never as missing credentials', async () => {
     // _getStoredTokens records the failure and resolves {} → _getClient resolves null.
     service._getClient = jest.fn(async () => null);

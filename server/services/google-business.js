@@ -970,6 +970,10 @@ class GoogleBusinessService {
         try { await this._bellEditedAfterPost(existing, normalized); } catch (bellErr) {
           logger.error(`[gbp] edited-after-post bell failed for review row ${existing.id}: ${bellErr.message}`);
           result.sideEffectError = bellErr.message;
+          // Same rule as the other post-write steps: a dead or saturated
+          // database failing the bell must reach the caller's breaker or a
+          // feed of edited reviews waits one timeout per row (codex r9 P1).
+          if (isSystemicDbFailure(bellErr)) result.systemicError = bellErr;
         }
       }
     } else {
