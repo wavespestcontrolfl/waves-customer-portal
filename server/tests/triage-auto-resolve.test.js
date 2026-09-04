@@ -718,7 +718,7 @@ describe('evidence helpers', () => {
     const turfProgram = est({ estimate_data: { proposal: { enabled: true, programs: [{ service: 'lawn', label: 'Bermuda program', frequencyPerYear: 8, pricePerApplication: 90 }] } } });
     expect(estimateCoversAsk(card(plan), turfProgram)).toBe(false);
     expect(estimateCoversAsk(lawnAsk, turfProgram)).toBe(true);
-    expect(deliveredEstimateScope(turfProgram).lines).toEqual([{ names: ['Bermuda program', 'lawn', 'Lawn Care'], recurring: true, oneTime: false, authored: true }]);
+    expect(deliveredEstimateScope(turfProgram).lines).toEqual([{ names: ['Bermuda program', 'lawn', 'Lawn Care', 'Every 6 Weeks'], recurring: true, oneTime: false, authored: true }]);
     // The engine's stinging line carries the category enum as its service
     // key; the enum's own words answer it (codex r22 P2).
     const wasps = card({ requested_service_categories: ['stinging_insect'], requested_specific_service: null });
@@ -805,6 +805,16 @@ describe('evidence helpers', () => {
     expect(estimateCoversAsk(cadenceAsk('Quarterly Pest Control Service'), rawQuarterly)).toBe(true);
     expect(estimateCoversAsk(cadenceAsk('Quarterly Pest Control Service'), rawBiMonthly)).toBe(false);
     expect(estimateCoversAsk(cadenceAsk('Bi-Monthly Pest Control Service'), rawBiMonthly)).toBe(true);
+    // The seasonal mosquito program's structured identity beats its nine
+    // visits (not "Every 6 Weeks"), and an authored program's
+    // frequencyPerYear is its cadence (codex r36 P2 ×2).
+    const mosquitoAsk = (name) => card({ requested_service_categories: ['mosquito'], requested_specific_service: name, requested_service_intent: 'recurring_membership_inquiry' });
+    const seasonal = est({ estimate_data: { result: { recurring: { services: [{ service: 'mosquito', name: 'Mosquito (Seasonal)', selectedProgram: 'seasonal9', visits: 9, mo: 60 }] } } } });
+    expect(estimateCoversAsk(mosquitoAsk('Seasonal Mosquito Control Service'), seasonal)).toBe(true);
+    expect(estimateCoversAsk(mosquitoAsk('Monthly Mosquito Control Service'), seasonal)).toBe(false);
+    const authoredQuarterly = est({ estimate_data: { proposal: { enabled: true, programs: [{ service: 'pest', label: 'Pest Control', frequencyPerYear: 4, pricePerApplication: 100 }] } } });
+    expect(estimateCoversAsk(cadenceAsk('Quarterly Pest Control Service'), authoredQuarterly)).toBe(true);
+    expect(estimateCoversAsk(cadenceAsk('Bi-Monthly Pest Control Service'), authoredQuarterly)).toBe(false);
     expect(estimateCoversAsk(termiteQuote('quote_only'), treatmentLine)).toBe(true);
     // A quote-only ask takes either subtype — the category / specific
     // service says what was quoted, so a delivered inspection quote closes

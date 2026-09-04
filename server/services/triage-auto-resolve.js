@@ -1211,10 +1211,20 @@ const isPlaceholder = (entry) => entry.quoteRequired === true || entry.requiresM
 // carry the same label the public menu prints (codex r35 P2).
 const CADENCE_KEY_BY_VISITS = { 12: 'monthly', 9: 'every_6_weeks', 8: 'every_6_weeks', 6: 'bimonthly', 4: 'quarterly', 2: 'semiannual', 1: 'annual' };
 const CADENCE_KEY_BY_WORD = { monthly: 'monthly', bimonthly: 'bimonthly', everyweeks: 'every_6_weeks', quarterly: 'quarterly', semiannual: 'semiannual', biannual: 'semiannual', annual: 'annual', yearly: 'annual' };
+// The structured program identity wins over a visit count: the seasonal
+// mosquito program (selectedProgram 'seasonal9', 9 visits) is "Seasonal",
+// not the lawn / tree nine-visit cadence (codex r36 P2). An authored
+// proposal program carries frequencyPerYear (codex r36 P2).
+const CADENCE_KEY_BY_PROGRAM = [[/seasonal/, 'seasonal_feb_oct'], [/monthly/, 'monthly']];
 function cadenceWord(entry) {
   const { CADENCE_LABELS } = require('./public-services-menu');
   let key = null;
-  for (const raw of [entry.frequency, entry.recurringPattern, entry.visitsPerYear, entry.visits]) {
+  for (const raw of [entry.selectedProgram, entry.program, entry.programKey]) {
+    if (typeof raw !== 'string') continue;
+    key = (CADENCE_KEY_BY_PROGRAM.find(([re]) => re.test(raw.toLowerCase())) || [])[1] || null;
+    if (key) break;
+  }
+  for (const raw of key ? [] : [entry.frequency, entry.recurringPattern, entry.frequencyPerYear, entry.visitsPerYear, entry.visits]) {
     if (raw == null || raw === '') continue;
     key = typeof raw === 'number' || /^\d+$/.test(String(raw))
       ? CADENCE_KEY_BY_VISITS[Math.round(Number(raw))] || null
@@ -1257,8 +1267,15 @@ function lineCollector() {
 // to the scan's label as well — one vocabulary judging, the other
 // vouching, never a local copy of either. The structured identity the
 // normalizer validated is among an authored line's names.
+// The public menu's family label rides beside the reader's: the catalog
+// names a caller cites say "Mosquito Control Service" where the reader's
+// label is the bare "Mosquito", and a specific name keeps its "control"
+// (r34 P1) — the menu's wording is the customer-facing one (codex r36
+// P2). The two maps key pest / lawn differently.
+const MENU_FAMILY_KEY = { pest: 'pest_control', lawn: 'lawn_care' };
 function lineWords(line) {
   const { serviceKeysFromText, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
+  const { FAMILY_LABELS } = require('./public-services-menu');
   const names = Array.isArray(line.names) ? line.names.filter((w) => typeof w === 'string' && w.trim()) : [];
   let keys = serviceKeysFromText(...names);
   if (line.authored === true) {
@@ -1266,8 +1283,8 @@ function lineWords(line) {
     const vouched = new Set(familiesIn(names.join('. ')).flatMap((fam) => serviceKeysFromText(fam.label)));
     keys = keys.filter((k) => vouched.has(k));
   }
-  const families = keys.flatMap((k) => (k && k !== 'unknown' ? [k, SERVICE_LINE_LABELS[k]] : []));
-  return [...names, ...families].join(' ');
+  const families = keys.flatMap((k) => (k && k !== 'unknown' ? [k, SERVICE_LINE_LABELS[k], FAMILY_LABELS[MENU_FAMILY_KEY[k] || k]] : []));
+  return [...names, ...families].filter(Boolean).join(' ');
 }
 
 // An authored proposal's lines from the CANONICAL normalizer (the shape
@@ -1285,7 +1302,7 @@ function proposalLines(row, add) {
   if (proposal.enabled !== true) return;
   const AUTHORED = { authored: true };
   const family = (key) => (key && key !== 'other' ? [key, SERVICE_LINE_LABELS[key]] : []);
-  for (const program of proposal.programs || []) add([program.label, ...family(program.service)], RECURRING, program.annual > 0, AUTHORED);
+  for (const program of proposal.programs || []) add([program.label, ...family(program.service), cadenceWord(program)], RECURRING, program.annual > 0, AUTHORED);
   for (const building of proposal.buildings || []) {
     for (const item of building.lineItems || []) {
       add([item.description], item.frequency === 'one_time' ? ONE_TIME : RECURRING, item.amount > 0, AUTHORED);
