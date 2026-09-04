@@ -462,7 +462,7 @@ describe('admin communications SMS route', () => {
     // Visit-lane card request in the body: the composer send runs the
     // service's own one-text mechanics — claim the visit BEFORE the
     // provider call, mark the request after a real send, release otherwise.
-    const CARD = { id: 'r9', kind: 'visit', status: 'pending', customer_id: 'cust-A', scheduled_service_id: 'v-77', sent_at: null };
+    const CARD = { id: 'r9', kind: 'visit', status: 'pending', customer_id: 'cust-A', scheduled_service_id: 'v-77', sent_at: null, token: 'abcDEF123_-xyz789QWERTY' };
     function wireCardDb({ claimResult = 1 } = {}) {
       db.mockImplementation((table) => {
         const first = jest.fn();

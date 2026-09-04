@@ -1807,8 +1807,16 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
   describe('card request send claim (the service\'s own one-text mechanics, run by the composer send)', () => {
     const cards = [{ token: TOKEN, scheduledServiceId: 'v1' }, { token: 'tok2ABCDEF_-0123456789', scheduledServiceId: 'v2' }];
 
+    const pendingRows = { v1: { status: 'pending', token: TOKEN, sent_at: null }, v2: { status: 'pending', token: 'tok2ABCDEF_-0123456789', sent_at: null } };
+    function wireRequests(rows = pendingRows) {
+      const requests = chainBuilder();
+      requests.first = jest.fn(async () => rows[requests.where.mock.calls.at(-1)[0].scheduled_service_id] ?? null);
+      return requests;
+    }
+
     test('claim: each visit through the service\'s own claim (NULL → stamp, else stale-lease adoption), one stamp; both won → the claim rides back', async () => {
       claimCardLinkSend.mockReset().mockResolvedValue(true);
+      mockBuilders = { scheduled_services: chainBuilder(), appointment_card_requests: wireRequests() };
       const r = await claimCardRequestSends(cards);
       expect(r.ok).toBe(true);
       expect(r.claim.cards).toEqual(cards);
@@ -1816,10 +1824,30 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(claimCardLinkSend).toHaveBeenCalledWith('v2', r.claim.stamp, cards[1].token);
     });
 
+    test('claim: the request row is re-read UNDER the claim — a capture completed, a rotated token or a text that went out meanwhile releases the claim and refuses (pre-push Codex P1)', async () => {
+      for (const [row, msg] of [
+        [{ status: 'completed', token: TOKEN, sent_at: null }, /no longer live/],
+        [{ status: 'pending', token: 'rotatedTOKEN_0123456789', sent_at: null }, /no longer live/],
+        [{ status: 'pending', token: TOKEN, sent_at: new Date() }, /already being sent, or was already texted/],
+        [null, /no longer live/],
+      ]) {
+        claimCardLinkSend.mockReset().mockResolvedValue(true);
+        const visits = chainBuilder();
+        mockBuilders = { scheduled_services: visits, appointment_card_requests: wireRequests({ ...pendingRows, v2: row }) };
+        const r = await claimCardRequestSends(cards);
+        expect(r.ok).toBe(false);
+        expect(r.error).toMatch(msg);
+        // Both claims this call won are released, value-guarded on the stamp.
+        expect(visits.where).toHaveBeenCalledWith({ id: 'v1', card_link_sent_at: expect.any(Date) });
+        expect(visits.where).toHaveBeenCalledWith({ id: 'v2', card_link_sent_at: expect.any(Date) });
+        expect(visits.update).toHaveBeenCalledTimes(2);
+      }
+    });
+
     test('claim: a visit already claimed refuses and hands back the claims won before it', async () => {
       claimCardLinkSend.mockReset().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
       const visits = chainBuilder();
-      mockBuilders = { scheduled_services: visits };
+      mockBuilders = { scheduled_services: visits, appointment_card_requests: wireRequests() };
       const r = await claimCardRequestSends(cards);
       expect(r.ok).toBe(false);
       expect(r.error).toMatch(/already being sent, or was already texted/);

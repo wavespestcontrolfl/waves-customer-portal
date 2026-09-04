@@ -1243,10 +1243,25 @@ async function claimCardRequestSends(cards) {
   const { claimCardLinkSend } = require('./appointment-card-request');
   const stamp = new Date();
   const won = [];
+  const CLAIMED = 'This card request is already being sent, or was already texted — the customer gets one card request per appointment. Remove the link before sending.';
   for (const card of cards) {
-    if (await claimCardLinkSend(card.scheduledServiceId, stamp, card.token)) { won.push(card); continue; }
-    await releaseCardRequestSends({ stamp, cards: won });
-    return { ok: false, error: 'This card request is already being sent, or was already texted — the customer gets one card request per appointment. Remove the link before sending.' };
+    if (!await claimCardLinkSend(card.scheduledServiceId, stamp, card.token)) {
+      await releaseCardRequestSends({ stamp, cards: won });
+      return { ok: false, error: CLAIMED };
+    }
+    won.push(card);
+    // The claim stamps the VISIT; the request row is re-read under it
+    // (pre-push Codex P1): a capture completed, a row rotated to another
+    // token, or a text that went out between the seam's check and this
+    // claim would otherwise ride a stale payment-adjacent link out under a
+    // claim nobody finalizes.
+    const row = await db('appointment_card_requests')
+      .where({ scheduled_service_id: card.scheduledServiceId })
+      .first('status', 'token', 'sent_at');
+    if (!row || row.status !== 'pending' || row.sent_at || row.token !== card.token) {
+      await releaseCardRequestSends({ stamp, cards: won });
+      return { ok: false, error: row?.sent_at ? CLAIMED : 'This card request link is no longer live — remove it and insert a fresh one.' };
+    }
   }
   return { ok: true, claim: { stamp, cards: won } };
 }
