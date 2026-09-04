@@ -214,7 +214,15 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // Mirror the win onto the lead's ad_service_attribution funnel row
   // (won → 'booked'; 'completed' stays the revenue sync's to write). Monotonic
   // in SQL and best-effort — never blocks the conversion.
-  await bridgeLeadFunnelStage(leadId, 'won');
+  // A win the bridge could not land on any row — the lead's funnel row was
+  // never stamped, or /calculate dropped it when the row was filed as a
+  // repeat and staff converted that repeat by hand — is rebuilt here from
+  // the row's own stored touch, at booked, so no conversion path (admin
+  // convert, referral) leaves a won lead invisible to the Ads funnel
+  // (codex #3834 r22 P2). Idempotent on lead_id and a no-op without a
+  // stored touch, like the intake stamp it stands in for.
+  const bridged = await bridgeLeadFunnelStage(leadId, 'won');
+  if (!funnelRowFor && !bridged.updated) funnelRowFor = await db('leads').where('id', leadId).first();
   if (funnelRowFor) await stampLeadFunnelRow(db, funnelRowFor, { customerId: customerId || null, funnelStage: 'booked' });
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —

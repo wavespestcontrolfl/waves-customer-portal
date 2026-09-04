@@ -74,9 +74,11 @@ async function followDuplicateLink(database, lead) {
 // back to its own immediate marker and reading as two opportunities (codex
 // #3834 r17 P1). The same bounded, cycle-safe walk through live duplicate
 // hops as followDuplicateLink.
-// The identity a claimed write pins — customer link, phone, email, exactly
-// as the row was read (codex #3834 r17 P1, r18 P1).
-const identityOf = (row) => ({ customer_id: row.customer_id ?? null, phone: row.phone ?? null, email: row.email ?? null });
+// The identity a claimed write pins — customer link, phone, email, AND the
+// estimate link — exactly as the row was read (codex #3834 r17 P1, r18 P1):
+// a row staff linked to a different estimate after the read is that deal's
+// lead, and this event's value hints must not land on it (codex r22 P1).
+const identityOf = (row) => ({ customer_id: row.customer_id ?? null, phone: row.phone ?? null, email: row.email ?? null, estimate_id: row.estimate_id ?? null });
 
 async function resolveAncestry(database, repeat) {
   const seen = new Set([repeat.id]);
@@ -641,6 +643,9 @@ async function markLinkedLeadEstimateAccepted({
       // overwrite the row's customer with this one (codex #3834 r17 P1).
       if (claim) stamp.whereNull('estimate_id').whereIn('status', claim).where(identityOf(lead));
       stamped = await stamp.update({ estimate_id: estimateId, updated_at: new Date() });
+      // The row now carries this link, and the conversion's identity claim
+      // below pins it (codex r22 P1).
+      if (stamped) lead.estimate_id = estimateId;
       if (claim && !stamped) {
         const current = await database('leads').where({ id: lead.id }).first();
         // Refresh the caller's row from the re-read — the WHOLE row — so the
@@ -672,10 +677,24 @@ async function markLinkedLeadEstimateAccepted({
       // status write that made the claim lose is exactly the write that
       // bumps updated_at, so a timestamp key misses the very race it is
       // meant to repair (codex #3834 r21 P1). A link another writer made
-      // since carries THAT estimate's id and is never erased; a row a
-      // concurrent acceptance of this same estimate already converted is
-      // won with this link and keeps it (pre-push P1 on r20).
-      if (stamped) await database('leads').where({ id: lead.id }).where({ estimate_id: estimateId }).whereNot({ status: 'won' }).update({ estimate_id: null, updated_at: new Date() });
+      // since carries THAT estimate's id and is never erased. The one won
+      // row that keeps the link is a concurrent acceptance of this same
+      // estimate: won, linked to this customer, on the contact the row was
+      // read with (pre-push P1 on r20) — a row an admin edit re-identified
+      // AND won in the same write is someone else's deal, and the link comes
+      // off so the fallback's win is the only one on this estimate (codex
+      // r22 P1).
+      if (stamped) {
+        const wonByThisAcceptance = {
+          status: 'won',
+          customer_id: customerId !== undefined ? (customerId || null) : (lead.customer_id ?? null),
+          phone: lead.phone ?? null,
+          email: lead.email ?? null,
+        };
+        await database('leads').where({ id: lead.id }).where({ estimate_id: estimateId })
+          .whereNot((q) => q.where(wonByThisAcceptance))
+          .update({ estimate_id: null, updated_at: new Date() });
+      }
       const current = await database('leads').where({ id: lead.id }).first();
       if (current) Object.assign(lead, current);
       return false;
@@ -1048,12 +1067,19 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
   // on `inquiryBeganAt`, NOT the row's first_contact_at: the keeper is the
   // row the conversion stamps a funnel row for, and that row must date from
   // the repeat's real first contact, not a sibling's (codex r21 P2).
+  // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
+  // estimate belongs to that deal — it is never converted, never carries
+  // this estimate's value hints, and never stands as the root that silences
+  // its repeats: the repeat stands in for it exactly as the accept path's
+  // named-row fallback does (codex #3834 r22 P1). (Tier 1 already handled a
+  // lead linked to THIS estimate.)
+  const inScope = (row) => !estimateId || !row.estimate_id || row.estimate_id === estimateId;
   const keepers = new Map(); // ancestry key → keeper
   let wonAncestry = false;
   for (const repeat of repeats) {
     if (!duplicateMarkerOf(repeat)) continue;
     const { root, key: ancestryKey } = await resolveAncestry(database, repeat);
-    if (linked.some((l) => l.id === ancestryKey)) continue;
+    if (linked.some((l) => l.id === ancestryKey && inScope(l))) continue;
     // A root already WON as this customer's opportunity (linked to them, or
     // unlinked with a still-matching contact — the accept path's rule) is
     // the deal closed: its repeats are add-ons, never a stand-in, and the
@@ -1065,7 +1091,7 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
       wonAncestry = true;
       continue;
     }
-    const rootIsOurs = !!root && !CLOSED_LEAD_STATUSES.has(root.status) && ownedByUs(root);
+    const rootIsOurs = !!root && !CLOSED_LEAD_STATUSES.has(root.status) && ownedByUs(root) && inScope(root);
     if (rootIsOurs) {
       if (!keepers.has(ancestryKey)) keepers.set(ancestryKey, root);
       continue;
@@ -1076,11 +1102,7 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
     else keepers.set(ancestryKey, { ...repeat, inquiryBeganAt: began });
   }
   linked.push(...keepers.values());
-  // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
-  // estimate belongs to that deal — exclude it so we never convert it or
-  // misattribute this estimate's value hints. (Tier 1 already handled a
-  // lead linked to THIS estimate.)
-  const scoped = estimateId ? linked.filter((l) => !l.estimate_id || l.estimate_id === estimateId) : linked;
+  const scoped = linked.filter(inScope);
   // A won ancestry with nothing else open IS the established customer, not
   // a customer with no lead (the reason the caller logs).
   if (!scoped.length) return wonAncestry ? { reason: 'customer_link_established' } : { candidates: [] };

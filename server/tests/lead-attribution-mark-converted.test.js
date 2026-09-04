@@ -4,6 +4,7 @@
 // conversion write — so a preview stub that swaps markConverted out swaps
 // the row out with it.
 let mockUpdateRows = 1;
+let mockFirstRow = null;
 const mockCalls = [];
 jest.mock('../models/db', () => {
   const db = (table) => {
@@ -13,7 +14,7 @@ jest.mock('../models/db', () => {
       whereIn: (...a) => { mockCalls.push([table, 'whereIn', ...a]); return q; },
       update: async (patch) => { mockCalls.push([table, 'update', patch]); return mockUpdateRows; },
       insert: async (row) => { mockCalls.push([table, 'insert', row]); return [row]; },
-      first: async () => null,
+      first: async () => mockFirstRow,
     };
     return q;
   };
@@ -35,7 +36,21 @@ const { markConverted } = require('../services/lead-attribution');
 const claimCalls = () => mockCalls.slice(0, mockCalls.findIndex((c) => c[1] === 'update')).filter((c) => c[0] === 'leads');
 
 describe('markConverted claims', () => {
-  beforeEach(() => { mockCalls.length = 0; mockUpdateRows = 1; jest.clearAllMocks(); });
+  beforeEach(() => { mockCalls.length = 0; mockUpdateRows = 1; mockFirstRow = null; jest.clearAllMocks(); });
+
+  test('a win the bridge lands on no row (a repeat converted by hand after /calculate dropped its row) rebuilds the booked row from the lead itself (codex r22 P2)', async () => {
+    mockFirstRow = { id: 'lead-manual', status: 'won', customer_id: 'c1', first_contact_at: '2026-09-01T12:00:00Z' };
+    const ok = await markConverted('lead-manual', { customerId: 'c1' });
+    expect(ok).toBe(true);
+    expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-manual', 'won');
+    expect(stampLeadFunnelRow).toHaveBeenCalledWith(db, mockFirstRow, { customerId: 'c1', funnelStage: 'booked' });
+  });
+
+  test('a win the bridge DID land needs no rebuilt row', async () => {
+    bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 1, stage: 'booked' });
+    await markConverted('lead-bridged', { customerId: 'c1' });
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+  });
 
   test('onlyIfStatusIn + onlyIfIdentity pin the status AND identity the caller read on the status write', async () => {
     const identity = { customer_id: null, phone: '9415550142', email: 'a@example.com' };
