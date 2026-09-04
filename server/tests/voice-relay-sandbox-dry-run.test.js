@@ -83,8 +83,8 @@ describe('RelayConversation.sandbox', () => {
 });
 
 describe('every call_log query site is either sandbox-excluding or audited as safe', () => {
-  // A source scanner, not a hand-picked list: every file under server/services
-  // and server/routes that queries call_log must either apply
+  // A source scanner, not a hand-picked list: every file under server/services,
+  // server/routes and server/scripts that queries call_log must either apply
   // whereNotSandboxCall / read VOICE_RELAY_SANDBOX_SOURCE row-level, or be
   // listed here with the reason a sandbox row (inbound, no recording, no
   // extraction, no customer_id, no disposition; relay-written transcript)
@@ -92,7 +92,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
   const fs = require('fs');
   const path = require('path');
   const ROOT = path.join(__dirname, '..');
-  const QUERY_RE = /(db|trx|knex|dbc|conn)\(['"]call_log( as [a-z]+)?['"]\)|from\(['"]call_log['"]\)|\.table\(['"]call_log['"]\)|\bFROM call_log\b|\bJOIN call_log\b/gi;
+  const QUERY_RE = /(db|trx|knex|dbc|conn)\(['"]call_log( as [a-z]+)?['"]\)|from\(['"]call_log['"]\)|\.table\(['"]call_log['"]\)|\bFROM call_log\b(?![.\w])|\bJOIN call_log\b(?![.\w])/gi;
   const SAFE = {
     // Writers and per-row processors keyed by id / CallSid / a marker only
     // the recording processor stamps — none of them lists inbound calls.
@@ -148,6 +148,10 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/call-processing-stall-watchdog.js': 'requires a recording (recording-less rows are filtered before the page)',
     'services/promised-estimate-watcher.js': 'requires an enriched quote_promised extraction',
     'services/unworked-comms-watcher.js': 'requires disposition = callback_task_created, which only extraction sets',
+    'scripts/backfill-resolution-artifacts.js': 'requires ai_extraction_enriched, which the relay never writes',
+    'scripts/speaker-label-eval.js': 'requires transcript_structured, which only the recording processor writes',
+    'scripts/v2-promotion-readiness.js': 'requires v2_extraction_status, which only extraction sets',
+    'scripts/verify-v2-shadow-path.js': 'requires processing_status = processed, which only the recording processor sets',
   };
   // A query keyed by a row id, CallSid, call_log_id, customer_id (a sandbox
   // row never gains one) or the processor's token: knex form or raw SQL.
@@ -192,6 +196,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
   };
   walk(path.join(ROOT, 'services'));
   walk(path.join(ROOT, 'routes'));
+  walk(path.join(ROOT, 'scripts'));
 
   test('no call_log reader is unclassified', () => {
     expect(offenders).toEqual([]);

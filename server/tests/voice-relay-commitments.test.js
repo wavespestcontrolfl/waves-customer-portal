@@ -63,10 +63,10 @@ describe('relay session → owed commitments', () => {
     // Never the raw turns: those are unscrubbed.
     expect(site).not.toContain('transcript: this._transcript');
     // Railway logs are plaintext: the three commitment log lines, the
-    // message-sync failure line, and the two telemetry lines (per-turn stats,
-    // relay event shape) carry a masked CallSid.
+    // message-sync failure line, and the three telemetry lines (per-turn
+    // stats, relay event shape, relay_failed salvage) carry a masked CallSid.
     expect(conversation).toContain("const { maskSid } = require('../twilio-failure-alerts');");
-    expect(conversation.match(/callSid=\$\{maskSid\(this\.callSid\)\}/g)).toHaveLength(6);
+    expect(conversation.match(/callSid=\$\{maskSid\(this\.callSid\)\}/g)).toHaveLength(7);
   });
 
   test('the promises are recorded even when the voice-message sync rejects: the sync has its own catch ahead of the commitments block (codex #3725 r18 P2)', () => {

@@ -1594,20 +1594,22 @@ router.post('/relay-sandbox', async (req, res) => {
       })
       .onConflict('twilio_call_sid')
       .ignore();
-    // The recording disclosure FIRST (FL §934.03 — the sandbox number is
-    // publicly dialable and the relay transcribes every caller), then the
-    // <Gather> for the cell code, then the default relay in the SAME
-    // document: no digits ⇒ Twilio falls through to the <Connect> after the
-    // timeout. The cell continuation renders the relay only — the
-    // disclosure has already played on this call.
-    twiml.play(wavesGreetingUrl());
-    twiml.gather({
+    // The recording disclosure (FL §934.03 — the sandbox number is publicly
+    // dialable and the relay transcribes every caller) plays INSIDE the cell
+    // <Gather>, so digits count from the first second of the call: a runner
+    // that sends its cell code at answer is heard (Twilio drops digits sent
+    // before a <Gather> starts). A human caller presses nothing, hears the
+    // whole disclosure, and falls through to the default relay in the SAME
+    // document after the timeout. The cell continuation renders the relay
+    // only — the disclosure has already played on this call.
+    const gather = twiml.gather({
       input: 'dtmf',
       numDigits: 2,
       timeout: SANDBOX_CELL_GATHER_TIMEOUT_SEC,
       action: RELAY_SANDBOX_CELL_ACTION,
       method: 'POST',
     });
+    gather.play(wavesGreetingUrl());
     const gatherInner = twiml.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
     const relayXml = sandboxRelayXml({ callSid: CallSid });
     logger.info(`[relay-sandbox] answering ${maskSid(CallSid)} from=${maskPhone(From)}`);

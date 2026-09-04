@@ -82,6 +82,30 @@ describe('RelayConversation — explicit end after capture', () => {
     }));
   });
 
+  test('a relay_failed row that won the race keeps the transcript + telemetry, not the outcome (codex r6 P1)', async () => {
+    const updates = [];
+    const update = jest.fn(async (patch) => { updates.push(patch); return updates.length === 1 ? 0 : 1; });
+    const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
+    const builder = {
+      update,
+      where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
+      whereRaw: jest.fn(() => builder),
+    };
+    db.mockReturnValue(builder);
+    const convo = new RelayConversation({ callSid: 'CA-failed', sessionKey: 'nonce-MINE', from: '+19415551234', send: jest.fn() });
+    convo.leadCaptured = true;
+    convo._transcript.push({ role: 'caller', text: 'hi, ants again', turn: 1 }, { role: 'agent', text: 'Sorry to hear that.', turn: 1 });
+    await convo.end('relay_failed');
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toEqual(expect.objectContaining({ call_outcome: 'ai_handled' }));
+    // The salvage is keyed to the failure stamp, owner-fenced, and never touches the outcome.
+    expect(builder.where).toHaveBeenCalledWith('call_outcome', 'relay_failed');
+    expect(builder.whereRaw).toHaveBeenCalledTimes(2);
+    expect(updates[1]).toEqual(expect.objectContaining({ transcription_status: 'completed' }));
+    expect(updates[1]).not.toHaveProperty('call_outcome');
+    expect(updates[1]).not.toHaveProperty('status');
+  });
+
   // ⭐ The recent-texts block is customer-AUTHORED SMS text. It rides the USER
   // role, never `system`, and is seeded exactly once, ahead of the caller's
   // first turn, as a user/assistant pair so roles still strictly alternate.

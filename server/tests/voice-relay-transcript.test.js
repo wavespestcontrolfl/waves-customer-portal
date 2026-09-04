@@ -240,13 +240,19 @@ describe('end() persists the transcript on the SAME call_log row', () => {
   });
 
   // #2177 voicemail-clobber guard: unchanged, and still fences the transcript.
-  test('#2177 guard still holds — the transcript rides the SAME fenced UPDATE', async () => {
-    const { update, guardQ } = primeCallLog({ rows: 0 }); // 0 rows: /relay-complete won the race
+  // The only other write is the relay_failed salvage (codex #3852 r6 P1): keyed
+  // to the failure stamp a voicemail row never carries, and outcome-free.
+  test('#2177 guard still holds — the transcript rides the SAME fenced UPDATE; the salvage never reaches a voicemail row', async () => {
+    const { update, guardQ, builder } = primeCallLog({ rows: 0 }); // 0 rows: /relay-complete won the race
     const convo = conversationWithTurns('CA-already-voicemail');
     await convo.end('ws_close');
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
     expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']);
-    expect(update).toHaveBeenCalledTimes(1); // one statement, not two
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(builder.where).toHaveBeenCalledWith('call_outcome', 'relay_failed');
+    expect(update.mock.calls[1][0]).not.toHaveProperty('call_outcome');
+    expect(update.mock.calls[1][0]).not.toHaveProperty('status');
+    expect(update.mock.calls[1][0]).not.toHaveProperty('answered_by');
   });
 
   // ⭐ THE FLOOR RUNS BEFORE THE STAMP. The transcript records `lead_captured`
@@ -306,10 +312,12 @@ describe('end() persists the transcript on the SAME call_log row', () => {
 
     await convo.end('ws_close');
 
-    // Still ONE fenced statement — the transcript never escapes the guard via a
-    // second unfenced write.
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(db).toHaveBeenCalledTimes(1);
+    // Still ONE outcome statement — the transcript never escapes the guard
+    // via an unfenced write: the only second write is keyed to a relay_failed
+    // stamp (0 rows on a voicemail row) and carries no outcome.
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(db).toHaveBeenCalledTimes(2);
+    expect(update.mock.calls[1][0]).not.toHaveProperty('call_outcome');
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
     expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']);
     expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/transcript NOT persisted/i));

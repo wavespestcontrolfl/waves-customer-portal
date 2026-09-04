@@ -64,7 +64,7 @@ Socket.io registers its own `upgrade` handler and only acts on `/socket.io/`. We
 
    Every sandbox call gets a `call_log` row with `source='voice_relay_sandbox'` (excluded from the calls tab, the unified inbox, and the audits), so the session's transcript, `transcription_metadata.latency` (per-turn latency summary) and `.versions` (model / prompt sha / profile / voice stamps) land exactly as they do for a production call. A sandbox relay failure hangs up (`/relay-complete?sandbox=1`) instead of recording voicemail.
 
-   **Cell codes.** Inside the first three seconds the route accepts a two-digit DTMF code that selects a relay profile for that call (the audio runner sends it with `sendDigits`; a human caller who waits gets the production profile — exactly what a customer hears):
+   **Cell codes.** From answer until three seconds after the recording disclosure finishes, the route accepts a two-digit DTMF code that selects a relay profile for that call (the audio runner sends it with `sendDigits`; a human caller who waits gets the production profile — exactly what a customer hears):
 
    | Code | Profile |
    |---|---|

@@ -1046,7 +1046,11 @@ class RelayConversation {
       const cut = this._playing[idx];
       for (let i = 0; i < idx; i++) this._playing[i].done = true;
       cut.interrupted = true;
-      if (cut.playedSource !== 'twilio_event') {
+      if (cut.playedSource === 'twilio_event') {
+        // A tokens-played chunk landed earlier; the interrupt's prefix is
+        // newer and may be longer — keep whichever says more, if compatible.
+        if (utterance.length > cut.played.length && norm(utterance).startsWith(norm(cut.played))) cut.played = utterance;
+      } else {
         // An interrupt with no utterance (barge-in before any audio, or the
         // field omitted) says nothing about what played — the record must not
         // credit the whole planned text.
@@ -1680,15 +1684,16 @@ class RelayConversation {
         // claim between it and this UPDATE. For a keyed session the write
         // itself proves ownership: a row whose claim owner is no longer this
         // nonce matches 0 rows atomically (the voicemail-guard pattern).
-        if (this.sessionKey) {
-          // NULL owner allowed: an unverified session (claim never won — the
-          // row is unclaimed) still owns its own honest reconcile; only a
-          // FOREIGN owner means the record belongs to a replacement.
-          reconcileQuery.whereRaw(
+        // NULL owner allowed: an unverified session (claim never won — the
+        // row is unclaimed) still owns its own honest reconcile; only a
+        // FOREIGN owner means the record belongs to a replacement.
+        const fenceOwner = (q) => (this.sessionKey
+          ? q.whereRaw(
             "((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)",
             [this.sessionKey],
-          );
-        }
+          )
+          : q);
+        fenceOwner(reconcileQuery);
         const updated = await reconcileQuery
           .update({
             status: 'completed',
@@ -1703,7 +1708,19 @@ class RelayConversation {
         // there is no call_log row for this CallSid (a call answered outside
         // the signed webhooks). Either way the conversation is not
         // recoverable, so say so.
+        // A relay that FAILED after exchanging turns: /relay-complete can stamp
+        // relay_failed before this reconcile runs, so it matched 0 rows. The
+        // transcript, latency and version stamps are the evidence for exactly
+        // that failure — keep them; the outcome stays. relay_failed only (the
+        // sandbox stamp): a production voicemail row's transcript belongs to
+        // the recording processor.
+        let salvaged = 0;
         if (transcriptUpdate && !updated) {
+          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).where('call_outcome', 'relay_failed'))
+            .update({ ...transcriptUpdate, updated_at: new Date() });
+          if (salvaged) logger.info(`[voice-relay] transcript kept on a relay_failed row callSid=${maskSid(this.callSid)} turns=${this._transcript.length}`);
+        }
+        if (transcriptUpdate && !updated && !salvaged) {
           logger.error(
             `[voice-relay] transcript NOT persisted callSid=${this.callSid} (0 rows: voicemail-guard or missing call_log row) `
             + `— ${this._transcript.length} turns lost from the audit trail`

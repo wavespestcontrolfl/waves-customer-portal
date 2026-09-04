@@ -87,9 +87,11 @@ describe('POST /relay-sandbox', () => {
     expect(JSON.parse(insert.mock.calls[0][0].metadata)).toEqual({ relay_sandbox: true });
     expect(onConflict).toHaveBeenCalledWith('twilio_call_sid'); // a Twilio retry re-renders, never re-inserts
     const xml = res.body;
-    // The recording disclosure MP3 plays BEFORE the cell <Gather> and the
-    // relay — a sandbox caller is transcribed like any other (codex r3 P1).
-    expect(xml).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Play>https:\/\/[^<]+\.mp3<\/Play><Gather /);
+    // The recording disclosure MP3 plays INSIDE the cell <Gather>, before the
+    // relay — a sandbox caller is transcribed like any other (codex r3 P1),
+    // and a runner's digits sent at answer are collected, not dropped
+    // (codex r6 P1).
+    expect(xml).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Gather [^>]*><Play>https:\/\/[^<]+\.mp3<\/Play><\/Gather>/);
     expect(xml).toMatch(/<Gather [^>]*numDigits="2"/);
     expect(xml).toMatch(/<Gather [^>]*timeout="3"/);
     expect(xml).toContain(`action="${RELAY_SANDBOX_CELL_ACTION}"`);

@@ -239,6 +239,21 @@ describe('interrupt(detail) — the record is what the caller heard', () => {
     expect(entry.playedSource).toBe('interrupt_truncation');
   });
 
+  test('a longer, compatible interrupt prefix extends an earlier tokens-played chunk (codex r6 P2)', () => {
+    const { convo, stat } = convoWithSpokenTurn();
+    convo.say('One two three four five.');
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'One two' });
+    convo.interrupt({ utteranceUntilInterrupt: 'One two three four', durationUntilInterruptMs: 900 });
+    expect(stat.playedSource).toBe('twilio_event');
+    expect(agentEntries(convo)[0].text).toBe('One two three four [interrupted]');
+    // An INCOMPATIBLE longer prefix is not trusted over the event.
+    const other = convoWithSpokenTurn({ callSid: 'CA-tel-x' });
+    other.convo.say('One two three four five.');
+    other.convo.handleRelayEvent({ type: 'tokens-played', tokens: 'One two' });
+    other.convo.interrupt({ utteranceUntilInterrupt: 'Something else entirely', durationUntilInterruptMs: 900 });
+    expect(agentEntries(other.convo)[0].text).toBe('One two [interrupted]');
+  });
+
   test('tokens-played outranks the interrupt utterance for the played text', () => {
     const { convo, stat } = convoWithSpokenTurn();
     convo.say('One two three four.');
