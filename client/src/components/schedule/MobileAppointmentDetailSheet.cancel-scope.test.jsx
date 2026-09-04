@@ -66,6 +66,16 @@ describe('MobileAppointmentDetailSheet cancel scope', () => {
     expect(statusCall().scope).toBe('this_only');
   });
 
+  it('offers the series scopes on a legacy row that carries only recurringPattern', async () => {
+    render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: null, recurringPattern: 'quarterly' }} onClose={() => {}} />);
+    fireEvent.click(screen.getByText('Cancel appointment'));
+    expect(screen.getByText('Apply changes to')).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('All appointments in series'));
+    fireEvent.click(screen.getByText('Confirm cancellations'));
+    await waitFor(() => expect(statusCall()).not.toBeNull());
+    expect(statusCall().scope).toBe('series');
+  });
+
   it.each([
     ['This and following appointments', 'following'],
     ['All appointments in series', 'series'],

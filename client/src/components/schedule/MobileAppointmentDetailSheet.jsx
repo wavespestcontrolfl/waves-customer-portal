@@ -353,7 +353,9 @@ export default function MobileAppointmentDetailSheet({
   };
 
   // Series options only for a recurring visit — mirrors ScheduleCustomerSidebar.
-  const canCancelSeries = !!service?.isRecurring;
+  // A legacy series row can carry recurring_pattern without is_recurring; the
+  // dispatch status route accepts either as series evidence, so match it.
+  const canCancelSeries = !!(service?.isRecurring || service?.recurringPattern);
   const cancelAppointment = async () => {
     // Busy BEFORE the async card-hold preview — a slow preview must not
     // leave the Cancel control active for a double-tap re-entry.
