@@ -22,6 +22,7 @@
  * count partials, never to act on them.
  */
 
+const crypto = require('crypto');
 const logger = require('../logger');
 
 const enumOf = (values) => (v) => values.includes(String(v));
@@ -224,7 +225,10 @@ function resolveSandboxCell(code) {
       warnOnce(`raw:${raw}`, `[relay-profiles] VOICE_RELAY_SANDBOX_ATTRS rejected: ${checked.error}`);
       return null;
     }
-    return { relayAttrs: checked.attrs, relayProfileId: 'sandbox_raw' };
+    // The stamp names the attribute map, not just the cell: two cell-99 runs
+    // on different raw attrs must be attributable from their rows.
+    const canonical = JSON.stringify(Object.keys(checked.attrs).sort().map((k) => [k, checked.attrs[k]]));
+    return { relayAttrs: checked.attrs, relayProfileId: `sandbox_raw_${crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 12)}` };
   }
   const id = SANDBOX_CELLS[key];
   const profile = id ? resolveRelayProfile(id) : null;

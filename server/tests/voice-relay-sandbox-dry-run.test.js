@@ -92,7 +92,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
   const fs = require('fs');
   const path = require('path');
   const ROOT = path.join(__dirname, '..');
-  const QUERY_RE = /(db|trx|knex|dbc)\('call_log( as [a-z]+)?'\)|from\('call_log'\)|\.table\('call_log'\)|\bFROM call_log\b|\bJOIN call_log\b/i;
+  const QUERY_RE = /(db|trx|knex|dbc|conn)\('call_log( as [a-z]+)?'\)|from\('call_log'\)|\.table\('call_log'\)|\bFROM call_log\b|\bJOIN call_log\b/i;
   const SAFE = {
     // Writers and per-row processors keyed by id / CallSid / a marker only
     // the recording processor stamps — none of them lists inbound calls.
@@ -128,6 +128,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/missed-call-bell.js': 'requires customer_id and a terminal missed status',
     'services/contact-correction.js': 'keyed by id',
     'services/call-sentiment.js': 'keyed by id',
+    'services/call-intelligence.js': 'keyed by id',
     'services/lead-attribution.js': 'keyed by CallSid',
     'services/customer-properties.js': 'keyed by id / ownership token',
     'services/ads/call-attribution.js': 'keyed by id / a marker the processor stamps',

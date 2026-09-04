@@ -41,6 +41,7 @@ const logger = require('./logger');
 const { toE164 } = require('../utils/phone');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { syncVoiceMessageForCall } = require('./conversations');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 // How far back each hourly run scans. Generous: the run is idempotent and the
 // candidate set (unlinked calls with a usable number) is small.
@@ -131,9 +132,11 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
   let skipped = 0;
   let cursorId = null;
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const query = conn('call_log')
+    // A bake-off call never becomes a customer's call (it would feed
+    // customer-keyed readers such as reply-training snapshots).
+    const query = whereNotSandboxCall(conn('call_log')
       .whereNull('customer_id')
-      .where('created_at', '>=', cutoff)
+      .where('created_at', '>=', cutoff))
       // Rejected empty voicemails were DELIBERATELY unlinked by the
       // processor; sync must never re-attach them.
       .whereRaw('transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
@@ -191,9 +194,9 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
     // processor may have rejected the voicemail and deliberately cleared
     // the link in the gap — re-linking a sentinel row would undo that
     // unlink, so the sentinel predicate repeats here.
-    const updated = await conn('call_log')
+    const updated = await whereNotSandboxCall(conn('call_log')
       .whereIn('id', callIds)
-      .whereNull('customer_id')
+      .whereNull('customer_id'))
       .whereRaw('transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
       .whereRaw(NOT_EXPLICITLY_UNLINKED_SQL)
       .update({ customer_id: customer.id, updated_at: new Date() });

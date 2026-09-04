@@ -655,9 +655,22 @@ class RelayConversation {
   }
 
   /** Re-derive one utterance's stored text from what was played. */
+  /**
+   * The context the model actually saw = the caller block (system role) AND
+   * the recent-texts data turn (user role). Two calls on the same account
+   * block with different texts must not stamp alike. Hash only — never stored.
+   */
+  _snapshotSha(block) {
+    const dataTurn = (this._callerContext && this._callerContext.dataTurn) || '';
+    const parts = [block, dataTurn].filter(Boolean);
+    return parts.length ? sha256(parts.join('\n\n')) : null;
+  }
+
   _syncPlayedEntry(entry) {
     if (entry.notPlayed) {
       entry.text = '[not played — caller interrupted]';
+    } else if (entry.playedUnknown) {
+      entry.text = '[interrupted — played text unknown]';
     } else {
       const heard = entry.played != null && entry.played !== '' ? entry.played : entry.planned;
       entry.text = `${heard}${entry.interrupted ? ' [interrupted]' : ''}`.trim();
@@ -1033,9 +1046,13 @@ class RelayConversation {
       const cut = this._playing[idx];
       for (let i = 0; i < idx; i++) this._playing[i].done = true;
       cut.interrupted = true;
-      if (cut.playedSource !== 'twilio_event' && utterance) {
+      if (cut.playedSource !== 'twilio_event') {
+        // An interrupt with no utterance (barge-in before any audio, or the
+        // field omitted) says nothing about what played — the record must not
+        // credit the whole planned text.
         cut.played = utterance;
         cut.playedSource = 'interrupt_truncation';
+        cut.playedUnknown = !utterance;
       }
       cut.done = true;
       this._syncPlayedEntry(cut);
@@ -1381,7 +1398,7 @@ class RelayConversation {
       // on the same prompt hash alike), the caller block on its own, and the
       // tool schemas the model saw. Hashes only — nothing is stored twice.
       this._promptSha = sha256(composeSystemPrompt(bareBase, profileText));
-      this._contextSnapshotSha = callerBlock ? sha256(callerBlock) : null;
+      this._contextSnapshotSha = this._snapshotSha(callerBlock);
       this._toolSchemaSha = sha256(JSON.stringify(this._tools));
     }
     // ⭐ A LATE-HYDRATED KNOWN CALLER BLOCK STILL REACHES THE MODEL. The system
@@ -1397,7 +1414,7 @@ class RelayConversation {
       this._lateContextBlock = null;
       // The version record hashes the context the model actually saw — the
       // late block is that context for this call.
-      this._contextSnapshotSha = sha256(lateBlock);
+      this._contextSnapshotSha = this._snapshotSha(lateBlock);
       this.messages.push(
         { role: 'user', content: `ACCOUNT CONTEXT (hydrated after the call started — same rules as a KNOWN CALLER block):\n\n${lateBlock}` },
         { role: 'assistant', content: 'Noted — I have the account context for this caller now.' },

@@ -229,6 +229,16 @@ describe('interrupt(detail) — the record is what the caller heard', () => {
     expect(agentEntries(convo)[0].text).toBe('Goodbye.');
   });
 
+  test('an interrupt with no utterance never credits the planned text (codex r4 P2)', () => {
+    const { convo, stat } = convoWithSpokenTurn();
+    convo.say('I can get someone out Tuesday morning.');
+    convo.interrupt({ durationUntilInterruptMs: 40 });
+    expect(stat.interrupted).toBe(true);
+    const [entry] = agentEntries(convo);
+    expect(entry.text).toBe('[interrupted — played text unknown]');
+    expect(entry.playedSource).toBe('interrupt_truncation');
+  });
+
   test('tokens-played outranks the interrupt utterance for the played text', () => {
     const { convo, stat } = convoWithSpokenTurn();
     convo.say('One two three four.');

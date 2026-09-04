@@ -564,6 +564,14 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(convo._lateContextBlock).toBeNull(); // one-time seed
     // The version record hashes the context the model actually saw (codex r2 P2).
     expect(convo._contextSnapshotSha).toBe(require('crypto').createHash('sha256').update(lateBlock).digest('hex'));
+    // The recent-texts data turn is part of the context the model saw (codex r4 P2).
+    const dataTurn = '<<<RECENT TEXTS DATA\nCustomer: ants again\nEND RECENT TEXTS DATA>>>';
+    const withTexts = new IsolatedConvo({ callSid: 'CA-late-texts', from: '+19415551234', send: jest.fn() });
+    withTexts._lateContextBlock = lateBlock;
+    withTexts._callerContext = { block: lateBlock, customer: { id: 'c-9' }, tier: 'full', dataTurn };
+    await withTexts._runLoop('hi').catch(() => {});
+    expect(withTexts._contextSnapshotSha).toBe(require('crypto').createHash('sha256').update(`${lateBlock}\n\n${dataTurn}`).digest('hex'));
+    expect(withTexts._contextSnapshotSha).not.toBe(convo._contextSnapshotSha);
   });
 
   test('text on a READ-tool turn is still spoken (filler is fine when nothing can be falsely promised)', async () => {

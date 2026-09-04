@@ -147,7 +147,7 @@ describe('POST /relay-sandbox/cell', () => {
     await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-6', To: SANDBOX, Digits: '99' } }, res);
     expect(res.body).toContain('speechModel="nova-2-general"');
     expect(res.body).toContain('deepgramSmartFormat="false"');
-    expect(res.body).toContain('value="sandbox_raw"');
+    expect(res.body).toMatch(/value="sandbox_raw_[0-9a-f]{12}"/);
     res = mockRes();
     await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-7', To: SANDBOX, Digits: '77' } }, res);
     expect(res.body).not.toContain('speechModel=');

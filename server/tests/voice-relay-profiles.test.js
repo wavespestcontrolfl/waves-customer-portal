@@ -139,7 +139,14 @@ describe('resolveSandboxCell — the two-digit DTMF selector', () => {
 
   test('99 ⇒ raw VOICE_RELAY_SANDBOX_ATTRS when valid, null (warned) when not', () => {
     process.env.VOICE_RELAY_SANDBOX_ATTRS = JSON.stringify({ speechModel: 'nova-2-general', ignoreBackchannel: true });
-    expect(resolveSandboxCell('99')).toEqual({ relayAttrs: { speechModel: 'nova-2-general', ignoreBackchannel: 'true' }, relayProfileId: 'sandbox_raw' });
+    const cell = resolveSandboxCell('99');
+    expect(cell.relayAttrs).toEqual({ speechModel: 'nova-2-general', ignoreBackchannel: 'true' });
+    expect(cell.relayProfileId).toMatch(/^sandbox_raw_[0-9a-f]{12}$/);
+    // The stamp follows the attribute map, key order aside (codex r4 P2).
+    process.env.VOICE_RELAY_SANDBOX_ATTRS = JSON.stringify({ ignoreBackchannel: 'true', speechModel: 'nova-2-general' });
+    expect(resolveSandboxCell('99').relayProfileId).toBe(cell.relayProfileId);
+    process.env.VOICE_RELAY_SANDBOX_ATTRS = JSON.stringify({ speechModel: 'nova-3-general', ignoreBackchannel: 'true' });
+    expect(resolveSandboxCell('99').relayProfileId).not.toBe(cell.relayProfileId);
     process.env.VOICE_RELAY_SANDBOX_ATTRS = JSON.stringify({ url: 'wss://evil.example' });
     expect(resolveSandboxCell('99')).toBeNull();
     expect(logger.warn.mock.calls[0][0]).toMatch(/VOICE_RELAY_SANDBOX_ATTRS rejected/);
