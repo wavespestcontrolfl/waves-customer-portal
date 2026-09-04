@@ -58,6 +58,7 @@ import {
 import TimeGridDay from "../../components/schedule/TimeGridDay";
 import TimeGridDays from "../../components/schedule/TimeGridDays";
 import MobileWeekGrid from "../../components/schedule/MobileWeekGrid";
+import MobileDayStrip from "../../components/schedule/MobileDayStrip";
 import MobileDispatchList from "../../components/schedule/MobileDispatchList";
 import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
@@ -1293,43 +1294,9 @@ export default function DispatchPageV2({
         <div className="text-11 text-ink-secondary mb-2">{syncMsg}</div>
       )}
 
-      {/* Mobile day strip — 7 rolling days centered on the selected date.
-          Styled to mirror ViewModeSelectorV2 (Day / 5-Day / Week / Month):
-          touch-safe hairline pills, dark fill when active, single inline label
-          "<num> <weekday-letter>" so all 7 fit comfortably in the row. */}
-      {viewMode === "day" && (
-        <div className="md:hidden mb-4 flex justify-center overflow-x-auto">
-          {" "}
-          <div className="inline-flex gap-1 min-w-max">
-            {Array.from({ length: 7 }).map((_, i) => {
-              const iso = addDaysISO(date, i - 3);
-              const d = dateAtNoonUTC(iso);
-              const selected = iso === date;
-              const dayNum = d.getUTCDate();
-              const weekdayLetter = d.toLocaleDateString("en-US", {
-                timeZone: "UTC",
-                weekday: "narrow",
-              });
-              return (
-                <button
-                  key={iso}
-                  onClick={() => setDate(iso)}
-                  className={cn(
-                    "inline-flex items-center justify-center gap-1 h-11 min-w-11 px-2 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors flex-shrink-0",
-                    selected
-                      ? "bg-zinc-900 text-white border-zinc-900"
-                      : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",
-                  )}
-                >
-                  {" "}
-                  <span className="u-nums">{dayNum}</span>{" "}
-                  <span>{weekdayLetter}</span>{" "}
-                </button>
-              );
-            })}
-          </div>{" "}
-        </div>
-      )}
+      {/* Mobile day strip — scrollable window of days with a live month
+          label; scrolling browses, tapping selects. */}
+      {viewMode === "day" && <MobileDayStrip date={date} onSelect={setDate} />}
 
       {/* Mobile-only ViewMode selector — Day + Week only on phones. */}
       <div className="md:hidden mb-3 grid grid-cols-2 gap-1.5">
