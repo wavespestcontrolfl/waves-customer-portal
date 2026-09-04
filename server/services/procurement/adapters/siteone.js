@@ -561,7 +561,15 @@ async function place(
     await gate(finalCents, 'checkout total');
     if (!(await page.locator(SELECTORS.placeOrder).first().count())) throw new RefusedError('no_place_order', 'place-order button not found', evidence);
     submitted = true;
-    const externalOrderNumber = await submitAndReadOrderNumber(page, { evidence, upload });
+    let externalOrderNumber;
+    try { externalOrderNumber = await submitAndReadOrderNumber(page, { evidence, upload }); }
+    catch (e) {
+      // The click happened at THIS total: an ambiguous outcome parks with it
+      // (a null amount on a placed_at row would count $0 against the
+      // monthly cap — pre-push P0).
+      if (e.ambiguous && e.cents == null) e.cents = finalCents;
+      throw e;
+    }
     return { externalOrderNumber, amountCents: finalCents, evidence, dryRun: false };
   } finally {
     // Nothing was submitted (dry run, refusal, error): leave no cart behind

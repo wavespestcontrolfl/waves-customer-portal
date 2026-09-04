@@ -268,6 +268,19 @@ test('a restock bell that rejects, or resolves null (not persisted), is a sweep 
   expect(nullRow.errors).toEqual([expect.objectContaining({ message: 'bell: notification not persisted' })]);
 });
 
+test('an open auto request pinned to a vendor the product has left (no vendorId learnable) still rings — the dispatcher never claims it (Codex r10 P1)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-old', status: 'open', source: 'auto_reorder', vendor: 'Old Vendor', metadata: {} };
+  mockState.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/x' };
+  mockState.autoOrder = true; // vendor B (the product's current vendor) IS auto-orderable
+  const notify = jest.fn(async () => ({}));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(mockState.updates).toHaveLength(0); // not the request's vendor: nothing learned
+  expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-old' }]);
+  expect(notify).toHaveBeenCalledTimes(1);
+  mockState.autoOrder = false;
+});
+
 test('reorder quantity cleared under the lock → unconfigured, no row', async () => {
   mockState.candidates = [lowSign];
   mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: true, active: true, reorder_quantity: null, auto_reorder_vendor_id: 'vend-gemplers', inventory_unit: 'each' };

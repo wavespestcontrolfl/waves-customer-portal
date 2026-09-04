@@ -3310,20 +3310,7 @@ router.get('/restock-requests', async (req, res, next) => {
         // Automatic order outcome (null = never dispatched): placing | placed
         // | failed | needs_review, with the vendor number, total and the
         // parked reason so the tab explains why a request still needs a hand.
-        order: hasOrders && row.order_status ? {
-          status: row.order_status,
-          adapter: row.order_adapter,
-          externalOrderNumber: row.order_number || null,
-          amountCents: showSpend && row.order_amount_cents != null ? Number(row.order_amount_cents) : null,
-          // The parked message can quote the total (cap wording): techs get
-          // the reason code only.
-          error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
-          placedAt: row.order_placed_at || null,
-          revokedAt: row.order_revoked_at || null,
-          // What the order actually bought, in the request's unit (packages
-          // round up) — the tab's receive default.
-          orderedQuantity: row.order_placed_at && !row.order_revoked_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null, // a revoked order is not what arrives
-        } : null,
+        order: hasOrders ? restockOrderView(row, showSpend) : null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,
@@ -3339,6 +3326,30 @@ router.get('/restock-requests', async (req, res, next) => {
     });
   } catch (err) { next(err); }
 });
+
+// The automatic-order outcome on a Restock row (null = never dispatched):
+// placing | placed | failed | needs_review with the vendor number, total
+// and the parked reason so the tab explains why a request still needs a
+// hand. Spend is owner-only: a single-product order total IS the unit
+// cost, so a technician gets the reason code and no amount (Codex r1 P2).
+// Its own stage, separate from the base row mapping (Codex r10 P2).
+function restockOrderView(row, showSpend) {
+  if (!row.order_status) return null;
+  return {
+    status: row.order_status,
+    adapter: row.order_adapter,
+    externalOrderNumber: row.order_number || null,
+    amountCents: showSpend && row.order_amount_cents != null ? Number(row.order_amount_cents) : null,
+    // The parked message can quote the total (cap wording): techs get the
+    // reason code only.
+    error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
+    placedAt: row.order_placed_at || null,
+    revokedAt: row.order_revoked_at || null,
+    // What the order actually bought, in the request's unit (packages round
+    // up) — the tab's receive default; a revoked order is not what arrives.
+    orderedQuantity: row.order_placed_at && !row.order_revoked_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,
+  };
+}
 
 // POST /restock-requests/:id/action — update request status and optionally receive stock.
 router.post('/restock-requests/:id/action', async (req, res, next) => {

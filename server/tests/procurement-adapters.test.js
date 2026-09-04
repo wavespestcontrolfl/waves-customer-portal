@@ -389,6 +389,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     await expect(s1.place(args({ beforeSubmit: async () => ({ ok: false, reason: 'over_cap' }) }), first.deps)).rejects.toMatchObject({ refuse: 'over_cap', cents: 9900 });
   });
 
+  test('an ambiguous submit (no confirmation number after the click) carries the checkout total the click happened at (pre-push P0)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberText: 'Thank you for your order' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+    expect(st.placeClicked).toBe(1);
+  });
+
   test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {
     const { st, deps } = fakeSiteOne({ gotoFailOnce: true });
     const r = await s1.place(args(), deps);

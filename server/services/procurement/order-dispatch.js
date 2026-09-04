@@ -589,6 +589,15 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
 }
 
 async function claimRequest(trx, { requestId, registry }) {
+  // The product's pricing advisory lock FIRST — the lock every
+  // vendor_pricing writer holds to commit — then the request row, then the
+  // product row: the sweep's order (auto-reorder.js lockProductPricing), so
+  // insertClaim reads one committed pricing configuration and no inverse
+  // order can deadlock (Codex r10 P1). The product id is peeked unlocked
+  // only to name the lock; the row itself is read again FOR UPDATE.
+  const peek = await trx('product_restock_requests').where({ id: requestId }).first('product_id');
+  if (!peek) return { skipped: 'not_found' };
+  await require('./auto-reorder').lockProductPricing(trx, peek.product_id);
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request) return { skipped: 'not_found' };
   if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
@@ -640,7 +649,11 @@ function parkForPlaceError(conn, err, { ctx, vendor, quoteCents }) {
   // refusal at the cart or checkout stage) parks with THAT amount — the
   // ledger must show the binding total, not an earlier quote (Codex r4 P2).
   if (err.refuse) return park(conn, { ...ctx, reason: err.refuse, message: err.message, amountCents: err.cents ?? quoteCents, evidence: err.evidence || null });
-  if (err.ambiguous) return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.`, amountCents: quoteCents, evidence: err.evidence || null });
+  // An ambiguous submit (the click happened) parks with the total the
+  // adapter had in hand at the click — a vendor that quotes at place time
+  // has no earlier quote, and a null amount on a placed_at row would count
+  // as $0 against the monthly cap (pre-push P0).
+  if (err.ambiguous) return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.`, amountCents: err.cents ?? quoteCents, evidence: err.evidence || null });
   return park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
 }
 
