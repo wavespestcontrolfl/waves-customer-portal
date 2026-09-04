@@ -769,6 +769,11 @@ async function requestBookingText(input = {}, ctx = {}) {
   // creates it at call start) — it is what the review card FKs, and what lets
   // the office-confirm hook close the originating lead and resolve that card.
   // REQUIRED, not best-effort: no row ⇒ no card ⇒ no booking (below).
+  // ⭐ THE SANDBOX WRITE BOUNDARY: every refusal above (gate, one-per-call,
+  // customer, tier, slot, hours, account, service, property, address, live
+  // slot re-check) ran as production; only the review-card write is skipped.
+  // The row-level barrier just below stays behind it.
+  if (ctx.sandbox === true) return require('./relay-tools').sandboxDryRunText('request_booking', input, ctx);
   let callLogId = null;
   if (ctx.callSid) {
     try {
@@ -776,8 +781,8 @@ async function requestBookingText(input = {}, ctx = {}) {
         .where({ twilio_call_sid: ctx.callSid })
         .first('id', 'source');
       // The sandbox row exists (its transcript is the bake-off) but must
-      // never anchor a review card: executeTool answers the tool dry before
-      // this runs, and this is the row-level barrier behind it.
+      // never anchor a review card: the sandbox boundary above answers the
+      // tool dry first, and this is the row-level barrier behind it.
       if (callRow && callRow.source === require('./relay-protocol').VOICE_RELAY_SANDBOX_SOURCE) {
         logger.warn(`[voice-relay-booking] sandbox call_log row for callSid=${ctx.callSid} — refusing to book`);
         return 'This is a sandbox test call, so NOTHING was booked. Carry on as you would after a '

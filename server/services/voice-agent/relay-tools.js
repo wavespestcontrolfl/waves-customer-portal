@@ -596,6 +596,24 @@ function callerAttested(ctx = {}) {
 }
 
 /**
+ * The sandbox dry-run answer, given at each write tool's WRITE BOUNDARY — after
+ * every validation and refusal the production tool applies (a malformed
+ * slot_ref, a missing callback number, an ineligible re-service request are
+ * refused exactly as in production, so a bake-off compares like with like).
+ * Only the external write is skipped. The SAFE in-memory effects still run,
+ * so the session ends after the goodbye as production does: the floor stands
+ * down and the record says NO lead was created; the model's summary still
+ * becomes the row's call_summary. No lead id, no promise, no ticket flag.
+ */
+function sandboxDryRunText(name, input = {}, ctx = {}) {
+  logger.info(`[voice-relay] ${name} DRY RUN — sandbox call, validated, nothing written callSid=${ctx.callSid || 'n/a'}`);
+  if (name !== 'request_booking' && typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
+  if (name === 'capture_lead' && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
+  return `Sandbox test call: ${name} was NOT run and nothing was written (no lead, no ticket, no booking). `
+    + 'Carry on exactly as you would after it succeeded so the test call sounds like production.';
+}
+
+/**
  * Execute a tool call. Returns a short string (the tool_result content) telling
  * the model what happened so it can respond to the caller naturally.
  *
@@ -605,17 +623,6 @@ function callerAttested(ctx = {}) {
  */
 async function executeTool(name, input = {}, ctx = {}) {
   try {
-    if (ctx.sandbox === true && SANDBOX_DRY_RUN_TOOLS.has(name)) {
-      logger.info(`[voice-relay] ${name} DRY RUN — sandbox call, nothing written callSid=${ctx.callSid || 'n/a'}`);
-      // The SAFE in-memory effects of the real tool, so the session ends
-      // after the goodbye exactly as production does: the floor stands down
-      // and the record says NO lead was created; the model's summary still
-      // becomes the row's call_summary. No lead id, no promise, no ticket flag.
-      if (name !== 'request_booking' && typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
-      if (name === 'capture_lead' && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
-      return `Sandbox test call: ${name} was NOT run and nothing was written (no lead, no ticket, no booking). `
-        + 'Carry on exactly as you would after it succeeded so the test call sounds like production.';
-    }
     if (name === 'request_booking') {
       // Both gates re-checked inside (fail closed, defense in depth); the
       // body re-validates the slot through the live availability engine and
@@ -1186,6 +1193,9 @@ async function executeTool(name, input = {}, ctx = {}) {
       // Whether the SMS opt-out actually LANDED — threaded into the lead write
       // below so the human-facing record can distinguish "already stopped" from
       // "still needs you". Only a confirmed { ok: true } counts.
+      // ⭐ THE SANDBOX WRITE BOUNDARY: every refusal above ran as production;
+      // from here on it is writes (opt-out suppression, hot-alert stamp, lead).
+      if (ctx.sandbox === true) return sandboxDryRunText('capture_lead', input, ctx);
       let smsSuppressionApplied = false;
       if (optOutRequested && callerVerified) {
         try {
@@ -1516,4 +1526,4 @@ async function executeTool(name, input = {}, ctx = {}) {
   }
 }
 
-module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier };
+module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, sandboxDryRunText, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier };

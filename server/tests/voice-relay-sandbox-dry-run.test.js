@@ -10,6 +10,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn(() => { throw new Error('db must not be touched'); }));
 jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
+// The re-service dedupe reads through the scheduler (its own db handle); the
+// sandbox boundary sits behind them, so they answer "nothing open" here.
+jest.mock('../services/reservice-scheduler', () => ({
+  openReserviceCallbacks: jest.fn(async () => ({})),
+  reserviceLanesForCustomer: jest.fn(async () => []),
+  openCallbackExistsForLane: jest.fn(async () => false),
+  RESERVICE_LANES: {},
+}));
 
 const db = require('../models/db');
 const { createLeadFromExtraction } = require('../services/lead-from-extraction');
@@ -18,33 +26,75 @@ const { RelayConversation } = require('../services/voice-agent/relay-conversatio
 const { whereNotSandboxCall, VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
 
 describe('executeTool on a sandbox session', () => {
-  beforeEach(() => jest.clearAllMocks());
+  const OLD_CTX_GATE = process.env.VOICE_RELAY_CONTEXT_ENABLED;
+  beforeEach(() => { jest.clearAllMocks(); process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
+  afterEach(() => {
+    if (OLD_CTX_GATE === undefined) delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    else process.env.VOICE_RELAY_CONTEXT_ENABLED = OLD_CTX_GATE;
+  });
 
-  test.each([...SANDBOX_DRY_RUN_TOOLS])('%s is answered dry — nothing runs, nothing is written', async (name) => {
-    const out = await executeTool(name, { anything: 'x' }, { sandbox: true, callSid: 'CA-sb-1', from: '+19415551234' });
-    expect(out).toMatch(/Sandbox test call/);
-    expect(out).toMatch(new RegExp(name + ' was NOT run'));
-    expect(out).toMatch(/nothing was written/);
+  // ⭐ VALIDATION FIRST (codex r7 P2): a malformed call is refused exactly as
+  // in production — the dry run answers only at the write boundary, so a
+  // bake-off measures the same post-tool conversation production would have.
+  test('a malformed sandbox call gets the production refusal, never a fake success', async () => {
+    const base = { sandbox: true, callSid: 'CA-sb-1', markCaptured: jest.fn() };
+    const noNumber = await executeTool('capture_lead', { call_summary: 'x' }, { ...base, from: 'anonymous' });
+    expect(noNumber).toMatch(/valid phone number/);
+    const noCustomer = await executeTool('request_reservice', { lane: 'pest', issue: 'ants' }, { ...base, from: '+19415551234' });
+    expect(noCustomer).not.toMatch(/Sandbox test call/);
+    const noSlot = await executeTool('request_booking', { service: 'pest' }, { ...base, from: '+19415551234', customerId: 'c-1', customerTier: 'full' });
+    expect(noSlot).toMatch(/slot_ref|not available/);
+    for (const out of [noNumber, noCustomer, noSlot]) expect(out).not.toMatch(/Sandbox test call/);
+    expect(base.markCaptured).not.toHaveBeenCalled();
     expect(db).not.toHaveBeenCalled();
     expect(createLeadFromExtraction).not.toHaveBeenCalled();
   });
 
-  test('a dry-run capture keeps the in-memory completion effects so the call still ends after the goodbye (codex r3 P1)', async () => {
+  test('a VALID capture is answered dry at the write boundary and keeps the in-memory completion effects (codex r3 P1)', async () => {
     const markCaptured = jest.fn();
     const noteCallSummary = jest.fn();
     const noteLeadId = jest.fn();
-    const markReserviceFiled = jest.fn();
-    const ctx = { sandbox: true, callSid: 'CA-sb-3', from: '+19415551234', markCaptured, noteCallSummary, noteLeadId, markReserviceFiled };
-    await executeTool('capture_lead', { call_summary: 'Caller asked about ants.' }, ctx);
+    const ctx = { sandbox: true, callSid: 'CA-sb-3', from: '+19415551234', markCaptured, noteCallSummary, noteLeadId };
+    const out = await executeTool('capture_lead', { first_name: 'Pat', call_summary: 'Caller asked about ants.', lead_quality: 'warm' }, ctx);
+    expect(out).toMatch(/Sandbox test call: capture_lead was NOT run/);
+    expect(out).toMatch(/nothing was written/);
     expect(markCaptured).toHaveBeenCalledWith({ leadCreated: false });
     expect(noteCallSummary).toHaveBeenCalledWith('Caller asked about ants.');
-    await executeTool('request_reservice', { problem: 'ants are back' }, ctx);
-    expect(markCaptured).toHaveBeenCalledTimes(2);
-    await executeTool('request_booking', {}, ctx);
-    expect(markCaptured).toHaveBeenCalledTimes(2); // production request_booking does not mark a capture either
     expect(noteLeadId).not.toHaveBeenCalled();
-    expect(markReserviceFiled).not.toHaveBeenCalled(); // nothing was filed
     expect(db).not.toHaveBeenCalled();
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
+  });
+
+  test('a VALID re-service request runs every production check, then skips only the ticket write', async () => {
+    // Reads answer "nothing open"; the write transaction must never start.
+    const chain = {};
+    for (const m of ['where', 'whereIn', 'whereNull', 'orderBy', 'select']) chain[m] = jest.fn(() => chain);
+    chain.first = jest.fn(async () => undefined);
+    db.mockImplementation(() => chain);
+    db.transaction = jest.fn(async () => { throw new Error('write transaction must not start'); });
+    const markCaptured = jest.fn();
+    const markReserviceFiled = jest.fn();
+    const ctx = { sandbox: true, callSid: 'CA-sb-4', from: '+19415551234', customerId: 'c-1', customerTier: 'full', markCaptured, markReserviceFiled };
+    const out = await executeTool('request_reservice', { lane: 'pest', issue: 'ants are back in the kitchen' }, ctx);
+    expect(out).toMatch(/Sandbox test call: request_reservice was NOT run/);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(markCaptured).toHaveBeenCalledWith({ leadCreated: false });
+    expect(markReserviceFiled).not.toHaveBeenCalled(); // nothing was filed
+    db.mockImplementation(() => { throw new Error('db must not be touched'); });
+    delete db.transaction;
+  });
+
+  test('an already-open voice request never re-pages the owner from a sandbox session (hook P0)', async () => {
+    const chain = {};
+    for (const m of ['where', 'whereIn', 'whereNull', 'orderBy', 'select']) chain[m] = jest.fn(() => chain);
+    chain.update = jest.fn(async () => 1);
+    chain.first = jest.fn(async () => ({ id: 'sr-1', source: 'voice_agent', owner_alerted_at: null, created_at: new Date(), category: 'pest_control', customer_id: 'c-1' }));
+    db.mockImplementation(() => chain);
+    const ctx = { sandbox: true, callSid: 'CA-sb-5', from: '+19415551234', customerId: 'c-1', customerTier: 'full', markCaptured: jest.fn() };
+    const out = await executeTool('request_reservice', { lane: 'pest', issue: 'ants are back' }, ctx);
+    expect(out).not.toMatch(/Sandbox test call/); // the production "already open" answer
+    expect(chain.update).not.toHaveBeenCalled(); // no claim stamp, no page
+    db.mockImplementation(() => { throw new Error('db must not be touched'); });
   });
 
   test('the gate covers every tool that writes outside the call_log row', () => {

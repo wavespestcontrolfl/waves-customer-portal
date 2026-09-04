@@ -134,13 +134,43 @@ describe('POST /relay-sandbox', () => {
 });
 
 describe('POST /relay-sandbox/cell', () => {
-  test('a known code selects that profile (sandbox-only ones included)', async () => {
+  function primeStamp() {
+    const update = jest.fn().mockResolvedValue(1);
+    const where = jest.fn(() => ({ update }));
+    db.mockImplementation(() => ({ where }));
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    return { update, where };
+  }
+  beforeEach(() => primeStamp());
+
+  test('a known code selects that profile (sandbox-only ones included), stamps it on the row, and replays the disclosure first', async () => {
+    const { update, where } = primeStamp();
     const res = mockRes();
     await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-5', To: SANDBOX, Digits: '09' } }, res);
     expect(res.body).toContain('speechModel="flux"');
     expect(res.body).toContain('partialPrompts="true"');
     expect(res.body).toContain('<Parameter name="relay_profile" value="flux_partials_probe_v1" />');
     expect(res.body).toContain(`action="${RELAY_COMPLETE_ACTION_SANDBOX}"`);
+    // A digit interrupted the disclosure nested in the answer <Gather>; the
+    // continuation replays it in full BEFORE the relay (codex r7 P1).
+    expect(res.body).toMatch(/<Response><Play>https:\/\/[^<]+\.mp3<\/Play><Connect[ >]/);
+    // The selected cell lands on the row before the relay opens, so a profile
+    // Twilio rejects at setup is still attributable (codex r7 P2).
+    expect(where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-sb-5' });
+    const patch = update.mock.calls[0][0];
+    expect(patch.metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
+    expect(JSON.parse(patch.metadata.bindings[0])).toEqual({
+      relay_profile_id: 'flux_partials_probe_v1',
+      relay_attrs: expect.objectContaining({ speechModel: 'flux', partialPrompts: 'true' }),
+    });
+  });
+
+  test('a stamp failure never costs the caller the call', async () => {
+    db.mockImplementation(() => { throw new Error('pool down'); });
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-5b', To: SANDBOX, Digits: '09' } }, res);
+    expect(res.body).toContain('<ConversationRelay');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/cell stamp failed/));
   });
 
   test('99 renders the raw sandbox attrs; an unknown code falls back to the production profile', async () => {
@@ -151,9 +181,11 @@ describe('POST /relay-sandbox/cell', () => {
     expect(res.body).toContain('deepgramSmartFormat="false"');
     expect(res.body).toMatch(/value="sandbox_raw_[0-9a-f]{12}"/);
     res = mockRes();
+    const { update } = primeStamp();
     await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-7', To: SANDBOX, Digits: '77' } }, res);
     expect(res.body).not.toContain('speechModel=');
     expect(res.body).toMatch(/<ConversationRelay [^>]*\/><\/Connect>/);
+    expect(update).not.toHaveBeenCalled(); // production profile: the session's own version stamps cover it
   });
 
   test('a production number ⇒ 403', async () => {

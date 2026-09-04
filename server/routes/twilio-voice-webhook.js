@@ -1600,8 +1600,8 @@ router.post('/relay-sandbox', async (req, res) => {
     // that sends its cell code at answer is heard (Twilio drops digits sent
     // before a <Gather> starts). A human caller presses nothing, hears the
     // whole disclosure, and falls through to the default relay in the SAME
-    // document after the timeout. The cell continuation renders the relay
-    // only — the disclosure has already played on this call.
+    // document after the timeout. The cell continuation replays the
+    // disclosure (a digit cut it short) and then renders the relay.
     const gather = twiml.gather({
       input: 'dtmf',
       numDigits: 2,
@@ -1629,7 +1629,33 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
     const cell = resolveSandboxCell(digits);
     logger.info(`[relay-sandbox] cell "${digits}" → ${cell ? cell.relayProfileId : 'production profile'} ${maskSid(CallSid)}`);
-    return res.type('text/xml').send(sandboxRelayXml({ callSid: CallSid, cell }));
+    // The selected cell lands on the row BEFORE the relay opens: a profile
+    // whose attributes make Twilio reject <ConversationRelay> never reaches
+    // the WS setup frame, so no session exists to stamp it at close — and
+    // that is exactly the profile a bake-off must be able to attribute.
+    // Fail-soft: a stamp failure must not cost the caller the call.
+    if (cell) {
+      try {
+        await db('call_log')
+          .where({ twilio_call_sid: CallSid })
+          .update({
+            metadata: db.raw(
+              "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+              [JSON.stringify({ relay_profile_id: cell.relayProfileId, relay_attrs: cell.relayAttrs })],
+            ),
+          });
+      } catch (stampErr) {
+        logger.warn(`[relay-sandbox] cell stamp failed ${maskSid(CallSid)}: ${stampErr.message}`);
+      }
+    }
+    // A digit INTERRUPTS the disclosure nested in the answer <Gather> (same
+    // rule as the language menu above), and Twilio does not report whether
+    // the <Play> completed — so the continuation replays the complete
+    // disclosure before the relay transcribes a word. Unconditional.
+    const replay = new VoiceResponse();
+    replay.play(wavesGreetingUrl());
+    const replayInner = replay.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
+    return res.type('text/xml').send(sandboxRelayXml({ callSid: CallSid, cell }).replace('<Response>', `<Response>${replayInner}`));
   } catch (err) {
     logger.error(`[relay-sandbox] cell error: ${err.message}`);
     return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
