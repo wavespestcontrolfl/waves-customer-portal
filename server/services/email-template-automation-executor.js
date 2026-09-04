@@ -1091,15 +1091,28 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     // landing in between (pre-push Codex P1 on 235f8e5a5); the post-send
     // stamp (markServicePrepSent) then never retargets an owned page
     // (GH Codex #3856 r19 P0).
-    if (String(claimedRun.entity_type || '') === 'scheduled_service'
-      && String(claimedRun.template_key || '').startsWith('prep.')) {
-      const claimed = await db('scheduled_services')
+    // A FRESH claim (the key was unset) is provisional until the guide
+    // delivers: a blocked send hands it back (fenced like the manual
+    // sender's releasePrepPage — never a delivered or opened page) so a
+    // later guide for the visit isn't refused over a send nobody received
+    // (pre-push Codex P1 on 61bff479f); an ambiguous throw keeps it.
+    const prepRun = String(claimedRun.entity_type || '') === 'scheduled_service'
+      && String(claimedRun.template_key || '').startsWith('prep.');
+    let freshPrepClaim = false;
+    if (prepRun) {
+      const fresh = await db('scheduled_services')
         .where({ id: claimedRun.entity_id })
-        .where((q) => q.whereNull('prep_template_key').orWhere({ prep_template_key: claimedRun.template_key }))
+        .whereNull('prep_template_key')
         .update({ prep_template_key: claimedRun.template_key })
         .returning('id');
-      if (!claimed.length) {
-        return markRunSkipped(claimedRun, 'prep page owned by another guide', { guard: 'prep_page_owned', attempt: attemptNumber });
+      freshPrepClaim = fresh.length > 0;
+      if (!freshPrepClaim) {
+        const owned = await db('scheduled_services')
+          .where({ id: claimedRun.entity_id, prep_template_key: claimedRun.template_key })
+          .first('id');
+        if (!owned) {
+          return markRunSkipped(claimedRun, 'prep page owned by another guide', { guard: 'prep_page_owned', attempt: attemptNumber });
+        }
       }
     }
 
@@ -1129,6 +1142,19 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
       provider_message_id: result.message?.provider_message_id || null,
       deduped: !!result.deduped,
     });
+    if (status !== 'sent' && freshPrepClaim) {
+      // Definite no-delivery on a fresh claim: hand the page back.
+      try {
+        await db('scheduled_services')
+          .where({ id: claimedRun.entity_id, prep_template_key: claimedRun.template_key })
+          .whereNull('prep_sent_at')
+          .whereNull('prep_first_viewed_at')
+          .whereRaw('COALESCE(prep_view_count, 0) = 0')
+          .update({ prep_template_key: null });
+      } catch (releaseErr) {
+        logger.warn(`[email-template-automations] prep page release failed for service ${claimedRun.entity_id}: ${releaseErr.message}`);
+      }
+    }
     // Prep guides: a CONFIRMED send stamps the visit's prep_sent_at (the
     // tracker's "prep actually went out" proof) and aligns the rendered
     // guide to the delivered template. Queue time is too early — a queued

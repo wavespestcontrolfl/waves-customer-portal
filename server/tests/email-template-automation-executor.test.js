@@ -930,7 +930,7 @@ describe('email template automation executor', () => {
         chain({ returning: [{ id: 'e3' }] }),
       ],
       // 1st: live-payload refresh of the visit row; 2nd: the pre-dispatch
-      // page claim (unkeyed or same key → this guide); 3rd: the
+      // FRESH page claim (unkeyed → this guide); 3rd: the
       // markServicePrepSent confirmed-delivery stamp.
       scheduled_services: [
         chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
@@ -994,6 +994,7 @@ describe('email template automation executor', () => {
       }),
     });
     const blockedRun = { ...queuedRun, status: 'blocked' };
+    const releaseQuery = chain({});
 
     setDbQueues({
       'email_template_automations as a': [chain({ result: [prepAutomation] })],
@@ -1008,12 +1009,13 @@ describe('email template automation executor', () => {
         chain({ returning: [{ id: 'e2' }] }),
         chain({ returning: [{ id: 'e3' }] }),
       ],
-      // The live-payload read and the pre-dispatch page claim — NO stamp
-      // query is queued; a stamp attempt would throw "Unexpected db table"
-      // and fail this test.
+      // The live-payload read, the FRESH page claim, then — blocked, nothing
+      // delivered — the claim's release. NO stamp query is queued; a stamp
+      // attempt would throw "Unexpected db table" and fail this test.
       scheduled_services: [
         chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
         chain({ returning: [{ id: 'svc-1' }] }),
+        releaseQuery,
       ],
     });
     EmailTemplates.sendTemplate.mockResolvedValue({ blocked: true, reason: 'suppressed' });
@@ -1032,6 +1034,10 @@ describe('email template automation executor', () => {
     });
 
     expect(result.results[0].run.status).toBe('blocked');
+    // A fresh claim on a blocked send is handed back, fenced on delivery/view.
+    expect(releaseQuery.update).toHaveBeenCalledWith({ prep_template_key: null });
+    expect(releaseQuery.whereNull).toHaveBeenCalledWith('prep_sent_at');
+    expect(releaseQuery.whereNull).toHaveBeenCalledWith('prep_first_viewed_at');
   });
 
   test('a prep guide run whose visit page is keyed to ANOTHER guide is skipped before dispatch — one page per visit across lanes (GH Codex #3856 r19 P0)', async () => {
@@ -1078,11 +1084,12 @@ describe('email template automation executor', () => {
         chain({ returning: [{ id: 'e2' }] }),
         chain({ returning: [{ id: 'e3' }] }),
       ],
-      // The live-payload read, then the atomic page claim matches nothing —
-      // the page is a manual lawn guide's (keyed between read and send).
+      // The live-payload read; the FRESH claim matches nothing (keyed
+      // meanwhile) and the same-key ownership read finds another guide's.
       scheduled_services: [
         chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
         chain({ returning: [] }),
+        chain({ first: undefined }),
       ],
     });
 
