@@ -221,6 +221,16 @@ async function login(page, creds) {
       const u = document.querySelector(userSel);
       const p = document.querySelector(passSel);
       if (!u || !p) return 'nofields';
+      // Where the credentials would POST: the password field's owning form,
+      // its action resolved against the page — HTTPS on siteone.com or a
+      // subdomain, or nothing is typed. SITEONE_BOT_ALLOWED_HOSTS widens the
+      // egress lock for assets, never for a credential post (pre-push P0).
+      const form = p.form;
+      if (!form) return 'badform';
+      let action;
+      try { action = new URL(form.getAttribute('action') || '', location.href); } catch { return 'badform'; }
+      const ah = action.hostname.toLowerCase();
+      if (action.protocol !== 'https:' || !(ah === 'siteone.com' || ah.endsWith('.siteone.com'))) return 'badform';
       for (const [el, v] of [[u, user], [p, pw]]) {
         el.focus();
         el.value = v;
@@ -229,7 +239,8 @@ async function login(page, creds) {
       }
       return 'ok';
     }, { user: creds.email || creds.username, pw: creds.password, userSel: SELECTORS.loginUser, passSel: SELECTORS.loginPass });
-    if (filled !== 'ok') throw runLevel(`siteone login aborted: ${filled === 'offhost' ? 'redirected off the trusted host' : 'login fields not found'}`);
+    const FILL_ABORT = { offhost: 'redirected off the trusted host', nofields: 'login fields not found', badform: 'the login form would post credentials off the trusted host — nothing typed' };
+    if (filled !== 'ok') throw runLevel(`siteone login aborted: ${FILL_ABORT[filled] || filled}`);
     const submit = page.locator(SELECTORS.loginSubmit).first();
     await submit.click().catch(() => page.locator(SELECTORS.loginPass).first().press('Enter'));
     await page.waitForFunction((passSel) => {

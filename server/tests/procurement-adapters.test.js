@@ -243,7 +243,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const page = {
       goto: async (u) => { if (st.gotoFailOnce) { st.gotoFailOnce = false; throw new Error('net::ERR_TIMED_OUT'); } st.url = u; },
       url: () => st.url,
-      evaluate: async () => 'ok',
+      evaluate: async () => st.loginFill || 'ok', // loginFill: what the in-page fill reports ('badform' = the form posts off-host)
       waitForFunction: async () => {},
       waitForTimeout: async () => {},
       waitForLoadState: async () => {},
@@ -405,6 +405,14 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const stuck = fakeSiteOne({ cardUntilBillTo: true, accountSelectable: false });
     await expect(s1.place(args(), stuck.deps)).rejects.toMatchObject({ refuse: expect.stringMatching(/card_required|bill_to_account/) });
     expect(stuck.st.placeClicked).toBe(0);
+  });
+
+  test('a login form whose action would post credentials off the trusted host is never filled — run-level, no submit (pre-push P0)', async () => {
+    const { st, deps, browser } = fakeSiteOne({ loginFill: 'badform' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ runLevel: true, message: expect.stringMatching(/post credentials off the trusted host/) });
+    expect(st.loggedIn).toBe(false);
+    expect(st.placeClicked).toBe(0);
+    expect(browser.close).toHaveBeenCalled();
   });
 
   test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {
