@@ -653,6 +653,12 @@ router.post('/sms', async (req, res, next) => {
           }
         } else {
           await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
+          // A suppressed text (sentinel send) withheld the email leg too —
+          // say so, or the composer reports "Message sent." for a Both ask
+          // that delivered nothing (GH Codex #3856 r1 P1).
+          if (reviewRequestEmail === true) {
+            reviewEmailOutcome = { sent: false, reason: 'text_not_sent' };
+          }
         }
       } catch (markErr) {
         logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);

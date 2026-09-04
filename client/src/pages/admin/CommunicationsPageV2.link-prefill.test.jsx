@@ -195,6 +195,7 @@ describe("reviewEmailNote", () => {
     expect(reviewEmailNote({ sent: true })).toBe(" Review request emailed too.");
     expect(reviewEmailNote({ sent: false, reason: "email_off" })).toMatch(/skipped — review emails are off/);
     expect(reviewEmailNote({ sent: false, reason: "no_email" })).toMatch(/no email on file/);
+    expect(reviewEmailNote({ sent: false, reason: "text_not_sent" })).toMatch(/text did not go out/);
     expect(reviewEmailNote({ sent: false, reason: "something_new" })).toMatch(/could not be sent/);
   });
 });

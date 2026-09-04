@@ -822,6 +822,7 @@ describe('admin communications SMS route', () => {
       await withServer(async (baseUrl) => {
         const res = await send(baseUrl, { reviewRequestEmail: true });
         expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ reviewEmail: { sent: false, reason: 'text_not_sent' } });
         expect(ReviewService.releaseInlineClaim).toHaveBeenCalledWith('rr-1', expect.any(Date));
         expect(ReviewService.sendInlineEmailCopy).not.toHaveBeenCalled();
       });

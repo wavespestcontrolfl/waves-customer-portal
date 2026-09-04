@@ -702,6 +702,7 @@ export function reviewEmailNote(outcome) {
   if (!outcome) return "";
   if (outcome.sent) return " Review request emailed too.";
   const why = {
+    text_not_sent: "the text did not go out, so the email was held back",
     no_email: "no email on file",
     email_off: "review emails are off in their preferences",
     email_blocked: "the address is suppressed",
