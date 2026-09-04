@@ -57,7 +57,7 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 
-const { runSuppliesAutoReorderSweep } = require('../services/procurement/auto-reorder');
+const { runSuppliesAutoReorderSweep, sweepFailureError } = require('../services/procurement/auto-reorder');
 
 const lowSign = {
   id: 'prod-sign', name: 'Pesticide application sign 4x5', inventory_on_hand: '80', inventory_unit: 'each',
@@ -271,12 +271,17 @@ test('no reorder_quantity → unconfigured, no row', async () => {
   expect(notify).not.toHaveBeenCalled();
 });
 
-test('a per-product failure is recorded and the sweep continues', async () => {
+test('a per-product failure is recorded and the sweep continues — and the run still fails for job health (pre-push P1)', async () => {
   mockState.candidates = [lowSign, { ...lowSign, id: 'prod-stake', name: 'Yard sign stake' }];
   mockState.insertThrows = true;
   const res = await runSuppliesAutoReorderSweep({ notify: jest.fn() });
   expect(res.errors).toHaveLength(2);
   expect(res.created).toHaveLength(0);
+  const failure = sweepFailureError(res);
+  expect(failure).toBeInstanceOf(Error);
+  expect(failure.message).toMatch(/2 product\(s\) failed: .*Yard sign stake \(insert boom\)/);
+  expect(sweepFailureError({ errors: [] })).toBeNull();
+  expect(sweepFailureError({ skipped: 'gated' })).toBeNull();
 });
 
 test('re-bell on an open auto request says what the REQUEST says, not the product\'s edited config (Codex r6 P2)', async () => {

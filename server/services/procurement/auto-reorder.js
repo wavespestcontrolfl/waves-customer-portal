@@ -308,4 +308,15 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
   return result;
 }
 
-module.exports = { runSuppliesAutoReorderSweep, findLowStockCandidates, AUTO_REORDER_GATE: GATE, AUTO_REORDER_SOURCE: SOURCE };
+// What the scheduler throws after a sweep whose per-product failures were
+// contained: the sweep keeps going past one bad product (and returns the
+// full result for its callers), but a run with ANY failed product must go
+// red on its job_health row, not be recorded as a success (pre-push P1).
+// Same contract as the attribution-transfer sweep's scheduler block.
+function sweepFailureError(result) {
+  const failed = result?.errors || [];
+  if (!failed.length) return null;
+  return new Error(`[auto-reorder] ${failed.length} product(s) failed: ${failed.map((e) => `${e.name} (${e.message})`).join('; ')}`);
+}
+
+module.exports = { runSuppliesAutoReorderSweep, sweepFailureError, findLowStockCandidates, AUTO_REORDER_GATE: GATE, AUTO_REORDER_SOURCE: SOURCE };
