@@ -317,16 +317,11 @@ async function ensureServicePrepToken(serviceId, templateKey) {
 // the template that was just delivered, in one write. Last DELIVERED guide
 // wins — a queued-but-skipped or failed resend never moves either field, so
 // the emailed URL keeps rendering the guide the customer actually received.
-// Conditional: stamps only a row this key owns (or an unkeyed one, which
-// it claims). One prep page per visit — a lane that delivered a DIFFERENT
-// guide must never retarget the page another lane's customer link already
-// renders (pre-push Codex P1 on b36ba5eb7). Returns the row count.
 async function markServicePrepSent(serviceId, templateKey) {
   const key = clean(templateKey);
   if (!isPrepTemplateKey(key)) throw new Error(`Not a prep template key: ${templateKey}`);
-  return db('scheduled_services')
+  await db('scheduled_services')
     .where({ id: serviceId })
-    .where((q) => q.where({ prep_template_key: key }).orWhereNull('prep_template_key'))
     .update({ prep_sent_at: db.fn.now(), prep_template_key: key });
 }
 
