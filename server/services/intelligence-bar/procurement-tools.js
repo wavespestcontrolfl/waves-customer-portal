@@ -1234,8 +1234,8 @@ async function createRestockRequest(input) {
     const live = await findLiveRestockRequest(trx, fresh.id);
     if (live) {
       return {
-        error: `A restock request for ${fresh.name} is already ${live.status} (${live.source || 'staff'}, ${live.requested_quantity ?? '?'} ${live.unit || ''}) — nothing was requested. Update that request instead.`,
-        existing_request: { id: live.id, status: live.status, source: live.source || null, requested_quantity: toNumber(live.requested_quantity), unit: live.unit || null },
+        error: `A restock request for ${fresh.name} is already ${live.status} — nothing was requested. Update that request instead.`,
+        existing_request: { id: live.id, status: live.status, source: live.source, requested_quantity: toNumber(live.requested_quantity), unit: live.unit },
       };
     }
     const lockedUnit = input.unit || fresh.inventory_unit;

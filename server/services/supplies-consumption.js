@@ -166,16 +166,22 @@ async function consumeCompletionSupplies(db, {
       // Not retried (the closeout must never depend on a supplies write and
       // stock is advisory) — but not silent either: one deduped bell per
       // (product, visit) so the office adjusts the count instead of the miss
-      // hiding in a log line (Codex r3 P2).
+      // hiding in a log line (Codex r3 P2). notifyAdmin resolves NULL when
+      // it could not persist the notification (its own catch), so the
+      // resolved row is checked like a throw: a lost bell is an error-level
+      // log and a second errors entry, never a silent success
+      // (Codex r11 P2).
       try {
-        await require('./notification-service').notifyAdmin(
+        const bell = await require('./notification-service').notifyAdmin(
           'system',
           `Inventory: ${product.name} was not deducted for a completed visit`,
           `Adjust the count by ${product.per_completion_usage} ${product.inventory_unit || ''} on the Inventory page. Reason: ${err.message}`,
           { bell: true, link: '/admin/inventory', dedupeKey: `supplies-consumption-failed:${product.id}:${scheduledServiceId}`, metadata: { productId: product.id, scheduledServiceId } },
         );
+        if (!bell) throw new Error('notification not persisted');
       } catch (bellErr) {
-        logger.warn(`[supplies-consumption] failure bell not sent for ${product.name}: ${bellErr.message}`);
+        logger.error(`[supplies-consumption] failure bell NOT sent for ${product.name} on visit ${scheduledServiceId} — missed deduction of ${product.per_completion_usage} ${product.inventory_unit || ''}: ${bellErr.message}`);
+        result.errors.push({ productId: product.id, reason: 'failure_bell_not_sent', message: bellErr.message });
       }
     }
   }

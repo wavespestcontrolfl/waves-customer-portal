@@ -218,10 +218,20 @@ test('a thrown error is contained — and rings ONE deduped bell so the miss is 
   expect(opts.dedupeKey).toBe('supplies-consumption-failed:prod-sign:svc-1');
 });
 
-test('a bell failure on top of a deduction failure is still contained', async () => {
+test('a bell failure on top of a deduction failure is still contained — and recorded, not treated as sent', async () => {
   notifyAdmin.mockImplementationOnce(async () => { throw new Error('bell down'); });
   const { db } = fakeDb({ products: [sign], throwOnInsert: true });
-  await expect(consumeCompletionSupplies(db, args)).resolves.toMatchObject({ errors: [{ productId: 'prod-sign' }] });
+  await expect(consumeCompletionSupplies(db, args)).resolves.toMatchObject({
+    errors: [{ productId: 'prod-sign', message: 'insert boom' }, { productId: 'prod-sign', reason: 'failure_bell_not_sent', message: 'bell down' }],
+  });
+});
+
+test('notifyAdmin resolving null (its own persistence failure) counts as a lost bell (Codex r11 P2)', async () => {
+  notifyAdmin.mockImplementationOnce(async () => null);
+  const { db } = fakeDb({ products: [sign], throwOnInsert: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ productId: 'prod-sign', message: 'insert boom' }, { productId: 'prod-sign', reason: 'failure_bell_not_sent', message: 'notification not persisted' }]);
+  expect(require('../services/logger').error).toHaveBeenCalledWith(expect.stringContaining('failure bell NOT sent'));
 });
 
 test('a successful deduction rings no bell', async () => {
