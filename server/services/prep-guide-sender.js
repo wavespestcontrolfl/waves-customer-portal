@@ -146,6 +146,23 @@ async function claimPrepPage(serviceId, templateKey) {
   return Number(claimed) > 0;
 }
 
+// A claim is PROVISIONAL until a channel delivers: when nothing went out,
+// hand the page back so a failed first attempt neither blocks a later
+// guide nor ties the visit to content the customer never received. Only
+// our own key is released, and only while no delivery of it was ever
+// stamped (markServicePrepSent sets prep_sent_at — the delivered key stays;
+// pre-push Codex P1 on dde34633e).
+async function releasePrepPage(serviceId, templateKey) {
+  try {
+    await db('scheduled_services')
+      .where({ id: serviceId, prep_template_key: templateKey })
+      .whereNull('prep_sent_at')
+      .update({ prep_template_key: null });
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] prep page release failed for service ${serviceId}: ${err.message}`);
+  }
+}
+
 // The visit the guide hangs on, plus its tokened page URL. A visit row holds
 // ONE prep token, and /prep/:token renders the row's prep_template_key — so
 // a row that already carries a DIFFERENT guide (a combined "Pest + Lawn"
@@ -347,6 +364,7 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   result.ok = result.emailSent || result.smsSent;
   if (!result.ok) {
     result.reason = 'send_failed';
+    if (stampVisit) await releasePrepPage(stampVisit.id, config.emailTemplateKey);
   } else if (wantEmail && wantSms && result.emailSent !== result.smsSent) {
     // Both: one leg delivered, the other did not — say which, or the
     // operator reads a half-delivered ask as fully sent (GH Codex #3856 r2 P2).

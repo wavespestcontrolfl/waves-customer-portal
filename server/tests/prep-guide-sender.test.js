@@ -309,6 +309,19 @@ describe('sendPrepToCustomer', () => {
 
     expect(result).toMatchObject({ ok: false, reason: 'send_failed' });
     expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
+    // The provisional page claim is handed back — a later guide is not
+    // blocked by a send that delivered nothing.
+    expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
+  });
+
+  test('a delivered guide keeps its page claim; a partial Both does not release it', async () => {
+    upcomingVisitRow = VISIT;
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'suppressed' });
+
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
+
+    expect(result).toMatchObject({ ok: true, reason: 'partial', failedChannel: 'sms' });
+    expect(serviceUpdates.some((p) => p && p.prep_template_key === null)).toBe(false);
   });
 
   test('a visit whose prep page already carries another guide is never re-keyed or linked', async () => {
