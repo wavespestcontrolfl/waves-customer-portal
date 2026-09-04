@@ -748,6 +748,11 @@ describe('review request follow-up flow', () => {
       require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ found: false });
       expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toBeNull();
       expect(rrQuery.update).not.toHaveBeenCalled();
+
+      // Provider unreachable = unknown: throws so the route fails closed (r14 P2).
+      require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ unavailable: true });
+      await expect(ReviewService.findInlineAwaitingEmail('cust-1')).rejects.toThrow(/evidence unavailable/);
+      expect(rrQuery.update).not.toHaveBeenCalled();
     });
   });
 

@@ -1939,6 +1939,10 @@ const ReviewService = {
     // (repairing the stamp, as claimInlineForSend does); no proof = not this
     // row, and the caller's gated ask decides (GH Codex #3856 r10 P2).
     const evidence = await this._inlineSendEvidence(row);
+    // Provider unreachable = UNKNOWN, not "not this row": the caller fails
+    // closed (409, try again) rather than minting a fresh ask beside a
+    // stranded row that could still retry once the provider is back (r14 P2).
+    if (evidence.unavailable) throw new Error(`inline send evidence unavailable (requestId=${row.id})`);
     if (!evidence.found) return null;
     await this.markInlineDelivered(row.id);
     return { id: row.id };

@@ -166,12 +166,21 @@ function manualPrepTriggerId(customerId, templateKey, visitId) {
 // the customer on THIS visit — see reservationAbandoned. Throws on a read
 // failure (the caller fails closed).
 async function manualDeliveryTrace(visit, takenKey, customerId) {
-  const email = await db('email_messages')
-    .where({ trigger_event_id: manualPrepTriggerId(customerId, takenKey, visit.id) })
+  const pastDispatch = (q) => q
     .whereNot('status', 'blocked')
     .whereRaw("COALESCE(error_message, '') <> ?", [ABORTED_BEFORE_DISPATCH])
     .first('id');
+  const email = await pastDispatch(db('email_messages')
+    .where({ trigger_event_id: manualPrepTriggerId(customerId, takenKey, visit.id) }));
   if (email) return true;
+  // Rows the parent sender wrote carry the customer-wide legacy id
+  // (manual_prep:<customer>:<key>); an email-only customer whose stamp
+  // was lost has no other trace, so a legacy row sent since this visit was
+  // created keeps the page — conservative, visit-bounded (GH Codex #3856
+  // r14 P0). No created_at to bound on = any legacy row keeps it.
+  let legacy = db('email_messages').where({ trigger_event_id: `manual_prep:${customerId}:${takenKey}` });
+  if (visit.created_at) legacy = legacy.where('created_at', '>=', visit.created_at);
+  if (await pastDispatch(legacy)) return true;
   if (visit.prep_token) {
     const text = await db('sms_log')
       .where('direction', 'outbound')

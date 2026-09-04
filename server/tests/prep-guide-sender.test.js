@@ -539,6 +539,10 @@ describe('sendPrepToCustomer', () => {
     manualEmailRow = null;
     manualSmsRow = { id: 'sms-1' };
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' })).toMatchObject({ ok: false, reason: 'prep_page_taken' });
+    // With no visit-scoped row the legacy customer-wide id from the parent
+    // sender is consulted too, bounded to rows since this visit was created (r14 P0).
+    expect(manualEmailQueries.some((q) => q.where.mock.calls.some(([arg]) => arg && arg.trigger_event_id === 'manual_prep:cust-1:prep.flea')
+      && q.where.mock.calls.some(([col, op, v]) => col === 'created_at' && op === '>=' && v instanceof Date))).toBe(true);
     manualSmsRow = null;
     interactionMarkerRow = { id: 'ci-1' };
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' })).toMatchObject({ ok: false, reason: 'prep_page_taken' });
