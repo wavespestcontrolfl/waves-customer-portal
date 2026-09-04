@@ -734,6 +734,7 @@ class RelayConversation {
       case 'agent_speaking_start': {
         const stat = this._speechTurn();
         if (stat && stat.agentSpeakingStartAt == null) stat.agentSpeakingStartAt = t;
+        if (stat && stat.awaitingAudio) this._finishTurn(stat);
         break;
       }
       case 'agent_speaking_end': {
@@ -759,9 +760,18 @@ class RelayConversation {
     this._pendingPartials = (this._pendingPartials || 0) + 1;
   }
 
-  /** One structured log line per caller turn — durations only, never text. */
+  /**
+   * One structured log line per caller turn — durations only, never text.
+   * Twilio's agent-speaking event lands AFTER the text frame that finished
+   * the turn, so a turn that spoke waits for it (the speaker handler calls
+   * this again); end() flushes whatever never arrived.
+   */
   _finishTurn(stat) {
     if (!stat || stat.logged) return;
+    if (stat.firstSendAt != null && stat.agentSpeakingStartAt == null && !this.ended) {
+      stat.awaitingAudio = true;
+      return;
+    }
     stat.logged = true;
     const ms = (a, b) => (Number.isFinite(a) && Number.isFinite(b) && b >= a ? `${Math.round(b - a)}ms` : 'n/a');
     logger.info(
@@ -1423,6 +1433,7 @@ class RelayConversation {
         try { this._controller.abort(); } catch { /* no-op */ }
       }, STREAM_TIMEOUT_MS);
       const modelStartAt = now();
+      stat.rounds += 1; // an ATTEMPT — a timed-out or aborted round is still a round
       try {
         const stream = anthropic.messages.stream(
           {
@@ -1445,7 +1456,6 @@ class RelayConversation {
         // Once per ROUND — the turn keeps its FIRST token, not the last round's.
         stream.once?.('text', () => { stat.firstTokenAt ??= now(); });
         msg = await stream.finalMessage();
-        stat.rounds += 1;
       } catch (err) {
         if (streamTimedOut) {
           stat.timedOut = true;
@@ -1626,6 +1636,8 @@ class RelayConversation {
         // /relay-complete already stamped voicemail must not be retro-fitted
         // with an AI transcript. Composition never throws; null just means
         // there was nothing said worth recording.
+        // Turns still waiting on a speaker event log now (firstAudio=n/a).
+        for (const s of this._turnStats) this._finishTurn(s);
         const { buildTranscriptUpdate, summarizeTurnStats } = require('./relay-transcript');
         const transcriptUpdate = buildTranscriptUpdate({
           turns: this._transcript,

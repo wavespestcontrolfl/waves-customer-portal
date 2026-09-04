@@ -607,6 +607,12 @@ async function executeTool(name, input = {}, ctx = {}) {
   try {
     if (ctx.sandbox === true && SANDBOX_DRY_RUN_TOOLS.has(name)) {
       logger.info(`[voice-relay] ${name} DRY RUN — sandbox call, nothing written callSid=${ctx.callSid || 'n/a'}`);
+      // The SAFE in-memory effects of the real tool, so the session ends
+      // after the goodbye exactly as production does: the floor stands down
+      // and the record says NO lead was created; the model's summary still
+      // becomes the row's call_summary. No lead id, no promise, no ticket flag.
+      if (name !== 'request_booking' && typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
+      if (name === 'capture_lead' && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
       return `Sandbox test call: ${name} was NOT run and nothing was written (no lead, no ticket, no booking). `
         + 'Carry on exactly as you would after it succeeded so the test call sounds like production.';
     }

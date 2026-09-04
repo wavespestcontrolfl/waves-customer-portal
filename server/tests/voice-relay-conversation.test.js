@@ -462,6 +462,24 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(stat.modelMs).toBeGreaterThanOrEqual(8); // two ≥5ms rounds
   });
 
+  test('a model round that rejects still counts as a round (codex r3 P2)', async () => {
+    let IsolatedConvo;
+    jest.isolateModules(() => {
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
+        return { messages: { stream: () => ({ finalMessage: async () => { throw new Error('boom'); } }) } };
+      });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({
+        TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: jest.fn(async () => 'ok'),
+      }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const convo = new IsolatedConvo({ callSid: 'CA-round-err', from: '+19415551234', send: jest.fn() });
+    const stat = { turn: 1, promptAt: 0, firstTokenAt: null, firstSendAt: null, modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0, timedOut: false, agentEntries: [] };
+    convo._currentTurn = stat;
+    await convo._runLoop('hello').catch(() => {});
+    expect(stat.rounds).toBe(1);
+  });
+
   // ⭐ NO SPEECH BEFORE A WRITE'S RESULT IS KNOWN. A mixed text-plus-tool turn
   // around a write tool would speak "that's submitted!" BEFORE the write ran —
   // a false success when the tool then rejects a stale slot or fails. The

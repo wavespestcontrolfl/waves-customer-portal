@@ -80,6 +80,9 @@ describe('per-turn stats', () => {
     expect(stat.turn).toBe(1);
     expect(Number.isFinite(stat.promptAt)).toBe(true);
     expect(stat.loopStartAt).toBeGreaterThanOrEqual(stat.promptAt);
+    // The turn spoke, so its log line waits for Twilio's agent-speaking event.
+    expect(logger.info.mock.calls.some((c) => /\[voice-relay\] turn=1 /.test(c[0]))).toBe(false);
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', state: 'started' });
     // The turn log line ran once and carries durations, never text.
     const line = logger.info.mock.calls.map((c) => c[0]).find((s) => /\[voice-relay\] turn=1 /.test(s));
     expect(line).toMatch(/endpoint=n\/a firstToken=n\/a/);
@@ -159,6 +162,28 @@ describe('per-turn stats', () => {
     const [first, second] = agentEntries(convo);
     expect(first).toMatchObject({ text: 'One moment.', done: true, playedSource: 'assumed' });
     expect(second).toMatchObject({ played: 'The office opens', done: false });
+  });
+
+  test('the turn log waits for the agent-speaking event so firstAudio is real, and end() flushes the rest (codex r3 P2)', async () => {
+    const { convo, stat } = convoWithSpokenTurn({ callSid: 'CA-tel-log' });
+    stat.callerSpeechStoppedAt = 900; // firstAudio is measured from the caller's stop
+    convo.say('One moment.');
+    logger.info.mockClear();
+    convo._finishTurn(stat);
+    expect(stat.logged).toBeUndefined();
+    expect(logger.info.mock.calls.some(([m]) => /turn=1/.test(m))).toBe(false);
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', state: 'started' });
+    const line = logger.info.mock.calls.map(([m]) => m).find((m) => /turn=1/.test(m));
+    expect(line).toMatch(/firstAudio=\d+ms/);
+    expect(stat.logged).toBe(true);
+    // A turn whose event never comes is flushed at close.
+    const second = { ...stat, turn: 2, logged: undefined, awaitingAudio: undefined, agentSpeakingStartAt: null };
+    convo._turnStats.push(second);
+    convo._finishTurn(second);
+    expect(second.logged).toBeUndefined();
+    convo.leadCaptured = true; // keep the hangup capture floor out of this test
+    await convo.end('caller_hangup');
+    expect(second.logged).toBe(true);
   });
 
   test('Flux partial prompts are counted on the turn they precede, never acted on — after the first turn too (codex r2 P1)', async () => {

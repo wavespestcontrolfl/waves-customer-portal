@@ -29,6 +29,24 @@ describe('executeTool on a sandbox session', () => {
     expect(createLeadFromExtraction).not.toHaveBeenCalled();
   });
 
+  test('a dry-run capture keeps the in-memory completion effects so the call still ends after the goodbye (codex r3 P1)', async () => {
+    const markCaptured = jest.fn();
+    const noteCallSummary = jest.fn();
+    const noteLeadId = jest.fn();
+    const markReserviceFiled = jest.fn();
+    const ctx = { sandbox: true, callSid: 'CA-sb-3', from: '+19415551234', markCaptured, noteCallSummary, noteLeadId, markReserviceFiled };
+    await executeTool('capture_lead', { call_summary: 'Caller asked about ants.' }, ctx);
+    expect(markCaptured).toHaveBeenCalledWith({ leadCreated: false });
+    expect(noteCallSummary).toHaveBeenCalledWith('Caller asked about ants.');
+    await executeTool('request_reservice', { problem: 'ants are back' }, ctx);
+    expect(markCaptured).toHaveBeenCalledTimes(2);
+    await executeTool('request_booking', {}, ctx);
+    expect(markCaptured).toHaveBeenCalledTimes(2); // production request_booking does not mark a capture either
+    expect(noteLeadId).not.toHaveBeenCalled();
+    expect(markReserviceFiled).not.toHaveBeenCalled(); // nothing was filed
+    expect(db).not.toHaveBeenCalled();
+  });
+
   test('the gate covers every tool that writes outside the call_log row', () => {
     expect([...SANDBOX_DRY_RUN_TOOLS].sort()).toEqual(['capture_lead', 'request_booking', 'request_reservice']);
     const registered = [...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS].map((t) => t.name);

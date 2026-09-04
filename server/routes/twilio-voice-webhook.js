@@ -764,6 +764,14 @@ function languageVestibule({ routingConfig, handoffKind, reentry }) {
 // `greetingUrl` null (the answers-first relay path has no greeting MP3 — the
 // relay welcomeGreeting is its disclosure) renders the Gather with only the
 // Spanish sentence.
+// The greeting MP3 = the FL §934.03 recording / transcription / AI-processing
+// disclosure (see the /voice handler). One resolver so every path that
+// transcribes a caller — including the sandbox — plays the same asset.
+function wavesGreetingUrl() {
+  return process.env.WAVES_GREETING_URL
+    || 'https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3';
+}
+
 function appendLanguageVestibule(twiml, { greetingUrl, vestibule }) {
   if (!vestibule) {
     if (greetingUrl) twiml.play(greetingUrl);
@@ -1139,8 +1147,7 @@ router.post('/voice', async (req, res) => {
     // WAVES_GREETING_URL exists so the asset can be swapped without a
     // code deploy; fallback to the production URL is documented and
     // intentional.
-    const greetingUrl = process.env.WAVES_GREETING_URL
-      || 'https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3';
+    const greetingUrl = wavesGreetingUrl();
 
     // ── Pre-connect caller screen (before any staff ring / agent leg) ──
     if (screenReentry === 'failed') {
@@ -1526,8 +1533,9 @@ router.post('/relay-complete', async (req, res) => {
 // a relay profile (relay-profiles SANDBOX_CELLS; '99' = raw
 // VOICE_RELAY_SANDBOX_ATTRS) — the audio runner sends it with `sendDigits`. A
 // human caller who waits gets the production profile, i.e. exactly what a
-// customer would hear. Fail closed: not the sandbox number ⇒ 403; relay not
-// attached ⇒ a spoken notice and hangup, never a stranded call.
+// customer would hear — after the same recording disclosure MP3 every
+// production inbound path plays. Fail closed: not the sandbox number ⇒ 403;
+// relay not attached ⇒ a spoken notice and hangup, never a stranded call.
 // Signature validation is the mount's (index.js), same as /voice.
 // =========================================================================
 const RELAY_SANDBOX_CELL_ACTION = '/api/webhooks/twilio/relay-sandbox/cell';
@@ -1586,8 +1594,13 @@ router.post('/relay-sandbox', async (req, res) => {
       })
       .onConflict('twilio_call_sid')
       .ignore();
-    // <Gather> for the cell code, then the default relay in the SAME document:
-    // no digits ⇒ Twilio falls through to the <Connect> after the timeout.
+    // The recording disclosure FIRST (FL §934.03 — the sandbox number is
+    // publicly dialable and the relay transcribes every caller), then the
+    // <Gather> for the cell code, then the default relay in the SAME
+    // document: no digits ⇒ Twilio falls through to the <Connect> after the
+    // timeout. The cell continuation renders the relay only — the
+    // disclosure has already played on this call.
+    twiml.play(wavesGreetingUrl());
     twiml.gather({
       input: 'dtmf',
       numDigits: 2,
