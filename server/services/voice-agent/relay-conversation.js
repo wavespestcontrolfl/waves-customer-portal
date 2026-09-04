@@ -29,6 +29,19 @@ const { activeTools } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
 
+/**
+ * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
+ * context (Sandy PR 1B). Read at call time so a flip reaches the next
+ * barge-in without a redeploy; `feature-gates.voiceRelayInterruptContext` is the status listing.
+ * Off ⇒ a barge-in only aborts the in-flight generation and the model's
+ * history is byte-identical to today: it still believes the caller heard the
+ * whole reply and tends to repeat the unheard clause verbatim.
+ */
+function isInterruptContextEnabled() {
+  // Same parser as the status listing, so the two can never disagree.
+  return require('../../config/feature-gates').gateEnvValue('GATE_VOICE_RELAY_INTERRUPT_CONTEXT');
+}
+
 // Monotonic clock for every duration (a wall clock can step; this cannot).
 const now = () => performance.now();
 const sha256 = (text) => crypto.createHash('sha256').update(String(text)).digest('hex');
@@ -471,6 +484,8 @@ class RelayConversation {
     this._playing = []; // agent utterances sent and not yet known to have finished, in send order
     this._lastCallerSpeechStopAt = null; // from the clientSpeaking-end event
     this._interruptFollowupTimer = null;
+    // PR 1B: the barge-in the NEXT caller message is annotated with (gate on).
+    this._pendingInterruptNote = null;
     this._eventShapesSeen = new Set();
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
     // active relay profile and the voice it rendered) — stamped into the
@@ -963,7 +978,9 @@ class RelayConversation {
       }
       if (entry) this._playing.push(entry);
       this._send(t);
+      return entry;
     }
+    return null;
   }
 
   /** Handle one transcribed caller turn. Serialized so turns never interleave. */
@@ -1096,7 +1113,8 @@ class RelayConversation {
       }
       cut.done = true;
       this._syncPlayedEntry(cut);
-      for (const later of this._playing.slice(idx + 1)) {
+      const laters = this._playing.slice(idx + 1);
+      for (const later of laters) {
         later.notPlayed = true;
         later.played = '';
         later.playedSource = 'interrupt_truncation';
@@ -1104,6 +1122,7 @@ class RelayConversation {
         this._syncPlayedEntry(later);
       }
       this._playing = [];
+      this._noteInterruptForModel(cut, laters);
     }
     clearTimeout(this._interruptFollowupTimer);
     this._interruptFollowupStat = stat;
@@ -1113,6 +1132,41 @@ class RelayConversation {
       stat.interruptWithoutFollowupTranscript = true;
     }, INTERRUPT_FOLLOWUP_MS);
     this._interruptFollowupTimer.unref?.();
+  }
+
+  /**
+   * PR 1B (GATE_VOICE_RELAY_INTERRUPT_CONTEXT): make the model's history agree
+   * with the air after a barge-in. Each cut utterance's assistant message has
+   * its text replaced by the utterance's PLAYED record — the same
+   * `entry.text` the transcript stores ("<heard> [interrupted]",
+   * "[not played — caller interrupted]", "[interrupted — played text
+   * unknown]") — so the rewrite reads played text by construction, never
+   * `planned`. Tool-use blocks on that message are kept (their tool_result
+   * must still pair). The next caller message then carries what the caller
+   * heard, so the model resumes from there instead of repeating the clause
+   * the caller never heard. Utterances with no history message (copy()
+   * fallbacks) get the note only. Gate off ⇒ nothing here runs.
+   */
+  _noteInterruptForModel(cut, laters) {
+    if (!isInterruptContextEnabled()) return;
+    for (const entry of [cut, ...laters]) {
+      const msg = entry.historyMessage;
+      if (!msg || !Array.isArray(msg.content)) continue;
+      const kept = msg.content.filter((b) => b && b.type !== 'text');
+      msg.content = [{ type: 'text', text: entry.text }, ...kept];
+    }
+    const heard = cut.playedUnknown ? null : String(cut.played || '').trim();
+    this._pendingInterruptNote = { heard: heard || null };
+  }
+
+  /** The one-shot prefix the next caller message carries after a barge-in. */
+  _consumeInterruptNote() {
+    const note = this._pendingInterruptNote;
+    if (!note) return '';
+    this._pendingInterruptNote = null;
+    return note.heard
+      ? `[Caller interrupted you after: "${note.heard}"] `
+      : '[Caller interrupted you before your reply finished; what they heard is unknown] ';
   }
 
   /**
@@ -1471,11 +1525,14 @@ class RelayConversation {
     // stable for caching AND the transcript reads honestly.
     if (callerText) {
       const clockBlock = contextEnabled ? renderClockBlock(this._officeHours) : null;
+      // PR 1B: the model — not the transcript — is told what the caller heard
+      // before they cut in. Set only under its gate (see interrupt()).
+      const turnText = `${this._consumeInterruptNote()}${callerText}`;
       this.messages.push({
         role: 'user',
         content: clockBlock
-          ? [{ type: 'text', text: clockBlock }, { type: 'text', text: callerText }]
-          : callerText,
+          ? [{ type: 'text', text: clockBlock }, { type: 'text', text: turnText }]
+          : turnText,
       });
     }
 
@@ -1557,12 +1614,13 @@ class RelayConversation {
       // empty end_turn, ending the exchange with no confirmation spoken at
       // all. Suppressed turns are stored tool-use-only, so the follow-up round
       // knows nothing has been said yet and states the outcome itself.
-      this.messages.push({
+      const assistantMessage = {
         role: 'assistant',
         content: hasPendingWrite && text
           ? msg.content.filter((b) => b.type !== 'text')
           : msg.content,
-      });
+      };
+      this.messages.push(assistantMessage);
       // ⭐ RE-PROVEN IMMEDIATELY BEFORE SPEAKING. The turn-entry check is
       // check-then-act — a reconnect can take the claim during the model
       // round, and this socket would then speak from cached account context.
@@ -1573,8 +1631,11 @@ class RelayConversation {
         try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
         return;
       }
-      if (text && !hasPendingWrite) this.say(text);
-      else if (text && hasPendingWrite) {
+      if (text && !hasPendingWrite) {
+        // The utterance's own history message — what a barge-in rewrites (PR 1B).
+        const entry = this.say(text);
+        if (entry) entry.historyMessage = assistantMessage;
+      } else if (text && hasPendingWrite) {
         logger.info(`[voice-relay] suppressed pre-write text on a write-tool turn callSid=${this.callSid}`);
       }
 

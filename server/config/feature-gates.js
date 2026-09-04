@@ -652,6 +652,17 @@ const gates = {
   // the vestibule is never offered when no Spanish session could start.
   voiceSpanishMenu: process.env.GATE_VOICE_SPANISH_MENU === 'true',
 
+  // Sandy PR 1B — interruption-aware conversation context. On, a barge-in
+  // rewrites the cut reply in the model's history to what the caller actually
+  // heard (the played-text record, "… [interrupted]") and prefixes the next
+  // caller message with `[Caller interrupted you after: "…"]`, so the model
+  // resumes from there instead of repeating the unheard clause. Off ⇒ a
+  // barge-in only aborts the generation; the model's messages are
+  // byte-identical to today. Read at CALL time in
+  // services/voice-agent/relay-conversation.js (a flip needs no redeploy);
+  // this entry is the status/log listing. Kill switch: unset.
+  voiceRelayInterruptContext: gateEnvValue('GATE_VOICE_RELAY_INTERRUPT_CONTEXT'),
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
