@@ -149,7 +149,11 @@ async function seedPriceAndOpening(knex, productId, item, ctx, seededOnHand) {
     const priced = await knex('vendor_pricing').where({ product_id: productId, vendor_id: ctx.vendorId }).first('id');
     if (!priced) await knex('vendor_pricing').insert(pricingRow(productId, item, ctx));
   }
-  if (ctx.hasMovements && seededOnHand > 0) await knex('product_inventory_movements').insert(openingMovement(productId, seededOnHand));
+  if (!ctx.hasMovements || !(seededOnHand > 0)) return;
+  // At most one opening movement per product, however many times the seed
+  // runs against a row whose count was cleared in between (pre-push P1).
+  const opened = await knex('product_inventory_movements').where({ product_id: productId }).whereRaw("metadata->>'source' = 'seed_migration'").first('id');
+  if (!opened) await knex('product_inventory_movements').insert(openingMovement(productId, seededOnHand));
 }
 
 async function seedKitItem(knex, item, ctx) {
