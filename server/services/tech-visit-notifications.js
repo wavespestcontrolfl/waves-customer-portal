@@ -252,7 +252,11 @@ function cardStands({ kind, technicianId, snapshot, previousStatus }, row) {
     // the newest card. The later move's own card is the one that lands.
     if (snapshotSuperseded(snapshot, row)) return false;
   }
-  if (kind === 'unassigned' && holder === recipient) return false;
+  // A moved-off card after the visit ended (codex r10 P2): a delayed A→B
+  // card across a deploy overlap would otherwise land "Now with B" on a
+  // visit B has since completed or cancelled — the final lifecycle change
+  // is the last word, and it was announced by its own path.
+  if (kind === 'unassigned' && (holder === recipient || TERMINAL_VISIT_STATUSES.has(String(row.status)))) return false;
   if (kind === 'cancelled' && String(row.status) !== 'cancelled') return false;
   return { holder };
 }

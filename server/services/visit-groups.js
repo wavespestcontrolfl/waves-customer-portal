@@ -2823,9 +2823,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // moved" card was suppressed on the member's rebooker call (the
       // reassignment was going to send the pair) — send it now so the move
       // is never silent for the person still holding the stop.
+      const holder = target.committedTechnicianId !== undefined
+        ? target.committedTechnicianId
+        : (target.expect.technician_id || null);
       if (Object.prototype.hasOwnProperty.call(options, 'technicianId')
         && (options.technicianId || null) !== (target.expect.technician_id || null)
-        && target.expect.technician_id) {
+        && holder) {
         const win = targetTuple(target);
         // The snapshot asserts only what the plan knows (pre-push audit P1):
         // an object-shaped window carries no end, and a row without one had
@@ -2837,7 +2840,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (win.window_end) snapshot.windowEnd = win.window_end;
         void require('./tech-visit-notifications').notifyVisitRescheduled({
           visitId: target.id,
-          technicianId: target.expect.technician_id,
+          technicianId: holder,
           actorId: options.actorId || initiatedBy || null,
           previous: { date: target.expect.scheduled_date, windowStart: target.expect.window_start, windowEnd: target.expect.window_end },
           snapshot,
@@ -2873,6 +2876,11 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // snapshot (codex r6): an operator confirm between plan and move must
       // not be rewound by a caller restoring 'pending'.
       if (r && r.previousStatus) target.previousStatus = String(r.previousStatus);
+      // The holder on the COMMITTED row (codex r10 P1): a reassignment that
+      // raced the plan can have landed a third technician — the fence in
+      // alignMember then fails for exactly that reason, and the fallback
+      // card must go to whoever holds the stop now, not the plan's tech.
+      if (r && r.technicianId !== undefined) target.committedTechnicianId = r.technicianId || null;
       if (r && Array.isArray(r.warnings)) warnings.push(...r.warnings);
       if (target.isPrimary) primaryResult = r;
       await alignMember();

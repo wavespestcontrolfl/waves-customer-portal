@@ -806,7 +806,12 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
 // parent-linked flow untouched. Best-effort per child, and callers invoke
 // this after their own parent-cancel commits — a cascade failure must
 // never fail the parent cancel.
-async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId }) {
+// actorId: the staff row cancelling the parent (a technicians.id, or null)
+// — rides into each child's history + the child's tech cancel card, so a
+// technician cancelling their own booking hears nothing about its follow-up
+// (codex #3887 r10 P2). Labels never come here: job_status_history's
+// transitioned_by is a uuid column.
+async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null }) {
   if (!parentServiceId) return 0;
   const { transitionJobStatus } = require('./job-status');
   const now = new Date();
@@ -826,7 +831,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId }) {
           jobId: child.id,
           fromStatus: 'pending',
           toStatus: 'cancelled',
-          transitionedBy: null,
+          transitionedBy: actorId || null,
           notes: `Cancelled with parent call booking ${parentServiceId}`,
           trx,
         });

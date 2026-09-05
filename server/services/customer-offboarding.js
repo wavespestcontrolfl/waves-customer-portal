@@ -354,7 +354,7 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
   }
   try {
     const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
-    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id });
+    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id, actorId: actorId || null });
   } catch (e) {
     logger.error(`[customer-offboarding] call follow-up cascade failed for ${visit.id}: ${e.message}`);
   }

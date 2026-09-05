@@ -340,6 +340,16 @@ describe('Codex r9 writers (source order)', () => {
     expect(src.match(/notifyTechVisitChange\(/g)).toHaveLength(1);
   });
 
+  test('the call follow-up cancel cascade carries the acting staff row from both callers (child card + history)', () => {
+    const track = read('../services/track-transitions.js');
+    expect(track).toContain('async function cascadeCallFollowUpCancel(serviceId, actorId = null) {');
+    expect(track).toContain("await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: serviceId, actorId });");
+    expect(track.match(/cascadeCallFollowUpCancel\(serviceId, actorId\)/g)).toHaveLength(3);
+    expect(track).not.toContain('cascadeCallFollowUpCancel(serviceId);');
+    const offboarding = read('../services/customer-offboarding.js');
+    expect(offboarding).toContain("await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id, actorId: actorId || null });");
+  });
+
   test('a grouped move re-pointed to another technician names the customer on the card, never on dispatch_alerts.resolved_by', () => {
     const src = read('../services/visit-groups.js');
     expect(src).toContain("actorId: options.actorId || null,\n              // The card's actor");

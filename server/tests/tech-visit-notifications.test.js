@@ -160,6 +160,11 @@ describe('notifyTechVisitChange', () => {
     expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
     prime({ visit: { ...VISIT, status: 'completed' } });
     expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    // unassigned on a visit that has since ended: a delayed "Now with B" never lands on a completed / cancelled visit.
+    prime({ visit: { ...VISIT, status: 'completed', technician_id: ADAM_ID } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    prime({ visit: { ...VISIT, status: 'cancelled', technician_id: ADAM_ID } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
     expect(mockWriteCard).not.toHaveBeenCalled();
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });

@@ -69,7 +69,8 @@ const SERVICE = { id: 'a', visit_id: 'v1' };
 function fakeRebooker(behaviour = {}) {
   const impl = async (id, date, win, reason, by, opts) => {
     if (behaviour[id] === 'throw') throw Object.assign(new Error(`member ${id} boom`), { code: 'SLOT_TAKEN' });
-    return { success: true, originalDate: '2026-08-30', newDate: date, id, win, opts };
+    // An object behaviour is merged into the result (e.g. the committed holder the rebooker reports).
+    return { success: true, originalDate: '2026-08-30', newDate: date, id, win, opts, ...(behaviour[id] && typeof behaviour[id] === 'object' ? behaviour[id] : {}) };
   };
   return { reschedule: jest.fn(impl), rescheduleSeries: jest.fn(impl) };
 }
@@ -608,6 +609,17 @@ describe('moveVisitAsUnit — codex #3609 r13', () => {
     expect(openEnded.actorId).toBe('admin');
     expect(openEnded.snapshot).toEqual({ date: '2026-09-02', windowStart: '09:00' });
     expect('windowEnd' in openEnded.snapshot).toBe(false);
+    // The fallback card goes to the holder the COMMITTED move reported (a raced reassignment landed t3 —
+    // the very reason the stale fence failed), never to the plan's expected technician.
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a'), member('b')], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't3' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+    ] });
+    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' }));
+    await moveVisitAsUnit({ rebooker: fakeRebooker({ a: { technicianId: 't3' } }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { technicianId: 't9' } });
+    expect(notifyVisitRescheduled).toHaveBeenCalledTimes(1);
+    expect(notifyVisitRescheduled.mock.calls[0][0]).toMatchObject({ visitId: 'a', technicianId: 't3' });
     jest.clearAllMocks(); db.__calls.length = 0;
     db.__script = script({ members: [member('a'), member('b')], landedRows: { b: landedRow() } });
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
