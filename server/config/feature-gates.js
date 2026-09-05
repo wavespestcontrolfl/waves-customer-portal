@@ -461,6 +461,7 @@ const gates = {
   // silently ignoring one (an ignored count reads to the office as a plan they
   // capped). Kill switch: unset or any non-'true' value; visits already added
   // or cancelled are not reversed when it flips.
+  editApptAddress: process.env.GATE_EDIT_APPT_ADDRESS === 'true',
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 
   // Applying a PRICE or primary-SERVICE change from Edit appointment to "this
