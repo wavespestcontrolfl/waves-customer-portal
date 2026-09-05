@@ -1025,7 +1025,12 @@ function orderNumberIn(text) {
   // recorded with it, the same number rerendered without it would read as a
   // new one, and the date / money exclusions would miss (Codex #3876 r17 P2).
   for (const m of String(text).matchAll(/(?:order|confirmation)(?!\s*date)(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))*(?:\s+is)?\s*:?\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isId(m[1])) return m[1];
-  return null;
+  // A dedicated number element (`[data-test="order-number"]`, `.order-number`)
+  // carries the bare identifier and no label: the WHOLE text, when it is one
+  // identifier token, is the number (pre-push hook P1 on de3e4a993). Prose
+  // still needs the label — a ZIP or price inside a sentence never qualifies.
+  const whole = String(text).trim();
+  return /^[A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9]$/i.test(whole) && isId(whole) ? whole : null;
 }
 
 // The checkout stage: bill-to proof, identity + final total, the cap gate on

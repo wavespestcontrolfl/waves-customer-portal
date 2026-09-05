@@ -528,6 +528,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumberIn('Order # SO-12345.')).toBe('SO-12345');
     expect(s1._internals.orderNumberIn('Order date 2026-09-05.')).toBeNull();
     expect(s1._internals.orderNumberIn('Order # pending. Total $105.93.')).toBeNull();
+    expect(s1._internals.orderNumberIn('SO-778899')).toBe('SO-778899'); // a dedicated number element's bare identifier (hook P1)
+    expect(s1._internals.orderNumberIn(' 55501234 ')).toBe('55501234');
+    expect(s1._internals.orderNumberIn('2026-09-05')).toBeNull(); // bare date / price / prose are not ids
+    expect(s1._internals.orderNumberIn('105.93')).toBeNull();
+    expect(s1._internals.orderNumberIn('Processing order…')).toBeNull();
+    expect(s1._internals.orderNumberIn('Ships to 34205')).toBeNull();
     expect(s1._internals.orderNumberIn('Order ref SO-778899')).toBe('SO-778899');
     expect(s1._internals.orderNumberIn('Reference 55501 · Ready')).toBeNull();
     expect(s1._internals.orderNumberIn('Total 1,234.56 · Order # SO-778899')).toBe('SO-778899');
@@ -651,6 +657,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(r.evidence.placeOrderValidated).toBe(true);
     expect(ok.st.trialDone).toBe(true);
     expect(ok.st.placeClicked).toBe(0);
+  });
+
+  test('a dedicated confirmation element carrying only the bare identifier is the order number (hook P1)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberText: 'SO-778899' });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.placeClicked).toBe(1);
   });
 
   test('loginConfigured mirrors validatePlaceArgs: login + account number (r12 P2)', () => {
