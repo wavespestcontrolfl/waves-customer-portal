@@ -66,6 +66,18 @@ const SIB1_SHIFTED = dayOffset(19); // sibling 1 recomputed from the new anchor 
 const SIB2 = dayOffset(24); // weekly sibling 2 (BASE + 14)
 const SIB2_SHIFTED = dayOffset(26); // sibling 2 recomputed (TARGET + 14)
 
+// An UPDATE result that resolves to the row count like knex AND answers
+// `.returning([...])` with the committed row (the reschedule writer reads the
+// committed technician_id off the CAS write).
+function updateResult(count, rows) {
+  const p = Promise.resolve(count);
+  return {
+    then: p.then.bind(p),
+    catch: p.catch.bind(p),
+    returning: jest.fn().mockResolvedValue(rows ?? (count ? [{ id: 'svc-1', technician_id: 'tech-1' }] : [])),
+  };
+}
+
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
@@ -85,7 +97,7 @@ function chain(overrides = {}) {
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn(),
-    update: jest.fn().mockResolvedValue(1),
+    update: jest.fn().mockImplementation(() => updateResult(1)),
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
@@ -113,7 +125,7 @@ function liveService(status) {
 // Wire db/trx mocks for a full single-job reschedule pass.
 function wireRescheduleMocks(service) {
   const serviceLookup = chain({ first: jest.fn().mockResolvedValue(service) });
-  const updateQuery = chain({ update: jest.fn().mockResolvedValue(1) });
+  const updateQuery = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
   const historyInsert = chain();
   const logInsert = chain();
   const logCount = chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
@@ -304,6 +316,43 @@ describe('live-status reschedule override (allowLive)', () => {
     });
   });
 
+  test('a same-tech move names the tech on the COMMITTED row (RETURNING), not the unlocked pre-read', async () => {
+    const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
+    const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+    // Dispatch reassigned tech-1 → tech-7 between the pre-read and the write:
+    // the move commits for tech-7 (the CAS does not pin technician_id on a
+    // same-tech move), so tech-7 is the one told.
+    updateQuery.update.mockImplementation(() => updateResult(1, [{ id: 'svc-1', technician_id: 'tech-7' }]));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin',
+      { allowLive: true, actorId: 'virginia' },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(notifyAssignmentChange).not.toHaveBeenCalled();
+    expect(notifyVisitRescheduled).toHaveBeenCalledTimes(1);
+    expect(notifyVisitRescheduled.mock.calls[0][0]).toMatchObject({ visitId: 'svc-1', technicianId: 'tech-7' });
+    // The CAS carried no technician pin — the tech was not part of this move.
+    const casWheres = updateQuery.where.mock.calls.map((c) => c[0]).filter((a) => a && typeof a === 'object');
+    expect(casWheres.some((w) => Object.prototype.hasOwnProperty.call(w, 'technician_id'))).toBe(false);
+  });
+
+  test('a tech CHANGE pins the observed prior tech in the CAS — a raced reassignment misses instead of naming the wrong "from" tech', async () => {
+    const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
+    const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+    updateQuery.update.mockImplementation(() => updateResult(0));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+      { technicianId: 'tech-2', actorId: 'virginia' },
+    )).rejects.toMatchObject({ statusCode: 409 });
+
+    const casWheres = updateQuery.where.mock.calls.map((c) => c[0]).filter((a) => a && typeof a === 'object');
+    expect(casWheres).toEqual(expect.arrayContaining([{ technician_id: 'tech-1' }]));
+    expect(notifyVisitRescheduled).not.toHaveBeenCalled();
+    expect(notifyAssignmentChange).not.toHaveBeenCalled();
+  });
+
   test('a move that also changes the tech tells both techs (no duplicate "moved" card); system callers are named by initiatedBy', async () => {
     const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
     wireRescheduleMocks(liveService('confirmed'));
@@ -411,7 +460,7 @@ describe('live-status reschedule override (allowLive)', () => {
     // Same-series date-collision probe (codex r6 on #2725) runs once before
     // any row updates — no clash by default.
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const updates = siblings.map(() => chain({ update: jest.fn().mockResolvedValue(1) }));
+    const updates = siblings.map(() => chain({ update: jest.fn().mockImplementation(() => updateResult(1)) }));
     const historyInsert = chain();
     const logInsert = chain();
 
@@ -631,7 +680,7 @@ describe('live-status reschedule override (allowLive)', () => {
     ]);
     // Tech completes the job between the sibling SELECT and the UPDATE —
     // the status-guarded write matches 0 rows.
-    updates[0].update.mockResolvedValue(0);
+    updates[0].update.mockImplementation(() => updateResult(0));
 
     await expect(SmartRebooker.rescheduleSeries(
       'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
@@ -769,10 +818,10 @@ describe('live-status reschedule override (allowLive)', () => {
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
     // No same-series date collision…
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const anchorUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     // …the conflict now surfaces via the shared tech-blind check below, not a
     // local tech-scoped probe. This sibling update must NEVER be reached.
-    const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const sibUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const historyInsert = chain();
     const logInsert = chain();
 
@@ -842,7 +891,7 @@ describe('live-status reschedule override (allowLive)', () => {
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
     const techOverlapProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const anchorUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const historyInsert = chain();
     const logInsert = chain();
     // Under the kill switch the tech guard skips, so its probe query never
