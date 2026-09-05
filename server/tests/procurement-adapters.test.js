@@ -235,7 +235,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // `disabled` models Playwright's actionability failure; `{ trial: true }` runs the checks without dispatching (r5 P2)
       // onTrial models a delayed rerender landing DURING the awaited trial wait (r6 P1)
       // A forced click skips the actionability wait: on a disabled control the browser ignores it (nothing dispatched) — it never throws (r8 P1)
-      click: async (o) => { if (spec.disabled) { if (o && o.force) return; throw new Error('element is not enabled'); } if (o && o.trial) { if (spec.onTrial) await spec.onTrial(); return; } if (spec.onClick) await spec.onClick(o); },
+      click: async (o) => { if (spec.detachedWhen && spec.detachedWhen()) throw new Error('Element is not attached to the DOM'); if (spec.disabled) { if (o && o.force) return; throw new Error('element is not enabled'); } if (o && o.trial) { if (spec.onTrial) await spec.onTrial(); return; } if (spec.onClick) await spec.onClick(o); },
       fill: async (v) => { if (spec.onFill) spec.onFill(v); },
       press: async (key) => { if (spec.onPress) await spec.onPress(key); },
       waitFor: async () => {},
@@ -245,6 +245,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     // cartRowQtyTwoVisible: two VISIBLE quantity children — the input with the requested figure beside a label with SiteOne's adjustment (r21 P2); cartRowQtyTwoVisibleSame: both read the same
     const child = (spec) => (spec.value != null && (st.cartRowQtyTwoVisible || st.cartRowQtyTwoVisibleSame)) ? el({ count: 2, nth: (i) => (i === 1 && st.cartRowQtyTwoVisibleSame ? el({ count: 1, visible: true, text: ` ${spec.value} ` }) : el({ count: 1, visible: true, value: i === 1 && st.cartRowQtyTwoVisible ? spec.value + 1 : spec.value })) }) : (st.cartRowChildrenHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'STALE-9', value: 9 }) : el({ count: 1, visible: true, ...spec })) }) : el({ count: 1, visible: true, ...spec }));
     // cartSkuInAttribute: the row's SKU node carries the code in data-product-code and shows unrelated text (r21 P2)
+    // cartSkuAttrBesideText: the row shows BOTH a data-product-code node and a `SKU: <code>` text child for the same SKU (#3876 r25 P2, fixed in #3900)
     // checkoutRowSwapAtClick: reading the row's SKU is the moment SiteOne replaces the row with a substitute product (S1-99 × same qty):
     // a re-resolving locator then reads the substitute's quantity beside the old SKU; the old row's handle is detached instead (r11 P1)
     const swapping = (l) => st.checkoutRowSwapAtClick && st.atClick && l.sku === 'S1-77';
@@ -252,7 +253,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     // l.hiddenUntilRead: this row is hidden when the scan enumerates visibility and becomes visible once another row's SKU is read (r18 P1)
     // checkoutRowSwapAfterScan: the checkout row is replaced by a different visible row (S1-99) after the scan read it — same count, same visibility mask (r20 P2)
     const swappedAfterScan = (l, atCheckout) => atCheckout && st.checkoutRowSwapAfterScan && (st.checkoutSkuReads || 0) >= 1;
-    const line = (l, atCheckout = false) => el({ count: 1, isVisibleThrows: !!l.detachedDuringScan, get visible() { return !(swapping(l) && st.rowSwapped) && !(l.hiddenUntilRead && !st.rowRead); }, detachedWhen: () => swapping(l) && st.rowSwapped, sub: (sub) => sub === S.cartLineSku ? child(st.cartSkuInAttribute ? { text: 'Remove', attrs: { 'data-product-code': l.sku } } : { text: swapping(l) && st.rowSwapped ? 'S1-99' : swappedAfterScan(l, atCheckout) ? 'S1-99' : l.sku, onRead: () => { if (swapping(l)) st.rowSwapped = true; st.rowRead = true; if (atCheckout) st.checkoutSkuReads = (st.checkoutSkuReads || 0) + 1; } }) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
+    const line = (l, atCheckout = false) => el({ count: 1, isVisibleThrows: !!l.detachedDuringScan, get visible() { return !(swapping(l) && st.rowSwapped) && !(l.hiddenUntilRead && !st.rowRead); }, detachedWhen: () => swapping(l) && st.rowSwapped, sub: (sub) => sub === S.cartLineSku ? (st.cartSkuAttrBesideText ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: true, text: 'Remove', attrs: { 'data-product-code': l.sku } }) : el({ count: 1, visible: true, text: `SKU: ${l.sku}` })) }) : child(st.cartSkuInAttribute ? { text: 'Remove', attrs: { 'data-product-code': l.sku } } : { text: swapping(l) && st.rowSwapped ? 'S1-99' : swappedAfterScan(l, atCheckout) ? 'S1-99' : l.sku, onRead: () => { if (swapping(l)) st.rowSwapped = true; st.rowRead = true; if (atCheckout) st.checkoutSkuReads = (st.checkoutSkuReads || 0) + 1; } })) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
     const resolve = (sel) => {
       // loginPassHiddenAfterLogin: a hidden responsive duplicate of the password input survives a successful sign-in
       // The visible password field's own form carries the real submit control (formSubmitCount: 0 = none → Enter submits);
@@ -376,7 +377,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // placeOrderDisabledAfterTrial: a rerender disables Place Order between the trial click and the dispatch (r8 P1)
       // placeOrderReplacedAtClick: the button element the trial validated is removed and replaced once the confirmation baseline has been sampled —
       // the handle taken at the trial reads detached (not visible); a locator would re-resolve to the replacement (hook P1)
-      const placeBtn = () => el({ count: 1, get visible() { return !(st.placeOrderReplacedAtClick && st.baselineSampled); }, get disabled() { return !!st.placeOrderDisabled || (!!st.placeOrderDisabledAfterTrial && !!st.trialDone); }, onTrial: () => { st.trialDone = true; }, onClick: (o) => { st.placeClicked += 1; st.placeClickOpts = o; } });
+      // placeOrderReplacedAtTrial: the button is replaced right after the trial click (before the handle check) (r5 P1 on #3900)
+      const placeBtn = () => el({ count: 1, detachedWhen: () => st.placeOrderReplacedAtClick && st.baselineSampled, get visible() { return !(st.placeOrderReplacedAtClick && st.baselineSampled) && !(st.placeOrderReplacedAtTrial && st.trialDone); }, get disabled() { return !!st.placeOrderDisabled || (!!st.placeOrderDisabledAfterTrial && !!st.trialDone); }, onTrial: () => { st.trialDone = true; }, onClick: (o) => { st.placeClicked += 1; st.placeClickOpts = o; } });
       // placeOrderDuplicateAfterFirst: a rerender exposes a SECOND visible Place Order after the stage's first resolution (r1 P2 on #3900)
       if (sel === S.placeOrder && st.placeOrderDuplicateAfterFirst && st.placeResolves > 1) return el({ count: 2, nth: () => placeBtn() });
       if (sel === S.placeOrder && st.placeOrderHiddenOnly) return el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } });
@@ -393,6 +395,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : st.orderNumberDuringLoop && (st.totalReads || 0) > 1 ? el({ count: 1, visible: true, text: st.orderNumberDuringLoop }) : el();
       // orderNumberRetained: the SPA keeps the pre-click reference node (orderNumberBeforeClick) shown and APPENDS the confirmation node (r17 P2)
       if (sel === S.orderNumber && st.orderNumberRetained) return el({ count: 2, nth: (i) => el({ count: 1, visible: true, text: i === 0 ? st.orderNumberBeforeClick : 'Order # SO-778899' }) });
+      // orderNumberUnreadableBeside: after the click, a second confirmation node's visibility read throws on every poll (r5 P2 on #3900)
+      if (sel === S.orderNumber && st.orderNumberUnreadableBeside && st.placeClicked) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: true, text: 'Order # SO-778899' }) : el({ count: 1, isVisibleThrows: true, text: 'Order # SO-999999' })) });
       // orderNumberSequence: the confirmation node's text per post-click poll (last value repeats) (r1 P2 on #3900)
       if (sel === S.orderNumber && st.orderNumberSequence) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.orderNumberSequence[Math.min(st.confReads - 1, st.orderNumberSequence.length - 1)] }); }
       // orderNumberLate: the confirmation element renders first as "Processing order…" and populates a few polls later
@@ -724,6 +728,19 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
   });
 
+  test('the claim is re-asserted on the final pre-click pass: a reservation that reports claim_lost while the checks ran refuses, no click (r5 P1 on #3900)', async () => {
+    let calls = 0;
+    const { st, deps } = fakeSiteOne();
+    await expect(s1.place(args({ beforeSubmit: async (c) => { calls += 1; return calls >= 3 ? { ok: false, reason: 'claim_lost', message: 'parked by stale recovery' } : { ok: true }; } }), deps)).rejects.toMatchObject({ refuse: 'claim_lost' });
+    expect(st.placeClicked).toBe(0);
+    expect(st.cart).toEqual([]);
+  });
+
+  test('a confirmation-selector node that cannot be read after the click leaves the scan unresolved — the readable node never settles beside it (r5 P2 on #3900)', async () => {
+    const { deps } = fakeSiteOne({ orderNumberUnreadableBeside: true, checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+  });
+
   test('the confirmation identifier must settle: a reference value rendered a tick before the order number is never recorded — the settled number is (r1 P2 on #3900)', async () => {
     const { st, deps } = fakeSiteOne({ orderNumberSequence: ['Order ref SO-000002', 'Order # SO-778899', 'Order # SO-778899'] });
     expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
@@ -885,6 +902,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.addClicked).toBe(1);
   });
 
+  test('a row showing a data-product-code node BESIDE a "SKU: <code>" text child is ONE SKU reading — the order places (#3876 r25 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ cartSkuAttrBesideText: true });
+    await expect(s1.place(args(), deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.placeClicked).toBe(1);
+  });
+
   test('a SKU node matched by data-product-code is read from the attribute, not its button text (r20 P2)', async () => {
     const { st, deps } = fakeSiteOne({ productSkuInAttribute: true });
     expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
@@ -899,12 +922,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   });
 
   test('a total that changes DURING the tender re-check is caught by the final read, re-gated and recorded (r4 P1)', async () => {
-    // read 1 = checkout stage; read 2 = loop; [tender re-check]; read 3 differs → gate → read 4 equal; [re-check]; read 5 equal → click
+    // read 1 = checkout stage; read 2 = loop; [tender re-check]; [final claim re-check @10593]; read 3 differs → gate @11240 → read 4 equal; [re-check]; [final claim re-check @11240]; read 5 equal → click
     const seq = { 1: '$105.93', 2: '$105.93', 3: '$112.40' };
     const { st, deps } = fakeSiteOne({ totalByRead: (n) => `Order total ${seq[n] || '$112.40'}` });
     const totals = [];
     const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
-    expect(totals).toEqual([9900, 10593, 11240]);
+    expect(totals).toEqual([9900, 10593, 10593, 11240, 11240]); // every pass ends with the final claim re-check on its figure (#3900 r5 P1)
     expect(r).toMatchObject({ amountCents: 11240 });
     expect(st.placeClicked).toBe(1);
   });
@@ -1095,11 +1118,17 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   });
 
   test('the dispatch goes to the ELEMENT the trial validated: a Place Order button replaced after the final checks refuses place_order_replaced — no click, cart emptied (hook P1)', async () => {
-    const { st, deps } = fakeSiteOne({ placeOrderReplacedAtClick: true });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'place_order_replaced' });
+    // The handle check now precedes the baseline (#3900 r5 P1), so a control replaced AFTER the baseline is a detached handle the forced
+    // click cannot dispatch: nothing is submitted and the outcome parks ambiguous (the cart is left for review); a control replaced
+    // before the baseline still refuses place_order_replaced (placeOrderReplacedAtTrial).
+    const { st, deps } = fakeSiteOne({ placeOrderReplacedAtClick: true, checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.trialDone).toBe(true);
     expect(st.placeClicked || 0).toBe(0);
-    expect(st.cart).toEqual([]);
+    const early = fakeSiteOne({ placeOrderReplacedAtTrial: true });
+    await expect(s1.place(args(), early.deps)).rejects.toMatchObject({ refuse: 'place_order_replaced' });
+    expect(early.st.placeClicked || 0).toBe(0);
+    expect(early.st.cart).toEqual([]);
   });
 
   test('the selected-tender count is the radio\'s OWN group: a label-associated radio with an opaque value places (r16 P2); an UNNAMED radio has no countable group — refused, never the account-value fallback (r18 P1)', async () => {
@@ -1156,7 +1185,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(r).toMatchObject({ dryRun: true, amountCents: 10593, externalOrderNumber: null });
     expect(r.evidence.billToAccountVerified).toBe(true);
     expect(r.evidence.accountVerified).toBe(true);
-    expect(totals).toEqual([9900, 10593]);
+    expect(totals).toEqual([9900, 10593]); // the dry run stops before the pre-click loop: no final claim re-check
     expect(st.placeClicked || 0).toBe(0);
     expect(st.cart).toEqual([]); // nothing submitted: the cart is emptied
   });
@@ -1171,7 +1200,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ checkoutTotalText: 'Order total $105.93', totalAtClick: 'Order total $112.40' });
     const totals = [];
     const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
-    expect(totals).toEqual([9900, 10593, 11240]);
+    expect(totals).toEqual([9900, 10593, 11240, 11240]); // the last = the final claim re-check on the stable figure (#3900 r5 P1)
     expect(r).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 11240 });
     expect(r.evidence.totalChangedBeforeClick).toEqual({ from: 10593, to: 11240 });
     expect(st.placeClicked).toBe(1);
@@ -1183,7 +1212,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ totalByRead: (n) => `Order total ${seq[n] || '$118.00'}` });
     const totals = [];
     const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
-    expect(totals).toEqual([9900, 10593, 11240, 11800]);
+    expect(totals).toEqual([9900, 10593, 11240, 11800, 11800]); // the last = the final claim re-check on the stable figure (#3900 r5 P1)
     expect(r).toMatchObject({ amountCents: 11800 });
     expect(st.placeClicked).toBe(1);
   });
@@ -1217,7 +1246,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(r.evidence.billToAccountVerified).toBe(true);
     expect(r.evidence.accountVerified).toBe(true);
     expect(r.evidence.shipToVerified).toMatch(/123 example ave/);
-    expect(totals).toEqual([9900, 10593]);
+    expect(totals).toEqual([9900, 10593, 10593]); // the last = the final claim re-check (#3900 r5 P1)
     expect(st.placeClicked).toBe(1);
     expect(st.cart).toEqual([{ sku: 'S1-77', qty: 2 }]); // submitted: never cleared
   });

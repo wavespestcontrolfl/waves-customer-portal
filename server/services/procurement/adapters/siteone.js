@@ -114,7 +114,7 @@ const SELECTORS = Object.freeze({
   // The confirmation node: dedicated number elements, plus the textual
   // formats `orderNumbersIn` accepts ("Order #", "order number is",
   // "confirmation number") in ordinary headings / paragraphs (Codex #3900 P2).
-  orderNumber: '[data-test="order-number"], .order-number, .confirmation-number, .order-confirmation-number, :is(h1, h2, h3, p, strong):has-text("Order #"), :is(h1, h2, h3, p, strong):has-text("order number"), :is(h1, h2, h3, p, strong):has-text("confirmation number"), :is(h1, h2, h3, p, strong):has-text("Confirmation #")',
+  orderNumber: '[data-test="order-number"], .order-number, .confirmation-number, .order-confirmation-number, :is(h1, h2, h3, p, strong):has-text("Order #"), :is(h1, h2, h3, p, strong):has-text("order number"), :is(h1, h2, h3, p, strong):has-text("confirmation number"), :is(h1, h2, h3, p, strong):has-text("Confirmation #"), :is(h1, h2, h3, p, strong):has-text("Order ID"), :is(h1, h2, h3, p, strong):has-text("Order no"), :is(h1, h2, h3, p, strong):has-text("Order ref"), :is(h1, h2, h3, p, strong):has-text("Confirmation ID")',
   placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
   // Confirmation-number element only — never a bare :has-text() that an
   // ancestor (the body) would satisfy ahead of the real node (Codex r3 P1).
@@ -271,12 +271,16 @@ async function shownChild(rowHandle, selector) {
   if (shown.length <= 1) return shown[0] || null;
   // The VALUE is compared, not its DOM form: an input carrying "2" beside
   // a label reading "2" is one reading (pre-push hook P1 on def020079).
+  // Every SKU reading — attribute AND text — is normalized the same way, so
+  // `data-product-code="S1-77"` beside `SKU: S1-77` is one reading, never
+  // two that refuse a valid row (Codex #3876 r25 P2).
+  const isSku = selector === SELECTORS.cartLineSku;
   const reading = async (h) => {
     const attr = await h.getAttribute('data-product-code').catch(() => null);
     if (attr) return normalizeSku(attr);
     const value = await h.inputValue().catch(() => null);
     const raw = value != null ? value : await h.textContent().catch(() => '');
-    return String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    return isSku ? normalizeSku(raw) : String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
   };
   const readings = new Set(await Promise.all(shown.map(reading)));
   return readings.size === 1 ? shown[0] : null;
@@ -896,10 +900,18 @@ async function readCheckoutTotal(page, { evidence, upload, screenshot = true }) 
 // caller's cart cleanup guard flips only when the click actually happened
 // (a pre-click refusal here still cleans the cart — Codex #3853 r15 P2).
 // The whitespace-normalized text of every shown confirmation-number node.
+// Unreadable = unresolved (null): a node whose visibility or text cannot be
+// read mid-rerender may carry a different order number, so the poll must
+// not settle the readable one (Codex #3900 r5 P2).
 async function shownOrderTexts(page) {
-  const nodes = (await matches(page, SELECTORS.orderNumber).catch(() => ({ shown: [] }))).shown;
+  let nodes;
+  try { nodes = (await matches(page, SELECTORS.orderNumber, { strict: true })).shown; } catch { return null; }
   const texts = [];
-  for (const n of nodes) texts.push((await n.textContent().catch(() => '') || '').replace(/\s+/g, ' '));
+  for (const n of nodes) {
+    const t = await n.textContent().catch(() => null);
+    if (t == null) return null;
+    texts.push(String(t).replace(/\s+/g, ' '));
+  }
   return texts;
 }
 
@@ -1000,13 +1012,25 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     await recheckTenderAtClick(page, radio, { evidence, upload });
     await identity();
     await lines();
-    baseline = await preClickOrderBaseline(page, refuse);
+    // The claim is re-asserted on the final pass even when the figure did
+    // not change: the checks above can outlive the claim (stale recovery
+    // parks it after prolonged heartbeat failures), and only the reservation
+    // — conditional on `status = 'placing'` — refuses `claim_lost`; without
+    // it the click would spend after the claim was settled (Codex #3900 r5
+    // P1). It is an awaited DB write, so the total is read again after it.
+    await gate(cents, 'final claim check');
     // Still the validated element, still shown: a detached handle is a
     // replaced control — refused, nothing submitted (hook P1). Read BEFORE
-    // the final total read, so that pure read stays the last await before
-    // the click (Codex #3876 r18 P1); a control replaced during that read
-    // is a detached handle the forced click cannot dispatch → ambiguous.
+    // the baseline and the final total read; a control replaced during
+    // those is a detached handle the forced click cannot dispatch → ambiguous.
     if (!(await placeHandle.isVisible().catch(() => false))) await refuse('place_order_replaced', 'the Place Order control was replaced after the final checks — nothing submitted');
+    // The baseline is the LAST read but one: only the final pure total read
+    // stands between it and the click, so a reference node that appears
+    // during the earlier awaits is in the baseline (Codex #3900 r5 P1); the
+    // total read stays last (Codex #3876 r4 P1) — a node appearing inside
+    // that single read is the residual window, and it still has to survive
+    // two settle polls to be recorded.
+    baseline = await preClickOrderBaseline(page, refuse);
     shownCents = await readCheckoutTotal(page, { evidence, upload, screenshot: false });
     if (shownCents === cents) break;
     if (i >= 3) throw unstable(shownCents);
@@ -1076,7 +1100,9 @@ async function waitForNewOrderNumber(page, baseline, timeout) {
   for (;;) {
     if (!isTrustedSiteOneUrl(page.url())) throw new Error(`confirmation page left the trusted host (${String(page.url()).slice(0, 80)})`);
     const fresh = new Map();
-    for (const text of await shownOrderTexts(page)) {
+    const texts = await shownOrderTexts(page);
+    if (texts == null) { candidate = null; if (Date.now() >= deadline) return null; await page.waitForTimeout(500); continue; } // unreadable scan: nothing settles on it
+    for (const text of texts) {
       if (baseline.texts.has(text)) continue;
       // EVERY labeled identifier in the node is judged: a wrapper that grew
       // from the pre-click reference to reference + confirmation carries the
