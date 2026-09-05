@@ -817,6 +817,11 @@ export default function PublicBookingPage() {
       if (!res.ok) throw new Error(data.error || 'Could not check that date');
       if (!isCurrent()) return;
       if (data.capture_token) captureTokenRef.current = data.capture_token;
+      // The full window stays tappable while the browse loads; a slot picked
+      // there must not survive the swap to the browsed day (Continue would
+      // carry a time that is no longer on screen).
+      setSelectedDate(null);
+      setSelectedSlot(null);
       setBrowseDays(data.days || []);
     } catch {
       if (!isCurrent()) return;

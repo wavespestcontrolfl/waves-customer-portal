@@ -105,9 +105,14 @@ describe('PublicBookingPage custom-date browse', () => {
     await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
 
     fireEvent.change(await screen.findByLabelText(/Need a date further out/), { target: { value: browsed } });
+    // A slot tapped in the still-visible window while the browse loads must
+    // not survive the swap.
+    fireEvent.click(screen.getByRole('button', { name: /^Choose 9:00 AM/ }));
 
     // One picker: the browsed day is the selected day and the only times shown.
     const chosen = await screen.findByRole('button', { name: /^Choose 1:00 PM on Saturday, September 5/ });
+    expect(screen.queryByRole('button', { name: /^Choose 9:00 AM/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Continue/ })).toBeDisabled();
     expect(screen.queryByRole('button', { name: /^Choose 9:00 AM/ })).not.toBeInTheDocument();
     expect(screen.getAllByRole('option', { selected: true }).map((o) => o.getAttribute('aria-label'))).toEqual([expect.stringMatching(/^Saturday, September 5/)]);
     fireEvent.click(chosen);
