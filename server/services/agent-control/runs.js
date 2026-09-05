@@ -491,7 +491,11 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   // closes its own attempt row and nothing else. Fenced on the row being
   // open — or holding openAttempt's superseded placeholder — so a second
   // finish / fail racing on one handle cannot rewrite a recorded outcome
-  // (Codex r8).
+  // (Codex r8). LOCK ORDER: the run row first, then attempts — the same
+  // order openAttempt takes (agent_runs, then the open attempts), so a
+  // reopen racing an older handle's completion cannot deadlock (pre-push
+  // audit); a stale handle's fenced update touches no run row and so
+  // holds no run lock when it closes its attempt.
   function closeAttempt(trx, result, failure = {}) {
     if (!attemptId) return null;
     return trx('agent_attempts').where({ id: attemptId }).where((q) => q.whereNull('finished_at').orWhere({ error_code: 'superseded' })).update({
@@ -519,7 +523,6 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     const rows = artifactRows(artifacts);
     // 'moved' | 'stale' | null (the transaction failed and rolled back)
     const outcome = await guarded('finish', () => db.transaction(async (trx) => {
-      await closeAttempt(trx, res);
       const n = await fenced(trx).update({
         lifecycle: 'terminal',
         result: res,
@@ -535,6 +538,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
         ...(summary ? { summary: db.raw('summary || ?::jsonb', [jsonb(summary)]) } : {}),
         updated_at: now,
       });
+      await closeAttempt(trx, res); // after the run row (lock order), stale or not
       if (!Number(n)) return 'stale';
       if (workItemId && res === 'succeeded') await trx('work_items').where({ id: workItemId }).update({ status: 'done', updated_at: now });
       if (rows.length) await trx('run_artifacts').insert(rows);
@@ -562,7 +566,6 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
       : { lifecycle: 'terminal', result, finished_at: now, event: 'failed' };
     // the attempt close, the transition and its events in one transaction (see finish)
     const outcome = await guarded('fail', () => db.transaction(async (trx) => {
-      await closeAttempt(trx, result, { failureClass: klass, errorCode: code, errorMessage: message });
       const n = await fenced(trx).update({
         lifecycle: transition.lifecycle,
         result: transition.result,
@@ -574,6 +577,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
         lease_expires_at: null,
         updated_at: now,
       });
+      await closeAttempt(trx, result, { failureClass: klass, errorCode: code, errorMessage: message }); // after the run row (lock order)
       if (!Number(n)) return 'stale';
       await trx('run_events').insert(eventRow(runId, transition.event, message, { failure_class: klass, error_code: code, attempt: attemptNo, result: transition.result }));
       if (isQualityFailure(klass)) await trx('run_events').insert(eventRow(runId, 'eval_candidate', null, { failure_class: klass }));

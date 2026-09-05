@@ -19,7 +19,7 @@ jest.mock('../models/db', () => {
     agent_attempts: ['run_id', 'attempt_no'],
   };
   const store = {};
-  const state = { failNext: null, idSeq: 0 }; // failNext: table whose next op throws
+  const state = { failNext: null, idSeq: 0, ops: [] }; // failNext: table whose next op throws; ops: every write in order (lock-order assertions)
   const uuid = () => `00000000-0000-4000-8000-${String(++state.idSeq).padStart(12, '0')}`;
   const matches = (row, where, whereNot, nulls = [], anyOf = []) => Object.entries(where).every(([k, v]) => String(row[k]) === String(v))
     && Object.entries(whereNot || {}).every(([k, v]) => String(row[k]) !== String(v))
@@ -51,6 +51,7 @@ jest.mock('../models/db', () => {
       then(resolve, reject) {
         try {
           if (state.failNext === table) { state.failNext = null; throw new Error(`fake ${table} down`); }
+          if (st.op) state.ops.push(`${table}:${st.op}`);
           const rows = store[table];
           let out;
           if (st.op === 'insert') {
@@ -126,6 +127,7 @@ beforeEach(() => {
   for (const k of Object.keys(store)) delete store[k];
   state.failNext = null;
   state.idSeq = 0;
+  state.ops = [];
   mockWarn.mockClear();
   mockToolEvent.mockClear();
   process.env.GATE_AGENT_RUNS = 'true';
@@ -400,6 +402,19 @@ describe('a spent handle', () => {
     expect(f2).toMatchObject({ stale: true });
     expect(store.agent_attempts[1]).toMatchObject({ result: 'succeeded', error_code: null });
     expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded' });
+  });
+
+  test('lock order: every path that closes or reopens a run writes agent_runs before agent_attempts (a reopen racing a completion cannot deadlock)', async () => {
+    const order = (from) => state.ops.slice(from).filter((o) => o.endsWith(':update') && /^agent_(runs|attempts):/.test(o)).map((o) => o.split(':')[0]);
+    const a = await runs.startRun(base);
+    let mark = state.ops.length;
+    await a.finish({});
+    expect(order(mark)).toEqual(['agent_runs', 'agent_attempts']);
+    const b = await runs.startRun(base); // reopen: run first, then the open attempts, then the new attempt row
+    expect(order(mark).slice(2, 4)).toEqual(['agent_runs', 'agent_attempts']);
+    mark = state.ops.length;
+    await b.fail({ error: new Error('x'), errorCode: 'openai_500' });
+    expect(order(mark)).toEqual(['agent_runs', 'agent_attempts']);
   });
 
   test('runManaged retries a terminal write that rolled back once, then lets the handle go', async () => {
