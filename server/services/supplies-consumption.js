@@ -78,6 +78,16 @@ function appliesToLine(rawLines, serviceLine) {
   return !!serviceLine && lines.includes(String(serviceLine));
 }
 
+// Every active kit product with a per-completion count — the consumption's
+// candidate list, re-read by lookupSettled.
+function kitProducts(db) {
+  return db('products_catalog')
+    .where('active', true)
+    .whereNotNull('per_completion_usage')
+    .where('per_completion_usage', '>', 0)
+    .select('id', 'name', 'per_completion_usage', 'per_completion_service_lines', 'inventory_on_hand', 'inventory_unit');
+}
+
 // Why the LOCKED row is not deductible now, or null. Eligibility is
 // re-derived from the locked row: a retire or a service-line edit between
 // the scan and the lock must not deduct (pre-push codex P1).
@@ -117,7 +127,24 @@ async function settledReason(trx, { productId, scheduledServiceId }) {
 // when it could not persist the notification, so the resolved row is
 // checked like a throw: a lost bell is an error-level log and an errors
 // entry, never a silent success (Codex r11 P2).
-async function ringMissedDeductionBell(db, result, { scheduledServiceId, product = null, reason }) {
+// The visit-wide lookup bell is retired only when the lookup can be re-run
+// now AND every kit product that applies to this visit's line already has a
+// usage movement — one movement proves one product, not the visit (Codex
+// r27 P1, owner ruling). Unreadable again, or any product still owed: the
+// bell (and the owed marker) stay.
+async function lookupSettled(db, { scheduledServiceId, serviceLine }) {
+  let products;
+  try { products = await kitProducts(db); } catch { return false; }
+  // A corrupt scope is owed too (its hand-off is a product bell the retry
+  // may never have reached): fail closed, keep the visit bell.
+  const owed = products.filter((p) => parseLines(p.per_completion_service_lines) === INVALID_LINES || appliesToLine(p.per_completion_service_lines, serviceLine));
+  for (const p of owed) {
+    if (!await db('product_inventory_movements').where({ product_id: p.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).first('id')) return false;
+  }
+  return true;
+}
+
+async function ringMissedDeductionBell(db, result, { scheduledServiceId, product = null, reason, serviceLine = null }) {
   const title = product ? `Inventory: ${product.name} was not deducted for a completed visit` : 'Inventory: yard-sign supplies were not deducted for a completed visit';
   // The lookup bell names no product: which kit items this visit should
   // have consumed is decided only after the lookup (service-line scope), so
@@ -134,7 +161,9 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
     // kit — between our failed attempt and this insert; its bell clear ran
     // before our bell existed. Re-check the settled movement AFTER the bell
     // persisted and retire our own bell when the kit is in fact deducted.
-    const settled = await db('product_inventory_movements').where({ scheduled_service_id: scheduledServiceId, movement_type: 'usage', ...(product ? { product_id: product.id } : {}) }).whereRaw("metadata->>'source' = ?", [SOURCE]).first('id');
+    const settled = product
+      ? await db('product_inventory_movements').where({ product_id: product.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).whereRaw("metadata->>'source' = ?", [SOURCE]).first('id')
+      : await lookupSettled(db, { scheduledServiceId, serviceLine });
     if (settled) await clearMissedDeductionBells(db, { scheduledServiceId, productId: product?.id || null });
   } catch (bellErr) {
     logger.error(`[supplies-consumption] failure bell NOT sent for ${product ? product.name : 'the visit'} on visit ${scheduledServiceId}: ${bellErr.message}`);
@@ -144,15 +173,17 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
 
 // A deduction that SUCCEEDS on a retried completion (the resume path runs
 // this hook again) retires the failure bell an earlier attempt rang for
-// the same (product, visit) — and the visit-scoped lookup bell — so staff
-// do not follow a stale "adjust by hand" on top of the real deduction
-// (Codex r15 P2). The row is stamped metadata.autoRetired so settledReason
-// never mistakes it for a staff hand-off (Codex r26 P1). Best effort,
-// never throws.
+// the same (product, visit), so staff do not follow a stale "adjust by
+// hand" on top of the real deduction (Codex r15 P2). The visit-scoped
+// lookup bell (productId null) is retired ONLY once lookupSettled proved
+// every applicable product deducted — one product's deduction must not
+// strip the hand-off protection of the others (hook r27 P1). The row is
+// stamped metadata.autoRetired so settledReason never mistakes it for a
+// staff hand-off (Codex r26 P1). Best effort, never throws.
 async function clearMissedDeductionBells(db, { scheduledServiceId, productId = null }) {
-  const keys = [`supplies-consumption-failed:lookup:${scheduledServiceId}`, ...(productId ? [`supplies-consumption-failed:${productId}:${scheduledServiceId}`] : [])];
+  const key = productId ? `supplies-consumption-failed:${productId}:${scheduledServiceId}` : `supplies-consumption-failed:lookup:${scheduledServiceId}`;
   try {
-    await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereNull('read_at').update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb") });
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).whereNull('read_at').update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb") });
   } catch (err) {
     logger.warn(`[supplies-consumption] could not retire the failure bell for ${productId} on visit ${scheduledServiceId}: ${err.message}`);
   }
@@ -175,15 +206,11 @@ async function consumeCompletionSupplies(db, {
 
   let products;
   try {
-    products = await db('products_catalog')
-      .where('active', true)
-      .whereNotNull('per_completion_usage')
-      .where('per_completion_usage', '>', 0)
-      .select('id', 'name', 'per_completion_usage', 'per_completion_service_lines', 'inventory_on_hand', 'inventory_unit');
+    products = await kitProducts(db);
   } catch (err) {
     logger.warn(`[supplies-consumption] product lookup failed (non-blocking): ${err.message}`);
     result.errors.push({ reason: 'lookup_failed', message: err.message });
-    await ringMissedDeductionBell(db, result, { scheduledServiceId, reason: err.message });
+    await ringMissedDeductionBell(db, result, { scheduledServiceId, reason: err.message, serviceLine });
     return result;
   }
 
@@ -257,7 +284,21 @@ async function consumeCompletionSupplies(db, {
       await ringMissedDeductionBell(db, result, { scheduledServiceId, product, reason: err.message });
     }
   }
+  // An open visit-wide lookup bell (an earlier attempt could not read the
+  // catalog) is retired only when every applicable product is now proven
+  // deducted — never on one product's movement (hook r27 P1).
+  await retireLookupBellIfSettled(db, { scheduledServiceId, serviceLine });
   return result;
+}
+
+async function retireLookupBellIfSettled(db, { scheduledServiceId, serviceLine }) {
+  try {
+    const open = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`supplies-consumption-failed:lookup:${scheduledServiceId}`]).whereNull('read_at').first('id');
+    if (!open) return;
+    if (await lookupSettled(db, { scheduledServiceId, serviceLine })) await clearMissedDeductionBells(db, { scheduledServiceId });
+  } catch (err) {
+    logger.warn(`[supplies-consumption] lookup-bell settlement check failed for visit ${scheduledServiceId}: ${err.message}`);
+  }
 }
 
 module.exports = { consumeCompletionSupplies, appliesToLine, COMPLETION_CONSUMABLE_SOURCE: SOURCE, INSPECTION_SERVICE_RE };

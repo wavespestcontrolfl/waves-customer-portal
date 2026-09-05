@@ -31,6 +31,7 @@ process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
 const path = require('path');
 const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
 const { auditVendorOrder } = require(path.join(__dirname, '..', '..', 'server', 'services', 'audit-log'));
+const { RECEIVED_SETTLES_SQL } = require(path.join(__dirname, '..', '..', 'server', 'services', 'procurement', 'order-dispatch'));
 
 function arg(name) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -55,14 +56,17 @@ const parseEvidence = (raw) => (typeof raw === 'string' ? (() => { try { return 
 // an ET month boundary still needs its ledger id here (Codex r12 P2). A row
 // already revoked (evidence.revokedAt) is reconciled — its request is
 // cancelled, not received — and stays off the list (Codex r23 P2); a late
-// placement strips the marker and puts it back.
+// placement strips the marker and puts it back. A received request settles
+// its row unless the order landed after that receipt (evidence
+// .landedAfterReceive): that one is listed, it is what the operator must
+// reconcile (hook r27 P1).
 async function listDispatched() {
   const rows = await db('vendor_orders as vo')
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .leftJoin('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
     .whereRaw("(vo.status IN ('placing', 'placed') OR (vo.status = 'needs_review' AND vo.placed_at IS NOT NULL))")
-    .whereNot('prr.status', 'received')
+    .whereRaw(RECEIVED_SETTLES_SQL)
     .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
     .orderBy('vo.created_at', 'desc')
     .select('vo.id', 'vo.status', 'vo.amount_cents', 'vo.external_order_number', 'vo.placed_at', 'v.name as vendor', 'pc.name as product', 'prr.status as request_status');
@@ -110,7 +114,11 @@ function assertRevocableLocked(locked, row) {
 // ledger is marked: a request received in between means the stock landed,
 // so there is nothing to revoke and a revokedAt marker would falsely audit
 // a vendor cancellation (Codex r18 P2). Throws the reason.
-function assertRequestInFlight(req) {
+// Exception: a received request whose automatic order landed AFTER that
+// receipt (ledger evidence.landedAfterReceive) — the order is still out, so
+// it is revocable; the request stays received (Codex r27 P1).
+function assertRequestInFlight(req, lockedEvidence) {
+  if (req?.status === 'received' && lockedEvidence.landedAfterReceive) return;
   if (!req || !new Set(['open', 'ordered']).has(req.status)) throw new Error(`restock request is ${req?.status || 'missing'} — ${req?.status === 'received' ? 'the stock was received; nothing to revoke' : 'not an order in flight'}`);
 }
 
@@ -125,7 +133,7 @@ async function revoke(row) {
     const locked = await trx('vendor_orders').where({ id: row.id }).forUpdate().first('status', 'placed_at', 'evidence', 'external_order_number', 'amount_cents', 'updated_at');
     assertRevocableLocked(locked, row);
     const req = await trx('product_restock_requests').where({ id: row.restock_request_id }).forUpdate().first('status', 'metadata');
-    assertRequestInFlight(req);
+    assertRequestInFlight(req, parseEvidence(locked.evidence));
     const revokedAt = new Date().toISOString();
     // The row's reconciliation bell ("cancel with the vendor or record the
     // revoke") is now obsolete: retire the notification and strip the
@@ -133,13 +141,14 @@ async function revoke(row) {
     await trx('vendor_orders').where({ id: row.id }).update({
       status: 'needs_review',
       error: `revoked: operator revoke ${revokedAt} (was ${locked.status})`.slice(0, 400),
-      evidence: trx.raw("(COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt') || ?::jsonb", [JSON.stringify({ revokedAt })]),
+      evidence: trx.raw("(COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt' - 'landedAfterReceive') || ?::jsonb", [JSON.stringify({ revokedAt })]),
       updated_at: new Date(),
     });
     await trx('notifications').whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${row.id}`, `auto-order:${row.id}:%`]).whereNull('read_at').update({ read_at: new Date() });
     // Cancelled, not reopened (pre-push P1): the next sweep raises a fresh
     // request the dispatcher can claim; the office can also order by hand.
-    await trx('product_restock_requests').where({ id: row.restock_request_id }).update({
+    // A received request stays received — its stock was counted.
+    if (req.status !== 'received') await trx('product_restock_requests').where({ id: row.restock_request_id }).update({
       status: 'cancelled',
       closed_at: new Date(),
       metadata: JSON.stringify({ ...parseEvidence(req.metadata), autoOrderCancelled: 'revoked_vendor_order', autoOrderCancelledAt: revokedAt, revokedVendorOrderId: row.id }),

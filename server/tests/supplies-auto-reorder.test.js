@@ -58,7 +58,10 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 
-jest.mock('../services/procurement/order-dispatch', () => ({ canAutoOrder: jest.fn(async ({ vendorId }) => mockState.autoOrder === true && (!mockState.autoOrderVendor || vendorId === mockState.autoOrderVendor)) }));
+jest.mock('../services/procurement/order-dispatch', () => ({
+  canAutoOrder: jest.fn(async ({ vendorId }) => mockState.autoOrder === true && (!mockState.autoOrderVendor || vendorId === mockState.autoOrderVendor)),
+  findLiveAutoOrder: jest.fn(async () => mockState.liveAutoOrder || null), // the product's unreconciled automatic order
+}));
 
 const { runSuppliesAutoReorderSweep, sweepFailureError } = require('../services/procurement/auto-reorder');
 
@@ -300,6 +303,20 @@ test('an open auto request still re-rings when the product\'s reorder quantity w
   expect(r.unconfigured).toHaveLength(0);
   expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
   expect(notify).toHaveBeenCalledTimes(1);
+});
+
+test('an open auto request with an automatic order already OUT (ambiguous submit / stale recovery park) is NOT re-belled "order manually" when the dispatcher no longer orders — the ledger bell owns it (hook r27 P0)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Sticker Mule', metadata: { vendorId: 'vend-sm' } };
+  mockState.autoOrder = false; // gate closed since the order went out
+  mockState.liveAutoOrder = { status: 'needs_review', external_order_number: null, vendor_name: 'Sticker Mule' };
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(r.renotified).toEqual([]);
+    expect(r.deduped).toEqual([expect.objectContaining({ requestId: 'req-auto' }), expect.objectContaining({ requestId: 'req-auto', reason: 'auto_order_live' })]);
+    expect(notify).not.toHaveBeenCalled();
+  } finally { mockState.liveAutoOrder = null; }
 });
 
 test('an open auto request is found and re-belled even after the product\'s low-stock threshold was cleared (Codex r15 P2)', async () => {
