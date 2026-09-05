@@ -79,6 +79,12 @@ describe('adapters project onto the canonical shape', () => {
     expect(approvalFailed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', errorCode: 'approval_failed', errorMessage: 'astro PR open failed: 502', detail: 'astro PR open failed: 502', finishedAt: ago(1e3).toISOString() });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', trust_build_approved_at: ago(500) })).toMatchObject({ lifecycle: 'terminal', disposition: 'applied', finishedAt: ago(500).toISOString() });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'skipped_gate_fail', quality_gate_result: { ok: false } })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'instruction' });
+    // an in-app approval flips a parked draft to publishing_* in place (completed_at stays, only updated_at moves): running, active from that claim, kept live by the list predicate however old
+    const { runStatus } = require('../services/agent-activity');
+    const publishingRow = { ...base, outcome: 'publishing_named_competitor', completed_at: ago(3 * 864e5), claimed_at: ago(3 * 864e5), updated_at: ago(2e3) };
+    expect(runStatus(publishingRow)).toBe('running');
+    expect(autonomousRuns.fromRow(publishingRow)).toMatchObject({ lifecycle: 'running', startedAt: ago(2e3).toISOString(), lastHeartbeatAt: ago(2e3).toISOString(), finishedAt: null });
+    expect(autonomousRuns.PUBLISHING).toBe("outcome LIKE 'publishing%'");
     const running = autonomousRuns.fromRow({ ...base, outcome: null, shadow_mode: true });
     expect(running.lifecycle).toBe('running');
     expect(running.subtitle).toBe('new post · blog · shadow');

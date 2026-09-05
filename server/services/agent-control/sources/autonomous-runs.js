@@ -14,8 +14,15 @@ const LANE = 'blog_draft';
 // is executing its decision, that decision's time is the run's start.
 const NEWEST_APPROVAL = 'FROM content_email_approvals a WHERE a.run_id = autonomous_runs.id ORDER BY a.created_at DESC LIMIT 1';
 const EXECUTING_AT = `(SELECT CASE WHEN a.status = 'executing' THEN a.decided_at END ${NEWEST_APPROVAL})`;
+// An in-app approval of a parked draft flips its outcome to publishing_*
+// IN PLACE (autonomous-runner: outcome + updated_at only; completed_at and
+// claimed_at stay) — agent-activity's runStatus reads publishing* as
+// running, and so does this adapter: live however old, active again from
+// that claim (updated_at is the only stamp it writes).
+const PUBLISHING = "outcome LIKE 'publishing%'";
+const PUBLISHING_RE = /^publishing/;
 // Sort / page key = the run's startedAt in fromRow (spanFor), at ms precision.
-const START = () => db.raw(`date_trunc('milliseconds', COALESCE(${EXECUTING_AT}, claimed_at, created_at))`);
+const START = () => db.raw(`date_trunc('milliseconds', COALESCE(${EXECUTING_AT}, CASE WHEN ${PUBLISHING} THEN updated_at END, claimed_at, created_at))`);
 const ID = 'id';
 const COLUMNS = () => [
   'id', 'action_type', 'page_type', 'shadow_mode', 'outcome', 'skip_reason', 'failure_message',
@@ -100,6 +107,7 @@ function decisionFor(run, status) {
 // owner replies) and with no finish yet (Codex r1).
 function spanFor(run, decided, decidedAt) {
   if (decided === DECIDED.executing) return { startedAt: decidedAt, finishedAt: null, lastHeartbeatAt: decidedAt };
+  if (PUBLISHING_RE.test(run.outcome || '')) return { startedAt: run.updated_at || run.claimed_at || run.created_at, finishedAt: null, lastHeartbeatAt: run.updated_at };
   return {
     startedAt: run.claimed_at || run.created_at,
     finishedAt: decided ? decidedAt || run.completed_at : run.completed_at,
@@ -153,6 +161,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       .where((q) => {
         q.whereNull('completed_at');
         q.orWhereRaw(PARKED);
+        q.orWhereRaw(PUBLISHING);
         q.orWhere(START(), '>=', from);
       }), { source: SOURCE, idColumn: 'autonomous_runs.id' }), { start: START(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
@@ -172,4 +181,4 @@ async function get(id) {
   }
 }
 
-module.exports = { SOURCE, LANE, list, get, fromRow };
+module.exports = { SOURCE, LANE, PUBLISHING, list, get, fromRow };
