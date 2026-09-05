@@ -1956,6 +1956,7 @@ async function renderRelayReconnect(req, callSid, failure, genMs) {
     action,
     ...(spanish ? { language: SPANISH_LANGUAGE, ...(spanishVoice ? { voice: spanishVoice } : {}) } : {}),
     welcomeGreeting: recovery.resumeGreeting(language),
+    tokenNow: genMs, // a concurrent reissue makes this token stale at the atomic claim fence
     ...relayOpts,
     parameters: { resumed: '1', ...(spanish ? { lang: 'es' } : {}) },
   });
