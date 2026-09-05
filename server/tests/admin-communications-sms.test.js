@@ -746,6 +746,16 @@ describe('admin communications SMS route', () => {
         });
       });
 
+      test('an AMBIGUOUS provider outcome (retryable / deferred) keeps the claim — the provider may still hold the text (GH Codex #3893 r12 P1)', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, retryable: true, code: 'PROVIDER_TIMEOUT', reason: 'timed out' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY });
+          expect(res.status).toBe(422);
+          expect(claimSpy).toHaveBeenCalledWith(REPORTS);
+          expect(releaseSpy).not.toHaveBeenCalled();
+        });
+      });
+
       test('a blocked send hands the claim back; a lost claim (the flow is sending) refuses before the provider', async () => {
         sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SMS_OPTED_OUT', reason: 'opted out' });
         await withServer(async (baseUrl) => {

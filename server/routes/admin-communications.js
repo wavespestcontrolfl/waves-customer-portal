@@ -324,6 +324,15 @@ router.post('/sms', async (req, res, next) => {
       contractActivations = null;
       logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — prepared contract links stay activated (${ids})`);
     }
+    // The project delivery claim stays too (GH Codex #3893 r12 P1): the
+    // provider may still hold the text, and restoring the row's state would
+    // let a resend start inside that window. The send flow's own stale-claim
+    // takeover (ten minutes) recovers the row, as after a crashed send.
+    if (projectClaim) {
+      const claim = projectClaim;
+      projectClaim = null;
+      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — keeping the project report delivery claim for projects ${claim.projects.map((p) => p.id).join(', ')}`);
+    }
     if (cardClaim) {
       const claim = cardClaim;
       cardClaim = null;
@@ -794,9 +803,6 @@ router.post('/sms', async (req, res, next) => {
     // success) or no send happened (on failure). Clear it so it can't linger as
     // a stuck 'sending' row blocking auto-sends to the thread.
     await clearManualReservation();
-    // The provider has answered either way — the project delivery claim has
-    // covered its window; the row's delivery state is restored.
-    await releaseProjectClaim();
     if (result.blocked || result.sent === false) {
       if (!result.blocked && (result.retryable || result.deferred)) {
         await holdBearerStateAmbiguous(result);
@@ -805,6 +811,9 @@ router.post('/sms', async (req, res, next) => {
         await releaseCardClaim();
         await restoreContractLinks();
       }
+      // Definitive no-send: the project delivery claim is handed back (an
+      // ambiguous outcome kept it above — this is a no-op then).
+      await releaseProjectClaim();
       if (claimedReviewRequestId) {
         await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
@@ -899,6 +908,9 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] card request claim finalize failed (text already sent): ${markErr.message}`);
       }
     }
+    // The text left — the project delivery claim has covered its window; the
+    // row's delivery state is restored (the text is a re-share, not a delivery).
+    await releaseProjectClaim();
     if (claimedReviewRequestId) {
       try {
         reviewEmailOutcome = await settleInlineReviewAfterSend({
@@ -1054,8 +1066,8 @@ router.post('/sms', async (req, res, next) => {
       && (err.providerOutcome.retryable || err.providerOutcome.deferred)) {
       await holdBearerStateAmbiguous({ code: err.providerOutcome.providerErrorCode || 'PROVIDER_FAILURE' });
     }
-    // The project delivery claim is handed back on a throw too — accepted
-    // or not, the provider window it fenced is over.
+    // The project delivery claim is handed back on a throw too — accepted,
+    // or definitively not sent; an ambiguous outcome kept it above.
     await releaseProjectClaim();
     // Same convention for the card request claim: accepted → mark, else release.
     if (cardClaim) {
