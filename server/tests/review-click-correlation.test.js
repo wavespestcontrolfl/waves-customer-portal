@@ -364,6 +364,10 @@ describe('reviewerSurnames', () => {
     expect(reviewerSurnames('Dana B.')).toEqual(['dana b']);
     // Later generational numerals (GH codex r9 P1).
     expect(reviewerSurnames('John Smith VI')).toEqual(['john smith', 'smith']);
+    // Roman I is a numeral suffix too, behind the same two-token guard (#3875 r5 P2).
+    expect(reviewerSurnames('John Smith I')).toEqual(['john smith', 'smith']);
+    expect(reviewerSurnames('John Smith, I')).toEqual(['john smith', 'smith']);
+    expect(reviewerSurnames('Alex I')).toEqual(['alex i']);
     expect(reviewerSurnames('John Smith X')).toEqual(['john smith', 'smith']);
     // A comma fixes last-name-first order (GH codex r9 P1): the surname is
     // the head, a one-token head included; a suffix-only tail is normal order.

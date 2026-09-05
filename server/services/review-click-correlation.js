@@ -72,7 +72,7 @@ function normalizeName(value) {
  * generational numerals run through X, so "John Smith VI" offers "smith",
  * never "vi" (GH codex r9 P1) — but a numeral is a suffix only behind at
  * least two name tokens: "Alex Vi" is a person surnamed Vi (GH codex #3875
- * r1 P2).
+ * r1 P2); the set starts at I ("John Smith I"; GH codex #3875 r5 P2).
  * A comma fixes the order (GH codex r9 P1): "Smith, John" is last-name-
  * first, so the surname is the part BEFORE the comma — the WHOLE head and
  * only that ("De La Cruz, Maria" offers "de la cruz", never "cruz": the
@@ -87,7 +87,7 @@ function normalizeName(value) {
  * a surname match (GH codex #3875 r2 P1).
  */
 const NAME_SUFFIXES = new Set(['jr', 'sr', 'md', 'dds', 'dvm', 'phd', 'esq', 'cpa']);
-const NUMERAL_SUFFIXES = new Set(['ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x']);
+const NUMERAL_SUFFIXES = new Set(['i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x']);
 
 // Normalized name tokens with the trailing suffixes dropped. `preceding` =
 // name tokens that stand before this segment ("John Smith, III": the tail
