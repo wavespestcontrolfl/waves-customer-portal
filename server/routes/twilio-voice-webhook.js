@@ -778,10 +778,12 @@ async function appendRelayTransfer(req, twiml, callSid) {
     // and, in the same statement, the ai_transferred outcome when the row
     // is not already terminal (the tool normally wrote it; this covers a
     // packet write that never landed). 0 rows = already rung ⇒ a bare
-    // terminal response. Best-effort and BOUNDED: a stalled pool is exactly
-    // the failure the fail-open transfer tolerates, so the claim may never
-    // hold the TwiML past Twilio's webhook timeout (codex r1 P1) — on
-    // timeout the ring proceeds (fail open, logged).
+    // terminal response. BOUNDED: a stalled pool may never hold the TwiML
+    // past Twilio's webhook timeout (codex r1 P1) — and a claim that did not
+    // CONFIRM (timeout / error) falls to voicemail, never to a ring that a
+    // retry could duplicate (hook P1): the one-ring guarantee needs a
+    // durable claim, and voicemail is the non-duplicating fallback every
+    // other relay failure already takes.
     const { RELAY_TERMINAL_OUTCOMES } = require('../services/voice-agent/relay-protocol');
     const claimed = await withDeadline(
       db('call_log').where('twilio_call_sid', callSid)
@@ -799,7 +801,11 @@ async function appendRelayTransfer(req, twiml, callSid) {
       logger.warn(`[relay-complete] transfer ring already claimed for ${maskSid(callSid)} — retry gets a bare response`);
       return;
     }
-    if (claimed === 'timeout') logger.warn(`[relay-complete] transfer ring claim timed out for ${maskSid(callSid)} — ringing anyway (fail open)`);
+    if (!(Number(claimed) > 0)) {
+      logger.error(`[relay-complete] transfer ring claim ${claimed} for ${maskSid(callSid)} — voicemail instead of an unconfirmed ring`);
+      appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
+      return;
+    }
   }
   const forwardNumbers = getFallbackForwardNumbers();
   if (forwardNumbers.length === 0) {

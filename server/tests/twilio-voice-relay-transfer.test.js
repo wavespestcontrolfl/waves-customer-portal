@@ -84,7 +84,7 @@ describe('/relay-complete', () => {
     expect(res.body).toMatch(/^<\?xml[^>]*\?><Response\/>$/);
   });
 
-  test('a HUNG ring claim never holds the transfer TwiML (P1) — the Dial renders within the stamp deadline (fail open)', async () => {
+  test('a HUNG ring claim never holds the TwiML past the deadline (P1) — and an UNCONFIRMED claim falls to voicemail, never a ring a retry could duplicate', async () => {
     jest.useFakeTimers();
     const { builder } = primeDb();
     builder.update = jest.fn(() => new Promise(() => {})); // pool stalled
@@ -93,7 +93,15 @@ describe('/relay-complete', () => {
     await jest.advanceTimersByTimeAsync(2000);
     await p;
     jest.useRealTimers();
-    expect(res.body).toContain('<Dial record="record-from-answer-dual"');
+    expect(res.body).toContain('<Record');
+    expect(res.body).not.toContain('<Dial');
+    // A DB error on the claim takes the same non-duplicating path.
+    const { builder: b2 } = primeDb();
+    b2.update = jest.fn(async () => { throw new Error('pool down'); });
+    const res2 = mockRes();
+    await handlerFor('/relay-complete')({ body: { CallSid: 'CA-err', HandoffData: TRANSFER }, query: {} }, res2);
+    expect(res2.body).toContain('<Record');
+    expect(res2.body).not.toContain('<Dial');
   });
 
   test('transfer with no staff numbers configured ⇒ voicemail (never a stranded caller)', async () => {
