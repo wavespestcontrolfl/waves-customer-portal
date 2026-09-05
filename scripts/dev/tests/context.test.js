@@ -80,6 +80,7 @@ test('runner identifies its checkout, rejects foreign stop requests, and release
   fs.copyFileSync(path.join(sourceRoot, '.nvmrc'), path.join(root, '.nvmrc'));
   fs.mkdirSync(path.join(root, 'client'));
   fs.copyFileSync(path.join(sourceRoot, 'client/vite.config.js'), path.join(root, 'client/vite.config.js'));
+  fs.cpSync(path.join(sourceRoot, 'shared'), path.join(root, 'shared'), { recursive: true });
   fs.writeFileSync(path.join(root, 'client/preview-estimate.html'), '<!doctype html><title>Runner fixture</title>');
   // This disposable test fixture only reads the installed dependencies.
   fs.symlinkSync(path.join(sourceRoot, 'node_modules'), path.join(root, 'node_modules'), 'dir');
