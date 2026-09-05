@@ -101,8 +101,9 @@ function resumeGreeting(language) {
 }
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, promises = [], holdOpen = false, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [] }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [] }) {
   return {
+    slot_refs: slotRefs,
     lookup_refs: lookupRefs,
     lookup_results: lookupResults,
     // Customer-book lookups consumed on this leg — the per-call anti-fishing
@@ -306,6 +307,12 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         lookupResults: [...new Set(legs.flatMap((seg) => Array.isArray(seg.lookup_results) ? seg.lookup_results.filter((result) => typeof result === 'string') : []))],
         lookupRefs: legs.flatMap((seg) => Array.isArray(seg.lookup_refs) ? seg.lookup_refs : [])
           .filter((entry) => Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' && typeof entry[1] === 'string'),
+        // Later offers carry the context used for the commit-time slot recheck.
+        // Old segments without the registry remain readable.
+        slotRefs: [...new Map([...legs].sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0))
+          .flatMap((seg) => Array.isArray(seg.slot_refs) ? seg.slot_refs : [])
+          .filter((entry) => Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string'
+            && typeof entry[1]?.date === 'string' && Number.isFinite(entry[1]?.startMinutes)))],
         // The earliest leg's start = the call's start (null when no leg recorded one).
         startedAtMs: legs.map((seg) => Date.parse(seg.started_at || '')).filter((ms) => Number.isFinite(ms) && ms > 0).reduce((min, ms) => (min === null || ms < min ? ms : min), null),
         // The LATEST leg's hold (a later complete capture clears it) and the

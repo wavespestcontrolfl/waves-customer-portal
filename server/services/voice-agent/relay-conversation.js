@@ -1438,7 +1438,9 @@ class RelayConversation {
           this._slotRefs.set(existing, context);
           return existing;
         }
-        const ref = `S${this._slotRefs.size + 1}`;
+        // Match customer refs: a late prior segment cannot alias this leg's offer.
+        const prefix = require('./relay-recovery').isRecoveryGateOn() ? `${this.sessionGeneration || 0}-` : '';
+        const ref = `S${prefix}${this._slotRefs.size + 1}`;
         this._slotRefs.set(ref, context);
         this._slotRefsByKey.set(key, ref);
         return ref;
@@ -1616,7 +1618,7 @@ class RelayConversation {
    * promise THIS leg already made for the same kind is kept.
    */
   _applyResumeState(state) {
-    this._resume = state || null;
+    this._resume = state; // loadResumeState returns a verified state or null
     if (!state) return;
     this.leadCaptured = [this.leadCaptured, state.relayLeadId, state.leadCaptured, state.reserviceFiled, state.noLeadCreated].some(Boolean);
     // The earlier leg's lead is THIS call's lead for the booking card too
@@ -1637,6 +1639,12 @@ class RelayConversation {
       this._lookupRefs.set(ref, customerId);
       if (!this._lookupRefsByCustomer.has(customerId)) this._lookupRefsByCustomer.set(customerId, ref);
     }
+    // Keep this leg's newer search context and reverse-key choice on reload.
+    this._slotRefs = new Map([...(state.slotRefs || []), ...this._slotRefs]);
+    this._slotRefsByKey = new Map([
+      ...[...this._slotRefs].map(([ref, slot]) => [`${slot.date}@${slot.startMinutes}`, ref]),
+      ...this._slotRefsByKey,
+    ]);
     // A re-service already FILED on an earlier leg is this call's artifact:
     // no lead is owed (the floor stays down) and the close reports it filed.
     // A capture that deliberately created NO lead (an existing lifecycle
@@ -2097,6 +2105,7 @@ class RelayConversation {
           lookupsUsed: this._priorLookupsUsed + this._lookupsUsed,
           lookupRefs: [...this._lookupRefs.entries()],
           lookupResults: this._lookupResults,
+          slotRefs: [...this._slotRefs],
         });
         const appended = await withTimeout(
           db('call_log').where('twilio_call_sid', this.callSid)
