@@ -10,6 +10,9 @@
  * date went stale after a reschedule). {prep_label} names the guide,
  * {prep_url} is the page link; the renderer nulls on an unresolved
  * placeholder, so the sender only picks this template when a token exists.
+ * Visit-neutral wording: the same text carries prep.rodent for a "Rodent
+ * Inspection Service" (that guide covers inspections), so it never promises
+ * a treatment (GH Codex #3856 r26 P2).
  *
  * Seed-only, onConflict-ignore (matches 20260711400000): an admin edit to
  * the body is preserved on redeploy.
@@ -19,7 +22,7 @@ const NEW_TEMPLATES = [
     template_key: 'auto_prep_guide_link',
     name: 'Prep Guide Link',
     category: 'onboarding',
-    body: "Hello {first_name}! Your {prep_label} prep guide is here: {prep_url}\n\nPlease read it before your visit so the treatment works as well as it can.\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
+    body: "Hello {first_name}! Your {prep_label} prep guide is here: {prep_url}\n\nPlease read it before your visit so everything goes as smoothly as possible.\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
     description: 'Texts the tokened prep guide page for any treatment type. Sent by the Communications "Send prep guide" action on the Text and Both channels when the customer has an upcoming visit of that type.',
     variables: JSON.stringify(['first_name', 'prep_label', 'prep_url']),
     is_active: true,

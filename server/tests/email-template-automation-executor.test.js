@@ -1296,6 +1296,59 @@ describe('email template automation executor', () => {
     })).results[0].run.status).toBe('retry_scheduled');
   });
 
+  test('a same-guide page already stamped delivered (a manual or composer send landed after the run was queued) skips the run as already delivered — never a second send (GH Codex #3856 r26 P1)', async () => {
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({}),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      payload: JSON.stringify({ scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' }),
+    });
+    const skippedRun = { ...queuedRun, status: 'skipped', exit_reason: 'prep guide already delivered for this visit' };
+    const skipQuery = chain({ returning: [skippedRun] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        skipQuery,
+      ],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'e1' }] }), chain({ returning: [{ id: 'e2' }] }), chain({ returning: [{ id: 'e3' }] })],
+      // Live read; the fresh claim matches nothing (already keyed); the
+      // same-key read finds OUR key — stamped delivered.
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [] }),
+        chain({ first: { id: 'svc-1', prep_sent_at: new Date() } }),
+      ],
+    });
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: { scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+    expect(result.results[0].run.status).toBe('skipped');
+    expect(skipQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped', exit_reason: 'prep guide already delivered for this visit' }));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('a prep run that finally FAILS before dispatch hands its fresh page claim back; a post-dispatch throw keeps it (pre-push Codex P1 on e493a0711)', async () => {
     const prepAutomation = automation({
       id: 'automation-prep',

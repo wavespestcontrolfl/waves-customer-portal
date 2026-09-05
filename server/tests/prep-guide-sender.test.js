@@ -679,6 +679,14 @@ describe('sendPrepToCustomer', () => {
     expect(excluded).toBe(true);
   });
 
+  test('the interior-pest visit match excludes a "Pest Inspection Service" — a diagnostic walkthrough gets no treatment prep (GH Codex #3856 r26 P1)', async () => {
+    upcomingVisitRow = { ...VISIT, service_type: 'Pest Inspection Service' };
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'interior_pest', channel: 'email' });
+    const q = scheduledQueries.find((sq) => sq.whereRaw.mock.calls.some(([sql]) => sql.includes('LIKE ?')));
+    const patterns = q.whereRaw.mock.calls.filter(([sql]) => sql.startsWith('LOWER(service_type) NOT LIKE')).map(([, b]) => b[0]);
+    expect(patterns).toEqual(expect.arrayContaining(['%inspect%', '%assess%']));
+  });
+
   test('the termite visit match excludes inspection, monitoring and WDO visits (treatment prep only)', async () => {
     upcomingVisitRow = VISIT;
     await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'email' });

@@ -1048,7 +1048,12 @@ function isPrepRun(run) {
 // other guide. A read-then-send would race a manual claim landing in
 // between (pre-push Codex P1 on 235f8e5a5); the post-send stamp
 // (markServicePrepSent) then never retargets an owned page (GH Codex #3856
-// r19 P0). Returns { owned, fresh }; a non-prep run owns nothing fresh.
+// r19 P0). A same-guide page already STAMPED delivered (prep_sent_at — the
+// manual sender's or composer's text / email landed after this run was
+// queued; run creation takes no prep-send lock) is not sent again: the run
+// is skipped as already delivered (GH Codex #3856 r26 P1).
+// Returns { owned, fresh } or { owned: false, delivered: true }; a non-prep
+// run owns nothing fresh.
 async function claimPrepPageForRun(run) {
   if (!isPrepRun(run)) return { owned: true, fresh: false };
   const fresh = await db('scheduled_services')
@@ -1059,8 +1064,10 @@ async function claimPrepPageForRun(run) {
   if (fresh.length > 0) return { owned: true, fresh: true };
   const owned = await db('scheduled_services')
     .where({ id: run.entity_id, prep_template_key: run.template_key })
-    .first('id');
-  return { owned: !!owned, fresh: false };
+    .first('id', 'prep_sent_at');
+  if (!owned) return { owned: false, fresh: false };
+  if (owned.prep_sent_at) return { owned: false, fresh: false, delivered: true };
+  return { owned: true, fresh: false };
 }
 
 // A FRESH claim is provisional until the guide delivers. Did THIS attempt
@@ -1136,7 +1143,7 @@ async function withPrepSendLock(run, fn) {
 // send failure for executeRun's retry / fail decision.
 async function dispatchRun(run, automation, executionPayload) {
   const prepClaim = await claimPrepPageForRun(run);
-  if (!prepClaim.owned) return { skipReason: 'prep page owned by another guide' };
+  if (!prepClaim.owned) return { skipReason: prepClaim.delivered ? 'prep guide already delivered for this visit' : 'prep page owned by another guide' };
   let prepDispatched = false;
   try {
     const result = await EmailTemplates.sendTemplate({

@@ -74,7 +74,12 @@ const PREP_CONFIG = Object.freeze({
     // plan ("Pest & Rodent Control") is pest-primary — the same split
     // waveguard-existing-services.js isRodentLedText draws (GH Codex #3856
     // r20 P2).
-    excludeKeywords: ['lawn pest', { keyword: 'rodent', unless: 'pest%rodent' }],
+    // prep.interior_pest describes a scheduled interior treatment (clear
+    // the treatment areas, treated surfaces) — the catalog's "Pest
+    // Inspection Service" (20260507000002) is a diagnostic walkthrough and
+    // gets none of it, like the lawn and termite matchers (GH Codex #3856
+    // r26 P1). prep.rodent covers inspections itself, so rodent stays.
+    excludeKeywords: ['lawn pest', { keyword: 'rodent', unless: 'pest%rodent' }, 'inspect', 'assess'],
     emailTemplateKey: 'prep.interior_pest',
     smsStandaloneKey: null,
   },
