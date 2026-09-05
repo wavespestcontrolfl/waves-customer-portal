@@ -207,7 +207,7 @@ describe('siteone internals', () => {
 
   test('every selector lives in the frozen SELECTORS map', () => {
     expect(Object.isFrozen(SELECTORS)).toBe(true);
-    for (const k of ['loginUser', 'loginPass', 'searchInput', 'qtyInput', 'addToCart', 'cartTotal', 'cardField', 'mfaField', 'billToAccount', 'placeOrder', 'orderNumber']) expect(typeof SELECTORS[k]).toBe('string');
+    for (const k of ['loginUser', 'loginPass', 'searchInput', 'qtyInput', 'addToCart', 'cartTotal', 'cardField', 'mfaField', 'billToAccount', 'checkoutLine', 'placeOrder', 'orderNumber']) expect(typeof SELECTORS[k]).toBe('string');
   });
 });
 
@@ -270,6 +270,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       const hiddenCopy = (target) => el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenControlClicked = (st.hiddenControlClicked || 0) + 1; }, onFill: () => { st.hiddenControlClicked = (st.hiddenControlClicked || 0) + 1; } }) : target) });
       if (sel === S.qtyInput) return st.productControlsHiddenFirst ? hiddenCopy(qtyInput) : qtyInput;
       if (sel === S.addToCart) return st.productControlsHiddenFirst ? hiddenCopy(addToCart) : addToCart;
+      // The checkout order summary mirrors the cart unless checkoutLines overrides it, or checkoutLinesAtClick once the Place Order stage has begun (r7 P1)
+      if (sel === S.checkoutLine) { const ls = st.checkoutLines || (st.checkoutLinesAtClick && st.atClick ? st.checkoutLinesAtClick : st.cart); return el({ count: ls.length, nth: (i) => line(ls[i]) }); }
       // cartLinesResponsive: every cart line is rendered twice — a hidden mobile copy after the visible row
       if (sel === S.cartLine) return st.cartLinesResponsive
         ? el({ count: st.cart.length * 2, nth: (i) => (i % 2 ? el({ count: 1, visible: false }) : line(st.cart[i / 2])) })
@@ -339,6 +341,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // orderNumberHiddenFirst: a hidden stale confirmation node precedes the visible current one
       // Before the click there is no confirmation node — unless orderNumberBeforeClick models a pre-existing reference element
       // orderNumberDuringLoop: a reference node appears only once the Place Order stage's re-checks are under way (after the loop's first total read) (r6 P2)
+      // orderNumberBaselineUnreadable: the pre-click node's visibility read throws; orderNumbersBeforeClick: N shown reference nodes before the click (r7 P2)
+      if (sel === S.orderNumber && !st.placeClicked && st.orderNumberBaselineUnreadable) return el({ count: 1, isVisibleThrows: true });
+      if (sel === S.orderNumber && !st.placeClicked && st.orderNumbersBeforeClick) return el({ count: st.orderNumbersBeforeClick.length, nth: (i) => el({ count: 1, visible: true, text: st.orderNumbersBeforeClick[i] }) });
       if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : st.orderNumberDuringLoop && (st.totalReads || 0) > 1 ? el({ count: 1, visible: true, text: st.orderNumberDuringLoop }) : el();
       // orderNumberLate: the confirmation element renders first as "Processing order…" and populates a few polls later
       if (sel === S.orderNumber && st.orderNumberLate) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.confReads <= 3 ? 'Processing order…' : 'Order # SO-778899' }); }
@@ -810,6 +815,42 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ orderNumberDuringLoop: 'Order # SO-556677', orderNumberText: 'Order # SO-556677', checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.placeClicked).toBe(1);
+  });
+
+  test('a checkout order summary that no longer matches [SKU × packages] at the stage refuses checkout_lines_mismatch — dry run included, no click (r7 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ checkoutLines: [{ sku: 'S1-77', qty: 2 }, { sku: 'S1-99', qty: 1 }] });
+    await expect(s1.place(args({ dryRun: true }), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]);
+  });
+
+  test('a quantity SiteOne adjusts once the Place Order stage has begun is caught at the click boundary — refused, no click (r7 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ checkoutLinesAtClick: [{ sku: 'S1-77', qty: 1 }] });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]);
+  });
+
+  test('a separator-formatted account display ("12345-01") matches the configured number digit for digit; a superstring still does not (r7 P2)', async () => {
+    const dashed = { ...creds, accountNumber: '12345-01' };
+    const ok = fakeSiteOne({ accountText: 'Account # 12345-01' });
+    await expect(s1.place(args({ credentials: dashed, dryRun: true }), ok.deps)).resolves.toMatchObject({ dryRun: true });
+    const bad = fakeSiteOne({ accountText: 'Account # 912345-01' });
+    await expect(s1.place(args({ credentials: dashed }), bad.deps)).rejects.toMatchObject({ refuse: 'account_mismatch' });
+    expect(bad.st.placeClicked || 0).toBe(0);
+  });
+
+  test('two shown reference nodes before the click are BOTH the baseline: one left standing after a rejected click is ambiguous, not placed (r7 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumbersBeforeClick: ['Order # SO-111111', 'PO reference 55501'], orderNumberText: 'PO reference 55501', checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+    expect(st.placeClicked).toBe(1);
+  });
+
+  test('a pre-click confirmation baseline that cannot be read refuses confirmation_baseline_unreadable BEFORE the click (r7 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberBaselineUnreadable: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'confirmation_baseline_unreadable' });
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]);
   });
 
   test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {
