@@ -464,7 +464,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     }, {
       scheduled_services: [{ id: '00000000-0000-0000-0000-000000000001', customer_id: 'fixture-customer', status: 'en_route', scheduled_date: '2099-01-02' }],
       customers: [{ id: 'fixture-customer', address_line1: '100 Test Street' }],
-      customer_properties: [{ id: '00000000-0000-0000-0000-000000000002', customer_id: 'fixture-customer', active: true, address_line1: '200 Test Street' }],
+      customer_properties: [{ id: '00000000-0000-0000-0000-000000000002', customer_id: 'fixture-customer', active: true, address_line1: '200 Test Street', city: 'Test City', state: 'FL', zip: '34201' }],
     }],
     ['estimate-tools', 'executeEstimateTool', 'create_agent_estimate_draft', {
       leadId: 'lead-1',

@@ -119,3 +119,13 @@ All 37 targeted route/read/address tests, 130 auto-dispatch unit tests, and four
 migrated-PostgreSQL tests passed; the production build passed. The new PostgreSQL
 case proves that a destination changed after scoring is rejected. This is still
 not a simultaneous multi-session race test.
+
+Latest prerequisite reconciliation: incorporated `0634210e1`, including complete
+address validation and preservation of completed template locations through future
+address overrides. The IB visit scope still has no parent/default update. Its
+preview now names route-position clearing and validates the same required address
+components as the shared commit. Adopted the prerequisite's equivalent destination
+freshness implementation rather than keeping two field sets. All 181 shared
+address/recurrence/price-scope/IB tests and all four PostgreSQL tests passed.
+The shared financial-stamp module changes address inheritance only; no pricing
+values or payment behavior were changed or exercised against production.

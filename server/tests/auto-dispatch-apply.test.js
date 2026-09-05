@@ -511,21 +511,21 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
 });
 
 
-test.each(['property_id', 'service_address_line1', 'service_address_line2', 'service_address_city',
-  'service_address_state', 'service_address_zip', 'lat', 'lng'])('refuses a changed destination %s after scoring', async field => {
-  db.mockImplementation(() => readRow({ ...SERVICE, [field]: 'changed' }));
-  await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+const LOCATION = {
+  property_id: 'property-original', service_address_line1: '100 Example Street', service_address_line2: '',
+  service_address_city: 'Example City', service_address_state: 'FL', service_address_zip: '00000', lat: '27.4', lng: '-82.5',
+};
+test.each(Object.keys(LOCATION))('rejects a changed %s before applying a scored move', async (field) => {
+  const scored = { ...SERVICE, ...LOCATION };
+  db.mockImplementation(() => readRow({ ...scored, [field]: field === 'lat' || field === 'lng' ? '28.5' : 'changed' }));
+  await expect(applyAutoDispatchMove(scored, BEST, 'run1', {})).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
   expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
 });
 
-test('pins the scored destination in the rebooker atomic expected-state predicate', async () => {
-  const service = { ...SERVICE, property_id: 'fixture-property', service_address_line1: '100 Test Street', lat: '27.4' };
-  const queue = [readRow(service), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+test('pins the complete location in the atomic rebooker expectation', async () => {
+  const scored = { ...SERVICE, ...LOCATION };
+  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
   db.mockImplementation(() => queue.shift());
-  await applyAutoDispatchMove(service, BEST, 'run1', {});
-  expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject({
-    property_id: service.property_id, service_address_line1: service.service_address_line1,
-    service_address_line2: null, service_address_city: null, service_address_state: null,
-    service_address_zip: null, lat: '27.4', lng: null,
-  });
+  await applyAutoDispatchMove(scored, BEST, 'run1', {});
+  expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject(LOCATION);
 });

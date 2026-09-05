@@ -37,7 +37,7 @@ postgres('Intelligence Bar operational flows on PostgreSQL', () => {
       { id: ids.rental, customer_id: ids.customer, address_line1: '200 Test Street', address_line2: 'Unit 2', city: 'Test City', state: 'FL', zip: '34201', latitude: 27.4, longitude: -82.5 },
     ]);
     await mockDb('service_visits').insert({ id: ids.visit, customer_id: ids.customer, property_id: ids.primary, scheduled_date: today, stop_base_key: `${ids.primary}:${today}`, created_by: 'ib-postgres-fixture' });
-    const base = { customer_id: ids.customer, property_id: ids.primary, scheduled_date: today, service_type: 'Fixture service', window_start: '12:00', window_end: '13:00' };
+    const base = { customer_id: ids.customer, property_id: ids.primary, scheduled_date: today, service_type: 'Fixture service', route_order: 2, window_start: '12:00', window_end: '13:00' };
     await mockDb('scheduled_services').insert({ ...base, id: ids.template, is_recurring: true });
     await mockDb('scheduled_services').insert([
       { ...base, id: ids.stop, status: 'en_route', recurring_parent_id: ids.template, visit_id: ids.visit },
@@ -61,7 +61,7 @@ postgres('Intelligence Bar operational flows on PostgreSQL', () => {
     expect(await confirm(preview)).toMatchObject({ success: true, messages_sent: false });
     const changed = await mockDb('scheduled_services').whereIn('id', [ids.stop, ids.grouped]);
     expect(changed).toHaveLength(2);
-    for (const row of changed) expect(row).toMatchObject({ property_id: ids.rental, service_address_line2: 'Unit 2', status: 'en_route', window_start: '12:00:00' });
+    for (const row of changed) expect(row).toMatchObject({ property_id: ids.rental, service_address_line2: 'Unit 2', status: 'en_route', route_order: null, window_start: '12:00:00' });
     const untouched = await mockDb('scheduled_services').whereIn('id', [ids.template, ids.future]);
     expect(untouched.every(row => row.property_id === ids.primary)).toBe(true);
     expect((await mockDb('service_visits').where({ id: ids.visit }).first()).property_id).toBe(ids.rental);

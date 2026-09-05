@@ -54,6 +54,7 @@ function connection({ rows = [row], visits = [], selected = property } = {}) {
     chain.update = async (patch) => { query.patch = patch; return result.length; };
     return chain;
   });
+  conn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   conn.fn = { now: () => 'now' };
   conn.calls = calls;
   return conn;
@@ -66,7 +67,7 @@ test.each(['pending', 'confirmed', 'en_route', 'on_site', 'completed', 'cancelle
   expect(await applyAppointmentAddress(conn, plan, 'admin-a')).toEqual([row.id]);
   const patch = conn.calls.find((call) => call.table === 'scheduled_services' && call.patch).patch;
   expect(patch).toMatchObject({ property_id: property.id, service_address_line1: property.address_line1,
-    service_address_line2: '', zone: null, lat: null, lng: null, pre_service_brief: null });
+    service_address_line2: '', zone: null, route_order: null, lat: null, lng: null, pre_service_brief: null });
   expect(patch).not.toHaveProperty('status');
   expect(patch).not.toHaveProperty('en_route_at');
   expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ trx: conn, critical: true }));
@@ -117,28 +118,20 @@ test('editing a child includes its template and outstanding siblings, not anothe
 });
 
 
-test('visit scope changes the child and its grouped lines without selecting the recurrence template or siblings', async () => {
-  const template = { ...row, id: 'template', status: 'completed' };
-  const child = { ...row, id: 'child', recurring_parent_id: template.id, visit_id: 'visit-a' };
-  const grouped = { ...child, id: 'grouped', is_recurring: false };
-  const sibling = { ...child, id: 'future', visit_id: null, scheduled_date: '2099-02-01' };
-  const conn = connection({ rows: [template, child, grouped, sibling] });
-  const plan = await planAppointmentAddress(conn, child.id, property.id, 'visit');
-  expect(plan.rows.map(r => r.id)).toEqual(['child', 'grouped']);
-  await applyAppointmentAddress(conn, plan, 'fixture-admin');
-  const changed = conn.calls.find(call => call.table === 'scheduled_services' && call.patch);
-  expect(changed.filters).toContainEqual(['whereIn', 'id', ['child', 'grouped']]);
-});
-
-test('does not expand a historical template to terminal grouped siblings', async () => {
+test('changes future defaults without relocating a historical template or its siblings', async () => {
   const template = { ...row, id: 'template', status: 'completed', visit_id: 'historic' };
   const sibling = { ...template, id: 'historic-sibling', is_recurring: false };
   const child = { ...row, id: 'child', recurring_parent_id: 'template' };
   const conn = connection({ rows: [child, sibling, template], visits: [{ id: 'historic', stop_base_key: 'old:2099-01-01' }] });
   const plan = await planAppointmentAddress(conn, child.id, property.id);
   expect(plan.rows.map((r) => r.id)).toEqual(['child', 'template']);
-  await expect(applyAppointmentAddress(conn, plan, 'admin-a')).rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED' });
-  expect(conn.calls.some((call) => call.patch)).toBe(false);
+  await applyAppointmentAddress(conn, plan, 'admin-a');
+  const addressWrite = conn.calls.find((call) => call.patch?.service_address_line1);
+  expect(addressWrite.filters).toContainEqual(['whereIn', 'id', ['child']]);
+  const defaultWrite = conn.calls.find((call) => call.patch?.recurring_template_overrides);
+  expect(defaultWrite.filters).toContainEqual(['where', { id: 'template', customer_id: row.customer_id }]);
+  expect(JSON.parse(defaultWrite.patch.recurring_template_overrides.bindings[0]).appointment_address.property_id).toBe(property.id);
+  expect(frozenVisitVerdict).not.toHaveBeenCalled();
 });
 
 test.each(['issued_link', 'completion_in_flight', 'visit_not_open', 'unreadable'])('refuses frozen visit %s before any write', async (reason) => {
@@ -171,4 +164,39 @@ test('ordinary edit saves pre-acquire tech-day fences before maintenance too', (
   expect(fence).toBeGreaterThan(-1);
   expect(fence).toBeLessThan(maintenance);
   expect(fence).toBeLessThan(conditionalStop);
+});
+
+
+test.each(['address_line1', 'city', 'state', 'zip'])('rejects an incomplete %s before any plan writes', async (field) => {
+  for (const value of [null, undefined, '', '   ']) {
+    const conn = connection({ selected: { ...property, [field]: value } });
+    const plan = await planAppointmentAddress(conn, row.id, property.id);
+    await expect(applyAppointmentAddress(conn, plan, 'admin-a')).rejects.toMatchObject({ statusCode: 422, isOperational: true });
+    expect(conn.calls.some((call) => call.patch)).toBe(false);
+  }
+});
+
+test('a deleted appointment returns an operational not-found error', async () => {
+  await expect(planAppointmentAddress(connection({ rows: [] }), row.id, property.id))
+    .rejects.toMatchObject({ statusCode: 404, isOperational: true });
+});
+
+test('address changes discard the stale route position echoed by the modal', () => {
+  const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const addressBranch = source.slice(source.indexOf('    if (addressPlan) {'));
+  expect(addressBranch.slice(0, 220)).toContain('delete updates.route_order');
+});
+
+
+test('visit scope changes the child and its grouped lines without selecting the recurrence template or siblings', async () => {
+  const template = { ...row, id: 'template', status: 'completed' };
+  const child = { ...row, id: 'child', recurring_parent_id: template.id, visit_id: 'visit-a' };
+  const grouped = { ...child, id: 'grouped', is_recurring: false };
+  const sibling = { ...child, id: 'future', visit_id: null, scheduled_date: '2099-02-01' };
+  const conn = connection({ rows: [template, child, grouped, sibling] });
+  const plan = await planAppointmentAddress(conn, child.id, property.id, 'visit');
+  expect(plan.rows.map(r => r.id)).toEqual(['child', 'grouped']);
+  await applyAppointmentAddress(conn, plan, 'fixture-admin');
+  const changed = conn.calls.find(call => call.table === 'scheduled_services' && call.patch);
+  expect(changed.filters).toContainEqual(['whereIn', 'id', ['child', 'grouped']]);
 });

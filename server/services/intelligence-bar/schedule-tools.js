@@ -197,7 +197,9 @@ async function appointmentPropertyPreview(conn, plan) {
     throw new Error('This appointment is also the recurring plan template. Use the Dispatch address editor to review the recurring-plan effects.');
   }
   const property = await conn('customer_properties').where({ id: plan.propertyId, customer_id: plan.anchor.customer_id, active: true }).first();
-  if (!property?.address_line1) throw new Error('Choose an active saved property belonging to this customer.');
+  if (!property || !['address_line1', 'city', 'state', 'zip'].every(field => typeof property[field] === 'string' && property[field].trim())) {
+    throw new Error('Choose an active saved customer property with a street, city, state and ZIP code.');
+  }
   const customer = await conn('customers').where({ id: plan.anchor.customer_id }).whereNull('deleted_at').first();
   if (!customer) throw new Error('Customer not found');
   return {
@@ -212,7 +214,7 @@ async function appointmentPropertyPreview(conn, plan) {
       status: row.status, service_type: row.service_type,
       current_address: formatAddress(effectiveServiceAddress(row, customer)),
     })),
-    effects: 'Changes the destination and map coordinates for these service lines; regroups their visit at the destination and clears the cached pre-service brief. Preserves the primary customer address, future visits, schedule times, status, and billing. Sends no messages.',
+    effects: 'Changes the destination and map coordinates for these service lines; regroups their visit at the destination and clears the route position and cached pre-service brief. Preserves the primary customer address, future visits, schedule times, status, and billing. Sends no messages.',
     navigation: 'An already-open navigation app may need its destination refreshed separately.',
   };
 }

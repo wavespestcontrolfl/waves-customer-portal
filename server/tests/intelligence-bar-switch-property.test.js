@@ -22,7 +22,7 @@ let property;
 beforeEach(() => {
   jest.clearAllMocks();
   gates.isEnabled.mockReturnValue(true);
-  property = { id: input.property_id, address_line1: '200 Test Street', customer_id: 'customer' };
+  property = { id: input.property_id, address_line1: '200 Test Street', city: 'Test City', state: 'FL', zip: '34201', customer_id: 'customer' };
   plan = { anchor: { id: input.appointment_id, customer_id: 'customer' }, propertyId: input.property_id, scope: 'visit', rows: [
     { id: input.appointment_id, customer_id: 'customer', scheduled_date: '2099-01-02', status: 'en_route', recurring_parent_id: 'template' },
   ] };
@@ -40,7 +40,7 @@ const call = (params = input, context = {}) => executeScheduleTool('switch_appoi
 
 test('en-route preview is mutation-free and scoped to this visit', async () => {
   const preview = await call();
-  expect(preview.destination).toBe('200 Test Street');
+  expect(preview.destination).toContain('200 Test Street');
   expect(preview.stops[0].status).toBe('en_route');
   expect(address.planAppointmentAddress).toHaveBeenCalledWith(db, input.appointment_id, input.property_id, 'visit');
   expect(address.applyAppointmentAddress).not.toHaveBeenCalled();
