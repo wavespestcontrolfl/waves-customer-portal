@@ -33,9 +33,9 @@ const { redactAccessCodes } = require('./context-aggregator');
 const { matchServiceProtocol } = require('./protocol-matcher');
 const {
   buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations,
-  itemHasNitrogen, itemHasPhosphorus, itemIsPgr,
+  itemHasNitrogen, itemHasPhosphorus,
 } = require('./waveguard-plan-engine');
-const { latestComparableGroupApplication } = require('./waveguard-approval-engine');
+const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 
 const PROMPT_VERSION = 'job_card_paragraph_v1';
 const LANE_ID = 'job_card_paragraph';
@@ -438,7 +438,7 @@ function productLimits(product) {
     maxWindMph: num(product.max_wind_mph),
     // rainfast_minutes is the canonical label interval (rain_free_hours is
     // the legacy column some rows still carry alone).
-    rainFreeHours: num(product.rainfast_minutes) > 0 ? num(product.rainfast_minutes) / 60 : num(product.rain_free_hours),
+    rainFreeHours: num(product.rainfast_minutes) > 0 ? num(product.rainfast_minutes) / 60 : (num(product.rain_free_hours) > 0 ? num(product.rain_free_hours) : null),
   };
 }
 
@@ -671,10 +671,10 @@ function planBlocksOf({ plan }) {
 }
 
 /**
- * The plan's guards applied to ONE product the plan did not evaluate (a
- * searched, off-plan product): the property's active ordinance windows
- * (N / P blackout) and the PGR-on-stressed-turf rule, using the same
- * predicates the plan engine uses on its own items.
+ * The ordinance guard applied to ONE searched product: the property's
+ * active N / P blackout windows with the plan engine's own predicates.
+ * (Off-protocol, conditional, PGR, max-rate and rotation are the manager-
+ * approval engine's — see mixForProduct.)
  */
 function productBlocksUnderPlan({ plan }, product) {
   if (!plan) return [];
@@ -685,10 +685,6 @@ function productBlocksUnderPlan({ plan }, product) {
     const where = w.jurisdictionName ? ` (${clean(w.jurisdictionName, 60)})` : '';
     if (w.restrictedNitrogen && itemHasNitrogen(item)) blocks.push({ code: 'nitrogen_blackout', message: `Nitrogen blackout is active${where} — this product carries nitrogen.` });
     if (w.restrictedPhosphorus && itemHasPhosphorus(item)) blocks.push({ code: 'phosphorus_blackout', message: `Phosphorus blackout is active${where} — this product carries phosphorus.` });
-  }
-  const stress = gate.latestAssessment?.stressFlags || {};
-  if ((stress.drought_stress || stress.heat_stress || stress.recent_scalp) && itemIsPgr(item)) {
-    blocks.push({ code: 'pgr_on_stressed_turf', message: 'Turf is flagged stressed — no growth regulator this visit.' });
   }
   return blocks;
 }
@@ -851,7 +847,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date() } = {}) {
   const [product, svc] = await Promise.all([
     dbh('products_catalog').where({ id: productId }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
-    serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('service_type', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
+    serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('customer_id', 'scheduled_date', 'service_type', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
   // no rig assignment to trust, so no dose — never "any active rig".
@@ -862,16 +858,31 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // already resolved (substitution rate override, nutrient-target rate)
   // is dosed at the plan's rate, never the catalog default.
   const plan = detectServiceLine(svc.service_type) === 'lawn' ? await loadLawnPlan(serviceId, { dbh, deps, now }) : null;
-  // Plan-wide blocks first, then the plan's guards on this product itself
-  // (an off-plan nitrogen fertilizer during a blackout, a PGR on stressed
-  // turf) — the search is not a way around the plan.
-  const planBlocks = plan ? [...planBlocksOf(plan), ...productBlocksUnderPlan(plan, product)] : [];
   const planned = plan?.plan ? [...(plan.plan.mixCalculator?.items || []), ...(plan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
   const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
   const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
+  // Plan-wide blocks first; then THIS product through the same guards the
+  // closeout applies (manager approvals: off-protocol, unselected
+  // conditional, PGR on stressed turf, label max rate, rotation) plus the
+  // ordinance blackout — the search is not a way around the plan.
+  const planWide = plan ? planBlocksOf(plan) : [];
+  const productBlocks = plan?.plan
+    ? [
+      ...productBlocksUnderPlan(plan, product),
+      ...(await (deps.evaluateApprovals || evaluateWaveGuardManagerApprovals)(dbh, {
+        customerId: svc.customer_id,
+        service: svc,
+        plan: plan.plan,
+        products: [{ productId: product.id, name: product.name, rate: ratePer1000, rateUnit }],
+        serviceDate: etCalendarDayOf(svc.scheduled_date || now),
+      }).catch((err) => { logger.warn(`[job-card] approval check failed: ${err.message}`); return { blocks: [PLAN_UNAVAILABLE] }; })).blocks.map((b) => ({ code: b.code || null, message: clean(b.message, 200) })),
+    ]
+    : [];
+  const planBlocks = [...planWide, ...productBlocks];
   const tankMixable = isTankMixable(product);
   let mix;
-  if (planBlocks.length) mix = { amount: null, unit: rateUnit || null, reason: 'Lawn plan blocked — amounts withheld' };
+  if (planWide.length) mix = { amount: null, unit: rateUnit || null, reason: 'Lawn plan blocked — amounts withheld' };
+  else if (productBlocks.length) mix = { amount: null, unit: rateUnit || null, reason: clean(productBlocks[0].message, 160) };
   else if (!tankMixable) mix = { amount: null, unit: rateUnit || null, reason: 'Not a tank mix — apply as labeled' };
   else mix = buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons });
   const packSizes = await loadPackSizes(dbh, [product.id]);

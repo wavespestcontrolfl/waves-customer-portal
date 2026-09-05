@@ -238,6 +238,13 @@ describe('buildSprayCheck', () => {
     expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', min_temp_f: 50, max_temp_f: 90 }], hourly: gappy, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature forecast' });
   });
 
+  test('a zero rain-free interval is no rain limit at all, even at a half-hour start (Codex r14 P1)', () => {
+    const late = new Date(now.getTime() + 30 * 60000);
+    const wetNow = hourly.map((h, i) => (i === 0 ? { ...h, rainChance: 90 } : h));
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 0 }], hourly: wetNow, now: late }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No limit on file' });
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 0, max_wind_mph: 10 }], hourly: wetNow.slice(0, 5).map((h) => ({ ...h, windMph: 5 })), now: late }).verdicts[0].verdict).toBe('ok');
+  });
+
   test('no forecast → unknown with reason', () => {
     const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: null, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No forecast' });
@@ -405,50 +412,58 @@ describe('mixForProduct', () => {
   };
   const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: null };
 
-  const visit = { service_type: 'Quarterly Pest Control', assigned_equipment_system_id: null, assigned_calibration_id: null };
+  const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', assigned_equipment_system_id: null, assigned_calibration_id: null };
   const lawnVisit = { ...visit, service_type: 'WaveGuard Lawn Care' };
   const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' };
   const at = { now: new Date('2026-09-04T12:00:00Z') };
 
+  const approve = () => jest.fn().mockResolvedValue({ blocks: [], warnings: [] });
+
   test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
     const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] } });
-    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan }, ...at });
+    const evaluateApprovals = approve();
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at });
     expect(out).toMatchObject({ amount: null, reason: 'Lawn plan blocked — amounts withheld', planBlocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] });
     // A plan that fails to build is a block too.
     buildPlan.mockRejectedValue(new Error('boom'));
-    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan }, ...at })).planBlocks[0].code).toBe('plan_unavailable');
-    // A pest visit never builds the plan.
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).planBlocks[0].code).toBe('plan_unavailable');
+    // A pest visit never builds the plan nor runs approvals.
     const pest = makeDb({ scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live] });
-    buildPlan.mockClear();
-    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: pest, deps: { buildPlan }, ...at })).amount).toBe(6.215);
+    buildPlan.mockClear(); evaluateApprovals.mockClear();
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: pest, deps: { buildPlan, evaluateApprovals }, ...at })).amount).toBe(6.215);
     expect(buildPlan).not.toHaveBeenCalled();
+    expect(evaluateApprovals).not.toHaveBeenCalled();
   });
 
-  test('an off-plan searched product still faces the plan\'s guards (Codex r13 P1)', async () => {
+  test('an off-plan searched product still faces the plan\'s guards (Codex r13 + r14 P1)', async () => {
     const urea = { id: 'n1', name: 'Urea 46-0-0', category: 'fertilizer', analysis_n: 46, analysis_p: 0, default_rate_per_1000: 2, rate_unit: 'lb' };
-    const primo = { id: 'pg', name: 'Primo Maxx', category: 'plant growth regulator', default_rate_per_1000: 0.25, rate_unit: 'fl oz' };
     const windows = [{ jurisdictionName: 'Manatee County', restrictedNitrogen: true, restrictedPhosphorus: false }];
-    const cleanPlan = { propertyGate: { blocks: [], activeOrdinanceWindows: windows, latestAssessment: { stressFlags: { drought_stress: true } } }, mixCalculator: { items: [], conditionalOptions: [] } };
+    const cleanPlan = { propertyGate: { blocks: [], activeOrdinanceWindows: windows }, mixCalculator: { items: [], conditionalOptions: [] } };
     const buildPlan = jest.fn().mockResolvedValue(cleanPlan);
     const dbh = (rows) => makeDb({ scheduled_services: [lawnVisit], products_catalog: rows, equipment_calibrations: [live] });
-    const n = await jobCard.mixForProduct('n1', 110, { serviceId: 'svc1', dbh: dbh([urea]), deps: { buildPlan }, ...at });
-    expect(n).toMatchObject({ amount: null, reason: 'Lawn plan blocked — amounts withheld', planBlocks: [{ code: 'nitrogen_blackout' }] });
-    const p = await jobCard.mixForProduct('pg', 110, { serviceId: 'svc1', dbh: dbh([primo]), deps: { buildPlan }, ...at });
-    expect(p).toMatchObject({ amount: null, planBlocks: [{ code: 'pgr_on_stressed_turf' }] });
-    // A nitrogen-free, non-PGR product doses normally under the same plan.
-    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan }, ...at })).amount).toBe(6.215);
+    // Ordinance blackout on an off-plan nitrogen product.
+    const n = await jobCard.mixForProduct('n1', 110, { serviceId: 'svc1', dbh: dbh([urea]), deps: { buildPlan, evaluateApprovals: approve() }, ...at });
+    expect(n).toMatchObject({ amount: null, reason: expect.stringContaining('Nitrogen blackout'), planBlocks: [{ code: 'nitrogen_blackout' }] });
+    // The manager-approval engine judges the searched product (off-protocol,
+    // conditional, PGR, max rate, rotation) with the visit's plan and rate.
+    const evaluateApprovals = jest.fn().mockResolvedValue({ blocks: [{ code: 'off_protocol_product', message: 'Celsius WG is not part of the current WaveGuard protocol card.' }], warnings: [] });
+    const off = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals }, ...at });
+    expect(off).toMatchObject({ amount: null, reason: 'Celsius WG is not part of the current WaveGuard protocol card.', planBlocks: [{ code: 'off_protocol_product' }] });
+    expect(evaluateApprovals).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ plan: cleanPlan, products: [{ productId: 'p1', name: 'Celsius WG', rate: 0.113, rateUnit: 'oz' }] }));
+    // Approved by every guard → doses normally under the same plan.
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: approve() }, ...at })).amount).toBe(6.215);
   });
 
   test('a product the lawn plan resolved is dosed at the plan\'s rate, not the catalog default (Codex r12 P1)', async () => {
     const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     // Saved substitution override: 0.2 oz/1,000 instead of the catalog's 0.113.
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [{ product: { id: 'p1' }, mix: { ratePer1000: 0.2, rateUnit: 'oz' } }], conditionalOptions: [] } });
-    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan }, ...at });
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at });
     expect(out).toMatchObject({ amount: 11, ratePer1000: 0.2, rateSource: 'plan' });
     // Not on the plan → catalog rate.
     buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [], conditionalOptions: [] } });
-    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan }, ...at })).toMatchObject({ amount: 6.215, rateSource: 'catalog' });
+    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at })).toMatchObject({ amount: 6.215, rateSource: 'catalog' });
   });
 
   test('no visit row → null, never a dose from an unassigned rig (Codex r9 P1)', async () => {
