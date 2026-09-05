@@ -1597,6 +1597,29 @@ router.get('/job-card/mix', async (req, res, next) => {
   }
 });
 
+// GET /job-card/products?q= — the Tank search. Active catalog products by
+// name / category / active ingredient, id + name + category only: the mix
+// route owns rates and keeps vendor pricing owner-only. (The lawn
+// substitution search this replaced was retired with #3935.)
+router.get('/job-card/products', async (req, res, next) => {
+  try {
+    if (!jobCard.jobCardEnabled()) return res.json({ enabled: false, products: [] });
+    const q = String(req.query.q || '').trim();
+    if (q.length < 2) return res.json({ enabled: true, products: [] });
+    const products = await db('products_catalog')
+      .where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); })
+      .where(function searchProducts() {
+        this.whereILike('name', `%${q}%`).orWhereILike('category', `%${q}%`).orWhereILike('active_ingredient', `%${q}%`);
+      })
+      .orderBy('name')
+      .limit(8)
+      .select('id', 'name', 'category');
+    res.json({ enabled: true, products });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/job-card/:serviceId', async (req, res, next) => {
   try {
     if (!jobCard.jobCardEnabled()) return res.json({ enabled: false });

@@ -4942,7 +4942,7 @@ function JobCardTank({ tank, serviceId, D }) {
     let cancelled = false;
     const t = setTimeout(async () => {
       try {
-        const data = await adminFetch(`/admin/protocols/lawn/substitution-products?q=${encodeURIComponent(term)}&limit=8`);
+        const data = await adminFetch(`/admin/protocols/job-card/products?q=${encodeURIComponent(term)}`);
         if (!cancelled) setResults(data?.products || []);
       } catch {
         if (!cancelled) setResults([]);
