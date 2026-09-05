@@ -128,7 +128,11 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       setDetailVersion((version) => version + 1);
       setSelectedId((current) => next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null);
     } catch (err) {
-      if (request === listRequest.current) setContentError(err.message);
+      if (request !== listRequest.current) return;
+      setContentError(err.message);
+      setData(null);
+      setSelectedId(null);
+      setDetail(null);
     } finally {
       if (listInFlight.current === request) listInFlight.current = null;
       if (request === listRequest.current) setLoading(false);
@@ -397,7 +401,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
               )}
               <div className="mt-3 flex items-center justify-between gap-2 text-14 text-zinc-600">
                 <ActionBtn variant="secondary" disabled={loading || offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>Previous</ActionBtn>
-                <span>{items.length ? offset + 1 : 0}–{offset + items.length} of {data?.total || 0}</span>
+                <span>{items.length ? offset + 1 : 0}–{items.length ? offset + items.length : 0} of {data?.total || 0}</span>
                 <ActionBtn variant="secondary" disabled={loading || offset + items.length >= (data?.total || 0)} onClick={() => setOffset(offset + 50)}>Next</ActionBtn>
               </div>
             </div>

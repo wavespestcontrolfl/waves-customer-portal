@@ -164,3 +164,22 @@ describe('activity observability', () => {
     }
   });
 });
+
+describe('failed activity queries', () => {
+  it.each(['page', 'status', 'lane'])('clears old cards and detail after a failed %s request', async (change) => {
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText('Full draft revision 1');
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, opts) => url.includes('/review?')
+      ? Promise.reject(new Error('Activity unavailable')) : original(url, opts));
+    if (change === 'page') fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    if (change === 'status') fireEvent.change(screen.getByRole('combobox', { name: 'Activity status' }), { target: { value: 'skipped' } });
+    if (change === 'lane') fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    await screen.findByText('Activity unavailable');
+    expect(screen.queryByText('Seasonal ants blog-1')).toBeNull();
+    expect(screen.queryByText('Full draft revision 1')).toBeNull();
+    expect(screen.getByText('0–0 of 0')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Next' }).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Requeue' })).toBeNull();
+  });
+});
