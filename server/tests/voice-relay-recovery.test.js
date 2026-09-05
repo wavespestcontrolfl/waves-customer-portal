@@ -518,6 +518,18 @@ describe('the conversation side', () => {
     expect(seg.started_at).toBe(new Date(t0).toISOString()); // this leg's segment carries the CALL's start forward
   });
 
+  test('the provider-failure callback links the customer and rings the row\'s number only for a VERIFIED session; an unverified one files unlinked to the number it declared (hook r26 P1)', async () => {
+    const { triggerNotification: trig } = require('../services/notification-triggers');
+    primeDb({ firstRow: { id: 'cl-9', customer_id: 'C1', from_phone: '+19415550000' } });
+    const unverified = new RelayConversation({ callSid: 'CA-cb-unv', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+    expect(await unverified._fileFailureCallback()).toBe(true);
+    expect(trig).toHaveBeenLastCalledWith('customer_voicemail_callback', expect.objectContaining({ phone: '+19415551234', customerId: null, callLogId: 'cl-9' }));
+    const verified = new RelayConversation({ callSid: 'CA-cb-ver', sessionKey: 'nonce-1', from: '+19415550000', send: jest.fn() });
+    verified._callerVerified = true;
+    expect(await verified._fileFailureCallback()).toBe(true);
+    expect(trig).toHaveBeenLastCalledWith('customer_voicemail_callback', expect.objectContaining({ phone: '+19415550000', customerId: 'C1', callLogId: 'cl-9' }));
+  });
+
   test('a lead captured on an earlier leg whose relay_lead_id stamp did not land is still restored as captured (segment lead_captured) (codex r3 P2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', lead_captured: true }] } } });

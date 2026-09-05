@@ -1701,16 +1701,22 @@ class RelayConversation {
    */
   async _fileFailureCallback() {
     if (this.sandbox || !this.callSid) return false;
-    const phone = toE164(this.from || '');
-    if (!isLikelyE164(phone)) return false;
     try {
-      const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('id', 'customer_id').catch(() => null), 2000, null);
+      const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('id', 'customer_id', 'from_phone').catch(() => null), 2000, null);
+      // Identity follows verification (hook r26 P1): only a session that
+      // proved the call (ANI matched the signed webhook's row) links the
+      // row's customer and rings back the row's number; an unverified
+      // session files an UNLINKED callback to the number it declared —
+      // the same capture-only rule its lead writes follow.
+      const verified = this._callerVerified === true;
+      const phone = toE164((verified && row && row.from_phone) || this.from || '');
+      if (!isLikelyE164(phone)) return false;
       const { triggerNotification } = require('../notification-triggers');
       const res = await withTimeout(triggerNotification('customer_voicemail_callback', {
         name: (this._estimateFields && this._estimateFields.first_name) || null,
         phone,
         service: null,
-        customerId: (row && row.customer_id) || null,
+        customerId: (verified && row && row.customer_id) || null,
         callLogId: (row && row.id) || null,
         reason: 'sandy_provider_failure',
       }), 3000, null);
