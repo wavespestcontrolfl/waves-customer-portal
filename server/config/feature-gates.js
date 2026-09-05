@@ -653,6 +653,17 @@ const gates = {
   // the vestibule is never offered when no Spanish session could start.
   voiceSpanishMenu: process.env.GATE_VOICE_SPANISH_MENU === 'true',
 
+  // Sandy PR 1B — interruption-aware conversation context. On, a barge-in
+  // rewrites the cut reply in the model's history to what the caller actually
+  // heard (the played-text record, "… [interrupted]") and prefixes the next
+  // caller message with `[Caller interrupted you after: "…"]`, so the model
+  // resumes from there instead of repeating the unheard clause. Off ⇒ a
+  // barge-in only aborts the generation; the model's messages are
+  // byte-identical to today. Read at CALL time in
+  // services/voice-agent/relay-conversation.js (a flip needs no redeploy);
+  // this entry is the status/log listing. Kill switch: unset.
+  voiceRelayInterruptContext: gateEnvValue('GATE_VOICE_RELAY_INTERRUPT_CONTEXT'),
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
@@ -1283,6 +1294,16 @@ const gates = {
   // Born from the 2026-07 backlog: ~1,800 open vs 32 ever resolved.
   // Off → cron ticks are no-ops.
   triageAutoResolve: process.env.GATE_TRIAGE_AUTO_RESOLVE === 'true',
+  // Evidence rules layered on the sweep above (needs it ON to run at all):
+  // quote_promised closes on an estimate DIRECTLY linked to the call and
+  // delivered after it; email_unverified on the call-captured address
+  // engaging (open/click, not merely delivered) with a later email;
+  // caller_not_authorized on a human adding the caller's number as a
+  // service contact after the call; not_confirmed on a live booking created
+  // after the card; address cards on a completed visit at the address the
+  // call named. Every rule needs evidence that postdates the CARD, never
+  // same-customer coincidence. Off → the four original rules only.
+  triageAutoResolveEvidence: process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate

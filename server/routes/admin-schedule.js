@@ -12241,7 +12241,10 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 //      the same trx; rollback on race avoids half-set lifecycle
 //      timestamps.
 //   6. Post-completion automation chain only fires on success.
-//      Cancellation handler likewise.
+//
+// 'completed' and 'cancelled' are both refused at the top of the handler
+// now (completion flow / dispatch status route own them); the notes above
+// describe the migration this route went through, not its current targets.
 //
 // Note on column names: scheduled_services still carries both the
 // check_in/check_out/actual_duration and actual_start/actual_end/
@@ -12276,6 +12279,20 @@ router.put('/:id/status', async (req, res, next) => {
       return res.status(409).json({
         error: 'Use the completion flow to complete a visit (it mints the service record and invoice).',
         code: 'USE_COMPLETION_FLOW',
+      });
+    }
+
+    // ⛔ 'cancelled' is not accepted here either. PUT /admin/dispatch/:id/status
+    // is the ONE staff cancel writer: it owns the this_only / following /
+    // series scope, the combined series notice, and the shared
+    // visit-cancellation follow-through (card-fee rails, invoice void,
+    // tracker). This route's cancel branch had no live caller after the
+    // dead V2 dispatch cards were removed (#3858) and was retired with it —
+    // a second cancel path only drifts. Refuse before any write.
+    if (toStatus === 'cancelled') {
+      return res.status(409).json({
+        error: 'Cancel visits through the dispatch status route (it owns the series scope and the cancellation follow-through).',
+        code: 'USE_DISPATCH_CANCEL',
       });
     }
 
@@ -12445,8 +12462,9 @@ router.put('/:id/status', async (req, res, next) => {
           transitionedBy: req.technicianId,
           notes: notes || null,
           trx,
-          // This route's cancel branch sends its own notice below — the
-          // shared-writer hook must stand down, not race the claim.
+          // 'cancelled' is refused above, so the shared writer's cancel-notice
+          // hook has nothing to claim on this route — the value stays only so
+          // the hook's late-claim path (undefined/true) never arms here.
           notifyCustomer: 'caller',
           // Same for the legacy activation: this route runs the OFFICE
           // version of it below and owns the stamp.
@@ -12474,61 +12492,6 @@ router.put('/:id/status', async (req, res, next) => {
     // handles both 409 and 5xx). Each block is internally
     // best-effort with try/catch + log + continue; a failure in one
     // doesn't block the others.
-
-    // Cancellation: notify via appointment reminders. Was: ran
-    // BEFORE the UPDATE — phantom notification on UPDATE failure.
-    if (toStatus === 'cancelled') {
-      try {
-        const AppointmentReminders = require('../services/appointment-reminders');
-        await AppointmentReminders.handleCancellation(req.params.id);
-      } catch (e) { logger.error(`Appointment cancellation handler failed: ${e.message}`); }
-      // Cancelling a call-booked primary pulls its pending follow-up
-      // (visit 2) off the schedule too — shared with the track-transitions
-      // cancel path; best-effort after the parent commit.
-      try {
-        const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: svc.id });
-        if (cancelled > 0) {
-          logger.info(`[admin-schedule] status cancel cascaded to ${cancelled} call-created follow-up visit(s) of ${svc.id}`);
-        }
-      } catch (e) { logger.error(`[admin-schedule] status-cancel call follow-up cascade failed for ${svc.id}: ${e.message}`); }
-      // Void any still-open invoice pre-minted for this visit ("Charge now")
-      // so dunning doesn't chase a cancelled job. Paid/processing stay put.
-      await voidOpenInvoicesForCancelledService(svc.id);
-
-      // One-time card-on-file hold: charge the in-window late-cancel fee or
-      // release outside it. This route (the V2 dispatch delete/cancel action)
-      // is a separate cancel path from PUT /admin/dispatch/:id/status, so the
-      // hook must be mirrored here. waiveCardHoldFee (body) = business-
-      // initiated cancel, release free — admin-only (route is technician-
-      // reachable and a fee waiver is a billing decision). Dark until
-      // ONE_TIME_CARD_HOLD; no-op when no hold exists. Best-effort — never
-      // block the committed cancel.
-      try {
-        const CardHolds = require('../services/estimate-card-holds');
-        const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
-        const holdResult = await CardHolds.handleCardHoldCancellation({
-          scheduledServiceId: svc.id,
-          waiveFee,
-        });
-        // Appointment-card fee rail fallback for visits with no hold row
-        // (mutually exclusive lanes — the rail re-checks). Same waive flag.
-        if (holdResult?.reason === 'no_hold') {
-          const ApptCardRequests = require('../services/appointment-card-request');
-          const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
-            scheduledServiceId: svc.id,
-            waiveFee,
-          });
-          // Unresolved (non-released) fee outcomes must reach the office
-          // (Codex #3153 r16 P1) — never a silent successful cancel.
-          await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: apptFeeOutcome });
-        }
-      } catch (e) {
-        // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
-        logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`);
-        await require('../services/appointment-card-request')
-          .alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: { released: false, reason: 'fee_step_error' } });
-      }
-    }
 
     // Outbound-callback booking confirmed by the office → arm the deferred
     // reminders, convert the originating call lead, resolve the review card.

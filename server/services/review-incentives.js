@@ -685,6 +685,24 @@ async function getAttributionQueue(options = {}) {
   };
 }
 
+// The customer surname as the attribution search compares it: lowercased and
+// apostrophe-free in every form (ASCII ', typographic ’ ‘, modifier ʼ) —
+// mirroring normalizeName in review-click-correlation — and then de-accented
+// the same way it is (combining marks only: every precomposed Latin letter
+// NFD splits into base + mark; ß ø ł æ are NOT folded on either side). No
+// unaccent extension exists, so `translate()` carries the table; one
+// expression for both spelling directions — a reviewer typed without accents
+// against a record stored with them, and the reverse (GH codex r4 P1, r5 P2,
+// r8 P2).
+const FOLD = [
+  ['a', 'áàâäãåāąǎạảấầẩẫậắằẳẵặ'], ['c', 'çćčĉċ'], ['d', 'ď'], ['e', 'éèêëēęěėĕẹẻẽếềểễệ'], ['g', 'ğĝġģ'],
+  ['i', 'íìîïīįǐĩỉị'], ['l', 'ĺļľ'], ['n', 'ñńňņ'], ['o', 'óòôöõōőǒơọỏốồổỗộớờởỡợ'], ['r', 'řŕŗ'],
+  ['s', 'śšşŝș'], ['t', 'ťţț'], ['u', 'úùûüūůűųǔũưụủứừửữự'], ['w', 'ŵ'], ['y', 'ýÿŷỳỵỷỹ'], ['z', 'źžż'],
+];
+const FOLD_FROM = FOLD.map(([, chars]) => chars).join('');
+const FOLD_TO = FOLD.map(([base, chars]) => base.repeat(chars.length)).join('');
+const LAST_NAME_FOLDED = `translate(regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g'), '${FOLD_FROM}', '${FOLD_TO}')`;
+
 async function searchAttributionCandidates(options = {}) {
   const conn = options.conn || db;
   const reviewId = options.reviewId;
@@ -702,9 +720,24 @@ async function searchAttributionCandidates(options = {}) {
   const search = String(options.q || '').trim();
   const fallbackName = String(review.reviewer_name || '').trim();
   const terms = search || fallbackName;
+  // Proximity to service ranks in SQL, BEFORE the page is cut (pre-push P1
+  // r3/r4): a customer with a completed visit in the same 90-day window the
+  // service picker uses (recentServiceCandidatesForCustomer) leads, then
+  // last name. Owner ruling 2026-09-03.
+  const reviewAt = review.review_created_at || review.created_at || new Date();
+  const reviewDateOnly = etBusinessDate(reviewAt);
+  const serviceCutoff = etBusinessDateOffset(reviewAt, -90);
+  // Live customers only: `active` survives archiving (the archive path stamps
+  // deleted_at alone), and an archived record must never be offered for a
+  // link it could not be confirmed against (GH codex r8 P2).
   let query = conn('customers')
     .where({ active: true })
-    .orderBy('last_name', 'asc')
+    .whereNull('deleted_at')
+    .orderByRaw(
+      `(EXISTS (SELECT 1 FROM service_records sr WHERE sr.customer_id = customers.id AND sr.technician_id IS NOT NULL AND sr.service_date BETWEEN ? AND ?)
+        OR EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.customer_id = customers.id AND ss.status = 'completed' AND ss.technician_id IS NOT NULL AND ss.scheduled_date BETWEEN ? AND ?)) DESC, last_name ASC`,
+      [serviceCutoff, reviewDateOnly, serviceCutoff, reviewDateOnly],
+    )
     .limit(limit)
     .select(
       'id',
@@ -722,11 +755,29 @@ async function searchAttributionCandidates(options = {}) {
   if (terms) {
     const like = `%${terms}%`;
     const likeLower = `%${terms.toLowerCase()}%`;
+    // A two-token Google display name ("slim northgate") rarely equals the
+    // customer record ("Sam Northgate"): the COMPLETE surname alone is also a
+    // hit (owner ruling 2026-09-03) — every whole-word suffix of the name,
+    // so "De La Cruz" is found and not just "Cruz" (GH codex r1 P1). The
+    // suffixes are normalized (lowercase, de-accented, apostrophe-free,
+    // dashes canonical) and the column is folded the same way
+    // (LAST_NAME_FOLDED), so "Muñoz-Pérez" / "Munoz-Perez" typed finds the
+    // record whichever way it is stored (GH codex r1 P2, r8 P2), and
+    // "O’Connor" finds "O'Connor" or "OConnor" (GH codex r4 P1, r5 P2).
+    // Surnames derive from the REVIEWER NAME fallback only — an explicit
+    // search-box value keeps the plain field matching ("10 Main Street" must
+    // not add every customer surnamed Street, ranked ahead of the address
+    // hit; GH codex r2 P2).
+    const { reviewerSurnames } = require('./review-click-correlation');
+    const surnames = search ? [] : reviewerSurnames(fallbackName);
     query = query.where(function searchCustomers() {
       this.whereILike('first_name', like)
         .orWhereILike('last_name', like)
-        .orWhereRaw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE ?", [likeLower])
-        .orWhereILike('phone', like)
+        .orWhereRaw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE ?", [likeLower]);
+      if (surnames.length) {
+        this.orWhereRaw(`${LAST_NAME_FOLDED} IN (${surnames.map(() => '?').join(', ')})`, surnames);
+      }
+      this.orWhereILike('phone', like)
         .orWhereILike('email', like)
         .orWhereILike('address_line1', like)
         .orWhereILike('city', like);
@@ -734,34 +785,38 @@ async function searchAttributionCandidates(options = {}) {
   }
 
   const customers = await query;
-  // The row's currently linked customer is ALWAYS a candidate (pre-push P1):
-  // for a click_auto/manual_no_visit row the correlation module's
-  // linked-customer suppression keeps them out of likelyReviewers, and a
-  // handle reviewer name ("SunshineGal88") matches no customer search — so
-  // the confirm queue's own subject would open with no card and no confirm
-  // button, forcing the admin to retype the displayed name. Strict
-  // active === true, matching the search filter — an inactive customer is
-  // never offered for confirmation (GH codex #3483 r5/r8).
-  if (
-    review.customer_id
-    && (review.link_source === 'click_auto' || review.link_source === 'manual_no_visit')
-    && !customers.some((c) => String(c.id) === String(review.customer_id))
-  ) {
-    const current = await conn('customers')
-      .where({ id: review.customer_id, active: true })
-      .first(
-        'id',
-        'first_name',
-        'last_name',
-        'phone',
-        'email',
-        'address_line1',
-        'address_line2',
-        'city',
-        'state',
-        'zip',
-      );
-    if (current) customers.unshift(current);
+  // The row's currently linked customer leads the list: pinned first
+  // wherever the search returned them (pre-push P1 r2), and for a
+  // click_auto/manual_no_visit row ALWAYS present (pre-push P1) — the
+  // correlation module's linked-customer suppression keeps them out of
+  // likelyReviewers, and a handle reviewer name ("SunshineGal88") matches
+  // no customer search, so the confirm queue's own subject would otherwise
+  // open with no card and no confirm button, forcing the admin to retype
+  // the displayed name. Strict active === true, matching the search filter
+  // — an inactive customer is never offered for confirmation (GH codex
+  // #3483 r5/r8).
+  if (review.customer_id) {
+    const linkedId = String(review.customer_id);
+    const at = customers.findIndex((c) => String(c.id) === linkedId);
+    if (at > 0) customers.unshift(...customers.splice(at, 1));
+    else if (at < 0 && (review.link_source === 'click_auto' || review.link_source === 'manual_no_visit')) {
+      const current = await conn('customers')
+        .where({ id: review.customer_id, active: true })
+        .whereNull('deleted_at')
+        .first(
+          'id',
+          'first_name',
+          'last_name',
+          'phone',
+          'email',
+          'address_line1',
+          'address_line2',
+          'city',
+          'state',
+          'zip',
+        );
+      if (current) customers.unshift(current);
+    }
   }
   const candidates = [];
   for (const customer of customers) {
@@ -800,6 +855,7 @@ async function searchAttributionCandidates(options = {}) {
       clickedBeforeReview: l.clickedBeforeReview,
       locationMatch: l.locationMatch,
       alreadyFlagged: l.alreadyFlagged,
+      nameMatch: l.nameMatch === true,
     });
   }
 

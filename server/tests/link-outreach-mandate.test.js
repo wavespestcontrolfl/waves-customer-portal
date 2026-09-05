@@ -178,3 +178,64 @@ describe('recipientReview (§13)', () => {
     await expect(M.recipientReview(db, 'editor@bradentonherald.com')).rejects.toThrow('connection reset');
   });
 });
+
+describe('the follow-up (§6.4)', () => {
+  const sent = { outreach_status: 'sent', outreach_to_email: 'Editor@Example.org', outreach_subject: 'A resource', outreach_body: 'Hi', follow_up_status: 'drafted', follow_up_subject: 'Re: A resource', follow_up_body: 'A quick nudge — happy to send anything that helps.' };
+  test('followUpReview judges the follow-up draft on the thread\'s recipient; only a drafted follow-up can be clean', () => {
+    expect(M.followUpReview(sent).clean).toBe(true);
+    expect(M.followUpReview({ ...sent, follow_up_status: 'none' })).toMatchObject({ clean: false, reason: 'no follow-up draft' });
+    expect(M.followUpReview({ ...sent, follow_up_body: 'We can pay a fee.' })).toMatchObject({ clean: false, flags: ['payment'] });
+    expect(M.followUpReview({ ...sent, outreach_to_email: 'nope' })).toMatchObject({ clean: false, reason: 'invalid recipient' });
+    expect(M.draftReview(sent).clean).toBe(false); // the pitch is sent — not a draft
+  });
+  test('the follow-up\'s own shape is deterministic: the subject is exactly "Re: <the pitch\'s subject>", the body is bounded; a failed automatic reply check routes it to the owner', () => {
+    expect(M.followUpReview({ ...sent, follow_up_subject: 'Re: A Resource' })).toMatchObject({ clean: false, flags: ['follow_up_subject'], reason: 'follow_up_subject' });
+    expect(M.followUpReview({ ...sent, follow_up_subject: 'A resource' })).toMatchObject({ clean: false, flags: ['follow_up_subject'] });
+    expect(M.followUpReview({ ...sent, follow_up_subject: '  Re: A resource  ' }).clean).toBe(true);
+    expect(M.followUpReview({ ...sent, follow_up_body: Array(M.FOLLOW_UP_MAX_WORDS + 1).fill('word').join(' ') })).toMatchObject({ clean: false, flags: ['follow_up_length'] });
+    expect(M.followUpReview({ ...sent, follow_up_body: 'We can pay a fee.', follow_up_subject: 'x' })).toMatchObject({ clean: false, flags: ['payment', 'follow_up_subject'], reason: 'payment, follow_up_subject' });
+    expect(M.followUpReview({ ...sent, follow_up_skipped_reason: 'reply_check_failed' })).toMatchObject({ clean: false, flags: [], reason: expect.stringMatching(/owner sends it/) });
+  });
+  test('followUpHash binds the recipient, the follow-up subject and body — never the pitch\'s text', () => {
+    expect(M.followUpHash(sent)).toBe(M.draftHash({ outreach_to_email: 'editor@example.org', outreach_subject: 'Re: A resource', outreach_body: sent.follow_up_body }));
+    expect(M.followUpHash(sent)).not.toBe(M.draftHash(sent));
+    expect(M.followUpHash({ ...sent, follow_up_body: 'x' })).not.toBe(M.followUpHash(sent));
+  });
+  test('draftOf picks the send\'s columns in the sender\'s shape', () => {
+    expect(M.draftOf(sent, true)).toEqual({ outreach_to_email: 'Editor@Example.org', outreach_subject: 'Re: A resource', outreach_body: sent.follow_up_body });
+    expect(M.draftOf(sent)).toEqual({ outreach_to_email: 'Editor@Example.org', outreach_subject: 'A resource', outreach_body: 'Hi' });
+  });
+  test('FOLLOW_UP_STATUSES: contacted, plus the Judge-owned statuses on a submit-first path only', () => {
+    expect([...M.FOLLOW_UP_STATUSES({ acquisition_type: 'resource_outreach', account_required: true, execution_after_send: true })]).toEqual(['contacted']);
+    expect([...M.FOLLOW_UP_STATUSES(null)]).toEqual(['contacted']);
+    // submit-first = the policy's submitFirst: an outreach path whose acquire step EXISTS (account / content submission) and precedes the pitch
+    expect([...M.FOLLOW_UP_STATUSES({ acquisition_type: 'resource_outreach', account_required: true, execution_after_send: false })]).toEqual(['contacted', 'placed', 'live', 'indexed']);
+    expect([...M.FOLLOW_UP_STATUSES({ acquisition_type: 'content_submission', execution_after_send: false })]).toEqual(['contacted', 'placed', 'live', 'indexed']);
+    // the flag alone on a send-first path (no acquire step) means nothing (Codex r15): its placed / live row has no follow-up left
+    expect([...M.FOLLOW_UP_STATUSES({ acquisition_type: 'resource_outreach', execution_after_send: false })]).toEqual(['contacted']);
+    expect([...M.FOLLOW_UP_STATUSES({ acquisition_type: 'directory', execution_after_send: false })]).toEqual(['contacted']);
+    expect([...M.FOLLOW_UP_STATUSES_ANY]).toEqual(['contacted', 'placed', 'live', 'indexed']);
+  });
+  test('followUpDueAt is ten days after the send; followUpPending = sent pitch with a drafted / in-flight / errored follow-up', () => {
+    expect(M.followUpDueAt('2026-09-03T00:00:00Z').toISOString()).toBe('2026-09-13T00:00:00.000Z');
+    // ten ET CALENDAR days at the pitch's ET wall-clock time, across the DST seam (2026-11-01): 08:00 EDT → 08:00 EST, not 240 elapsed hours (07:00 EST)
+    expect(M.followUpDueAt('2026-10-28T12:00:00Z').toISOString()).toBe('2026-11-07T13:00:00.000Z');
+    expect(M.followUpDueAt(new Date('2026-03-05T13:30:00Z')).toISOString()).toBe('2026-03-15T12:30:00.000Z'); // 08:30 EST → 08:30 EDT
+    expect(M.followUpDueAt('2026-09-03T00:00:00.250Z').getMilliseconds()).toBe(250);
+    // pending is PATH-aware for a drafted follow-up (Codex r4): the placement must still be in FOLLOW_UP_STATUSES(path)
+    const sendFirst = { acquisition_type: 'resource_outreach', execution_after_send: true }, submitFirst = { acquisition_type: 'resource_outreach', account_required: true, execution_after_send: false }; // submit-first = the acquire step exists AND precedes the pitch
+    const contacted = { ...sent, status: 'contacted' };
+    expect(M.followUpPending(contacted, sendFirst)).toBe(true);
+    expect(M.followUpPending({ ...contacted, follow_up_status: 'sending' }, sendFirst)).toBe(true);
+    expect(M.followUpPending({ ...contacted, follow_up_status: 'send_error' }, sendFirst)).toBe(true);
+    for (const st of ['none', 'due', 'sent', 'skipped']) expect(M.followUpPending({ ...contacted, follow_up_status: st }, sendFirst)).toBe(false);
+    expect(M.followUpPending({ ...contacted, outreach_status: 'drafted' }, sendFirst)).toBe(false);
+    expect(M.followUpPending(null, sendFirst)).toBe(false);
+    // a send-first row promoted to live has left the follow-up lifecycle: the draft is no longer pending (the sender refuses it by the same rule) — an ambiguous send stays pinned
+    expect(M.followUpPending({ ...contacted, status: 'live' }, sendFirst)).toBe(false);
+    expect(M.followUpPending({ ...contacted, status: 'live', follow_up_status: 'sending' }, sendFirst)).toBe(true);
+    // the Judge-owned statuses follow up on a submit-first path
+    for (const st of ['placed', 'live', 'indexed']) expect(M.followUpPending({ ...contacted, status: st }, submitFirst)).toBe(true);
+    expect(M.followUpPending({ ...contacted, status: 'placed' }, sendFirst)).toBe(false);
+  });
+});

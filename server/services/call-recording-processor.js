@@ -1414,6 +1414,9 @@ async function shouldHoldLeadEmailEnrollment(callLogId, { procToken = null, call
             ...(heldEmails.length ? {
               email_as_heard: heldEmails[0],
               email_candidates: heldEmails,
+              // Filing-time snapshot of the address this card releases — the
+              // evidence sweep reads THIS, never the hold's mutable held_email.
+              email_release_target: String(heldEmails[0]).trim().toLowerCase(),
               confirmation_question: 'The email review-state lookup failed mid-run — read this address back with the customer before releasing.',
             } : {}),
           },
@@ -7099,6 +7102,18 @@ const CallRecordingProcessor = {
     } catch (e) {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
     }
+    // The linked customer's address AT FILING, snapshotted on every review
+    // card this pass files (buildTriageItem.onFileAddress) — enforce AND
+    // shadow lanes alike (codex r31 P2): the evidence sweep reads it
+    // instead of the customer's current columns. Reassigned to the
+    // CANONICAL customer's row once Step 3 resolves it (below), so the
+    // cards filed after that point carry the right property too.
+    let onFileAddress = knownCaller
+      ? { address_line1: knownCaller.addressLine1, address_line2: knownCaller.addressLine2, city: knownCaller.addressCity, zip: knownCaller.addressZip }
+      : null;
+    // Every card this pass files is created after this instant — the
+    // canonical re-stamp after Step 3 below is scoped to them.
+    const cardsFiledSince = new Date();
     // Cross-call threading context: the latest other call from this number in
     // the last week, so a continuation call completes the earlier record
     // instead of restarting from nothing. Fail-open — extraction proceeds
@@ -7935,7 +7950,15 @@ const CallRecordingProcessor = {
           for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
             if (flag === 'missing_unit_number') clarifyUnitOwed = true;
             await db('triage_items')
-              .insert(buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory', addressValidation }))
+              .insert(buildTriageItem({
+                callLogId: call.id, flag, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress,
+                // The surname card's filing-time names include the merged V1
+                // extraction's — what backfillCustomerFromAppointmentContact
+                // writes onto the record (codex r18 P1).
+                ...(flag === 'missing_last_name'
+                  ? { extraPayload: { heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null } } }
+                  : {}),
+              }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
           }
@@ -8028,7 +8051,7 @@ const CallRecordingProcessor = {
               : [routingResult.reason || 'routing_rejected'];
             const triageReasons = blockingReasons;
             for (const flag of triageReasons.slice(0, 10)) {
-              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation });
+              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
             }
             // Demoted flags survive a block by ANOTHER gate (codex round-4
@@ -8041,7 +8064,7 @@ const CallRecordingProcessor = {
             for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
               try {
                 await db('triage_items')
-                  .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation }))
+                  .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
               } catch (fe) {
                 logger.warn(`[call-proc-v2] blocked-branch fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
@@ -8063,7 +8086,7 @@ const CallRecordingProcessor = {
               for (const f of routingResult.failedOpenFlags) {
                 try {
                   await db('triage_items')
-                    .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation }))
+                    .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
                     .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
                 } catch (fe) {
                   logger.warn(`[call-proc-v2] fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
@@ -8264,6 +8287,7 @@ const CallRecordingProcessor = {
                   .insert(buildTriageItem({
                     callLogId: call.id,
                     flag,
+                    onFileAddress,
                     extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                     severity: 'advisory',
                     // Google's resolved building when it has one (a corrected
@@ -8292,9 +8316,17 @@ const CallRecordingProcessor = {
                 .insert(buildTriageItem({
                   callLogId: call.id,
                   flag,
+                  onFileAddress,
                   extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                   severity: 'advisory',
-                  extraPayload: (isAddressFlag && addressRecovery?.attempted) ? {
+                  // The surname card's filing-time names include the merged
+                  // V1 extraction's — what backfillCustomerFromAppointmentContact
+                  // writes onto the record. The shadow bridge files this card
+                  // from the same merged extraction the enforce site does, so
+                  // it stamps the same snapshot (codex r19 P1).
+                  extraPayload: flag === 'missing_last_name' ? {
+                    heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
+                  } : (isAddressFlag && addressRecovery?.attempted) ? {
                     address_as_heard: rawStreetBeforeAdopt,
                     address_recovered: flag === 'address_recovered' ? extracted.address_line1 : null,
                     address_candidates: addressRecovery.candidates || [],
@@ -8326,9 +8358,13 @@ const CallRecordingProcessor = {
               .map((flag) => buildTriageItem({
                 callLogId: call.id,
                 flag,
+                onFileAddress,
                 extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                 severity: 'advisory',
-                extraPayload: dictationEmailPayload,
+                // + the address the run adopted at filing time (the release
+                // target the evidence sweep may verify); null when the
+                // dictation demoted it — then only a human can settle it.
+                extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
               })),
           });
         }
@@ -8404,9 +8440,11 @@ const CallRecordingProcessor = {
             cards: emailReasons.slice(0, 10).map((flag) => buildTriageItem({
               callLogId: call.id,
               flag,
+              onFileAddress,
               extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
               severity: 'advisory',
-              extraPayload: dictationEmailPayload,
+              // Same filing-time release-target snapshot as the shadow branch.
+              extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
             })),
           });
         }
@@ -8663,6 +8701,7 @@ const CallRecordingProcessor = {
           .insert(buildTriageItem({
             callLogId: call.id,
             flag: 'shared_phone_ambiguous',
+            onFileAddress,
             extraction: v2CanonicalExtraction || undefined,
             extraPayload: {
               share_count: sharedPhoneAmbiguity.shareCount,
@@ -8857,6 +8896,7 @@ const CallRecordingProcessor = {
           .insert(buildTriageItem({
             callLogId: call.id,
             flag: 'second_service_address',
+            onFileAddress,
             extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
             severity: 'advisory',
           }))
@@ -8914,6 +8954,33 @@ const CallRecordingProcessor = {
     // truthy but say nothing about the caller — without the usability gate
     // they'd open bogus "save this number" cards and suppress legitimate
     // backfills (pre-push audit P1).
+    // The on-file address this pass stamped on its cards followed the
+    // PRELIMINARY phone lookup; Step 3 may have resolved a different
+    // customer (transcript-name / shared-phone reconciliation, an operator
+    // link, an existing call.customer_id) or minted one FROM this call (no
+    // on-file address at all). Re-stamp the pass's own cards from the
+    // CANONICAL customer — still filing time, the same pass — so the
+    // evidence sweep judges the ask against the property the call is
+    // actually linked to (codex r32 P2). The cards this pass files AFTER
+    // this point (phone-not-on-file, authorization, booking, follow-up
+    // flags…) take the canonical row directly (pre-push audit P1 on
+    // 21de12c4d). Fail-soft: the cards stand.
+    if (customerId) {
+      try {
+        const { onFileAddressSnapshot } = require('./call-routing-gates');
+        const canonical = createdCustomerFromCall
+          ? null
+          : await db('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+        onFileAddress = canonical || null;
+        await db('triage_items')
+          .where({ call_log_id: call.id, status: 'open' })
+          .where('created_at', '>=', cardsFiledSince)
+          .update({ payload: db.raw("jsonb_set(COALESCE(payload, '{}'::jsonb), '{on_file_address}', ?::jsonb, true)", [JSON.stringify(onFileAddressSnapshot(canonical))]) });
+      } catch (e) {
+        logger.warn(`[call-proc] on-file address re-stamp skipped for ${maskSid(callSid)}: ${e.message}`);
+      }
+    }
+
     const verifiableAni = firstExternalPhone(call.from_phone);
     if (customerId && verifiableAni && !createdCustomerFromCall && !isOutboundCall(call)) {
       try {
@@ -8931,6 +8998,7 @@ const CallRecordingProcessor = {
             .insert(buildTriageItem({
               callLogId: call.id,
               flag: 'caller_phone_not_on_file',
+              onFileAddress,
               extraction: v2CanonicalExtraction,
               severity: 'advisory',
               extraPayload: {
@@ -9032,6 +9100,7 @@ const CallRecordingProcessor = {
               .insert(buildTriageItem({
                 callLogId: call.id,
                 flag: 'second_service_address',
+                onFileAddress,
                 extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
                 severity: 'advisory',
               }))
@@ -15162,6 +15231,9 @@ const CallRecordingProcessor = {
               if (!existingCandidates.some((c) => String(c?.value || '').trim().toLowerCase() === heldLc)) {
                 recoveryEmailEvidence.email_candidates = [{ value: extracted.email }, ...existingCandidates];
               }
+              // Filing-time snapshot of the release target for the evidence
+              // sweep (the hold's held_email is mutable — fanout retargets it).
+              recoveryEmailEvidence.email_release_target = heldLc;
             }
             // The WHOLE recovery — card insert, ledger retarget, claim
             // invalidation — rides ONE token-fenced transaction (Codex
@@ -16537,5 +16609,12 @@ CallRecordingProcessor.resolveCallBookingPropertyLinkage = resolveCallBookingPro
 // Agents-hub Queue view) read it from here so a change to the env parsing
 // or default can never split "retryable" from "failed" across surfaces.
 CallRecordingProcessor.CALL_EXTRACTION_MAX_ATTEMPTS = CALL_EXTRACTION_MAX_ATTEMPTS;
+
+// Production contract for the TRIAGE AUTO-RESOLVE sweep (NOT test-only): a
+// confirmed card is answered only by a booking at the ET wall-clock hour the
+// call agreed, and the sweep must read that hour with the exact rendering
+// the booking path wrote window_start from — a second implementation of the
+// ET-offset-vs-instant rule would drift from it.
+CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
 
 module.exports = CallRecordingProcessor;

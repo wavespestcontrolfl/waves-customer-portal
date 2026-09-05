@@ -1011,6 +1011,8 @@ describe('aggregateState (§3.1)', () => {
     ['a handoff park is acquiring', [{ status: 'ready_for_payment', rows: [A('OWNER_PAYMENT')] }], 'acquiring'],
     ['an UNLEASED authorized sibling still wins over a leased one', [{ status: 'prospect', claimed_at: NOW, rows: [A('AUTO_FREE')] }, { status: 'prospect', rows: [A('AUTO_FREE')] }], 'ready_to_acquire'],
     ['the same payment row on a non-outreach placement is pending', [{ status: 'prospect', rows: [A('AUTO_FREE'), { ...A('OWNER_PAYMENT'), dimension: 'payment' }] }], 'qualified'],
+    ['a CLOSED conversation (§13) is history, not an active intermediate: alone it reads qualified', [{ status: 'contacted', conversation_closed_at: NOW, rows: [A('AUTO_OUTREACH', true)] }], 'qualified'],
+    ['a CLOSED conversation beside a live link cannot hold the domain at acquiring', [{ status: 'live', rows: [A('OWNER_FREE', true)] }, { status: 'contacted', conversation_closed_at: NOW, rows: [A('AUTO_OUTREACH', true)] }], 'acquired'],
     ['no rows ⇒ qualified', [{ status: 'prospect', rows: [] }], 'qualified'],
   ])('%s', (_, placementsIn, expected) => { expect(bridge.aggregateState(placementsIn)).toBe(expected); });
 });
