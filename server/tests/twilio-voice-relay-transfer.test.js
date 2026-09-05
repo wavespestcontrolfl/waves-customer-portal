@@ -28,11 +28,12 @@ function mockRes() {
   res.send = jest.fn((body) => { res.body = body; return res; });
   return res;
 }
-function primeDb() {
+function primeDb({ rows = 1 } = {}) {
   const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
-  const update = jest.fn(async () => 1);
-  const builder = { update, where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }), first: jest.fn(async () => null), select: jest.fn(() => builder) };
+  const update = jest.fn(async () => rows);
+  const builder = { update, where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }), whereRaw: jest.fn(() => builder), first: jest.fn(async () => null), select: jest.fn(() => builder) };
   db.mockReturnValue(builder);
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   return { builder, update, guardQ };
 }
 
@@ -57,13 +58,16 @@ describe('parseHandoffData', () => {
 });
 
 describe('/relay-complete', () => {
-  test('transfer ⇒ ai_transferred stamped (idempotent, terminal-guarded) + the staff Dial with the screen URLs and NO query string', async () => {
-    const { update, guardQ, builder } = primeDb();
+  test('transfer ⇒ the ring is CLAIMED once (ai_transferred stamped only when not terminal) + the staff Dial with the screen URLs and NO query string', async () => {
+    const { update, builder } = primeDb();
     const res = mockRes();
     await handlerFor('/relay-complete')({ body: { CallSid: 'CA-t1', HandoffData: TRANSFER }, query: {} }, res);
     expect(builder.where).toHaveBeenCalledWith('twilio_call_sid', 'CA-t1');
-    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ call_outcome: 'ai_transferred' }));
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_transfer_ring_at'));
+    const patch = update.mock.calls[0][0];
+    expect(patch.call_outcome.sql).toMatch(/NOT IN \(\?, \?, \?\) THEN \?/);
+    expect(patch.call_outcome.bindings).toEqual(['voicemail', 'relay_failed', 'ai_transferred', 'ai_transferred']);
+    expect(patch.metadata.sql).toContain('relay_transfer_ring_at');
     expect(res.body).toContain('<Dial record="record-from-answer-dual"');
     expect(res.body).toContain('action="/api/webhooks/twilio/call-complete"');
     expect(res.body).toContain('timeout="30"');
@@ -73,7 +77,14 @@ describe('/relay-complete', () => {
     expect(res.body).not.toContain('<Record');
   });
 
-  test('a HUNG outcome stamp never holds the transfer TwiML (P1) — the Dial renders within the stamp deadline', async () => {
+  test('a Twilio RETRY of the transfer callback (ring already claimed ⇒ 0 rows) gets a bare response, never a second staff ring', async () => {
+    primeDb({ rows: 0 });
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: { CallSid: 'CA-retry', HandoffData: TRANSFER }, query: {} }, res);
+    expect(res.body).toMatch(/^<\?xml[^>]*\?><Response\/>$/);
+  });
+
+  test('a HUNG ring claim never holds the transfer TwiML (P1) — the Dial renders within the stamp deadline (fail open)', async () => {
     jest.useFakeTimers();
     const { builder } = primeDb();
     builder.update = jest.fn(() => new Promise(() => {})); // pool stalled

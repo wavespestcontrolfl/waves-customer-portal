@@ -772,17 +772,34 @@ async function appendRelayTransfer(req, twiml, callSid) {
     return;
   }
   if (callSid) {
-    // Best-effort and BOUNDED: a stalled pool is exactly the failure the
-    // fail-open transfer tolerates, so this stamp may never hold the TwiML
-    // past Twilio's webhook timeout (codex r1 P1).
+    // ONE staff ring per call, claimed atomically: Twilio may retry this
+    // action callback, and every retry would otherwise render a fresh
+    // <Dial> (hook P1). The claim stamps metadata.relay_transfer_ring_at
+    // and, in the same statement, the ai_transferred outcome when the row
+    // is not already terminal (the tool normally wrote it; this covers a
+    // packet write that never landed). 0 rows = already rung ⇒ a bare
+    // terminal response. Best-effort and BOUNDED: a stalled pool is exactly
+    // the failure the fail-open transfer tolerates, so the claim may never
+    // hold the TwiML past Twilio's webhook timeout (codex r1 P1) — on
+    // timeout the ring proceeds (fail open, logged).
     const { RELAY_TERMINAL_OUTCOMES } = require('../services/voice-agent/relay-protocol');
-    await withDeadline(
+    const claimed = await withDeadline(
       db('call_log').where('twilio_call_sid', callSid)
-        .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', RELAY_TERMINAL_OUTCOMES))
-        .update({ call_outcome: 'ai_transferred', updated_at: new Date() })
-        .catch((err) => logger.warn(`[relay-complete] ai_transferred stamp failed for ${maskSid(callSid)}: ${err.message}`)),
+        .whereRaw("COALESCE(metadata->>'relay_transfer_ring_at', '') = ''")
+        .update({
+          call_outcome: db.raw('CASE WHEN call_outcome IS NULL OR call_outcome NOT IN (?, ?, ?) THEN ? ELSE call_outcome END', [...RELAY_TERMINAL_OUTCOMES, 'ai_transferred']),
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transfer_ring_at', ?::text)", [new Date().toISOString()]),
+          updated_at: new Date(),
+        })
+        .catch((err) => { logger.warn(`[relay-complete] transfer ring claim failed for ${maskSid(callSid)}: ${err.message}`); return 'error'; }),
       STAMP_DEADLINE_MS,
+      'timeout',
     );
+    if (claimed === 0) {
+      logger.warn(`[relay-complete] transfer ring already claimed for ${maskSid(callSid)} — retry gets a bare response`);
+      return;
+    }
+    if (claimed === 'timeout') logger.warn(`[relay-complete] transfer ring claim timed out for ${maskSid(callSid)} — ringing anyway (fail open)`);
   }
   const forwardNumbers = getFallbackForwardNumbers();
   if (forwardNumbers.length === 0) {
