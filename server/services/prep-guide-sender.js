@@ -297,31 +297,30 @@ async function automationLaneLive(visit, key, customerId) {
   return !!enrollment;
 }
 
-// After a confirmed manual delivery of a sequence-backed guide (flea /
-// bed bug / cockroach), the customer's live enrolment for that sequence is
-// settled — cancelled with a reason, the runner's own cancel shape
-// (cancelEnrollmentForSuppression) — so a held one cannot resume and send
-// the same prep again (GH Codex #3856 r23 P1). automationLaneLive lets the
-// manual send through only when no enrolment still awaits the prep step;
-// this closes the held case (step 0 only — an enrolment on its follow-up
-// steps keeps them), and a lost write is logged, never a failed send.
-// The composer's prep-link text is the same confirmed delivery and settles
-// through here too — the runner's step-0 pick consults neither prep_sent_at
-// nor the interaction marker (GH Codex #3856 r30 P1).
+// After a confirmed delivery of a sequence-backed guide (flea / bed bug /
+// cockroach) — the manual sender's email / text, or the composer's prep-link
+// text — the customer's live enrolment still awaiting its prep step is
+// settled as DELIVERED: advanced past step 0 through the runner's own
+// advanceEnrollment, so a held one cannot resume and send the same prep
+// again (GH Codex #3856 r23 P1) while its later follow-up steps keep their
+// schedule (a cancel would drop them — pre-push Codex P1 on 47f085038).
+// automationLaneLive lets the manual send through only when no enrolment
+// still awaits the prep step; this closes the held case (step 0 only — an
+// enrolment already on its follow-ups is untouched), and a lost write is
+// logged, never a failed send. The runner's step-0 pick consults neither
+// prep_sent_at nor the interaction marker, so this is the only fence
+// (GH Codex #3856 r30 P1).
 async function settleHeldEnrollment(customerId, templateKey) {
   const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[templateKey];
   if (!sequenceKey) return;
   try {
-    await db('automation_enrollments')
+    const enrollment = await db('automation_enrollments')
       .where({ customer_id: customerId, template_key: sequenceKey, current_step: 0 })
       .whereIn('status', LIVE_ENROLLMENT_STATUSES)
-      .update({
-        status: 'cancelled',
-        next_send_at: null,
-        completed_at: new Date(),
-        metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify('manual_prep_sent')]),
-        updated_at: new Date(),
-      });
+      .first();
+    if (!enrollment) return;
+    const { advanceEnrollment } = require('./automation-runner');
+    await advanceEnrollment(enrollment);
   } catch (err) {
     logger.warn(`[prep-guide-sender] enrolment settle failed for customer ${customerId} (${sequenceKey}): ${err.message}`);
   }

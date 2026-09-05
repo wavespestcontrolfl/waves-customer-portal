@@ -467,10 +467,22 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
   }
 }
 
-async function advanceEnrollment(enrollment, steps) {
+// Moves an enrolment past the step it just delivered: the next enabled step
+// is scheduled from its own delay, or the enrolment completes when none
+// remain. Fenced on the step the caller saw, so two settlers of one step
+// (the tick and a manual / composer prep delivery through
+// prep-guide-sender's settleHeldEnrollment) cannot advance it twice. Steps
+// are loaded when the caller has none.
+async function advanceEnrollment(enrollment, steps = null) {
+  if (!steps) {
+    steps = await db('automation_steps')
+      .where({ template_key: enrollment.template_key, enabled: true })
+      .orderBy('step_order', 'asc');
+  }
+  const fence = { id: enrollment.id, current_step: enrollment.current_step };
   const nextIdx = enrollment.current_step + 1;
   if (nextIdx >= steps.length) {
-    await db('automation_enrollments').where({ id: enrollment.id }).update({
+    await db('automation_enrollments').where(fence).update({
       status: 'completed',
       completed_at: new Date(),
       last_sent_at: new Date(),
@@ -482,7 +494,7 @@ async function advanceEnrollment(enrollment, steps) {
   }
   const nextStep = steps[nextIdx];
   const nextSendAt = new Date(Date.now() + (nextStep.delay_hours || 0) * 3600 * 1000);
-  await db('automation_enrollments').where({ id: enrollment.id }).update({
+  await db('automation_enrollments').where(fence).update({
     current_step: nextIdx,
     last_sent_at: new Date(),
     next_send_at: nextSendAt,
@@ -577,6 +589,7 @@ module.exports = {
   hasLocalContent,
   enrollCustomer,
   sendStep,
+  advanceEnrollment,
   processDueSteps,
   testSequence,
   substitute,

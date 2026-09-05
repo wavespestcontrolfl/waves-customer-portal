@@ -91,6 +91,8 @@ function livenessQuery(rows) {
   return q;
 }
 jest.mock('../services/email-template-automation-executor', () => ({ RUNNABLE_STATUSES: ['queued', 'scheduled', 'retry_scheduled'] }));
+jest.mock('../services/automation-runner', () => ({ advanceEnrollment: jest.fn(async () => ({ sent: true, done: false })) }));
+const { advanceEnrollment } = require('../services/automation-runner');
 // Rows affected by an awaited .update() (the prep-page claim); 1 = claimed.
 let serviceUpdateCount = 1;
 function scheduledQuery() {
@@ -598,30 +600,51 @@ describe('sendPrepToCustomer', () => {
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: false, reason: 'prep_send_pending' });
     expect(enrollmentUpdates).toEqual([]);
 
-    // Finished lanes let it through, and the delivery settles any live
-    // enrolment for the flea sequence (the runner's cancel shape).
+    // Finished lanes let it through; a finished enrolment has nothing to
+    // settle.
     enrollmentRows = [{ id: 'enr-1', status: 'completed' }];
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: true });
-    expect(enrollmentUpdates).toEqual([expect.objectContaining({ status: 'cancelled', next_send_at: null, completed_at: expect.any(Date) })]);
-    expect(enrollmentUpdates[0].metadata).toEqual({ sql: expect.stringContaining('cancel_reason'), bindings: ['"manual_prep_sent"'] });
+    expect(advanceEnrollment).not.toHaveBeenCalled();
+
+    // The delivery settles a live step-0 enrolment as DELIVERED through the
+    // runner's own advance — its follow-up steps keep their schedule; a
+    // cancel would drop them (pre-push Codex P1 on 47f085038). The lane
+    // parks the manual send while such an enrolment is live, so this is
+    // the held case: the template is disabled.
+    enrollmentRows = [{ id: 'enr-1', status: 'active', template_enabled: false, current_step: 0, template_key: 'flea' }];
+    runRows = [{ status: 'completed' }];
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea' };
+    // (automationLaneLive still parks it — a live step-0 enrolment holds the page.)
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: false, reason: 'prep_send_pending' });
+    expect(advanceEnrollment).not.toHaveBeenCalled();
 
     // An enrolment already past step 0 (the prep step — the runner's
     // stampPrepSentForSequence) has sent the prep: it neither parks the
     // manual re-send nor gets settled (its follow-up steps keep going;
     // GH Codex #3856 r25 P2). The settle write itself is step-0 scoped.
-    enrollmentUpdates = [];
     enrollmentRows = [{ id: 'enr-1', status: 'active', template_enabled: true, current_step: 1 }];
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: true });
-    // The settle write was issued but scoped to current_step 0 — it cannot
-    // touch this advanced enrolment.
-    expect(enrollmentUpdates).toHaveLength(1);
+    // The settle read is scoped to current_step 0 — it cannot see this
+    // advanced enrolment, so nothing is advanced.
+    expect(advanceEnrollment).not.toHaveBeenCalled();
     expect(enrollmentWheres.filter((w) => w && typeof w === 'object' && w.template_key === 'flea').every((w) => w.current_step === 0)).toBe(true);
 
+    // The settle itself (the composer's prep-link text calls it directly —
+    // no lane check there; GH Codex #3856 r30 P1): a live step-0 enrolment
+    // is advanced through the runner, held or not.
+    const { settleHeldEnrollment } = require('../services/prep-guide-sender');
+    enrollmentRows = [{ id: 'enr-1', status: 'active', template_enabled: false, current_step: 0, template_key: 'flea' }];
+    await settleHeldEnrollment('cust-1', 'prep.flea');
+    expect(advanceEnrollment).toHaveBeenCalledTimes(1);
+    expect(advanceEnrollment).toHaveBeenCalledWith(expect.objectContaining({ id: 'enr-1', current_step: 0 }));
+    expect(enrollmentUpdates).toEqual([]); // no cancel write
+    advanceEnrollment.mockClear();
+
     // A guide with no sequence (lawn) settles nothing.
-    enrollmentUpdates = [];
     upcomingVisitRow = { ...VISIT };
     servicePrepRow = { prep_token: 'h'.repeat(32), prep_template_key: 'prep.lawn' };
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'both' })).toMatchObject({ ok: true });
+    expect(advanceEnrollment).not.toHaveBeenCalled();
     expect(enrollmentUpdates).toEqual([]);
   });
 

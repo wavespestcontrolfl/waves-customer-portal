@@ -436,3 +436,38 @@ describe('automation runner scheduler tick', () => {
     expect(dueChain.where).toHaveBeenCalledWith('t.enabled', true);
   });
 });
+
+describe('advanceEnrollment', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('loads the enabled steps when the caller has none, schedules the next step from its delay, and fences the write on the step it saw', async () => {
+    const { advanceEnrollment } = require('../services/automation-runner');
+    const update = chain();
+    setDbQueues({
+      automation_steps: [chain({ result: [
+        { id: 'step-1', step_order: 0, delay_hours: 0, enabled: true },
+        { id: 'step-2', step_order: 1, delay_hours: 72, enabled: true },
+      ] })],
+      automation_enrollments: [update],
+    });
+    const before = Date.now();
+    const out = await advanceEnrollment({ id: 'enr-1', template_key: 'flea', current_step: 0 });
+    expect(out).toMatchObject({ sent: true, done: false });
+    // A concurrent settler of the same step (the tick vs a manual /
+    // composer prep delivery) cannot advance it twice.
+    expect(update.where).toHaveBeenCalledWith({ id: 'enr-1', current_step: 0 });
+    const patch = update.update.mock.calls[0][0];
+    expect(patch.current_step).toBe(1);
+    expect(patch.next_send_at.getTime()).toBeGreaterThanOrEqual(before + 72 * 3600 * 1000);
+  });
+
+  test('completes the enrolment when no enabled step remains', async () => {
+    const { advanceEnrollment } = require('../services/automation-runner');
+    const update = chain();
+    setDbQueues({ automation_enrollments: [update] });
+    const out = await advanceEnrollment({ id: 'enr-1', template_key: 'flea', current_step: 0 }, [{ id: 'step-1', step_order: 0 }]);
+    expect(out).toMatchObject({ sent: true, done: true });
+    expect(update.where).toHaveBeenCalledWith({ id: 'enr-1', current_step: 0 });
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', next_send_at: null, current_step: 1 }));
+  });
+});
