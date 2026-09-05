@@ -511,6 +511,11 @@ async function reringPendingBells({ conn = db, notify = null } = {}) {
     // reads a bare ? as a binding placeholder (hook r27 P1).
     .whereRaw("prr.status <> 'cancelled'")
     .whereRaw(RECEIVED_SETTLES_SQL)
+    // A pre-submit park's bell ("order manually") is re-rung only while the
+    // request is still open: staff who ordered by hand and marked it ordered
+    // must not be told again (hook r27 P1). Dispatched rows (placed_at set)
+    // carry reconciliation bells, re-rung in any live state.
+    .whereRaw("(vo.placed_at IS NOT NULL OR prr.status = 'open')")
     .whereRaw("jsonb_exists(vo.evidence, 'bell')")
     .whereRaw("NULLIF(vo.evidence->>'bellAt', '') IS NULL")
     .select('vo.id', 'vo.evidence', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name');
