@@ -149,7 +149,7 @@ export default function CustomerDialogHost() {
                 color: CUSTOMER_SURFACE.text,
                 fontFamily: FONTS.heading,
                 fontSize: 14,
-                fontWeight: 850,
+                fontWeight: 700,
                 cursor: 'pointer',
               }}
             >
@@ -170,7 +170,7 @@ export default function CustomerDialogHost() {
               color: '#fff',
               fontFamily: FONTS.heading,
               fontSize: 14,
-              fontWeight: 850,
+              fontWeight: 700,
               cursor: 'pointer',
             }}
           >

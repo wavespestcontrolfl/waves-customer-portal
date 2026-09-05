@@ -184,7 +184,7 @@ function States() {
 }
 
 function Showcase() {
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   return (
     <WavesShell>
       {/* WavesShell owns the page's one <main>; the showcase is a plain column. */}

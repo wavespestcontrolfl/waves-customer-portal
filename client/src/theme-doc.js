@@ -37,12 +37,13 @@ import { CUSTOMER_SURFACE } from './theme-customer';
 export const DOC_FONT = FONTS.body; // "'Inter', system-ui, sans-serif"
 export const DOC_FONT_SERIF = FONTS.serif;
 
-// Fixed type scale. On a glass surface (every customer page) nothing renders
-// under 14px — the runtime sheet in glass/glass-theme.css floors it, so the
-// scale starts at 14 (no micro/caption; the PDF twin keeps its own 8/9).
+// Fixed SCREEN type scale (paper keeps h1 34 / h2 24 via .waves-print-h1/-h2
+// in glass-theme.css's print block). Nothing renders under 14px on a customer surface — the
+// runtime sheet in glass/glass-theme.css floors it and check-portal-brand
+// refuses smaller literals and tokens at build time (no micro/caption).
 export const FS = {
   body: 14, // meta rows, table cells, buttons, eyebrows, fine print
-  bodyLg: 15, // primary prose paragraphs
+  bodyLg: 16, // primary prose paragraphs (owner D1 2026-09-05: body prose is 16 on customer surfaces)
   lead: 16, // lead-ins, input text (16 = no iOS zoom)
   sub: 18, // sub-headings, intro lines
   h4: 16,
@@ -57,7 +58,6 @@ export const FW = {
   medium: 500,
   semibold: 600,
   bold: 700,
-  heavy: 800, // display/eyebrow emphasis only
 };
 
 export const LH = {

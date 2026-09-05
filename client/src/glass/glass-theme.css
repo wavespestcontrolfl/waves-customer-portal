@@ -30,6 +30,8 @@ html[data-glass-theme] {
   --border-strong: rgba(4, 57, 94, 0.24);
   --brand-soft: rgba(4, 57, 94, 0.08);
   --brand-ring: rgba(4, 57, 94, 0.18);
+  /* TrustFooter's legal lines read --text-subtle; the sheet's muted grey, not the marketing gray-500. */
+  --text-subtle: #475569;
 }
 
 /* Decorative orbs and the review ticker intentionally extend beyond their
@@ -451,9 +453,12 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
    r12 cards, r10 controls, r999 pills; primary actions 48 (BrandButton), gold
    accent actions 44 minimum, choice chips 40 minimum; 16px input text (no iOS
    zoom) with a 14px placeholder in the muted grey. ===== */
-html[data-glass-theme] [data-glass] { border-radius: 12px !important; }
+html[data-glass-theme] [data-glass]:not([data-glass="modal"]) { border-radius: 12px !important; }
 html[data-glass-theme] [data-glass-pill] { border-radius: 999px !important; }
-html[data-glass-theme] button:not([data-glass-pill]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
+/* r10 controls — except a control that authors its own round shape (pill 999 /
+   circle 50%), tagged or inline: the multi-service selector on /book, the
+   carousel arrows, switches and close buttons keep their geometry. */
+html[data-glass-theme] button:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
 html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !important; }
 html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 40px !important; }
 html[data-glass-theme] .service-report-v1 .cross-sell-card h2, html[data-glass-theme] .service-report-v1 .review-request-card h2 { font-size: 20px !important; }
@@ -474,16 +479,16 @@ html[data-glass-theme] .sr-cell, html[data-glass-theme] .applied-product-card, h
 html[data-glass-theme] .sr-cell-label, html[data-glass-theme] .section-eyebrow, html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"] {
   font-size: 14px !important; font-weight: 600 !important; letter-spacing: 0.06em !important; text-transform: uppercase; color: #3F4A65 !important;
 }
-html[data-glass-theme] .service-report-v1 .sr-section p, html[data-glass-theme] .service-report-v1 .report-card p { font-size: 15px !important; color: #3F4A65 !important; line-height: 1.5 !important; }
+html[data-glass-theme] .service-report-v1 .sr-section p, html[data-glass-theme] .service-report-v1 .report-card p { font-size: 16px !important; color: #3F4A65 !important; line-height: 1.5 !important; }
 html[data-glass-theme] .service-report-v1 .sr-section, html[data-glass-theme] .service-report-v1 .report-card, html[data-glass-theme] .service-report-v1 .review-request-card, html[data-glass-theme] .service-report-v1 .cross-sell-card, html[data-glass-theme] .service-report-v1 .service-status-card { margin-top: 16px !important; }
 html[data-glass-theme] [data-glass="soft"] {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.15)), rgba(244, 239, 224, 0.36) !important;
 }
 
 /* Report Ask Waves = the estimate's Ask Waves card (owner 2026-09-03). */
-html[data-glass-theme] .waves-ask-card { display: grid !important; grid-template-columns: 1fr !important; gap: 12px !important; padding: 24px !important; margin: 16px 0 0 !important; position: static !important; }
+html[data-glass-theme] .waves-ask-card { display: grid !important; grid-template-columns: 1fr !important; gap: 12px !important; padding: 24px !important; margin: 16px 0 0 !important; }
 html[data-glass-theme] .waves-ask-title { margin: 0 !important; }
-html[data-glass-theme] .waves-ask-intro { margin: 0 !important; font-size: 15px !important; color: #3F4A65 !important; line-height: 1.5 !important; }
+html[data-glass-theme] .waves-ask-intro { margin: 0 !important; font-size: 16px !important; color: #3F4A65 !important; line-height: 1.5 !important; }
 html[data-glass-theme] .waves-ask-form { display: grid !important; grid-template-columns: minmax(0, 1fr) auto !important; gap: 12px !important; align-items: center !important; }
 html[data-glass-theme] .waves-ask-form input { width: 100%; min-height: 48px !important; padding: 12px 16px !important; font-size: 16px !important; border: 1px solid rgba(4, 57, 94, 0.16) !important; border-radius: 10px !important; background: rgba(255, 255, 255, 0.8) !important; color: #04395E !important; outline: none; box-sizing: border-box; }
 html[data-glass-theme] .waves-ask-eyebrow { display: block !important; }
@@ -494,6 +499,35 @@ html[data-glass-theme] .waves-ask-row[data-first] { border-top: 0 !important; }
 /* The card is interactive chrome: never print it (the sheet's display: grid !important would otherwise beat the page's print rule). */
 @media print { html[data-glass-theme] .waves-ask-card { display: none !important; } }
 html[data-glass-theme] .waves-ask-go { font-size: 14px !important; font-weight: 600 !important; color: #3F4A65 !important; }
+/* Shared by the service report and the project report (moved out of ReportViewPage's style block 2026-09-05). */
+/* Ask Waves answer sits in the card's normal flow under the question
+   rows (the old sticky bar's dropdown was absolutely positioned). */
+html[data-glass-theme] .waves-ask-answer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+  border: 1px solid rgba(4, 57, 94, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 12px 14px;
+  color: #04395E;
+  font-size: 16px;
+  line-height: 1.5;
+}
+html[data-glass-theme] .waves-ask-dismiss {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  margin: -10px -12px -10px 0;
+  border: 0;
+  background: transparent;
+  color: #475569;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
 html[data-glass-theme] .sr-shell section[data-glass], html[data-glass-theme] .sr-shell .pest-await { margin-bottom: 16px !important; }
 html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !important; }
 
@@ -586,6 +620,10 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
    Estimates had NO print path: grain printed over content, sticky bars
    repeated every page, translucent cards collapsed to faint washes. */
 @media print {
+  /* Paper keeps the pre-#3892 heading scale (h1 34 / h2 24) until batch D
+     rules on print typography — the screen tokens grew to 40 / 26. */
+  .waves-print-h1 { font-size: 34px !important; }
+  .waves-print-h2 { font-size: 24px !important; }
   .glass-scene-orbs,
   .glass-scene-grain,
   .gc-mbb,

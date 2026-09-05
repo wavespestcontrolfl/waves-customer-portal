@@ -226,14 +226,14 @@ function classify(revealIO, statIO) {
  * error / loaded) call this once at the top of the component instead of
  * mounting the component in every branch.
  */
-export function useGlassTheme(active, variant = 'full') {
+export function useGlassTheme(active) {
   // Layout effect, not effect: the scene attribute + first classify() must
   // land before the browser paints, or the page flashes its untagged legacy
   // inline styles for a frame (owner saw the old theme pop on draft previews).
   useLayoutEffect(() => {
     if (!active) return undefined;
     const html = document.documentElement;
-    const { orbs, cleanup: sceneCleanup } = applyGlassScene(variant);
+    const { orbs, cleanup: sceneCleanup } = applyGlassScene();
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const revealIO = new IntersectionObserver((ents) => {
       ents.forEach((en) => {
@@ -312,10 +312,10 @@ export function useGlassTheme(active, variant = 'full') {
       if (statIO) statIO.disconnect();
       sceneCleanup();
     };
-  }, [active, variant]);
+  }, [active]);
 }
 
-export default function EstimateGlassTheme({ active, variant = 'full' }) {
-  useGlassTheme(active, variant);
+export default function EstimateGlassTheme({ active }) {
+  useGlassTheme(active);
   return null;
 }

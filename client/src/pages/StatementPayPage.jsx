@@ -337,7 +337,7 @@ export default function StatementPayPage() {
   // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
   // retired; the pay lane renders the same scene as every glass surface).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);

@@ -860,7 +860,7 @@ function ScoreRing({ score, size = 90, stroke = 7, label }) {
         <div style={{ fontSize: size * 0.28, fontWeight: 700, color: B.navy, lineHeight: 1 }}>
           {score || 0}
         </div>
-        {label && <div style={{ fontSize: 9, color: PORTAL_SHELL.muted, marginTop: 2, fontWeight: 600 }}>{label}</div>}
+        {label && <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2, fontWeight: 600 }}>{label}</div>}
       </div>
     </div>
   );
@@ -1935,14 +1935,14 @@ function PhotoGallery({ photos }) {
             {p.isBest && (
               <div style={{
                 position: 'absolute', top: 6, left: 6, background: B.teal, color: '#fff',
-                fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+                fontSize: 14, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
               }}>BEST</div>
             )}
             {p.type && p.type !== 'general' && (
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0,
                 background: 'linear-gradient(transparent, rgba(0,0,0,0.6))',
-                color: '#fff', fontSize: 10, fontWeight: 600, padding: '12px 8px 6px',
+                color: '#fff', fontSize: 14, fontWeight: 600, padding: '12px 8px 6px',
                 textTransform: 'capitalize',
               }}>
                 {p.type.replace(/_/g, ' ')}
@@ -2106,13 +2106,13 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
                   <span style={{ fontWeight: 700, color: current >= 75 ? B.green : current >= 50 ? B.orange : B.red }}>{current}%</span>
                   {delta !== 0 && (
                     <span style={{
-                      fontSize: 10, marginLeft: 6, fontWeight: 700,
+                      fontSize: 14, marginLeft: 6, fontWeight: 700,
                       color: delta > 0 ? B.green : B.red,
                     }}>
                       {delta > 0 ? '+' : ''}{delta}
                     </span>
                   )}
-                  <span style={{ color: PORTAL_SHELL.muted, fontSize: 10, marginLeft: 4 }}>from {initial}%</span>
+                  <span style={{ color: PORTAL_SHELL.muted, fontSize: 14, marginLeft: 4 }}>from {initial}%</span>
                 </span>
               </div>
               <div style={{
@@ -2162,7 +2162,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               border: `1px solid ${B.teal}12`,
             }}>
               <TrendSparkline trend={trend} height={70} />
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10, color: PORTAL_SHELL.muted }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 14, color: PORTAL_SHELL.muted }}>
                 <span>{fmtDate(trend[0].date, { month: 'short', year: '2-digit' })}</span>
                 <span>{fmtDate(trend[trend.length - 1].date, { month: 'short', year: '2-digit' })}</span>
               </div>
@@ -2311,7 +2311,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
         <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {seasonalContext.pressureSignals.filter(s => s.level === 'high' || s.level === 'regulatory').slice(0, 3).map((s, i) => (
             <span key={i} style={{
-              fontSize: 10, padding: '3px 8px', borderRadius: 6,
+              fontSize: 14, padding: '3px 8px', borderRadius: 6,
               background: s.level === 'regulatory' ? `${B.red}15` : `${B.orange}15`,
               color: s.level === 'regulatory' ? B.red : B.orange,
               fontWeight: 600,
@@ -3760,7 +3760,7 @@ function ServicesTab() {
                           <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, lineHeight: 1 }}>
                             {parseDate(s.date).getDate()}
                           </div>
-                          <div style={{ fontSize: 10, fontWeight: 700, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
                             {parseDate(s.date).toLocaleDateString('en-US', { month: 'short' })}
                           </div>
                         </div>
@@ -3916,7 +3916,7 @@ function ServicesTab() {
                 {lightbox.caption}
               </div>
             )}
-            <button type="button" aria-label="Close photo" onClick={() => setLightbox(null)}
+            <button type="button" aria-label="Close photo" data-glass-pill="" onClick={() => setLightbox(null)}
               style={{
                 position: 'absolute', top: -10, right: -10, width: 36, height: 36, borderRadius: '50%',
                 border: 'none', background: B.white, color: B.navy, fontSize: 18, fontWeight: 700, cursor: 'pointer',
@@ -4547,7 +4547,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui, lineHeight: 1 }}>
           {s.svcDate.getDate()}
         </div>
-        <div style={{ fontSize: 10, fontWeight: 700, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
           {s.svcDate.toLocaleDateString('en-US', { month: 'short' })}
         </div>
       </div>
@@ -4712,6 +4712,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               const anySaving = APPOINTMENT_CHANNEL_KEYS.some(k => !!prefsLocked[k]);
               return (
                 <button
+                  data-glass-pill=""
                   onClick={() => handleAllAppointmentChannels(allEmail ? 'sms' : 'email')}
                   disabled={anySaving}
                   style={{
@@ -4868,7 +4869,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       </span>
                     </button>
                     {p.locked && (
-                      <span style={{ fontSize: 10, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
+                      <span style={{ fontSize: 14, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
                   </div>
                   </div>
@@ -4938,7 +4939,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     </div>
                     {property.id === customer.id && multiProperty && (
                       <span style={{
-                        fontSize: 10, fontWeight: 700, color: B.wavesBlue,
+                        fontSize: 14, fontWeight: 700, color: B.wavesBlue,
                         background: '#fff', border: `1px solid ${B.wavesBlue}22`,
                         borderRadius: 8, padding: '4px 8px', whiteSpace: 'nowrap',
                       }}>Current</span>
@@ -6228,7 +6229,7 @@ function BillingTab({ customer, refreshCustomer }) {
                 width: 48, height: 32, borderRadius: 6,
                 background: B.glassNavy,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: '#fff', fontSize: 10, fontWeight: 700, letterSpacing: 0, fontFamily: FONTS.ui,
+                color: '#fff', fontSize: 14, fontWeight: 700, letterSpacing: 0, fontFamily: FONTS.ui,
               }}>{(c.brand || (isBankMethod(c.methodType) ? 'BANK' : 'CARD')).toUpperCase().slice(0, 6)}</div>
             )}
             <div style={{ flex: 1, minWidth: 180 }}>
@@ -7014,6 +7015,7 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
       role="switch"
       aria-checked={!!checked}
       aria-label={label}
+      data-glass-pill=""
       onClick={onChange}
       disabled={disabled}
       style={{
@@ -10789,8 +10791,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
                               </div>
                             )}
                             <div style={{
-                              fontSize: 10,
-                              fontWeight: isCurrentMonth ? 800 : 600,
+                              fontSize: 14,
+                              fontWeight: isCurrentMonth ? 700 : 600,
                               letterSpacing: '0.02em',
                               color: isCurrentMonth ? B.wavesBlue : 'rgba(4,57,94,0.5)',
                             }}>{month[0]}</div>
@@ -15218,7 +15220,7 @@ export default function PortalPage() {
   const menuRef = useRef(null);
   // Home is the hero surface (full scene with orbs). Glass is the unconditional
   // portal theme now, so the scene always mounts.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   // Close menu on outside click
   useEffect(() => {

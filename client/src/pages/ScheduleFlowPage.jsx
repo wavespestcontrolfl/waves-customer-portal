@@ -68,8 +68,8 @@ const PRIMARY_CTA = {
   border: `1px solid ${COLORS.glassNavy}`,
   borderRadius: 10,
   fontFamily: FONTS.ui,
-  fontWeight: 800,
-  fontSize: 15,
+  fontWeight: 700,
+  fontSize: 16,
   cursor: 'pointer',
   textDecoration: 'none',
 };
@@ -101,7 +101,7 @@ function Card({ children, style, ...rest }) {
 
 function CardTitle({ children }) {
   return (
-    <div data-gt="h3x" style={{ fontSize: 20, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+    <div data-gt="h3x" style={{ fontSize: 20, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 8 }}>
       {children}
     </div>
   );
@@ -174,7 +174,7 @@ function NotFoundCard({ title, body }) {
   return (
     <Card>
       <CardTitle>{title}</CardTitle>
-      <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>{body}</div>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>{body}</div>
       <ContactRow />
     </Card>
   );
@@ -184,13 +184,13 @@ function LoadErrorCard({ title, onRetry }) {
   return (
     <Card>
       <CardTitle>{title}</CardTitle>
-      <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
         This looks temporary. Your link is still valid—try again in a moment.
       </div>
       <button
         type="button"
         onClick={onRetry}
-        style={{ marginTop: 16, border: 0, borderRadius: 10, padding: '11px 16px', background: COLORS.glassNavy, color: '#fff', font: 'inherit', fontWeight: 800, cursor: 'pointer' }}
+        style={{ marginTop: 16, border: 0, borderRadius: 10, padding: '11px 16px', background: COLORS.glassNavy, color: '#fff', font: 'inherit', fontWeight: 700, cursor: 'pointer' }}
       >
         Try again
       </button>
@@ -210,7 +210,7 @@ function HelpCard({ children }) {
 function EmptyTimesCard({ aiFiltered }) {
   return (
     <Card>
-      <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
         {aiFiltered
           ? 'No open times match that search — try another day, or show all open times above.'
           : "We don't have open times to offer online right now. Text or call us and we'll find a time that works."}
@@ -257,7 +257,7 @@ function AskCard({ onSearch, aiFiltered, onShowAll }) {
       <h2 className="waves-ask-title" style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.2, color: S.text, margin: 0 }}>
         Search for a day or time
       </h2>
-      <p className="waves-ask-intro" style={{ margin: 0, fontSize: 15, color: S.body, lineHeight: 1.5 }}>
+      <p className="waves-ask-intro" style={{ margin: 0, fontSize: 16, color: S.body, lineHeight: 1.5 }}>
         Tell us when works — a day, a time of day, or both — and we&apos;ll show the openings that match.
       </p>
       <div className="waves-ask-form" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 12, alignItems: 'center' }}>
@@ -282,7 +282,7 @@ function AskCard({ onSearch, aiFiltered, onShowAll }) {
           type="button"
           onClick={() => ask()}
           disabled={asking || !question.trim()}
-          style={{ minHeight: 48, padding: '0 20px', border: 0, borderRadius: 10, background: COLORS.yellow, color: S.text, font: 'inherit', fontSize: 15, fontWeight: 800, cursor: 'pointer' }}
+          style={{ minHeight: 48, padding: '0 20px', border: 0, borderRadius: 10, background: COLORS.yellow, color: S.text, font: 'inherit', fontSize: 16, fontWeight: 700, cursor: 'pointer' }}
         >
           {asking ? 'Checking…' : 'Search'}
         </button>
@@ -531,7 +531,7 @@ function WeatherMoveBanner({ move, serviceType }) {
         }}>
           <summary style={{
             listStyle: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
-            padding: 14, fontSize: 15, fontWeight: 600, color: S.text,
+            padding: 14, fontSize: 16, fontWeight: 600, color: S.text,
           }}>
             Why the move?
             <Icon name="chevronDown" size={16} style={{ marginLeft: 'auto', color: S.body }} />
@@ -572,7 +572,7 @@ function IneligibleCard({ data }) {
   return (
     <Card>
       <CardTitle>{data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}we can&apos;t move this one online</CardTitle>
-      <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
         {reasonCopy} Need a hand? Text or call and our team will help.
       </div>
       <ContactRow />
@@ -619,7 +619,7 @@ function RescheduleHero({ data, selectedSlot }) {
             </h1>
           </>
         )}
-        <div style={{ marginTop: 12, color: S.body, fontSize: 15, lineHeight: 1.55 }}>
+        <div style={{ marginTop: 12, color: S.body, fontSize: 16, lineHeight: 1.55 }}>
           {move ? (
             <>
               Your new time is confirmed — nothing else to do. Or pick any
@@ -653,7 +653,7 @@ function RescheduleSuccessCard({ result, service }) {
   return (
     <Card>
       <CardTitle>You&apos;re all set</CardTitle>
-      <div style={{ fontSize: 15, color: S.body, lineHeight: 1.6 }}>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
         Your {service?.type || 'service'} visit is now scheduled for{' '}
         <strong style={{ color: S.text }}>{formatDateLabel(result.newDate)}</strong>, arrival window{' '}
         <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
@@ -670,7 +670,7 @@ function NotEligibleCard({ data }) {
   return (
     <Card>
       <CardTitle>{data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}let&apos;s get you taken care of</CardTitle>
-      <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
         Free re-service visits come with an active recurring plan, and we don&apos;t
         show one on your account right now. Text or call us and we&apos;ll figure
         out the fastest way to help.
@@ -686,7 +686,7 @@ function AlreadyBookedCard({ lane }) {
   const booked = lane.alreadyBooked || {};
   return (
     <Card>
-      <div style={{ fontSize: 15, color: S.body, lineHeight: 1.6 }}>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
         Your <strong style={{ color: S.text }}>{booked.serviceType || lane.label}</strong> visit is
         set for <strong style={{ color: S.text }}>{formatDateLabel(booked.date)}</strong>
         {booked.windowStart ? <>, arrival window <strong style={{ color: S.text }}>{arrivalWindowLabel(booked.windowStart)}</strong></> : null}.
@@ -705,7 +705,7 @@ function ReserviceSuccessCard({ result }) {
   return (
     <Card>
       <CardTitle>You&apos;re all set</CardTitle>
-      <div style={{ fontSize: 15, color: S.body, lineHeight: 1.6 }}>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
         Your free <strong style={{ color: S.text }}>{result.serviceType || 're-service'}</strong> visit is
         scheduled for <strong style={{ color: S.text }}>{formatDateLabel(result.date)}</strong>, arrival window{' '}
         <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
@@ -725,7 +725,7 @@ function ReserviceCoveredView({ data }) {
     <>
       <Card>
         <CardTitle>{data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}you&apos;re covered</CardTitle>
-        <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
           We already have your free re-service on the calendar.
         </div>
       </Card>
@@ -750,7 +750,7 @@ function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, detail
         <h1 style={{ margin: 0, fontFamily: FONTS.serif, fontSize: 'clamp(30px, 5vw, 40px)', fontWeight: 500, lineHeight: 1.1, color: S.text }}>
           {data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pests back between visits?
         </h1>
-        <div style={{ marginTop: 12, color: S.body, fontSize: 15, lineHeight: 1.55 }}>
+        <div style={{ marginTop: 12, color: S.body, fontSize: 16, lineHeight: 1.55 }}>
           Breakthrough activity between regular visits is covered — pick a time
           below and we&apos;ll send a tech back out at <strong style={{ color: S.text }}>no charge</strong>.
         </div>
@@ -874,7 +874,7 @@ const FLOWS = {
 export default function ScheduleFlowPage({ flow }) {
   const cfg = FLOWS[flow];
   const { token } = useParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
