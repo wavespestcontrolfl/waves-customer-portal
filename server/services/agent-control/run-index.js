@@ -86,12 +86,14 @@ function sortKey(run) {
   return `${run.startedAt || run.createdAt || ''}|${run.key}`;
 }
 
-function validate({ preset, status, area, lane, now }) {
+function validate({ preset, status, area, lane, limit, now }) {
   const checks = [
     ['window', preset, (v) => !!resolveWindow(v, now)],
     ['status', status, (v) => STATUSES.includes(v)],
     ['area', area, (v) => !v || modelSwitchboard.AREAS.some((a) => a.key === v)],
     ['lane', lane, (v) => !v || knownLane(v)],
+    // an integer page size, or the default; a float / word can neither slice nor snapshot a cursor
+    ['limit', limit, (v) => v === DEFAULT_LIMIT || Number.isInteger(Number(v))],
   ];
   for (const [name, value, ok] of checks) if (!ok(value)) throw badRequest(`unknown ${name}: ${value}`);
 }
@@ -208,7 +210,7 @@ async function collectPage({ window, lane, area, status, after, pageSize, now })
 async function listRuns(params = {}) {
   const { lane, area, status, window: preset, cursor, limit } = { ...LIST_DEFAULTS, ...defined(params) };
   const now = params.now ?? new Date();
-  validate({ preset, status, area, lane, now });
+  validate({ preset, status, area, lane, limit, now });
   const window = resolveWindow(preset, now);
   const pageSize = Math.min(MAX_LIMIT, Math.max(1, Number(limit) || DEFAULT_LIMIT));
   const after = decodeCursor(cursor);

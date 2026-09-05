@@ -261,7 +261,7 @@ describe('listRuns', () => {
     const p3 = await runIndex.listRuns({ limit: 2, cursor: p2.nextCursor, now: NOW });
     expect(p3.runs.map((r) => r.id)).toEqual(['a5']);
     expect(p3.nextCursor).toBeNull();
-    for (const bad of [{ cursor: '!!' }, { cursor: Buffer.from('{"p":{"nope":["x","y"]}}').toString('base64url') }, { window: '90d' }, { status: 'weird' }, { area: 'nope' }, { lane: 'not_a_lane' }, { window: 'constructor' }]) {
+    for (const bad of [{ cursor: '!!' }, { cursor: Buffer.from('{"p":{"nope":["x","y"]}}').toString('base64url') }, { window: '90d' }, { status: 'weird' }, { area: 'nope' }, { lane: 'not_a_lane' }, { window: 'constructor' }, { limit: '2.5' }, { limit: 'ten' }]) {
       await expect(runIndex.listRuns({ ...bad, now: NOW })).rejects.toMatchObject({ status: 400 });
     }
   });

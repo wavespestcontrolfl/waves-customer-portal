@@ -193,15 +193,19 @@ async function insertRun(args, laneId, policy, workItemId, traceId, now) {
 // once a newer attempt opened, the older handle's finish / fail / heartbeat
 // no longer touch the run — only its own attempt row.
 async function openAttempt(run, policy, now) {
-  // A reopened run gets a fresh lease and a clean current outcome — the
-  // previous attempt's result and error live on in agent_attempts.
+  // A reopened run gets a fresh lease, a clean current outcome and a fresh
+  // clock — started_at / last_progress_at are THIS attempt's, so health.js
+  // judges the retry from its own start (the previous attempt's timing,
+  // result and error live on in agent_attempts).
   const [updated] = await db('agent_runs').where({ id: run.id }).update({
     attempts: db.raw('attempts + 1'),
     lifecycle: 'running',
     worker_id: WORKER_ID,
     leased_at: now,
     lease_expires_at: new Date(now.getTime() + policy.stall_after_ms),
-    started_at: run.started_at || now,
+    started_at: now,
+    last_progress_at: now,
+    progress_sequence: 0,
     finished_at: null,
     result: null,
     disposition: null,

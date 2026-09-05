@@ -159,7 +159,10 @@ describe('start / step / finish', () => {
     expect(b.id).toBe(a.id);
     expect(b.attemptNo).toBe(2);
     expect(b.traceId).toBe(a.traceId); // the persisted trace, not a fresh one
-    expect(runRow()).toMatchObject({ lifecycle: 'running', finished_at: null, error_code: null });
+    expect(runRow()).toMatchObject({ lifecycle: 'running', finished_at: null, error_code: null, progress_sequence: 0 });
+    // the retry's clock is its own: started_at moved to the reopen, not attempt 1's start
+    expect(runRow().started_at.getTime()).toBeGreaterThanOrEqual(store.agent_attempts[1].started_at.getTime());
+    expect(runRow().last_progress_at.getTime()).toBe(runRow().started_at.getTime());
     await b.finish({});
     expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', failure_class: null, error_code: null, error_message: null });
     expect(store.agent_attempts.map((x) => x.attempt_no)).toEqual([1, 2]);
