@@ -1,15 +1,6 @@
 /**
- * Customer-voice validators.
- *
- * Hard customer/lead-facing voice rule:
- *   - validateNoCustomerEmoji      Customer/lead messages MUST NOT contain emoji.
- *                                  Internal BI is allowed via policy.allowEmoji.
- *
- * This is policy-aware: it reads the resolved policy.allowEmoji
- * rather than hardcoding the audience check.
- * That keeps the rule-of-thumb in one place (policy.js) and lets the
- * BI internal_briefing purpose continue to use the 📊 emoji + dollar
- * amounts in its Monday SMS.
+ * Customer-voice validator. SMS permits emoji for every audience;
+ * other channels retain the resolved policy.allowEmoji restriction.
  */
 
 // Unicode property escape — covers everything Unicode classifies as a
@@ -49,7 +40,7 @@ function findEmoji(body) {
  * @returns {{ ok: boolean, code?: string, reason?: string }}
  */
 function validateNoCustomerEmoji(input, policy) {
-  if (policy.allowEmoji) return { ok: true };
+  if (input.channel === 'sms' || policy.allowEmoji) return { ok: true };
   const { found, sample } = findEmoji(input.body);
   if (found) {
     return {
