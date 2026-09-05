@@ -1137,6 +1137,23 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const selected = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(selected.context).toEqual({ line: 'Tree & Shrub Care', conditional: false });
     expect(selected.amount).toBe(0.5);
+    // The same guard on the PRIMARY non-lawn visit (hook P1): a Tree & Shrub
+    // visit's own "if needed" Headway is withheld, its selected Talus doses.
+    rows.scheduled_services = [{ ...visit, service_type: 'Tree & Shrub Care', service_category: 'tree_shrub' }];
+    rows.scheduled_service_addons = [];
+    protocols.tree_shrub.visits[0] = { visit: 9, month: 'Sep', primary: 'Talus IGR 0.5 fl oz/gal for whitefly/scale nymphs', secondary: 'Headway only for labeled ornamental disease and only if FRAC history allows' };
+    const primary = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(primary.context).toEqual({ line: null, conditional: true });
+    expect(primary.amount).toBeNull();
+    expect(primary.reason).toBe('Listed as "if needed" on this visit\'s protocol — confirm the call before mixing');
+    rows.products_catalog = [{ ...product, id: 't', name: 'Talus IGR' }];
+    const talus = await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(talus.context).toEqual({ line: null, conditional: false });
+    expect(talus.amount).toBe(0.5);
+    // An inspection by identity has no protocol line: nothing to withhold on, nothing to dose under.
+    rows.scheduled_services = [{ ...visit, service_type: 'Tree & Shrub Assessment', service_category: 'inspection' }];
+    expect((await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') })).context).toEqual({ line: null });
+    expect(buildPlan).not.toHaveBeenCalled();
   });
 
   test('the tank search runs the spray check at the property: a Hold withholds the dose', async () => {

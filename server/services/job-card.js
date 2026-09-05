@@ -1295,9 +1295,12 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
     serviceId
       ? dbh('scheduled_services as ss')
         .join('customers as c', 'ss.customer_id', 'c.id')
+        .leftJoin('services as s', 'ss.service_id', 's.id')
         .where('ss.id', serviceId)
         .select(
           'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id',
+          // The primary line's catalog identity, by the card's own rule.
+          dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
           // The booked property's pin, by the card's own rule (see loadJobCardFacts).
           dbh.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as latitude`),
           dbh.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as longitude`),
@@ -1310,15 +1313,17 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // no rig assignment to trust, so no dose — never "any active rig".
   if (!product || !svc) return null;
   const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now));
-  // A product booked through a non-lawn add-on is judged under that add-on's
-  // protocol, not the primary lawn plan (an off-protocol / blackout block of
-  // the lawn plan says nothing about a pest or tree & shrub mix).
-  const addonLine = await addonLineForProduct(dbh, serviceId, product, etCalendarDayOf(svc.scheduled_date || now), deps);
+  // The non-lawn protocol line (primary visit or add-on) that names this
+  // product: an add-on's product is judged under that add-on's protocol,
+  // not the primary lawn plan (an off-protocol / blackout block of the lawn
+  // plan says nothing about a pest or tree & shrub mix), and a line the
+  // protocol lists as "if needed" is withheld exactly as the card does.
+  const protocolLine = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
   // A lawn visit's plan governs the search too: its blocks withhold the dose
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
   // is dosed at the plan's rate, never the catalog default.
-  const plan = !addonLine && detectServiceLine(svc.service_type) === 'lawn' ? await loadLawnPlan(serviceId, { dbh, deps, now }) : null;
+  const plan = !protocolLine && detectServiceLine(svc.service_type) === 'lawn' ? await loadLawnPlan(serviceId, { dbh, deps, now }) : null;
   const planned = plan?.plan ? [...(plan.plan.mixCalculator?.items || []), ...(plan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
   const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
   const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
@@ -1361,9 +1366,9 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   const withheld = [
     [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
     [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
-    // The add-on's protocol lists this product as "if needed": no dose
-    // until the call is made, exactly as the card withholds its amount.
-    [addonLine?.selected === false, `Listed as "if needed" on ${addonLine?.name} — confirm the call before mixing`],
+    // The protocol lists this product as "if needed": no dose until the
+    // call is made, exactly as the card withholds its amount.
+    [protocolLine?.selected === false, `Listed as "if needed" on ${protocolLine?.addon || "this visit's protocol"} — confirm the call before mixing`],
     [!tankMixable, 'Not a tank mix — apply as labeled'],
     [!product.label_verified_at, 'Label rate not yet verified'],
     [sprayCheck.verdict === 'hold', `Spray check: ${sprayCheck.reason}`],
@@ -1384,7 +1389,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
     rateVerified: Boolean(product.label_verified_at),
     tankMixable,
     sprayCheck,
-    context: addonLine ? { line: addonLine.name, conditional: !addonLine.selected } : { line: null },
+    context: protocolLine ? { line: protocolLine.addon, conditional: !protocolLine.selected } : { line: null },
     ...mix,
     planBlocks,
     tank,
@@ -1393,30 +1398,35 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
 }
 
 /**
- * The add-on (by catalog identity) whose treatment protocol names this
- * product, if any: the product is matched the way the card matched it
- * (name + aliases against that program's visit), and `selected` says
- * whether that line is booked work or the visit's "if needed" (a selected
- * line on any add-on wins over a conditional one). Null when the product
- * is not an add-on line's, or the visit has no add-ons.
+ * The non-lawn protocol line that names this product — the primary visit's
+ * (by catalog identity, name for a legacy row: resolveVisitProducts' rule)
+ * or an add-on's — if any. The product is matched the way the card matched
+ * it (name + aliases against that program's visit); `addon` is the add-on's
+ * name (null for the primary line) and `selected` says whether the line is
+ * booked work or the visit's "if needed" (a selected line anywhere wins
+ * over a conditional one). Null when no non-lawn protocol names the product.
  */
-async function addonLineForProduct(dbh, serviceId, product, scheduledDate, deps = {}) {
-  const addons = await loadAddons(dbh, serviceId);
+async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDate, deps = {}) {
   const protocols = deps.protocols || require('../config/protocols.json');
-  const candidates = addons
-    .map((a) => ({ ...a, programKey: addonProgramKey(a.category, a.name, protocols) }))
-    .filter((a) => a.programKey && a.programKey !== 'lawn');
+  const primaryKey = svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols) : undefined;
+  const primaryIsLawn = primaryKey === undefined ? detectServiceLine(svc.service_type) === 'lawn' : primaryKey === 'lawn';
+  const candidates = [
+    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null }] : []),
+    ...(await loadAddons(dbh, serviceId))
+      .map((a) => ({ addon: a.name, name: a.name, programKey: addonProgramKey(a.category, a.name, protocols) }))
+      .filter((a) => a.programKey && a.programKey !== 'lawn'),
+  ];
   if (!candidates.length) return null;
   const aliases = await dbh('product_aliases').where({ product_id: product.id }).select('alias_name')
     .catch((err) => { throw unavailable('Product catalog unavailable', err); });
   const catalog = [{ ...product, aliases: aliases.map((r) => r.alias_name) }];
   let conditional = null;
-  for (const addon of candidates) {
-    const { lines } = resolveProtocolLines(addon.name, scheduledDate, protocols, catalog, { programKey: addon.programKey });
+  for (const c of candidates) {
+    const { lines } = resolveProtocolLines(c.name, scheduledDate, protocols, catalog, c.programKey ? { programKey: c.programKey } : {});
     const hit = lines.find((l) => l.product.id === product.id);
     if (!hit) continue;
-    if (hit.selected !== false) return { name: addon.name, selected: true };
-    conditional = conditional || { name: addon.name, selected: false };
+    if (hit.selected !== false) return { addon: c.addon, selected: true };
+    conditional = conditional || { addon: c.addon, selected: false };
   }
   return conditional;
 }
