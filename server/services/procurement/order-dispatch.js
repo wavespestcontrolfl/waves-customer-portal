@@ -172,7 +172,7 @@ async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
   // P2). Unconfigured = not auto-orderable = the sweep bells the office.
   const configured = !!adapter && (typeof adapter.configured !== 'function' || adapter.configured() === true);
   if (!configured || !gateEnvValue(VENDOR_GATE[key])) return false;
-  if (!adapter.loginRequired || typeof adapter.loginConfigured !== 'function') return true;
+  if (!adapter.loginRequired) return true;
   // Configured by the vendor row (the SiteOne login + account number): a row
   // without it is not auto-orderable — the sweep bells the office rather
   // than standing down (Codex #3853 r12 P2). A lookup that THROWS (the
@@ -672,7 +672,7 @@ async function resolveClaimVendor(trx, { request, registry, deadAdapters = null,
   // on — skipped without a bell, the next run re-reads it.
   if (!adapter.loginRequired) return { vendor, adapterKey, m };
   if (!login || login.vendorId !== vendor.id || login.version !== rowVersion(vendor)) return { skipped: 'vendor_changed_at_claim' };
-  if (typeof adapter.loginConfigured === 'function' && adapter.loginConfigured(login.credentials) !== true) return { skipped: 'adapter_unconfigured' };
+  if (adapter.loginConfigured(login.credentials) !== true) return { skipped: 'adapter_unconfigured' };
   return { vendor, adapterKey, m, credentials: login.credentials };
 }
 
@@ -1171,13 +1171,13 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
       if (binding.parked) return binding.parked;
       quoteCents = binding.quoteCents;
     }
-    const base = { vendorSku, quantity, quoteCents };
+    // `credentials` is the login the claim looked up for a login-driven
+    // adapter (undefined for every other — the claim already decided which).
+    const base = { vendorSku, quantity, quoteCents, credentials };
     // An adapter with no static quote reads the vendor's total at the point of
     // sale and runs the cap reservation through beforeSubmit right before it
     // submits (the binding total is the vendor's, never a local estimate).
-    const quoted = adapter.quotesAtPlace ? { ...base, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { env }) } : base;
-    // A login-driven adapter places with the login the claim already looked up.
-    const placeArgs = adapter.loginRequired ? { ...quoted, credentials } : quoted;
+    const placeArgs = adapter.quotesAtPlace ? { ...base, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { env }) } : base;
     const stopHeartbeat = startClaimHeartbeat(conn, ledger.id);
     try {
       placed = await adapter.place(placeArgs);
@@ -1188,13 +1188,14 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
       // login) parks THIS request as usual and takes the adapter out of the
       // run: its remaining requests stay unclaimed instead of resubmitting
       // the same rejected credential once each (Codex #3853 r21 P1). The
-      // marker rides on the park's failure too, so a transient DB error
-      // while parking cannot revive the adapter for the run (r22 P2).
-      const down = err.adapterDown ? adapterKey : null;
+      // adapter's boolean becomes the key ONCE, here; the marker rides on
+      // the park's failure too (into the outer settlement), so a transient
+      // DB error while parking cannot revive the adapter for the run (r22 P2).
+      if (err.adapterDown) err.adapterDown = adapterKey;
       let parked;
       try { parked = await parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }); }
-      catch (parkErr) { if (down) parkErr.adapterDown = down; throw parkErr; }
-      return down ? { ...parked, adapterDown: down } : parked;
+      catch (parkErr) { parkErr.adapterDown = err.adapterDown; throw parkErr; }
+      return withAdapterDown(parked, err);
     } finally { stopHeartbeat(); }
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
@@ -1214,10 +1215,12 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     // Run-level failures are scoped to THIS adapter for the batch loop: the
     // other vendors' requests still dispatch (Codex r8 P1).
     if (err.runLevel) { err.adapterKey = adapterKey; throw err; }
-    const settled = await settleAfterError(conn, err, { ctx, vendor, submitted, placed, quoteCents, env });
-    return err.adapterDown ? { ...settled, adapterDown: err.adapterDown } : settled;
+    return withAdapterDown(await settleAfterError(conn, err, { ctx, vendor, submitted, placed, quoteCents, env }), err);
   }
 }
+// The per-request result carries the adapter-down marker (the adapter key)
+// when the error that settled it did — the batch loop reads it once.
+const withAdapterDown = (result, err) => (err.adapterDown ? { ...result, adapterDown: err.adapterDown } : result);
 
 // A request the sweep left to the dispatcher (its vendor auto-ordered at
 // sweep time) that the claim now finds undispatchable — vendor deactivated

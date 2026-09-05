@@ -296,20 +296,31 @@ async function login(page, creds) {
     // form ahead of the visible one would take the click and the valid login
     // would park login_rejected — Codex #3853 r16 P1). Without exactly one
     // visible submit control in that form, Enter on the password field
-    // submits it.
+    // submits it. Enter is ONLY the no-control path: a click whose promise
+    // rejects (a slow or failed navigation after the click dispatched) may
+    // already have posted the credential, and a second submit is exactly the
+    // resubmission the one-submit-per-run rule forbids — the click's outcome
+    // is inspected like any other, and an unproven session after it is
+    // 'unverified', never a retry (Codex #3853 r23 P1).
     const passField = (await matches(page, SELECTORS.loginPass)).shown[0];
     const formSubmits = (await matches(passField.locator('xpath=ancestor::form[1]'), SELECTORS.loginSubmit)).shown;
-    if (formSubmits.length === 1) await formSubmits[0].click().catch(() => passField.press('Enter'));
+    let clickUnsettled = false;
+    if (formSubmits.length === 1) await formSubmits[0].click().catch(() => { clickUnsettled = true; });
     else await passField.press('Enter');
     // Signed in = EVERY password field gone or hidden (a hidden responsive
     // duplicate must not read as "still on the login page" — pre-push P1).
     await page.waitForFunction((passSel) => Array.from(document.querySelectorAll(passSel)).every((pw) => !pw.offsetParent), SELECTORS.loginPass, { timeout: LOGIN_TIMEOUT }).catch(() => {});
     await page.waitForTimeout(1500);
-    if ((await matches(page, SELECTORS.loginPass)).shown.length || !isTrustedSiteOneUrl(page.url())) return 'rejected';
     // The password form is gone — but signed in means a SHOWN account marker;
     // an intermediate page (MFA step, maintenance, an error page on the same
     // host) is 'unverified', never a session (Codex #3853 r22 P1).
-    return (await matches(page, SELECTORS.accountMarker)).shown.length ? 'ok' : 'unverified';
+    if ((await matches(page, SELECTORS.accountMarker)).shown.length && isTrustedSiteOneUrl(page.url())) return 'ok';
+    // An unsettled click cannot tell "not submitted" from "submitted and
+    // still loading": neither a rejection nor a transient error (both would
+    // resubmit the credential) — it parks unverified (r23 P1).
+    if (clickUnsettled) return 'unverified';
+    if ((await matches(page, SELECTORS.loginPass)).shown.length || !isTrustedSiteOneUrl(page.url())) return 'rejected';
+    return 'unverified';
   };
   let outcome = null; // 'ok' | 'rejected' | 'unverified' — the last attempt that RETURNED
   let lastError = null;
