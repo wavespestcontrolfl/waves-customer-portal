@@ -645,12 +645,13 @@ async function assignTechnician(input, actionContext = {}) {
 
   // Tech-facing notices (tech-visit-notifications.js): this writer bypasses
   // assignDispatchJob, so it tells both techs itself. Post-commit,
-  // best-effort; the operator's own moves stay silent.
+  // best-effort and NOT awaited — a bulk reassign must not serialize push
+  // delivery into the tool's response; the operator's own moves stay silent.
   {
     const { notifyAssignmentChange } = require('../tech-visit-notifications');
     for (const s of services) {
       if ((s.current_tech_id || null) === tech.id) continue;
-      await notifyAssignmentChange({
+      void notifyAssignmentChange({
         visitId: s.id, fromTechId: s.current_tech_id || null, toTechId: tech.id, actorId: actionContext.technicianId || null,
       });
     }
@@ -1340,12 +1341,13 @@ async function swapTechAssignments(input, actionContext = {}) {
 
   // Tech-facing notices (tech-visit-notifications.js): a swap is two
   // reassignments per stop; both techs hear each one. Post-commit,
-  // best-effort; the operator's own swap stays silent for them.
+  // best-effort and NOT awaited (push delivery stays off the response
+  // path); the operator's own swap stays silent for them.
   {
     const { notifyAssignmentChange } = require('../tech-visit-notifications');
     const swapActor = actionContext.technicianId || null;
-    for (const sid of aIds) await notifyAssignmentChange({ visitId: sid, fromTechId: techA.id, toTechId: techB.id, actorId: swapActor });
-    for (const sid of bIds) await notifyAssignmentChange({ visitId: sid, fromTechId: techB.id, toTechId: techA.id, actorId: swapActor });
+    for (const sid of aIds) void notifyAssignmentChange({ visitId: sid, fromTechId: techA.id, toTechId: techB.id, actorId: swapActor });
+    for (const sid of bIds) void notifyAssignmentChange({ visitId: sid, fromTechId: techB.id, toTechId: techA.id, actorId: swapActor });
   }
 
   // Visit-group seam (codex #3590 r9): a whole-day swap moves every child

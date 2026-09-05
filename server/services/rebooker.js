@@ -1489,9 +1489,10 @@ class SmartRebooker {
       });
     });
 
-    // Tech-facing notice (tech-visit-notifications.js), post-commit and
-    // best-effort: a tech change tells both techs; a same-tech date/window
-    // move tells the holder. options.actorId is the acting staff row when a
+    // Tech-facing notice (tech-visit-notifications.js), post-commit,
+    // best-effort and NOT awaited (push delivery stays off the caller's
+    // response path): a tech change tells both techs; a same-tech
+    // date/window move tells the holder. options.actorId is the acting staff row when a
     // staff surface made the move (so their own move stays silent); system
     // callers are named by initiatedBy.
     try {
@@ -1501,7 +1502,7 @@ class SmartRebooker {
       const noticeTechChanged = Object.prototype.hasOwnProperty.call(options, 'technicianId')
         && (options.technicianId || null) !== priorTechId;
       if (noticeTechChanged) {
-        await techNotices.notifyAssignmentChange({
+        void techNotices.notifyAssignmentChange({
           visitId: serviceId, fromTechId: priorTechId, toTechId: options.technicianId || null, actorId: noticeActor,
         });
       } else if (priorTechId) {
@@ -1513,7 +1514,7 @@ class SmartRebooker {
           || hhmm(updates.window_start) !== hhmm(service.window_start)
           || hhmm(updates.window_end) !== hhmm(service.window_end);
         if (slotChanged) {
-          await techNotices.notifyVisitRescheduled({
+          void techNotices.notifyVisitRescheduled({
             visitId: serviceId,
             technicianId: priorTechId,
             actorId: noticeActor,

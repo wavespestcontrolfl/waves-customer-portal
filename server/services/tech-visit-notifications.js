@@ -252,7 +252,9 @@ async function notifyTechVisitChange({
 
 // Run `fn` after the caller's OUTERMOST commit (a savepoint's own promise
 // resolves at savepoint release — same rule as dispatch-assignment's
-// broadcast hook); with no trx, run it now. Errors never reach the caller.
+// broadcast hook); with no trx, start it now. Errors never reach the
+// caller, and callers do not await the returned promise: push delivery
+// (APNs / FCM / web-push round trips) stays off every response path.
 function afterCommit(trx, fn) {
   const { commitPromiseOf } = require('../utils/trx-commit-promise');
   const commitPromise = trx ? commitPromiseOf(trx) : null;
