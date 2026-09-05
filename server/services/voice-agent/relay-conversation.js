@@ -2136,6 +2136,7 @@ class RelayConversation {
         // (transcriptUpdate.transcription stays this socket's text — the
         // salvage / stash below use it as the relay_transcript stash.)
         let composedTranscription = null;
+        let composedFromRowOnly = null; // PR 2B: a resumed socket with NO turns of its own still owns the composition
         if (recoveryOn && segmentAppended && transcriptUpdate && transcriptUpdate.transcription) {
           composedTranscription = db.raw('COALESCE(?, ?)', [recovery.composeSegmentsSql(db), transcriptUpdate.transcription]);
           try {
@@ -2143,6 +2144,17 @@ class RelayConversation {
             tm.segments = { this_generation: this.sessionGeneration, appended: true };
             transcriptUpdate.transcription_metadata = JSON.stringify(tm);
           } catch { /* keep the metadata as built */ }
+        } else if (recoveryOn && this._resume && !(transcriptUpdate && transcriptUpdate.transcription)) {
+          // The caller hung up before speaking on the reconnected leg: the
+          // reconnect claim fenced the first socket's reconcile out, so this
+          // close is the only one that can put the earlier segment(s) on the
+          // columns (hook P1). Composed from the row; NULL leaves the row as is.
+          const { TRANSCRIPTION_PROVIDER: RELAY_PROVIDER } = require('./relay-transcript');
+          composedFromRowOnly = {
+            transcription: db.raw('COALESCE(?, transcription)', [recovery.composeSegmentsSql(db)]),
+            transcription_provider: db.raw('CASE WHEN ? IS NOT NULL THEN ? ELSE transcription_provider END', [recovery.composeSegmentsSql(db), RELAY_PROVIDER]),
+            transcription_status: db.raw("CASE WHEN ? IS NOT NULL THEN 'completed' ELSE transcription_status END", [recovery.composeSegmentsSql(db)]),
+          };
         }
         fenceOwner(reconcileQuery);
         const updated = await reconcileQuery
@@ -2154,6 +2166,7 @@ class RelayConversation {
             updated_at: new Date(),
             ...(transcriptUpdate || {}),
             ...(composedTranscription ? { transcription: composedTranscription } : {}),
+            ...(composedFromRowOnly || {}),
           });
         // LOUD on a dropped audit record: 0 rows with a real transcript means
         // either the voicemail guard fired (a genuinely failed relay leg) or
@@ -2249,13 +2262,13 @@ class RelayConversation {
         // reach the Owed queue from there too (codex r2 P2) — only the
         // transfer's salvage, never a relay_failed row's or the sandbox's.
         const transferSalvaged = salvaged > 0 && this._transferRequested === true && this.sandbox !== true;
-        if ((updated || transferSalvaged) && transcriptUpdate?.transcription) {
+        if ((updated || transferSalvaged) && (transcriptUpdate?.transcription || composedFromRowOnly)) {
           // PR 2B: on a reconnected call the persisted transcript is the
           // composed one (all segments); the commitments pass reads THAT
           // under the same owner fence, so segment 1's promises reach Owed
           // even though its own socket's pass was skipped (hook P1).
-          let commitmentsTranscript = transcriptUpdate.transcription;
-          if (composedTranscription) {
+          let commitmentsTranscript = transcriptUpdate ? transcriptUpdate.transcription : null;
+          if (composedTranscription || composedFromRowOnly) {
             const persisted = await withTimeout(
               fenceOwner(db('call_log').where('twilio_call_sid', this.callSid)).first('transcription').catch(() => null),
               2000,

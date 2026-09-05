@@ -129,12 +129,23 @@ function appendSegmentPatch(db, segment) {
       [compose(), appended, compose(), appended],
     ),
     transcription: db.raw(
-      "CASE WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ? ELSE transcription END",
-      [require('./relay-transcript').TRANSCRIPTION_PROVIDER, compose(), compose()],
+      // Sandy-owned column ⇒ the whole composed call. A COMPOSITE the
+      // recording processor already wrote ("[AI segment]…[Staff|Voicemail
+      // segment]…") ⇒ only its AI portion is refreshed; the recorded
+      // portion is preserved verbatim. Anything else is left alone.
+      `CASE
+         WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ?
+         WHEN transcription LIKE '[AI segment]%' AND transcription ~ ? AND ? IS NOT NULL
+           THEN '[AI segment]' || E'\\n' || ? || substring(transcription from ?)
+         ELSE transcription
+       END`,
+      [require('./relay-transcript').TRANSCRIPTION_PROVIDER, compose(), compose(), COMPOSITE_RECORDED_RE, compose(), compose(), COMPOSITE_RECORDED_RE],
     ),
     updated_at: new Date(),
   };
 }
+// The recorded half of a processor composite, from its segment header to the end.
+const COMPOSITE_RECORDED_RE = '\\n\\n\\[(Staff|Voicemail) segment\\]\\n[\\s\\S]*$';
 
 /** The close-time column-write fence: a socket older than the latest reconnect never writes columns. */
 function generationFenceSql(q, generation) {

@@ -93,12 +93,21 @@ describe('relay-recovery module', () => {
     const { db } = primeDb();
     const seg = recovery.buildSegment({ generation: 1, text: 'Caller: first leg' });
     const patch = recovery.appendSegmentPatch(db, seg);
-    expect(patch.transcription.sql).toBe("CASE WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ? ELSE transcription END");
+    expect(patch.transcription.sql).toContain("WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ?");
+    expect(patch.transcription.sql).toMatch(/ELSE transcription\s+END$/);
     expect(patch.transcription.bindings[0]).toBe('conversation_relay'); // a recording's transcript is never touched
     expect(patch.transcription.bindings[1].sql).toContain("COALESCE(metadata->'relay_segments', '[]'::jsonb) || ?::jsonb"); // unioned with THIS segment
     expect(patch.metadata.sql).toBe("CASE WHEN (metadata->'relay_transcript') IS NOT NULL AND ? IS NOT NULL THEN jsonb_set(?, '{relay_transcript,text}', to_jsonb(?::text), false) ELSE ? END");
     expect(patch.metadata.bindings[1].sql).toContain("'relay_segments'"); // the append rides both branches
     expect(patch.metadata.bindings[3].sql).toContain("'relay_segments'");
+  });
+
+  test('appendSegmentPatch refreshes the AI portion of a processor composite and preserves the recorded portion (hook P1)', () => {
+    const { db } = primeDb();
+    const patch = recovery.appendSegmentPatch(db, recovery.buildSegment({ generation: 1, text: 'Caller: first leg' }));
+    expect(patch.transcription.sql).toMatch(/WHEN transcription LIKE '\[AI segment\]%' AND transcription ~ \? AND \? IS NOT NULL\s+THEN '\[AI segment\]' \|\| E'\\n' \|\| \? \|\| substring\(transcription from \?\)/);
+    expect(patch.transcription.bindings[3]).toBe('\\n\\n\\[(Staff|Voicemail) segment\\]\\n[\\s\\S]*$');
+    expect(patch.transcription.bindings[6]).toBe(patch.transcription.bindings[3]);
   });
 
   test('loadResumeState proves the hint from the row: reconnects > 0 ⇒ state; otherwise null; bounded and fail-soft', async () => {
@@ -183,6 +192,23 @@ describe('the conversation side', () => {
     expect(updates[0].metadata.sql).toContain('jsonb_set(?, \'{relay_transcript,text}\'');
     expect(updates[0].transcription.sql).toContain('transcription_provider = ?');
     expect(syncVoiceMessageForCall).toHaveBeenCalledWith('CA-rec');
+  });
+
+  test('a resumed socket the caller never spoke on still composes the earlier segment(s) onto the columns at its close (hook P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates, builder } = primeDb({ firstRow: { metadata: { relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: first leg' }] }, transcription: 'Caller: first leg' } });
+    const convo = new RelayConversation({ callSid: 'CA-silent', sessionKey: 'nonce-2', sessionGeneration: 2, from: '+19415551234', send: jest.fn(), resumed: true });
+    convo.leadCaptured = true;
+    await convo._resumeReady;
+    await convo.end('ws_close'); // no turns ⇒ no segment append, no local transcriptUpdate
+    const reconcile = updates.find((u) => u.call_outcome === 'ai_handled');
+    expect(reconcile.transcription.sql).toBe('COALESCE(?, transcription)');
+    expect(reconcile.transcription.bindings[0].sql).toContain("string_agg(seg->>'text'");
+    expect(reconcile.transcription_provider.sql).toBe('CASE WHEN ? IS NOT NULL THEN ? ELSE transcription_provider END');
+    expect(reconcile.transcription_provider.bindings[1]).toBe('conversation_relay');
+    expect(builder.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [2]);
+    // …and the commitments pass reads the persisted composed transcript
+    expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ transcript: 'Caller: first leg', sessionKey: 'nonce-2' }));
   });
 
   test('a proven prior lead restores the capture state (lead_captured true; the session may end when the caller is done) (hook P1)', async () => {
