@@ -184,9 +184,11 @@ async function main() {
       const data = await json(await page.request.get(`${baseUrl}/api/reports/${record.report_view_token}/data`));
       assert.ok(!JSON.stringify(data).includes('QA-PRIVATE-'));
       await page.evaluate(() => localStorage.clear());
-      const renderedReport = page.waitForResponse((response) => response.url().endsWith(`/api/reports/${record.report_view_token}/data`));
+      const renderedReport = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/reports/${record.report_view_token}/data`);
       await page.goto(`${baseUrl}/report/${record.report_view_token}`);
-      const publicReport = await json(await renderedReport);
+      const reportResponse = await renderedReport;
+      assert.equal(reportResponse.request().headers().authorization, undefined);
+      const publicReport = await json(reportResponse);
       assert.ok(!publicReport.staffViewer, 'Render the customer report without a staff session');
       assert.ok(!JSON.stringify(publicReport).includes('QA-PRIVATE-'));
       await page.getByRole('heading', { name: /Hi QA/i }).waitFor();
