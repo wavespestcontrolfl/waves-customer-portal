@@ -42,6 +42,7 @@
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
  *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
+ *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
@@ -663,6 +664,17 @@ const gates = {
   // this entry is the status/log listing. Kill switch: unset.
   voiceRelayInterruptContext: gateEnvValue('GATE_VOICE_RELAY_INTERRUPT_CONTEXT'),
 
+  // Sandy PR 2A — human handoff. On, and ONLY while the office is open right
+  // now, the relay registers `transfer_to_office`: the caller is handed to
+  // the staff simul-ring (press-1 screen, ≤20-word whisper after accept)
+  // with a server-built handoff packet on call_log.metadata.relay_handoff
+  // and call_outcome='ai_transferred'. After hours the tool is absent and
+  // the prompt offers a callback via capture_lead. Off ⇒ no tool, prompt and
+  // /relay-complete byte-identical to today. Read at CALL time
+  // (services/voice-agent/relay-transfer.js, exact 'true'); this entry is the
+  // status/log listing. Kill switch: unset.
+  voiceRelayTransfer: process.env.GATE_VOICE_RELAY_TRANSFER === 'true',
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
@@ -789,7 +801,7 @@ const gates = {
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
 
   // Cron Jobs — automated scheduled tasks (reminders, billing, intelligence)
-  cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : true,
+  cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : process.env.GATE_CRON_JOBS !== 'false',
 
   // Weekly lawn pricing invariant sweep — re-runs the pricing engine across the
   // full track×size×tier grid against LIVE DB config and raises an admin alert
@@ -1386,6 +1398,15 @@ const gates = {
   // the office's manual match flow; already-made links keep their
   // link_source='click_auto' stamp for audit.
   reviewClickAutoLink: process.env.GATE_REVIEW_CLICK_AUTOLINK === 'true',
+  // The surname rung of that matcher (click_name: the ONE in-window clicker
+  // whose complete last name is the reviewer's; see
+  // findConfidentClickMatch). Ships DARK on its own switch because its
+  // ambiguity semantics were still converging at review time (#3822 r6):
+  // off, the rung never links and its inverse-location scan never runs —
+  // sole_click and click_near stay on reviewClickAutoLink alone; the
+  // surname still ranks SUGGESTIONS. Needs reviewClickAutoLink too. Kill:
+  // unset.
+  reviewClickAutoLinkSurname: process.env.GATE_REVIEW_CLICK_AUTOLINK_SURNAME === 'true',
 
   // Event → Automations-tab sequence wirings (all explicit opt-in in EVERY
   // environment, same rationale as treatmentAutomationEnroll; each kill =
@@ -1899,6 +1920,18 @@ const gates = {
   // GATE_AUTO_ORDER.
   autoReorder: gateEnvValue('GATE_AUTO_REORDER'),
 
+  // Vendor order dispatch (runs right after the 6:10 ET reorder sweep): an
+  // open auto_reorder request whose vendor has an adapter is ORDERED —
+  // Sticker Mule reorder API, SiteOne browser bot — under the env spend caps
+  // (AUTO_ORDER_MAX_PER_ORDER_CENTS + AUTO_ORDER_MAX_MONTHLY_CENTS, both
+  // required). Master gate AND the per-vendor gate must be true; all three
+  // are read at CALL time (gateEnvValue), kill = unset any one. Revoke a
+  // placed order: ops/agents/auto-order-revoke.js. Off → the sweep bells
+  // "order manually" exactly as before.
+  autoOrder: gateEnvValue('GATE_AUTO_ORDER'),
+  autoOrderStickerMule: gateEnvValue('GATE_AUTO_ORDER_STICKERMULE'),
+  autoOrderSiteOne: gateEnvValue('GATE_AUTO_ORDER_SITEONE'),
+
   // Auto property-lookup on call-pipeline property creation — each NEWLY
   // created customer_properties row from a call fires one full property
   // lookup (county + LLM trio + satellite vision: real per-call spend) and
@@ -2329,6 +2362,16 @@ const gates = {
   // (default, dev AND prod): nothing is written. Kill switch: unset. Read at
   // CALL time via gateEnvValue.
   llmCallTraces: gateEnvValue('GATE_LLM_CALL_TRACES'),
+
+  // Agent-control hub read — routes/admin-agents.js /control/areas +
+  // /control/lanes via services/agent-control/hub-read.js. ON: the Control
+  // center reads per-lane calls, ok / fallback rates, latency, tokens and
+  // attention status from the llm_dispatch_log call ledger, and the hub
+  // probe reports features.ledger = true. OFF (default, dev AND prod): both
+  // routes 404 and the probe says no ledger, so the client renders nothing
+  // new. Read-only either way. Kill switch: unset. This entry is for
+  // logGateStatus; the route reads gateEnvValue at CALL time.
+  agentControlRead: gateEnvValue('GATE_AGENT_CONTROL_READ'),
 
   // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
   // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become

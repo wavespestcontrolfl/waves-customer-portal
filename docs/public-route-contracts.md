@@ -147,9 +147,17 @@ deliberate POST form submission (scanner-safe, mirrors confirm), answer/
 reaction keys validated against the server-side config allowlists
 (newsletter-quiz.js / newsletter-feedback.js), 30 req/min per IP, always
 returns 200 so it can't probe which tokens/answers are real),
-`/api/public/prep/:token` (read-only, 32-hex token format gate,
+`/api/public/prep/:token` (32-hex token format gate,
 60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
-filters email-only blocks, server-side interpolation, generic 404),
+filters email-only blocks, server-side interpolation, generic 404; the
+ONLY writes are its own view analytics, all after a successful render —
+for a scheduled-service token the visit's `prep_view_count` /
+`prep_first_viewed_at` stamp is fenced on the rendered template key (a
+miss = the key moved, so the page re-resolves and renders the new guide),
+which pairs with the manual prep sender's re-key / release fence on those
+view columns so an opened page never changes guide or 404s behind the
+customer; the `prep_guide_views` log row follows; response shape
+unchanged),
 `/api/public/prep/:token/pdf` (downloadable PDF twin of the prep page —
 action-bar Download parity with service reports; same 32-hex token format
 gate, same 60 req/min limiter, same privacy headers, generic 404; payload
@@ -1060,6 +1068,36 @@ the test number, can neither create dispatch work nor move a metric. The
 transcript, latency summary and version stamps land on the sandbox row
 exactly as in production; that record is the bake-off. Any change to the
 number gate or the dry-run invariant is security-critical).
+`/api/webhooks/twilio/relay-complete` (POST; machine-to-machine TwiML
+webhook — the `<Connect><ConversationRelay>` action Twilio calls when the
+AI receptionist's relay leg ends. Twilio-signature validated at the
+`/api/webhooks/twilio` mount like every Twilio inbound route. Payload:
+standard Twilio voice-webhook form fields (`CallSid`, `SessionStatus`,
+`ErrorCode`) plus `HandoffData` — the JSON string the relay's OWN end frame
+set (absent on a caller hang-up or a session failure), which the handler
+parses tolerantly and trusts for nothing beyond `reason`. Pre-PR-2A
+behaviour is unchanged: a failed session ⇒ voicemail (sandbox: a
+`relay_failed` stamp + hangup), otherwise a bare `<Response/>`. **Sandy PR
+2A adds `reason: 'transfer'`** (`GATE_VOICE_RELAY_TRANSFER` exactly 'true'
+— the gate lives at the `transfer_to_office` tool that emits the frame; the
+frame itself only exists when the tool ran, and only the server's own
+socket can send one): the handler claims ONE staff ring per CallSid
+atomically on the call_log row (`metadata.relay_transfer_ring_at`, stamped
+with `call_outcome = 'ai_transferred'` when the row is not already
+terminal) under a 1.5s deadline, OWNER-BOUND to the frame's
+`owner` (the socket's `relay_session_claim_owner` nonce; a superseded
+socket's frame matches 0 rows), and renders the same staff simul-ring
+`<Dial>` the live `/voice` backstop renders — identical screen / accept
+URLs, no summary, no id and no query string on any URL: the ≤20-word staff
+whisper is read from the persisted packet (`metadata.relay_handoff`) after
+press-1 only. A Twilio retry (ring already claimed ⇒ 0 rows) gets a bare
+response, never a second ring; an unconfirmed claim (timeout / error) and
+a call with no staff forward numbers are stamped `voicemail` (bounded,
+best-effort) and get the voicemail recorder; `?sandbox=1` (the signed
+query the sandbox route rendered) hangs up — a test call never rings
+staff. The caller's own text is never in the URL or the TwiML. Any change
+to the claim, the owner fence, the sandbox branch or what the whisper may
+speak is security-critical).
 `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
 appointment-card-request funnel — ALSO serves the standalone "set up
