@@ -921,6 +921,8 @@ function ProductLabelsCard({ items }) {
 
 export default function ProtocolReferenceTabV2() {
   const [programs, setPrograms] = useState(null);
+  const [catalogError, setCatalogError] = useState(false);
+  const [catalogReload, setCatalogReload] = useState(0);
   const [selectedTrack, setSelectedTrack] = useState(null);
   const [trackData, setTrackData] = useState(null);
   const [trackError, setTrackError] = useState(null);
@@ -980,6 +982,8 @@ export default function ProtocolReferenceTabV2() {
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setCatalogError(false);
     adminFetch("/admin/protocols/programs")
       .then(async (d) => {
         if (cancelled) return;
@@ -1004,15 +1008,18 @@ export default function ProtocolReferenceTabV2() {
             // Leave the selector visible; a manual click can retry the track fetch.
           }
         }
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       })
       .catch(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setCatalogError(true);
+          setLoading(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [catalogReload]);
 
   useEffect(() => {
     adminFetch("/admin/equipment-systems/calibrations")
@@ -1081,6 +1088,19 @@ export default function ProtocolReferenceTabV2() {
       <div className="text-ink-tertiary p-10 text-center text-13">
         Loading protocols…
       </div>
+    );
+  }
+
+  if (catalogError) {
+    return (
+      <Card className="px-5 py-6 text-center">
+        <div role="alert" className="text-14 text-alert-fg mb-3">
+          Failed to load protocol catalog
+        </div>
+        <Button variant="secondary" onClick={() => setCatalogReload(value => value + 1)}>
+          Retry
+        </Button>
+      </Card>
     );
   }
 
