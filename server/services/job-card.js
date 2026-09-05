@@ -27,6 +27,7 @@ const { getHourlyRainOutlook } = require('./weather-forecast');
 // The classifier that stamps service_records.service_line — a callback
 // visit is 'pest' there, so the history filter must agree.
 const { detectServiceLine } = require('./service-report/service-line-configs');
+const { SEVERITY_RANK } = require('./service-report/pressure-trend');
 const { addETDays, etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 const { redactAccessCodes } = require('./context-aggregator');
 const { matchServiceProtocol } = require('./protocol-matcher');
@@ -165,12 +166,14 @@ async function loadLastVisit(dbh, customerId, serviceLine) {
     .first()
     .catch(() => null);
   if (!record) return null;
-  const finding = await dbh('service_findings')
+  // severity is text: rank it (critical > high > medium > low > info)
+  // with the report's own ranking, never alphabetically.
+  const findings = await dbh('service_findings')
     .where({ service_record_id: record.id })
-    .orderBy('severity', 'desc')
-    .select('title')
-    .first()
-    .catch(() => null);
+    .select('title', 'severity')
+    .catch(() => []);
+  const rank = (f) => SEVERITY_RANK[String(f?.severity || '').toLowerCase()] || 0;
+  const finding = (Array.isArray(findings) ? findings : []).filter((f) => f?.title).sort((a, b) => rank(b) - rank(a))[0] || null;
   return {
     date: etCalendarDayOf(record.service_date),
     serviceType: clean(record.service_type, 60),
@@ -905,5 +908,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit },
 };

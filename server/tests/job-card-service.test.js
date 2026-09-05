@@ -300,6 +300,26 @@ describe('tankFromCalibrations', () => {
   });
 });
 
+describe('loadLastVisit picks the most severe finding, not the alphabetically last (Codex r13 P1)', () => {
+  test('critical beats medium and low', async () => {
+    const tables = {
+      service_records: [{ id: 'r1', service_date: '2026-08-20', service_type: 'Lawn', technician_notes: 'notes', is_callback: false }],
+      service_findings: [{ title: 'Minor dollar spot', severity: 'medium' }, { title: 'Chinch bug outbreak', severity: 'critical' }, { title: 'Thin edge', severity: 'low' }],
+    };
+    const dbh = (table) => {
+      const rows = tables[String(table).split(' as ')[0]] ?? [];
+      const chain = {};
+      for (const m of ['where', 'modify', 'orderBy', 'select']) chain[m] = () => chain;
+      chain.first = async () => rows[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+      return chain;
+    };
+    const out = await jobCard._test.loadLastVisit(dbh, 'c1', 'lawn');
+    expect(out.summary).toBe('Chinch bug outbreak');
+  });
+});
+
 describe('access codes never enter the model-safe facts', () => {
   test('accessCodes keeps raw codes; clean() redacts a code typed into a note', () => {
     const prefs = { property_gate_code: '4545#', access_notes: 'Side gate, code 4545#' };
