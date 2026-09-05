@@ -338,8 +338,9 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     // Model-safe facts. Nothing below carries a code or a phone number:
     // keyword redaction in clean(), then the known code values themselves.
     facts: scrubKnownCodes({
-      pets: petLine(prefs),
-      petsSecured: clean(prefs?.pets_secured_plan, 80),
+      // Pets are the primary home's too: unknown at an alternate address.
+      pets: petLine(propertyPrefs),
+      petsSecured: clean(propertyPrefs?.pets_secured_plan, 80),
       gates: codes.map((c) => c.label),
       entry: clean(propertyPrefs?.access_notes || propertyPrefs?.side_gate_access, 120),
       parking: clean(propertyPrefs?.parking_notes, 80),
@@ -380,7 +381,7 @@ function buildTemplateParagraph(facts, { isLawn = false } = {}) {
   if (facts.pets) add(1, `Pets: ${facts.pets}${facts.petsSecured ? ` (${facts.petsSecured})` : ''}`);
   else if (facts.petsSecured) add(1, `Pets secured: ${facts.petsSecured}`);
   if (facts.gates.length) add(1, `${facts.gates.join(' and ').toLowerCase()} code on file, tap to show`);
-  if (facts.alternateAddress) add(1, 'visit at a non-primary address — the home\'s access details are not shown');
+  if (facts.alternateAddress) add(1, 'visit at a non-primary address — the home\'s pets and access details are not shown');
   add(1, facts.entry, 4);
   add(1, facts.parking, 9);
   if (facts.chemicalSensitivity) add(1, `chemical sensitivity${facts.chemicalSensitivity !== 'yes' ? `: ${facts.chemicalSensitivity}` : ''}`);
@@ -1134,6 +1135,19 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
  * product for 110 or 1 gallons of water on the visit's rig (the
  * appointment's assigned equipment, else the one active rig).
  */
+// A base line the lawn resolver left unselected — the losing BRANCH_ONE_OF
+// fertilizer for the property's soil-P result, PREMIUM_ONLY on an ineligible
+// plan — sits in neither mixCalculator list, and the approval engine treats
+// every protocol.base item as planned. The search blocks it itself.
+const UNSELECTED_BASE_REASONS = {
+  mutually_exclusive_branch_not_selected: 'Not the fertilizer branch this property\'s plan selected — amount withheld',
+  premium_or_drought_prep_not_selected: 'Premium-only line, not on this plan — amount withheld',
+};
+function unselectedBaseBlock(plan, product) {
+  const item = (plan?.protocol?.base || []).find((i) => i.product?.id === product.id && i.selected === false);
+  return item ? { code: 'base_not_selected', message: UNSELECTED_BASE_REASONS[item.selectionReason] || 'Not selected by this visit\'s plan — amount withheld' } : null;
+}
+
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
   const [product, svc] = await Promise.all([
     dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
@@ -1160,8 +1174,10 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // conditional, PGR on stressed turf, label max rate, rotation) plus the
   // ordinance blackout — the search is not a way around the plan.
   const planWide = plan ? planBlocksOf(plan) : [];
+  const unselectedBase = planned ? null : unselectedBaseBlock(plan?.plan, product);
   const productBlocks = plan?.plan
     ? [
+      ...(unselectedBase ? [unselectedBase] : []),
       ...productBlocksUnderPlan(plan, product),
       ...(await (deps.evaluateApprovals || evaluateWaveGuardManagerApprovals)(dbh, {
         customerId: svc.customer_id,

@@ -547,6 +547,23 @@ describe('mixForProduct', () => {
     expect(evaluateApprovals).not.toHaveBeenCalled();
   });
 
+  test('a base line the resolver left unselected is withheld by the search, not dosed at the catalog rate (Codex r9 P1)', async () => {
+    const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
+    const loser = { raw: 'Fertilizer branch B', role: 'base', selected: false, selectionReason: 'mutually_exclusive_branch_not_selected', product: { id: 'p1' } };
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [loser], conditional: [] }, mixCalculator: { items: [], conditionalOptions: [] } });
+    const evaluateApprovals = approve();
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at });
+    expect(out).toMatchObject({ amount: null, reason: 'Not the fertilizer branch this property\'s plan selected — amount withheld', planBlocks: [{ code: 'base_not_selected' }] });
+    // PREMIUM_ONLY on an ineligible plan names its own reason; an unknown reason still withholds.
+    buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [{ ...loser, selectionReason: 'premium_or_drought_prep_not_selected' }] }, mixCalculator: { items: [], conditionalOptions: [] } });
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).reason).toBe('Premium-only line, not on this plan — amount withheld');
+    buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [{ ...loser, selectionReason: 'other' }] }, mixCalculator: { items: [], conditionalOptions: [] } });
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).amount).toBeNull();
+    // The same product on a selected line (a winning branch) doses at the plan's rate.
+    buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [loser, { ...loser, selected: true }] }, mixCalculator: { items: [{ product: { id: 'p1' }, selected: true, mix: { ratePer1000: 0.2, rateUnit: 'oz' } }], conditionalOptions: [] } });
+    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).toMatchObject({ amount: 11, rateSource: 'plan', planBlocks: [] });
+  });
+
   test('an off-plan searched product still faces the plan\'s guards (Codex r13 + r14 P1)', async () => {
     const urea = { id: 'n1', name: 'Urea 46-0-0', category: 'fertilizer', analysis_n: 46, analysis_p: 0, default_rate_per_1000: 2, rate_unit: 'lb' };
     const windows = [{ jurisdictionName: 'Manatee County', restrictedNitrogen: true, restrictedPhosphorus: false }];
@@ -866,21 +883,24 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     dbh.raw = (sql) => sql;
     return dbh;
   };
-  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', watering_days: '["Mon"]' };
+  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', watering_days: '["Mon"]' };
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
   test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
     const deps = { getRecentCalls: async () => [] };
     const away = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(true), property_preferences: prefs }), deps);
     expect(away.access.codes).toEqual([]);
-    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: 'dog' });
-    expect(jobCard.buildTemplateParagraph(away.facts)).toContain('visit at a non-primary address');
+    // Pets and the securing plan are the primary home's as well (Codex r9 P1).
+    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: '', petsSecured: '' });
+    const awayText = jobCard.buildTemplateParagraph(away.facts);
+    expect(awayText).toMatch(/visit at a non-primary address — the home's pets and access details are not shown/i);
+    expect(awayText).not.toMatch(/dog|crated/);
     // The primary home's code is still scrubbed from notes and still a leak check for the rewrite (hook P1).
     expect(away.facts.visitNotes).toBe('Try [code] first');
     expect(away.knownCodes).toEqual([{ label: 'Property gate', code: '4545#' }]);
     const home = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(false), property_preferences: prefs }), deps);
     expect(home.access.codes).toEqual([{ label: 'Property gate', code: '4545#' }]);
-    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false });
+    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false, pets: 'dog', petsSecured: 'crated in garage' });
   });
 
   test('pet presence is a critical fact even without a securing plan (P1)', () => {
