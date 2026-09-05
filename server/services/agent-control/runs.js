@@ -108,13 +108,16 @@ function jsonb(value) {
   }
 }
 
-async function insertEvent(runId, eventType, message = null, metadata = null, conn = db) {
-  return guarded('run_events', () => conn('run_events').insert({
-    run_id: runId,
-    event_type: clip(eventType, 40),
-    message: clip(message, 2000),
-    metadata: jsonb(metadata),
-  }));
+function eventRow(runId, eventType, message = null, metadata = null) {
+  return { run_id: runId, event_type: clip(eventType, 40), message: clip(message, 2000), metadata: jsonb(metadata) };
+}
+
+// Standalone (guarded) event write. Inside a transaction, insert eventRow()
+// on the trx DIRECTLY: a swallowed error there leaves the PostgreSQL
+// transaction aborted, so its COMMIT silently rolls back while the callback
+// reports success — the write must throw to the transaction's own guard.
+async function insertEvent(runId, eventType, message = null, metadata = null) {
+  return guarded('run_events', () => db('run_events').insert(eventRow(runId, eventType, message, metadata)));
 }
 
 // ── Inert handle (gate off / DB refused) ─────────────────────────────
@@ -447,9 +450,10 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     return Number(moved) > 0;
   }
 
-  async function writeArtifacts(artifacts, conn = db) {
-    if (!Array.isArray(artifacts) || !artifacts.length) return;
-    const rows = artifacts
+  // Rows for the finish transaction (inserted on the trx directly, see insertEvent).
+  function artifactRows(artifacts) {
+    if (!Array.isArray(artifacts)) return [];
+    return artifacts
       .filter((a) => a && ARTIFACT_KINDS.has(a.kind))
       .map((a) => ({
         run_id: runId,
@@ -459,33 +463,39 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
         content_redacted: clip(a.content, 8192),
         redaction_confidence: clip(a.redactionConfidence, 8),
       }));
-    if (rows.length) await guarded('artifacts', () => conn('run_artifacts').insert(rows));
   }
 
-  async function closeAttempt(result, failure = {}) {
-    if (!attemptId) return;
-    await guarded('attempt.close', () => db('agent_attempts').where({ id: attemptId }).update({
+  // The attempt row closes in the SAME transaction as the run's transition
+  // (atomic: never a closed attempt on a still-running run); a stale handle
+  // closes its own attempt row and nothing else.
+  function closeAttempt(trx, result, failure = {}) {
+    if (!attemptId) return null;
+    return trx('agent_attempts').where({ id: attemptId }).update({
       finished_at: new Date(),
       result,
       failure_class: failure.failureClass || null,
       error_code: clip(failure.errorCode, 80),
       error_message: failure.errorMessage || null,
-    }));
+    });
   }
 
   // Shared effects (work item, artifacts, events) follow ONLY a fenced
   // transition that moved the run — a stale handle (a newer attempt opened)
   // closes its own attempt row and nothing else — and land INSIDE that
-  // transaction: a reopen racing the commit cannot slip its `resumed` event
-  // in before this attempt's `finished` / artifacts (Codex r5).
+  // transaction, unguarded: a reopen racing the commit cannot slip its
+  // `resumed` event in before this attempt's `finished` / artifacts, and a
+  // failed write rolls the whole transition back (the outer guard warns,
+  // the run stays as it was) rather than committing half of it (Codex r5 +
+  // pre-push audit).
   async function finish({ result = 'succeeded', disposition = null, summary = null, artifacts = null } = {}) {
     if (spent()) return false;
     closed = true;
     const now = new Date();
     const res = RESULT.includes(result) ? result : 'succeeded';
     const dispo = DISPOSITION.includes(disposition) ? disposition : null;
-    await closeAttempt(res);
+    const rows = artifactRows(artifacts);
     const moved = await guarded('finish', () => db.transaction(async (trx) => {
+      await closeAttempt(trx, res);
       const n = await fenced(trx).update({
         lifecycle: 'terminal',
         result: res,
@@ -503,9 +513,9 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
       });
       if (!Number(n)) return false;
       if (workItemId && res === 'succeeded') await trx('work_items').where({ id: workItemId }).update({ status: 'done', updated_at: now });
-      await writeArtifacts(artifacts, trx);
-      await insertEvent(runId, 'finished', null, { result: res, disposition: dispo }, trx);
-      if (dispo) await insertEvent(runId, 'disposition', null, { disposition: dispo }, trx);
+      if (rows.length) await trx('run_artifacts').insert(rows);
+      await trx('run_events').insert(eventRow(runId, 'finished', null, { result: res, disposition: dispo }));
+      if (dispo) await trx('run_events').insert(eventRow(runId, 'disposition', null, { disposition: dispo }));
       return true;
     }), false);
     return moved;
@@ -526,9 +536,9 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     const outcome = canRetry
       ? { lifecycle: 'queued', result: null, finished_at: null, event: 'retry_scheduled' }
       : { lifecycle: 'terminal', result, finished_at: now, event: 'failed' };
-    await closeAttempt(result, { failureClass: klass, errorCode: code, errorMessage: message });
-    // the transition and its events in one transaction (see finish)
+    // the attempt close, the transition and its events in one transaction (see finish)
     const moved = await guarded('fail', () => db.transaction(async (trx) => {
+      await closeAttempt(trx, result, { failureClass: klass, errorCode: code, errorMessage: message });
       const n = await fenced(trx).update({
         lifecycle: outcome.lifecycle,
         result: outcome.result,
@@ -541,8 +551,8 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
         updated_at: now,
       });
       if (!Number(n)) return false;
-      await insertEvent(runId, outcome.event, message, { failure_class: klass, error_code: code, attempt: attemptNo, result: outcome.result }, trx);
-      if (isQualityFailure(klass)) await insertEvent(runId, 'eval_candidate', null, { failure_class: klass }, trx);
+      await trx('run_events').insert(eventRow(runId, outcome.event, message, { failure_class: klass, error_code: code, attempt: attemptNo, result: outcome.result }));
+      if (isQualityFailure(klass)) await trx('run_events').insert(eventRow(runId, 'eval_candidate', null, { failure_class: klass }));
       return true;
     }), false);
     // stale handle: its attempt row carries the failure; the run belongs to a newer attempt

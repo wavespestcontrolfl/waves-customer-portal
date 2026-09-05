@@ -80,7 +80,15 @@ jest.mock('../models/db', () => {
   };
   // summary || ?::jsonb → a merge marker the fake update applies
   db.raw = (sql, binds) => (/\|\|/.test(sql) ? { __merge: JSON.parse(binds[0]) } : /\+ 1$/.test(sql) ? { __inc: true } : { sql, binds });
-  db.transaction = async (fn) => fn(db);
+  // rollback-aware: a callback that throws restores the store to its pre-transaction state
+  db.transaction = async (fn) => {
+    const snapshot = structuredClone(store);
+    try { return await fn(db); } catch (err) {
+      for (const k of Object.keys(store)) delete store[k];
+      Object.assign(store, snapshot);
+      throw err;
+    }
+  };
   db.__store = store;
   db.__state = state;
   return db;
@@ -328,6 +336,23 @@ describe('a spent handle', () => {
     expect(runRow().progress_sequence).toBe(0);
     await b.heartbeat({ progress: true });
     expect(runRow().progress_sequence).toBe(1);
+  });
+
+  test('a failed write inside finish / fail rolls the whole transition back: the run stays running and its attempt open', async () => {
+    const a = await runs.startRun(base);
+    state.failNext = 'run_events';
+    expect(await a.finish({ result: 'succeeded' })).toBe(false);
+    expect(runRow()).toMatchObject({ lifecycle: 'running', result: null, finished_at: null });
+    expect(store.agent_attempts[0].finished_at).toBeUndefined();
+    expect(store.run_artifacts || []).toHaveLength(0); // (the warn is rate-limited to one a minute across this file)
+    // fail: the same — no half-persisted retry state
+    const b = await runs.startRun({ ...base, sourceRunId: 'r2', maxAttempts: 3 });
+    state.failNext = 'run_events';
+    const r = await b.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: true });
+    expect(r).toEqual({ retry: false, failureClass: 'provider', result: null, stale: true });
+    const row = store.agent_runs.find((x) => x.source_run_id === 'r2');
+    expect(row).toMatchObject({ lifecycle: 'running', error_code: null });
+    expect(store.agent_attempts.find((x) => x.run_id === row.id).finished_at).toBeUndefined();
   });
 
   test('a stale handle stepping past the budget stamps nothing and writes no budget event on the newer attempt', async () => {
