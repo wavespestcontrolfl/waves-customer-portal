@@ -966,6 +966,15 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false, pets: 'dog', petsSecured: 'crated in garage', instructions: 'Enter from the north side', awayUntil: '2099-01-01' });
   });
 
+  test('special instructions and the visit note reach the card verbatim, outside the paragraph budget (hook P1)', async () => {
+    const deps = { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } };
+    const base = factsDb({ 'scheduled_services as ss': visit(false), property_preferences: { ...prefs, special_instructions: 'Do not treat the vegetable garden' } });
+    // The paragraph cache write is the one mutation on this path.
+    const dbh = Object.assign((table) => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
+    const card = await jobCard.buildJobCard('svc1', { dbh, deps, now: new Date('2026-09-04T12:00:00Z') });
+    expect(card.notes).toEqual({ instructions: 'Do not treat the vegetable garden', visitNotes: 'Try [code] first' });
+  });
+
   test('pet presence is a critical fact even without a securing plan (P1)', () => {
     const facts = { ...baseFacts(), pets: 'dog' };
     expect(jobCard._test.criticalFacts(facts)).toContain('dog');

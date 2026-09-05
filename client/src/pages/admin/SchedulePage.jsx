@@ -5077,6 +5077,12 @@ function JobCardTab({ card, loading, error, D }) {
       {card.paragraph?.text && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
       )}
+      {card.notes?.instructions && (
+        <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Instructions: {card.notes.instructions}</p>
+      )}
+      {card.notes?.visitNotes && (
+        <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>Visit note: {card.notes.visitNotes}</p>
+      )}
       <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
       <JobCardTank tank={card.tank} serviceId={card.serviceId} D={D} />
       {card.planBlocks?.length > 0 && (

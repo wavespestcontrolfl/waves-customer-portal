@@ -1166,6 +1166,9 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     serviceLine: facts.serviceLine,
     strip: { ...facts.strip, access: facts.access },
     paragraph,
+    // Shown verbatim under the paragraph: the 60-word budget may trim them
+    // out of the template and the rewrite need not keep them.
+    notes: { instructions: facts.facts.instructions || null, visitNotes: facts.facts.visitNotes || null },
     sprayCheck: { ...sprayCheck, coordsSource: facts.coords.source, window: isToday ? 'today' : 'not_today' },
     tank,
     products: cards,
