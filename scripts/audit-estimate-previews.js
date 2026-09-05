@@ -8,8 +8,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
-const { chromium } = require('playwright');
+const { previewServer: startPreviewServer, launchBrowser, evidence, previewPage } = require('./qa/browser');
 
 const ALL_SCENARIOS = [
   'pest', 'lawn', 'mosquito', 'tree_shrub', 'termite_bait', 'rodent',
@@ -38,42 +37,15 @@ const SLOT_PICKER_SCENARIOS = [
 // pdf pass must fall through to the normal page rather than print an
 // official-looking document with no pricing table.
 const PDF_FALLTHROUGH_SCENARIOS = ['quote_required'];
-const baseUrl = process.env.ESTIMATE_PREVIEW_BASE_URL || 'http://127.0.0.1:4178';
+const root = path.resolve(__dirname, '..');
+let baseUrl;
+const provenance = evidence(root);
 const artifactDir = process.env.ESTIMATE_PREVIEW_ARTIFACT_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'waves-estimate-audit-'));
 fs.mkdirSync(artifactDir, { recursive: true });
 
 const failures = [];
 const observations = [];
 const fail = (scenario, viewport, message) => failures.push({ scenario, viewport, message });
-
-async function previewServerAvailable() {
-  try {
-    const response = await fetch(`${baseUrl}/preview-estimate.html`, { signal: AbortSignal.timeout(1000) });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function ensurePreviewServer() {
-  if (await previewServerAvailable()) return null;
-  if (process.env.ESTIMATE_PREVIEW_BASE_URL) {
-    throw new Error(`Estimate preview server is unavailable at ${baseUrl}`);
-  }
-
-  const child = spawn(
-    process.platform === 'win32' ? 'npm.cmd' : 'npm',
-    ['--prefix', 'client', 'run', 'dev', '--', '--host', '127.0.0.1', '--port', '4178'],
-    { stdio: 'inherit' },
-  );
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    if (child.exitCode != null) throw new Error(`Estimate preview server exited with code ${child.exitCode}`);
-    if (await previewServerAvailable()) return child;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  child.kill('SIGTERM');
-  throw new Error(`Timed out waiting for estimate preview server at ${baseUrl}`);
-}
 
 async function revealWholePage(page) {
   await page.evaluate(async () => {
@@ -121,27 +93,16 @@ const auditPageInBrowser = () => {
   };
 };
 
-async function launchBrowser() {
-  try {
-    return await chromium.launch({ headless: true });
-  } catch (error) {
-    const configured = process.env.PLAYWRIGHT_CHROME_PATH;
-    const macChrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-    const executablePath = configured || (fs.existsSync(macChrome) ? macChrome : null);
-    if (!executablePath) throw error;
-    return chromium.launch({ headless: true, executablePath });
-  }
-}
-
 (async () => {
   let previewServer = null;
   let browser = null;
   try {
-    previewServer = await ensurePreviewServer();
+    previewServer = await startPreviewServer(root, process.env.ESTIMATE_PREVIEW_BASE_URL);
+    baseUrl = previewServer.baseUrl;
     browser = await launchBrowser();
     for (const scenario of SCENARIOS) {
       for (const [viewportName, viewport] of Object.entries(VIEWPORTS)) {
-        const page = await browser.newPage({ viewport });
+        const page = await previewPage(browser, baseUrl, viewport);
         const runtimeErrors = [];
         page.on('pageerror', (error) => runtimeErrors.push(error.message));
         const url = `${baseUrl}/preview-estimate.html?scenario=${scenario}&chrome=0`;
@@ -192,7 +153,7 @@ async function launchBrowser() {
         await page.close();
       }
 
-      const printPage = await browser.newPage({ viewport: VIEWPORTS.desktop });
+      const printPage = await previewPage(browser, baseUrl, VIEWPORTS.desktop);
       const printUrl = `${baseUrl}/preview-estimate.html?scenario=${scenario}&chrome=0&mode=pdf`;
       await printPage.goto(printUrl, { waitUntil: 'domcontentloaded' });
       await printPage.locator('.estimate-document-v1, h1').first().waitFor({ state: 'visible', timeout: 15000 });
@@ -230,10 +191,11 @@ async function launchBrowser() {
     }
   } finally {
     await browser?.close();
-    previewServer?.kill('SIGTERM');
+    await previewServer?.close();
   }
 
   const result = {
+    provenance,
     artifactDir,
     scenarios: SCENARIOS.length,
     renderedPages: observations.filter((entry) => entry.viewport !== 'print').length,

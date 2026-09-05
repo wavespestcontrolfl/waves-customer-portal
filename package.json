@@ -63,7 +63,9 @@
     "worktree:setup": "node scripts/dev/worktree.js setup",
     "worktree:status": "node scripts/dev/worktree.js status",
     "worktree:stop": "node scripts/dev/worktree.js stop",
-    "test:dev-workflow": "node --test scripts/dev/tests/*.test.js"
+    "test:dev-workflow": "node --test scripts/dev/tests/*.test.js",
+    "qa:previews": "node scripts/qa/previews.js",
+    "test:qa-workflow": "node --test scripts/qa/tests/*.test.js"
   },
   "lint-staged": {
     "*.{js,jsx,cjs,mjs}": "eslint --fix --cache --cache-location node_modules/.cache/eslint --no-warn-ignored"

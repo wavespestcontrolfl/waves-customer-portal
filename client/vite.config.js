@@ -1,5 +1,8 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { createRequire } from 'node:module';
+const devContext = createRequire(import.meta.url)('../scripts/dev/context.js');
+import { fileURLToPath } from 'node:url';
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://localhost:3001';
 
@@ -20,7 +23,17 @@ const capShimAlias = capShim ? {
 } : {};
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), {
+    name: 'waves-preview-checkout',
+    apply: 'serve',
+    configureServer(server) {
+      const stamp = devContext.checkoutStamp(fileURLToPath(new URL('..', import.meta.url)));
+      server.middlewares.use((_req, res, next) => {
+        res.setHeader('X-Waves-Checkout', stamp);
+        next();
+      });
+    },
+  }],
   resolve: { alias: { ...capShimAlias } },
   // Vitest reads this block. The global setup shims window.matchMedia (jsdom
   // omits it) so tests can mount the liquid-glass scene, which now renders on
