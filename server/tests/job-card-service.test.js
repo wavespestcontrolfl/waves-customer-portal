@@ -934,6 +934,12 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect((await run('Quarterly Pest Control', 'pest_control')).lines.map((l) => l.product.id)).toEqual(['d']);
     // No identity (legacy row) → the name match as before.
     expect((await run('Quarterly Pest Control', null)).lines.map((l) => l.product.id)).toEqual(['d']);
+    // A lawn-named inspection never builds the lawn plan (hook P1).
+    const buildPlan = jest.fn();
+    const lawnInspection = await jobCard.resolveVisitLines({ facts: { isLawn: true, serviceId: 'svc1', serviceType: 'Lawn Assessment Service', serviceCategory: 'inspection', scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}), deps: { buildPlan } });
+    expect(buildPlan).not.toHaveBeenCalled();
+    expect(lawnInspection.lines).toEqual([]);
+    expect(lawnInspection.note).toBe('No treatment protocol for this service (inspection)');
   });
 
   test('card line text keeps the instruction, never the dosing value (hook P1)', () => {

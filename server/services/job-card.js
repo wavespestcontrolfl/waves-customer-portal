@@ -937,7 +937,14 @@ function productBlocksUnderPlan({ plan }, product) {
 }
 
 async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
-  if (facts.isLawn) {
+  // Identity gates the primary line before any branch — a catalog
+  // inspection or assessment resolves no treatment products even when its
+  // name reads as lawn or pest. A legacy row without identity keeps the
+  // name-based classification.
+  const identityKey = facts.serviceCategory ? addonProgramKey(facts.serviceCategory, facts.serviceType, protocols) : undefined;
+  if (identityKey === null) return { visit: null, lines: [], blocks: [], note: `No treatment protocol for this service (${facts.serviceCategory})` };
+  const isLawn = identityKey === undefined ? facts.isLawn : identityKey === 'lawn';
+  if (isLawn) {
     const loaded = await loadLawnPlan(facts.serviceId, { dbh, deps, now });
     const plan = loaded.plan;
     if (!plan) return { visit: null, lines: [], blocks: planBlocksOf(loaded) };
@@ -962,16 +969,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     const blocks = planBlocksOf(loaded);
     return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks };
   }
-  // Identity gates the primary line exactly like an add-on: an inspection
-  // or assessment booked from the catalog resolves no treatment products
-  // even though its name would match the pest program. A legacy row with
-  // no catalog identity keeps the name match.
-  if (facts.serviceCategory) {
-    const programKey = addonProgramKey(facts.serviceCategory, facts.serviceType, protocols);
-    if (!programKey) return { visit: null, lines: [], blocks: [], note: `No treatment protocol for this service (${facts.serviceCategory})` };
-    return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey }), blocks: [] };
-  }
-  return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog), blocks: [] };
+  return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, identityKey ? { programKey: identityKey } : {}), blocks: [] };
 }
 
 /**
