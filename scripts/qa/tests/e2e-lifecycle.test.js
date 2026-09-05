@@ -11,7 +11,7 @@ const { createRequire } = require('node:module');
 const entry = path.resolve(__dirname, '../e2e.js');
 const realRequire = createRequire(entry);
 
-async function runHarness(t, { seedOnly = false, built = false } = {}) {
+async function runHarness(t, { seedOnly = false, built = false, pageFails = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'waves-qa-lifecycle-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   if (built) {
@@ -24,7 +24,13 @@ async function runHarness(t, { seedOnly = false, built = false } = {}) {
   server.kill = () => { events.push('server-stopped'); server.exitCode = 0; server.emit('exit'); };
   const browserContext = {
     tracing: { start: async () => {}, stop: async () => { throw new Error('trace write failed'); } },
-    route: async () => {}, newPage: async () => { throw new Error('browser disconnected'); },
+    route: async () => {}, newPage: async () => {
+      if (!pageFails) throw new Error('browser disconnected');
+      return {
+        goto: async () => { throw new Error('journey navigation failed'); },
+        screenshot: async () => { throw new Error('screenshot disconnected'); },
+      };
+    },
   };
   const mocks = {
     '../dev/context': { readContext: () => ({ id: 'fixture', root, ports: { api: 12345 } }),
@@ -66,5 +72,15 @@ test('a failed trace preserves the journey error, report, and resource shutdown'
   assert.deepEqual(result.events, ['seeded', 'server-started', 'browser-closed', 'server-stopped', 'database-closed']);
   assert.equal(result.processState.exitCode, 1);
   assert.equal(result.report.error, 'browser disconnected');
+  assert.deepEqual(result.report.cleanupErrors, ['Trace: trace write failed']);
+});
+
+test('a failed failure screenshot preserves the original journey error', async (t) => {
+  const result = await runHarness(t, { built: true, pageFails: true });
+  assert.equal(result.processState.exitCode, 1);
+  assert.equal(result.report.error, 'journey navigation failed');
+  assert.deepEqual(result.report.steps, [{ name: 'staff-login-and-role-isolation', passed: false,
+    error: 'journey navigation failed', screenshotError: 'screenshot disconnected' }]);
+  assert.deepEqual(result.events, ['seeded', 'server-started', 'browser-closed', 'server-stopped', 'database-closed']);
   assert.deepEqual(result.report.cleanupErrors, ['Trace: trace write failed']);
 });

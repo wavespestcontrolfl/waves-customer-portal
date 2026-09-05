@@ -73,8 +73,10 @@ async function main() {
         report.steps.push({ name, passed: true });
         console.log(`PASS ${name}`);
       } catch (error) {
-        report.steps.push({ name, passed: false, error: error.message });
-        await page.screenshot({ path: path.join(artifactDir, `${name}-failed.png`), fullPage: true });
+        const result = { name, passed: false, error: error.message };
+        report.steps.push(result);
+        await page.screenshot({ path: path.join(artifactDir, `${name}-failed.png`), fullPage: true })
+          .catch((screenshotError) => { result.screenshotError = screenshotError.message; });
         throw error;
       }
     }
