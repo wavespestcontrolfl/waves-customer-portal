@@ -496,6 +496,80 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     }
   });
 
+  test.each([
+    ['FK', { link: 'fk', match: true }],
+    ['lead mirror', { link: 'mirror', match: true }],
+    ['agreeing FK and mirror', { link: 'both', match: true }],
+    ['explicit foreign estimate owner', { link: 'fk', foreignEstimate: true }],
+    ['foreign FK alongside own FK', { link: 'fk', foreignLink: 'fk' }],
+    ['foreign mirror alongside own FK', { link: 'fk', foreignLink: 'mirror' }],
+    ['foreign FK alongside own mirror', { link: 'mirror', foreignLink: 'fk' }],
+    ['unknown owner FK alongside own mirror', { link: 'mirror', foreignLink: 'fk', unknownOwner: true }],
+    ['unknown owner mirror alongside own FK', { link: 'fk', foreignLink: 'mirror', unknownOwner: true }],
+    ['only a deleted customer lead', { link: 'both', deleted: true }],
+    ['only a matching phone', { link: 'none' }],
+    ['sent status without handoff', { link: 'fk', noHandoff: true }],
+    ['handoff before call ended', { link: 'fk', beforeCallEnd: true }],
+    ['handoff outside association window', { link: 'mirror', outsideWindow: true }],
+    ['deleted foreign lead does not override live owner', { link: 'fk', foreignLink: 'mirror', deletedForeign: true, match: true }],
+  ])('lead-linked estimate association: %s', async (_label, scenario) => {
+    // Every trial rolls back all fixtures and refresh writes, including failures.
+    const trx = await db.transaction();
+    try {
+      const sourceCall = await trx('call_log').where({ id: callId }).first();
+      const [customer, foreignCustomer] = await trx('customers').insert([
+        { first_name: 'SyntheticPrimary', phone: PHONE },
+        { first_name: 'SyntheticOther', phone: '+15555550199' },
+      ]).returning('id');
+      // No call SID or metadata lead provenance: only customer -> lead -> quote.
+      const call = { ...sourceCall, customer_id: customer.id, twilio_call_sid: null, metadata: {} };
+      const [lead] = await trx('leads').insert({
+        customer_id: customer.id, phone: PHONE, status: 'estimate_sent',
+        deleted_at: scenario.deleted ? new Date() : null,
+      }).returning('id');
+      const [foreignLead] = await trx('leads').insert({
+        customer_id: scenario.unknownOwner ? null : foreignCustomer.id,
+        phone: PHONE, status: 'estimate_sent',
+        deleted_at: scenario.deletedForeign ? new Date() : null,
+      }).returning('id');
+      const endedAt = cc.callEndedAt(call);
+      const handedOffAt = new Date(endedAt.getTime() + (
+        scenario.beforeCallEnd ? -1000 : scenario.outsideWindow
+          ? (cc.ASSOCIATION_WINDOW_DAYS + 1) * 24 * 60 * 60 * 1000 : 60000
+      ));
+      const data = scenario.noHandoff ? {} : { deliveryState: { lastDeliveredAt: handedOffAt.toISOString() } };
+      if (['mirror', 'both'].includes(scenario.link)) data.lead_id = lead.id;
+      if (scenario.foreignLink === 'mirror') data.lead_id = foreignLead.id;
+      const [estimate] = await trx('estimates').insert({
+        status: 'sent', sent_at: handedOffAt, created_at: call.created_at,
+        customer_id: scenario.foreignEstimate ? foreignCustomer.id : null,
+        customer_phone: PHONE, estimate_data: JSON.stringify(data),
+      }).returning('id');
+      if (['fk', 'both'].includes(scenario.link)) await trx('leads').where({ id: lead.id }).update({ estimate_id: estimate.id });
+      if (scenario.foreignLink === 'fk') await trx('leads').where({ id: foreignLead.id }).update({ estimate_id: estimate.id });
+      const proof = await cc.resolveFulfillment(trx, { kind: 'send_estimate' }, call);
+      if (scenario.match) {
+        expect(proof).toMatchObject({ record_id: estimate.id, strength: 'association', matched_at: handedOffAt });
+        const [commitment] = await trx('call_commitments').insert({
+          call_log_id: call.id, commitment_key: 'waves:send_estimate:lead-hint',
+          party: 'waves', kind: 'send_estimate', description: 'Send synthetic quote',
+          status: 'open',
+        }).returning('id');
+        await cc.refreshFulfillment(trx, call.id, call);
+        const refreshed = await trx('call_commitments').where({ id: commitment.id }).first();
+        expect(refreshed.status).toBe('open');
+        expect(refreshed.fulfilled_at).toBeNull();
+        expect(refreshed.fulfillment).toMatchObject({ record_id: estimate.id, strength: 'association' });
+        // The read-based association must not repair ownership as a side effect.
+        expect((await trx('estimates').where({ id: estimate.id }).first('customer_id')).customer_id).toBeNull();
+      } else {
+        expect(proof).toBeNull();
+      }
+    } finally {
+      await trx.rollback();
+    }
+  });
+
   test('fulfillment is measured from the END of the call: an estimate sent while the caller was still on the line is not proof of a promise made in that call', async () => {
     const call = await db('call_log').where({ id: callId }).first(); // inbound, 90 s long
     const midCall = new Date(call.created_at.getTime() + 30 * 1000);
