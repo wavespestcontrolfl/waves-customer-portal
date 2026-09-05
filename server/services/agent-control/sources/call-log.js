@@ -6,7 +6,7 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, modelLabel, keyset, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'call_log';
 const LANE = 'call_extraction';
@@ -84,13 +84,13 @@ function fromRow(c) {
 
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await keyset(db('call_log')
+    const rows = await keyset(notMirrored(db('call_log')
       .select(COLUMNS)
       .whereNotNull('processing_status')
       .where((q) => {
         q.where('processing_status', 'processing');
         q.orWhere(START, '>=', from);
-      }), { start: START, id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'call_log.id' }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

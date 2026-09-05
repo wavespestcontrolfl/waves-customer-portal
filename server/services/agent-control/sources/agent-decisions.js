@@ -6,7 +6,7 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, modelLabel, keyset, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'agent_decisions';
 const START = db.raw("date_trunc('milliseconds', created_at)");
@@ -82,12 +82,12 @@ function fromRow(d) {
 
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await keyset(db('agent_decisions')
+    const rows = await keyset(notMirrored(db('agent_decisions')
       .select(COLUMNS)
       .where((q) => {
         q.whereIn('status', ['pending_review', 'scheduled', 'active']);
         q.orWhere(START, '>=', from);
-      }), { start: START, id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'agent_decisions.id' }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

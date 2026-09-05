@@ -6,7 +6,7 @@
 
 const db = require('../../../models/db');
 const { RUN_STAGES, runStatus } = require('../../agent-activity');
-const { canonicalRun, humanize, keyset, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'autonomous_runs';
 const LANE = 'blog_draft';
@@ -94,12 +94,12 @@ function fromRow(run) {
 
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await keyset(db('autonomous_runs')
+    const rows = await keyset(notMirrored(db('autonomous_runs')
       .select(COLUMNS)
       .where((q) => {
         q.whereNull('completed_at');
         q.orWhere(START, '>=', from);
-      }), { start: START, id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'autonomous_runs.id' }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

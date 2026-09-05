@@ -143,6 +143,19 @@ function keyset(query, { start, id, cursor, limit }) {
   return query.orderBy([{ column: start, order: 'desc' }, { column: id, order: 'desc' }]).limit(limit);
 }
 
+// Legacy rows a canonical agent_runs row already mirrors (same
+// source_system + source_run_id, S5.x dual-write) are excluded in SQL —
+// page-independent, so a mirror and its legacy row can never both appear
+// however the pages fall. `idColumn` is the legacy row's id, TABLE-QUALIFIED
+// (a bare `id` inside the subquery resolves to agent_runs.id).
+function notMirrored(query, { source, idColumn }) {
+  return query.whereNotExists(function mirror() {
+    this.select(this.client.raw('1')).from('agent_runs')
+      .where('agent_runs.source_system', source)
+      .whereRaw(`agent_runs.source_run_id = ${idColumn}::text`);
+  });
+}
+
 // A source that has not been migrated on this deployment (or whose columns
 // predate this reader) contributes nothing, reported as unavailable; any
 // other failure is thrown — a monitoring surface must never present an
@@ -151,4 +164,4 @@ function isMissingSchema(err) {
   return !!err && (err.code === MISSING_TABLE_SQLSTATE || err.code === UNDEFINED_COLUMN_SQLSTATE);
 }
 
-module.exports = { canonicalRun, defined, keyset, iso, humanize, modelLabel, areaFor, isMissingSchema, MISSING_TABLE_SQLSTATE };
+module.exports = { canonicalRun, defined, keyset, notMirrored, iso, humanize, modelLabel, areaFor, isMissingSchema, MISSING_TABLE_SQLSTATE };

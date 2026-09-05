@@ -7,7 +7,7 @@
 
 const db = require('../../../models/db');
 const { LANE_RUNTIME } = require('../lane-policies');
-const { canonicalRun, humanize, keyset, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'job_health';
 const START = db.raw("date_trunc('milliseconds', last_started_at)");
@@ -72,12 +72,12 @@ function fromRow(job) {
 
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await keyset(db('job_health')
+    const rows = await keyset(notMirrored(db('job_health')
       .select(COLUMNS)
       .where((q) => {
         q.where('last_status', 'running').orWhere('last_status', 'failed').orWhere('consecutive_failures', '>', 0);
         q.orWhere(START, '>=', from);
-      }), { start: START, id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'job_health.job_name' }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

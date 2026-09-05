@@ -139,10 +139,11 @@ function countBuckets(scoped) {
 // the whole window on the first page (the counting scan, COUNT_SCAN_LIMIT
 // per source), `pageSize + 1` on cursor pages — and refilled when its
 // slice runs dry while another source still has rows, so a page never
-// ends early because one slice held only filtered-out rows. A legacy row
-// whose (source_system, source_run_id) a canonical run mirrors is dropped
-// when that run is in the canonical slice or already emitted (a mirror is
-// opened when its legacy row starts, so they sit together in time).
+// ends early because one slice held only filtered-out rows. Legacy rows a
+// canonical run mirrors are excluded by each adapter's SQL anti-join
+// (sources/shape.js notMirrored), so no per-request dedupe state exists.
+// A scan that spends MAX_SCAN_ROUNDS on non-matching rows returns an EMPTY
+// page WITH the advanced cursor — the client keeps paging.
 const MAX_SCAN_ROUNDS = 8;
 
 // The merge step: yields the newest head across the sources, advancing that
@@ -168,8 +169,6 @@ async function collectPage({ window, lane, area, status, after, pageSize, now })
   const inScope = (run) => (!lane || run.laneId === lane) && (!area || run.area === area);
   const matches = (run) => status === 'all' || bucketsOf(run)[status];
   const state = new Map(readers.map((s) => [s.SOURCE, { reader: s, pos: (after && after.get(s.SOURCE)) || null, buf: [], done: false }]));
-  const mirrored = new Set();
-  const dropped = (run) => !run.canonical && mirrored.has(`${run.sourceSystem}:${run.sourceRunId}`);
   const unavailable = [];
   const page = [];
   let counts = null;
@@ -184,15 +183,12 @@ async function collectPage({ window, lane, area, status, after, pageSize, now })
       if (r.unavailable) unavailable.push(st.reader.SOURCE);
       st.done = r.runs.length < scan;
       st.buf = r.runs.map((run) => annotate(run, now));
-      for (const run of st.buf) if (run.canonical) mirrored.add(`${run.sourceSystem}:${run.sourceRunId}`);
     }));
     if (round === 0) {
       capped = [...state.values()].some((st) => !st.done);
-      // the same rows the merge will emit: in scope, mirrored legacy rows dropped
-      if (!after) counts = countBuckets([...state.values()].flatMap((st) => st.buf).filter((run) => inScope(run) && !dropped(run)));
+      if (!after) counts = countBuckets([...state.values()].flatMap((st) => st.buf).filter(inScope));
     }
     for (const run of readyRows(state)) {
-      if (dropped(run)) continue;
       if (inScope(run) && matches(run)) {
         page.push(run);
         if (page.length === pageSize) snapshot = new Map([...state].map(([k, st]) => [k, st.pos]));
@@ -202,10 +198,11 @@ async function collectPage({ window, lane, area, status, after, pageSize, now })
     if (page.length > pageSize || [...state.values()].every((st) => st.done && !st.buf.length)) break;
   }
   const runs = page.slice(0, pageSize);
-  // more = a further match was seen, or some source still has unread rows
+  // more = a further match was seen, or some source still has unread rows;
+  // an empty page then still carries the advanced positions
   const more = page.length > pageSize || [...state.values()].some((st) => !st.done || st.buf.length);
   const positions = snapshot || new Map([...state].map(([k, st]) => [k, st.pos]));
-  return { runs, counts, countsCapped: !after && capped, nextCursor: more && runs.length ? encodeCursor(positions) : null, unavailable };
+  return { runs, counts, countsCapped: !after && capped, nextCursor: more ? encodeCursor(positions) : null, unavailable };
 }
 
 async function listRuns(params = {}) {

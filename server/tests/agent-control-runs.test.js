@@ -73,6 +73,7 @@ jest.mock('../models/db', () => {
   };
   // summary || ?::jsonb → a merge marker the fake update applies
   db.raw = (sql, binds) => (/\|\|/.test(sql) ? { __merge: JSON.parse(binds[0]) } : /\+ 1$/.test(sql) ? { __inc: true } : { sql, binds });
+  db.transaction = async (fn) => fn(db);
   db.__store = store;
   db.__state = state;
   return db;
@@ -212,20 +213,25 @@ describe('start / step / finish', () => {
 
 describe('concurrent starts', () => {
   test('two starts on one source key get distinct attempts, and the older handle no longer writes the run', async () => {
-    const a = await runs.startRun(base);
+    const a = await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
     const b = await runs.startRun(base);
     expect(a.id).toBe(b.id);
     expect([a.attemptNo, b.attemptNo]).toEqual([1, 2]);
     expect(a.attemptId).not.toBe(b.attemptId);
     expect(store.agent_attempts.map((x) => x.attempt_no)).toEqual([1, 2]);
-    await a.finish({ result: 'succeeded', disposition: 'applied' });
-    // fenced out: the run still belongs to attempt 2
+    expect(await a.finish({ result: 'succeeded', disposition: 'applied' })).toBe(false);
+    // fenced out: the run still belongs to attempt 2; no work-item / event side effects, only attempt 1 closed
     expect(runRow()).toMatchObject({ lifecycle: 'running', attempts: 2, result: null, disposition: null });
     expect(store.agent_attempts[0]).toMatchObject({ result: 'succeeded' });
+    expect(store.work_items[0].status).not.toBe('done');
+    expect(events(a.id)).toEqual(['started', 'resumed']);
+    expect(await a.fail({ error: new Error('late'), errorCode: 'openai_500' })).toMatchObject({ retry: false, stale: true });
+    expect(events(a.id)).toEqual(['started', 'resumed']);
     await a.heartbeat({ progress: true });
     expect(runRow().progress_sequence ?? 0).toBe(0);
     await b.fail({ error: new Error('x'), errorCode: 'openai_500' });
     expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'errored', attempts: 2 });
+    expect(events(a.id)).toEqual(['started', 'resumed', 'failed']);
   });
 
   test('a write failure logs the operation and error code, never the driver message', async () => {

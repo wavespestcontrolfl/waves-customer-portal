@@ -166,12 +166,11 @@ describe('listRuns', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  test('merges canonical first, dedupes a mirrored legacy row, derives health, buckets and counts', async () => {
+  test('merges canonical and legacy rows newest-first, derives health, buckets and counts, reports unavailable sources', async () => {
     spies.agentRuns.mockResolvedValue({ runs: [canonicalRun({ source: 'agent_runs', id: 'r1', sourceSystem: 'autonomous_runs', sourceRunId: 'a1', laneId: 'blog_draft', lifecycle: 'running', createdAt: ago(40 * 60e3), startedAt: ago(40 * 60e3), lastHeartbeatAt: ago(20 * 60e3), lastProgressAt: ago(20 * 60e3), canonical: true })], unavailable: false });
-    spies.autonomousRuns.mockResolvedValue({ runs: [laneRun({ id: 'a1' }), laneRun({ id: 'a2', createdAt: ago(30e3) }), laneRun({ id: 'a3', result: 'errored', createdAt: ago(45e3) })], unavailable: false });
+    spies.autonomousRuns.mockResolvedValue({ runs: [laneRun({ id: 'a2', createdAt: ago(30e3) }), laneRun({ id: 'a3', result: 'errored', createdAt: ago(45e3) })], unavailable: false });
     spies.messageDrafts.mockResolvedValue({ runs: [canonicalRun({ source: 'message_drafts', id: 'd1', laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(3 * 864e5), lastProgressAt: ago(3 * 864e5) })], unavailable: false });
     const out = await runIndex.listRuns({ window: '7d', now: NOW });
-    // newest start first; the canonical row took precedence over its mirror a1
     expect(out.runs.map((r) => r.key)).toEqual(['autonomous_runs:a2', 'autonomous_runs:a3', 'agent_runs:r1', 'message_drafts:d1']);
     expect(out.runs[2]).toMatchObject({ health: 'stalled', healthReason: 'no_heartbeat' });
     expect(out.runs[3]).toMatchObject({ health: 'healthy', attention: 'human_wait' });
@@ -179,7 +178,17 @@ describe('listRuns', () => {
     expect(out.unavailableSources).toEqual(['job_health']);
     expect(out.phases.runs).toBe(false);
     expect(out.nextCursor).toBeNull();
-    expect(spies.autonomousRuns).toHaveBeenCalledWith(expect.objectContaining({ from: expect.any(Date), laneId: null }));
+    expect(spies.autonomousRuns).toHaveBeenCalledWith(expect.objectContaining({ from: expect.any(Date), laneId: null, cursor: null }));
+  });
+
+  test('legacy adapters exclude rows a canonical run mirrors through an SQL anti-join (page-independent)', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const { notMirrored, keyset } = require('../services/agent-control/sources/shape');
+    const { sql, bindings } = keyset(notMirrored(knex('call_log').select('id'), { source: 'call_log', idColumn: 'call_log.id' }), { start: 'created_at', id: 'id', cursor: { at: NOW, id: 'c9' }, limit: 3 }).toSQL().toNative();
+    expect(sql).toMatch(/where not exists \(select 1 from "agent_runs" where "agent_runs"\."source_system" = \$1 and agent_runs\.source_run_id = call_log\.id::text\)/);
+    expect(sql).toMatch(/\("created_at" < \$2 or \("created_at" = \$3 and "id" < \$4\)\)/);
+    expect(sql).toMatch(/order by "created_at" desc, "id" desc limit \$5/);
+    expect(bindings).toEqual(['call_log', NOW, NOW, 'c9', 3]);
   });
 
   test('status / area / lane filters; a lane filter skips single-lane adapters that cannot match', async () => {
@@ -245,6 +254,15 @@ describe('listRuns', () => {
     }
     expect(seen).toEqual(['b6', 'b5', 'b4', 'b3', 'b2', 'b1']);
     expect(cursor).toBeNull();
+    // a filtered scan that spends its rounds on non-matching rows returns an EMPTY page with the advanced cursor
+    const sparse = [...Array.from({ length: 30 }, (_, i) => laneRun({ id: `s${String(i).padStart(2, '0')}`, createdAt: ago((i + 1) * 1000) })), laneRun({ id: 'zz', result: 'errored', createdAt: ago(99e3) })];
+    spies.autonomousRuns.mockImplementation(sqlLike(sparse));
+    let pg = await runIndex.listRuns({ limit: 1, status: 'failed', cursor: Buffer.from('{"p":{}}').toString('base64url'), now: NOW });
+    expect(pg.runs).toEqual([]);
+    expect(pg.nextCursor).not.toBeNull();
+    let hops = 1;
+    while (!pg.runs.length && pg.nextCursor && hops < 10) { pg = await runIndex.listRuns({ limit: 1, status: 'failed', cursor: pg.nextCursor, now: NOW }); hops += 1; }
+    expect(pg.runs.map((r) => r.id)).toEqual(['zz']);
   });
 
   test('sources merge newest-first across pages, each resuming from its own position; a capped first page flags counts and offers a cursor', async () => {

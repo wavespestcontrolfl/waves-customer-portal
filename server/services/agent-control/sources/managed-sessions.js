@@ -6,7 +6,7 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, keyset, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
 const { classifyFailure } = require('../taxonomy');
 
 const SOURCE = 'managed_sessions';
@@ -54,8 +54,8 @@ function baseQuery() {
 
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await keyset(baseQuery()
-      .where(START, '>=', from), { start: START, id: ID, cursor, limit });
+    const rows = await keyset(notMirrored(baseQuery()
+      .where(START, '>=', from), { source: SOURCE, idColumn: 'llm_dispatch_log.provider_ref' }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

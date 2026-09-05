@@ -4,7 +4,7 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, modelLabel, keyset, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'message_drafts';
 const LANE = 'sms_draft';
@@ -72,11 +72,11 @@ function baseQuery() {
 
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await keyset(baseQuery()
+    const rows = await keyset(notMirrored(baseQuery()
       .where((q) => {
         q.where('d.status', 'pending');
         q.orWhere(START, '>=', from);
-      }), { start: START, id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'd.id' }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

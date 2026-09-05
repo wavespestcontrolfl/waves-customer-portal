@@ -260,7 +260,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   let budgetFlagged = false;
   let progress = Number(run.progress_sequence || 0);
   // this handle's attempt is the run's current one (see openAttempt)
-  const fenced = () => db('agent_runs').where({ id: runId, attempts: attemptNo });
+  const fenced = (conn = db) => conn('agent_runs').where({ id: runId, attempts: attemptNo });
 
   async function touch(patch, extendLease = true) {
     const now = new Date();
@@ -390,32 +390,39 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     }));
   }
 
+  // Shared effects (work item, events) follow ONLY a fenced transition that
+  // moved the run — a stale handle (a newer attempt opened) closes its own
+  // attempt row and nothing else. The run + work-item writes share one
+  // transaction so the pair is atomic.
   async function finish({ result = 'succeeded', disposition = null, summary = null, artifacts = null } = {}) {
     const now = new Date();
     const res = RESULT.includes(result) ? result : 'succeeded';
     const dispo = DISPOSITION.includes(disposition) ? disposition : null;
-    await guarded('finish', () => fenced().update({
-      lifecycle: 'terminal',
-      result: res,
-      disposition: dispo,
-      // a successful retry clears the previous attempt's error from the
-      // run's current outcome (it stays on that attempt row)
-      failure_class: null,
-      error_code: null,
-      error_message: null,
-      finished_at: now,
-      last_heartbeat_at: now,
-      lease_expires_at: null,
-      ...(summary ? { summary: db.raw('summary || ?::jsonb', [jsonb(summary)]) } : {}),
-      updated_at: now,
-    }));
-    if (workItemId && res === 'succeeded') {
-      await guarded('work_item.done', () => db('work_items').where({ id: workItemId }).update({ status: 'done', updated_at: now }));
-    }
-    await writeArtifacts(artifacts);
     await closeAttempt(res);
+    const moved = await guarded('finish', () => db.transaction(async (trx) => {
+      const n = await fenced(trx).update({
+        lifecycle: 'terminal',
+        result: res,
+        disposition: dispo,
+        // a successful retry clears the previous attempt's error from the
+        // run's current outcome (it stays on that attempt row)
+        failure_class: null,
+        error_code: null,
+        error_message: null,
+        finished_at: now,
+        last_heartbeat_at: now,
+        lease_expires_at: null,
+        ...(summary ? { summary: db.raw('summary || ?::jsonb', [jsonb(summary)]) } : {}),
+        updated_at: now,
+      });
+      if (n && workItemId && res === 'succeeded') await trx('work_items').where({ id: workItemId }).update({ status: 'done', updated_at: now });
+      return Number(n) > 0;
+    }), false);
+    if (!moved) return false;
+    await writeArtifacts(artifacts);
     await insertEvent(runId, 'finished', null, { result: res, disposition: dispo });
     if (dispo) await insertEvent(runId, 'disposition', null, { disposition: dispo });
+    return true;
   }
 
   async function fail({ error = null, errorCode = null, failureClass = null, retryable = false } = {}) {
@@ -424,16 +431,13 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     const code = clip(errorCode ?? err.code, 80);
     const message = sanitizeJobError(err.message ?? code ?? 'failed');
     const klass = failureClass ?? classifyFailure(code ?? message);
-    const canRetry = retryable
-      && attemptNo < Number(run.max_attempts)
-      && !!run.idempotency_key
-      && !NO_RETRY_CLASSES.has(policy.side_effect_class);
+    const canRetry = [retryable, attemptNo < Number(run.max_attempts), run.idempotency_key, !NO_RETRY_CLASSES.has(policy.side_effect_class)].every(Boolean);
     const result = CODE_RESULT[code] ?? CLASS_RESULT[klass] ?? 'errored';
     const outcome = canRetry
       ? { lifecycle: 'queued', result: null, finished_at: null, event: 'retry_scheduled' }
       : { lifecycle: 'terminal', result, finished_at: now, event: 'failed' };
     await closeAttempt(result, { failureClass: klass, errorCode: code, errorMessage: message });
-    await guarded('fail', () => fenced().update({
+    const moved = await guarded('fail', () => fenced().update({
       lifecycle: outcome.lifecycle,
       result: outcome.result,
       failure_class: klass,
@@ -443,7 +447,9 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
       last_heartbeat_at: now,
       lease_expires_at: null,
       updated_at: now,
-    }));
+    }), 0);
+    // stale handle: its attempt row carries the failure; the run belongs to a newer attempt
+    if (!Number(moved)) return { retry: false, failureClass: klass, result: null, stale: true };
     await insertEvent(runId, outcome.event, message, { failure_class: klass, error_code: code, attempt: attemptNo, result: outcome.result });
     if (isQualityFailure(klass)) await insertEvent(runId, 'eval_candidate', null, { failure_class: klass });
     return { retry: canRetry, failureClass: klass, result: outcome.result };
