@@ -56,7 +56,10 @@ export default function WavesAIScheduleSearch({
       const kids = [...el.children].slice(0, chips.length);
       const setWidth = kids.reduce((w, k) => w + k.offsetWidth, 0) + 8 * chips.length;
       el.style.setProperty('--chip-shift', `-${setWidth}px`);
-      setDrift(setWidth > el.clientWidth - 36);
+      // Reduced motion: no drift, so the overflowing set stays a plain
+      // scrollable strip instead of a clipped one (GH Codex pre-push P1).
+      const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      setDrift(!reduced && setWidth > el.clientWidth - 36);
     };
     measure();
     window.addEventListener('resize', measure);

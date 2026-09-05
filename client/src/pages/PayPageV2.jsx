@@ -2665,6 +2665,11 @@ export default function PayPageV2() {
               Invoice · {invoice.invoiceNumber}
             </div>
             <SerifHeading style={{ marginBottom: SP.xs }}>Review and pay</SerifHeading>
+            {invoice.dueDate ? (
+              <div style={{ fontSize: FS.body, color: isOverdue ? DOC.danger : DOC.muted, fontWeight: isOverdue ? FW.bold : FW.regular }}>
+                {isOverdue ? 'Was due ' : 'Due '}{formatInvoiceDate(invoice.dueDate)}
+              </div>
+            ) : null}
           </div>
 
           {/* Amount-due hero removed (owner 2026-08-31: the figure already
