@@ -366,13 +366,15 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   // A transition and its event are one transaction: the event exists only
   // when the fenced stamp moved the run, and a reopen racing the commit
   // cannot interleave its `resumed` event with this attempt's (Codex r6).
+  // true = moved; false = the fence refused it (a newer attempt owns the
+  // run); null = the write itself failed (rolled back, nothing recorded).
   async function transition(eventType, patch, { extendLease = true, message = null, metadata = null } = {}) {
     return guarded(eventType, () => db.transaction(async (trx) => {
       const n = await stamp(trx, patch, extendLease);
       if (!Number(n)) return false;
       await trx('run_events').insert(eventRow(runId, eventType, message, metadata));
       return true;
-    }), false);
+    }), null);
   }
 
   // Progress is incremented IN the fenced update, not written from a
@@ -389,11 +391,13 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
 
   async function flagBudget(kind) {
     if (budgetFlagged) return;
-    budgetFlagged = true;
     // the event only when the fenced stamp moved the run: a stale handle
     // (a newer attempt opened) must not narrate a budget transition the
-    // current attempt never made (Codex r3)
-    await transition('budget_exceeded', { summary: db.raw("summary || ?::jsonb", [jsonb({ budget_exceeded: kind })]) }, { extendLease: false, metadata: { kind, max_steps: budget.max_steps, max_tool_calls: budget.max_tool_calls } });
+    // current attempt never made (Codex r3). Flagged once it persisted or
+    // the fence refused it — a write that FAILED recorded nothing, so the
+    // next over-budget step tries again (Codex r13).
+    const moved = await transition('budget_exceeded', { summary: db.raw("summary || ?::jsonb", [jsonb({ budget_exceeded: kind })]) }, { extendLease: false, metadata: { kind, max_steps: budget.max_steps, max_tool_calls: budget.max_tool_calls } });
+    budgetFlagged = moved !== null;
   }
 
   // Every step body runs under the handle's RESOLVED identity (a reopen

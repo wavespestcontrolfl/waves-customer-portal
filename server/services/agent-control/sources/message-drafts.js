@@ -73,10 +73,15 @@ const DRAFTS_LINK = '/admin/agents?tab=drafts';
 // adapter's own maps (one vocabulary): the owner's verdict closes the run;
 // a scheduled / sending decision makes it wait on the send (from the
 // decision's span); null while the owner still owes the review (or the
-// draft has no decision row).
+// draft has no decision row). A SHADOW draft consults only a terminal
+// linked decision: revertDraftsToShadow (sms-suggest-mode) sets an
+// ignored / expired / superseded suggestion back to 'shadow' after writing
+// that decision, so the outcome lives on the decision row (Codex r13).
 function decisionState(d) {
-  if (d.status !== 'suggested' || !d.decision_status || d.decision_status === 'pending_review') return null;
+  if (!d.decision_status || d.decision_status === 'pending_review') return null;
   const status = decisions.STATUS_MAP[d.decision_status] || { lifecycle: 'terminal', result: null };
+  const consulted = d.status === 'suggested' || (d.status === 'shadow' && status.lifecycle === 'terminal');
+  if (!consulted) return null;
   const verdict = decisions.VERDICT[d.decision_verdict] || {};
   return {
     ...status,

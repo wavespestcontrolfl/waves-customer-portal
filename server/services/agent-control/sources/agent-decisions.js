@@ -100,7 +100,18 @@ const VERDICT = Object.freeze({
   dismissed: { verification: 'failed', disposition: 'rejected' },
   ignored: { verification: 'overridden', disposition: 'no_action' },
 });
-const TRIAGE_LINK = '/admin/agents?tab=triage';
+// The hub's Triage & Decisions tab (AgentsHubPage TABS.DECISIONS — an
+// unknown tab key falls back to Overview; Codex r13). A house-voice
+// suggestion is actionable only in its comms thread — the tab keeps its
+// pending rows out of the queue and the review route rejects them
+// (admin-agent-decisions): it links to the thread, the deep link the
+// ops digest and alerts already use.
+const DECISIONS_LINK = '/admin/agents?tab=decisions';
+const SUGGEST_WORKFLOW = 'sms_house_voice_suggest';
+function linkFor(d) {
+  if (d.workflow !== SUGGEST_WORKFLOW) return DECISIONS_LINK;
+  return d.customer_id ? `/admin/communications?thread=${d.customer_id}` : '/admin/communications';
+}
 
 function flagNames(flags) {
   if (!Array.isArray(flags)) return [];
@@ -148,7 +159,7 @@ function fromRow(d) {
       ...(flags.length ? [{ key: 'safety', label: 'Safety flags', status: 'blocked', detail: flags.slice(0, 4).join(' · '), ms: null, toolName: null }] : []),
       { key: 'review', label: 'Owner review', status: waiting ? 'running' : verdict === NO_VERDICT ? 'skipped' : 'done', detail: humanize(d.human_verdict) || null, ms: null, toolName: null },
     ],
-    link: TRIAGE_LINK,
+    link: linkFor(d),
     entity: d.entity_type ? { type: d.entity_type, id: d.entity_id } : null,
   });
 }

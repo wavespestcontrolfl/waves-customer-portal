@@ -308,6 +308,20 @@ describe('start / step / finish', () => {
     expect(runRow().summary).toEqual({ budget_exceeded: 'steps' });
     expect(store.agent_run_steps).toHaveLength(max + 2);
   });
+
+  test('budget: a marker whose write failed is retried by the next over-budget step, and still recorded once (Codex r13)', async () => {
+    const h = await runs.startRun(base);
+    const max = policyFor('blog_draft').budget.max_steps;
+    for (let i = 0; i < max; i += 1) await h.step({ key: `s${i}` }, async () => i);
+    state.failNext = 'agent_runs';
+    await h.step({ key: 'over1' }, async () => 1);
+    expect(events(h.id).filter((e) => e === 'budget_exceeded')).toHaveLength(0);
+    expect(runRow().summary).toEqual({});
+    await h.step({ key: 'over2' }, async () => 2);
+    await h.step({ key: 'over3' }, async () => 3);
+    expect(events(h.id).filter((e) => e === 'budget_exceeded')).toHaveLength(1);
+    expect(runRow().summary).toEqual({ budget_exceeded: 'steps' });
+  });
 });
 
 describe('concurrent starts', () => {

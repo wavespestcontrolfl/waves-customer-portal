@@ -139,6 +139,10 @@ describe('adapters project onto the canonical shape', () => {
     expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'corrected', decision_verdict: 'corrected' })).toMatchObject({ lifecycle: 'terminal', disposition: 'applied', verification: 'warning' });
     expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'ignored', decision_verdict: 'ignored' })).toMatchObject({ lifecycle: 'terminal', disposition: 'no_action', verification: 'overridden' });
     expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'superseded' })).toMatchObject({ lifecycle: 'terminal', result: 'canceled', disposition: 'no_action' });
+    // a suggestion the producer set back to shadow (ignored / expired / superseded) keeps the terminal decision's outcome; a live decision is not projected onto a shadow draft
+    expect(messageDrafts.fromRow({ ...base, status: 'shadow', decision_status: 'expired', decision_at: ago(1e3) })).toMatchObject({ lifecycle: 'terminal', result: 'canceled', disposition: 'no_action', finishedAt: ago(1e3).toISOString() });
+    expect(messageDrafts.fromRow({ ...base, status: 'shadow', decision_status: 'ignored', decision_verdict: 'ignored' })).toMatchObject({ result: 'succeeded', disposition: 'no_action', verification: 'overridden' });
+    expect(messageDrafts.fromRow({ ...base, status: 'shadow', decision_status: 'scheduled', decision_active_from: ago(-600e3) })).toMatchObject({ lifecycle: 'terminal', disposition: 'no_action', verification: 'unjudged' });
   });
 
   test('agent_decisions: the producers\' workflows map to lanes / the SMS area, every written status is mapped, unknown ones surface', () => {
@@ -274,6 +278,13 @@ describe('adapters project onto the canonical shape', () => {
     const unknown = callLog.fromRow({ id: 'y', processing_status: 'brand_new_state', created_at: ago(1e3) });
     expect(unknown).toMatchObject({ lifecycle: 'terminal', result: null });
     expect(runIndex.bucketsOf({ ...unknown, health: 'healthy', attention: null })).toMatchObject({ failed: true, attention: true, done: false });
+  });
+
+  test('agent_decisions: the action link is the hub decisions tab; a house-voice suggestion links to its comms thread, where it is actionable (Codex r13)', () => {
+    const base = { id: 'd1', status: 'pending_review', created_at: ago(5e3), customer_id: 77 };
+    expect(agentDecisions.fromRow({ ...base, workflow: 'contact_correction' }).link).toBe('/admin/agents?tab=decisions');
+    expect(agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_suggest' }).link).toBe('/admin/communications?thread=77');
+    expect(agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_suggest', customer_id: null }).link).toBe('/admin/communications');
   });
 
   test('job_health: a running job is live, a failing job is errored, a lane comes from its policy workflow_id', () => {
