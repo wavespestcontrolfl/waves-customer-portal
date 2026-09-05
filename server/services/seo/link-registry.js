@@ -66,7 +66,7 @@ const PATH_LINK_TYPES = Object.freeze([...CLAIMABLE_LINK_TYPES]);
 const ATTEMPT_PROVIDERS = Object.freeze(['deterministic_runner', 'openai_cua', 'claude_cu', 'stagehand', 'grok', 'human']);
 const ATTEMPT_ACTIONS = Object.freeze(['investigate', 'create_account', 'complete_form', 'submit', 'resume', 'outreach_send']);
 const ATTEMPT_OUTCOMES = Object.freeze([
-  'slot_reserved', 'submitting', 'submit_ambiguous',
+  'slot_reserved', 'slot_released', 'submitting', 'submit_ambiguous',
   'placed', 'pending', 'drafted', 'sent', 'failed', 'skipped', 'blocked', 'captcha',
   'needs_owner', 'human_step_done', 'ready_for_payment', 'ready_for_credentials',
   'no_payment_required', 'price_changed', 'instrument_unavailable', 'auto_renew_unavoidable',
@@ -465,7 +465,7 @@ function movePatch(row, target, now, { syncUrl = false } = {}) {
   // The transition CONSUMES the lease stamp: a same-path reconcile at release
   // fires once per lease, never again on every later release or operator
   // draft of the same (now settled) row.
-  const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null, leased_path_revision: null };
+  const patch = { path_id: target.id, outreach_draft_attempts: 0, updated_at: now, automation_policy: null, last_classified_at: null, leased_path_revision: null };
   // The execution URL follows the successor; a URL-less successor (outreach)
   // CLEARS it — the retired route must not survive as the page the outreach
   // drafter fetches and cites. A release-time reconcile of the SAME path

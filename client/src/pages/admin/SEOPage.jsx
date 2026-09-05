@@ -3685,6 +3685,9 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
         const p = c.path;
         return (
           <div key={c.placement.id} style={{ border: `1px solid ${D.border}`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
+            {c.submission_ambiguity && <p style={{ fontSize: 14, color: D.amber }}>The submission may have reached the publisher. Automatic retry is held. Review its evidence in the Registry and record a confirmed placement on the Link Building board.</p>}
+
+
             <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, fontFamily: MONO }}>
                 {c.domain.domain}
