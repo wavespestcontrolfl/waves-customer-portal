@@ -991,6 +991,19 @@ test('a credential lookup that THROWS is run-level: nothing claimed, nothing par
   expect(notify).not.toHaveBeenCalled();
 });
 
+test('a login-driven adapter already dead this run is skipped adapter_down WITHOUT another credential lookup (Codex #3853 r24 P2)', async () => {
+  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  const calls = getVendorLoginCredentials.mock.calls.length;
+  const place = jest.fn();
+  expect(await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: () => true, place }, { deadAdapters: new Set(['siteone']) })).toMatchObject({ skipped: 'adapter_down' });
+  expect(getVendorLoginCredentials.mock.calls).toHaveLength(calls);
+  expect(place).not.toHaveBeenCalled();
+});
+
 test('a bell notifyAdmin swallowed (null return) is NOT delivered: bellPending, no bellAt stamp, re-rung next run (r2 P1)', async () => {
   notify = jest.fn(async () => null); // notification-service returns null when its insert/dedupe failed
   mockState.pricing = null;

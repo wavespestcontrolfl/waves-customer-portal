@@ -684,16 +684,19 @@ async function resolveClaimVendor(trx, { request, registry, deadAdapters = null,
 // plus the claim transaction's, and the pool floor is 2 — a third connection
 // from inside the transaction would wait forever (pre-push P1). A lookup that
 // THROWS is run-level for this adapter: nothing written. Null when the
-// request's vendor needs no login (the claim re-resolves the vendor under lock).
+// request's vendor needs no login (the claim re-resolves the vendor under
+// lock) — or when the adapter is already dead this run: the claim will skip
+// it adapter_down, and a credential store that IS the failure must not be
+// hit again once per remaining request (Codex #3853 r24 P2).
 const rowVersion = (row) => (row && row.updated_at != null ? new Date(row.updated_at).toISOString() : null);
 
-async function prefetchVendorLogin(conn, requestId, registry) {
+async function prefetchVendorLogin(conn, requestId, registry, deadAdapters = null) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first('metadata');
   const vendorId = request ? meta(request.metadata).vendorId : null;
   const vendor = vendorId ? await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code', 'active', 'updated_at') : null;
   const adapterKey = adapterKeyFor(vendor);
   const adapter = adapterKey ? registry[adapterKey] : null;
-  if (!adapter || !adapter.loginRequired) return null;
+  if (!adapter || !adapter.loginRequired || (deadAdapters && deadAdapters.has(adapterKey))) return null;
   // version = the vendor row's updated_at at read time: the claim re-reads it
   // under lock and refuses a login read from an older row (Codex #3853 r15 P1).
   try { return { vendorId: vendor.id, version: rowVersion(vendor), credentials: await getVendorLoginCredentials(conn, vendor.id) }; }
@@ -1267,7 +1270,7 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   // now, not after another silent day (Codex r18 P2).
   if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await bellUndispatchable(conn, requestId, notify)) };
   const registry = adapters || loadAdapters();
-  const login = await prefetchVendorLogin(conn, requestId, registry);
+  const login = await prefetchVendorLogin(conn, requestId, registry, deadAdapters);
   const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login }));
   if (claim.skipped) {
     // A lost hand-off bell is reported, not swallowed: the request stays open
