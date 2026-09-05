@@ -34,7 +34,7 @@ export default defineConfig({
       });
     },
   }],
-  resolve: { alias: { ...capShimAlias } },
+  resolve: { alias: { ...capShimAlias, '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)) } },
   // Vitest reads this block. The global setup shims window.matchMedia (jsdom
   // omits it) so tests can mount the liquid-glass scene, which now renders on
   // every customer surface.
@@ -115,7 +115,7 @@ export default defineConfig({
   // Rollup's static analysis to fail with "X is not exported by …" errors.
   // See: https://vitejs.dev/config/dep-optimization-options#optimizedeps-include
   optimizeDeps: {
-    include: ['../shared/lawn-scores.cjs', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
+    include: ['@lawn-scores', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
   },
   build: {
     outDir: 'dist',

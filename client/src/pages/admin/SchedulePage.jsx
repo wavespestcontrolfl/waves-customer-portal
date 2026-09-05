@@ -1,4 +1,4 @@
-import lawnScores from '../../../../shared/lawn-scores.cjs';
+import lawnScores from '@lawn-scores';
 // client/src/pages/admin/SchedulePage.jsx
 //
 // Shared-utility module for the V2 dispatch surface. The V1 page
