@@ -211,6 +211,7 @@ async function aiRecap(input = {}) {
   // outcome reaches here; sensitive outcomes (concern/incomplete/declined/etc.)
   // skip AI entirely via DETERMINISTIC_OUTCOMES above, so no escalation needed.
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+    laneId: 'completion_recap',
     text: buildPrompt(input),
     jsonMode: false,
     maxTokens: 220,

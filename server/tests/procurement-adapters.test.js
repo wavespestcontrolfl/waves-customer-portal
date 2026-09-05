@@ -220,7 +220,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   function fakeSiteOne(opts = {}) {
     const st = { cart: [], removable: true, accountSelectable: true, url: 'https://www.siteone.com/en/login', loggedIn: false, placeClicked: 0, addClicked: 0, qty: null, ...opts };
     const el = (spec = {}) => ({
-      count: async () => spec.count ?? 0,
+      count: async () => { if (spec.countThrows) throw new Error('locator.count: Target closed'); return spec.count ?? 0; },
       evaluate: async (fn) => fn({ tagName: (spec.tag || 'input').toUpperCase(), id: spec.id || '', name: spec.name || '', value: spec.value ?? '' }),
       getAttribute: async (n) => (spec.attrs ? spec.attrs[n] ?? null : null),
       first() { return this; },
@@ -252,6 +252,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // look for a NESTED form and miss the button (r18 P1) — only a form-relative control selector resolves it.
       const loginForm = el({ count: 1, sub: (sub) => (sub === S.loginSubmit && !/^\s*form\b/.test(sub) ? (st.formSubmitCount === 0 ? el() : submit) : el()) });
       const passField = el({ count: 1, visible: true, sub: (sub) => (sub === 'xpath=ancestor::form[1]' ? loginForm : el()), onPress: async (key) => { st.pressed = [...(st.pressed || []), key]; if (key === 'Enter') await submit.click(); } });
+      // loginInspectThrows: the post-submit password-field count throws mid-navigation (pre-push hook P1)
+      if (sel === S.loginPass && st.loggedIn && st.loginInspectThrows) return el({ countThrows: true });
       if (sel === S.loginPass) return st.loggedIn ? (st.loginPassHiddenAfterLogin ? el({ count: 1, visible: false }) : el()) : passField;
       if (sel === S.loginSubmit) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenSubmitClicked = (st.hiddenSubmitClicked || 0) + 1; } }) : submit) });
       if (sel === S.loginError) return el();
@@ -692,6 +694,13 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_unverified', adapterDown: true });
     expect(st.loginSubmits || 0).toBe(0);
     expect(st.pressed).toEqual(['Enter']); // one press, no second attempt
+    expect(st.addClicked).toBe(0);
+  });
+
+  test('a post-submit inspection that THROWS (locator count mid-navigation) is not a retry: login_unverified, adapter down, the credential sent once (pre-push hook P1)', async () => {
+    const { st, deps } = fakeSiteOne({ loginInspectThrows: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_unverified', adapterDown: true });
+    expect(st.loginSubmits).toBe(1);
     expect(st.addClicked).toBe(0);
   });
 

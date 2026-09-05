@@ -183,7 +183,7 @@ describe('enrollSequenceFromEvent', () => {
 
     const result = await enrollSequenceFromEvent({ templateKey: 'payment_failed', customerId: 'cust-1', source: 'autopay_failure' });
 
-    expect(result).toEqual({ enrolled: false, reason: 'error' });
+    expect(result).toEqual({ enrolled: false, reason: 'error', error: expect.objectContaining({ message: 'boom' }) });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('autopay_failure'));
   });
 

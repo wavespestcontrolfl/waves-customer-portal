@@ -112,8 +112,11 @@ const CAPS_LOCK_KEY = 'vendor-order-caps';
 // received once more — its own receipt (Codex r27 P1, owner ruling).
 const POST_SUBMIT_REASONS = new Set(['ambiguous_after_submit', 'persist_after_placement', 'over_cap_after_placement', 'stale_placing', 'no_final_total', 'placed_on_received_request']);
 // A received request settles its ledger row — unless the order landed after
-// that receipt (evidence.landedAfterReceive): that row stays live.
-const RECEIVED_SETTLES_SQL = "(prr.status <> 'received' OR NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)";
+// that receipt (evidence.landedAfterReceive), or the claim is still
+// 'placing' (an older pod received while the call is out: the marker is
+// stamped only when the call returns, and the claim must stay live until
+// then — Codex r29 P1): those rows stay live.
+const RECEIVED_SETTLES_SQL = "(vo.status = 'placing' OR prr.status <> 'received' OR NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)";
 
 // vendors.code → adapter (.claude/vendor-codes.md). Name is the fallback for
 // a row that predates the code column.
@@ -333,8 +336,11 @@ async function assertManualActionAllowed(trx, requestId, action) {
 // strips it: a delivery in flight (park / re-ring) that lands afterwards
 // fails deliverBell's version check instead of resurrecting the
 // instruction (hook P1).
+// The ledger row is LOCKED before its notifications — the order deliverBell
+// and the manual restock actions take, so a caller that holds no ledger lock
+// yet (the sweep's hand-off) cannot deadlock against them (hook r31 P1).
 async function settleRequestLedgerBells(trx, requestId) {
-  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id');
+  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id');
   if (!row) return;
   await retireLedgerBells(trx, row.id);
   await trx('vendor_orders').where({ id: row.id }).update({ evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt'"), updated_at: new Date() });
@@ -492,32 +498,46 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
     logger.warn(`[order-dispatch] bell for ledger ${ledgerId} was not persisted (re-rung next run)`);
     return false;
   }
-  let superseded = false;
+  // Retire-and-stamp is ONE transaction under the ledger row lock, and the
+  // delivered version is verified against the row FIRST (hook r31 P1): a
+  // delayed delivery of an earlier version resuming after its replacement
+  // was delivered and stamped must retire only ITSELF, never the current
+  // bell — a current bell already stamped would otherwise never re-ring.
+  //   current  → every OTHER version of this row's bell (an earlier park's
+  //              copy, the unversioned key) is retired, then bellAt lands:
+  //              an obsolete reconcile / dry-run instruction is never left
+  //              unread beside its replacement (Codex r31 P1);
+  //   replaced → the notification just inserted (the stale copy) is
+  //              retired; the replacement stays pending for the re-ring
+  //              (Codex r23 P1, hook P1).
+  // A failed transaction leaves bellAt null: the next run re-rings this
+  // version (a dedupe refresh, never a double) and retries the retire.
+  const key = (ver) => (ver ? `auto-order:${ledgerId}:${ver}` : `auto-order:${ledgerId}`);
+  let outcome;
   try {
-    // Stamp ONLY the bell version that was delivered: if the row's bell was
-    // replaced meanwhile, the replacement stays pending for the re-ring.
-    const stamp = conn('vendor_orders').where({ id: ledgerId });
-    if (v) stamp.whereRaw("evidence->'bell'->>'v' = ?", [v]);
-    const n = await stamp.update({
-      evidence: conn.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ bellAt: new Date().toISOString() })]),
-      updated_at: new Date(),
+    outcome = await conn.transaction(async (trx) => {
+      const row = await trx('vendor_orders').where({ id: ledgerId }).forUpdate().first('id', 'evidence');
+      const current = meta(row?.evidence).bell?.v || null;
+      if (!row || current !== (v || null)) {
+        await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key(v)]).whereNull('read_at').update({ read_at: new Date() });
+        return 'superseded';
+      }
+      await trx('notifications')
+        .whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [key(null), `${key(null)}:%`])
+        .whereRaw("metadata->>'dedupeKey' <> ?", [key(v)])
+        .whereNull('read_at')
+        .update({ read_at: new Date() });
+      await trx('vendor_orders').where({ id: ledgerId }).update({
+        evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ bellAt: new Date().toISOString() })]),
+        updated_at: new Date(),
+      });
+      return 'stamped';
     });
-    // Zero rows = the row's bell was replaced after this one was delivered:
-    // the REPLACEMENT is still pending, so this is not a delivery (hook P1).
-    superseded = n !== 1;
   } catch (err) {
-    // The bell landed; the dedupeKey makes the re-ring a refresh, not a double.
-    logger.warn(`[order-dispatch] bell stamp failed for ledger ${ledgerId}: ${err.message}`);
+    logger.warn(`[order-dispatch] bell v${v || '?'} for ledger ${ledgerId} landed but could not be stamped (re-rung next run): ${err.message}`);
+    return false;
   }
-  if (!superseded) return true;
-  // The notification just inserted carries the superseded version's
-  // instructions (a stale reconcile / dry-run text beside the replacement):
-  // retire it now rather than leave it unread (Codex r23 P1).
-  try {
-    await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-order:${ledgerId}:${v}`]).whereNull('read_at').update({ read_at: new Date() });
-  } catch (err) {
-    logger.warn(`[order-dispatch] superseded bell v${v} for ledger ${ledgerId} could not be retired: ${err.message}`);
-  }
+  if (outcome === 'stamped') return true;
   logger.warn(`[order-dispatch] bell v${v || '?'} for ledger ${ledgerId} was superseded before its stamp — retired; replacement re-rung next run`);
   return false;
 }
@@ -601,15 +621,33 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
   const bell = parkBell({ reason, status, product, vendor, request, amountCents, message, placed });
   const patch = parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed });
   const transitioned = await conn.transaction(async (trx) => {
+    let rowPatch = patch;
+    let reopen = false;
+    if (staleBefore) {
+      // Stale recovery: the request's status is read HERE, under the ledger →
+      // request locks (the scan's snapshot is unlocked): received by an older
+      // pod meanwhile ⇒ the park carries landedAfterReceive so every
+      // live-order guard keeps the possibly-placed order live (Codex r30 P1).
+      await trx('vendor_orders').where({ id: ledger.id }).forUpdate().first('id');
+      const fresh = await trx('product_restock_requests').where({ id: request.id }).forUpdate().first('status');
+      if (fresh?.status === 'received') rowPatch = { ...patch, evidence: JSON.stringify({ ...JSON.parse(patch.evidence), landedAfterReceive: new Date().toISOString() }) };
+      // Cancelled by an older pod while the claim was placing: the order may
+      // have gone out, and a cancelled request can be neither received nor
+      // revoked (both refuse) while the live-order guard blocks a
+      // replacement — restore it to ordered, as a late placement does
+      // (Codex r31 P1).
+      if (fresh?.status === 'cancelled') { reopen = true; rowPatch = { ...rowPatch, evidence: JSON.stringify({ ...JSON.parse(rowPatch.evidence), reopenedFromCancelledAt: new Date().toISOString() }) }; }
+    }
     const transition = trx('vendor_orders').where({ id: ledger.id, status: 'placing' });
     // Stale recovery: the heartbeat observed at scan time must STILL be old —
     // a run that resumed beating between the scan and this write keeps its
     // claim (Codex r5 P1).
     if (staleBefore) transition.where('updated_at', '<', staleBefore);
-    const n = await transition.update(patch);
+    const n = await transition.update(rowPatch);
     if (!n) return false;
-    if (markRequestOrdered) await requestToOrdered(trx, request.id);
-    await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: status, amount_cents: amountCents, reason: `${reason}: ${message}`.slice(0, 400), trx });
+    if (markRequestOrdered || reopen) await requestToOrdered(trx, request.id);
+    // The vendor order number rides into the audit row when the park knows it (Codex r30 P2).
+    await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: status, amount_cents: amountCents, external_order_number: placed?.externalOrderNumber || null, reason: `${reason}: ${message}`.slice(0, 400), trx });
     return true;
   });
   if (!transitioned) {
@@ -716,6 +754,9 @@ function retireRequestBell(trx, requestId) {
 
 async function cancelAtClaim(trx, { request, product, m, ineligible }) {
   await retireRequestBell(trx, request.id);
+  // A re-claimable dry-run row's own versioned bell ("turn dry run off to
+  // order for real") is withdrawn with the need (Codex r30 P1).
+  await settleRequestLedgerBells(trx, request.id);
   await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({
     status: 'cancelled',
     closed_at: new Date(),
@@ -757,7 +798,8 @@ async function lockedProductGuards(trx, { request }) {
     .join('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
     .where('prr.product_id', request.product_id)
     .whereNot('prr.id', request.id)
-    .whereNotNull('vo.placed_at')
+    // A sibling claim still placing counts too (its request may already be received — Codex r29 P1).
+    .whereRaw("(vo.status = 'placing' OR vo.placed_at IS NOT NULL)")
     .whereRaw(RECEIVED_SETTLES_SQL)
     .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
     .first('vo.id');
@@ -823,6 +865,10 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   const peek = await trx('product_restock_requests').where({ id: requestId }).first('product_id');
   if (!peek) return { skipped: 'not_found' };
   await require('./auto-reorder').lockProductPricing(trx, peek.product_id);
+  // LOCK ORDER: any existing ledger row (a re-claimable dry-run park) BEFORE
+  // the request — the order every manual action and the revoke CLI use, so a
+  // reclaim racing a manual action waits instead of deadlocking (hook P1).
+  await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id');
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request) return { skipped: 'not_found' };
   if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
@@ -1005,7 +1051,7 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
   // The office closed the request while the vendor call was in flight: an
   // order exists that the tab no longer expects — say so once. A cancelled
   // request is put back to ordered (requestToOrdered).
-  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. ${freshStatus === 'cancelled' ? 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke.' : 'Reconcile by hand.'}` });
+  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(finalCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. ${freshStatus === 'cancelled' ? 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke.' : 'Reconcile by hand.'}` });
   const outcome = await conn.transaction(async (trx) => {
     // The cap lock FIRST — the reservation's own order (cap lock → ledger
     // row): the amount this commit records lands while no concurrent
@@ -1075,10 +1121,16 @@ async function settleAfterError(conn, err, { ctx, vendor, submitted, placed, quo
       // The figure this park records reaches the row under the cap lock
       // first, like every other post-submit amount (Codex r27 P1); a claim
       // lost meanwhile is attached as a late placement instead.
-      const amountCents = placed?.amountCents ?? quoteCents ?? null;
+      // The figure is the positive one — the vendor's, the quote, or what
+      // beforeSubmit reserved on the row — never a zero that would overwrite
+      // the reservation and drop the order from the month (Codex r31 P1);
+      // with no positive figure anywhere, the per-order cap, as every other
+      // post-submit park counts it.
+      const known = await settledFinalCents(conn, { ledger, placed, quoteCents });
+      const { amountCents, counted } = known == null ? unconfirmedAmount(env) : { amountCents: known, counted: '' };
       const reserved = await reservePostSubmitAmount(conn, ledger, amountCents, env);
       if (reserved.reason === 'claim_lost') return await recordPlaced(conn, { ctx, placed: placed || { externalOrderNumber: null, amountCents, evidence: null }, finalCents: amountCents, quoteCents });
-      const parked = await park(conn, { ...ctx, markRequestOrdered: true, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${placed?.amountCents != null ? ` (${dollars(placed.amountCents)})` : ''} was placed but recording it failed: ${err.message}.`, amountCents: placed?.amountCents ?? quoteCents ?? null, evidence: placed?.evidence || null, placed });
+      const parked = await park(conn, { ...ctx, markRequestOrdered: true, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${known != null ? ` (${dollars(known)})` : ''} was placed but recording it failed: ${err.message}.${counted}`, amountCents, evidence: placed?.evidence || null, placed });
       // The row had already left 'placing' (stale recovery / revoke while
       // the vendor call ran) and the late-placement attachment itself
       // failed: a skipped park would read as harmless while the confirmed
@@ -1270,6 +1322,12 @@ async function bellUndispatchable(conn, requestId, notify) {
   if (!after || after.status !== 'open' || after.source !== 'auto_reorder') {
     await retireRequestBell(conn, requestId);
     return { requestClosed: true };
+  }
+  // Another pod claimed it meanwhile (rolling gate change): its claim
+  // retired a bell that did not exist yet — retire this one (Codex r29 P1).
+  if (await findLiveAutoOrder(conn, request.product_id)) {
+    await retireRequestBell(conn, requestId);
+    return { autoOrderLive: true };
   }
   return { belled: true };
 }

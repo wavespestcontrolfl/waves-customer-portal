@@ -60,12 +60,15 @@ describe('RelayConversation — explicit end after capture', () => {
     // guard must match NULL too (NULL <> 'voicemail' is NULL in SQL) — else
     // successful calls never finalize. Verify the guard is "NULL OR not voicemail".
     const update = jest.fn().mockResolvedValue(1);
-    const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNot: jest.fn().mockReturnThis() };
+    const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
     const builder = {
       update,
       where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
+      whereIn: jest.fn(() => builder),
     };
     db.mockReturnValue(builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
 
     const convo = new RelayConversation({ callSid: 'CA9', from: '+19415551234', send: jest.fn() });
     convo.leadCaptured = true; // skip the capture-floor lead write
@@ -73,12 +76,40 @@ describe('RelayConversation — explicit end after capture', () => {
 
     expect(db).toHaveBeenCalledWith('call_log');
     expect(builder.where).toHaveBeenCalledWith('twilio_call_sid', 'CA9');
-    // the guard callback ran whereNull('call_outcome') OR orWhereNot(...,'voicemail')
+    // the guard callback ran whereNull('call_outcome') OR orWhereNotIn(..., the
+    // terminal outcomes — voicemail, and relay_failed on the sandbox)
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'completed', answered_by: 'ai_agent', call_outcome: 'ai_handled',
     }));
+  });
+
+  test('a relay_failed row that won the race keeps the transcript + telemetry, not the outcome (codex r6 P1)', async () => {
+    const updates = [];
+    const update = jest.fn(async (patch) => { updates.push(patch); return updates.length === 1 ? 0 : 1; });
+    const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
+    const builder = {
+      update,
+      where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
+      whereIn: jest.fn(() => builder),
+      whereRaw: jest.fn(() => builder),
+    };
+    db.mockReturnValue(builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const convo = new RelayConversation({ callSid: 'CA-failed', sessionKey: 'nonce-MINE', from: '+19415551234', send: jest.fn() });
+    convo.leadCaptured = true;
+    convo._transcript.push({ role: 'caller', text: 'hi, ants again', turn: 1 }, { role: 'agent', text: 'Sorry to hear that.', turn: 1 });
+    await convo.end('relay_failed');
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toEqual(expect.objectContaining({ call_outcome: 'ai_handled' }));
+    // The salvage is keyed to the failure stamp, owner-fenced, and never touches the outcome.
+    expect(builder.whereIn).toHaveBeenCalledWith('call_outcome', ['relay_failed', 'ai_transferred']);
+    expect(builder.whereRaw).toHaveBeenCalledTimes(3); // owner fence ×2 + the salvage's provider guard (PR 2A)
+    expect(updates[1]).toEqual(expect.objectContaining({ transcription_status: 'completed' }));
+    expect(updates[1]).not.toHaveProperty('call_outcome');
+    expect(updates[1]).not.toHaveProperty('status');
   });
 
   // ⭐ The recent-texts block is customer-AUTHORED SMS text. It rides the USER
@@ -420,6 +451,73 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(spoken).toMatch(/anything else I can help/i);
   });
 
+  // Per-turn model telemetry across a tool round (pre-push hook on #3852 r2):
+  // the turn keeps its FIRST token stamp, and every model round's wall time
+  // lands on the stat.
+  test('a tool round keeps the first-token stamp and accumulates model time', async () => {
+    let IsolatedConvo;
+    let stat;
+    let firstStamp = null;
+    let stampRound = null;
+    jest.isolateModules(() => {
+      let call = 0;
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
+        return {
+          messages: {
+            stream: () => ({
+              on: (event, cb) => {
+                if (event !== 'streamEvent') return;
+                cb({ type: 'message_start' }); // no content yet — must not stamp
+                if (call === 0) expect(stat.firstTokenAt).toBeNull();
+                cb({ type: 'content_block_start' }); // round 1's block is tool_use
+                if (firstStamp == null) { firstStamp = stat.firstTokenAt; stampRound = call + 1; }
+              },
+              finalMessage: async () => {
+                call += 1;
+                await new Promise((r) => setTimeout(r, 5));
+                return call === 1
+                  ? { content: [{ type: 'tool_use', id: 't1', name: 'get_availability', input: {} }], stop_reason: 'tool_use' }
+                  : { content: [{ type: 'text', text: 'Tuesday at nine works.' }], stop_reason: 'end_turn' };
+              },
+            }),
+          },
+        };
+      });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({
+        TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: jest.fn(async () => 'ok'),
+      }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const convo = new IsolatedConvo({ callSid: 'CA-model-time', from: '+19415551234', send: jest.fn() });
+    stat = { turn: 1, promptAt: 0, firstTokenAt: null, firstSendAt: null, modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0, timedOut: false, agentEntries: [] };
+    convo._currentTurn = stat;
+    await convo._runLoop('when can you come').catch(() => {});
+    expect(stat.rounds).toBe(2);
+    expect(stat.toolCount).toBe(1);
+    expect(firstStamp).not.toBeNull();
+    expect(stat.firstTokenAt).toBe(firstStamp); // round 2's first token did not overwrite it
+    expect(stampRound).toBe(1); // stamped by round 1's tool_use block, not deferred to the text round
+    expect(stat.modelMs).toBeGreaterThanOrEqual(8); // two ≥5ms rounds
+  });
+
+  test('a model round that rejects still counts as a round (codex r3 P2)', async () => {
+    let IsolatedConvo;
+    jest.isolateModules(() => {
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
+        return { messages: { stream: () => ({ finalMessage: async () => { throw new Error('boom'); } }) } };
+      });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({
+        TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: jest.fn(async () => 'ok'),
+      }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const convo = new IsolatedConvo({ callSid: 'CA-round-err', from: '+19415551234', send: jest.fn() });
+    const stat = { turn: 1, promptAt: 0, firstTokenAt: null, firstSendAt: null, modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0, timedOut: false, agentEntries: [] };
+    convo._currentTurn = stat;
+    await convo._runLoop('hello').catch(() => {});
+    expect(stat.rounds).toBe(1);
+  });
+
   // ⭐ NO SPEECH BEFORE A WRITE'S RESULT IS KNOWN. A mixed text-plus-tool turn
   // around a write tool would speak "that's submitted!" BEFORE the write ran —
   // a false success when the tool then rejects a stale slot or fails. The
@@ -495,12 +593,23 @@ describe('RelayConversation — explicit end after capture', () => {
       IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
     });
     const convo = new IsolatedConvo({ callSid: 'CA-late-block', from: '+19415551234', send: jest.fn() });
-    convo._lateContextBlockPending = true; // what onLateContext sets when blocks were frozen
-    convo._callerContext = { block: 'KNOWN CALLER: Pat Smith, full tier.', customer: { id: 'c-9' }, tier: 'full' };
+    const lateBlock = 'KNOWN CALLER: Pat Smith, full tier.';
+    convo._lateContextBlock = lateBlock; // what onLateContext sets when blocks were frozen
+    convo._callerContext = { block: lateBlock, customer: { id: 'c-9' }, tier: 'full' };
     await convo._runLoop('hi').catch(() => {});
     const userTurns = convo.messages.filter((m) => m.role === 'user').map((m) => JSON.stringify(m.content));
     expect(userTurns.some((t) => t.includes('ACCOUNT CONTEXT (hydrated after the call started'))).toBe(true);
-    expect(convo._lateContextBlockPending).toBe(false); // one-time seed
+    expect(convo._lateContextBlock).toBeNull(); // one-time seed
+    // The version record hashes the context the model actually saw (codex r2 P2).
+    expect(convo._contextSnapshotSha).toBe(require('crypto').createHash('sha256').update(lateBlock).digest('hex'));
+    // The recent-texts data turn is part of the context the model saw (codex r4 P2).
+    const dataTurn = '<<<RECENT TEXTS DATA\nCustomer: ants again\nEND RECENT TEXTS DATA>>>';
+    const withTexts = new IsolatedConvo({ callSid: 'CA-late-texts', from: '+19415551234', send: jest.fn() });
+    withTexts._lateContextBlock = lateBlock;
+    withTexts._callerContext = { block: lateBlock, customer: { id: 'c-9' }, tier: 'full', dataTurn };
+    await withTexts._runLoop('hi').catch(() => {});
+    expect(withTexts._contextSnapshotSha).toBe(require('crypto').createHash('sha256').update(`${lateBlock}\n\n${dataTurn}`).digest('hex'));
+    expect(withTexts._contextSnapshotSha).not.toBe(convo._contextSnapshotSha);
   });
 
   test('text on a READ-tool turn is still spoken (filler is fine when nothing can be falsely promised)', async () => {
@@ -715,7 +824,7 @@ describe('RelayConversation — explicit end after capture', () => {
     const builder = {};
     builder.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(builder, builder); return builder; });
     builder.whereNull = jest.fn(() => builder);
-    builder.orWhereNot = jest.fn(() => builder);
+    builder.orWhereNotIn = jest.fn(() => builder);
     builder.whereRaw = jest.fn(() => builder);
     // Owner read (supersession pre-check): our own nonce — not superseded.
     builder.first = jest.fn(async () => ({ metadata: { relay_session_claim_owner: 'nonce-MINE' } }));

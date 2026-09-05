@@ -247,7 +247,7 @@ function buildCallSummary({ modelSummary, turns = [], reason, leadCaptured } = {
  * Never throws: a composition failure returns null and the reconcile proceeds
  * with the original outcome/duration columns.
  */
-function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null, leadCaptured = false, reserviceFiled = false, callSid = null, model = null, startedAt = null } = {}) {
+function buildTranscriptUpdate({ turns = [], modelSummary = null, reason, leadCaptured = false, reserviceFiled = false, callSid, model, startedAt = null, latency, versions } = {}) {
   try {
     const transcription = buildTranscriptText(turns);
     if (!transcription && !clean(modelSummary, MAX_SUMMARY_CHARS)) return null;
@@ -275,6 +275,11 @@ function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null,
         tool_calls: toolCalls,
         started_at: startedAt ? new Date(startedAt).toISOString() : null,
         ended_at: new Date().toISOString(),
+        // Per-call latency summary (summarizeTurnStats) and the version
+        // stamps that make every later bake-off and audit finding
+        // attributable to the exact model / prompt / profile that spoke.
+        latency: latency || null,
+        versions: versions || null,
       }),
       call_summary: buildCallSummary({ modelSummary, turns, reason, leadCaptured }),
       // ⚠️ `processing_status` IS DELIBERATELY NOT WRITTEN HERE.
@@ -311,12 +316,88 @@ function buildTranscriptUpdate({ turns = [], modelSummary = null, reason = null,
   }
 }
 
+// ── Per-call latency summary ────────────────────────────────────────────────
+// Turn stats are monotonic-clock timestamps (performance.now) the session
+// records per caller turn (relay-conversation). Two kinds of metric come out:
+//   • application estimates — prompt→first-send, first token, model/tool
+//     time — available on every turn;
+//   • audio metrics — caller-stop→first-send, send→first-audio,
+//     caller-stop→first-audio — available ONLY on turns where Twilio's
+//     speaker events supplied the caller-stop / agent-start instants. They
+//     are never mixed: an estimate must not lower an audio percentile, so the
+//     audio percentiles are computed over `audio_metric_turns` alone and the
+//     SLA (rubric) reads those.
+const LONG_SILENCE_MS = 3000;
+
+function percentile(values, p) {
+  const sorted = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return Math.round(sorted[idx]);
+}
+
+function span(from, to) {
+  return Number.isFinite(from) && Number.isFinite(to) && to >= from ? to - from : null;
+}
+
+function countBy(values) {
+  const out = {};
+  for (const v of values) {
+    if (v == null) continue;
+    const key = String(v);
+    out[key] = (out[key] || 0) + 1;
+  }
+  return out;
+}
+
+function summarizeTurnStats(stats = []) {
+  const turns = (Array.isArray(stats) ? stats : []).filter((t) => t && typeof t === 'object');
+  const nonNull = (arr) => arr.filter((v) => v != null);
+  const endpoint = nonNull(turns.map((t) => span(t.callerSpeechStoppedAt, t.promptAt)));
+  const promptToSend = nonNull(turns.map((t) => span(t.promptAt, t.firstSendAt)));
+  const firstToken = nonNull(turns.map((t) => span(t.promptAt, t.firstTokenAt)));
+  const stopToSend = nonNull(turns.map((t) => span(t.callerSpeechStoppedAt, t.firstSendAt)));
+  const sendToAudio = nonNull(turns.map((t) => span(t.firstSendAt, t.agentSpeakingStartAt)));
+  const stopToAudio = nonNull(turns.map((t) => span(t.callerSpeechStoppedAt, t.agentSpeakingStartAt)));
+  const toolMs = turns.map((t) => Number(t.toolMs) || 0);
+  return {
+    turns: turns.length,
+    audio_metric_turns: stopToAudio.length,
+    endpoint_delay_p50: percentile(endpoint, 50),
+    endpoint_delay_max: endpoint.length ? Math.round(Math.max(...endpoint)) : null,
+    prompt_to_first_send_p50: percentile(promptToSend, 50),
+    prompt_to_first_send_p95: percentile(promptToSend, 95),
+    first_token_p50: percentile(firstToken, 50),
+    stop_to_first_send_p50: percentile(stopToSend, 50),
+    stop_to_first_send_p95: percentile(stopToSend, 95),
+    send_to_first_audio_p50: percentile(sendToAudio, 50),
+    send_to_first_audio_p95: percentile(sendToAudio, 95),
+    stop_to_first_audio_p50: percentile(stopToAudio, 50),
+    stop_to_first_audio_p95: percentile(stopToAudio, 95),
+    model_ms_total: Math.round(turns.reduce((s, t) => s + (Number(t.modelMs) || 0), 0)),
+    tool_ms_total: Math.round(toolMs.reduce((s, v) => s + v, 0)),
+    tool_ms_max: toolMs.length ? Math.round(Math.max(...toolMs)) : null,
+    tool_calls: turns.reduce((s, t) => s + (Number(t.toolCount) || 0), 0),
+    model_rounds: turns.reduce((s, t) => s + (Number(t.rounds) || 0), 0),
+    barge_ins: turns.filter((t) => t.interrupted === true).length,
+    interrupt_without_followup_transcript: turns.filter((t) => t.interruptWithoutFollowupTranscript === true).length,
+    long_silence_turns: promptToSend.filter((v) => v > LONG_SILENCE_MS).length,
+    timed_out_turns: turns.filter((t) => t.timedOut === true).length,
+    streamed_turns: turns.filter((t) => t.renderer && t.renderer !== 'block').length,
+    partial_prompt_count: turns.reduce((s, t) => s + (Number(t.partialCount) || 0), 0),
+    effort_counts: countBy(turns.map((t) => t.effort)),
+    // Only turns that actually spoke have a played source worth counting.
+    played_sources: countBy(turns.filter((t) => t.firstSendAt != null).map((t) => t.playedSource)),
+  };
+}
+
 module.exports = {
   buildTranscriptText,
   scrubForStorage,
   scrubTurnsForStorage,
   buildCallSummary,
   buildTranscriptUpdate,
+  summarizeTurnStats,
   TRANSCRIPTION_PROVIDER,
   MAX_TRANSCRIPT_CHARS,
   CALLER_LABEL,

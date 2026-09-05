@@ -31,7 +31,7 @@
  */
 
 const LEDGER = Object.freeze(['call', 'session', 'unrecordable']);
-const UNRECORDABLE_REASON = Object.freeze(['audio', 'embedding', 'image', 'video', 'search', 'direct_sdk']);
+const UNRECORDABLE_REASON = Object.freeze(['audio', 'embedding', 'image', 'video', 'search', 'direct_sdk', 'no_call_site']);
 const CADENCE = Object.freeze(['hourly', 'daily', 'weekly', 'event']);
 
 const DEFAULT_RUNTIME = Object.freeze({
@@ -163,7 +163,9 @@ const LANE_RUNTIME = {
   // M3 (Codex r19): the public lawn analyzer persists customer_summary and returns the teaser without staff review.
   lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'service_report', maturity: 'M3' },
   // direct_sdk + offline (Codex r18): the WDO treatment-photo path in admin-projects.js is one anthropic.messages.create with no fallback.
-  wdo_project_brief: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null },
+  // Both sites (brief + treatment-photo read) ride dispatchWithFallback, so the
+  // adapters record them; the direct_sdk mark was stale (S2c follow-up).
+  wdo_project_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null },
   // internal_write: a project-scoped lookup persists the answer to projects.wdo_history (admin-projects.js) — Codex r9.
   wdo_history: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'retrieval_qa' },
 
@@ -295,7 +297,8 @@ const LANE_RUNTIME = {
   kb_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
   wiki_compiler: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
   embeddings: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'embedding', fallback_class: 'offline', eval_family: null },
-  extreme_tier: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: null, expected_duration_ms: 300_000 },
+  // no_call_site: the EXTREME tier is a deliberate opt-in with no automatic lane — nothing dispatches on it today, so there is no call to label (S2c).
+  extreme_tier: { side_effect_class: 'read_only', ledger: 'unrecordable', unrecordable_reason: 'no_call_site', fallback_class: 'interactive', eval_family: null, expected_duration_ms: 300_000 },
 
   // ── Customer portal ──
   // M3 (Codex r17): processIntakeMessage returns the reply to the public intake route and records it sent_to_customer with its session audit.

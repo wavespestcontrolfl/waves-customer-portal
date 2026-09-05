@@ -36,6 +36,15 @@ const { toE164, isLikelyE164 } = require('../../utils/phone');
 
 const LEAD_QUALITIES = ['hot', 'warm', 'cold', 'spam'];
 
+// ⭐ THE TOOLS A SANDBOX CALL NEVER RUNS. Everything that writes outside the
+// call's own call_log row — a lead (and the owner alert, do-not-contact stamp
+// and estimate surfacing that ride on it), a re-service ticket, a booking
+// request. Gated HERE, ahead of every branch, so a new write tool cannot be
+// added without deciding whether a test call may run it. The model is told to
+// carry on as if the write landed so the test call still sounds like
+// production — which is what a profile bake-off is measuring.
+const SANDBOX_DRY_RUN_TOOLS = new Set(['capture_lead', 'request_reservice', 'request_booking']);
+
 const TOOLS = [
   {
     name: 'capture_lead',
@@ -403,11 +412,15 @@ const BOOKING_TOOLS = [
  * GATE_VOICE_AI_BOOKING (both checked at call time, not module load, so an
  * env flip takes effect without a restart of the test/process).
  */
-function activeTools() {
+function activeTools({ officeOpen = null } = {}) {
   const { isContextEnabled } = require('./relay-context');
-  if (!isContextEnabled()) return TOOLS;
+  // PR 2A: transfer_to_office rides every tool set — it needs no account
+  // context, only the gate and an OPEN office (null = unknown = closed).
+  const { isTransferAvailable, TRANSFER_TOOLS } = require('./relay-transfer');
+  const transfer = isTransferAvailable(officeOpen) ? TRANSFER_TOOLS : [];
+  if (!isContextEnabled()) return [...TOOLS, ...transfer];
   const { isBookingEnabled } = require('./relay-booking');
-  return isBookingEnabled() ? [...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS] : [...TOOLS, ...CONTEXT_TOOLS];
+  return isBookingEnabled() ? [...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...transfer] : [...TOOLS, ...CONTEXT_TOOLS, ...transfer];
 }
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -587,6 +600,32 @@ function callerAttested(ctx = {}) {
 }
 
 /**
+ * The sandbox dry-run answer, given at each write tool's WRITE BOUNDARY — after
+ * every validation and refusal the production tool applies (a malformed
+ * slot_ref, a missing callback number, an ineligible re-service request are
+ * refused exactly as in production, so a bake-off compares like with like).
+ * Only the external write is skipped. The SAFE in-memory effects still run,
+ * so the session ends after the goodbye as production does: the floor stands
+ * down and the record says NO lead was created; the model's summary still
+ * becomes the row's call_summary. No lead id, no promise, no ticket flag.
+ */
+function sandboxDryRunText(name, input = {}, ctx = {}, { estimateMissing = [] } = {}) {
+  logger.info(`[voice-relay] ${name} DRY RUN — sandbox call, validated, nothing written callSid=${ctx.callSid || 'n/a'}`);
+  // An incomplete estimate capture holds the call open and re-prompts in
+  // production; the dry run keeps that behaviour so the bake-off measures it.
+  const holdOpen = estimateMissing.length > 0;
+  if (name !== 'request_booking' && typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false, holdOpen });
+  if (name === 'capture_lead' && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
+  return `Sandbox test call: ${name} was NOT run and nothing was written (no lead, no ticket, no booking). `
+    + 'Carry on exactly as you would after it succeeded so the test call sounds like production.'
+    + (holdOpen
+      ? ` IMPORTANT: the estimate request is NOT queued yet — still missing: ${estimateMissing.join(', ')}. `
+        + 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
+        + 'estimate_requested: true.'
+      : '');
+}
+
+/**
  * Execute a tool call. Returns a short string (the tool_result content) telling
  * the model what happened so it can respond to the caller naturally.
  *
@@ -596,6 +635,12 @@ function callerAttested(ctx = {}) {
  */
 async function executeTool(name, input = {}, ctx = {}) {
   try {
+    if (name === 'transfer_to_office') {
+      // Gate + office state re-checked inside (fail closed); the packet is
+      // server-built and the staff leg is rendered by /relay-complete.
+      const { transferToOfficeText } = require('./relay-transfer');
+      return await transferToOfficeText(input, ctx);
+    }
     if (name === 'request_booking') {
       // Both gates re-checked inside (fail closed, defense in depth); the
       // body re-validates the slot through the live availability engine and
@@ -1166,6 +1211,9 @@ async function executeTool(name, input = {}, ctx = {}) {
       // Whether the SMS opt-out actually LANDED — threaded into the lead write
       // below so the human-facing record can distinguish "already stopped" from
       // "still needs you". Only a confirmed { ok: true } counts.
+      // ⭐ THE SANDBOX WRITE BOUNDARY: every refusal above ran as production;
+      // from here on it is writes (opt-out suppression, hot-alert stamp, lead).
+      if (ctx.sandbox === true) return sandboxDryRunText('capture_lead', input, ctx, { estimateMissing: estimateRequested ? estimateMissing : [] });
       let smsSuppressionApplied = false;
       if (optOutRequested && callerVerified) {
         try {
@@ -1482,12 +1530,19 @@ async function executeTool(name, input = {}, ctx = {}) {
     return `Unknown tool "${String(name || '').replace(/[^\w.-]/g, '').slice(0, 40)}". Do not retry; continue the conversation.`;
   } catch (err) {
     logger.error(`[voice-relay] tool "${name}" failed: ${err.message}`);
+    // The failure is answered with a string; the session reads this flag so
+    // the handoff record never reports a failed tool as ok.
+    if (ctx && typeof ctx === 'object') ctx.toolFailed = true;
     if (name === 'capture_lead') {
       return 'The lead could not be saved right now, but proceed to wrap up the call politely; the call is still recorded for follow-up.';
     }
     if (name === 'request_booking') {
       return 'The booking request could not be placed — NOTHING was booked. Tell the caller a Waves '
         + 'team member will call to schedule, and capture the lead with their preferred time.';
+    }
+    if (name === 'transfer_to_office') {
+      return 'The transfer could not be started. Do NOT try again — take their details with capture_lead '
+        + 'and say a Waves team member will call them back.';
     }
     if (CONTEXT_TOOL_NAMES.includes(name)) {
       return 'Could not look that up right now. Do not guess — tell the caller a Waves team member will follow up with the details.';
@@ -1496,4 +1551,4 @@ async function executeTool(name, input = {}, ctx = {}) {
   }
 }
 
-module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier };
+module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, sandboxDryRunText, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier };

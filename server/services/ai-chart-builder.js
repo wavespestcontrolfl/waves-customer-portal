@@ -100,10 +100,10 @@ async function extractImageIntent(images) {
   const text = 'Extract the analytical intent the user wants, from the attached image(s).';
   let res;
   try {
-    res = await callGemini({ model: GEMINI_VISION_BEST, system, text, images: imgs, jsonMode: true, maxTokens: 400 });
+    res = await callGemini({ laneId: 'chart_builder_image', model: GEMINI_VISION_BEST, system, text, images: imgs, jsonMode: true, maxTokens: 400 });
     if (!res || !res.ok || !res.json) {
       logger.warn(`[ai-chart-builder] Gemini intent miss (${res?.reason}); falling back to Claude`);
-      res = await callAnthropic({ model: FLAGSHIP, system, text, images: imgs, jsonMode: true, maxTokens: 400 });
+      res = await callAnthropic({ laneId: 'chart_builder_image', model: FLAGSHIP, system, text, images: imgs, jsonMode: true, maxTokens: 400 });
     }
   } catch (err) {
     logger.error(`[ai-chart-builder] intent extraction threw: ${err.message}`);
@@ -165,6 +165,7 @@ async function generateChartSpec(prompt, opts = {}) {
   let res;
   try {
     res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      laneId: 'chart_builder_sql',
       system: buildSystemPrompt(), text, jsonMode: true, jsonSchema: CHART_SPEC_SCHEMA, maxTokens: 1200,
     });
   } catch (err) {

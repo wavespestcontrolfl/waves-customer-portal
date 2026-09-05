@@ -17,6 +17,8 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const worker = require('./link-prospect-worker');
 const { fetchPageText } = require('./contact-finder');
+const { callAnthropic } = require('../llm/call');
+const { etDateString, etParts } = require('../../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -40,6 +42,84 @@ ANGLE by tier / link_type:
 - link_type guest_post: offer one specific, genuinely useful local guest-article idea.
 
 Return ONLY JSON: {"subject": "...", "body": "..."}. The body is plain text with \\n line breaks and ends with the two-line signature.`;
+
+// The ONE follow-up (plan §6.4): ten days of silence after the pitch. Shorter than the pitch, no new ask, the same
+// mandate (no reciprocal promise, payment, discount, guarantee or commitment — the classifier and the owner read it).
+const FOLLOW_UP_SYSTEM_PROMPT = `You are the outreach drafter for Waves Pest Control (family-owned, SW Florida). A while ago we sent the ONE-TO-ONE backlink-outreach email below and heard nothing — the SENT line says exactly when. Write ONE short, courteous follow-up (~50–90 words) in the SAME thread. A human reviews it before any send.
+
+RULES (mandatory):
+- Reply in the thread: the subject is "Re: " followed by the original subject, verbatim.
+- One gentle nudge, no new ask, no pressure, no guilt. Restate the one useful thing in a sentence and offer to send anything that helps.
+- Timing: refer to the earlier email loosely ("a little while ago", "recently", "last month") consistent with the SENT line — never state a number of days or weeks, and never a date the SENT line does not support.
+- No pricing, no incentives-for-links, no "we'll link back", no discounts, no guarantees, no fabricated facts.
+- Identify clearly as Waves Pest Control. End EXACTLY with two lines: "— The Waves Pest Control Team" then "{brand} · {city}, FL · {phone}" using the SIGN-OFF DETAILS provided.
+- Do NOT write a recipient address or a "From:" line.
+
+Return ONLY JSON: {"subject": "...", "body": "..."}. The body is plain text with \\n line breaks and ends with the two-line signature.`;
+
+// the pitch's real send date for the follow-up prompt: the lease can run days or weeks after the ten-day mark (a
+// batch cap, a dark drafter gate, provider downtime, drafting failures), so the model is told WHEN, never "ten days ago"
+function sentLine(prospect, now = new Date()) {
+  const sentAt = prospect.outreach_sent_at ? new Date(prospect.outreach_sent_at) : null;
+  if (!sentAt || Number.isNaN(sentAt.getTime())) return '- sent: (date unknown — refer to it only as "a little while ago")';
+  // ET CALENDAR days (the dates shown are ET dates): an elapsed-hours count reads 9 across the spring seam beside dates ten apart
+  const etDay = (d) => { const p = etParts(d); return Date.UTC(p.year, p.month - 1, p.day) / 86400000; };
+  const days = Math.max(0, Math.round(etDay(now) - etDay(sentAt)));
+  return `- sent: ${etDateString(sentAt)} (${days} day${days === 1 ? '' : 's'} ago, as of ${etDateString(now)})`;
+}
+
+function buildFollowUpPrompt(prospect, profile, loc, now = new Date()) {
+  const city = loc ? String(loc.name || '').replace(/,.*$/, '').trim() : 'Bradenton';
+  return [
+    'ORIGINAL EMAIL (sent, unanswered)',
+    `- site: ${prospect.target_domain}`,
+    sentLine(prospect, now),
+    `- subject: ${prospect.outreach_subject || ''}`,
+    '- body:',
+    String(prospect.outreach_body || ''),
+    '',
+    'SIGN-OFF DETAILS (use verbatim):',
+    `- brand: ${profile.brand}`,
+    `- city: ${city}`,
+    `- phone: ${loc ? loc.phone : ''}`,
+  ].join('\n');
+}
+
+// through the shared Anthropic caller (services/llm/call.js): thinking-safe text read, loose-JSON parse, provider
+// error normalization — the injected client keeps the drafter's per-site config and the test seam
+async function draftFollowUp(prospect, { profile, anthropic }) {
+  const loc = pickLocation(prospect, profile);
+  const r = await callAnthropic({ model: DRAFT_MODEL, maxTokens: 800, system: FOLLOW_UP_SYSTEM_PROMPT, text: buildFollowUpPrompt(prospect, profile, loc), jsonMode: false, anthropicClient: anthropic });
+  return r.ok ? parseDraft(r.text) : null;
+}
+
+/**
+ * The follow-up pass (§6.4): lease every due follow-up (worker.claim followUp), draft it in the pitch's thread, park it
+ * as follow_up_status 'drafted' for the bridge's decision. A failure releases the lease back to due (retried next
+ * run); nothing here sends. Returns { claimed, drafted, failed }.
+ */
+async function draftFollowUps({ batchSize, dryRun, client, profile }) {
+  const claimed = await worker.claim({ n: batchSize, type: 'outreach', followUp: true, ...(dryRun ? { preview: true } : {}) });
+  let drafted = 0, failed = 0;
+  const samples = [];
+  for (const p of claimed) {
+    try {
+      const draft = await draftFollowUp(p, { profile, anthropic: client });
+      if (!draft) {
+        if (!dryRun) await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: 'drafter produced no usable follow-up' }).catch(() => {});
+        failed++; continue;
+      }
+      if (dryRun) { samples.push({ domain: p.target_domain, follow_up: true, to_email: p.outreach_to_email, subject: draft.subject, body: draft.body }); drafted++; continue; }
+      const res = await worker.report({ prospect_id: p.id, outcome: 'drafted', lease_token: p.lease_token, outreach_subject: draft.subject, outreach_body: draft.body, notes: 'auto-drafted follow-up' });
+      if (res && res.ok) drafted++; else { failed++; logger.warn(`[outreach-drafter] follow-up report rejected for ${p.target_domain}: ${res && res.code}`); }
+    } catch (err) {
+      logger.error(`[outreach-drafter] follow-up error on ${p.target_domain}: ${err.message}`);
+      if (!dryRun) await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: `drafter error: ${String(err.message).slice(0, 160)}` }).catch(() => {});
+      failed++;
+    }
+  }
+  return { claimed: claimed.length, drafted, failed, samples };
+}
 
 // Pick the office location whose city the prospect targets (so the sign-off phone
 // matches the market); else the default location.
@@ -102,7 +182,9 @@ async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageT
 
 /**
  * run — claim a batch of outreach prospects (email-bearing only), draft each, park
- * as 'drafted'. dryRun prints without writing. Returns { claimed, drafted, skipped, failed }.
+ * as 'drafted'. dryRun prints without writing. Returns { claimed, drafted, skipped, failed }
+ * summed over BOTH lanes (the follow-up pass + the pitches — what the cron log and the
+ * CLI print), with the follow-up pass itemized under `followUps`.
  */
 async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = {}) {
   let client = anthropic;
@@ -115,15 +197,36 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
   // A dry run uses the READ-ONLY preview: a live claim settles its candidates
   // (repoints, draft clears, unclassify) before leasing, and none of that may
   // happen on a preview — nothing is leased, so nothing is released either.
-  const claimed = await worker.claim({ n: batchSize, type: 'outreach', requireContactEmail: true, ...(dryRun ? { preview: true } : {}) });
-  if (!claimed.length) {
-    logger.info('[outreach-drafter] no claimable outreach prospects with a contact email');
-    return { claimed: 0, drafted: 0, skipped: 0, failed: 0 };
-  }
   const profile = worker.businessProfile();
+  // the follow-up pass first: due follow-ups are few and dated; a pitch batch never starves them. ONE budget for
+  // both lanes — batchSize (the nightly's, the CLI's --limit) bounds the run's leases and model calls: pitches get
+  // what the follow-ups left
+  const followUps = await draftFollowUps({ batchSize, dryRun, client, profile });
+  const remaining = Math.max(0, batchSize - followUps.claimed);
+  const claimed = remaining ? await worker.claim({ n: remaining, type: 'outreach', requireContactEmail: true, ...(dryRun ? { preview: true } : {}) }) : [];
+  if (!claimed.length) {
+    logger.info(remaining ? '[outreach-drafter] no claimable outreach prospects with a contact email' : `[outreach-drafter] the batch of ${batchSize} went to follow-ups — no pitch claimed`);
+    return totals(followUps, { claimed: 0, drafted: 0, skipped: 0, failed: 0, samples: [] }, dryRun);
+  }
+  const pitches = await draftPitches({ claimed, dryRun, client, profile, fetchPageFn });
+  // (a dry run previewed without leasing — there is nothing to release)
+  logger.info(`[outreach-drafter] claimed=${claimed.length} drafted=${pitches.drafted} skipped=${pitches.skipped} failed=${pitches.failed} follow-ups=${followUps.drafted}/${followUps.claimed}${dryRun ? ' (DRY-RUN)' : ''}`);
+  return totals(followUps, pitches, dryRun);
+}
+
+// the two lanes summed into the totals the cron log and the CLI print, the follow-up pass itemized
+function totals(followUps, pitches, dryRun) {
+  return {
+    claimed: pitches.claimed + followUps.claimed, drafted: pitches.drafted + followUps.drafted, skipped: pitches.skipped, failed: pitches.failed + followUps.failed,
+    followUps: { claimed: followUps.claimed, drafted: followUps.drafted, failed: followUps.failed },
+    ...(dryRun ? { samples: [...followUps.samples, ...pitches.samples] } : {}),
+  };
+}
+
+// the pitch lane: one draft per leased prospect, reported drafted / failed / skipped on its lease
+async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn }) {
   let drafted = 0, skipped = 0, failed = 0;
   const samples = []; // dry-run previews — returned to the CLI's stdout, NOT logged (email/body are PII)
-
   for (const p of claimed) {
     const email = p.contact_email;
     if (!email || !worker.isValidEmail(email)) { // defensive — claim already required a contact_email
@@ -154,12 +257,8 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
       failed++;
     }
   }
-
-  // (a dry run previewed without leasing — there is nothing to release)
-
-  logger.info(`[outreach-drafter] claimed=${claimed.length} drafted=${drafted} skipped=${skipped} failed=${failed}${dryRun ? ' (DRY-RUN)' : ''}`);
-  return { claimed: claimed.length, drafted, skipped, failed, ...(dryRun ? { samples } : {}) };
+  return { claimed: claimed.length, drafted, skipped, failed, samples };
 }
 
 module.exports = { run };
-module.exports._internals = { parseDraft, pickLocation, buildUserPrompt, draftOne, SYSTEM_PROMPT, DRAFT_MODEL };
+module.exports._internals = { parseDraft, pickLocation, buildUserPrompt, draftOne, draftFollowUp, buildFollowUpPrompt, sentLine, SYSTEM_PROMPT, FOLLOW_UP_SYSTEM_PROMPT, DRAFT_MODEL };

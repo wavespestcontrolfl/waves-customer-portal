@@ -1131,6 +1131,7 @@ async function loadCandidateCalls(db, options) {
     .map((col) => `cl.${col}`);
 
   const query = db('call_log as cl')
+    .modify((q) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(q, 'cl.source')) // bake-off calls are not data
     .select(selected)
     .whereNotNull('cl.transcription')
     .whereRaw('length(cl.transcription) >= ?', [options.minTranscriptChars])

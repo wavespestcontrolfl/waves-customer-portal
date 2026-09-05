@@ -30,6 +30,7 @@ async function analyzeSentiment(callSid) {
   }
 
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    laneId: 'call_sentiment',
     maxTokens: 1024,
     jsonMode: true,
     text: `Analyze the sentiment of this customer service phone call transcript from Waves Pest Control. Return a JSON object with exactly these fields:

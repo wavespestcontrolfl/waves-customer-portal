@@ -611,7 +611,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     // (prospect-domain-lock) and is refused while another row for the domain is
     // already in active outreach — otherwise both are claimable by the worker.
     const result = await db.transaction(async (trx) => {
-      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'conversation_closed_at');
+      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'path_id');
       if (!current) return { missing: true };
       // "In outreach" = active-outreach status AND an outreach-lane link_type:
       // a status flip OR a link_type change out of the signup lane can put a
@@ -631,11 +631,21 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // edit (notes, a page move) on a row that carries the stamp.
       const resultStatus = 'status' in patch ? patch.status : current.status;
       if (ACTIVE_OUTREACH_STATUSES.includes(resultStatus) && ('status' in patch || entersOutreach)) patch.conversation_closed_at = null;
+      // a CLOSED conversation reopened by that edit (the stamp dropped on a row that was already in the active set, so
+      // entersOutreach did not run the probe) is a board admission too: the closure released the domain to a later
+      // placement, and two conversations for one publisher must not become active — the same per-domain admission probe
+      // (the probe ignores closure-stamped rows, so the row being reopened is not its own conflict)
+      if (patch.conversation_closed_at === null && current.conversation_closed_at && !entersOutreach) {
+        const { inFlight } = await claimProspectDomain(trx, current.target_domain);
+        if (inFlight && inFlight.id !== current.id) return { inFlight };
+      }
       // an edit whose RESULT is an open conversation (§13: contacted / negotiating, a park from them, or a sent pitch
       // on a row the reopen above just made active again) while the current row is not one OPENS it for the
       // recipient: the same recipient-level lock + predicate the send claim takes, so no two writers open the same inbox
       const Outreach = require('../services/seo/link-prospect-outreach');
-      const opensConversation = Outreach.conversationOpen({ ...current, ...patch }) && !Outreach.conversationOpen(current);
+      // the predicate is path-aware (a submit-first row's follow-up is owed past its outcome): the row's path rides along
+      const currentPath = current.path_id ? await trx('seo_link_acquisition_paths').where({ id: current.path_id }).first('id', 'execution_after_send', 'acquisition_type', 'account_required') : null;
+      const opensConversation = Outreach.conversationOpen({ ...current, ...patch }, currentPath) && !Outreach.conversationOpen(current, currentPath);
       if (opensConversation) {
         // the same lock ORDER as the send claim (domain → inbox advisory lock → row lock) for EVERY conversation-opening
         // edit, not only a board admission — a page move below re-takes the domain lock, which must never follow the
@@ -733,6 +743,26 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
           .where('outreach_status', 'send_error')
           .orWhere((s) => s.where('outreach_status', 'sending').andWhere('updated_at', '<', staleCutoff)))
     );
+    // …and a FOLLOW-UP send in the same ambiguous states (§6.4) — settled by the same decision over its own columns;
+    // aged from the follow-up's own attempt stamp (the verifier bumps updated_at on a Judge-owned placed / live row)
+    const followUpReconcile = await orderByPriority(
+      db('seo_link_prospects')
+        .where((b) => b
+          .where('follow_up_status', 'send_error')
+          .orWhere((s) => s.where('follow_up_status', 'sending').andWhere('follow_up_attempted_at', '<', staleCutoff)))
+    );
+    for (const p of followUpReconcile) needsReconcile.push({ ...p, follow_up: true, outreach_subject: p.follow_up_subject });
+    // …and a DRAFTED follow-up the automatic attempt routed to the owner on a marker (reply check failed, recipient review
+    // required): sendable from the Owner queue while the cause is transient — and, when it is not (a thread deleted, a
+    // match the owner declines), skippable HERE, the one terminal action (`outcome: 'skip'`); "It sent" / "Re-queue"
+    // do not apply to it (the endpoint refuses them)
+    // …or ANY drafted follow-up while the authority contract is off (nothing can send it — the skip is the one action)
+    const unverifiable = await orderByPriority(
+      isEnabled('linkAuthority')
+        ? db('seo_link_prospects').where({ follow_up_status: 'drafted' }).whereIn('follow_up_skipped_reason', [...M.OWNER_MARKERS])
+        : db('seo_link_prospects').where({ follow_up_status: 'drafted' })
+    );
+    for (const p of unverifiable) needsReconcile.push({ ...p, follow_up: true, unverifiable: true, outreach_subject: p.follow_up_subject });
     const sentToday = await Outreach.dailySendCount();
     // §6.4 / §13 — what the owner sees before Approve & send: the draft review and the recipient match to acknowledge
     let byEmail = null; let reviewError = null;
@@ -802,16 +832,17 @@ router.post('/prospects/:id/outreach/send', requireAdmin, async (req, res, next)
 });
 
 // POST /api/admin/backlink-agent/prospects/:id/outreach/reconcile — resolve a
-// send_error (ambiguous Gmail failure) deliberately: { outcome: 'sent' | 'requeue' }.
+// send_error (ambiguous Gmail failure) deliberately: { outcome: 'sent' | 'requeue' } — and, with follow_up: true,
+// { outcome: 'skip' } settles a follow-up the owner has reviewed and will not send (§6.4).
 // requireAdmin: it records/clears a primary-inbox send, same privilege as send.
 router.post('/prospects/:id/outreach/reconcile', requireAdmin, async (req, res, next) => {
   try {
     const Outreach = require('../services/seo/link-prospect-outreach');
     const result = await Outreach.reconcileSendError({
-      prospectId: req.params.id, outcome: req.body?.outcome, approvedBy: req.technician?.name || 'admin',
+      prospectId: req.params.id, outcome: req.body?.outcome, approvedBy: req.technician?.name || 'admin', followUp: req.body?.follow_up === true,
     });
     if (!result.ok) {
-      const status = { not_found: 404, not_reconcilable: 409, not_requeueable: 409, send_in_flight: 409 }[result.code] || 400;
+      const status = { not_found: 404, not_reconcilable: 409, not_requeueable: 409, send_in_flight: 409, bad_outcome: 400 }[result.code] || 400;
       return res.status(status).json(result);
     }
     res.json(result);

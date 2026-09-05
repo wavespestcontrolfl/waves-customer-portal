@@ -26,6 +26,32 @@ function firstDefined(...values) {
   return null;
 }
 
+// CONNECTION-class row failures in one run that abort a location's GBP
+// loop as systemic (see _storeGbpFeed).
+const GBP_ROW_FAILURE_BREAKER = 3;
+
+// Connection-wide vs row-specific: pg reports a dead/unavailable session
+// with no SQLSTATE, class 08 (connection exception), class 53 (insufficient
+// resources) or 57P0x (shutdown / cannot connect); Knex's pool timeout and
+// socket resets carry no SQLSTATE at all. Integrity (23xxx) and data (22xxx)
+// errors are about ONE row and never trip the breaker.
+function isSystemicDbFailure(err) {
+  const code = String((err && err.code) || '');
+  // Node socket codes ride in err.code too (ECONNRESET / ECONNREFUSED /
+  // ETIMEDOUT / EPIPE, plus the DNS and route failures ENOTFOUND /
+  // ENETUNREACH and the whole libuv EAI_* resolver family — codex r7/r8 P1) and Knex's pool timeout is a
+  // KnexTimeoutError — classify those before any SQLSTATE test, or they
+  // read as row errors.
+  if (/^E(CONNRESET|CONNREFUSED|TIMEDOUT|PIPE|HOSTUNREACH|NETUNREACH|NETDOWN|NOTFOUND|AI_[A-Z]+)$/i.test(code)) return true;
+  if (String((err && err.name) || '') === 'KnexTimeoutError') return true;
+  // 57014 (query_canceled) is what statement_timeout raises under database
+  // overload — every row would wait the full timeout under the location
+  // lock, the exact crawl the breaker exists to stop (codex r3 P1).
+  if (/^(08|53)/.test(code) || /^57P0[123]$/.test(code) || code === '57014') return true;
+  if (/^\d{5}$/.test(code)) return false; // any other SQLSTATE is about the statement/row
+  return /timeout acquiring a connection|econnreset|econnrefused|etimedout|enotfound|enetunreach|getaddrinfo|connection terminated|socket hang up/i.test(String((err && err.message) || ''));
+}
+
 function sameReviewerAndTime(row, reviewerName, createdAt, maxDriftMs = 24 * 60 * 60 * 1000) {
   if (!row?.reviewer_name || !row?.review_created_at || !reviewerName || !createdAt) return false;
   const rowTime = new Date(row.review_created_at).getTime();
@@ -134,6 +160,7 @@ class GoogleBusinessService {
 
     // Cache of OAuth2 clients per location
     this._clients = {};
+    this._tokenLookupErrors = {};
 
     if (!this.configured) {
       logger.warn('[gbp] No GBP OAuth client credentials found for any location — Google Business Profile disabled');
@@ -149,9 +176,13 @@ class GoogleBusinessService {
       const row = await db('system_settings')
         .where({ key: tokenSettingsKey(locationId) })
         .first();
+      delete this._tokenLookupErrors[locationId];
       return parseJsonObject(row?.value);
     } catch (err) {
       logger.warn(`[gbp] Stored token lookup failed for ${locationId}: ${err.message}`);
+      // Remembered so a null client can be reported as the DB failure it
+      // is, not as missing credentials (codex #3833 r1 P2).
+      this._tokenLookupErrors[locationId] = err.message;
       return {};
     }
   }
@@ -524,7 +555,10 @@ class GoogleBusinessService {
       return flipped > 0;
     } catch (err) {
       logger.warn(`[gbp] Auto-mark left-review failed for customer ${customerId}: ${err.message}`);
-      return false;
+      // A failure marker (distinct from false = nothing to flip) carrying
+      // the original error, so the sync's side-effect guard can report it
+      // AND classify it for the breaker (pre-push audit, codex r5 P1).
+      return { failed: true, error: err };
     }
   }
 
@@ -589,7 +623,8 @@ class GoogleBusinessService {
    * GATE_REVIEW_CLICK_AUTOLINK: link an unlinked review to the ONE customer
    * whose tracked review-link click confidently explains it (sole clicker in
    * the correlation window, location match, tight before-window — see
-   * findConfidentClickMatch). Runs from the deferred end-of-batch phase so
+   * findConfidentClickMatch; its surname rung additionally needs
+   * GATE_REVIEW_CLICK_AUTOLINK_SURNAME). Runs from the deferred end-of-batch phase so
    * the sole-clicker exclusion sees the whole batch's links, and re-reads
    * the live row so a manual match landed mid-sync always wins.
    *
@@ -627,12 +662,14 @@ class GoogleBusinessService {
         let result;
         try {
           result = await db.transaction(async (trx) => {
-          const match = await findConfidentClickMatch(row, { conn: trx });
-          if (!match) return { nomatch: true };
-          // The collector entry is a detached payload — re-read the live row.
+          // The collector entry is a detached payload captured under an
+          // EARLIER hold of this lock; a newer runner may have rewritten the
+          // review (reviewer_name at least) in between. Read the live row
+          // FIRST and correlate on ITS fields, so the surname rung never
+          // judges a stale name (GH codex r4 P1).
           const live = await trx('google_reviews')
             .where({ google_review_id: row.google_review_id })
-            .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id');
+            .first('id', 'customer_id', 'missing_since', 'star_rating', 'location_id', 'reviewer_name', 'review_created_at');
           // Vanished or removal-stamped since the collector queued it: the
           // review is no longer live, so the match-this bell would point at
           // an unusable flow (the removal alert already rang) — handled,
@@ -642,21 +679,27 @@ class GoogleBusinessService {
           // a "come match this" bell for an already-matched review is pure
           // noise — handled, so the caller skips the unlinked notification.
           if (live.customer_id) return { handled: true };
+          const match = await findConfidentClickMatch(live, { conn: trx });
+          if (!match) return { nomatch: true };
           // One click must correspond to ONE eligible review (pre-push P1
-          // r6): if another unlinked review at this location also sits
-          // inside the click's forward window, the click can't say which of
-          // them the customer wrote — whichever processed first would steal
-          // it. JS-side id filter so mocked whereNot can't drop the guard.
+          // r6): if another unlinked review also sits inside the click's
+          // forward window, the click can't say which of them the customer
+          // wrote — whichever processed first would steal it. A trusted,
+          // location-matched click scopes the check to this GBP; a
+          // location-less legacy click (the surname rung) could have landed
+          // on ANY location's form, so its window spans every location —
+          // otherwise the first location to sync would claim the customer
+          // over a same-surname review elsewhere (GH codex r2 P1). JS-side
+          // id filter so mocked whereNot can't drop the guard.
           const clickedAtMs = new Date(match.clickedAt).getTime();
-          const windowRows = await trx('google_reviews')
+          let windowQuery = trx('google_reviews')
             .whereNull('customer_id')
             .whereNull('missing_since')
-            .where('location_id', row.location_id)
             .whereRaw("(reviewer_name IS NULL OR reviewer_name != '_stats')")
             .where('review_created_at', '>=', new Date(clickedAtMs))
-            .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS))
-            .limit(10)
-            .select('id');
+            .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS));
+          if (match.locationTrusted === true) windowQuery = windowQuery.where('location_id', live.location_id);
+          const windowRows = await windowQuery.limit(10).select('id');
           if (windowRows.some((r) => r.id !== live.id)) return { nomatch: true };
           // Conditional-write guards (pre-push P1 r2): a manual match or a
           // removal-reconcile stamp that committed before the lock was free
@@ -711,22 +754,25 @@ class GoogleBusinessService {
           await db('activity_log').insert({
             customer_id: result.match.customerId,
             action: 'review_auto_marked',
-            description: 'Click auto-link — marked "already left a Google review"; review asks stop pending human confirm in Reviews.',
+            description: `Click auto-link (${result.match.rung}) — marked "already left a Google review"; review asks stop pending human confirm in Reviews.`,
           });
         } catch { /* audit only */ }
         return result;
       }, { recordHealth: false });
       if (outcome?.skipped || outcome?.nomatch) return false;
       if (!outcome?.linked) return true;
-      const match = outcome.match;
+      const { match, live } = outcome;
       // FYI bell (exception-based ops): say WHAT linked and WHY so a wrong
-      // match is one glance + one manual re-match away, not silent.
+      // match is one glance + one manual re-match away, not silent. The
+      // WHY is the matcher's own evidence — only what the rung checked, with
+      // the real competing-click facts (GH codex r2 P2). Display fields come
+      // from the live row the match was judged on, not the payload.
       try {
-        const stars = Number(row.star_rating) || 0;
+        const stars = Number(live.star_rating) || 0;
         await NotificationService.notifyAdmin(
           'review',
-          `Auto-linked Google review from ${row.reviewer_name || 'Anonymous'}`,
-          `${stars}-star review was linked by click tracking: the customer tapped their review link ${match.clickOffsetLabel} this review posted (only click in the window, same location). Wrong match? Re-match it in Reviews.`,
+          `Auto-linked Google review from ${live.reviewer_name || 'Anonymous'}`,
+          `${stars}-star review was linked by click tracking: the customer tapped their review link ${match.clickOffsetLabel} this review posted (${match.evidence}). Wrong match? Re-match it in Reviews.`,
           {
             link: '/admin/reviews',
             metadata: {
@@ -735,12 +781,13 @@ class GoogleBusinessService {
               clickedAt: match.clickedAt,
               clickOffsetLabel: match.clickOffsetLabel,
               reason: 'click_auto_link',
+              rung: match.rung,
             },
           },
         );
       } catch { /* best-effort — the link itself already stands */ }
       // ID-only logging (AGENTS.md) — reviewer display names are PII.
-      logger.info(`[gbp] Click auto-link: review ${row.google_review_id} → customer ${match.customerId} (${match.clickOffsetLabel})`);
+      logger.info(`[gbp] Click auto-link (${match.rung}): review ${row.google_review_id} → customer ${match.customerId} (${match.clickOffsetLabel})`);
       return true;
     } catch (err) {
       logger.warn(`[gbp] Click auto-link failed: ${err.message}`);
@@ -930,8 +977,18 @@ class GoogleBusinessService {
       // snapshot is stale by definition (codex r48).
       if (edited === 'yielded') return { id: existing.id, inserted: false, yielded: true };
       // The action bell only after the park is durable.
-      if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, normalized);
       result = { id: existing.id, inserted: false };
+      if (edited === 'posted_parked') {
+        // Post-write (the park is durable): a bell failure is not a storage failure.
+        try { await this._bellEditedAfterPost(existing, normalized); } catch (bellErr) {
+          logger.error(`[gbp] edited-after-post bell failed for review row ${existing.id}: ${bellErr.message}`);
+          result.sideEffectError = bellErr.message;
+          // Same rule as the other post-write steps: a dead or saturated
+          // database failing the bell must reach the caller's breaker or a
+          // feed of edited reviews waits one timeout per row (codex r9 P1).
+          if (isSystemicDbFailure(bellErr)) result.systemicError = bellErr;
+        }
+      }
     } else {
       try {
         // Auto-reply lane: a review the sync sees for the FIRST time enters
@@ -990,35 +1047,80 @@ class GoogleBusinessService {
         result = { id: winner.id, inserted: false };
       }
     }
-    // Reinstatement clear — a review present in the feed is not missing. The
-    // main update above deliberately never touches missing_since; the clear
-    // is its own conditional UPDATE evaluated against the CURRENT column
-    // value, so a stamp committed by a newer reconciliation between our
-    // snapshot read and this statement survives (only stamps older than this
-    // runner's fetch start may be cleared). A fresh insert carries no stamp.
-    if (!result.inserted) {
-      const clear = db('google_reviews')
-        .where({ id: result.id })
-        .whereNotNull('missing_since');
-      if (syncStart) clear.where('missing_since', '<', new Date(syncStart).toISOString());
-      const cleared = await clear.update({ missing_since: null }, ['id']);
-      // A stamped→clear transition means a review the removal alert reported
-      // gone is back on Google — tell the admin, or the "removed" bell is the
-      // last word they ever hear about it. Collected per run and flushed as
-      // one bell per location (a profile-wide reinstatement would otherwise
-      // ring dozens of bells).
-      if ((cleared || []).length > 0 && Array.isArray(pendingRestoredNotifications)) {
-        pendingRestoredNotifications.push({
-          review_id: result.id,
-          location_id: normalized.location_id,
-          reviewer_name: normalized.reviewer_name,
-          star_rating: normalized.star_rating,
-        });
+    await this._applyPostWriteSideEffects({ result, row, normalized, existing, syncStart, pendingRestoredNotifications, pendingUnlinkedNotifications });
+    return result;
+  }
+
+  // Post-write side effects for one upserted review: the row is stored and
+  // its synced_at token advanced before this runs, so a failure here must
+  // never read as a storage failure. Each effect runs under its own guard
+  // (a failed reinstatement clear or suppression mark cannot skip the
+  // attribution-moment thank-you), and the first failure is tagged on the
+  // result for the caller to surface as gbp_side_effect.
+  async _applyPostWriteSideEffects({ result, row, normalized, existing, syncStart, pendingRestoredNotifications, pendingUnlinkedNotifications }) {
+    // Everything below is post-write: the row is stored and its synced_at
+    // token advanced. A failure here must not read as a storage failure to
+    // the caller (the loop skips the removal reconcile on storage failures
+    // precisely because the token did NOT advance — false here), and each
+    // side effect runs independently so a failed reinstatement clear or
+    // suppression mark cannot skip the attribution-moment thank-you, which
+    // is never retried (existing.customer_id is set on the next sync).
+    // `failed(outcome)` inspects a RESOLVED result: the helpers self-catch
+    // and resolve a failure marker carrying the original error instead of
+    // throwing (suppression mark → { failed, error }, thank-you enrollment
+    // → { reason: 'error', error }); ordinary no-ops (nothing to flip, gate
+    // off, deduped) are not failures.
+    const sideEffect = async (label, fn, failed = () => false) => {
+      try {
+        const outcome = await fn();
+        if (failed(outcome)) {
+          const original = outcome && typeof outcome === 'object' ? outcome.error : null;
+          throw Object.assign(new Error(`${label} resolved a failure (${original ? original.message : (outcome && outcome.reason) || 'failed'})`), { cause: original || undefined });
+        }
+      } catch (sideErr) {
+        logger.error(`[gbp] post-write ${label} failed for review row ${result.id} (${normalized.gbp_review_name || normalized.google_review_id || '?'}): ${sideErr.message}`);
+        result.sideEffectError = result.sideEffectError || sideErr.message;
+        // The row is stored, but a dead or saturated database fails a
+        // post-write step the same way it fails an upsert — the caller's
+        // breaker must count it or a large feed waits one timeout per row
+        // (codex r5 P1). Classify the ORIGINAL error when a self-catching
+        // helper resolved a marker: the synthetic wrapper has no SQLSTATE.
+        const original = sideErr.cause || sideErr;
+        if (isSystemicDbFailure(original)) result.systemicError = result.systemicError || original;
       }
+    };
+    if (!result.inserted) {
+      // Reinstatement clear — a review present in the feed is not missing.
+      // The main update above deliberately never touches missing_since; the
+      // clear is its own conditional UPDATE evaluated against the CURRENT
+      // column value, so a stamp committed by a newer reconciliation between
+      // our snapshot read and this statement survives (only stamps older
+      // than this runner's fetch start may be cleared). A fresh insert
+      // carries no stamp.
+      await sideEffect('reinstatement clear', async () => {
+        const clear = db('google_reviews')
+          .where({ id: result.id })
+          .whereNotNull('missing_since');
+        if (syncStart) clear.where('missing_since', '<', new Date(syncStart).toISOString());
+        const cleared = await clear.update({ missing_since: null }, ['id']);
+        // A stamped→clear transition means a review the removal alert
+        // reported gone is back on Google — tell the admin, or the "removed"
+        // bell is the last word they ever hear about it. Collected per run
+        // and flushed as one bell per location (a profile-wide reinstatement
+        // would otherwise ring dozens of bells).
+        if ((cleared || []).length > 0 && Array.isArray(pendingRestoredNotifications)) {
+          pendingRestoredNotifications.push({
+            review_id: result.id,
+            location_id: normalized.location_id,
+            reviewer_name: normalized.reviewer_name,
+            star_rating: normalized.star_rating,
+          });
+        }
+      });
     }
     if (row.customer_id) {
       // A matched review means the customer left one — stop asking them.
-      await this._markCustomerLeftReview(row.customer_id);
+      await sideEffect('suppression mark', () => this._markCustomerLeftReview(row.customer_id), (flipped) => !!(flipped && flipped.failed));
       // Thank-you sequence on the ATTRIBUTION moment only (a new review, or
       // an existing one that just matched a customer) — not on every hourly
       // re-sync; the helper's once-ever dedupe backstops replays anyway.
@@ -1026,13 +1128,15 @@ class GoogleBusinessService {
       // the manual-match flow (review-incentives) behaves identically.
       const justAttributed = result.inserted || !existing?.customer_id;
       if (justAttributed) {
-        const { enrollReviewThankYou } = require('./automation-enroll');
-        await enrollReviewThankYou({
-          customerId: row.customer_id,
-          locationId: row.location_id,
-          starRating: row.star_rating,
-          source: 'google_review',
-        });
+        await sideEffect('thank-you enrollment', async () => {
+          const { enrollReviewThankYou } = require('./automation-enroll');
+          return enrollReviewThankYou({
+            customerId: row.customer_id,
+            locationId: row.location_id,
+            starRating: row.star_rating,
+            source: 'google_review',
+          });
+        }, (outcome) => outcome && outcome.reason === 'error');
       }
     } else if (result.inserted) {
       // New review we couldn't tie to a customer — alert the office to match
@@ -1044,11 +1148,12 @@ class GoogleBusinessService {
       // (codex #3264 r2).
       if (Array.isArray(pendingUnlinkedNotifications)) {
         pendingUnlinkedNotifications.push(row);
-      } else if (!(await this._attemptClickAutoLink(row))) {
-        await this._notifyUnlinkedReview(row);
+      } else {
+        await sideEffect('unlinked-review bell', async () => {
+          if (!(await this._attemptClickAutoLink(row))) await this._notifyUnlinkedReview(row);
+        });
       }
     }
-    return result;
   }
 
   async _syncPlacesStatsForLocation(loc, googleKey) {
@@ -1078,8 +1183,12 @@ class GoogleBusinessService {
     return { rating: googleRating, totalReviews: googleTotalReviews };
   }
 
-  async _syncPlacesReviewSampleForLocation(loc, googleKey, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null) {
-    if (!loc.googlePlaceId || !googleKey) return { synced: 0, new: 0 };
+  // `countedRowIds`: review row ids a breaker-tripped GBP store of this
+  // same location already counted as synced — the sample commonly carries
+  // those same recent reviews, so its updates to them still land but are
+  // reported in `alreadyCounted`, not counted twice (codex r6 P2).
+  async _syncPlacesReviewSampleForLocation(loc, googleKey, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null, countedRowIds = null) {
+    if (!loc.googlePlaceId || !googleKey) return { synced: 0, new: 0, alreadyCounted: 0 };
     // Ordering token for the reinstatement clear below — a removal stamp
     // written after this fetch began is newer information than this sample.
     const sampleSyncStart = new Date();
@@ -1088,7 +1197,7 @@ class GoogleBusinessService {
     const data = await res.json();
     if (data.status !== 'OK') throw new Error(`Places API: ${data.status}`);
     const reviews = data.result?.reviews || [];
-    let synced = 0, newCount = 0;
+    let synced = 0, newCount = 0, alreadyCounted = 0;
     for (const review of reviews) {
       const googleId = `places_${loc.googlePlaceId}_${review.time}`;
       let existing = await db('google_reviews').where({ google_review_id: googleId }).first();
@@ -1353,9 +1462,10 @@ class GoogleBusinessService {
           await this._notifyUnlinkedReview(notifyRow);
         }
       }
+      if (existing && countedRowIds && countedRowIds.has(existing.id)) alreadyCounted++;
       synced++;
     }
-    return { synced, new: newCount };
+    return { synced, new: newCount, alreadyCounted };
   }
 
   // =========================================================================
@@ -1378,6 +1488,7 @@ class GoogleBusinessService {
     // missing_since stamps, so a stored-row count reads healthy forever —
     // codex #3298 r1).
     const pulledCounts = {};
+    const gbpFailures = {};
     // Unlinked-review notifications collected across the WHOLE run and fired
     // after every location's reviews are inserted/linked — the likely-reviewer
     // exclusion must see the full batch (codex #3264 r2).
@@ -1413,6 +1524,7 @@ class GoogleBusinessService {
 
         let usedGbp = false;
         let gbpFailure = null;
+        let partialStoredIds = null;
         const locSyncStart = new Date();
         if (loc.googleLocationResourceName && await this._getClient(loc.id)) {
           try {
@@ -1423,33 +1535,59 @@ class GoogleBusinessService {
             // pages regardless.
             const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id);
             pulledCounts[loc.id] = reviews.length;
-            for (const review of reviews) {
-              const normalized = this._normalizeGbpReview(review, loc);
-              const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked, locRestored);
-              if (result.inserted) totalNew++;
-              totalSynced++;
-            }
+            const feed = await this._storeGbpFeed(loc, reviews, locSyncStart, pendingUnlinked, locRestored);
+            totalNew += feed.inserted;
+            totalSynced += feed.stored;
+            errors.push(...feed.errors.map((e) => ({ location: loc.name, ...e })));
             sources[loc.id] = 'gbp';
             usedGbp = true;
-            logger.info(`[gbp] Synced ${reviews.length} reviews for ${loc.name} via GBP Reviews API`);
+            logger.info(`[gbp] Synced ${feed.stored} of ${reviews.length} reviews for ${loc.name} via GBP Reviews API`);
             // Authoritative full pull succeeded → anything we synced before
-            // that Google no longer returns has been removed/filtered.
-            // A failed reconcile must NOT hide behind the successful pull:
-            // it silently disables removal detection, so it joins
-            // result.errors and rings the degraded-sync alert (24h-deduped)
-            // — without falling back to Places (the pull itself was fine).
-            const reconcile = await this._reconcileMissingReviews(loc, locSyncStart);
-            if (reconcile && reconcile.ok === false) {
+            // that Google no longer returns has been removed/filtered. Rows
+            // that failed to store this run never advanced synced_at, so
+            // they are excluded from the missing stamp (codex r2 P1) — the
+            // rest of the location still reconciles. A failed reconcile
+            // must NOT hide behind the successful pull: it silently disables
+            // removal detection, so it joins result.errors and rings the
+            // degraded-sync alert (24h-deduped) — without falling back to
+            // Places (the pull itself was fine).
+            const reconcile = await this._reconcileMissingReviews(loc, locSyncStart, { excludeReviewNames: feed.failedReviewNames });
+            const reconcileFailed = !!(reconcile && reconcile.ok === false);
+            if (reconcileFailed) {
               errors.push({ location: loc.name, error: reconcile.error, source: 'reconcile' });
               await this._notifyDegradedSync(loc, `removal reconcile failed: ${reconcile.error}`);
             }
+            // After the reconcile so the alert can say truthfully whether
+            // the rest of the location reconciled (pre-push audit r7).
+            if (feed.cause) await this._notifyDegradedSync(loc, `review upsert failed: ${feed.cause}`, { reconcileFailed });
           } catch (gbpErr) {
-            gbpFailure = gbpErr.message;
-            errors.push({ location: loc.name, error: gbpErr.message, source: 'gbp' });
-            logger.warn(`[gbp] GBP Reviews sync failed for ${loc.name}; using Places fallback: ${gbpErr.message}`);
+            if (gbpErr.partial) {
+              // Breaker trip after some rows stored: count the durable work.
+              totalNew += gbpErr.partial.inserted;
+              totalSynced += gbpErr.partial.stored;
+              errors.push(...gbpErr.partial.errors.map((e) => ({ location: loc.name, ...e })));
+              partialStoredIds = gbpErr.partial.storedIds;
+              // Rows landed from the GBP feed this run: the location is not
+              // "nothing synced" if the Places sample then lands nothing
+              // (codex r10 P2). A landed sample still upgrades to places_fallback.
+              if (gbpErr.partial.stored > 0) sources[loc.id] = 'gbp_partial';
+            }
+            // A breaker trip is a database-write failure: the pull itself
+            // succeeded, so the alert and the health line must say so instead
+            // of "the GBP pull failed" (codex r5 P2). Same prefix the
+            // non-aborting row-failure path uses, so both select the
+            // rows-failing-to-store alert.
+            gbpFailure = gbpErr.breaker ? `review upsert failed: ${gbpErr.message}` : gbpErr.message;
+            gbpFailures[loc.id] = gbpFailure;
+            errors.push({ location: loc.name, error: gbpFailure, source: gbpErr.breaker ? 'gbp_row' : 'gbp' });
+            logger.warn(`[gbp] GBP Reviews sync failed for ${loc.name}; using Places fallback: ${gbpFailure}`);
           }
         } else if (loc.googleLocationResourceName) {
-          gbpFailure = 'no_client';
+          // A null client after a FAILED token lookup is a database
+          // problem, not missing credentials.
+          const tokenErr = this._tokenLookupErrors[loc.id];
+          gbpFailure = tokenErr ? `stored-token lookup failed: ${tokenErr}` : 'no_client';
+          gbpFailures[loc.id] = gbpFailure;
         }
 
         if (!usedGbp) {
@@ -1462,14 +1600,16 @@ class GoogleBusinessService {
             await this._notifyDegradedSync(loc, gbpFailure || 'no_client');
           }
           if (GOOGLE_KEY) {
-            const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked, locRestored);
+            const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked, locRestored, partialStoredIds);
             pulledCounts[loc.id] = sample.synced;
-            totalSynced += sample.synced;
+            // Rows the breaker-tripped GBP store already counted are updated
+            // by the sample but not counted again (codex r6 P2).
+            totalSynced += sample.synced - (sample.alreadyCounted || 0);
             totalNew += sample.new;
-            sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
+            sources[loc.id] = sample.synced > 0 ? 'places_fallback' : (sources[loc.id] || 'none');
             logger.info(`[gbp] Synced ${sample.synced} review sample rows for ${loc.name} via Places API fallback`);
           } else {
-            sources[loc.id] = 'none';
+            sources[loc.id] = sources[loc.id] || 'none';
           }
         }
         await this._notifyRestoredReviews(locRestored);
@@ -1516,7 +1656,7 @@ class GoogleBusinessService {
     // class the 2026-08-08 manual review-status backfill fixed by hand.
     // Best-effort: health
     // reporting must never break the sync itself.
-    await this._assessReviewSyncHealth(sources, pulledCounts).catch((err) => {
+    await this._assessReviewSyncHealth(sources, pulledCounts, gbpFailures).catch((err) => {
       logger.warn(`[gbp] review sync health assessment failed: ${err.message}`);
     });
 
@@ -1529,7 +1669,9 @@ class GoogleBusinessService {
    *
    * Classes:
    *   feed_down     FIX  nothing synced this run (no GBP, no Places sample)
-   *   feed_degraded ACT  GBP creds broken; running on the ~5-review sample
+   *   feed_degraded ACT  GBP creds broken; running on the ~5-review sample —
+   *                      or a breaker trip that stored part of the GBP feed
+   *                      and no Places sample landed (source gbp_partial)
    *   silent_empty  ACT  GBP pull succeeds but the feed has ZERO reviews
    *                      (the Venice wipe class — mechanically "healthy")
    *   ingest_stale  ACT  Google shows more reviews than we ever ingested and
@@ -1538,16 +1680,32 @@ class GoogleBusinessService {
    *   stats_stale   ACT  no _stats row, or Places stats older than 7d — the
    *                      totals cross-check above is running blind
    */
-  _classifyLocationSyncHealth({ hasResource, source, pulledCount, rowCount, newestIngestAt, statsUpdatedAt, statsTotal, now = Date.now() }) {
+  _classifyLocationSyncHealth({ hasResource, source, pulledCount, gbpFailure, rowCount, newestIngestAt, statsUpdatedAt, statsTotal, now = Date.now() }) {
     if (!hasResource) return null;               // not a GBP-tracked location
     if (source === 'concurrent_skip') return null; // another runner owns this cycle
     const days = (ts) => (ts ? (now - new Date(ts).getTime()) / 86400000 : Infinity);
 
+    const failureText = gbpFailure && gbpFailure !== 'no_client' ? String(gbpFailure).replace(/\s+/g, ' ').slice(0, 200) : null;
+    // A breaker trip pulled the feed fine and failed WRITING it — say that,
+    // or the remediation reads as a Google/credentials problem (codex r5 P2).
+    const writeFailure = failureText && /^review upsert failed: /.test(failureText);
+    const failedWhat = writeFailure ? `the review writes failed: ${failureText.replace(/^review upsert failed: /, '')}` : `the GBP pull failed: ${failureText}`;
     if (source === 'none') {
-      return { cls: 'feed_down', severity: 'FIX', detail: 'nothing synced this run — GBP pull failed and no Places sample landed' };
+      return { cls: 'feed_down', severity: 'FIX', detail: `nothing synced this run — ${failureText ? failedWhat : 'the GBP pull failed'} and no Places sample landed` };
+    }
+    if (source === 'gbp_partial') {
+      // The breaker aborted the location after some GBP rows stored and the
+      // Places sample landed nothing: the durable writes are real, so this is
+      // degraded, not down (codex r10 P2).
+      return { cls: 'feed_degraded', severity: 'ACT', detail: `${failedWhat} — part of the GBP feed stored before the abort, no Places sample landed; removals were not reconciled this run` };
     }
     if (source === 'places_fallback') {
-      return { cls: 'feed_degraded', severity: 'ACT', detail: 'GBP credentials are broken — running on the ~5-review Places sample; removals and most new reviews are invisible' };
+      // Say what actually failed: a 503 from Google, a pool timeout, or a
+      // row write is not a credentials problem, and "reconnect the GBP
+      // account" is the wrong remediation for all three. Only the missing
+      // client is a credentials story.
+      const why = failureText ? failedWhat : 'GBP credentials are broken (client could not be initialized)';
+      return { cls: 'feed_degraded', severity: 'ACT', detail: `${why} — running on the ~5-review Places sample; removals and most new reviews are invisible` };
     }
     // Judged on the CURRENT pull, not retained rows: a wiped profile keeps
     // its historical rows (missing_since-stamped, never deleted), so a
@@ -1571,7 +1729,7 @@ class GoogleBusinessService {
    * backup channel, 24h-deduped via the notifications table. Kill switch:
    * REVIEW_SYNC_HEALTH_EMAIL=off (same convention as EMAIL_BOUNCE_RECOVERY).
    */
-  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}) {
+  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}, gbpFailures = {}) {
     if (String(process.env.REVIEW_SYNC_HEALTH_EMAIL || '').toLowerCase() === 'off') return { skipped: 'disabled' };
     // A cycle split across overlapping runners (per-location locks) gives
     // each runner a PARTIAL fleet view — two different signatures would both
@@ -1612,6 +1770,7 @@ class GoogleBusinessService {
         hasResource: !!loc.googleLocationResourceName,
         source: sources[loc.id],
         pulledCount: pulledCounts[loc.id],
+        gbpFailure: gbpFailures[loc.id],
         rowCount: Number(agg.row_count) || 0,
         newestIngestAt: agg.newest_ingest_at || null,
         statsUpdatedAt: agg.stats_updated_at || null,
@@ -1699,19 +1858,99 @@ class GoogleBusinessService {
    * the sync loop (a reconcile failure must not trigger the Places
    * fallback for a location whose GBP pull succeeded).
    */
-  async _reconcileMissingReviews(loc, syncStart) {
+  /**
+   * Store one location's GBP feed with per-review isolation (2026-09-03
+   * Parrish): one row's upsert threw a unique-key violation, the whole
+   * location fell to the Places sample, and the escalation blamed "GBP
+   * credentials" — for a pull that had succeeded. A row failure now skips
+   * that row and keeps the rest of the feed; the caller rings a dedicated
+   * alert with the real error and reconciles around the failed rows.
+   *
+   * Circuit breaker (codex r1 P1 / r2 P1 / r4 P1): only CONNECTION-class
+   * failures count, and they count for the whole run — a database that is
+   * down or saturated fails rows the same way whether or not one squeaks
+   * through in between, and walking a 100-review feed one pool timeout at a
+   * time would hold the location lock for the rest of the hour. Row-specific
+   * errors (integrity, data) never count: three unique-key conflicts are
+   * three bad rows, and aborting there would freeze every later review.
+   *
+   * Returns { stored, inserted, failedReviewNames, cause, errors } — throws
+   * only when the breaker trips (the caller's location catch takes over).
+   */
+  async _storeGbpFeed(loc, reviews, locSyncStart, pendingUnlinked, locRestored) {
+    const errors = [];
+    const rowFailures = [];
+    const storedIds = new Set();
+    let inserted = 0;
+    // Counted for the whole run, not adjacently: under intermittent pool
+    // saturation one success between timeouts must not reset the budget
+    // (codex r4 P1) — three connection-class failures in a feed is systemic.
+    let systemicFailures = 0;
+    // A connection-class failure counts whether it hit the upsert or a
+    // post-write step of a stored row (codex r5 P1) — the database is the
+    // same either way. `visited` is the rows walked so far (this one
+    // included); the stored count excludes the rows whose upsert failed.
+    const countSystemic = (err, visited) => {
+      if (++systemicFailures < GBP_ROW_FAILURE_BREAKER) return;
+      const stored = visited - rowFailures.length;
+      const abort = new Error(`${systemicFailures} review rows failed on connection-class errors this run — aborting the location (${stored} stored; last: ${err.message})`);
+      // Rows stored before the trip are durable — hand the counts to the
+      // caller so the run log and the manual sync response report them
+      // (codex r3 P2), and their row ids so the Places fallback does not
+      // count the same reviews a second time (codex r6 P2). `breaker`
+      // routes the alert to the database-write class, not the pull-failure
+      // one (codex r5 P2).
+      abort.partial = { stored, inserted, errors, storedIds };
+      abort.breaker = true;
+      throw abort;
+    };
+    for (const [i, review] of reviews.entries()) {
+      const normalized = this._normalizeGbpReview(review, loc);
+      const name = normalized.gbp_review_name || normalized.google_review_id || '?';
+      try {
+        const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked, locRestored);
+        if (result.inserted) inserted++;
+        if (result.id != null) storedIds.add(result.id);
+        // Stored, but a post-write side effect failed: the row is synced
+        // (no reconcile exclusion, no degraded alert) — it joins errors so
+        // the run is not reported clean (pre-push audit r3).
+        if (result.sideEffectError) errors.push({ error: `post-write side effect failed for ${name}: ${result.sideEffectError}`, source: 'gbp_side_effect' });
+        if (result.systemicError) countSystemic(result.systemicError, i + 1);
+      } catch (rowErr) {
+        if (rowErr.breaker) throw rowErr;
+        rowFailures.push({ review: name, error: rowErr.message });
+        logger.error(`[gbp] review upsert failed for ${loc.name} (${name}): ${rowErr.message}`);
+        if (isSystemicDbFailure(rowErr)) countSystemic(rowErr, i + 1);
+      }
+    }
+    const stored = reviews.length - rowFailures.length;
+    let cause = null;
+    if (rowFailures.length) {
+      // Name the row: a unique-violation message often omits the value, and
+      // the alert is what the operator inspects (codex r10 P2).
+      cause = `${rowFailures.length} of ${reviews.length} review row(s) failed to store (${stored} stored) — first: ${rowFailures[0].review}: ${rowFailures[0].error}`;
+      errors.push({ error: cause, source: 'gbp_row' });
+    }
+    return { stored, inserted, failedReviewNames: rowFailures.map((f) => f.review), cause, errors };
+  }
+
+  async _reconcileMissingReviews(loc, syncStart, { excludeReviewNames = [] } = {}) {
     try {
       // Only rows with an authoritative GBP identity: a Places-sampled row
       // (gbp_review_name null) can go stale legitimately — an edit moves the
       // Places timestamp, the GBP upsert may insert the same review under
       // its resource name, and the orphaned sample row would be falsely
       // reported as removed.
-      const candidates = await db('google_reviews')
+      let candidateQuery = db('google_reviews')
         .where({ location_id: loc.id })
         .where('reviewer_name', '!=', '_stats')
         .whereNotNull('gbp_review_name')
         .whereNull('missing_since')
-        .where('synced_at', '<', syncStart)
+        .where('synced_at', '<', syncStart);
+      // Rows whose upsert failed THIS run are present in the feed — their
+      // stale synced_at is a storage failure, not removal evidence.
+      if (excludeReviewNames.length) candidateQuery = candidateQuery.whereNotIn('gbp_review_name', excludeReviewNames);
+      const candidates = await candidateQuery
         // Fresh-review grace window: brand-new reviews flicker in and out of
         // the feed while Google settles (see MISSING_REVIEW_GRACE_MS) — one
         // absent pull is not removal evidence for them. review_created_at is
@@ -1931,16 +2170,22 @@ class GoogleBusinessService {
    * most once per 24h per location (dedupe on the notification title).
    * Best-effort — never throws into the sync loop.
    */
-  async _notifyDegradedSync(loc, cause) {
+  async _notifyDegradedSync(loc, cause, { reconcileFailed = false } = {}) {
+    // A breaker trip (the location aborted mid-feed) never reached the
+    // removal reconcile — the body must not claim the rest reconciled.
+    const breakerTrip = /aborting the location/.test(String(cause || ''));
     try {
       // The title is the 24h dedupe key, so distinct failure classes need
       // distinct titles: a pull-failure alert this morning must not
       // suppress a reconcile-failure alert this afternoon — they have
       // different remediation and both mean removals go undetected.
       const reconcileFailure = String(cause || '').startsWith('removal reconcile failed');
+      const upsertFailure = String(cause || '').startsWith('review upsert failed');
       const title = reconcileFailure
         ? `Google review removal reconcile failing for ${loc.name}`
-        : `Google review sync degraded for ${loc.name}`;
+        : upsertFailure
+          ? `Google review rows failing to store for ${loc.name}`
+          : `Google review sync degraded for ${loc.name}`;
       // The advisory lock serializes the check-then-insert across the hourly
       // job, the manual admin sync, and overlapping deploy instances — a
       // plain read-then-insert here would double-notify. A held lock means
@@ -1970,7 +2215,9 @@ class GoogleBusinessService {
           : `is fully down — no Places fallback is available (GOOGLE_MAPS_API_KEY is not set)`;
         const body = reconcileFailure
           ? `Review sync for ${loc.name} pulled the GBP feed, but the ${cause}. New reviews are still syncing; REMOVALS will not be detected until the reconcile succeeds.`
-          : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
+          : upsertFailure
+            ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored[;)]/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; ${breakerTrip ? `the location aborted before its removal reconcile, so nothing is misreported as removed; ${process.env.GOOGLE_MAPS_API_KEY ? 'the sync will attempt the Places sample fallback' : 'no Places fallback is available (GOOGLE_MAPS_API_KEY is not set)'}` : `the failed rows were excluded from this run's removal reconcile so they are not misreported as removed${reconcileFailed ? ' (and that reconcile FAILED — see its own alert)' : ' (the rest of the location reconciled normally)'}`}. This is a database write error, not a credentials problem — read the error and the code.`
+            : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
         await NotificationService.notifyAdmin(
           'review',
           title,

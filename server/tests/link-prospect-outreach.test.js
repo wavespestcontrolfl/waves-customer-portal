@@ -546,12 +546,14 @@ describe('dailySendCount', () => {
     expect(await Outreach.dailySendCount(q, new Date('2026-09-03T07:35:00Z'))).toBe(3); // 03:35 ET
     const [sql, bind] = raws[0];
     // the window opens at ET midnight of the run's day (a trailing 24h from a 3:35 nightly still held the previous night's attempts)
-    expect(bind).toEqual([new Date('2026-09-03T04:00:00Z'), new Date('2026-09-03T04:00:00Z')]);
-    expect(sql).toMatch(/SUM\(COALESCE\(\(outreach_attempted_at >= \?\)::int, 0\) \+ \(SELECT count\(\*\) FROM jsonb_array_elements_text\(.*'prior_outreach_attempts'.*\) AS a WHERE a::timestamptz >= \?\)\)/);
-    // both raws compile through knex with exactly two bindings each (since, since) — no stray '?'
+    const since = new Date('2026-09-03T04:00:00Z');
+    expect(bind).toEqual([since, since, since]);
+    // the follow-up attempt (§6.4) is a second COALESCEd term — a NULL follow-up stamp never nulls the row's sum
+    expect(sql).toMatch(/SUM\(COALESCE\(\(outreach_attempted_at >= \?\)::int, 0\) \+ COALESCE\(\(follow_up_attempted_at >= \?\)::int, 0\) \+ \(SELECT count\(\*\) FROM jsonb_array_elements_text\(.*'prior_outreach_attempts'.*\) AS a WHERE a::timestamptz >= \?\)\)/);
+    // both raws compile through knex with exactly three bindings each (since ×3) — no stray '?'
     const knex = require('knex')({ client: 'pg' });
-    expect(knex('seo_link_prospects').select(knex.raw(sql, bind)).toSQL().toNative().bindings).toHaveLength(2);
-    expect(knex('seo_link_prospects').whereRaw(wheres[0][0], wheres[0][1]).toSQL().toNative().bindings).toHaveLength(2);
+    expect(knex('seo_link_prospects').select(knex.raw(sql, bind)).toSQL().toNative().bindings).toHaveLength(3);
+    expect(knex('seo_link_prospects').whereRaw(wheres[0][0], wheres[0][1]).toSQL().toNative().bindings).toHaveLength(3);
   });
 
   test('a manual draft on a linked prospect is stamped with the path revision it was written against (Codex #3720 r5 P1)', async () => {

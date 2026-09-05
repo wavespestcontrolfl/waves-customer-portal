@@ -41,6 +41,7 @@ jest.mock('../models/db', () => {
         return this;
       },
       whereRaw() { return this; },
+      modify(fn) { fn(this); return this; },
       whereNot(col, val) { filtered = filtered.filter((r) => r[col] !== val); return this; },
       whereNull(col) { filtered = filtered.filter((r) => r[col] == null); return this; },
       where(a, b, c) {

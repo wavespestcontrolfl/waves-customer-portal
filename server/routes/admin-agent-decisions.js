@@ -196,6 +196,7 @@ async function loadDecisionContext(decision) {
       if (!(customerId || normalizePhoneLast10(phone))) return [];
       const q = db('call_log')
         .select('*')
+        .modify((qb) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(qb))
         .orderBy('created_at', 'desc')
         .limit(6);
       applyPhoneOrCustomerFilter(q, { customerId, phone });

@@ -2297,4 +2297,9 @@ module.exports = {
   // a portal cancellation without the boundary an admin end-of-coverage
   // decision holds.
   adminCoverageBoundaryInForce,
+  // Shared with the admin-dispatch series cancel: an UNPAID payment_pending
+  // term's standalone invoice would re-activate coverage for the visits just
+  // cancelled if paid afterwards (syncTermForInvoicePayment) — the same
+  // refusal this engine applies before its own wind-down.
+  findPendingPrepayInvoice,
 };

@@ -62,6 +62,9 @@ function createDbMock(initialRows = {}) {
       if (op === '<') return left < value;
       return left === value;
     }));
+    if (query.rawOrder) {
+      rows.sort((a, b) => query.rawOrder(a) - query.rawOrder(b) || String(a.last_name || '').localeCompare(String(b.last_name || '')));
+    }
     if (query.order) {
       const [key, dir] = query.order;
       rows.sort((a, b) => {
@@ -85,11 +88,16 @@ function createDbMock(initialRows = {}) {
       ops: [],
       ins: [],
       rawFilters: [],
+      // Raw OR clauses are pass-throughs (the mock does not model the
+      // customer search's LIKE group); their SQL + bindings are captured so
+      // a test can assert what the search binds.
+      rawWheres: [],
       order: null,
       limitValue: null,
       where(arg, op, value) {
         if (typeof arg === 'function') {
-          arg(this);
+          // knex binds the builder as `this` AND passes it — callbacks use either.
+          arg.call(this, this);
           return this;
         }
         if (arg && typeof arg === 'object') {
@@ -105,6 +113,9 @@ function createDbMock(initialRows = {}) {
         return this;
       },
       orWhere() { return this; },
+      whereILike() { return this; },
+      orWhereILike() { return this; },
+      orWhereRaw(sql, bindings) { this.rawWheres.push([String(sql), bindings || []]); return this; },
       whereNot(column, value) { this.notEquals.push([column, value]); return this; },
       whereIn(column, values) { this.ins.push([column, values]); return this; },
       whereNotNull(column) { this.notNull.push(column); return this; },
@@ -121,6 +132,19 @@ function createDbMock(initialRows = {}) {
       leftJoin() { return this; },
       select() { return this; },
       orderBy(column, direction = 'asc') { this.order = [column, direction]; return this; },
+      orderByRaw(sql) {
+        // The attribution search's service-proximity ORDER BY becomes a row
+        // sort: customers with a service_records / completed scheduled_services
+        // row first, then last name (bindings ignored — window is not modelled).
+        if (String(sql).includes('EXISTS (SELECT 1 FROM service_records')) {
+          this.rawOrder = (row) => {
+            const served = (state.rows.service_records || []).some((r) => r.customer_id === row.id && r.technician_id != null)
+              || (state.rows.scheduled_services || []).some((r) => r.customer_id === row.id && r.status === 'completed' && r.technician_id != null);
+            return served ? 0 : 1;
+          };
+        }
+        return this;
+      },
       limit(value) { this.limitValue = value; return this; },
       async first() { return filteredRows(this)[0] || null; },
       count() {
@@ -771,6 +795,156 @@ describe('review incentives', () => {
       periodEnd: new Date().toISOString(),
     });
     expect(dashboard.summary.confirmedGoogleReviews).toBe(1);
+  });
+
+  test('candidate search: a customer with a recent service leads a name-only match without one (owner ruling 2026-09-03)', async () => {
+    const daysAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-blake', first_name: 'Blake', last_name: 'Northgate', active: true },
+        { id: 'customer-sam', first_name: 'Sam', last_name: 'Northgate', active: true },
+      ],
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-sam',
+        technician_id: 'tech-1',
+        service_date: daysAgo(17).slice(0, 10),
+      }],
+      technicians: [{ id: 'tech-1', name: 'Adam' }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: null,
+        reviewer_name: 'slim northgate',
+        star_rating: 5,
+        review_created_at: daysAgo(10),
+        location_id: 'bradenton',
+        google_review_id: 'accounts/1/locations/2/reviews/northgate',
+      }],
+    });
+
+    const result = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    // Blake sorts first alphabetically by first name within the surname; the
+    // recent service moves Sam ahead.
+    expect(result.candidates.map((c) => [c.id, c.services.length > 0])).toEqual([
+      ['customer-sam', true],
+      ['customer-blake', false],
+    ]);
+    expect(result.likelyReviewers).toEqual([]);
+    // The review's currently linked click_auto customer stays pinned first even
+    // when the name search returns them mid-list and the service sort would
+    // demote them (pre-push P1 r2).
+    conn.__state.rows.google_reviews[0].customer_id = 'customer-blake';
+    conn.__state.rows.google_reviews[0].link_source = 'click_auto';
+    const pinned = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(pinned.candidates.map((c) => c.id)).toEqual(['customer-blake', 'customer-sam']);
+    // The service ranking happens in SQL before the page is cut: with
+    // limit 1 the serviced customer still wins over the alphabetical first.
+    conn.__state.rows.google_reviews[0].customer_id = null;
+    conn.__state.rows.google_reviews[0].link_source = null;
+    const paged = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn, limit: 1 });
+    expect(paged.candidates.map((c) => c.id)).toEqual(['customer-sam']);
+  });
+
+  // The surname clause: the folded column (lowercase, apostrophe-free,
+  // de-accented via translate()) IN the normalized whole-word suffixes.
+  const FOLDED_IN = /^translate\(regexp_replace\(LOWER\(last_name\), '\[''’‘ʼ\]', '', 'g'\), '[^']+', '[^']+'\) IN \(\?, \?\)$/;
+  // The translate() table folds every dash form to "-" and every accented
+  // Latin letter to its base, position for position (GH codex r9 P2).
+  const foldTable = (sql) => { const m = sql.match(/translate\(.*?, '([^']+)', '([^']+)'\)/); return { from: [...m[1]], to: [...m[2]] }; };
+
+  test('candidate search binds the COMPLETE surname list against the folded column — either side may carry the accents (GH codex r1 P1/P2, r8 P2)', async () => {
+    const conn = createDbMock({
+      customers: [{ id: 'customer-pepe', first_name: 'Pepe', last_name: 'Muñoz-Pérez', active: true }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: null,
+        reviewer_name: 'Pepe Muñoz-Pérez',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/pepe',
+      }],
+    });
+    await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    const surnameClauses = () => conn.mock.results.map((r) => r.value).filter((q) => q.table === 'customers').flatMap((q) => q.rawWheres).filter(([sql]) => sql.includes(') IN ('));
+    // Normalized whole-word suffixes, one equality list against the folded
+    // column — never a bare final token only. No unaccent extension is
+    // assumed: translate() folds the column.
+    expect(surnameClauses()).toEqual([[expect.stringMatching(FOLDED_IN), ['pepe munoz-perez', 'munoz-perez']]]);
+    // The reverse spelling direction — reviewer typed WITHOUT the accents the
+    // record keeps — binds the identical operands (GH codex r8 P2).
+    conn.mock.results.length = 0;
+    conn.__state.rows.google_reviews[0].reviewer_name = 'Pepe Munoz-Perez';
+    await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(surnameClauses()).toEqual([[expect.stringMatching(FOLDED_IN), ['pepe munoz-perez', 'munoz-perez']]]);
+    // Apostrophes in any form are dropped from the operands and from the
+    // column (GH codex r4 P1, r5 P2): "Pat O’Muñoz" finds a record stored
+    // "O'Muñoz", "OMunoz" or "O’Munoz".
+    conn.mock.results.length = 0;
+    conn.__state.rows.google_reviews[0].reviewer_name = 'Pat O’Muñoz';
+    await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(surnameClauses()).toEqual([[expect.stringMatching(FOLDED_IN), ['pat omunoz', 'omunoz']]]);
+    // A one-token display name binds no surname clause at all.
+    conn.mock.results.length = 0;
+    conn.__state.rows.google_reviews[0].reviewer_name = 'SunshineGal88';
+    await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(surnameClauses()).toEqual([]);
+  });
+
+  test('candidate search and the linked-customer pin skip ARCHIVED customers (deleted_at set, active untouched) (GH codex r8 P2)', async () => {
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-live', first_name: 'Sam', last_name: 'Northgate', active: true },
+        { id: 'customer-archived', first_name: 'Blake', last_name: 'Northgate', active: true, deleted_at: '2026-06-01T00:00:00.000Z' },
+      ],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: 'customer-archived',
+        link_source: 'click_auto',
+        reviewer_name: 'slim northgate',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/northgate',
+      }],
+    });
+    const result = await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    // Neither the search nor the click_auto linked-customer fallback offers
+    // the archived record.
+    expect(result.candidates.map((c) => c.id)).toEqual(['customer-live']);
+    const customerQueries = conn.mock.results.map((r) => r.value).filter((q) => q.table === 'customers');
+    expect(customerQueries.length).toBeGreaterThanOrEqual(2);
+    customerQueries.forEach((q) => expect(q.nulls).toContain('deleted_at'));
+  });
+
+  test('candidate search expands surnames ONLY on the reviewer-name fallback — an explicit q keeps plain field matching (GH codex r2 P2)', async () => {
+    const conn = createDbMock({
+      customers: [{ id: 'customer-pepe', first_name: 'Pepe', last_name: 'Street', active: true }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: null,
+        reviewer_name: 'Pepe Muñoz-Pérez',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/pepe',
+      }],
+    });
+    const surnameClauses = () => conn.mock.results.map((r) => r.value).filter((q) => q.table === 'customers').flatMap((q) => q.rawWheres)
+      .filter(([sql]) => sql.includes(') IN ('));
+    // "10 Main Street" is an address search: no customer surnamed "Street"
+    // may be pulled in (and ranked ahead of the address hit) by a surname
+    // clause derived from the search-box value.
+    await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn, q: '10 Main Street' });
+    expect(surnameClauses()).toEqual([]);
+    // The reviewer-name fallback still binds the surname alternatives.
+    conn.mock.results.length = 0;
+    await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
+    expect(surnameClauses()).toEqual([[expect.stringMatching(FOLDED_IN), ['pepe munoz-perez', 'munoz-perez']]]);
+    const table = foldTable(surnameClauses()[0][0]);
+    expect(table.from.length).toBe(table.to.length);
+    for (const dash of ['\u2010', '\u2011', '\u2013', '\u2014', '\u2212']) expect(table.to[table.from.indexOf(dash)]).toBe('-');
+    expect(table.to[table.from.indexOf('ñ')]).toBe('n');
   });
 
   test('candidate search and manual attribution reject removed reviews', async () => {

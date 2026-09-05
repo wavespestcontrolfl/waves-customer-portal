@@ -967,6 +967,7 @@ async function loadRecentPostedReplies(locationId, { conn = db, limit = RECENT_R
 
 async function requestDraft(grounding, mode, recentReplies, feedback, opts) {
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+    laneId: 'review_reply',
     system: buildSystemPrompt(mode, grounding),
     text: buildUserText(grounding, recentReplies, feedback, opts),
     jsonMode: false,

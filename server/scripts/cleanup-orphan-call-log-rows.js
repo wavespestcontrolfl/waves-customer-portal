@@ -34,6 +34,7 @@ const APPLY = process.argv.includes('--apply');
 
 (async () => {
   const baseQuery = () => db('call_log as c')
+    .modify((q) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(q, 'c.source')) // bake-off calls are not data
     .leftJoin('lead_sources as s', 'c.to_phone', 's.twilio_phone_number')
     .where('c.direction', 'inbound')
     .whereNull('s.id')

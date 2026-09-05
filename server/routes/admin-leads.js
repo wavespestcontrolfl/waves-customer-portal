@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
+const { assertAssignableTechnician } = require('../services/technician-eligibility');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 // Shared admin window validator (on the hour, >= 08:00, end <= 20:00). The
@@ -125,7 +126,7 @@ const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate
 // `status=open` filter (the Pipeline table's default) to this set — shared
 // with the dashboard alerts service so action queues use the same
 // membership.
-const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL } = require('../services/lead-statuses');
 
 // Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
@@ -222,10 +223,16 @@ router.get('/analytics/overview', async (req, res, next) => {
     // (raw new Date('2026-06-30') is midnight UTC = June 29 ET, dropping a day).
     const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
+    // Non-engaged rows (spam, cancelled, and the wizard's auto-filed
+    // 'duplicate' repeats — public-quote.js) are not prospects: they must
+    // not inflate the total or dilute the conversion rate (codex #3834 r6).
+    // A repeat that took the win beside an already-won original is a second
+    // win, not a second prospect (scopeToProspects, lead-statuses.js).
     const leads = await db('leads')
       .whereNull('deleted_at')
       .where('first_contact_at', '>=', start)
-      .where('first_contact_at', '<=', end);
+      .where('first_contact_at', '<=', end)
+      .modify(scopeToProspects);
 
     const total = leads.length;
     const won = leads.filter(l => l.status === 'won').length;
@@ -286,6 +293,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     // the page's date filter.
     const recentResponded = await db('leads')
       .whereNull('deleted_at')
+      .modify(scopeToProspects)
       .whereNotNull('response_time_minutes')
       .whereNotNull('first_contact_at')
       .whereRaw(
@@ -381,10 +389,15 @@ router.get('/analytics/funnel', async (req, res, next) => {
     const start = start_date ? new Date(start_date) : startOfETMonth();
     const end = end_date ? new Date(end_date) : new Date();
 
+    // The same prospect population as the overview KPIs and the source
+    // analytics (scopeToProspects): a suppressed rerun or a second win must
+    // not make the Pipeline funnel's Won total exceed its KPI (codex #3834
+    // r25 P2).
     const stages = await db('leads')
       .select('status')
       .count('* as count')
       .whereNull('deleted_at')
+      .modify(scopeToProspects)
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)
       .groupBy('status');
@@ -507,13 +520,17 @@ router.get('/sources', async (req, res, next) => {
   try {
     const monthStart = startOfETMonth();
 
+    // The same prospect population the source's ROI and the overview count
+    // (scopeToProspects): the client derives the source conversion rate from
+    // these raw counts, so a suppressed wizard rerun or a second win must not
+    // dilute it here either (codex #3834 r16 P2).
     const sources = await db('lead_sources')
       .select(
         'lead_sources.*',
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND leads.first_contact_at >= ?) as month_leads`, [monthStart]),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND leads.status = 'won' AND leads.first_contact_at >= ?) as month_conversions`, [monthStart]),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL) as total_leads`),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND leads.status = 'won') as total_conversions`),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL} AND leads.first_contact_at >= ?) as month_leads`, [monthStart]),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL} AND leads.status = 'won' AND leads.first_contact_at >= ?) as month_conversions`, [monthStart]),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL}) as total_leads`),
+        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL} AND leads.status = 'won') as total_conversions`),
       )
       .orderBy('name');
 
@@ -773,6 +790,13 @@ router.get('/', async (req, res, next) => {
       const { whereBuilderWarrantyExpiring } = require('../services/dashboard-alerts');
       whereBuilderWarrantyExpiring(countQuery);
     }
+    // The source panel counts prospects (scopeToProspects: no non-engaged
+    // rows, no second wins) — its drill shows the same population, so the
+    // list matches the count the owner clicked (codex #3834 r24 P2).
+    if (source_name) {
+      query = query.modify(scopeToProspects);
+      countQuery.modify(scopeToProspects);
+    }
     // Dashboard drills (source panel + builder-warranty bell): mirror
     // excludeInternalLeads so the drilled rows match the count the owner
     // clicked. Scoped to the drill paths so the day-to-day list is unchanged.
@@ -927,7 +951,9 @@ router.get('/:id', async (req, res, next) => {
             // exact failure this dissent guard exists to prevent.
             .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
         };
-        const rows = await db('call_log')
+        // The phone arms below would match a sandbox bake-off from a lead's
+        // number and surface its transcript as lead history (codex r15 P2).
+        const rows = await require('../services/voice-agent/relay-protocol').whereNotSandboxCall(db('call_log'))
           .where(function () {
             if (lead.twilio_call_sid) {
               this.orWhere(function sidArm() {
@@ -1050,9 +1076,13 @@ router.put('/:id', async (req, res, next) => {
 
     // Manual status edits (Kanban drags / detail-pane changes) mirror onto the
     // lead's ad_service_attribution funnel row. Monotonic + best-effort; a
-    // status with no funnel meaning no-ops inside the bridge.
+    // status with no funnel meaning no-ops inside the bridge. A manual WON is
+    // a conversion: it runs the shared settlement (bridge + wizard-repeat
+    // settlement) like the book route, so a repeat's win lands on its root's
+    // row instead of on the row /calculate deleted (codex #3834 r34 P1).
     if (updates.status && updates.status !== existingLead.status) {
-      await bridgeLeadFunnelStage(req.params.id, updates.status);
+      if (updates.status === 'won') await leadAttribution.settleWonFunnelRow(req.params.id, lead.customer_id || null);
+      else await bridgeLeadFunnelStage(req.params.id, updates.status);
     }
 
     await db('lead_activities').insert({
@@ -1584,6 +1614,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
       // ---- end slot-overlap guard part 2
 
+      await assertAssignableTechnician(technicianId || null, { conn: trx });
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,
@@ -1702,10 +1733,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       logger.warn(`[leads] booking pre-draft hook unavailable: ${predraftErr.message}`);
     }
 
-    // Funnel-row mirror for the in-transaction 'won' conversion above.
-    // Post-commit deliberately: the bridge must never abort the booking
-    // transaction, and it is monotonic + idempotent on its own.
-    await bridgeLeadFunnelStage(req.params.id, 'won');
+    // Funnel-row mirror for the in-transaction 'won' conversion above — the
+    // same settlement markConverted runs (a booked wizard repeat lands on its
+    // root's row or its own rebuilt one, codex #3834 r32 P1). Post-commit
+    // deliberately: it must never abort the booking transaction, and it is
+    // monotonic + idempotent on its own.
+    await leadAttribution.settleWonFunnelRow(req.params.id, customerId);
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({

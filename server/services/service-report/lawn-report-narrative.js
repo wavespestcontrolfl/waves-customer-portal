@@ -260,7 +260,7 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
 
   const callModel = deps.callModel || ((payload) => dispatchWithFallback(
     MODELS.TEXT_POLICIES.customerCopy,
-    { jsonMode: true, maxTokens: 1300, ...payload },
+    { laneId: 'lawn_visit_narratives', jsonMode: true, maxTokens: 1300, ...payload },
   ));
 
   let merged = v2;

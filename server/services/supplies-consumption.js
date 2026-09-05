@@ -130,18 +130,24 @@ async function settledReason(trx, { productId, scheduledServiceId }) {
 // The visit-wide lookup bell is retired only when the lookup can be re-run
 // now AND every kit product that applies to this visit's line already has a
 // usage movement — one movement proves one product, not the visit (Codex
-// r27 P1, owner ruling). Unreadable again, or any product still owed: the
-// bell (and the owed marker) stay.
+// r27 P1, owner ruling). Any product still owed: false. Unreadable again
+// (the catalog or a movement read failed): NULL — indeterminate is not
+// "not settled": the caller keeps the bell AND records the retirement as
+// failed so the owed marker survives for a later retry (Codex r31 P1).
 async function lookupSettled(db, { scheduledServiceId, serviceLine }) {
-  let products;
-  try { products = await kitProducts(db); } catch { return false; }
-  // A corrupt scope is owed too (its hand-off is a product bell the retry
-  // may never have reached): fail closed, keep the visit bell.
-  const owed = products.filter((p) => parseLines(p.per_completion_service_lines) === INVALID_LINES || appliesToLine(p.per_completion_service_lines, serviceLine));
-  for (const p of owed) {
-    if (!await db('product_inventory_movements').where({ product_id: p.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).first('id')) return false;
+  try {
+    const products = await kitProducts(db);
+    // A corrupt scope is owed too (its hand-off is a product bell the retry
+    // may never have reached): fail closed, keep the visit bell.
+    const owed = products.filter((p) => parseLines(p.per_completion_service_lines) === INVALID_LINES || appliesToLine(p.per_completion_service_lines, serviceLine));
+    for (const p of owed) {
+      if (!await db('product_inventory_movements').where({ product_id: p.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).first('id')) return false;
+    }
+    return true;
+  } catch (err) {
+    logger.warn(`[supplies-consumption] lookup-bell settlement is indeterminate for visit ${scheduledServiceId}: ${err.message}`);
+    return null;
   }
-  return true;
 }
 
 async function ringMissedDeductionBell(db, result, { scheduledServiceId, product = null, reason, serviceLine = null }) {
@@ -161,10 +167,15 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
     // kit — between our failed attempt and this insert; its bell clear ran
     // before our bell existed. Re-check the settled movement AFTER the bell
     // persisted and retire our own bell when the kit is in fact deducted.
+    // ANY usage movement settles the product — a tech-logged one included,
+    // the same predicate settledReason applies (Codex r29 P2).
     const settled = product
-      ? await db('product_inventory_movements').where({ product_id: product.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).whereRaw("metadata->>'source' = ?", [SOURCE]).first('id')
+      ? await db('product_inventory_movements').where({ product_id: product.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).first('id')
       : await lookupSettled(db, { scheduledServiceId, serviceLine });
-    if (settled) await clearMissedDeductionBells(db, { scheduledServiceId, productId: product?.id || null });
+    if (settled && !(await clearMissedDeductionBells(db, { scheduledServiceId, productId: product?.id || null }))) {
+      // The superseded bell stands: the marker must stay for a retry to retire it (hook P1).
+      result.errors.push({ productId: product?.id || null, reason: 'bell_retire_failed', message: 'the superseded adjust-by-hand bell could not be retired' });
+    }
   } catch (bellErr) {
     logger.error(`[supplies-consumption] failure bell NOT sent for ${product ? product.name : 'the visit'} on visit ${scheduledServiceId}: ${bellErr.message}`);
     result.errors.push({ productId: product?.id || null, reason: 'failure_bell_not_sent', message: bellErr.message });
@@ -180,12 +191,17 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
 // strip the hand-off protection of the others (hook r27 P1). The row is
 // stamped metadata.autoRetired so settledReason never mistakes it for a
 // staff hand-off (Codex r26 P1). Best effort, never throws.
+// Returns false when the retire did not land: the caller records
+// bell_retire_failed so the owed marker stays and a later retry retires the
+// obsolete bell after observing the movement (Codex r30 P1).
 async function clearMissedDeductionBells(db, { scheduledServiceId, productId = null }) {
   const key = productId ? `supplies-consumption-failed:${productId}:${scheduledServiceId}` : `supplies-consumption-failed:lookup:${scheduledServiceId}`;
   try {
     await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).whereNull('read_at').update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb") });
+    return true;
   } catch (err) {
     logger.warn(`[supplies-consumption] could not retire the failure bell for ${productId} on visit ${scheduledServiceId}: ${err.message}`);
+    return false;
   }
 }
 
@@ -275,7 +291,9 @@ async function consumeCompletionSupplies(db, {
       // The kit IS deducted (now, or by an earlier attempt whose bell clear
       // failed transiently): retire the stale hand-off bells either way
       // (Codex r17 P2).
-      if (outcome.consumed || outcome.skipped === 'already_consumed') await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id });
+      if ((outcome.consumed || outcome.skipped === 'already_consumed') && !(await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id }))) {
+        result.errors.push({ productId: product.id, reason: 'bell_retire_failed', message: 'the obsolete adjust-by-hand bell could not be retired' });
+      }
     } catch (err) {
       logger.warn(`[supplies-consumption] ${product.name} failed for visit ${scheduledServiceId} (non-blocking): ${err.message}`);
       result.errors.push({ productId: product.id, message: err.message });
@@ -287,18 +305,27 @@ async function consumeCompletionSupplies(db, {
   // An open visit-wide lookup bell (an earlier attempt could not read the
   // catalog) is retired only when every applicable product is now proven
   // deducted — never on one product's movement (hook r27 P1).
-  await retireLookupBellIfSettled(db, { scheduledServiceId, serviceLine });
+  await retireLookupBellIfSettled(db, result, { scheduledServiceId, serviceLine });
   return result;
 }
 
-async function retireLookupBellIfSettled(db, { scheduledServiceId, serviceLine }) {
+// Indeterminate at any step (the open-bell probe, the re-run lookup, the
+// retire itself) is a retirement FAILURE, never a quiet skip: the owed
+// marker must outlive a bell the office could still act on (Codex r31 P1).
+async function retireLookupBellIfSettled(db, result, { scheduledServiceId, serviceLine }) {
+  const failed = (message) => result.errors.push({ reason: 'bell_retire_failed', message });
+  let open;
   try {
-    const open = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`supplies-consumption-failed:lookup:${scheduledServiceId}`]).whereNull('read_at').first('id');
-    if (!open) return;
-    if (await lookupSettled(db, { scheduledServiceId, serviceLine })) await clearMissedDeductionBells(db, { scheduledServiceId });
+    open = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`supplies-consumption-failed:lookup:${scheduledServiceId}`]).whereNull('read_at').first('id');
   } catch (err) {
-    logger.warn(`[supplies-consumption] lookup-bell settlement check failed for visit ${scheduledServiceId}: ${err.message}`);
+    logger.warn(`[supplies-consumption] lookup-bell probe failed for visit ${scheduledServiceId}: ${err.message}`);
+    return failed(`the visit lookup bell could not be checked: ${err.message}`);
   }
+  if (!open) return;
+  const settled = await lookupSettled(db, { scheduledServiceId, serviceLine });
+  if (settled === false) return;
+  if (settled === null) return failed('the obsolete visit lookup bell could not be re-checked');
+  if (!(await clearMissedDeductionBells(db, { scheduledServiceId }))) failed('the obsolete visit lookup bell could not be retired');
 }
 
 module.exports = { consumeCompletionSupplies, appliesToLine, COMPLETION_CONSUMABLE_SOURCE: SOURCE, INSPECTION_SERVICE_RE };

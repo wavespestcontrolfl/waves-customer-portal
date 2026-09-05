@@ -3282,7 +3282,11 @@ router.get('/restock-requests', async (req, res, next) => {
       .orderByRaw('prr.needed_by asc nulls last')
       .orderBy('prr.created_at', 'desc')
       .limit(Math.max(1, Math.min(200, Number(req.query.limit || 100))));
-    if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
+    // Active includes a received request whose automatic order landed after
+    // that receipt (evidence.landedAfterReceive): it still needs the second
+    // Receive or a revoke, and its bell links here (Codex r29 P2).
+    if (status === 'active' && hasOrders) query = query.where((q) => q.whereIn('prr.status', ['open', 'ordered']).orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)"));
+    else if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
     const rows = await query;
     // Technicians see the order outcome (placed / needs review), never the
     // spend: a single-product order total IS the unit cost — owner-only,

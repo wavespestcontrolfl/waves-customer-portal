@@ -60,33 +60,27 @@ Socket.io registers its own `upgrade` handler and only acts on `/socket.io/`. We
 ## Owner steps to test Phase 0 on the sandbox
 
 1. Deploy this branch (or run locally) with `VOICE_RELAY_ENABLED=true`, `ANTHROPIC_API_KEY`, and **`VOICE_RELAY_WS_SECRET`** (a long random string) set. Without the secret the ws endpoint **refuses to attach** (fail-closed) — it is otherwise public and can spend tokens / write leads.
-2. Point +19412691697 at something that can MINT A PER-CALL TOKEN — a static TwiML Bin can no longer do this, which is why the sandbox runs on a Twilio Function (`voice-relay-sandbox` / `/relay-sandbox`). ⚠️ **The Function MUST be deployed with `protected` visibility** (Twilio then enforces a valid `X-Twilio-Signature` on every request — the deployed sandbox Function is, verified by an unsigned GET returning 403). A public token-minter is a minting ORACLE: it holds the secret and mints for caller-controlled `event.CallSid`, so anyone could mint tokens for arbitrary CallSids and open synthetic relay sessions. If Protected visibility is ever unavailable, validate `X-Twilio-Signature` in the Function body before minting — never mint unauthenticated. The URL must carry `callSid` + `t`, never the secret:
+2. Set `VOICE_RELAY_SANDBOX_NUMBER` to an **inactive** Twilio number — one that `server/config/twilio-numbers.js` either does not register or lists under `unassigned`. **The route enforces this:** a registered live line configured here is refused (403 on every call, one error log) — `+19412691697` is still registered as the Google Ads — Pest tracking line and seeded as an active paid source, so to keep using it as the sandbox, move it to `unassigned` (and retire the paid-source seed) first; otherwise pick another number. Then point that number's **voice URL at `POST https://<host>/api/webhooks/twilio/relay-sandbox`** (the same Twilio-signature-validated mount as `/voice`). The route mints the per-call token server-side (`buildRelayTwiML`), so the WS secret lives only on the server; the Twilio Function that used to hold a copy of `VOICE_RELAY_WS_SECRET` is retired — delete it once the number is repointed. The route refuses any `To` other than the sandbox number (403) and hangs up with a spoken notice when the relay is not attached. The `/ws/voice-agent` upgrade is rejected (socket destroyed) unless the token verifies against that CallSid, is unexpired, and has not been used — so a captured URL is worth one replay attempt on a call that has already ended.
 
-   ```xml
-   <?xml version="1.0" encoding="UTF-8"?>
-   <Response><Connect>
-     <ConversationRelay url="wss://<host>/ws/voice-agent?callSid=<CallSid>&amp;t=<token>"
-       welcomeGreeting="Thanks for calling Waves Pest Control. Just so you know, this call may be recorded, and you're speaking with our automated assistant. How can I help you today?"
-       welcomeGreetingInterruptible="none"
-       ttsProvider="ElevenLabs" language="en-US" />
-   </Connect></Response>
-   ```
+   Every sandbox call gets a `call_log` row with `source='voice_relay_sandbox'` (excluded from the calls tab, the unified inbox, and the audits), so the session's transcript, `transcription_metadata.latency` (per-turn latency summary) and `.versions` (model / prompt sha / profile / voice stamps) land exactly as they do for a production call. A sandbox relay failure hangs up (`/relay-complete?sandbox=1`) instead of recording voicemail.
 
-   where the token is minted from the CallSid the Function is answering:
+   **Cell codes.** From answer until three seconds after the recording disclosure finishes, the route accepts a two-digit DTMF code that selects a relay profile for that call (the audio runner sends it with `sendDigits`; a human caller who waits gets the production profile — exactly what a customer hears):
 
-   ```js
-   // Twilio Function — VOICE_RELAY_WS_SECRET lives in the Function's env, never in the URL.
-   // The nonce makes every mint unique (a Connect-action retry must not reproduce
-   // an already-burned token).
-   const exp = Math.floor((Date.now() + 5 * 60 * 1000) / 1000);
-   const nonce = require('crypto').randomBytes(8).toString('hex');
-   const mac = require('crypto').createHmac('sha256', process.env.VOICE_RELAY_WS_SECRET)
-     .update(`v1.${event.CallSid}.${exp}.${nonce}`).digest('hex').slice(0, 32);
-   const token = `v1.${exp}.${nonce}.${mac}`;
-   ```
+   | Code | Profile |
+   |---|---|
+   | 01 | `nova_baseline_v1` |
+   | 02 | `nova_hints_v1` |
+   | 03 | `flux_balanced_v1` (eot 0.8) |
+   | 04 | `flux_fast_v1` (eot 0.6) |
+   | 05 | `flux_noise_resistant_v1` (ignoreBackchannel + interruptSensitivity medium) |
+   | 06 | `flux_reporting_v1` (reportInputDuringAgentSpeech speech) |
+   | 07 | `flux_smartformat_off_v1` |
+   | 08 | `flux_tts_normalization_v1` |
+   | 09 | `flux_partials_probe_v1` (sandbox-only; counts Flux partials, never acts on them) |
+   | 99 | raw `VOICE_RELAY_SANDBOX_ATTRS` JSON |
 
-   (`relay-protocol.buildRelayTwiML({ wsUrl, callSid })` renders exactly this server-side, and `mintCallToken` is the same function.) The `/ws/voice-agent` upgrade is rejected (socket destroyed) unless the token verifies against that CallSid, is unexpired, and has not been used — so a captured URL is worth one replay attempt on a call that has already ended. **A URL carrying the raw secret is refused**: the whole point is that what leaks from a logged URL is no longer a working credential.
-3. Call the GA# and confirm: it answers, sounds natural, latency feels OK, and a lead lands in the Leads UI. **This call answers the build-vs-buy question.**
+   Production picks a profile with `VOICE_RELAY_PROFILE=<id>` (unset = the untuned relay, byte-identical TwiML). `relay-profiles.js` is the only place the attributes are chosen; the allowlist and value validation follow Twilio's `<ConversationRelay>` noun docs.
+3. Call the GA# and confirm: it answers, sounds natural, latency feels OK. **This call answers the build-vs-buy question.** No lead, ticket or booking is expected — a sandbox call is a dry run (its write tools are answered without running, so the conversation still sounds like production) — so verify the sourced `call_log` row (`source='voice_relay_sandbox'`) instead. Then read the row: `latency` should carry `prompt_to_first_send_*` on every turn and the `stop_to_first_audio_*` audio metrics only once Twilio's speaker events (`events="speaker-events tokens-played"`, on in every profile) are observed — the first call also pins the undocumented event payload shape (logged as `relay event shape seen …`, key names only). A deliberate barge-in should truncate the stored agent line to what was played, marked `[interrupted]`.
 
 ⚠️ On the first live call, verify the inbound `prompt` text field and outbound `text` frame against the deployed ConversationRelay version — `relay-protocol.parsePrompt()` already tolerates `voicePrompt`/`payload.text`; adjust there if needed.
 

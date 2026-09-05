@@ -24,6 +24,9 @@
  */
 const STICKER_MULE = { name: 'Sticker Mule', code: 25, type: 'online', website: 'https://www.stickermule.com', notes: 'Yard-sign stickers ("Serviced by Waves" 4x5). Reorder-only API — the first order of any item is placed by hand.', scraping_priority: 'skip' };
 const STICKER_NAME = 'Yard sign sticker 4x5 "Serviced by Waves"';
+// The row's identity beyond its code: the name, or the website (an admin may
+// have renamed the row since a prior apply).
+const isStickerMule = (row) => String(row.name || '').trim().toLowerCase() === STICKER_MULE.name.toLowerCase() || String(row.website || '').toLowerCase().includes('stickermule.com');
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('vendor_orders'))) {
@@ -61,6 +64,12 @@ exports.up = async function up(knex) {
   // a prior apply; down() leaves it in place) — the name is only the lookup
   // for a pre-code schema (Codex r5 P1).
   let vendor = hasCode ? await knex('vendors').where({ code: STICKER_MULE.code }).first() : null;
+  // A code-25 row that is NOT Sticker Mule (the earlier vendor-code guidance
+  // allowed 25 as the next appended code) is a collision, not the seed:
+  // adapterKeyFor reads every code-25 row as the Sticker Mule adapter, so
+  // the sticker must never be pointed at it — refuse and name the fix
+  // (Codex r31 P1).
+  if (vendor && !isStickerMule(vendor)) throw new Error(`vendors row "${vendor.name}" (${vendor.id}) already holds code ${STICKER_MULE.code}, which the Sticker Mule adapter owns — move it to a free code (.claude/vendor-codes.md) before applying`);
   if (!vendor) vendor = await knex('vendors').whereRaw('LOWER(name) = ?', [STICKER_MULE.name.toLowerCase()]).first();
   if (!vendor) {
     const row = { ...STICKER_MULE };

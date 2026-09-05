@@ -135,6 +135,7 @@ NOT a quote request: appointment confirmations/rescheduling, payment/billing que
 
 Message: ${JSON.stringify(text)}`;
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+      laneId: 'estimator_sms_signal',
       text: prompt,
       jsonMode: true,
       jsonSchema: grounded ? GROUNDED_SCHEMA : BARE_SCHEMA,

@@ -189,7 +189,7 @@ async function applyVisitSummaryNarrative(input = {}, deps = {}) {
   const callModel = deps.callModel
     || ((payload) => dispatchWithFallback(
       MODELS.TEXT_POLICIES.customerCopy,
-      { jsonMode: true, maxTokens: 400, ...payload },
+      { laneId: 'lawn_visit_narratives', jsonMode: true, maxTokens: 400, ...payload },
     ));
 
   let value = fallback;

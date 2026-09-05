@@ -465,6 +465,7 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
     ? MODELS.TEXT_POLICIES.visionAnalysis
     : MODELS.TEXT_POLICIES.contentDraft;
   const msg = await dispatchWithFallback(policy, {
+    laneId: 'wdo_project_brief',
     text: prompt,
     images,
     maxTokens: 900,
@@ -551,6 +552,7 @@ async function extractWdoTreatmentPhoto({ photo, propertyAddress }) {
   // VISION first, OpenAI Terra on a miss — the same policy the WDO brief
   // rides when a photo is attached.
   const msg = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
+    laneId: 'wdo_project_brief',
     text: buildWdoTreatmentPhotoPrompt(propertyAddress),
     images: [{ data: photo.buffer.toString('base64'), mimeType: photo.mediaType }],
     jsonMode: true,
@@ -1133,6 +1135,7 @@ async function draftProjectReport({ typeCfg, findings, rawRecommendations, custo
     archivedFeeValues,
   });
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.report, {
+    laneId: 'project_report',
     text: prompt,
     images,
     jsonMode: false,

@@ -30,13 +30,16 @@ const FROM = '+19415550142';
 // The end() reconcile builder: captures the fenced guard calls and the final
 // update payload so both the guard and the transcript can be asserted.
 function primeCallLog({ rows = 1, updateImpl } = {}) {
-  const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNot: jest.fn().mockReturnThis() };
+  const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
   const update = updateImpl || jest.fn().mockResolvedValue(rows);
   const builder = {
     update,
     where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
+    whereIn: jest.fn(() => builder),
+    whereRaw: jest.fn(() => builder), // the salvage's provider guard (PR 2A)
   };
   db.mockReturnValue(builder);
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   return { builder, guardQ, update };
 }
 
@@ -213,7 +216,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     expect(syncVoiceMessageForCall).toHaveBeenCalledWith('CA-transcript-1');
     // The guard is still in place around the whole update.
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
   });
 
   // ⭐ THE VOICEMAIL-EATING ORDERING, end to end.
@@ -240,13 +243,19 @@ describe('end() persists the transcript on the SAME call_log row', () => {
   });
 
   // #2177 voicemail-clobber guard: unchanged, and still fences the transcript.
-  test('#2177 guard still holds — the transcript rides the SAME fenced UPDATE', async () => {
-    const { update, guardQ } = primeCallLog({ rows: 0 }); // 0 rows: /relay-complete won the race
+  // The only other write is the relay_failed salvage (codex #3852 r6 P1): keyed
+  // to the failure stamp a voicemail row never carries, and outcome-free.
+  test('#2177 guard still holds — the transcript rides the SAME fenced UPDATE; the salvage never reaches a voicemail row', async () => {
+    const { update, guardQ, builder } = primeCallLog({ rows: 0 }); // 0 rows: /relay-complete won the race
     const convo = conversationWithTurns('CA-already-voicemail');
     await convo.end('ws_close');
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
-    expect(update).toHaveBeenCalledTimes(1); // one statement, not two
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(builder.whereIn).toHaveBeenCalledWith('call_outcome', ['relay_failed', 'ai_transferred']);
+    expect(update.mock.calls[1][0]).not.toHaveProperty('call_outcome');
+    expect(update.mock.calls[1][0]).not.toHaveProperty('status');
+    expect(update.mock.calls[1][0]).not.toHaveProperty('answered_by');
   });
 
   // ⭐ THE FLOOR RUNS BEFORE THE STAMP. The transcript records `lead_captured`
@@ -306,12 +315,14 @@ describe('end() persists the transcript on the SAME call_log row', () => {
 
     await convo.end('ws_close');
 
-    // Still ONE fenced statement — the transcript never escapes the guard via a
-    // second unfenced write.
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(db).toHaveBeenCalledTimes(1);
+    // Still ONE outcome statement — the transcript never escapes the guard
+    // via an unfenced write: the only second write is keyed to a relay_failed
+    // stamp (0 rows on a voicemail row) and carries no outcome.
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(db).toHaveBeenCalledTimes(2);
+    expect(update.mock.calls[1][0]).not.toHaveProperty('call_outcome');
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNot).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
     expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/transcript NOT persisted/i));
   });
 
@@ -352,7 +363,10 @@ describe('what the session records', () => {
     convo.say('Thanks for calling Waves.');
     convo.say('   '); // empty → neither spoken nor recorded
     expect(send).toHaveBeenCalledTimes(1);
-    expect(convo._transcript).toEqual([{ role: 'agent', text: 'Thanks for calling Waves.' }]);
+    // Agent entries carry `planned` (the full model text) beside `text` (what
+    // the caller heard — rewritten on a barge-in / played-tokens event).
+    expect(convo._transcript).toHaveLength(1);
+    expect(convo._transcript[0]).toMatchObject({ role: 'agent', text: 'Thanks for calling Waves.', planned: 'Thanks for calling Waves.', playedSource: 'assumed', interrupted: false });
   });
 
   test('caller turns are recorded in the serialized chain, so ordering matches the call', async () => {
