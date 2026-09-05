@@ -1343,7 +1343,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
         where: (a, b) => {
           const q = {
             whereNull: (c) => { q._null = c; return q; },
-            update: async (patch) => { updated.push({ table, where: a, whereNull: q._null, patch }); return 1; },
+            update: async (patch) => { updated.push({ table, where: a, whereNull: q._null, claimed: !!q._claimed, patch }); return 1; },
             first: async () => (table === 'ad_service_attribution'
               ? (a.lead_id in funnelRows && !(q._claimed && rootChanged) ? { id: `asa-${a.lead_id}`, funnel_stage: funnelRows[a.lead_id] } : null)
               : rows[typeof a === 'string' ? b : a.id] || null),
@@ -1388,7 +1388,8 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       // The accepting customer lands on the root's row when it has none
       // (an unlinked, contact-matched root) — never over one already there
       // (codex r32 P1).
-      expect(database._updated).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'root' }, whereNull: 'customer_id', patch: expect.objectContaining({ customer_id: 'c1' }) }]);
+      expect(database._updated).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'root' }, whereNull: 'customer_id', claimed: true, patch: expect.objectContaining({ customer_id: 'c1' }) }]);
+      expect(database._claims).toHaveLength(1); // the stamp carries the same EXISTS lead claim as the advance (pre-push P1)
     });
 
     test('the root changed under the settlement (the conditioned advance updates 0 rows and its row is still below booked) — the repeat carries its own row and the root is untouched (codex r29 P1)', async () => {

@@ -104,22 +104,23 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
     && !(root.estimate_id && repeat.estimate_id && String(root.estimate_id) !== String(repeat.estimate_id));
   if (!rootOurs) return repeat;
   const onlyIfLead = { ...identityOf(root), status: root.status };
+  // Every read or write on the root's row below carries the lead claim the
+  // advance carried: the root, as validated, still open, not deleted.
+  const rootStillOurs = function leadStillMatches() {
+    this.select(1).from('leads').whereRaw('leads.id = ad_service_attribution.lead_id').where(onlyIfLead).whereNull('deleted_at');
+  };
   const bridged = await bridgeLeadFunnelStage(root.id, 'won', database, { onlyIfLead });
   // A root row already at booked / completed counts as settled only under
   // the SAME lead claim the advance carried — the fallback read must not
   // accept an old stage on a root staff re-identified since (codex r30 P1).
-  const rootRow = bridged.updated ? null : await database('ad_service_attribution').where({ lead_id: root.id })
-    .whereExists(function leadStillMatches() {
-      this.select(1).from('leads').whereRaw('leads.id = ad_service_attribution.lead_id').where(onlyIfLead).whereNull('deleted_at');
-    })
-    .first('funnel_stage');
+  const rootRow = bridged.updated ? null : await database('ad_service_attribution').where({ lead_id: root.id }).whereExists(rootStillOurs).first('funnel_stage');
   const settled = !!bridged.updated || (!!rootRow && FUNNEL_STAGE_RANK[rootRow.funnel_stage] >= FUNNEL_STAGE_RANK.booked);
   if (!settled) return repeat;
   // The root's row now carries this customer's win: an unlinked root (matched
   // by contact) leaves the bridge's COALESCE-from-lead customer NULL, and the
   // revenue sync loads rows by customer_id — so the accepting customer is
   // stamped onto it, never over one already there (codex #3834 r32 P1).
-  if (customerId) await database('ad_service_attribution').where({ lead_id: root.id }).whereNull('customer_id').update({ customer_id: customerId, updated_at: new Date() });
+  if (customerId) await database('ad_service_attribution').where({ lead_id: root.id }).whereNull('customer_id').whereExists(rootStillOurs).update({ customer_id: customerId, updated_at: new Date() });
   await database('ad_service_attribution').where({ lead_id: repeat.id }).whereNot({ funnel_stage: 'completed' }).del();
   return null;
 }
